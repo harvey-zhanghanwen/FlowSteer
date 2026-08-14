@@ -1,0 +1,92 @@
+"""Exploration-plane primitives for adaptive workflow and peer routing."""
+
+from .evsi import (
+    CommonRandomNumbers,
+    EVPIEstimate,
+    EVSIEstimate,
+    clamp_tiny_negative,
+    estimate_particle_evpi,
+    estimate_particle_evsi,
+    make_common_random_numbers,
+    particle_evpi,
+    particle_evsi,
+    particle_evsi_many,
+)
+from .features import (
+    FEATURE_DIMENSION,
+    FEATURE_NAMES,
+    FEATURE_SCHEMA_VERSION,
+    MACEFeatureConfig,
+    MACEFeatureExtractor,
+    NORMALIZATION_L2_BOUND,
+    NORMALIZATION_NONE,
+    PREPROCESSING_VERSION,
+    jaccard_similarity,
+    ngram_set,
+    preprocess_text,
+)
+from .mace import (
+    LINUCB_STATE_VERSION,
+    MACE_STATE_VERSION,
+    DisjointLinUCB,
+    MACE,
+    blended_mace_reward,
+)
+from .paired_probe import (
+    PairedProbeRecord,
+    ProbeOrder,
+    randomize_probe_order,
+    randomize_probe_orders,
+    record_paired_probe,
+)
+from .policies import ThompsonRollout, ThompsonSamplingPolicy, UCBPolicy
+from .posterior import (
+    POSTERIOR_STATE_VERSION,
+    BayesianLinearPosterior,
+    PosteriorSnapshot,
+)
+from .records import LinUCBSelection, PolicyDecision, RoundSnapshot, readonly_array
+
+__all__ = [
+    "BayesianLinearPosterior",
+    "CommonRandomNumbers",
+    "DisjointLinUCB",
+    "EVPIEstimate",
+    "EVSIEstimate",
+    "FEATURE_DIMENSION",
+    "FEATURE_NAMES",
+    "FEATURE_SCHEMA_VERSION",
+    "LINUCB_STATE_VERSION",
+    "LinUCBSelection",
+    "MACE",
+    "MACEFeatureConfig",
+    "MACEFeatureExtractor",
+    "MACE_STATE_VERSION",
+    "NORMALIZATION_L2_BOUND",
+    "NORMALIZATION_NONE",
+    "POSTERIOR_STATE_VERSION",
+    "PREPROCESSING_VERSION",
+    "PairedProbeRecord",
+    "PolicyDecision",
+    "PosteriorSnapshot",
+    "ProbeOrder",
+    "RoundSnapshot",
+    "ThompsonRollout",
+    "ThompsonSamplingPolicy",
+    "UCBPolicy",
+    "blended_mace_reward",
+    "clamp_tiny_negative",
+    "estimate_particle_evpi",
+    "estimate_particle_evsi",
+    "jaccard_similarity",
+    "make_common_random_numbers",
+    "ngram_set",
+    "particle_evpi",
+    "particle_evsi",
+    "particle_evsi_many",
+    "preprocess_text",
+    "randomize_probe_order",
+    "randomize_probe_orders",
+    "readonly_array",
+    "record_paired_probe",
+]

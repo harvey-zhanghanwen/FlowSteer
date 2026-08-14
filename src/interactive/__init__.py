@@ -84,6 +84,20 @@ from .prompt_templates import (
     get_problem_type_hint,
 )
 
+# AgentGraph v1 is additive: explicit names avoid collisions with the legacy
+# Operator-DSL Trajectory/TurnRecord API above.
+from .agent_graph import AgentGraph, AgentGraphValidator, AgentNode, RelationBits
+from .agent_action_parser import AgentAction, AgentActionParser, AgentActionType
+from .agent_runtime import AgentRuntime, AgentRuntimeResult
+from .agent_workflow_env import AgentWorkflowEnv, AgentWorkflowStepResult
+from .director import AgentGraphOrchestrator, OpenAIDirectorClient
+from .openai_gateway import OpenAICompatibleGateway
+from .model_registry import ModelRegistry, ModelSpec, ProviderSpec
+from .records import TrajectoryRecord as AgentTrajectoryRecord, TurnRecord as AgentTurnRecord
+from .grpo_objective import GRPOTrajectory, action_masked_one_pass_loss
+from .exploration import BayesianLinearPosterior, DisjointLinUCB, MACEFeatureExtractor
+from .skills import SkillEvidenceGate, SkillLifecycleManager, SkillRecord, SkillStore
+
 __all__ = [
     'WorkflowGraph',
     'WorkflowNode',
@@ -128,4 +142,32 @@ __all__ = [
     'PROBLEM_TYPE_HINTS',
     'create_prompt_builder',
     'get_problem_type_hint',
+    'AgentGraph',
+    'AgentGraphValidator',
+    'AgentNode',
+    'RelationBits',
+    'AgentAction',
+    'AgentActionParser',
+    'AgentActionType',
+    'AgentRuntime',
+    'AgentRuntimeResult',
+    'AgentWorkflowEnv',
+    'AgentWorkflowStepResult',
+    'AgentGraphOrchestrator',
+    'OpenAIDirectorClient',
+    'OpenAICompatibleGateway',
+    'ModelRegistry',
+    'ModelSpec',
+    'ProviderSpec',
+    'AgentTrajectoryRecord',
+    'AgentTurnRecord',
+    'GRPOTrajectory',
+    'action_masked_one_pass_loss',
+    'BayesianLinearPosterior',
+    'DisjointLinUCB',
+    'MACEFeatureExtractor',
+    'SkillEvidenceGate',
+    'SkillLifecycleManager',
+    'SkillRecord',
+    'SkillStore',
 ]

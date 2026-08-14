@@ -1,0 +1,128 @@
+# FlowSteer AgentGraph v1 starter configuration.
+# This is a new, strict path; the legacy operator configuration remains intact.
+
+schema_version: "flowsteer.agentgraph.config.v1"
+experiment:
+  name: "flowsteer_qwen35_9b_bayesian_skills"
+  seed: 42
+  output_dir: "artifacts/agent_graph"
+
+data:
+  train_path: "data/train/train_12k.jsonl"
+  validation_path: "data/eval/gsm8k.jsonl"
+  test_path: "data/eval/ood.jsonl"
+  enforce_split_isolation: true
+  task_fields:
+    id: "task_id"
+    question: "question"
+    ground_truth: "ground_truth"
+    split: "split"
+
+storage:
+  schema_version: "flowsteer.agentgraph.v1"
+  root: "artifacts/agent_graph/evidence"
+  trajectory_format: "jsonl"
+  deduplicate_by_event_id: true
+  persist_exact_policy_receipts: true
+
+director:
+  # Resolve this placeholder from the environment before launching training.
+  base_model: "${QWEN35_9B_MODEL_PATH:-Qwen/Qwen3.5-9B}"
+  served_model_name: "qwen3.5-9b-director"
+  dtype: "bfloat16"
+  max_context_tokens: 16384
+  max_action_tokens: 768
+  temperature: 0.6
+  top_p: 0.95
+  top_k: 20
+  max_rounds: 20
+  lora:
+    enabled: true
+    rank: 64
+    alpha: 64
+    dropout: 0.05
+    target_modules: [q_proj, k_proj, v_proj, o_proj]
+
+agent_graph:
+  max_agents: 10
+  max_bidirectional_block_size: 2
+  require_unique_output: true
+  require_all_agents_reach_output: true
+  model_catalog_path: "config/model_catalog.yaml"
+
+grpo:
+  objective: "action_masked_one_pass"
+  group_key: [task_id, condition_id, policy_version]
+  samples_per_problem: 6
+  advantage_epsilon: 1.0e-8
+  equal_weight_per_problem: true
+  terminal_task_reward_only: true
+  structural_reward: 0.0
+  exploration_reward: 0.0
+  skill_usage_reward: 0.0
+  reject_forced_probes: true
+  reject_fallback_or_manual_repair: true
+  reject_reconstructed_context: true
+  require_exact_behavior_receipt: true
+  optimization_passes_per_rollout_batch: 1
+  learning_rate: 1.0e-5
+  gradient_accumulation_steps: 1
+  gradient_checkpointing: true
+  max_grad_norm: 1.0
+
+exploration:
+  enabled: true
+  strategy: "linucb"  # random | greedy | linucb | ucb | thompson | evsi
+  frozen_epoch_tasks: 128
+  probe_budget_per_epoch: 32
+  random_audit_floor: 0.05
+  feature_schema_version: "agentgraph-prefix-v1"
+  linucb:
+    ridge_lambda: 1.0
+    alpha: 0.75
+    update_enabled: true
+  posterior:
+    family: "gaussian_linear"
+    dimension: 32
+    prior_precision: 1.0
+    observation_noise: 0.25
+    covariance_inflation_after_policy_update: 1.25
+  paired_probe:
+    repeats_per_arm: 2
+    randomize_branch_order: true
+    regenerate_continuation: true
+    exclude_from_grpo: true
+    exclude_from_benchmark_metrics: true
+  evsi:
+    candidate_top_k: 5
+    posterior_particles: 256
+    fantasy_observations: 64
+    stop_threshold: 0.005
+
+skills:
+  enabled: true
+  retrieval_top_k: 3
+  activation_delay_epochs: 1
+  # Starter preregistration values; tune on validation, never on test.
+  delta_min: 0.03
+  max_harm_probability: 0.05
+  minimum_independent_problems: 20
+  minimum_effective_pairs: 20
+  minimum_empirical_coverage: 0.90
+  suspend_on_version_change: true
+
+gpu:
+  # Physical GPU IDs on worker09; each process sees its assigned card as cuda:0.
+  director_training_physical: 3
+  director_inference_physical: 4
+  probe_skill_training_physical: 5
+  director_training_device: "cuda:0"
+  director_inference_device: "cuda:0"
+  probe_skill_training_device: "cuda:0"
+  inference_base_url: "http://127.0.0.1:8003/v1"
+
+deployment:
+  exploration_beta: 0.0
+  allow_forced_probes: false
+  active_skills_only: true
+  require_version_compatible_skills: true

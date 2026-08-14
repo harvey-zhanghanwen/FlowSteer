@@ -39,6 +39,10 @@ eval_logs/
 .env
 *.yaml.local
 config/aflow_llm.yaml
+config/model_catalog.yaml
+
+# AgentGraph v1 runtime evidence and generated artifacts
+artifacts/
 
 # Large files
 *.tar.gz

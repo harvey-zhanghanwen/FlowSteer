@@ -1,0 +1,66 @@
+# Copy to config/model_catalog.yaml (ignored by Git if you add it locally).
+# This file contains model aliases only. Authentication is read from the
+# VECTOR_ENGINE_API_KEY environment variable at runtime.
+
+providers:
+  - provider_id: "local-director"
+    kind: "openai-compatible"
+    endpoint: "http://127.0.0.1:8003/v1"
+    max_concurrency: 32
+
+  - provider_id: "vectorengine"
+    kind: "openai-compatible"
+    endpoint: "${VECTOR_ENGINE_BASE_URL:-https://api.vectorengine.ai/v1}"
+    max_concurrency: 64
+    api_key_env: "VECTOR_ENGINE_API_KEY"
+
+models:
+  - model_id: "qwen3.5-9b-local"
+    provider_id: "local-director"
+    model_name: "qwen3.5-9b-director"
+    selection_weight: 10.0
+    cheap_weight: 10.0
+    fast_weight: 9.0
+    context_window: 16384
+
+  - model_id: "qwen3.5-9b-api"
+    provider_id: "vectorengine"
+    model_name: "${VECTOR_QWEN35_MODEL_ID:-qwen3.5-9b}"
+    selection_weight: 10.0
+    cheap_weight: 10.0
+    fast_weight: 9.0
+
+  - model_id: "deepseek-v4-flash"
+    provider_id: "vectorengine"
+    model_name: "${VECTOR_DEEPSEEK_FLASH_MODEL_ID:-deepseek-v4-flash}"
+    selection_weight: 8.0
+    cheap_weight: 9.0
+    fast_weight: 10.0
+
+  - model_id: "gpt-4o-mini"
+    provider_id: "vectorengine"
+    model_name: "${VECTOR_GPT4O_MINI_MODEL_ID:-gpt-4o-mini}"
+    selection_weight: 7.0
+    cheap_weight: 8.0
+    fast_weight: 9.0
+
+  - model_id: "gemini-fast"
+    provider_id: "vectorengine"
+    model_name: "${VECTOR_GEMINI_FAST_MODEL_ID:-gemini-flash}"
+    selection_weight: 7.0
+    cheap_weight: 8.0
+    fast_weight: 9.0
+
+  - model_id: "grok-fast"
+    provider_id: "vectorengine"
+    model_name: "${VECTOR_GROK_FAST_MODEL_ID:-grok-fast}"
+    selection_weight: 6.0
+    cheap_weight: 7.0
+    fast_weight: 8.0
+
+  - model_id: "minimax-fast"
+    provider_id: "vectorengine"
+    model_name: "${VECTOR_MINIMAX_FAST_MODEL_ID:-minimax-fast}"
+    selection_weight: 6.0
+    cheap_weight: 8.0
+    fast_weight: 8.0

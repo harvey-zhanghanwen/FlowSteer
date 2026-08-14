@@ -22,6 +22,20 @@ FlowSteer studies **Agent Designing Agentic Workflows**: a lightweight policy ag
 - **Designer--Executor decoupling**: the Flow-Director designs the workflow, while a pluggable executor backend runs the designed graph.
 - **Reinforced Progressive Canvas Editing**: the Flow-Director commits one atomic edit per turn and is trained end-to-end with a canvas-masked GRPO objective and diversity-constrained reward.
 
+## AgentGraph v1 Architecture
+
+This checkout now includes an additive AgentGraph v1 architecture for free-text
+Agent roles, per-node heterogeneous model selection, two-bit communication
+relations, finite bidirectional execution, MACE/Bayesian exploration, and
+versioned Skill evidence. It preserves the original Operator-DSL path while the
+new training integration is completed.
+
+The new path includes a Qwen3.5-9B Director configuration, a weighted cheap/fast
+API model pool, strict terminal-only one-pass GRPO primitives, three-GPU role
+mapping, evidence persistence, and a fully fake-testable inference runtime. See
+[the AgentGraph v1 guide](docs/AGENTGRAPH_V1.md) for setup, invariants, current
+status, and explicit unfinished boundaries.
+
 ## Method
 
 <div align="center">
