@@ -88,6 +88,31 @@ class RecordTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             EvaluationReceipt("eval", True, math.nan)
 
+    def test_evaluator_details_and_director_adapter_receipts_are_serialized(self) -> None:
+        evaluation = EvaluationReceipt(
+            "eval-v1",
+            True,
+            0.5,
+            metrics={"score": 0.5},
+            details={"rubric": [{"criterion": "correct", "met": True}]},
+        )
+        self.assertEqual(
+            evaluation.to_dict()["details"]["rubric"][0]["criterion"],
+            "correct",
+        )
+
+        adapter_turn = replace(
+            turn(),
+            policy_adapter="theta_live",
+            server_weight_version="default",
+        )
+        serialized = adapter_turn.to_dict()
+        self.assertEqual(serialized["policy_adapter"], "theta_live")
+        self.assertEqual(serialized["server_weight_version"], "default")
+
+        with self.assertRaises(ValueError):
+            EvaluationReceipt("eval-v1", False, None, details=[])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -99,6 +99,24 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(OpenAICompatibleGatewayError):
             await gateway.generate(request())
 
+    def test_qwen_chat_template_thinking_toggle_is_explicit(self) -> None:
+        item = request()
+        object.__setattr__(
+            item,
+            "model",
+            ModelSpec(
+                "model",
+                "provider",
+                model_name="supervisor_theta",
+                metadata={"chat_template_enable_thinking": "false"},
+            ),
+        )
+        payload = OpenAICompatibleGateway().request_payload(item)
+        self.assertEqual(
+            payload["chat_template_kwargs"],
+            {"enable_thinking": False},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

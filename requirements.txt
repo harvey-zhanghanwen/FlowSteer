@@ -17,6 +17,7 @@ safetensors>=0.4.0
 # ========== OpenAI API (LLM Judge) ==========
 openai>=1.0.0
 httpx>=0.25.0
+requests>=2.31.0
 socksio>=1.0.0
 
 # ========== Data Processing ==========

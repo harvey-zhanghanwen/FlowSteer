@@ -21,46 +21,54 @@ models:
     selection_weight: 10.0
     cheap_weight: 10.0
     fast_weight: 9.0
-    context_window: 32768
+    context_window: 8192
+    metadata:
+      chat_template_enable_thinking: "false"
+      max_tokens: "512"
 
-  - model_id: "qwen3.5-9b-api"
+  # The remote IDs below were returned by this VectorEngine account's
+  # /v1/models endpoint. Keep the exact spelling when copying the catalog.
+  - model_id: "qwen3.5-flash"
     provider_id: "vectorengine"
-    model_name: "${VECTOR_QWEN35_MODEL_ID:-qwen3.5-9b}"
+    model_name: "qwen3.5-flash"
     selection_weight: 10.0
     cheap_weight: 10.0
-    fast_weight: 9.0
+    fast_weight: 10.0
+    metadata:
+      max_tokens: "512"
 
   - model_id: "deepseek-v4-flash"
     provider_id: "vectorengine"
-    model_name: "${VECTOR_DEEPSEEK_FLASH_MODEL_ID:-deepseek-v4-flash}"
-    selection_weight: 8.0
+    model_name: "deepseek-v4-flash"
+    selection_weight: 9.0
     cheap_weight: 9.0
     fast_weight: 10.0
+    metadata:
+      max_tokens: "512"
 
   - model_id: "gpt-4o-mini"
     provider_id: "vectorengine"
-    model_name: "${VECTOR_GPT4O_MINI_MODEL_ID:-gpt-4o-mini}"
-    selection_weight: 7.0
+    model_name: "gpt-4o-mini"
+    selection_weight: 8.0
     cheap_weight: 8.0
     fast_weight: 9.0
+    metadata:
+      max_tokens: "512"
 
-  - model_id: "gemini-fast"
+  - model_id: "grok-4-1-fast-non-reasoning"
     provider_id: "vectorengine"
-    model_name: "${VECTOR_GEMINI_FAST_MODEL_ID:-gemini-flash}"
+    model_name: "grok-4-1-fast-non-reasoning"
     selection_weight: 7.0
-    cheap_weight: 8.0
-    fast_weight: 9.0
-
-  - model_id: "grok-fast"
-    provider_id: "vectorengine"
-    model_name: "${VECTOR_GROK_FAST_MODEL_ID:-grok-fast}"
-    selection_weight: 6.0
     cheap_weight: 7.0
-    fast_weight: 8.0
+    fast_weight: 9.0
+    metadata:
+      max_tokens: "512"
 
-  - model_id: "minimax-fast"
+  - model_id: "minimax-m2.5"
     provider_id: "vectorengine"
-    model_name: "${VECTOR_MINIMAX_FAST_MODEL_ID:-minimax-fast}"
-    selection_weight: 6.0
+    model_name: "MiniMax-M2.5"
+    selection_weight: 7.0
     cheap_weight: 8.0
     fast_weight: 8.0
+    metadata:
+      max_tokens: "512"

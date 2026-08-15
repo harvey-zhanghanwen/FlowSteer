@@ -130,13 +130,28 @@ class OpenAICompatibleGateway:
             raise OpenAICompatibleGatewayError("temperature must be non-negative")
         if not 0 < top_p <= 1:
             raise OpenAICompatibleGatewayError("top_p must be in (0, 1]")
-        return {
+        payload: Dict[str, Any] = {
             "model": request.model.model_name,
             "messages": build_agent_messages(request),
             "temperature": temperature,
             "top_p": top_p,
             "max_tokens": _integer(metadata, "max_tokens", self.default_max_tokens),
         }
+        thinking = metadata.get("chat_template_enable_thinking")
+        if thinking is not None:
+            normalized = thinking.strip().lower()
+            if normalized not in {"true", "false"}:
+                raise OpenAICompatibleGatewayError(
+                    "model metadata chat_template_enable_thinking must be true or false"
+                )
+            # SGLang's Qwen3.5 OpenAI surface accepts the Hugging Face chat
+            # template toggle under chat_template_kwargs.  This keeps Agent
+            # answers in message.content instead of an empty content field
+            # accompanied only by reasoning_content.
+            payload["chat_template_kwargs"] = {
+                "enable_thinking": normalized == "true"
+            }
+        return payload
 
     async def generate(self, request: AgentRequest) -> AgentResponse:
         endpoint = request.provider.endpoint

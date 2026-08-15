@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 import math
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
 from .persistence.ids import stable_id
 from .versioning import VersionBundle
@@ -93,6 +93,8 @@ class TurnRecord:
     graph_revision: int
     graph_snapshot: Mapping[str, Any]
     policy_version: str
+    policy_adapter: Optional[str] = None
+    server_weight_version: Optional[str] = None
     graph_snapshot_id: str = ""
     previous_graph_snapshot_id: Optional[str] = None
     executions: Sequence[ExecutionRecord] = field(default_factory=tuple)
@@ -111,6 +113,10 @@ class TurnRecord:
             raise ValueError("behavior log-prob receipt must match output token count")
         if not all(math.isfinite(float(value)) for value in self.behavior_log_probs):
             raise ValueError("behavior log-prob receipt must contain only finite values")
+        if self.policy_adapter is not None and not self.policy_adapter.strip():
+            raise ValueError("policy_adapter must be non-empty when supplied")
+        if self.server_weight_version is not None and not self.server_weight_version.strip():
+            raise ValueError("server_weight_version must be non-empty when supplied")
 
     @property
     def snapshot_receipt_verified(self) -> bool:
@@ -139,12 +145,15 @@ class EvaluationReceipt:
     reward: Optional[float]
     metrics: Mapping[str, float] = field(default_factory=dict)
     reason: str = ""
+    details: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.valid and self.reward is None:
             raise ValueError("valid evaluator receipt requires a reward")
         if self.reward is not None and not math.isfinite(float(self.reward)):
             raise ValueError("evaluator reward must be finite")
+        if not isinstance(self.details, Mapping):
+            raise ValueError("evaluator details must be a mapping")
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

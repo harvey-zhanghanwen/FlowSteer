@@ -1,0 +1,974 @@
+#!/usr/bin/env python3
+"""Run the bounded 7x2 AgentGraph Qwen3.5 smoke-training transaction."""
+
+# ruff: noqa: E402 -- executable scripts add the repository root before imports.
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+from collections import Counter, defaultdict
+from dataclasses import asdict, is_dataclass
+from datetime import datetime, timezone
+import json
+import os
+from pathlib import Path
+import sys
+from typing import Any, Awaitable, Callable, Mapping, Optional, Protocol, Sequence
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from src.interactive.agent_graph import AgentGraph, AgentNode, AgentRelation
+from src.interactive.agent_runtime import AgentRuntime
+from src.interactive.agent_workflow_env import AgentWorkflowEnv
+from src.interactive.config_loader import (
+    ConfigurationError,
+    load_model_registry,
+    load_yaml,
+    validate_agent_graph_config,
+)
+from src.interactive.director import AgentGraphOrchestrator
+from src.interactive.grpo_objective import same_condition_advantages
+from src.interactive.openai_gateway import OpenAICompatibleGateway
+from src.interactive.persistence import EvidenceStore
+from src.interactive.policy_sync import (
+    PolicySyncConfig,
+    PolicySyncError,
+    SGLangPolicyPublisher,
+)
+from src.interactive.records import TaskRecord, TrajectoryRecord
+from src.interactive.rollout_collector import (
+    AgentGraphRolloutCollector,
+    RolloutGate,
+    SGLangReceiptDirectorClient,
+)
+from src.interactive.smoke_trainer import (
+    Qwen35OnePassSmokeTrainer,
+    SmokeTrainerConfig,
+    trajectory_to_grpo,
+)
+from src.interactive.task_dataset import iter_task_records
+from src.interactive.task_evaluator import (
+    HEALTHBENCH_EVALUATOR_VERSION,
+    RAGEN_EVALUATOR_VERSION,
+    SKILLFLOW_REWARD_VERSION,
+    SWEBENCH_EVALUATOR_VERSION,
+    evaluate_task,
+)
+from src.interactive.versioning import VersionBundle
+
+
+PROMPT_VERSION = "agentgraph.director.minimal.v1"
+TOOL_VERSION = "agentgraph.atomic-actions.v1"
+
+EXPECTED_SOURCE_ORDER = (
+    "hotpotqa",
+    "triviaqa",
+    "aime_2026",
+    "healthbench_professional",
+    "webshop",
+    "alfworld",
+    "swe_bench",
+)
+
+
+class SmokeRunError(RuntimeError):
+    """The bounded run could not prove a complete training transaction."""
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _mapping(value: Any, name: str) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ConfigurationError(f"{name} must be a mapping")
+    return value
+
+
+def validate_smoke_bounds(config: Mapping[str, Any]) -> None:
+    """Reject any config that silently expands this one-update smoke run."""
+
+    validate_agent_graph_config(config)
+    experiment = _mapping(config.get("experiment"), "experiment")
+    data = _mapping(config.get("data"), "data")
+    smoke = _mapping(data.get("smoke"), "data.smoke")
+    grpo = _mapping(config.get("grpo"), "grpo")
+    director = _mapping(config.get("director"), "director")
+    policy_sync = _mapping(config.get("policy_sync"), "policy_sync")
+    evaluation = _mapping(config.get("evaluation"), "evaluation")
+    exploration = _mapping(config.get("exploration"), "exploration")
+    skills = _mapping(config.get("skills"), "skills")
+
+    checks = {
+        "experiment.phase": experiment.get("phase") == "smoke_training",
+        "experiment.training_enabled": experiment.get("training_enabled") is True,
+        "data.smoke.split": smoke.get("split") == "train",
+        "data.smoke.selection": smoke.get("selection") == "sequential_per_source",
+        "data.smoke.tasks_per_dataset": smoke.get("tasks_per_dataset") == 2,
+        "data.smoke.expected_total_tasks": smoke.get("expected_total_tasks") == 14,
+        "grpo.enabled": grpo.get("enabled") is True,
+        "grpo.samples_per_problem": grpo.get("samples_per_problem") == 2,
+        "grpo.expected_rollout_count": grpo.get("expected_rollout_count") == 28,
+        "grpo.optimization_passes_per_rollout_batch": (
+            grpo.get("optimization_passes_per_rollout_batch") == 1
+        ),
+        "grpo.max_optimizer_updates": grpo.get("max_optimizer_updates") == 1,
+        "grpo.terminal_task_reward_only": grpo.get("terminal_task_reward_only") is True,
+        "policy_sync.enabled": policy_sync.get("enabled") is True,
+        "policy_sync.post_update_canary_count": (
+            policy_sync.get("post_update_canary_count") == 1
+        ),
+        "evaluation.healthbench_judge_model": bool(
+            str(evaluation.get("healthbench_judge_model", "")).strip()
+        ),
+        "evaluation.max_environment_steps": (
+            evaluation.get("max_environment_steps") == 12
+        ),
+        "director.prompt_profile": director.get("prompt_profile") == "minimal",
+        "director.temperature": float(director.get("temperature", -1)) == 1.0,
+        "director.top_p": float(director.get("top_p", -1)) == 1.0,
+        "director.top_k": director.get("top_k") == -1,
+        "exploration.enabled": exploration.get("enabled") is False,
+        "skills.enabled": skills.get("enabled") is False,
+    }
+    failed = [name for name, valid in checks.items() if not valid]
+    if failed:
+        raise ConfigurationError(
+            "smoke config violates fixed bounds: " + ", ".join(failed)
+        )
+
+    source_order = tuple(str(value) for value in smoke.get("source_order", ()))
+    if source_order != EXPECTED_SOURCE_ORDER:
+        raise ConfigurationError(
+            "data.smoke.source_order must contain the fixed seven-source order"
+        )
+    for field_name in (
+        "behavior_policy_version",
+        "updated_policy_version",
+        "expected_server_weight_version",
+    ):
+        value = director.get(field_name)
+        if not isinstance(value, str) or not value.strip():
+            raise ConfigurationError(f"director.{field_name} must be non-empty")
+    if director["behavior_policy_version"] == director["updated_policy_version"]:
+        raise ConfigurationError("Director behavior and updated policy versions must differ")
+    oom = _mapping(_mapping(config["gpu"], "gpu")["oom_policy"], "gpu.oom_policy")
+    if tuple(oom.get("micro_batch_schedule", ())) != (4, 2, 1):
+        raise ConfigurationError("gpu.oom_policy.micro_batch_schedule must be [4, 2, 1]")
+
+
+def _resolve(root: Path, value: str | os.PathLike[str]) -> Path:
+    path = Path(value).expanduser()
+    return path if path.is_absolute() else root / path
+
+
+def _dataset_key(task: TaskRecord) -> str:
+    value = task.metadata.get("dataset_key")
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"task {task.task_id!r} has no metadata.dataset_key")
+    return value.strip()
+
+
+def _base_task_id(task: TaskRecord) -> str:
+    sampling = task.metadata.get("sampling", {})
+    if isinstance(sampling, Mapping):
+        value = sampling.get("base_task_id")
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return task.task_id
+
+
+def select_smoke_tasks(
+    tasks: Sequence[TaskRecord] | Any,
+    *,
+    source_order: Sequence[str],
+    per_source: int,
+    require_unique_base_tasks: bool,
+) -> tuple[TaskRecord, ...]:
+    """Select the first N records per dataset key in config order."""
+
+    if type(per_source) is not int or per_source <= 0:
+        raise ValueError("per_source must be a positive integer")
+    ordered_sources = tuple(str(value).strip() for value in source_order)
+    if not ordered_sources or any(not value for value in ordered_sources):
+        raise ValueError("source_order must contain non-empty dataset keys")
+    if len(ordered_sources) != len(set(ordered_sources)):
+        raise ValueError("source_order contains duplicate dataset keys")
+
+    selected: dict[str, list[TaskRecord]] = {source: [] for source in ordered_sources}
+    base_ids: dict[str, set[str]] = {source: set() for source in ordered_sources}
+    for task in tasks:
+        if task.split != "train":
+            raise ValueError(f"smoke task {task.task_id!r} is not in the train split")
+        source = _dataset_key(task)
+        if source not in selected or len(selected[source]) >= per_source:
+            continue
+        base_id = _base_task_id(task)
+        if require_unique_base_tasks and base_id in base_ids[source]:
+            continue
+        selected[source].append(task)
+        base_ids[source].add(base_id)
+        if all(len(items) == per_source for items in selected.values()):
+            break
+
+    missing = {
+        source: per_source - len(items)
+        for source, items in selected.items()
+        if len(items) != per_source
+    }
+    if missing:
+        detail = ", ".join(f"{source}: {count}" for source, count in missing.items())
+        raise ValueError(f"insufficient smoke tasks by source ({detail})")
+    return tuple(task for source in ordered_sources for task in selected[source])
+
+
+def evaluator_version_for(task: TaskRecord) -> str:
+    source = _dataset_key(task)
+    if source in {"hotpotqa", "triviaqa", "aime_2026"}:
+        return SKILLFLOW_REWARD_VERSION
+    if source == "healthbench_professional":
+        return HEALTHBENCH_EVALUATOR_VERSION
+    if source in {"webshop", "alfworld"}:
+        return RAGEN_EVALUATOR_VERSION
+    if source == "swe_bench":
+        return SWEBENCH_EVALUATOR_VERSION
+    raise ValueError(f"unsupported smoke dataset key: {source}")
+
+
+def version_bundle_for(
+    task: TaskRecord,
+    *,
+    policy_version: str,
+    model_catalog_version: str,
+) -> VersionBundle:
+    return VersionBundle(
+        policy=policy_version,
+        model_catalog=model_catalog_version,
+        evaluator=evaluator_version_for(task),
+        prompt=PROMPT_VERSION,
+        tool=TOOL_VERSION,
+    )
+
+
+def _json_value(value: Any) -> Any:
+    if hasattr(value, "to_dict"):
+        return value.to_dict()
+    if is_dataclass(value):
+        return asdict(value)
+    if isinstance(value, Mapping):
+        return dict(value)
+    raise TypeError("artifact values must be mappings, dataclasses, or expose to_dict()")
+
+
+def _write_json(path: Path, value: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(_json_value(value) if not isinstance(value, Mapping) else dict(value),
+                   ensure_ascii=False, indent=2, sort_keys=True)
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def _write_jsonl(path: Path, values: Sequence[Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        for value in values:
+            handle.write(
+                json.dumps(_json_value(value), ensure_ascii=False, sort_keys=True) + "\n"
+            )
+
+
+def _safe_error(error: BaseException) -> str:
+    message = str(error)
+    secret = os.environ.get("VECTOR_ENGINE_API_KEY", "")
+    if secret:
+        message = message.replace(secret, "[REDACTED]")
+    return f"{type(error).__name__}: {message}"
+
+
+def _graph_from_mapping(value: Mapping[str, Any]) -> AgentGraph:
+    raw_nodes = value.get("nodes", ())
+    raw_relations = value.get("relations", ())
+    if not isinstance(raw_nodes, Sequence) or isinstance(raw_nodes, (str, bytes)):
+        raise ValueError("final graph nodes are malformed")
+    if not isinstance(raw_relations, Sequence) or isinstance(raw_relations, (str, bytes)):
+        raise ValueError("final graph relations are malformed")
+    nodes = []
+    for item in raw_nodes:
+        if not isinstance(item, Mapping):
+            raise ValueError("final graph node is malformed")
+        nodes.append(
+            AgentNode(
+                str(item.get("id", "")),
+                str(item.get("model_id", "")),
+                str(item.get("contract", item.get("prompt", ""))),
+            )
+        )
+    relations = []
+    for item in raw_relations:
+        if not isinstance(item, Mapping):
+            raise ValueError("final graph relation is malformed")
+        relations.append(
+            AgentRelation(
+                str(item.get("source_id", "")),
+                str(item.get("target_id", "")),
+                item.get("source_to_target"),
+                item.get("target_to_source"),
+            )
+        )
+    revision = value.get("revision", 0)
+    if type(revision) is not int:
+        raise ValueError("final graph revision is malformed")
+    output = value.get("output_agent_id")
+    if output is not None and not isinstance(output, str):
+        raise ValueError("final graph output_agent_id is malformed")
+    return AgentGraph(nodes, relations, output_agent_id=output, revision=revision)
+
+
+class SmokeBackend(Protocol):
+    model_catalog_version: str
+
+    async def collect(
+        self,
+        task: TaskRecord,
+        rollout_index: int,
+        versions: VersionBundle,
+    ) -> TrajectoryRecord:
+        ...
+
+    def train(
+        self,
+        trajectories: Sequence[TrajectoryRecord],
+        output_dir: Path,
+    ) -> Any:
+        ...
+
+    async def publish(self, summary: Any) -> Any:
+        ...
+
+
+JudgeCallback = Callable[[Sequence[Mapping[str, str]], str], Awaitable[Any]]
+
+
+class LiveSmokeBackend:
+    """Thin wiring layer over the existing collector, trainer, and publisher."""
+
+    def __init__(
+        self,
+        *,
+        config: Mapping[str, Any],
+        registry: Any,
+        runtime: AgentRuntime,
+        director_client: SGLangReceiptDirectorClient,
+        rollout_gate: RolloutGate,
+        evidence_store: EvidenceStore,
+        trainer: Qwen35OnePassSmokeTrainer,
+        publisher: SGLangPolicyPublisher,
+        judge: Optional[JudgeCallback],
+        judge_model: str,
+    ) -> None:
+        self.config = config
+        self.registry = registry
+        self.runtime = runtime
+        self.director_client = director_client
+        self.rollout_gate = rollout_gate
+        self.evidence_store = evidence_store
+        self.trainer = trainer
+        self.publisher = publisher
+        self.judge = judge
+        self.judge_model = judge_model
+
+    @property
+    def model_catalog_version(self) -> str:
+        return self.registry.catalog_id
+
+    @classmethod
+    def from_config(cls, config: Mapping[str, Any], root: Path) -> "LiveSmokeBackend":
+        secret = os.environ.get("VECTOR_ENGINE_API_KEY", "")
+        if not secret:
+            raise ConfigurationError(
+                "missing required environment variable: VECTOR_ENGINE_API_KEY"
+            )
+
+        director = _mapping(config["director"], "director")
+        graph_config = _mapping(config["agent_graph"], "agent_graph")
+        grpo = _mapping(config["grpo"], "grpo")
+        gpu = _mapping(config["gpu"], "gpu")
+        oom = _mapping(gpu["oom_policy"], "gpu.oom_policy")
+        storage = _mapping(config["storage"], "storage")
+        sync = _mapping(config["policy_sync"], "policy_sync")
+        evaluation = _mapping(config["evaluation"], "evaluation")
+
+        catalog_path = _resolve(root, str(graph_config["model_catalog_path"]))
+        if not catalog_path.is_file():
+            raise ConfigurationError(
+                f"model catalog does not exist: {catalog_path}; copy the example first"
+            )
+        registry = load_model_registry(catalog_path)
+
+        try:
+            from transformers import AutoTokenizer
+        except ImportError as exc:  # pragma: no cover - heavy runtime only
+            raise RuntimeError("transformers is required for Qwen3.5 smoke rollout") from exc
+        tokenizer = AutoTokenizer.from_pretrained(
+            str(director["tokenizer_path"]),
+            trust_remote_code=True,
+        )
+
+        gate = RolloutGate()
+        director_client = SGLangReceiptDirectorClient(
+            tokenizer,
+            base_url=str(director["api_base"]),
+            api_key=os.environ.get("SGLANG_API_KEY", "EMPTY"),
+            policy_version=str(director["behavior_policy_version"]),
+            adapter_name=None,
+            expected_server_weight_version=str(
+                director["expected_server_weight_version"]
+            ),
+            rollout_gate=gate,
+            temperature=float(director["temperature"]),
+            top_p=float(director["top_p"]),
+            top_k=int(director["top_k"]),
+            max_tokens=int(director["max_action_tokens"]),
+        )
+
+        gateway = OpenAICompatibleGateway()
+        runtime = AgentRuntime(registry, gateway)
+        evidence_store = EvidenceStore(_resolve(root, str(storage["root"])))
+
+        lora = _mapping(director["lora"], "director.lora")
+        trainer = Qwen35OnePassSmokeTrainer(
+            SmokeTrainerConfig(
+                model_path=str(director["base_model"]),
+                tokenizer_path=str(director["tokenizer_path"]),
+                behavior_policy_version=str(director["behavior_policy_version"]),
+                updated_policy_version=str(director["updated_policy_version"]),
+                behavior_policy_adapter=None,
+                behavior_server_weight_version=str(
+                    director["expected_server_weight_version"]
+                ),
+                learner_device=str(gpu["learner_device"]),
+                gradient_replica_device=str(gpu["gradient_replica_device"]),
+                lora_rank=int(lora["rank"]),
+                lora_alpha=int(lora["alpha"]),
+                lora_dropout=float(lora["dropout"]),
+                lora_target_modules=tuple(str(value) for value in lora["target_modules"]),
+                learning_rate=float(grpo["learning_rate"]),
+                max_grad_norm=float(grpo["max_grad_norm"]),
+                advantage_epsilon=float(grpo["advantage_epsilon"]),
+                gradient_checkpointing=bool(grpo["gradient_checkpointing"]),
+                micro_batch_backoff=tuple(
+                    int(value) for value in oom["micro_batch_schedule"]
+                ),
+            )
+        )
+        publisher = SGLangPolicyPublisher(
+            PolicySyncConfig(
+                api_base=str(sync["api_base"]),
+                api_key=os.environ.get("SGLANG_API_KEY", "EMPTY"),
+                adapter_name_prefix=str(sync["adapter_name_prefix"]),
+                request_timeout_seconds=float(sync["request_timeout_seconds"]),
+                max_retries=int(sync["max_retries"]),
+                retry_backoff_seconds=float(sync["retry_backoff_seconds"]),
+            )
+        )
+        judge, judge_model = cls._build_healthbench_judge(
+            registry,
+            secret,
+            str(evaluation["healthbench_judge_model"]),
+        )
+        return cls(
+            config=config,
+            registry=registry,
+            runtime=runtime,
+            director_client=director_client,
+            rollout_gate=gate,
+            evidence_store=evidence_store,
+            trainer=trainer,
+            publisher=publisher,
+            judge=judge,
+            judge_model=judge_model,
+        )
+
+    @staticmethod
+    def _build_healthbench_judge(
+        registry: Any,
+        secret: str,
+        configured_model_id: str,
+    ) -> tuple[JudgeCallback, str]:
+        if not configured_model_id.strip():
+            raise ConfigurationError("evaluation.healthbench_judge_model is empty")
+        model = registry.require_model(configured_model_id)
+        provider = registry.provider_for(model.model_id)
+        if provider.api_key_env != "VECTOR_ENGINE_API_KEY":
+            raise ConfigurationError(
+                "configured HealthBench judge must use the VectorEngine provider"
+            )
+        if not provider.endpoint:
+            raise ConfigurationError("HealthBench judge provider has no endpoint")
+        try:
+            from openai import AsyncOpenAI
+        except ImportError as exc:  # pragma: no cover - runtime dependency
+            raise RuntimeError("openai is required for the HealthBench judge") from exc
+        client = AsyncOpenAI(api_key=secret, base_url=provider.endpoint)
+
+        async def judge(messages: Sequence[Mapping[str, str]], model_name: str) -> Any:
+            response = await client.chat.completions.create(
+                model=model_name,
+                messages=[dict(message) for message in messages],
+                max_tokens=2048,
+                temperature=0,
+            )
+            if not response.choices or response.choices[0].message.content is None:
+                return ""
+            return response.choices[0].message.content
+
+        return judge, model.model_name
+
+    async def collect(
+        self,
+        task: TaskRecord,
+        rollout_index: int,
+        versions: VersionBundle,
+    ) -> TrajectoryRecord:
+        director = _mapping(self.config["director"], "director")
+        experiment = _mapping(self.config["experiment"], "experiment")
+        orchestrator = AgentGraphOrchestrator(
+            self.registry,
+            self.director_client,
+            max_rounds=int(director["max_rounds"]),
+            seed=int(experiment["seed"]) + rollout_index,
+        )
+        environment = AgentWorkflowEnv(
+            self.registry,
+            runtime=self.runtime,
+            execute_on_edit=False,
+        )
+        collector = AgentGraphRolloutCollector(
+            orchestrator,
+            environment,
+            versions,
+            self.evidence_store,
+            condition_id="natural_smoke",
+            skills=(),
+            forced_probe=False,
+        )
+
+        async def evaluator_callback(
+            evaluated_task: TaskRecord,
+            final_answer: Optional[str],
+            final_graph: Mapping[str, Any],
+            final_runtime: Any,
+        ) -> Any:
+            del final_runtime
+            environment_graph = _graph_from_mapping(final_graph)
+            environment_step = 0
+
+            async def run_graph(observation: str) -> str:
+                nonlocal environment_step
+                environment_step += 1
+                result = await self.runtime.execute(
+                    environment_graph,
+                    observation,
+                    run_id=(
+                        f"environment:{evaluated_task.task_id}:"
+                        f"{rollout_index:04d}:{environment_step:04d}"
+                    ),
+                )
+                return result.final_answer
+
+            return await evaluate_task(
+                evaluated_task,
+                final_answer or "",
+                judge=self.judge,
+                judge_model=self.judge_model,
+                run_graph=run_graph,
+                max_environment_steps=int(
+                    _mapping(self.config["evaluation"], "evaluation")[
+                        "max_environment_steps"
+                    ]
+                ),
+            )
+
+        return await collector.collect(task, rollout_index, evaluator_callback)
+
+    def train(
+        self,
+        trajectories: Sequence[TrajectoryRecord],
+        output_dir: Path,
+    ) -> Any:
+        return self.trainer.train(trajectories, output_dir)
+
+    async def publish(self, summary: Any) -> Any:
+        director = _mapping(self.config["director"], "director")
+        checkpoint_version = f"checkpoint:{summary.updated_policy_version}"
+        try:
+            receipt = await asyncio.to_thread(
+                self.publisher.publish,
+                checkpoint_path=summary.checkpoint_dir,
+                checkpoint_version=checkpoint_version,
+                behavior_policy_version=summary.behavior_policy_version,
+                candidate_policy_version=summary.updated_policy_version,
+                step=1,
+                previous_adapter=None,
+                gate=self.rollout_gate,
+            )
+        except PolicySyncError:
+            raise
+
+        # The publisher has proven and committed the adapter. Bind subsequent
+        # native /generate calls to both its registered name and logical policy
+        # version under a second pause/drain boundary before any canary starts.
+        self.rollout_gate.pause()
+        try:
+            self.rollout_gate.drain()
+            self.director_client.update_policy_route(
+                policy_version=str(receipt.new_policy_version),
+                adapter_name=receipt.adapter_name,
+                expected_server_weight_version=str(
+                    director["expected_server_weight_version"]
+                ),
+            )
+        finally:
+            self.rollout_gate.resume()
+        return receipt
+
+
+def _summary_dict(summary: Any) -> dict[str, Any]:
+    value = _json_value(summary)
+    return dict(value)
+
+
+def _write_grpo_groups(path: Path, trajectories: Sequence[TrajectoryRecord]) -> None:
+    grouped: dict[tuple[str, str, str], list[tuple[TrajectoryRecord, Any]]] = defaultdict(
+        list
+    )
+    for record in trajectories:
+        item = trajectory_to_grpo(record)
+        grouped[item.group_key].append((record, item))
+    rows = []
+    for key, entries in sorted(grouped.items()):
+        eligible = [
+            item for record, item in entries if record.grpo_eligible and item.eligible
+        ]
+        eligible_advantages = same_condition_advantages(eligible)
+        advantages_by_id = {
+            item.trajectory_id: float(value)
+            for item, value in zip(eligible, eligible_advantages, strict=True)
+        }
+        rows.append(
+            {
+                "group_key": list(key),
+                "trajectory_ids": [item.trajectory_id for _, item in entries],
+                "rewards": [item.terminal_reward for _, item in entries],
+                "eligible": [
+                    record.grpo_eligible and item.eligible for record, item in entries
+                ],
+                "advantages": [
+                    advantages_by_id.get(item.trajectory_id) for _, item in entries
+                ],
+                "informative": bool(
+                    len(eligible) >= 2
+                    and any(float(value) != 0.0 for value in eligible_advantages)
+                ),
+            }
+        )
+    _write_jsonl(path, rows)
+
+
+def _artifact_paths(config: Mapping[str, Any], root: Path) -> dict[str, Path]:
+    storage = _mapping(config["storage"], "storage")
+    return {
+        "selected": _resolve(root, str(storage["selected_tasks_path"])),
+        "trajectories": _resolve(root, str(storage["trajectories_path"])),
+        "groups": _resolve(root, str(storage["grpo_groups_path"])),
+        "manifest": _resolve(root, str(storage["manifest_path"])),
+        "sync": _resolve(root, str(storage["sync_receipt_path"])),
+        "post_update": _resolve(root, str(storage["post_update_trajectories_path"])),
+        "training_root": _resolve(
+            root, str(_mapping(config["experiment"], "experiment")["output_dir"])
+        ),
+    }
+
+
+async def run_smoke(
+    config_path: str | Path,
+    *,
+    prepare_only: bool = False,
+    backend: Optional[SmokeBackend] = None,
+    project_root: Optional[str | Path] = None,
+) -> Mapping[str, Any]:
+    """Execute the exact bounded pipeline and return its persisted manifest."""
+
+    resolved_config = Path(config_path).expanduser().resolve()
+    root = (
+        Path(project_root).expanduser().resolve()
+        if project_root is not None
+        else resolved_config.parent.parent
+    )
+    config = load_yaml(resolved_config)
+    validate_smoke_bounds(config)
+    paths = _artifact_paths(config, root)
+
+    smoke = _mapping(_mapping(config["data"], "data")["smoke"], "data.smoke")
+    train_path = _resolve(root, str(_mapping(config["data"], "data")["train_path"]))
+    selected = select_smoke_tasks(
+        iter_task_records(train_path, expected_split="train"),
+        source_order=tuple(str(value) for value in smoke["source_order"]),
+        per_source=int(smoke["tasks_per_dataset"]),
+        require_unique_base_tasks=bool(smoke["require_unique_base_tasks"]),
+    )
+    if len(selected) != int(smoke["expected_total_tasks"]):
+        raise SmokeRunError("selected task count differs from the fixed smoke bound")
+    _write_jsonl(
+        paths["selected"],
+        [
+            {"schema_version": "flowsteer.agentgraph.task.v1", **task.to_dict()}
+            for task in selected
+        ],
+    )
+
+    source_counts = Counter(_dataset_key(task) for task in selected)
+    manifest: dict[str, Any] = {
+        "schema_version": "flowsteer.agentgraph.smoke_manifest.v1",
+        "status": "prepared" if prepare_only else "collecting",
+        "config_path": str(resolved_config),
+        "train_path": str(train_path),
+        "started_at": _utc_now(),
+        "bounds": {
+            "tasks_per_dataset": 2,
+            "selected_tasks": 14,
+            "rollouts_per_task": 2,
+            "expected_initial_rollouts": 28,
+            "max_optimizer_updates": 1,
+            "post_update_canaries": 1,
+        },
+        "selected_by_source": dict(sorted(source_counts.items())),
+        "artifacts": {name: str(path) for name, path in paths.items() if name != "training_root"},
+        "exploration_enabled": False,
+        "skills_enabled": False,
+    }
+    if prepare_only:
+        manifest["completed_at"] = _utc_now()
+        _write_json(paths["manifest"], manifest)
+        return manifest
+
+    _write_json(paths["manifest"], manifest)
+    try:
+        live_backend = backend or LiveSmokeBackend.from_config(config, root)
+    except Exception as exc:
+        manifest["status"] = "failed_runtime_setup"
+        manifest["error"] = _safe_error(exc)
+        manifest["completed_at"] = _utc_now()
+        _write_json(paths["manifest"], manifest)
+        raise SmokeRunError("smoke runtime setup failed") from exc
+    director = _mapping(config["director"], "director")
+    grpo = _mapping(config["grpo"], "grpo")
+    behavior_policy = str(director["behavior_policy_version"])
+    updated_policy = str(director["updated_policy_version"])
+    rollout_count = int(grpo["samples_per_problem"])
+
+    initial_jobs = []
+    for task in selected:
+        versions = version_bundle_for(
+            task,
+            policy_version=behavior_policy,
+            model_catalog_version=live_backend.model_catalog_version,
+        )
+        for rollout_index in range(rollout_count):
+            initial_jobs.append(live_backend.collect(task, rollout_index, versions))
+    try:
+        initial = tuple(await asyncio.gather(*initial_jobs))
+    except Exception as exc:
+        manifest["status"] = "failed_initial_rollout"
+        manifest["error"] = _safe_error(exc)
+        manifest["completed_at"] = _utc_now()
+        _write_json(paths["manifest"], manifest)
+        raise SmokeRunError("initial rollout collection failed") from exc
+    if len(initial) != int(grpo["expected_rollout_count"]):
+        raise SmokeRunError("initial rollout count differs from the fixed smoke bound")
+    if any(record.versions.policy != behavior_policy for record in initial):
+        raise SmokeRunError("initial trajectories contain a non-behavior policy version")
+    _write_jsonl(paths["trajectories"], initial)
+    _write_grpo_groups(paths["groups"], initial)
+
+    try:
+        summary = await asyncio.to_thread(
+            live_backend.train, initial, paths["training_root"]
+        )
+    except Exception as exc:
+        manifest["status"] = "failed_training"
+        manifest["error"] = _safe_error(exc)
+        manifest["completed_at"] = _utc_now()
+        _write_json(paths["manifest"], manifest)
+        raise SmokeRunError("one-pass smoke training failed") from exc
+    summary_value = _summary_dict(summary)
+    manifest["initial_rollouts"] = {
+        "collected": len(initial),
+        "valid_evaluators": sum(record.evaluation.valid for record in initial),
+        "grpo_eligible": sum(record.grpo_eligible for record in initial),
+        "evaluator_versions": dict(
+            sorted(Counter(record.evaluation.evaluator_version for record in initial).items())
+        ),
+    }
+    manifest["training"] = summary_value
+    if int(summary_value.get("optimizer_updates", 0)) != 1:
+        sync_value = {
+            "status": "not_attempted_no_optimizer_update",
+            "success": False,
+            "behavior_policy_version": behavior_policy,
+            "candidate_policy_version": updated_policy,
+        }
+        _write_json(paths["sync"], sync_value)
+        manifest["status"] = "failed_no_optimizer_update"
+        manifest["policy_sync"] = sync_value
+        manifest["completed_at"] = _utc_now()
+        _write_json(paths["manifest"], manifest)
+        raise SmokeRunError("smoke trainer completed zero optimizer updates")
+
+    try:
+        sync_receipt = await live_backend.publish(summary)
+    except PolicySyncError as exc:
+        sync_value = exc.receipt.to_dict()
+        _write_json(paths["sync"], sync_value)
+        manifest["status"] = "failed_policy_sync"
+        manifest["policy_sync"] = sync_value
+        manifest["completed_at"] = _utc_now()
+        _write_json(paths["manifest"], manifest)
+        raise SmokeRunError("SGLang policy publication failed") from exc
+    except Exception as exc:
+        sync_value = {
+            "status": "failed",
+            "success": False,
+            "behavior_policy_version": behavior_policy,
+            "candidate_policy_version": updated_policy,
+            "error": _safe_error(exc),
+        }
+        _write_json(paths["sync"], sync_value)
+        manifest["status"] = "failed_policy_sync"
+        manifest["policy_sync"] = sync_value
+        manifest["completed_at"] = _utc_now()
+        _write_json(paths["manifest"], manifest)
+        raise SmokeRunError("SGLang policy publication failed") from exc
+    sync_value = _summary_dict(sync_receipt)
+    if sync_value.get("success") is not True:
+        _write_json(paths["sync"], sync_value)
+        manifest["status"] = "failed_policy_sync"
+        manifest["policy_sync"] = sync_value
+        manifest["completed_at"] = _utc_now()
+        _write_json(paths["manifest"], manifest)
+        raise SmokeRunError("policy publisher returned an unsuccessful receipt")
+    adapter_name = sync_value.get("adapter_name")
+    new_policy = sync_value.get("new_policy_version")
+    if not isinstance(adapter_name, str) or not adapter_name.strip():
+        raise SmokeRunError("policy sync receipt has no adapter_name")
+    if new_policy != updated_policy:
+        raise SmokeRunError("policy sync receipt has the wrong updated policy version")
+    _write_json(paths["sync"], sync_value)
+
+    canary_count = int(
+        _mapping(config["policy_sync"], "policy_sync")["post_update_canary_count"]
+    )
+    canary_jobs = []
+    for index in range(canary_count):
+        task = selected[index % len(selected)]
+        versions = version_bundle_for(
+            task,
+            policy_version=updated_policy,
+            model_catalog_version=live_backend.model_catalog_version,
+        )
+        canary_jobs.append(live_backend.collect(task, 10_000 + index, versions))
+    try:
+        canaries = tuple(await asyncio.gather(*canary_jobs))
+    except Exception as exc:
+        manifest["status"] = "failed_post_update_canary"
+        manifest["policy_sync"] = sync_value
+        manifest["error"] = _safe_error(exc)
+        manifest["completed_at"] = _utc_now()
+        _write_json(paths["manifest"], manifest)
+        raise SmokeRunError("post-update canary collection failed") from exc
+    canary_valid = len(canaries) == canary_count and all(
+        record.versions.policy == updated_policy
+        and bool(record.turns)
+        and all(turn.policy_version == updated_policy for turn in record.turns)
+        and all(turn.policy_adapter == adapter_name for turn in record.turns)
+        for record in canaries
+    )
+    if not canary_valid:
+        manifest["status"] = "failed_post_update_canary"
+        manifest["policy_sync"] = sync_value
+        manifest["error"] = "canary policy or adapter receipt mismatch"
+        manifest["completed_at"] = _utc_now()
+        _write_json(paths["manifest"], manifest)
+        raise SmokeRunError("post-update canary did not use the published adapter")
+    _write_jsonl(paths["post_update"], canaries)
+
+    manifest.update(
+        status="completed",
+        policy_sync=sync_value,
+        post_update_canaries={
+            "collected": len(canaries),
+            "adapter_name": adapter_name,
+            "policy_version": updated_policy,
+            "trajectory_ids": [record.trajectory_id for record in canaries],
+        },
+        completed_at=_utc_now(),
+    )
+    _write_json(paths["manifest"], manifest)
+    return manifest
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--config",
+        default="config/training_agentgraph_smoke.yaml",
+        help="bounded smoke-training YAML",
+    )
+    parser.add_argument(
+        "--prepare-only",
+        action="store_true",
+        help="select and persist the 14 tasks without model, API, or GPU work",
+    )
+    return parser
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    args = build_parser().parse_args(argv)
+    config_path = _resolve(PROJECT_ROOT, args.config)
+    try:
+        manifest = asyncio.run(
+            run_smoke(
+                config_path,
+                prepare_only=bool(args.prepare_only),
+                project_root=PROJECT_ROOT,
+            )
+        )
+    except (ConfigurationError, SmokeRunError, ValueError, RuntimeError) as exc:
+        print(f"smoke run failed: {_safe_error(exc)}", file=sys.stderr)
+        return 1
+    print(
+        json.dumps(
+            {
+                "status": manifest["status"],
+                "selected_tasks": manifest["bounds"]["selected_tasks"],
+                "expected_initial_rollouts": manifest["bounds"][
+                    "expected_initial_rollouts"
+                ],
+                "max_optimizer_updates": manifest["bounds"]["max_optimizer_updates"],
+                "manifest": manifest["artifacts"]["manifest"],
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

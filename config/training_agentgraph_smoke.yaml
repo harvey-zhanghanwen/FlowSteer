@@ -1,0 +1,187 @@
+# Tiny, real AgentGraph training run: 2 tasks/source, 2 rollouts/task, 1 update.
+# This config activates only the design note's terminal-only one-pass path.
+
+schema_version: "flowsteer.agentgraph.config.v1"
+experiment:
+  name: "agentgraph_qwen35_9b_smoke_7x2"
+  phase: "smoke_training"
+  training_enabled: true
+  seed: 42
+  output_dir: "artifacts/agentgraph_smoke"
+
+data:
+  catalog_path: "config/datasets_agentgraph.yaml"
+  train_path: "data/agentgraph_v1/train.jsonl"
+  validation_path: "data/agentgraph_v1/validation.jsonl"
+  test_path: "data/agentgraph_v1/test.jsonl"
+  enforce_split_isolation: true
+  task_schema_version: "flowsteer.agentgraph.task.v1"
+  smoke:
+    split: "train"
+    source_key: "metadata.dataset_key"
+    source_order:
+      - "hotpotqa"
+      - "triviaqa"
+      - "aime_2026"
+      - "healthbench_professional"
+      - "webshop"
+      - "alfworld"
+      - "swe_bench"
+    selection: "sequential_per_source"
+    tasks_per_dataset: 2
+    expected_total_tasks: 14
+    require_unique_base_tasks: true
+  task_fields:
+    id: "task_id"
+    question: "question"
+    ground_truth: "ground_truth"
+    split: "split"
+    metadata: "metadata"
+
+storage:
+  schema_version: "flowsteer.agentgraph.v1"
+  root: "artifacts/agentgraph_smoke/evidence"
+  trajectory_format: "jsonl"
+  deduplicate_by_event_id: true
+  persist_exact_policy_receipts: true
+  selected_tasks_path: "artifacts/agentgraph_smoke/data/selected_tasks.jsonl"
+  trajectories_path: "artifacts/agentgraph_smoke/data/trajectories.jsonl"
+  grpo_groups_path: "artifacts/agentgraph_smoke/data/grpo_groups.jsonl"
+  manifest_path: "artifacts/agentgraph_smoke/data/training_manifest.json"
+  sync_receipt_path: "artifacts/agentgraph_smoke/data/sync_receipt.json"
+  post_update_trajectories_path: "artifacts/agentgraph_smoke/data/post_update_trajectories.jsonl"
+
+director:
+  # SkillFlow Qwen3.5 runtime profile, using the verified local split model and
+  # tokenizer directories rather than the incompatible Qwen3-8B vLLM path.
+  base_model: "${QWEN35_9B_MODEL_PATH:-/home/test/SKILLEV/skillev-new-b2-temp/model/Qwen3.5-9B-modelscope}"
+  tokenizer_path: "${QWEN35_9B_TOKENIZER_PATH:-/home/test/SKILLEV/skillev-new-b2-temp/tokenizer/Qwen3.5-9B}"
+  backend: "sglang"
+  api_base: "http://127.0.0.1:${FLOWSTEER_SUPERVISOR_PORT:-8015}/v1"
+  served_model_name: "supervisor_theta"
+  behavior_policy_version: "qwen35-9b-base-step-0000"
+  updated_policy_version: "qwen35-9b-smoke-step-0001"
+  expected_server_weight_version: "default"
+  live_adapter_name: "theta_live"
+  prompt_profile: "minimal"
+  dtype: "bfloat16"
+  max_context_tokens: 8192
+  max_action_tokens: 256
+  # Exact one-pass receipt contract: SGLang and the local learner both score
+  # the same untempered, untruncated categorical policy.
+  temperature: 1.0
+  top_p: 1.0
+  top_k: -1
+  max_rounds: 8
+  lora:
+    enabled: true
+    rank: 64
+    alpha: 128
+    dropout: 0.0
+    target_modules: [q_proj, k_proj, v_proj, o_proj]
+    backward_adapter:
+      rank: 16
+      alpha: 32
+      target_modules: [q_proj, v_proj]
+
+agent_graph:
+  max_agents: 10
+  contract_type: "free_text"
+  relation_encoding: "two_bit"
+  actions: [add_agent, modify_agent, delete_agent, set_relation, set_output, finish]
+  executor_selection: "seeded_weighted_random"
+  max_bidirectional_block_size: 2
+  require_unique_output: true
+  require_all_agents_reach_output: true
+  model_catalog_path: "config/model_catalog.yaml"
+
+evaluation:
+  healthbench_judge_model: "gpt-4o-mini"
+  max_environment_steps: 12
+  swebench_harness_enabled: false
+  invalid_evaluator_action: "persist_and_exclude"
+
+grpo:
+  enabled: true
+  objective: "action_masked_one_pass"
+  group_key: [task_id, condition_id, policy_version]
+  samples_per_problem: 2
+  expected_rollout_count: 28
+  advantage_epsilon: 1.0e-8
+  equal_weight_per_problem: true
+  terminal_task_reward_only: true
+  structural_reward: 0.0
+  exploration_reward: 0.0
+  skill_usage_reward: 0.0
+  require_valid_evaluator: true
+  invalid_evaluator_action: "persist_and_exclude"
+  reject_forced_probes: true
+  reject_fallback_or_manual_repair: true
+  reject_reconstructed_context: true
+  require_exact_behavior_receipt: true
+  optimization_passes_per_rollout_batch: 1
+  max_optimizer_updates: 1
+  learning_rate: 1.0e-5
+  gradient_accumulation_steps: 1
+  gradient_checkpointing: true
+  max_grad_norm: 1.0
+
+# A successful optimizer update is not considered published until the new,
+# version-named adapter is loaded by SGLang and used by a canary rollout.
+policy_sync:
+  enabled: true
+  api_base: "http://127.0.0.1:${FLOWSTEER_SUPERVISOR_PORT:-8015}"
+  load_endpoint: "/load_lora_adapter"
+  unload_endpoint: "/unload_lora_adapter"
+  adapter_name_prefix: "theta_smoke_step_"
+  behavior_policy_version_required: true
+  adapter_checkpoint_version_required: true
+  request_timeout_seconds: 120
+  max_retries: 3
+  retry_backoff_seconds: 2
+  fail_run_on_sync_error: true
+  post_update_canary_count: 1
+  canary:
+    endpoint: "/generate"
+    adapter_selector_field: "lora_path"
+    require_explicit_adapter_name: true
+    persist_full_trajectory: true
+
+# These are intentionally disabled. The initial Director sees only legal
+# actions, current state/feedback, and the model-selection boundary.
+exploration:
+  enabled: false
+  strategy: "none"
+  forced_probe_rollouts: 0
+
+skills:
+  enabled: false
+  initial_library: []
+  retrieval_top_k: 0
+
+gpu:
+  # Physical IDs: do not combine this mapping with a manual CUDA remap.
+  learner_physical: 3
+  rollout_physical: 4
+  gradient_replica_physical: 5
+  learner_device: "cuda:3"
+  rollout_engine: "sglang"
+  gradient_replica_device: "cuda:5"
+  supervisor_gpu_id: 4
+  supervisor_api_base: "http://127.0.0.1:8015/v1"
+  training_enabled: true
+  oom_policy:
+    status: "active"
+    micro_batch_size: 4
+    minimum_micro_batch_size: 1
+    micro_batch_schedule: [4, 2, 1]
+    retry_on_cuda_oom: true
+    split_items_across_learner_and_replica: true
+    gradient_accumulation_steps: 1
+    gradient_checkpointing: true
+
+deployment:
+  exploration_beta: 0.0
+  allow_forced_probes: false
+  active_skills_only: false
+  require_version_compatible_skills: true
