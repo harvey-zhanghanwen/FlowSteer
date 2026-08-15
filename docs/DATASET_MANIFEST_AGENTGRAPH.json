@@ -1,0 +1,69 @@
+{
+  "schema_version": "flowsteer.agentgraph.datasets.v1",
+  "task_schema_version": "flowsteer.agentgraph.task.v1",
+  "training_started": false,
+  "alignment_recipe": {
+    "selection": "sequential",
+    "heldout_split": "validation",
+    "heldout_count_per_dataset": 128,
+    "train_count_per_dataset": 512,
+    "cycle_training_only": true
+  },
+  "counts_by_split": {
+    "train": 3584,
+    "validation": 896,
+    "test": 0
+  },
+  "sources": {
+    "hotpotqa": {
+      "heldout_count": 128,
+      "train_count": 512,
+      "unique_train_candidates": 512,
+      "cycled_train_records": 0
+    },
+    "triviaqa": {
+      "heldout_count": 128,
+      "train_count": 512,
+      "unique_train_candidates": 512,
+      "cycled_train_records": 0
+    },
+    "aime_2026": {
+      "heldout_count": 128,
+      "official_2026_heldout": 30,
+      "historical_heldout": 98,
+      "train_count": 512,
+      "unique_train_candidates": 402,
+      "cycled_train_records": 110
+    },
+    "healthbench_professional": {
+      "heldout_count": 128,
+      "train_count": 512,
+      "unique_train_candidates": 397,
+      "cycled_train_records": 115
+    },
+    "webshop": {
+      "heldout_count": 128,
+      "train_count": 512,
+      "unique_train_candidates": 512,
+      "cycled_train_records": 0
+    },
+    "alfworld": {
+      "heldout_count": 128,
+      "train_count": 512,
+      "unique_train_candidates": 512,
+      "cycled_train_records": 0
+    },
+    "swe_bench": {
+      "heldout_count": 128,
+      "train_count": 512,
+      "unique_train_candidates": 372,
+      "cycled_train_records": 140
+    }
+  },
+  "validation": {
+    "schema_valid": true,
+    "heldout_train_base_id_overlap": 0,
+    "cycled_records_outside_train": 0,
+    "official_aime_2026_records_in_train": 0
+  }
+}

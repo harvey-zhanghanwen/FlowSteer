@@ -39,6 +39,24 @@ disabled in the architecture-only configuration. See
 status, explicit unfinished boundaries, and the
 [source map](docs/SOURCE_MAP.md) for FlowSteer/SkillFlow provenance.
 
+### AgentGraph seven-dataset view
+
+The AgentGraph path also includes a strict loader and preparation catalog for
+HotpotQA, TriviaQA, AIME 2026, HealthBench Professional, WebShop, ALFWorld, and
+SWE-bench.  The current local view follows the requested deterministic recipe:
+128 held-out plus 512 training records per dataset, with any repetition confined
+to the post-held-out training pool.  It produces 3,584 training and 896
+validation records; training remains disabled.
+
+```bash
+python scripts/prepare_agentgraph_datasets.py --catalog config/datasets_agentgraph.yaml
+python scripts/validate_agentgraph_datasets.py --data-dir data/agentgraph_v1
+```
+
+See [the dataset alignment guide](docs/DATASETS_AGENTGRAPH.md) for source paths,
+schema, exact counts, AIME's 30+98 held-out composition, runtime-resource gaps,
+and the distinction between this project view and official benchmark splits.
+
 ## Method
 
 <div align="center">

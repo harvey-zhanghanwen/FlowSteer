@@ -1,0 +1,129 @@
+# Seven-benchmark catalog for the AgentGraph path.
+#
+# The aligned record keeps the FlowSteer keys (source, ground_truth), the
+# SkillFlow keys (answer, task_type, context, extra, env_type/env_config), and
+# the design-note task contract (task_id, question, ground_truth, split,
+# metadata).  Training remains disabled in training_agent_graph.yaml.
+
+schema_version: "flowsteer.agentgraph.datasets.v1"
+
+raw_root: "${FLOWSTEER_DATASETS_ROOT:-/home/test/datasets}"
+aligned_dir: "data/agentgraph_v1"
+aligned_files:
+  train: "data/agentgraph_v1/train.jsonl"
+  validation: "data/agentgraph_v1/validation.jsonl"
+  test: "data/agentgraph_v1/test.jsonl"
+  manifest: "data/agentgraph_v1/manifest.json"
+
+# User-specified uniform recipe.  Records are never shuffled: the first 128
+# candidates become held-out validation, then the next 512 candidates become
+# training.  If fewer than 512 training candidates remain, only that training
+# pool is cycled from its first item; held-out items are never reused.
+alignment_recipe:
+  heldout_split: "validation"
+  heldout_count_per_dataset: 128
+  train_count_per_dataset: 512
+  selection: "sequential"
+  cycle_training_only: true
+
+sources:
+  hotpotqa:
+    enabled: true
+    display_name: "HotpotQA"
+    path: "${FLOWSTEER_DATASETS_ROOT:-/home/test/datasets}/HotpotQA_HF/distractor"
+    files:
+      train: "train-*.parquet"
+      validation: "validation-*.parquet"
+    candidate_sequence: [train, validation]
+    task_type: "multi_hop_qa"
+    metric: "token_f1"
+
+  triviaqa:
+    enabled: true
+    display_name: "TriviaQA"
+    # The local canonical copy intentionally uses the closed-book
+    # rc.nocontext configuration.
+    path: "${FLOWSTEER_DATASETS_ROOT:-/home/test/datasets}/TriviaQA_HF/rc.nocontext"
+    files:
+      train: "train-*.parquet"
+      validation: "validation-*.parquet"
+    candidate_sequence: [train, validation]
+    task_type: "factual_qa"
+    metric: "token_f1"
+
+  aime_2026:
+    enabled: true
+    display_name: "AIME 2026"
+    path: "${FLOWSTEER_DATASETS_ROOT:-/home/test/datasets}/AIME_2026/data/train-*.parquet"
+    historical_path: "${FLOWSTEER_SKILLFLOW_TRAIN_PATH:-/home/test/SKILLEV/skillflow-private-data/train_v3.json}"
+    # AIME 2026 has only 30 official problems.  Candidate order is therefore
+    # official 2026 first, followed by SkillFlow's 1983-2025 historical pool.
+    # This keeps every official 2026 problem out of training while allowing
+    # the global 128/512 rule to be satisfied without cycling held-out data.
+    candidate_sequence: [official_aime_2026, historical_aime_1983_2025]
+    task_type: "math_reasoning"
+    metric: "accuracy"
+
+  healthbench_professional:
+    enabled: true
+    display_name: "HealthBench Professional"
+    path: "${FLOWSTEER_DATASETS_ROOT:-/home/test/datasets}/HealthBench_Professional/healthbench_professional_eval.jsonl"
+    candidate_sequence: [public_release_order]
+    task_type: "open_ended"
+    metric: "healthbench_rubric"
+
+  webshop:
+    enabled: true
+    display_name: "WebShop"
+    path: "${FLOWSTEER_DATASETS_ROOT:-/home/test/datasets}/WebShop"
+    goals_file: "baseline_models/data/human_goals.json"
+    product_file: "data/items_shuffle.json"
+    attribute_file: "data/items_ins_v2.json"
+    # Native ranges are retained for provenance.  The uniform recipe consumes
+    # human goals in index order before assigning the project split.
+    split_ranges:
+      test: [0, 500]
+      validation: [500, 1500]
+      train: [1500, null]
+    task_type: "interactive_agent"
+    metric: "success_rate"
+    candidate_sequence: [all_human_goals]
+
+  alfworld:
+    enabled: true
+    display_name: "ALFWorld"
+    path: "${FLOWSTEER_DATASETS_ROOT:-/home/test/datasets}/ALFWorld"
+    data_dir: "data/json_2.1.1"
+    config_file: "repo/configs/base_config.yaml"
+    split_dirs:
+      train: "train"
+      validation: "valid_seen"
+      test: "valid_unseen"
+    task_type: "interactive_agent"
+    metric: "success_rate"
+    candidate_sequence: [train]
+
+  swe_bench:
+    enabled: true
+    display_name: "SWE-bench"
+    path: "${FLOWSTEER_DATASETS_ROOT:-/home/test/datasets}/SWE-bench/data"
+    files:
+      train: "train-*.parquet"
+      validation: "dev-*.parquet"
+    # SkillFlow uses SWE-bench Verified.  Keep its untouched 500 cases as the
+    # project test split instead of training on them.
+    verified_path: "${FLOWSTEER_SWEBENCH_VERIFIED_PATH:-/ssd1/iclr/.private/skillflow-resources/swebench-verified}"
+    task_type: "code_generation"
+    metric: "resolved_rate"
+    candidate_sequence: [swe_bench_verified]
+
+split_policy:
+  aligned_datasets:
+    - hotpotqa
+    - triviaqa
+    - aime_2026
+    - healthbench_professional
+    - webshop
+    - alfworld
+    - swe_bench
+  training_enabled: false

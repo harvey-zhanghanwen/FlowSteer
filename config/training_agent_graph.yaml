@@ -10,15 +10,23 @@ experiment:
   output_dir: "artifacts/agent_graph"
 
 data:
-  train_path: "data/train/train_12k.jsonl"
-  validation_path: "data/eval/gsm8k.jsonl"
-  test_path: "data/eval/ood.jsonl"
+  catalog_path: "config/datasets_agentgraph.yaml"
+  train_path: "data/agentgraph_v1/train.jsonl"
+  validation_path: "data/agentgraph_v1/validation.jsonl"
+  test_path: "data/agentgraph_v1/test.jsonl"
   enforce_split_isolation: true
+  task_schema_version: "flowsteer.agentgraph.task.v1"
+  sampling_recipe:
+    selection: "sequential"
+    heldout_count_per_dataset: 128
+    train_count_per_dataset: 512
+    cycle_training_only: true
   task_fields:
     id: "task_id"
     question: "question"
     ground_truth: "ground_truth"
     split: "split"
+    metadata: "metadata"
 
 storage:
   schema_version: "flowsteer.agentgraph.v1"

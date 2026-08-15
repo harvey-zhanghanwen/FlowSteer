@@ -1,0 +1,114 @@
+"""Strict JSONL task loading for the AgentGraph path.
+
+The reader keeps FlowSteer's line-oriented loader boundary while returning the
+``TaskRecord`` contract from the project design note.  Dataset-specific fields
+remain in ``metadata`` and are never added to the Director question.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any, Dict, Iterator, List, Mapping, Optional
+
+from .records import TaskRecord, VALID_SPLITS
+
+
+TASK_SCHEMA_VERSION = "flowsteer.agentgraph.task.v1"
+REQUIRED_FIELDS = frozenset(
+    {"schema_version", "task_id", "question", "ground_truth", "split", "metadata"}
+)
+
+
+def task_record_from_mapping(
+    item: Mapping[str, Any], *, expected_split: Optional[str] = None
+) -> TaskRecord:
+    """Validate one aligned mapping and return the runtime task record."""
+
+    missing = sorted(REQUIRED_FIELDS.difference(item))
+    if missing:
+        raise ValueError(f"aligned task is missing required fields: {missing}")
+    if item["schema_version"] != TASK_SCHEMA_VERSION:
+        raise ValueError(
+            f"unsupported task schema {item['schema_version']!r}; "
+            f"expected {TASK_SCHEMA_VERSION!r}"
+        )
+
+    split = str(item["split"])
+    if split not in VALID_SPLITS:
+        raise ValueError(f"invalid task split {split!r}")
+    if expected_split is not None and split != expected_split:
+        raise ValueError(
+            f"split isolation violation: expected {expected_split!r}, got {split!r}"
+        )
+
+    raw_metadata = item["metadata"]
+    if not isinstance(raw_metadata, Mapping):
+        raise ValueError("task metadata must be a mapping")
+    metadata = dict(raw_metadata)
+    # SkillFlow consumes these optional top-level fields.  Rehydrate them under
+    # one metadata key so the strict TaskRecord does not discard environment or
+    # code-task handles when a caller streams the canonical JSONL.
+    skillflow_fields = {
+        key: item[key]
+        for key in (
+            "answer",
+            "task_type",
+            "context",
+            "extra",
+            "env_type",
+            "env_config",
+            "code_files",
+        )
+        if key in item
+    }
+    if skillflow_fields:
+        metadata["skillflow"] = skillflow_fields
+
+    return TaskRecord(
+        task_id=str(item["task_id"]),
+        question=str(item["question"]),
+        ground_truth=item["ground_truth"],
+        split=split,
+        metadata=metadata,
+    )
+
+
+def iter_task_records(
+    path: str | Path,
+    *,
+    expected_split: Optional[str] = None,
+    limit: Optional[int] = None,
+) -> Iterator[TaskRecord]:
+    """Stream records without loading a multi-benchmark split into memory."""
+
+    source = Path(path)
+    if limit is not None and limit < 0:
+        raise ValueError("limit must be non-negative")
+    if limit == 0:
+        return
+    with source.open("r", encoding="utf-8") as handle:
+        emitted = 0
+        for line_number, line in enumerate(handle, start=1):
+            if not line.strip():
+                continue
+            try:
+                item: Dict[str, Any] = json.loads(line)
+                record = task_record_from_mapping(item, expected_split=expected_split)
+            except (json.JSONDecodeError, TypeError, ValueError) as exc:
+                raise ValueError(f"{source}:{line_number}: {exc}") from exc
+            yield record
+            emitted += 1
+            if limit is not None and emitted >= limit:
+                return
+
+
+def load_task_records(
+    path: str | Path,
+    *,
+    expected_split: Optional[str] = None,
+    limit: Optional[int] = None,
+) -> List[TaskRecord]:
+    """Materialize a split for callers that retain FlowSteer's list API."""
+
+    return list(iter_task_records(path, expected_split=expected_split, limit=limit))

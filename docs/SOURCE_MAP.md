@@ -29,6 +29,10 @@ Qwen3.5 path.
 | Three-role GPU topology | `device`, `supervisor_gpu_id`, and `extra_device` in SkillFlow | Mapped to physical GPUs 3, 4, and 5 in `training_agent_graph.yaml`. |
 | Split micro-batch backward | `GFlowNetTrainer._batched_logprob_backward` | Represented only by inactive OOM/micro-batch configuration. No backward code is claimed in this phase. |
 | Skill injection after bootstrap | `GenericTaskEnvironment` and `SkillWorkspace` | The Director prompt omits the Skill field when the validated Skill list is empty. |
+| Dataset preparation fields | `data/prepare_v3.py` | Adapted in `scripts/prepare_agentgraph_datasets.py`: retains `question`, `answer`, `task_type`, `context`, `extra`, and environment fields while adding the design-note `TaskRecord` keys. |
+| WebShop/ALFWorld task handles | `src/ragen_adapter.py` | The aligned records preserve `env_type` and `env_config`; runtime installation is reported separately from static dataset readiness. |
+| SWE-bench evaluator handle | `training/swebench_client.py` | The aligned records retain the Verified instance ID and harness payload; no repository checkout or tests are run during preparation. |
+| JSONL loading boundary | FlowSteer `train_interactive.py::load_dataset` and `eval_only.py::load_dataset` | `src/interactive/task_dataset.py` retains streaming JSONL while enforcing the design-note schema and split isolation; `scripts/run_agentgraph.py --dry-load` exercises it without a model call. |
 
 SkillFlow's TTB objective, backward policy training, partition head, skill
 evolution loop, benchmark environment, and local multi-executor launcher are
@@ -49,3 +53,31 @@ claims of upstream FlowSteer or SkillFlow functionality:
 Those modules are isolated from the runtime reward path.  In the checked-in
 architecture configuration, exploration, Skills, GRPO, optimizer work, and
 all GPU training are disabled.
+
+## Dataset-specific adaptations required by the requested benchmark list
+
+The public SkillFlow data release cannot be copied verbatim: it contains
+MedQA, not HealthBench Professional, and its checked-in `prepare_v3.py` still
+generates synthetic ALFWorld prompts.  The local adapter therefore makes only
+the compatibility changes required for this project:
+
+- real playable ALFWorld task descriptions and native train/seen/unseen splits;
+- the official WebShop baseline split ranges and full-product environment
+  paths;
+- the user-specified deterministic 128-held-out/512-train view for every
+  benchmark, with training-only cycling when a source pool is short;
+- AIME's explicit 30 official-2026 + 98 historical held-out composition,
+  followed by 402 unique historical training candidates and 110 training-only
+  cycle records;
+- SWE-bench Verified in source order (128 held out, 372 unique training
+  candidates, then 140 training-only cycle records); and
+- the design-note `task_id/question/ground_truth/split/metadata` contract on
+  every record, alongside upstream FlowSteer and SkillFlow aliases.
+
+Evaluator-only material (rubrics, gold patches, accepted aliases, supporting
+facts, and environment targets) is stored under `metadata.evaluator_payload`.
+The AgentGraph input loader constructs the Director task only from `question`.
+
+This 128/512 view is a project training/validation recipe, not an untouched
+official benchmark score split.  The manifest retains native split and base
+task IDs so a future official-evaluation view can remain separate.
