@@ -49,7 +49,7 @@ class OpenAIDirectorClient:
     def __init__(
         self,
         *,
-        base_url: str = "http://127.0.0.1:8005/v1",
+        base_url: str = "http://127.0.0.1:8015/v1",
         model: str = "supervisor_theta",
         api_key_env: Optional[str] = None,
         policy_version: str = "qwen3.5-9b-sglang-unversioned",

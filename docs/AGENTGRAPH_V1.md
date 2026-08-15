@@ -69,7 +69,8 @@ FlowSteer's Qwen3-8B vLLM launcher is not used for the new Director.  The
 Supervisor service follows SkillFlow's Qwen3.5-9B SGLang process boundary.
 The default physical cards are 3, 4, and 5; they are configured by physical
 index and must not be combined with a conflicting `CUDA_VISIBLE_DEVICES`
-remap.
+remap. The local API defaults to port 8015 because port 8005 is already used by
+an unrelated SkillFlow checkout on this host.
 
 | Physical GPU | Role | Default environment variable |
 | ---: | --- | --- |

@@ -6,7 +6,7 @@ set -euo pipefail
 project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 model_path="${QWEN35_9B_MODEL_PATH:-Qwen/Qwen3.5-9B}"
 python_bin="${FLOWSTEER_PYTHON_BIN:-python3}"
-port="${FLOWSTEER_SUPERVISOR_PORT:-8005}"
+port="${FLOWSTEER_SUPERVISOR_PORT:-8015}"
 context_length="${FLOWSTEER_SUPERVISOR_CONTEXT_LENGTH:-32768}"
 mem_fraction="${FLOWSTEER_SUPERVISOR_MEM_FRACTION:-0.82}"
 api_key="${SGLANG_API_KEY:-EMPTY}"

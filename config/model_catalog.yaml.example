@@ -5,7 +5,7 @@
 providers:
   - provider_id: "local-director"
     kind: "openai-compatible"
-    endpoint: "http://127.0.0.1:8005/v1"
+    endpoint: "http://127.0.0.1:8015/v1"
     max_concurrency: 32
 
   - provider_id: "vectorengine"

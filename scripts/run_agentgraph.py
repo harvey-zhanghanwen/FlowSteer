@@ -51,7 +51,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("question")
     parser.add_argument("--catalog", default="config/model_catalog.yaml")
-    parser.add_argument("--director-url", default="http://127.0.0.1:8005/v1")
+    parser.add_argument("--director-url", default="http://127.0.0.1:8015/v1")
     parser.add_argument("--director-model", default="supervisor_theta")
     parser.add_argument("--policy-version", default="qwen3.5-9b-sglang-local-v1")
     parser.add_argument("--max-rounds", type=int, default=20)

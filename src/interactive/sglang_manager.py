@@ -46,7 +46,7 @@ class SGLangSupervisorManager:
         self,
         *,
         model_path: str = "Qwen/Qwen3.5-9B",
-        port: int = 8005,
+        port: int = 8015,
         api_key: str = "EMPTY",
         gpu_id: int = 4,
         max_lora_rank: int = 64,

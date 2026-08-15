@@ -14,7 +14,7 @@ class SGLangSupervisorManagerTests(unittest.TestCase):
         self.assertEqual(args["reasoning_parser"], "qwen3")
         self.assertEqual(args["tool_call_parser"], "qwen3_coder")
         self.assertEqual(args["lora_target_modules"], ["q_proj", "k_proj", "v_proj", "o_proj"])
-        self.assertEqual(manager.api_base, "http://127.0.0.1:8005/v1")
+        self.assertEqual(manager.api_base, "http://127.0.0.1:8015/v1")
         self.assertFalse(manager.is_alive())
 
     def test_runtime_limits_are_validated_without_importing_sglang(self) -> None:

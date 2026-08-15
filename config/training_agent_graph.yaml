@@ -31,7 +31,7 @@ director:
   # SkillFlow runtime profile: Qwen3.5-9B Supervisor served by SGLang.
   base_model: "${QWEN35_9B_MODEL_PATH:-Qwen/Qwen3.5-9B}"
   backend: "sglang"
-  api_base: "http://127.0.0.1:${FLOWSTEER_SUPERVISOR_PORT:-8005}/v1"
+  api_base: "http://127.0.0.1:${FLOWSTEER_SUPERVISOR_PORT:-8015}/v1"
   served_model_name: "supervisor_theta"
   live_adapter_name: "theta_live"
   prompt_profile: "minimal"
@@ -136,7 +136,7 @@ gpu:
   rollout_engine: "sglang"
   gradient_replica_device: "cuda:5"
   supervisor_gpu_id: 4
-  supervisor_api_base: "http://127.0.0.1:8005/v1"
+  supervisor_api_base: "http://127.0.0.1:8015/v1"
   training_enabled: false
   # Future trainer knobs copied from SkillFlow's two-copy backward path. They
   # are configuration only in this phase; no optimizer/backward is launched.
