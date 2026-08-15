@@ -36,7 +36,7 @@ canary：
 
 ## 2. 已验证模块
 
-- 全量 unit test：159 passed。
+- 全量 unit test：161 passed。
 - 固定数据：128 条、128 个唯一 task ID，输入标记为 `full_passages_v1`。
 - SGLang base model `supervisor_theta` 可服务；既有
   `theta_smoke_step_000001` adapter 加载成功且 canary 通过。
