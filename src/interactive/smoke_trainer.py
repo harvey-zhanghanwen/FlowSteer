@@ -1,6 +1,7 @@
-"""One-update Qwen3.5 LoRA trainer for AgentGraph smoke rollouts.
+"""One-update-per-sealed-batch Qwen3.5 LoRA trainer for AgentGraph rollouts.
 
-Source boundary: model/PEFT loading, gradient checkpointing, replica splitting,
+Source boundary: model/PEFT loading, trainable adapter continuation, optimizer
+checkpointing, gradient checkpointing, token-cost-balanced replica splitting,
 and checkpoint layout are direct SkillFlow reuse.  Qwen3.5 multimodal loading
 and the two-physical-GPU split are necessary adaptations.  Terminal-only,
 action-masked one-pass GRPO is the project algorithm addition built on
@@ -33,6 +34,7 @@ class SmokeTrainerConfig:
     behavior_policy_version: str = "qwen35-9b-base-step-0000"
     updated_policy_version: str = "qwen35-9b-smoke-step-0001"
     behavior_policy_adapter: str | None = None
+    behavior_adapter_checkpoint: str | None = None
     behavior_server_weight_version: str = "default"
     learner_device: str = "cuda:3"
     gradient_replica_device: str = "cuda:5"
@@ -46,6 +48,8 @@ class SmokeTrainerConfig:
         "o_proj",
     )
     learning_rate: float = 1.0e-5
+    update_step: int = 1
+    optimizer_state_checkpoint: str | None = None
     max_grad_norm: float = 1.0
     advantage_epsilon: float = 1.0e-8
     behavior_logprob_tolerance: float = 0.25
@@ -88,6 +92,26 @@ class SmokeTrainerConfig:
             raise ValueError("behavior server weight version must be non-empty")
         if self.behavior_policy_adapter is not None and not self.behavior_policy_adapter.strip():
             raise ValueError("behavior policy adapter must be non-empty when supplied")
+        optional_paths = {
+            "behavior_adapter_checkpoint": self.behavior_adapter_checkpoint,
+            "optimizer_state_checkpoint": self.optimizer_state_checkpoint,
+        }
+        for name, value in optional_paths.items():
+            if value is not None and (
+                not isinstance(value, str) or not value.strip()
+            ):
+                raise ValueError(f"{name} must be non-empty when supplied")
+        if type(self.update_step) is not int or self.update_step <= 0:
+            raise ValueError("update_step must be a positive integer")
+        if self.update_step > 1 and self.behavior_adapter_checkpoint is None:
+            raise ValueError("step 2+ requires a behavior adapter checkpoint")
+        if (
+            self.optimizer_state_checkpoint is not None
+            and self.behavior_adapter_checkpoint is None
+        ):
+            raise ValueError(
+                "optimizer continuation requires a behavior adapter checkpoint"
+            )
         if self.lora_rank <= 0 or self.lora_alpha <= 0:
             raise ValueError("LoRA rank and alpha must be positive")
         numeric_settings = (
@@ -153,6 +177,14 @@ class SmokeTrainingSummary:
     trainable_update_l2: float
     checkpoint_dir: str
     exclusions: Mapping[str, str]
+    continuation_adapter_checkpoint: str = ""
+    continuation_loaded: bool = False
+    update_step: int = 0
+    committed_step: int = 0
+    optimizer_resume_status: str = "not_started"
+    optimizer_state_checkpoint: str = ""
+    optimizer_state_saved: bool = False
+    gradient_partition_token_costs: Tuple[int, int] = (0, 0)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -193,6 +225,62 @@ def trajectory_to_grpo(record: TrajectoryRecord) -> GRPOTrajectory:
         reconstructed_context=any(turn.reconstructed_context for turn in record.turns),
         exact_receipt_verified=all(turn.receipt_verified for turn in record.turns),
     )
+
+
+def _partition_groups_by_token_cost(
+    groups: Sequence[tuple[tuple[str, str, str], list[GRPOTrajectory]]],
+    records_by_id: Mapping[str, TrajectoryRecord],
+    worker_count: int = 2,
+) -> tuple[
+    list[list[tuple[tuple[str, str, str], list[GRPOTrajectory]]]],
+    tuple[int, ...],
+]:
+    """Greedily balance complete exact groups by sampled token cost.
+
+    This is the local two-GPU equivalent of SkillFlow's
+    ``partition_items_by_token_cost``: sort sealed work items by descending
+    cost, place each in the currently lightest bin, then restore source order
+    inside each bin.  An exact GRPO group is the indivisible item here because
+    its behavior-policy acceptance gate is evaluated as one unit.  Empty bins
+    are allowed when fewer exact groups than physical replicas are available.
+    """
+
+    if type(worker_count) is not int or worker_count <= 0:
+        raise ValueError("worker_count must be positive")
+    indexed: list[
+        tuple[
+            int,
+            tuple[tuple[str, str, str], list[GRPOTrajectory]],
+            int,
+        ]
+    ] = []
+    for original_index, group_entry in enumerate(groups):
+        _, group = group_entry
+        token_cost = sum(
+            len(turn.prompt_token_ids) + len(turn.output_token_ids)
+            for item in group
+            for turn in records_by_id[item.trajectory_id].turns
+        )
+        indexed.append((original_index, group_entry, max(token_cost, 1)))
+    indexed.sort(key=lambda entry: (-entry[2], entry[0]))
+    bins: list[
+        list[
+            tuple[
+                int,
+                tuple[tuple[str, str, str], list[GRPOTrajectory]],
+            ]
+        ]
+    ] = [[] for _ in range(worker_count)]
+    costs = [0] * worker_count
+    for original_index, group_entry, token_cost in indexed:
+        target = min(range(worker_count), key=lambda index: (costs[index], index))
+        bins[target].append((original_index, group_entry))
+        costs[target] += token_cost
+    partitions = [
+        [entry for _, entry in sorted(worker_items, key=lambda pair: pair[0])]
+        for worker_items in bins
+    ]
+    return partitions, tuple(costs)
 
 
 class Qwen35OnePassSmokeTrainer:
@@ -304,12 +392,25 @@ class Qwen35OnePassSmokeTrainer:
                 trainable_update_l2=0.0,
                 checkpoint_dir="",
                 exclusions=exclusions,
+                continuation_adapter_checkpoint=(
+                    self.config.behavior_adapter_checkpoint or ""
+                ),
+                update_step=self.config.update_step,
+                committed_step=(
+                    self.config.update_step - 1
+                    if self.config.behavior_adapter_checkpoint is not None
+                    else 0
+                ),
             )
             self._write_summary(output_path, summary)
             return summary
 
         torch, learner, replica = self._load_models()
-        group_partitions = [informative[::2], informative[1::2]]
+        group_partitions, _ = _partition_groups_by_token_cost(
+            informative,
+            records_by_id,
+            worker_count=2,
+        )
         models = [learner, replica]
         devices = [self.config.learner_device, self.config.gradient_replica_device]
 
@@ -337,10 +438,21 @@ class Qwen35OnePassSmokeTrainer:
                     else:
                         exclusions["|".join(key)] = result[2]
 
-            accepted_partitions = [
-                [(key, group) for key, group in partition if key in accepted_keys]
-                for partition in group_partitions
+            accepted_groups = [
+                (key, group)
+                for key, group in informative
+                if key in accepted_keys
             ]
+            # Receipt rejection seals the final gradient batch.  Re-run the
+            # same SkillFlow token-cost partitioner so the actual backward
+            # work, rather than the larger preflight candidate set, is balanced.
+            accepted_partitions, partition_token_costs = (
+                _partition_groups_by_token_cost(
+                    accepted_groups,
+                    records_by_id,
+                    worker_count=2,
+                )
+            )
             trained_group_count = sum(len(partition) for partition in accepted_partitions)
             if trained_group_count == 0:
                 summary = SmokeTrainingSummary(
@@ -365,6 +477,19 @@ class Qwen35OnePassSmokeTrainer:
                     trainable_update_l2=0.0,
                     checkpoint_dir="",
                     exclusions=exclusions,
+                    continuation_adapter_checkpoint=(
+                        self.config.behavior_adapter_checkpoint or ""
+                    ),
+                    continuation_loaded=(
+                        self.config.behavior_adapter_checkpoint is not None
+                    ),
+                    update_step=self.config.update_step,
+                    committed_step=(
+                        self.config.update_step - 1
+                        if self.config.behavior_adapter_checkpoint is not None
+                        else 0
+                    ),
+                    gradient_partition_token_costs=partition_token_costs,
                 )
                 self._write_summary(output_path, summary)
                 return summary
@@ -436,6 +561,10 @@ class Qwen35OnePassSmokeTrainer:
                 lr=self.config.learning_rate,
                 weight_decay=0.01,
             )
+            optimizer_resume_status = self._restore_optimizer_state(
+                torch,
+                optimizer,
+            )
             before_step = [parameter.detach().clone() for parameter in trainable]
             optimizer.step()
             update_l2_sq = sum(
@@ -458,7 +587,7 @@ class Qwen35OnePassSmokeTrainer:
                 output_path
                 / "checkpoint_final"
                 / "supervisor_lora"
-                / f"step_000001_{attempt_id}"
+                / f"step_{self.config.update_step:06d}_{attempt_id}"
             )
             checkpoint_root.mkdir(parents=True, exist_ok=True)
             learner.set_adapter("theta")
@@ -479,12 +608,23 @@ class Qwen35OnePassSmokeTrainer:
                 raise RuntimeError(
                     "PEFT did not materialize a complete theta adapter checkpoint"
                 )
+            optimizer_state_checkpoint, optimizer_state_saved = (
+                self._save_optimizer_state(torch, optimizer, checkpoint)
+            )
             (checkpoint / "policy_version.json").write_text(
                 json.dumps(
                     {
                         "behavior_policy_version": self.config.behavior_policy_version,
                         "updated_policy_version": self.config.updated_policy_version,
                         "optimizer_updates": 1,
+                        "optimizer_updates_this_run": 1,
+                        "committed_step": self.config.update_step,
+                        "continuation_adapter_checkpoint": (
+                            self.config.behavior_adapter_checkpoint
+                        ),
+                        "optimizer_resume_status": optimizer_resume_status,
+                        "optimizer_state_checkpoint": optimizer_state_checkpoint,
+                        "optimizer_state_saved": optimizer_state_saved,
                         "trainable_update_l2": trainable_update_l2,
                     },
                     ensure_ascii=False,
@@ -517,6 +657,18 @@ class Qwen35OnePassSmokeTrainer:
                 trainable_update_l2=trainable_update_l2,
                 checkpoint_dir=str(checkpoint),
                 exclusions=exclusions,
+                continuation_adapter_checkpoint=(
+                    self.config.behavior_adapter_checkpoint or ""
+                ),
+                continuation_loaded=(
+                    self.config.behavior_adapter_checkpoint is not None
+                ),
+                update_step=self.config.update_step,
+                committed_step=self.config.update_step,
+                optimizer_resume_status=optimizer_resume_status,
+                optimizer_state_checkpoint=optimizer_state_checkpoint,
+                optimizer_state_saved=optimizer_state_saved,
+                gradient_partition_token_costs=partition_token_costs,
             )
             self._write_summary(output_path, summary)
             return summary
@@ -530,7 +682,7 @@ class Qwen35OnePassSmokeTrainer:
     def _load_models(self):
         try:
             import torch
-            from peft import LoraConfig, get_peft_model
+            from peft import LoraConfig, PeftModel, get_peft_model
             from transformers import AutoModelForMultimodalLM
         except ImportError as exc:  # pragma: no cover - heavy runtime only
             raise RuntimeError(
@@ -548,17 +700,28 @@ class Qwen35OnePassSmokeTrainer:
                 trust_remote_code=True,
                 low_cpu_mem_usage=True,
             )
-            # PEFT mutates parts of its config while attaching an adapter, so
-            # each physical replica receives its own SkillFlow-compatible copy.
-            lora_config = LoraConfig(
-                r=self.config.lora_rank,
-                lora_alpha=self.config.lora_alpha,
-                target_modules=list(self.config.lora_target_modules),
-                lora_dropout=self.config.lora_dropout,
-                bias="none",
-                task_type="CAUSAL_LM",
-            )
-            model = get_peft_model(base, lora_config, adapter_name="theta")
+            if self.config.behavior_adapter_checkpoint is not None:
+                # SkillFlow continuation contract: both physical gradient
+                # replicas attach the exact frozen behavior adapter as a
+                # trainable theta adapter before any receipt preflight.
+                model = PeftModel.from_pretrained(
+                    base,
+                    self.config.behavior_adapter_checkpoint,
+                    adapter_name="theta",
+                    is_trainable=True,
+                )
+            else:
+                # PEFT mutates parts of its config while attaching an adapter,
+                # so each physical replica receives its own independent copy.
+                lora_config = LoraConfig(
+                    r=self.config.lora_rank,
+                    lora_alpha=self.config.lora_alpha,
+                    target_modules=list(self.config.lora_target_modules),
+                    lora_dropout=self.config.lora_dropout,
+                    bias="none",
+                    task_type="CAUSAL_LM",
+                )
+                model = get_peft_model(base, lora_config, adapter_name="theta")
             model.set_adapter("theta")
             if self.config.gradient_checkpointing:
                 model.gradient_checkpointing_enable(
@@ -573,6 +736,59 @@ class Qwen35OnePassSmokeTrainer:
         replica = load(self.config.gradient_replica_device)
         self._sync_lora_weights(learner, replica)
         return torch, learner, replica
+
+    def _restore_optimizer_state(self, torch, optimizer) -> str:
+        state_checkpoint = self.config.optimizer_state_checkpoint
+        if state_checkpoint is None:
+            if (
+                self.config.behavior_adapter_checkpoint is not None
+                and self.config.update_step > 1
+            ):
+                # The original step-1 smoke checkpoint predates optimizer-state
+                # persistence.  This is an explicit warm start, never reported
+                # as a fully resumed optimizer trajectory.
+                return "warm_start_fresh_optimizer"
+            return "fresh_optimizer"
+
+        payload = torch.load(
+            state_checkpoint,
+            map_location=self.config.learner_device,
+            weights_only=False,
+        )
+        if not isinstance(payload, Mapping):
+            raise ValueError("optimizer checkpoint payload must be a mapping")
+        if payload.get("format") != "flowsteer-smoke-optimizer-v1":
+            raise ValueError("optimizer checkpoint format differs")
+        committed_step = payload.get("committed_step")
+        if committed_step != self.config.update_step - 1:
+            raise ValueError(
+                "optimizer checkpoint committed step must immediately precede "
+                "update_step"
+            )
+        optimizer_state = payload.get("optimizer_state_dict")
+        if not isinstance(optimizer_state, Mapping):
+            raise ValueError("optimizer checkpoint is missing optimizer_state_dict")
+        optimizer.load_state_dict(optimizer_state)
+        return "restored_optimizer"
+
+    def _save_optimizer_state(self, torch, optimizer, checkpoint: Path) -> tuple[str, bool]:
+        # Step 1 remains compatible with the already-materialized smoke
+        # checkpoint.  Starting at step 2, every committed adapter carries the
+        # AdamW state needed for exact continuation at the next update.
+        if self.config.update_step < 2:
+            return "", False
+        state_path = checkpoint / "optimizer_state.pt"
+        torch.save(
+            {
+                "format": "flowsteer-smoke-optimizer-v1",
+                "committed_step": self.config.update_step,
+                "behavior_policy_version": self.config.behavior_policy_version,
+                "updated_policy_version": self.config.updated_policy_version,
+                "optimizer_state_dict": optimizer.state_dict(),
+            },
+            state_path,
+        )
+        return str(state_path), True
 
     @staticmethod
     def _is_cuda_oom(torch, error: RuntimeError) -> bool:

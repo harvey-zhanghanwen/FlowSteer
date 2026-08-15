@@ -98,6 +98,12 @@ class TurnRecord:
     graph_snapshot_id: str = ""
     previous_graph_snapshot_id: Optional[str] = None
     executions: Sequence[ExecutionRecord] = field(default_factory=tuple)
+    runtime_summary: Mapping[str, Any] = field(default_factory=dict)
+    execution_reused: bool = False
+    director_request_id: Optional[str] = None
+    director_latency_ms: Optional[float] = None
+    director_attempt_count: Optional[int] = None
+    director_generation_seed: Optional[int] = None
     reconstructed_context: bool = False
     receipt_verified: bool = False
     created_at: str = field(default_factory=utc_now)
@@ -117,6 +123,26 @@ class TurnRecord:
             raise ValueError("policy_adapter must be non-empty when supplied")
         if self.server_weight_version is not None and not self.server_weight_version.strip():
             raise ValueError("server_weight_version must be non-empty when supplied")
+        if type(self.execution_reused) is not bool:
+            raise ValueError("execution_reused must be bool")
+        if self.director_request_id is not None and not self.director_request_id.strip():
+            raise ValueError("director_request_id must be non-empty when supplied")
+        if self.director_latency_ms is not None and self.director_latency_ms < 0:
+            raise ValueError("director_latency_ms must be non-negative when supplied")
+        if self.director_attempt_count is not None and (
+            isinstance(self.director_attempt_count, bool)
+            or not isinstance(self.director_attempt_count, int)
+            or self.director_attempt_count < 1
+        ):
+            raise ValueError("director_attempt_count must be positive when supplied")
+        if self.director_generation_seed is not None and (
+            isinstance(self.director_generation_seed, bool)
+            or not isinstance(self.director_generation_seed, int)
+            or self.director_generation_seed < 0
+        ):
+            raise ValueError("director_generation_seed must be non-negative when supplied")
+        if not isinstance(self.runtime_summary, Mapping):
+            raise ValueError("runtime_summary must be a mapping")
 
     @property
     def snapshot_receipt_verified(self) -> bool:
@@ -183,6 +209,23 @@ class TrajectoryRecord:
     def group_key(self) -> Tuple[str, str, str]:
         return (self.task.task_id, self.condition_id, self.versions.fingerprint)
 
+    @property
+    def terminal_failure(self) -> bool:
+        """Whether the natural policy exhausted its edit budget without finish."""
+
+        return bool(
+            not self.explicit_finish
+            and self.termination_reason == "max_rounds"
+            and self.final_answer in (None, "")
+        )
+
+    @property
+    def natural_policy_terminal(self) -> bool:
+        return bool(
+            (self.explicit_finish and self.termination_reason == "finish")
+            or self.terminal_failure
+        )
+
     def _snapshot_chain_valid(self) -> bool:
         previous: Optional[str] = None
         for index, turn in enumerate(self.turns):
@@ -197,9 +240,13 @@ class TrajectoryRecord:
     def grpo_eligible(self) -> bool:
         return bool(
             self.task.split == "train"
-            and self.explicit_finish
+            and self.natural_policy_terminal
             and self.evaluation.valid
             and self.evaluation.reward is not None
+            and (
+                not self.terminal_failure
+                or float(self.evaluation.reward) == 0.0
+            )
             and self.evaluation.evaluator_version == self.versions.evaluator
             and not self.forced_probe
             and not self.api_fallback_used
@@ -229,6 +276,7 @@ class TrajectoryRecord:
             "evaluation": self.evaluation.to_dict(),
             "termination_reason": self.termination_reason,
             "explicit_finish": self.explicit_finish,
+            "terminal_failure": self.terminal_failure,
             "condition_satisfied": self.condition_satisfied,
             "forced_probe": self.forced_probe,
             "api_fallback_used": self.api_fallback_used,

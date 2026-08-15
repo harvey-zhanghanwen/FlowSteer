@@ -183,6 +183,90 @@ class SGLangPolicyPublisher:
             raise ValueError("step must be a non-negative integer")
         return f"{self.config.adapter_name_prefix}{step:06d}"
 
+    def ensure_loaded_adapter(
+        self,
+        *,
+        checkpoint_path: str | Path,
+        adapter_name: str,
+    ) -> Mapping[str, Any]:
+        """Load and canary an existing inference adapter without a policy update.
+
+        This is the evaluation-only subset of SkillFlow's external SGLang
+        publication boundary: model list, adapter load, model-list verification,
+        and chat canary.  It deliberately does not unload another policy or
+        claim that any weights were trained or published.
+        """
+
+        checkpoint = Path(checkpoint_path).expanduser().resolve()
+        if not checkpoint.is_dir():
+            raise ValueError("checkpoint_path must be an existing adapter directory")
+        if not isinstance(adapter_name, str) or not adapter_name.strip():
+            raise ValueError("adapter_name must be non-empty")
+        adapter_name = adapter_name.strip()
+        started_at = _utc_now()
+        started_monotonic = time.monotonic()
+        attempts: dict[str, int] = {}
+        before = self._model_ids(attempts, "models_before")
+        loaded_now = adapter_name not in before
+        try:
+            if loaded_now:
+                self._expect_success_flag(
+                    self._request(
+                        "post",
+                        "/load_lora_adapter",
+                        operation="load_adapter",
+                        attempts=attempts,
+                        json={
+                            "lora_name": adapter_name,
+                            "lora_path": str(checkpoint),
+                        },
+                    ),
+                    "external SGLang rejected the inference adapter",
+                )
+            after = self._model_ids(attempts, "models_after")
+            if adapter_name not in after:
+                raise _RequestFailure("inference adapter is absent from /v1/models")
+            validation = self._request(
+                "post",
+                "/v1/chat/completions",
+                operation="canary",
+                attempts=attempts,
+                json={
+                    "max_tokens": self.config.canary_max_tokens,
+                    "messages": [
+                        {"content": self.config.canary_prompt, "role": "user"}
+                    ],
+                    "model": adapter_name,
+                    "temperature": 0,
+                },
+            )
+            choices = self._json_object(validation, "canary response").get("choices")
+            if not isinstance(choices, list) or not choices:
+                raise _RequestFailure("inference adapter failed its chat canary")
+        except Exception:
+            if loaded_now:
+                try:
+                    self._unload(adapter_name, attempts, "rollback_adapter", retry=False)
+                except Exception:  # pragma: no cover - best-effort failure cleanup
+                    logger.exception("failed to unload rejected inference adapter")
+            raise
+        return {
+            "status": "ready",
+            "success": True,
+            "training_performed": False,
+            "policy_published": False,
+            "adapter_name": adapter_name,
+            "checkpoint_path": str(checkpoint),
+            "models_before": list(before),
+            "models_after": list(after),
+            "loaded_now": loaded_now,
+            "canary_succeeded": True,
+            "request_attempts": dict(attempts),
+            "started_at": started_at,
+            "completed_at": _utc_now(),
+            "duration_seconds": max(time.monotonic() - started_monotonic, 0.0),
+        }
+
     def publish(
         self,
         *,

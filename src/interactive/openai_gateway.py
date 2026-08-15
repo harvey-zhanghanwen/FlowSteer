@@ -6,7 +6,8 @@ import asyncio
 import json
 import os
 import socket
-from typing import Any, Dict, Mapping, Sequence
+import time
+from typing import Any, Dict, Mapping, Optional, Sequence
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -58,7 +59,10 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
 
     system = (
         "You are one node in an AgentGraph. Follow your assigned contract, use only "
-        "the messages supplied for this phase, and return the best task-facing content.\n\n"
+        "the messages supplied for this phase, and return the best task-facing content. "
+        "For a factual or numeric final answer, put only the concise answer span inside "
+        "<answer>...</answer>. If the task supplies legal or admissible actions and asks "
+        "for one action, return exactly one listed executable action with no explanation.\n\n"
         f"Agent ID: {request.agent.id}\nContract:\n{request.agent.contract}"
     )
     common = (
@@ -105,6 +109,7 @@ class OpenAICompatibleGateway:
         default_temperature: float = 0.0,
         default_top_p: float = 1.0,
         default_max_tokens: int = 4096,
+        default_seed: Optional[int] = None,
     ) -> None:
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
@@ -115,12 +120,19 @@ class OpenAICompatibleGateway:
         self.default_temperature = float(default_temperature)
         self.default_top_p = float(default_top_p)
         self.default_max_tokens = int(default_max_tokens)
+        self.default_seed = default_seed
         if self.default_temperature < 0:
             raise ValueError("default_temperature must be non-negative")
         if not 0 < self.default_top_p <= 1:
             raise ValueError("default_top_p must be in (0, 1]")
         if self.default_max_tokens <= 0:
             raise ValueError("default_max_tokens must be positive")
+        if self.default_seed is not None and (
+            isinstance(self.default_seed, bool)
+            or not isinstance(self.default_seed, int)
+            or self.default_seed < 0
+        ):
+            raise ValueError("default_seed must be a non-negative integer or None")
 
     def request_payload(self, request: AgentRequest) -> Dict[str, Any]:
         metadata = request.model.metadata
@@ -137,6 +149,10 @@ class OpenAICompatibleGateway:
             "top_p": top_p,
             "max_tokens": _integer(metadata, "max_tokens", self.default_max_tokens),
         }
+        if self.default_seed is not None:
+            # SkillFlow's OpenAI-compatible provider sends the configured seed
+            # to the serving boundary.  Keep the same fixed-run contract here.
+            payload["seed"] = self.default_seed
         thinking = metadata.get("chat_template_enable_thinking")
         if thinking is not None:
             normalized = thinking.strip().lower()
@@ -171,10 +187,23 @@ class OpenAICompatibleGateway:
         url = endpoint.rstrip("/") + "/chat/completions"
 
         last_error: BaseException | None = None
+        started_at = time.monotonic()
         for attempt in range(self.max_retries + 1):
             try:
                 response = await asyncio.to_thread(self._post_json, url, api_key, payload)
-                return self._parse_response(response, request)
+                parsed = self._parse_response(response, request)
+                metadata = dict(parsed.metadata)
+                metadata.update(
+                    {
+                        "latency_ms": max(
+                            (time.monotonic() - started_at) * 1000.0,
+                            0.0,
+                        ),
+                        "attempt_count": attempt + 1,
+                        "generation_seed": payload.get("seed"),
+                    }
+                )
+                return AgentResponse(parsed.text, metadata)
             except HTTPError as exc:
                 last_error = exc
                 retryable = exc.code in {408, 409, 425, 429} or exc.code >= 500

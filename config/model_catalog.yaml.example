@@ -15,6 +15,9 @@ providers:
     api_key_env: "VECTOR_ENGINE_API_KEY"
 
 models:
+  # SkillFlow's interactive environment uses a 4096-token Executor budget
+  # while keeping the Supervisor action budget small.  Reuse that boundary so
+  # a completed AIME derivation is not cut off before its final answer.
   - model_id: "qwen3.5-9b-local"
     provider_id: "local-director"
     model_name: "supervisor_theta"
@@ -24,7 +27,7 @@ models:
     context_window: 8192
     metadata:
       chat_template_enable_thinking: "false"
-      max_tokens: "512"
+      max_tokens: "4096"
 
   # The remote IDs below were returned by this VectorEngine account's
   # /v1/models endpoint. Keep the exact spelling when copying the catalog.
@@ -35,7 +38,7 @@ models:
     cheap_weight: 10.0
     fast_weight: 10.0
     metadata:
-      max_tokens: "512"
+      max_tokens: "4096"
 
   - model_id: "deepseek-v4-flash"
     provider_id: "vectorengine"
@@ -44,7 +47,7 @@ models:
     cheap_weight: 9.0
     fast_weight: 10.0
     metadata:
-      max_tokens: "512"
+      max_tokens: "4096"
 
   - model_id: "gpt-4o-mini"
     provider_id: "vectorengine"
@@ -53,7 +56,7 @@ models:
     cheap_weight: 8.0
     fast_weight: 9.0
     metadata:
-      max_tokens: "512"
+      max_tokens: "4096"
 
   - model_id: "grok-4-1-fast-non-reasoning"
     provider_id: "vectorengine"
@@ -62,7 +65,7 @@ models:
     cheap_weight: 7.0
     fast_weight: 9.0
     metadata:
-      max_tokens: "512"
+      max_tokens: "4096"
 
   - model_id: "minimax-m2.5"
     provider_id: "vectorengine"
@@ -71,4 +74,4 @@ models:
     cheap_weight: 8.0
     fast_weight: 8.0
     metadata:
-      max_tokens: "512"
+      max_tokens: "4096"

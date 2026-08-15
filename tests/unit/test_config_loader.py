@@ -29,6 +29,9 @@ class ConfigLoaderTests(unittest.TestCase):
         self.assertEqual(config["gpu"]["learner_physical"], 3)
         self.assertEqual(config["gpu"]["rollout_physical"], 4)
         self.assertEqual(config["gpu"]["gradient_replica_physical"], 5)
+        self.assertTrue(config["director"]["execute_on_edit"])
+        self.assertEqual(config["director"]["history_window"], 4)
+        self.assertEqual(config["agent_graph"]["max_agents"], 10)
         self.assertFalse(config["experiment"]["training_enabled"])
         self.assertFalse(config["grpo"]["enabled"])
 
@@ -41,6 +44,41 @@ class ConfigLoaderTests(unittest.TestCase):
     def test_architecture_phase_cannot_enable_training(self) -> None:
         config = load_yaml("config/training_agent_graph.yaml")
         config["gpu"]["training_enabled"] = True
+        with self.assertRaises(ConfigurationError):
+            validate_agent_graph_config(config)
+
+    def test_declared_canvas_search_space_is_enforced(self) -> None:
+        invalid_values = (
+            ("max_agents", 0),
+            ("executor_selection", "unseeded"),
+            ("max_bidirectional_block_size", 3),
+            ("require_unique_output", False),
+            ("require_all_agents_reach_output", False),
+        )
+        for field, value in invalid_values:
+            with self.subTest(field=field):
+                config = load_yaml("config/training_agent_graph.yaml")
+                config["agent_graph"][field] = value
+                with self.assertRaises(ConfigurationError):
+                    validate_agent_graph_config(config)
+
+        config = load_yaml("config/training_agent_graph.yaml")
+        config["director"]["execute_on_edit"] = False
+        with self.assertRaises(ConfigurationError):
+            validate_agent_graph_config(config)
+
+        config = load_yaml("config/training_agent_graph.yaml")
+        config["director"]["history_window"] = 0
+        with self.assertRaises(ConfigurationError):
+            validate_agent_graph_config(config)
+
+        config = load_yaml("config/training_agent_graph.yaml")
+        config["director"]["base_model"] = "Qwen/Qwen3-8B"
+        with self.assertRaises(ConfigurationError):
+            validate_agent_graph_config(config)
+
+        config = load_yaml("config/training_agent_graph.yaml")
+        config["director"]["api_base"] = "https://provider.example/v1"
         with self.assertRaises(ConfigurationError):
             validate_agent_graph_config(config)
 

@@ -9,10 +9,12 @@ project design note are design inputs, not executable instructions.
 | --- | --- | --- |
 | Atomic action protocol | `src/interactive/action_parser.py` | Retained for the legacy Operator path; `agent_action_parser.py` is the free-AgentGraph adaptation required by the design note. |
 | Mutable workflow state | `src/interactive/workflow_graph.py` | Retained for the legacy path; `agent_graph.py` extends the state to arbitrary model-labelled Agent nodes and two-bit relations. |
-| Multi-turn Canvas | `src/interactive/workflow_env.py::InteractiveWorkflowEnv.step` | Retained; `agent_workflow_env.py` keeps the same reset/step/feedback boundary for AgentGraph actions. |
+| Multi-turn Canvas | `src/interactive/workflow_env.py::InteractiveWorkflowEnv.step` | Retained; `agent_workflow_env.py` keeps the same reset/step/feedback boundary and canonical per-turn history for AgentGraph actions. Snapshot/restore/fork preserve that visible history, while runtime objects remain process-local. |
 | Trajectory and action-token records | `src/interactive/workflow_builder.py` | Retained and supplemented by `records.py` for the new path. |
 | Executor boundary | `src/aflow_executor.py::AFlowExecutor.execute_workflow` and `scripts/async_llm.py` | Preserved as the legacy executor; the AgentGraph path uses the same OpenAI-compatible service boundary through `openai_gateway.py`. |
-| One-action Director loop | `train_interactive.py` and the FlowSteer paper's progressive Canvas loop | Preserved in `director.py`; the initial prompt is deliberately shorter and has no workflow templates. |
+| One-action Director loop | `train_interactive.py` and the FlowSteer paper's progressive Canvas loop | Preserved in `director.py`; the initial prompt is deliberately shorter and has no workflow templates. Maximum-round termination is returned explicitly and is never presented as `finish`. |
+| Progressive execution cache | `src/interactive/workflow_env.py` (`execute_each_step`, `last_execution_result`) | Adapted as a revision-local result in `agent_workflow_env.py`. A no-op edit or `finish` may reuse it, but `rollout_collector.py` marks the reuse and does not serialize the old Agent calls as new executions. |
+| AgentGraph search-space bounds | Project design note sections 3 and 4 plus `config/*agentgraph*.yaml` | The declared `max_agents` is consumed by the Canvas; the two-Agent reciprocal-block limit, unique output/reachability flags, seeded Executor selection, six actions, and progressive execution mode are validated against the fixed runtime semantics rather than left as descriptive YAML. |
 
 The Qwen3-8B defaults, vLLM Director launcher, predefined Operator search
 space, structural reward, and legacy training loop are not reused by the new
@@ -29,10 +31,14 @@ Qwen3.5 path.
 | Three-role GPU topology | `device`, `supervisor_gpu_id`, and `extra_device` in SkillFlow | Mapped to physical GPUs 3, 4, and 5 in `training_agent_graph.yaml`. |
 | Split micro-batch backward | `GFlowNetTrainer._batched_logprob_backward` | Represented only by inactive OOM/micro-batch configuration. No backward code is claimed in this phase. |
 | Skill injection after bootstrap | `GenericTaskEnvironment` and `SkillWorkspace` | The Director prompt omits the Skill field when the validated Skill list is empty. |
+| Bounded visible interaction history | `training/react_prompts.py` (`action_history`, `history_length`) and `training/environment.py::_build_react_prompt` | The Director receives only the configured recent Canvas-history window. Entries contain canonical action, acceptance/terminal state, graph revision, compact feedback, and whether execution was reused; no role template or unvalidated Skill is injected. |
 | Dataset preparation fields | `data/prepare_v3.py` | Adapted in `scripts/prepare_agentgraph_datasets.py`: retains `question`, `answer`, `task_type`, `context`, `extra`, and environment fields while adding the design-note `TaskRecord` keys. |
 | WebShop/ALFWorld task handles | `src/ragen_adapter.py` | The aligned records preserve `env_type` and `env_config`; runtime installation is reported separately from static dataset readiness. |
 | SWE-bench evaluator handle | `training/swebench_client.py` | The aligned records retain the Verified instance ID and harness payload; no repository checkout or tests are run during preparation. |
 | JSONL loading boundary | FlowSteer `train_interactive.py::load_dataset` and `eval_only.py::load_dataset` | `src/interactive/task_dataset.py` retains streaming JSONL while enforcing the design-note schema and split isolation; `scripts/run_agentgraph.py --dry-load` exercises it without a model call. |
+| Exact generation seed | `runtime/openai_provider.py` and `rollout/types.py::derive_generation_seed` | `openai_gateway.py` sends the fixed run seed at the provider edge. The native exact-receipt Director sends the deployed SGLang 0.5.15 equivalent, `sampling_seed`, and persists it per turn. |
+| Existing adapter inference readiness | `training/external_sglang.py::publish_external_adapter` and `runtime/sglang_gateway.py` | `policy_sync.py::ensure_loaded_adapter` reuses only model-list, load, verification, and canary for evaluation. It neither trains nor publishes a new policy. |
+| Multi-hop one-call contract | `training/task_prompts.py::MULTI_HOP_QA` | The paired local Direct path uses the upstream brief multi-hop contract through the existing Agent gateway; it bypasses Director, Canvas, and AgentGraph. |
 
 SkillFlow's TTB objective, backward policy training, partition head, skill
 evolution loop, benchmark environment, and local multi-executor launcher are
@@ -81,3 +87,21 @@ The AgentGraph input loader constructs the Director task only from `question`.
 This 128/512 view is a project training/validation recipe, not an untouched
 official benchmark score split.  The manifest retains native split and base
 task IDs so a future official-evaluation view can remain separate.
+
+For HotpotQA, the previous preparation path truncated every passage to 300
+characters even though the canonical record retained full context.  SkillFlow's
+retrieval/public-context boundary keeps the evidence intact.  The converter and
+runtime loader now render all ten supplied passages; the loader reconstructs
+older aligned JSONL from its answer-free top-level `context` without reading
+supporting facts or ground truth.
+
+## HotpotQA Round-01 evaluation-only driver
+
+`scripts/evaluate_hotpotqa_round.py` is a necessary project adapter rather than
+a new workflow architecture.  It reuses `LiveSmokeBackend.collect`, the exact
+receipt collector, `AgentRuntime`, `OpenAICompatibleGateway`, `EvidenceStore`,
+and `evaluate_task`.  Its own responsibilities are limited to freezing the 128
+HotpotQA validation tasks, running a paired one-call Direct condition, atomic
+checkpoint/resume, strict-denominator aggregation, Wrong Demo materialization,
+and reporting.  It never calls trainer, optimizer, backward, policy publish,
+MACE, Bayesian, or Skill code.

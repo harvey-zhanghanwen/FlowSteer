@@ -24,6 +24,13 @@ new path establishes stricter execution and evidence invariants.
 | Skills | `skills/schema`, `validator`, `store`, `retrieval`, `lifecycle` | Inactive data/evidence primitives only; no mining or publication loop |
 | Evidence | `persistence/ids`, `trajectory_store`, `replay`, `versioning` | Versioned JSONL streams, idempotency, split isolation, and snapshot hash-chain replay are implemented |
 
+The progressive path now also carries FlowSteer-style Canvas history through
+snapshot/restore/fork and exposes only a bounded recent window to the Director,
+matching SkillFlow's visible ReAct-history boundary.  The YAML search-space
+limits are runtime constraints: `max_agents` is enforced by the Canvas, and
+the two-Agent reciprocal-block, unique-output, reachability, seeded Executor,
+six-action, and `execute_on_edit` settings are rejected when inconsistent.
+
 The design deliberately keeps three signals separate:
 
 ```mermaid
@@ -52,6 +59,13 @@ flowchart LR
   a sink.
 - The Director emits one strict JSON action per turn. The parser consumes only
   the first action boundary.
+- The Director endpoint is local and fixed to the Qwen3.5-9B
+  `supervisor_theta` route; catalog models are Executor candidates only.
+- Maximum-round exhaustion is an explicit `max_rounds` terminal failure, never
+  an implicit answer or `finish`.
+- A successful execution is local to one graph revision. Reusing it after a
+  no-op edit or `finish` is recorded, but its Agent calls are not duplicated as
+  new execution receipts.
 - GRPO groups use `(task_id, condition_id, policy_version)`. Singleton and
   constant-reward groups have zero advantage.
 - Forced probes, fallbacks, manual repairs, reconstructed contexts, invalid
@@ -142,8 +156,8 @@ python3 scripts/run_agentgraph.py \
 ```
 
 The initial Director prompt contains only the six legal actions, current graph,
-Canvas feedback, and model catalog.  With an empty Skill library it contains no
-Skill field or workflow template.  The inference loop gives the Director a
+Canvas feedback/history, runtime limits, and model catalog.  With an empty
+Skill library it contains no Skill field or workflow template.  The inference loop gives the Director a
 weighted cheap/fast model prior but does
 not hard-code a role enum. The Director can create free-text Agent contracts,
 choose models, set communication directions, choose the output Agent, repair an

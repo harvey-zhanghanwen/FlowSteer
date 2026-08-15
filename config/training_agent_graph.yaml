@@ -50,6 +50,8 @@ director:
   top_p: 0.95
   top_k: 20
   max_rounds: 20
+  execute_on_edit: true
+  history_window: 4
   lora:
     enabled: true
     rank: 64

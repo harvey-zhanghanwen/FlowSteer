@@ -113,12 +113,16 @@ def _versions() -> VersionBundle:
     )
 
 
-def _task(task_id: str = "hotpotqa:first", source: str = "HotpotQA") -> TaskRecord:
+def _task(
+    task_id: str = "hotpotqa:first",
+    source: str = "HotpotQA",
+    split: str = "train",
+) -> TaskRecord:
     return TaskRecord(
         task_id=task_id,
         question="What is the answer?",
         ground_truth="final answer",
-        split="train",
+        split=split,
         metadata={"source": source},
     )
 
@@ -133,7 +137,7 @@ def test_native_sglang_receipt_uses_real_input_ids_and_separates_versions():
         base_url="http://127.0.0.1:8015/v1",
     )
 
-    response = asyncio.run(client.propose("ordinary prompt"))
+    response = asyncio.run(client.propose("ordinary prompt", seed=23))
     payload = client.payloads[0]
     messages, template_kwargs = client.tokenizer.chat_calls[0]
     assert messages[0]["role"] == "system"
@@ -147,9 +151,13 @@ def test_native_sglang_receipt_uses_real_input_ids_and_separates_versions():
     assert payload["input_ids"] == [101, 102, 103]
     assert payload["return_logprob"] is True
     assert payload["lora_path"] == "theta_live"
+    assert payload["sampling_params"]["sampling_seed"] == 23
     assert response.metadata["policy_version"] == POLICY_VERSION
     assert response.metadata["server_weight_version"] == "default"
     assert response.metadata["adapter_name"] == "theta_live"
+    assert response.metadata["latency_ms"] >= 0.0
+    assert response.metadata["attempt_count"] == 1
+    assert response.metadata["generation_seed"] == 23
     assert len(response.metadata["output_token_ids"]) == len(
         response.metadata["behavior_log_probs"]
     )
@@ -278,14 +286,69 @@ def test_collector_materializes_exact_finish_trajectory_and_evidence(tmp_path):
     assert all(turn.policy_version == POLICY_VERSION for turn in trajectory.turns)
     assert all(turn.policy_adapter == "theta_live" for turn in trajectory.turns)
     assert all(turn.server_weight_version == "default" for turn in trajectory.turns)
+    assert all(turn.director_request_id for turn in trajectory.turns)
+    assert all((turn.director_latency_ms or 0.0) >= 0.0 for turn in trajectory.turns)
+    assert all(turn.director_attempt_count == 1 for turn in trajectory.turns)
+    assert [turn.director_generation_seed for turn in trajectory.turns] == [7, 8, 9]
     assert all(
         turn.executed_prefix_tokens < len(turn.output_token_ids)
         for turn in trajectory.turns
     )
     assert len(trajectory.turns[-1].executions) == 1
     assert trajectory.turns[-1].executions[0].output == "final answer"
+    assert trajectory.turns[-1].runtime_summary["output_agent_id"] == "solver"
+    assert trajectory.turns[-1].runtime_summary["outputs"] == {
+        "solver": "final answer"
+    }
+    assert trajectory.turns[-1].runtime_summary["block_completion_order"] == [
+        ["solver"]
+    ]
+    request_receipt = trajectory.turns[-1].executions[0].metadata["request"]
+    assert request_receipt["rendered_messages"][0]["role"] == "system"
+    assert request_receipt["rendered_messages"][1]["role"] == "user"
     assert len(evidence.snapshots) == 3
     assert len(evidence.trajectories) == 1
+
+
+def test_collector_does_not_duplicate_reused_progressive_execution():
+    registry = _registry()
+    client = ScriptedSGLangClient(
+        [
+            '{"action":"add_agent","agent_id":"solver","model_id":"cheap-model",'
+            '"contract":"solve directly"}',
+            '{"action":"set_output","agent_id":"solver"}',
+            '{"action":"finish"}',
+        ],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+    )
+    collector = AgentGraphRolloutCollector(
+        AgentGraphOrchestrator(registry, client, max_rounds=3),
+        AgentWorkflowEnv(
+            registry,
+            gateway=FakeGateway(),
+            execute_on_edit=True,
+        ),
+        _versions(),
+    )
+
+    def evaluator(task, final_answer, final_graph, runtime):
+        assert final_answer == "final answer"
+        assert runtime is not None
+        return {
+            "evaluator_version": EVALUATOR_VERSION,
+            "valid": True,
+            "reward": 1.0,
+            "metrics": {"f1": 1.0},
+            "reason": "exact",
+        }
+
+    trajectory = asyncio.run(collector.collect(_task(), 0, evaluator))
+
+    assert len(trajectory.turns[1].executions) == 1
+    assert trajectory.turns[1].execution_reused is False
+    assert trajectory.turns[2].executions == ()
+    assert trajectory.turns[2].execution_reused is True
 
 
 def test_collector_returns_complete_max_rounds_trajectory():
@@ -328,7 +391,45 @@ def test_collector_returns_complete_max_rounds_trajectory():
     assert trajectory.final_answer is None
     assert trajectory.evaluation.reward == 0.0
     assert trajectory.evaluation.details == {"terminal_state": "max_rounds"}
-    assert trajectory.grpo_eligible is False
+    assert trajectory.terminal_failure is True
+    assert trajectory.grpo_eligible is True
     assert len(trajectory.turns) == 1
     assert observed["runtime"] is None
     assert observed["final_graph"]["nodes"][0]["id"] == "solver"
+
+
+def test_collector_allows_explicit_heldout_split_without_grpo_admission():
+    registry = _registry()
+    client = ScriptedSGLangClient(
+        [
+            '{"action":"add_agent","agent_id":"solver","model_id":"cheap-model",'
+            '"contract":"solve"}',
+            '{"action":"set_output","agent_id":"solver"}',
+            '{"action":"finish"}',
+        ],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+    )
+    collector = AgentGraphRolloutCollector(
+        AgentGraphOrchestrator(registry, client, max_rounds=3),
+        AgentWorkflowEnv(registry, gateway=FakeGateway()),
+        _versions(),
+        expected_task_split="validation",
+    )
+
+    def evaluator(task, final_answer, final_graph, runtime):
+        return {
+            "evaluator_version": EVALUATOR_VERSION,
+            "valid": True,
+            "reward": 1.0,
+            "metrics": {"token_f1": 1.0},
+            "reason": "exact",
+        }
+
+    trajectory = asyncio.run(
+        collector.collect(_task(split="validation"), 0, evaluator)
+    )
+
+    assert trajectory.task.split == "validation"
+    assert trajectory.explicit_finish is True
+    assert trajectory.grpo_eligible is False

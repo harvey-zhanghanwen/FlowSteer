@@ -1,0 +1,157 @@
+# Fixed held-out HotpotQA architecture validation.  This file performs no
+# training, optimizer step, policy update, exploration, or Skill injection.
+
+schema_version: "flowsteer.agentgraph.config.v1"
+experiment:
+  name: "hotpotqa_architecture_round_01"
+  phase: "hotpotqa_evaluation"
+  training_enabled: false
+  seed: 20260815
+  condition_id: "hotpotqa_round_01_stable_zero"
+  prompt_version: "agentgraph.director.minimal.v2"
+  tool_version: "agentgraph.executor-react.v2"
+  output_dir: "artifacts/hotpotqa_round_01"
+
+data:
+  catalog_path: "config/datasets_agentgraph.yaml"
+  train_path: "data/agentgraph_v1/train.jsonl"
+  validation_path: "data/agentgraph_v1/validation.jsonl"
+  test_path: "data/agentgraph_v1/test.jsonl"
+  enforce_split_isolation: true
+  task_schema_version: "flowsteer.agentgraph.task.v1"
+
+hotpotqa_evaluation:
+  dataset_key: "hotpotqa"
+  split: "validation"
+  selection: "sequential"
+  sample_count: 128
+  rollouts_per_task: 1
+  concurrency: 4
+  direct_model_id: "qwen3.5-9b-local"
+  direct_protocol: "agent_runtime_single_call_skillflow_multihop_prompt_v1"
+
+storage:
+  schema_version: "flowsteer.agentgraph.hotpotqa_round.v1"
+  root: "artifacts/hotpotqa_round_01/evidence"
+  selected_tasks_path: "artifacts/hotpotqa_round_01/selected_tasks.jsonl"
+  direct_predictions_path: "artifacts/hotpotqa_round_01/direct_predictions.jsonl"
+  trajectories_path: "artifacts/hotpotqa_round_01/agentgraph_trajectories.jsonl"
+  failures_path: "artifacts/hotpotqa_round_01/collection_failures.jsonl"
+  paired_results_path: "artifacts/hotpotqa_round_01/paired_results.jsonl"
+  wrong_demos_path: "artifacts/hotpotqa_round_01/wrong_demos.jsonl"
+  manifest_path: "artifacts/hotpotqa_round_01/run_manifest.json"
+  preflight_receipt_path: "artifacts/hotpotqa_round_01/preflight_receipt.json"
+  report_json_path: "reports/hotpotqa_round_01/report.json"
+  report_markdown_path: "reports/hotpotqa_round_01/report.md"
+
+director:
+  base_model: "${QWEN35_9B_MODEL_PATH:-/home/test/SKILLEV/skillev-new-b2-temp/model/Qwen3.5-9B-modelscope}"
+  tokenizer_path: "${QWEN35_9B_TOKENIZER_PATH:-/home/test/SKILLEV/skillev-new-b2-temp/tokenizer/Qwen3.5-9B}"
+  backend: "sglang"
+  api_base: "http://127.0.0.1:${FLOWSTEER_SUPERVISOR_PORT:-8015}/v1"
+  served_model_name: "supervisor_theta"
+  behavior_policy_version: "qwen35-9b-smoke-step-0001"
+  behavior_adapter_name: "theta_smoke_step_000001"
+  behavior_adapter_checkpoint: "/ssd1/iclr/1/FlowSteer/artifacts/agentgraph_smoke/checkpoint_final/supervisor_lora/step_000001_20260815T071303632043Z/theta"
+  updated_policy_version: "unused-evaluation-only"
+  expected_server_weight_version: "default"
+  live_adapter_name: "theta_smoke_step_000001"
+  prompt_profile: "minimal"
+  dtype: "bfloat16"
+  max_context_tokens: 8192
+  max_action_tokens: 256
+  temperature: 1.0
+  top_p: 1.0
+  top_k: -1
+  max_rounds: 20
+  execute_on_edit: true
+  history_window: 4
+  lora:
+    enabled: true
+    rank: 64
+    alpha: 128
+    dropout: 0.0
+    target_modules: [q_proj, k_proj, v_proj, o_proj]
+
+agent_graph:
+  max_agents: 10
+  contract_type: "free_text"
+  relation_encoding: "two_bit"
+  actions: [add_agent, modify_agent, delete_agent, set_relation, set_output, finish]
+  executor_selection: "seeded_weighted_random"
+  max_bidirectional_block_size: 2
+  require_unique_output: true
+  require_all_agents_reach_output: true
+  model_catalog_path: "config/model_catalog.yaml"
+
+evaluation:
+  healthbench_judge_model: "gpt-4o-mini"
+  max_environment_steps: 20
+  swebench_harness_enabled: false
+  invalid_evaluator_action: "persist_and_exclude"
+
+grpo:
+  enabled: false
+  objective: "action_masked_one_pass"
+  group_key: [task_id, condition_id, policy_version]
+  samples_per_problem: 1
+  advantage_epsilon: 1.0e-8
+  equal_weight_per_problem: true
+  terminal_task_reward_only: true
+  structural_reward: 0.0
+  exploration_reward: 0.0
+  skill_usage_reward: 0.0
+  require_valid_evaluator: true
+  reject_forced_probes: true
+  reject_fallback_or_manual_repair: true
+  reject_reconstructed_context: true
+  require_exact_behavior_receipt: true
+  optimization_passes_per_rollout_batch: 0
+  max_optimizer_updates: 0
+  learning_rate: 0.0
+  gradient_checkpointing: false
+  max_grad_norm: 0.0
+
+policy_sync:
+  enabled: false
+  api_base: "http://127.0.0.1:${FLOWSTEER_SUPERVISOR_PORT:-8015}"
+  adapter_name_prefix: "theta_smoke_step_"
+  request_timeout_seconds: 120
+  max_retries: 3
+  retry_backoff_seconds: 2
+
+exploration:
+  enabled: false
+  strategy: "none"
+  forced_probe_rollouts: 0
+
+skills:
+  enabled: false
+  initial_library: []
+  retrieval_top_k: 0
+
+gpu:
+  learner_physical: 3
+  rollout_physical: 4
+  gradient_replica_physical: 5
+  learner_device: "cuda:3"
+  rollout_engine: "sglang"
+  gradient_replica_device: "cuda:5"
+  supervisor_gpu_id: 4
+  supervisor_api_base: "http://127.0.0.1:8015/v1"
+  training_enabled: false
+  oom_policy:
+    status: "inactive_evaluation_only"
+    micro_batch_size: 1
+    minimum_micro_batch_size: 1
+    micro_batch_schedule: [1]
+    retry_on_cuda_oom: false
+    split_items_across_learner_and_replica: false
+    gradient_accumulation_steps: 1
+    gradient_checkpointing: false
+
+deployment:
+  exploration_beta: 0.0
+  allow_forced_probes: false
+  active_skills_only: false
+  require_version_compatible_skills: true

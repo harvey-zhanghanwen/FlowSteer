@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import os
 import random
 import tempfile
@@ -18,7 +17,7 @@ from src.interactive.agent_graph import (
     GraphMutationError,
 )
 from src.interactive.agent_runtime import AgentRequest
-from src.interactive.agent_workflow_env import AgentWorkflowEnv
+from src.interactive.agent_workflow_env import AgentWorkflowEnv, AgentWorkflowStateError
 from src.interactive.model_registry import (
     ModelRegistry,
     ModelRegistryError,
@@ -293,6 +292,19 @@ class _ImmediateGateway:
         return f"answer:{request.agent.id}"
 
 
+class _FailOnceGateway(_ImmediateGateway):
+    def __init__(self) -> None:
+        super().__init__()
+        self._failed = False
+
+    async def generate(self, request: AgentRequest) -> str:
+        self.requests.append(request)
+        if not self._failed:
+            self._failed = True
+            raise RuntimeError("temporary executor failure")
+        return f"answer:{request.agent.id}"
+
+
 class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
     async def test_transactional_edits_finish_and_fork(self) -> None:
         registry = make_registry()
@@ -328,6 +340,151 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         after = await env.step('{"action":"finish"}')
         self.assertFalse(after.accepted)
         self.assertTrue(after.done)
+
+    async def test_progressive_failure_is_feedback_and_edit_stays_accepted(self) -> None:
+        registry = make_registry()
+        gateway = _FailOnceGateway()
+        env = AgentWorkflowEnv(
+            registry,
+            gateway,
+            problem="question",
+            execute_on_edit=True,
+        )
+        await env.step(
+            '{"action":"add_agent","agent_id":"a","model_id":"balanced","contract":"answer"}'
+        )
+
+        edited = await env.step('{"action":"set_output","agent_id":"a"}')
+
+        self.assertTrue(edited.accepted)
+        self.assertFalse(edited.done)
+        self.assertIsNone(edited.execution)
+        self.assertIn("execution_error=", edited.feedback)
+        self.assertIn("temporary executor failure", edited.feedback)
+        self.assertEqual("a", env.graph.output_agent_id)
+
+        retried = await env.step('{"action":"finish"}')
+        self.assertTrue(retried.accepted)
+        self.assertTrue(retried.done)
+        self.assertEqual("answer:a", retried.final_answer)
+        self.assertEqual(2, len(gateway.requests))
+
+    async def test_finish_reuses_successful_progressive_execution(self) -> None:
+        registry = make_registry()
+        gateway = _ImmediateGateway()
+        env = AgentWorkflowEnv(
+            registry,
+            gateway,
+            problem="question",
+            execute_on_edit=True,
+        )
+        await env.step(
+            '{"action":"add_agent","agent_id":"a","model_id":"balanced","contract":"answer"}'
+        )
+        progressive = await env.step('{"action":"set_output","agent_id":"a"}')
+
+        finished = await env.step('{"action":"finish"}')
+
+        self.assertTrue(finished.accepted)
+        self.assertIs(progressive.execution, finished.execution)
+        self.assertTrue(finished.execution_reused)
+        self.assertEqual(1, len(gateway.requests))
+
+    async def test_noop_edit_reuses_same_revision_execution(self) -> None:
+        registry = make_registry()
+        gateway = _ImmediateGateway()
+        env = AgentWorkflowEnv(
+            registry,
+            gateway,
+            problem="question",
+            execute_on_edit=True,
+        )
+        await env.step(
+            '{"action":"add_agent","agent_id":"a","model_id":"balanced","contract":"answer"}'
+        )
+        first = await env.step('{"action":"set_output","agent_id":"a"}')
+        repeated = await env.step('{"action":"set_output","agent_id":"a"}')
+
+        self.assertEqual(first.revision, repeated.revision)
+        self.assertIs(first.execution, repeated.execution)
+        self.assertTrue(repeated.execution_reused)
+        self.assertTrue(repeated.snapshot.history[-1].execution_reused)
+        self.assertEqual(1, len(gateway.requests))
+
+    async def test_history_survives_snapshot_restore_and_fork(self) -> None:
+        registry = make_registry()
+        env = AgentWorkflowEnv(registry, _ImmediateGateway(), problem="question")
+        await env.step("not an action")
+        await env.step(
+            '{"action":"add_agent","agent_id":"a","model_id":"balanced","contract":"answer"}'
+        )
+        snapshot = env.snapshot()
+
+        restored = AgentWorkflowEnv(registry, _ImmediateGateway())
+        restored.restore(snapshot)
+        fork = env.fork(snapshot)
+
+        self.assertEqual(snapshot.history, restored.history)
+        self.assertEqual(snapshot.history, fork.history)
+        self.assertEqual(2, len(snapshot.history))
+        self.assertFalse(snapshot.history[0].accepted)
+        self.assertEqual("add_agent", snapshot.history[1].to_dict()["action"]["action"])
+
+    async def test_runtime_agent_limit_rejects_only_new_agents(self) -> None:
+        registry = make_registry()
+        env = AgentWorkflowEnv(
+            registry,
+            _ImmediateGateway(),
+            problem="question",
+            max_agents=1,
+        )
+        await env.step(
+            '{"action":"add_agent","agent_id":"a","model_id":"balanced","contract":"answer"}'
+        )
+        over_limit = await env.step(
+            '{"action":"add_agent","agent_id":"b","model_id":"fast","contract":"check"}'
+        )
+
+        self.assertFalse(over_limit.accepted)
+        self.assertIn("max_agents=1", over_limit.feedback)
+        self.assertEqual(["a"], [node.id for node in env.graph.nodes])
+
+        oversized = AgentGraph(
+            [
+                AgentNode("a", "balanced", "answer"),
+                AgentNode("b", "fast", "check"),
+            ]
+        )
+        with self.assertRaises(AgentWorkflowStateError):
+            AgentWorkflowEnv(
+                registry,
+                _ImmediateGateway(),
+                graph=oversized,
+                max_agents=1,
+            )
+
+    async def test_finish_runtime_failure_is_rejected_and_canvas_can_continue(self) -> None:
+        registry = make_registry()
+        gateway = _FailOnceGateway()
+        env = AgentWorkflowEnv(registry, gateway, problem="question")
+        await env.step(
+            '{"action":"add_agent","agent_id":"a","model_id":"balanced","contract":"answer"}'
+        )
+        await env.step('{"action":"set_output","agent_id":"a"}')
+
+        failed = await env.step('{"action":"finish"}')
+        self.assertFalse(failed.accepted)
+        self.assertFalse(failed.done)
+        self.assertFalse(env.finished)
+        self.assertIn("execution_error=", failed.feedback)
+
+        changed = await env.step(
+            '{"action":"modify_agent","agent_id":"a","contract":"answer concisely"}'
+        )
+        self.assertTrue(changed.accepted)
+        finished = await env.step('{"action":"finish"}')
+        self.assertTrue(finished.accepted)
+        self.assertEqual("answer:a", finished.final_answer)
 
 
 if __name__ == "__main__":

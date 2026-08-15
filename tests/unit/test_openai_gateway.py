@@ -57,6 +57,8 @@ class MessageTests(unittest.TestCase):
         self.assertIn("Your draft:\nown", text)
         self.assertIn("Peer draft from peer:\npeer draft", text)
         self.assertIn("External upstream messages", text)
+        self.assertIn("<answer>...</answer>", messages[0]["content"])
+        self.assertIn("exactly one listed executable action", messages[0]["content"])
 
     def test_revision_without_drafts_is_rejected(self) -> None:
         broken = request(ExecutionPhase.SINGLE)
@@ -67,7 +69,7 @@ class MessageTests(unittest.TestCase):
 
 class GatewayTests(unittest.IsolatedAsyncioTestCase):
     async def test_request_and_response_mapping(self) -> None:
-        gateway = OpenAICompatibleGateway(max_retries=0)
+        gateway = OpenAICompatibleGateway(max_retries=0, default_seed=17)
         captured = {}
 
         def fake_post(url, api_key, payload):
@@ -86,7 +88,11 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(captured["api_key"], "EMPTY")
         self.assertEqual(captured["payload"]["model"], "remote-model-id")
         self.assertEqual(captured["payload"]["temperature"], 0.2)
+        self.assertEqual(captured["payload"]["seed"], 17)
         self.assertEqual(response.metadata["total_tokens"], 12)
+        self.assertGreaterEqual(response.metadata["latency_ms"], 0.0)
+        self.assertEqual(response.metadata["attempt_count"], 1)
+        self.assertEqual(response.metadata["generation_seed"], 17)
 
     async def test_missing_credential_names_variable_without_printing_key(self) -> None:
         with patch.dict(os.environ, {}, clear=True):

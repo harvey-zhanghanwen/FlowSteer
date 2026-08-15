@@ -52,6 +52,7 @@ from src.interactive.smoke_trainer import (
 )
 from src.interactive.task_dataset import iter_task_records
 from src.interactive.task_evaluator import (
+    EvaluationOutcome,
     HEALTHBENCH_EVALUATOR_VERSION,
     RAGEN_EVALUATOR_VERSION,
     SKILLFLOW_REWARD_VERSION,
@@ -188,11 +189,17 @@ def select_smoke_tasks(
     source_order: Sequence[str],
     per_source: int,
     require_unique_base_tasks: bool,
+    skip_per_source: int = 0,
+    expected_split: str = "train",
 ) -> tuple[TaskRecord, ...]:
     """Select the first N records per dataset key in config order."""
 
     if type(per_source) is not int or per_source <= 0:
         raise ValueError("per_source must be a positive integer")
+    if type(skip_per_source) is not int or skip_per_source < 0:
+        raise ValueError("skip_per_source must be a non-negative integer")
+    if not isinstance(expected_split, str) or not expected_split.strip():
+        raise ValueError("expected_split must be a non-empty string")
     ordered_sources = tuple(str(value).strip() for value in source_order)
     if not ordered_sources or any(not value for value in ordered_sources):
         raise ValueError("source_order must contain non-empty dataset keys")
@@ -201,11 +208,17 @@ def select_smoke_tasks(
 
     selected: dict[str, list[TaskRecord]] = {source: [] for source in ordered_sources}
     base_ids: dict[str, set[str]] = {source: set() for source in ordered_sources}
+    skipped: dict[str, int] = {source: 0 for source in ordered_sources}
     for task in tasks:
-        if task.split != "train":
-            raise ValueError(f"smoke task {task.task_id!r} is not in the train split")
+        if task.split != expected_split:
+            raise ValueError(
+                f"bounded task {task.task_id!r} is not in the {expected_split} split"
+            )
         source = _dataset_key(task)
         if source not in selected or len(selected[source]) >= per_source:
+            continue
+        if skipped[source] < skip_per_source:
+            skipped[source] += 1
             continue
         base_id = _base_task_id(task)
         if require_unique_base_tasks and base_id in base_ids[source]:
@@ -244,13 +257,15 @@ def version_bundle_for(
     *,
     policy_version: str,
     model_catalog_version: str,
+    prompt_version: str = PROMPT_VERSION,
+    tool_version: str = TOOL_VERSION,
 ) -> VersionBundle:
     return VersionBundle(
         policy=policy_version,
         model_catalog=model_catalog_version,
         evaluator=evaluator_version_for(task),
-        prompt=PROMPT_VERSION,
-        tool=TOOL_VERSION,
+        prompt=prompt_version,
+        tool=tool_version,
     )
 
 
@@ -338,6 +353,8 @@ class SmokeBackend(Protocol):
         task: TaskRecord,
         rollout_index: int,
         versions: VersionBundle,
+        *,
+        expected_task_split: str = "train",
     ) -> TrajectoryRecord:
         ...
 
@@ -367,7 +384,7 @@ class LiveSmokeBackend:
         director_client: SGLangReceiptDirectorClient,
         rollout_gate: RolloutGate,
         evidence_store: EvidenceStore,
-        trainer: Qwen35OnePassSmokeTrainer,
+        trainer: Optional[Qwen35OnePassSmokeTrainer],
         publisher: SGLangPolicyPublisher,
         judge: Optional[JudgeCallback],
         judge_model: str,
@@ -388,7 +405,13 @@ class LiveSmokeBackend:
         return self.registry.catalog_id
 
     @classmethod
-    def from_config(cls, config: Mapping[str, Any], root: Path) -> "LiveSmokeBackend":
+    def from_config(
+        cls,
+        config: Mapping[str, Any],
+        root: Path,
+        *,
+        evaluation_only: bool = False,
+    ) -> "LiveSmokeBackend":
         secret = os.environ.get("VECTOR_ENGINE_API_KEY", "")
         if not secret:
             raise ConfigurationError(
@@ -396,6 +419,7 @@ class LiveSmokeBackend:
             )
 
         director = _mapping(config["director"], "director")
+        experiment = _mapping(config["experiment"], "experiment")
         graph_config = _mapping(config["agent_graph"], "agent_graph")
         grpo = _mapping(config["grpo"], "grpo")
         gpu = _mapping(config["gpu"], "gpu")
@@ -421,12 +445,15 @@ class LiveSmokeBackend:
         )
 
         gate = RolloutGate()
+        behavior_adapter = director.get("behavior_adapter_name")
+        if behavior_adapter is not None:
+            behavior_adapter = str(behavior_adapter).strip() or None
         director_client = SGLangReceiptDirectorClient(
             tokenizer,
             base_url=str(director["api_base"]),
             api_key=os.environ.get("SGLANG_API_KEY", "EMPTY"),
             policy_version=str(director["behavior_policy_version"]),
-            adapter_name=None,
+            adapter_name=behavior_adapter,
             expected_server_weight_version=str(
                 director["expected_server_weight_version"]
             ),
@@ -437,36 +464,51 @@ class LiveSmokeBackend:
             max_tokens=int(director["max_action_tokens"]),
         )
 
-        gateway = OpenAICompatibleGateway()
+        gateway = OpenAICompatibleGateway(default_seed=int(experiment["seed"]))
         runtime = AgentRuntime(registry, gateway)
         evidence_store = EvidenceStore(_resolve(root, str(storage["root"])))
 
-        lora = _mapping(director["lora"], "director.lora")
-        trainer = Qwen35OnePassSmokeTrainer(
-            SmokeTrainerConfig(
-                model_path=str(director["base_model"]),
-                tokenizer_path=str(director["tokenizer_path"]),
-                behavior_policy_version=str(director["behavior_policy_version"]),
-                updated_policy_version=str(director["updated_policy_version"]),
-                behavior_policy_adapter=None,
-                behavior_server_weight_version=str(
-                    director["expected_server_weight_version"]
-                ),
-                learner_device=str(gpu["learner_device"]),
-                gradient_replica_device=str(gpu["gradient_replica_device"]),
-                lora_rank=int(lora["rank"]),
-                lora_alpha=int(lora["alpha"]),
-                lora_dropout=float(lora["dropout"]),
-                lora_target_modules=tuple(str(value) for value in lora["target_modules"]),
-                learning_rate=float(grpo["learning_rate"]),
-                max_grad_norm=float(grpo["max_grad_norm"]),
-                advantage_epsilon=float(grpo["advantage_epsilon"]),
-                gradient_checkpointing=bool(grpo["gradient_checkpointing"]),
-                micro_batch_backoff=tuple(
-                    int(value) for value in oom["micro_batch_schedule"]
-                ),
+        trainer: Optional[Qwen35OnePassSmokeTrainer] = None
+        if not evaluation_only:
+            lora = _mapping(director["lora"], "director.lora")
+            trainer = Qwen35OnePassSmokeTrainer(
+                SmokeTrainerConfig(
+                    model_path=str(director["base_model"]),
+                    tokenizer_path=str(director["tokenizer_path"]),
+                    behavior_policy_version=str(director["behavior_policy_version"]),
+                    updated_policy_version=str(director["updated_policy_version"]),
+                    behavior_policy_adapter=behavior_adapter,
+                    behavior_server_weight_version=str(
+                        director["expected_server_weight_version"]
+                    ),
+                    behavior_adapter_checkpoint=(
+                        str(_resolve(root, str(director["behavior_adapter_checkpoint"])))
+                        if director.get("behavior_adapter_checkpoint")
+                        else None
+                    ),
+                    update_step=int(experiment.get("update_step", 1)),
+                    optimizer_state_checkpoint=(
+                        str(_resolve(root, str(director["optimizer_state_checkpoint"])))
+                        if director.get("optimizer_state_checkpoint")
+                        else None
+                    ),
+                    learner_device=str(gpu["learner_device"]),
+                    gradient_replica_device=str(gpu["gradient_replica_device"]),
+                    lora_rank=int(lora["rank"]),
+                    lora_alpha=int(lora["alpha"]),
+                    lora_dropout=float(lora["dropout"]),
+                    lora_target_modules=tuple(
+                        str(value) for value in lora["target_modules"]
+                    ),
+                    learning_rate=float(grpo["learning_rate"]),
+                    max_grad_norm=float(grpo["max_grad_norm"]),
+                    advantage_epsilon=float(grpo["advantage_epsilon"]),
+                    gradient_checkpointing=bool(grpo["gradient_checkpointing"]),
+                    micro_batch_backoff=tuple(
+                        int(value) for value in oom["micro_batch_schedule"]
+                    ),
+                )
             )
-        )
         publisher = SGLangPolicyPublisher(
             PolicySyncConfig(
                 api_base=str(sync["api_base"]),
@@ -477,11 +519,14 @@ class LiveSmokeBackend:
                 retry_backoff_seconds=float(sync["retry_backoff_seconds"]),
             )
         )
-        judge, judge_model = cls._build_healthbench_judge(
-            registry,
-            secret,
-            str(evaluation["healthbench_judge_model"]),
-        )
+        judge: Optional[JudgeCallback] = None
+        judge_model = ""
+        if not evaluation_only:
+            judge, judge_model = cls._build_healthbench_judge(
+                registry,
+                secret,
+                str(evaluation["healthbench_judge_model"]),
+            )
         return cls(
             config=config,
             registry=registry,
@@ -535,28 +580,34 @@ class LiveSmokeBackend:
         task: TaskRecord,
         rollout_index: int,
         versions: VersionBundle,
+        *,
+        expected_task_split: str = "train",
     ) -> TrajectoryRecord:
         director = _mapping(self.config["director"], "director")
+        graph_config = _mapping(self.config["agent_graph"], "agent_graph")
         experiment = _mapping(self.config["experiment"], "experiment")
         orchestrator = AgentGraphOrchestrator(
             self.registry,
             self.director_client,
             max_rounds=int(director["max_rounds"]),
             seed=int(experiment["seed"]) + rollout_index,
+            history_window=int(director["history_window"]),
         )
         environment = AgentWorkflowEnv(
             self.registry,
             runtime=self.runtime,
-            execute_on_edit=False,
+            execute_on_edit=bool(director["execute_on_edit"]),
+            max_agents=int(graph_config["max_agents"]),
         )
         collector = AgentGraphRolloutCollector(
             orchestrator,
             environment,
             versions,
             self.evidence_store,
-            condition_id="natural_smoke",
+            condition_id=str(experiment.get("condition_id", "natural_smoke")),
             skills=(),
             forced_probe=False,
+            expected_task_split=expected_task_split,
         )
 
         async def evaluator_callback(
@@ -566,6 +617,19 @@ class LiveSmokeBackend:
             final_runtime: Any,
         ) -> Any:
             del final_runtime
+            source_key = _dataset_key(evaluated_task)
+            if source_key in {"webshop", "alfworld"} and final_answer is None:
+                # A natural Director budget exhaustion is already a real
+                # terminal failure in the MD/SkillFlow boundary.  Do not start
+                # a fresh interactive environment after the workflow itself
+                # failed to finish.
+                return EvaluationOutcome(
+                    valid=True,
+                    reward=0.0,
+                    metrics={"success": 0.0},
+                    reason="director_max_rounds_without_explicit_finish",
+                    evaluator_version=RAGEN_EVALUATOR_VERSION,
+                )
             environment_graph = _graph_from_mapping(final_graph)
             environment_step = 0
 
@@ -582,6 +646,11 @@ class LiveSmokeBackend:
                 )
                 return result.final_answer
 
+            configured_steps = _mapping(
+                self.config["evaluation"], "evaluation"
+            ).get("max_environment_steps_by_source", {})
+            if not isinstance(configured_steps, Mapping):
+                configured_steps = {}
             return await evaluate_task(
                 evaluated_task,
                 final_answer or "",
@@ -589,9 +658,12 @@ class LiveSmokeBackend:
                 judge_model=self.judge_model,
                 run_graph=run_graph,
                 max_environment_steps=int(
-                    _mapping(self.config["evaluation"], "evaluation")[
-                        "max_environment_steps"
-                    ]
+                    configured_steps.get(
+                        source_key,
+                        _mapping(self.config["evaluation"], "evaluation")[
+                            "max_environment_steps"
+                        ],
+                    )
                 ),
             )
 
@@ -602,10 +674,13 @@ class LiveSmokeBackend:
         trajectories: Sequence[TrajectoryRecord],
         output_dir: Path,
     ) -> Any:
+        if self.trainer is None:
+            raise RuntimeError("training is disabled for this evaluation-only backend")
         return self.trainer.train(trajectories, output_dir)
 
     async def publish(self, summary: Any) -> Any:
         director = _mapping(self.config["director"], "director")
+        experiment = _mapping(self.config["experiment"], "experiment")
         checkpoint_version = f"checkpoint:{summary.updated_policy_version}"
         try:
             receipt = await asyncio.to_thread(
@@ -614,8 +689,12 @@ class LiveSmokeBackend:
                 checkpoint_version=checkpoint_version,
                 behavior_policy_version=summary.behavior_policy_version,
                 candidate_policy_version=summary.updated_policy_version,
-                step=1,
-                previous_adapter=None,
+                step=int(experiment.get("update_step", 1)),
+                previous_adapter=(
+                    str(director["behavior_adapter_name"])
+                    if director.get("behavior_adapter_name")
+                    else None
+                ),
                 gate=self.rollout_gate,
             )
         except PolicySyncError:

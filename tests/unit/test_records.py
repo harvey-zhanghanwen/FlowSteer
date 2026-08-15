@@ -84,6 +84,38 @@ class RecordTests(unittest.TestCase):
         self.assertFalse(trajectory("test").grpo_eligible)
         self.assertFalse(trajectory(forced_probe=True).grpo_eligible)
 
+    def test_natural_max_round_failure_with_real_zero_reward_is_eligible(self) -> None:
+        failure = trajectory(
+            explicit_finish=False,
+            termination_reason="max_rounds",
+            final_answer=None,
+            evaluation=EvaluationReceipt("eval-v1", True, 0.0),
+        )
+        self.assertTrue(failure.terminal_failure)
+        self.assertTrue(failure.natural_policy_terminal)
+        self.assertTrue(failure.grpo_eligible)
+        self.assertTrue(failure.to_dict()["terminal_failure"])
+
+        self.assertFalse(
+            trajectory(
+                explicit_finish=False,
+                termination_reason="max_rounds",
+                final_answer=None,
+                evaluation=EvaluationReceipt("eval-v1", True, 0.5),
+            ).grpo_eligible
+        )
+        self.assertFalse(
+            trajectory(
+                explicit_finish=False,
+                termination_reason="max_rounds",
+                final_answer=None,
+                evaluation=EvaluationReceipt("eval-v1", False, None),
+            ).grpo_eligible
+        )
+        self.assertFalse(replace(failure, api_fallback_used=True).grpo_eligible)
+        self.assertFalse(replace(failure, manual_repair_used=True).grpo_eligible)
+        self.assertFalse(replace(failure, forced_probe=True).grpo_eligible)
+
     def test_nonfinite_evaluator_reward_is_rejected(self) -> None:
         with self.assertRaises(ValueError):
             EvaluationReceipt("eval", True, math.nan)
@@ -105,10 +137,23 @@ class RecordTests(unittest.TestCase):
             turn(),
             policy_adapter="theta_live",
             server_weight_version="default",
+            director_request_id="director-request-1",
+            director_latency_ms=12.5,
+            director_attempt_count=2,
+            director_generation_seed=9,
+            runtime_summary={"block_completion_order": [["solver"]]},
         )
         serialized = adapter_turn.to_dict()
         self.assertEqual(serialized["policy_adapter"], "theta_live")
         self.assertEqual(serialized["server_weight_version"], "default")
+        self.assertEqual(serialized["director_request_id"], "director-request-1")
+        self.assertEqual(serialized["director_latency_ms"], 12.5)
+        self.assertEqual(serialized["director_attempt_count"], 2)
+        self.assertEqual(serialized["director_generation_seed"], 9)
+        self.assertEqual(
+            serialized["runtime_summary"]["block_completion_order"],
+            [["solver"]],
+        )
 
         with self.assertRaises(ValueError):
             EvaluationReceipt("eval-v1", False, None, details=[])

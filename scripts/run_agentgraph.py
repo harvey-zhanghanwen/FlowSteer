@@ -74,7 +74,12 @@ async def run(args: argparse.Namespace) -> int:
         max_concurrency=args.max_concurrency,
         timeout_seconds=args.timeout,
     )
-    env = AgentWorkflowEnv(registry, runtime=runtime)
+    env = AgentWorkflowEnv(
+        registry,
+        runtime=runtime,
+        execute_on_edit=True,
+        max_agents=args.max_agents,
+    )
     director = OpenAIDirectorClient(
         base_url=args.director_url,
         model=args.director_model,
@@ -86,13 +91,20 @@ async def run(args: argparse.Namespace) -> int:
         director,
         max_rounds=args.max_rounds,
         seed=args.seed,
+        history_window=args.history_window,
     ).run(env, question)
-    print(result.final_answer)
+    if result.final_answer is not None:
+        print(result.final_answer)
+    else:
+        print(
+            f"workflow terminated without explicit finish: {result.termination_reason}",
+            file=sys.stderr,
+        )
     if args.show_graph:
         print(
             json.dumps(result.final_graph, ensure_ascii=False, indent=2, sort_keys=True)
         )
-    return 0
+    return 0 if result.explicit_finish else 1
 
 
 def main() -> int:
@@ -114,6 +126,8 @@ def main() -> int:
     parser.add_argument("--director-model", default="supervisor_theta")
     parser.add_argument("--policy-version", default="qwen3.5-9b-sglang-local-v1")
     parser.add_argument("--max-rounds", type=int, default=20)
+    parser.add_argument("--max-agents", type=int, default=10)
+    parser.add_argument("--history-window", type=int, default=4)
     parser.add_argument("--max-concurrency", type=int, default=16)
     parser.add_argument("--timeout", type=float, default=180.0)
     parser.add_argument("--seed", type=int, default=42)
@@ -121,6 +135,10 @@ def main() -> int:
     args = parser.parse_args()
     if args.task_index < 0:
         parser.error("--task-index must be non-negative")
+    if args.max_agents < 1:
+        parser.error("--max-agents must be positive")
+    if args.history_window < 1:
+        parser.error("--history-window must be positive")
     if bool(args.question) == bool(args.dataset):
         parser.error("provide exactly one of question or --dataset")
     return asyncio.run(run(args))

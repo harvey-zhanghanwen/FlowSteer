@@ -41,9 +41,14 @@ class GRPOTrajectory:
     def eligible(self) -> bool:
         binary_mask = all(type(value) is int and value in (0, 1) for value in self.action_mask)
         finite_log_probs = all(math.isfinite(float(value)) for value in self.token_log_probs)
+        # All inputs to this terminal-only objective have already crossed the
+        # immutable rollout-record gate.  A non-finish natural max-round
+        # terminal is learnable only as a zero-reward failure; forced probes,
+        # fallbacks, repairs, and invalid evaluator receipts remain excluded.
+        valid_terminal = self.explicit_finish or self.terminal_reward == 0.0
         return bool(
             self.evaluator_valid
-            and self.explicit_finish
+            and valid_terminal
             and not self.forced_probe
             and not self.fallback_or_manual_repair
             and not self.reconstructed_context

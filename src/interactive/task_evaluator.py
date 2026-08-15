@@ -389,18 +389,40 @@ def _evaluate_static(
             "missing_ground_truth",
             evaluator_version=SKILLFLOW_REWARD_VERSION,
         )
+    # Both upstream implementations make ``<answer>...</answer>`` an explicit
+    # final-answer boundary (FlowSteer's Format operator and SkillFlow's base
+    # task prompt).  Prefer the last complete boundary when it is present, but
+    # retain the historical raw-response behavior when it is absent.  This is
+    # intentionally not a containment or free-form "answer is" heuristic.
+    tagged_answers = re.findall(
+        r"<answer>\s*(.*?)\s*</answer>", prediction, re.IGNORECASE | re.DOTALL
+    )
+    scored_prediction = tagged_answers[-1].strip() if tagged_answers else prediction
     if dataset in {"hotpotqa", "triviaqa"}:
-        score = _token_f1_multi(prediction, answers)
-        metric_name = "token_f1"
+        # SkillFlow's terminal reward remains token F1.  FlowSteer's QA
+        # evaluator reports normalized EM alongside it; preserve both on the
+        # exact same extracted answer span for local baseline comparisons.
+        token_f1 = _token_f1_multi(scored_prediction, answers)
+        exact_match = max(
+            float(_normalize_answer(scored_prediction) == _normalize_answer(answer))
+            for answer in answers
+        )
+        score = token_f1
+        metrics = {"exact_match": exact_match, "token_f1": token_f1}
     else:
-        score = max(_exact_match(prediction, answer) for answer in answers)
-        metric_name = "exact_match"
+        score = max(_exact_match(scored_prediction, answer) for answer in answers)
+        metrics = {"exact_match": score}
     return EvaluationOutcome(
         valid=True,
         reward=score,
-        metrics={metric_name: score},
+        metrics=metrics,
         reason="evaluated",
-        details={"accepted_answer_count": len(answers)},
+        details={
+            "accepted_answer_count": len(answers),
+            "raw_prediction": prediction,
+            "scored_prediction": scored_prediction,
+            "structured_answer_extracted": bool(tagged_answers),
+        },
         evaluator_version=SKILLFLOW_REWARD_VERSION,
     )
 
@@ -651,13 +673,168 @@ def _lock_alfworld_task(module: Any, config: dict[str, Any]) -> tuple[dict[str, 
     }
 
 
-def _environment_prompt(observation: str, legal_actions: Sequence[Any]) -> str:
-    actions = "\n".join(str(action) for action in legal_actions)
+def _environment_task_description(
+    record: TaskRecord | Mapping[str, Any],
+    dataset: str,
+    observation: str,
+    adapter: Any,
+) -> str:
+    """Resolve the fixed task description using SkillFlow's ReAct boundary."""
+
+    if dataset == "webshop" and " [SEP] " in observation:
+        parts = observation.split(" [SEP] ")
+        if len(parts) >= 3 and parts[2].strip():
+            return parts[2].strip()
+    if dataset == "alfworld" and "Your task is to:" in observation:
+        return observation.split("Your task is to:", 1)[1].strip()
+
+    env = getattr(adapter, "_env", None)
+    authoritative_goal = getattr(env, "current_goal_instruction", "")
+    if str(authoritative_goal).strip():
+        return str(authoritative_goal).strip()
+
+    metadata = _metadata(record)
+    for container_name in ("skillflow", "extra"):
+        container = metadata.get(container_name, {})
+        if not isinstance(container, Mapping):
+            continue
+        extra = container.get("extra", container)
+        if isinstance(extra, Mapping):
+            for field_name in ("goal", "task", "task_description"):
+                value = str(extra.get(field_name, "")).strip()
+                if value:
+                    return value
+    return str(_record_field(record, "question", "")).strip()
+
+
+def _environment_actions(
+    dataset: str, available_actions: Any
+) -> tuple[list[str], bool]:
+    """Expand RAGEN actions exactly as SkillFlow's WebShop renderer does."""
+
+    if dataset == "webshop" and isinstance(available_actions, Mapping):
+        has_search_bar = bool(available_actions.get("has_search_bar"))
+        actions = ["search[<your query>]"] if has_search_bar else []
+        clickables = available_actions.get("clickables", ())
+        if isinstance(clickables, Sequence) and not isinstance(clickables, (str, bytes)):
+            actions.extend(f"click[{value}]" for value in clickables)
+        return actions, has_search_bar
+    if isinstance(available_actions, Sequence) and not isinstance(
+        available_actions, (str, bytes)
+    ):
+        return [str(action) for action in available_actions], False
+    return [], False
+
+
+def _recent_environment_history(trace: Sequence[Mapping[str, Any]]) -> str:
+    if not trace:
+        return "(none)"
+    lines = []
+    for entry in trace[-4:]:
+        lines.append(
+            "[Step {step}: Observation: {observation!r}, Action: {action!r}, "
+            "Result: {result!r}]".format(
+                step=int(entry["step"]) + 1,
+                observation=str(entry["observation"]),
+                action=str(entry["action"]),
+                result=str(
+                    entry.get("feedback", entry.get("next_observation", ""))
+                ),
+            )
+        )
+    return "\n".join(lines)
+
+
+# Copied verbatim from SkillFlow ``training/react_prompts.py``.  Keeping the
+# upstream action-format block avoids adding a project-specific ALFWorld role
+# or strategy while giving the Executor the same syntax examples it sees in
+# SkillFlow's deployed ReAct path.
+_ALFWORLD_ACTION_EXAMPLES = """Action format examples:
+> go to cabinet 1
+> take apple 1 from countertop 1
+> open fridge 1
+> move apple 1 to fridge 1
+> heat apple 1 with microwave 1
+> clean mug 1 with sinkbasin 1
+> cool potato 1 with fridge 1
+> move plate 1 to countertop 1
+> examine shelf 1
+"""
+
+
+def _environment_prompt(
+    *,
+    dataset: str,
+    task_description: str,
+    observation: str,
+    legal_actions: Sequence[str],
+    trace: Sequence[Mapping[str, Any]],
+    step_index: int,
+) -> str:
+    """Render the stateful subset of SkillFlow's WebShop/ALFWorld templates."""
+
+    actions = "\n".join(legal_actions)
+    history = _recent_environment_history(trace)
+    if dataset == "webshop":
+        return (
+            "You are an expert autonomous agent operating in the WebShop "
+            "e-commerce environment.\n"
+            f"Your task is to: {task_description}.\n"
+            f"Prior to this step, you have already taken {step_index} step(s). "
+            "Below are the most recent observations and corresponding actions:\n"
+            f"{history}\n"
+            f"You are now at step {step_index + 1} and your current observation is: "
+            f"{observation}.\n"
+            "Your admissible actions of the current situation are:\n[\n"
+            f"{actions}\n].\n\n"
+            "Return exactly one executable action string in the form "
+            "search[keywords] or click[value].\n"
+            "For click actions, copy one value from the admissible action list "
+            "exactly. You may instead enclose that one action in <action> tags."
+        )
     return (
-        f"Observation:\n{observation}\n\n"
-        f"Legal actions:\n{actions}\n\n"
-        "Return exactly one legal action."
+        "You are an expert agent operating in the ALFRED Embodied Environment.\n"
+        f"{_ALFWORLD_ACTION_EXAMPLES}"
+        f"Your task is to: {task_description}\n"
+        f"Prior to this step, you have already taken {step_index} step(s). "
+        "Below are the most recent observations and corresponding actions:\n"
+        f"{history}\n"
+        f"You are now at step {step_index + 1} and your current observation is: "
+        f"{observation}\n"
+        "Your admissible actions of the current situation are: [\n"
+        f"{actions}\n].\n\n"
+        "Pick exactly one action from the admissible actions list. Output only "
+        "that action, or enclose that one action in <action> tags."
     )
+
+
+def _parse_environment_action(
+    output: Any,
+    *,
+    dataset: str,
+    legal_actions: Sequence[str],
+    webshop_has_search_bar: bool,
+) -> Optional[str]:
+    """Parse only an explicit tag or a complete legal raw response."""
+
+    if not isinstance(output, str) or not output.strip():
+        return None
+    raw = output.strip()
+    tagged = re.findall(r"<action>\s*(.*?)\s*</action>", raw, re.IGNORECASE | re.DOTALL)
+    if len(tagged) > 1:
+        return None
+    candidate = tagged[0].strip() if tagged else raw
+    if not candidate or (not tagged and candidate != raw):
+        return None
+    if dataset == "webshop" and candidate == "search[<your query>]":
+        return None
+    if candidate in legal_actions:
+        return candidate
+    if dataset == "webshop" and webshop_has_search_bar:
+        match = re.fullmatch(r"search\[([^\[\]\n]+)\]", candidate)
+        if match and match.group(1).strip() and match.group(1).strip() != "<your query>":
+            return candidate
+    return None
 
 
 async def _evaluate_environment(
@@ -712,35 +889,125 @@ async def _evaluate_environment(
                 evaluator_version=RAGEN_EVALUATOR_VERSION,
                 details=lock_details,
             )
-    elif dataset == "webshop" and "goal_index" in config:
-        actual_goal = getattr(adapter._env, "current_goal_index", None)
-        lock_details.update(
-            requested_goal_index=int(config["goal_index"]),
-            actual_goal_index=actual_goal,
+    elif dataset == "webshop":
+        webshop_env = adapter._env
+        if "goal_index" in config:
+            actual_goal = getattr(webshop_env, "current_goal_index", None)
+            lock_details.update(
+                requested_goal_index=int(config["goal_index"]),
+                actual_goal_index=actual_goal,
+            )
+            if actual_goal is not None and int(actual_goal) != int(config["goal_index"]):
+                return _invalid(
+                    "webshop_goal_lock_mismatch",
+                    evaluator_version=RAGEN_EVALUATOR_VERSION,
+                    details=lock_details,
+                )
+
+        # SkillFlow's RAGENAdapter._reset_webshop passes these fields directly
+        # into WebShopEnv, which retains them on the live environment.  Check
+        # the requested protocol before accepting any terminal score so the
+        # same goal index from a reduced or different catalog is not mistaken
+        # for the aligned task.  This is an identity check only; it does not
+        # inspect file contents.
+        protocol_mismatches: dict[str, dict[str, Any]] = {}
+        for field_name in (
+            "human_goals",
+            "use_small",
+            "num_products",
+            "goal_split",
+            "file_path",
+            "attr_path",
+        ):
+            if field_name not in config or not hasattr(webshop_env, field_name):
+                continue
+            requested_value = config[field_name]
+            actual_value = getattr(webshop_env, field_name)
+            if field_name in {"file_path", "attr_path"}:
+                requested_value = _path_identity(requested_value)
+                actual_value = _path_identity(actual_value)
+            if actual_value != requested_value:
+                protocol_mismatches[field_name] = {
+                    "requested": requested_value,
+                    "actual": actual_value,
+                }
+
+        skillflow = _metadata(record).get("skillflow", {})
+        aligned_extra = (
+            skillflow.get("extra", {}) if isinstance(skillflow, Mapping) else {}
         )
-        if actual_goal is not None and int(actual_goal) != int(config["goal_index"]):
+        requested_instruction = (
+            str(aligned_extra.get("goal", "")).strip()
+            if isinstance(aligned_extra, Mapping)
+            else ""
+        )
+        actual_instruction = str(
+            getattr(webshop_env, "current_goal_instruction", "")
+        ).strip()
+        if (
+            requested_instruction
+            and actual_instruction
+            and " ".join(requested_instruction.split())
+            != " ".join(actual_instruction.split())
+        ):
+            protocol_mismatches["goal_instruction"] = {
+                "requested": requested_instruction,
+                "actual": actual_instruction,
+            }
+
+        lock_details["webshop_protocol"] = {
+            field_name: getattr(webshop_env, field_name)
+            for field_name in (
+                "human_goals",
+                "use_small",
+                "num_products",
+                "goal_split",
+                "file_path",
+                "attr_path",
+            )
+            if hasattr(webshop_env, field_name)
+        }
+        if protocol_mismatches:
+            lock_details["protocol_mismatches"] = protocol_mismatches
             return _invalid(
-                "webshop_goal_lock_mismatch",
+                "webshop_protocol_mismatch",
                 evaluator_version=RAGEN_EVALUATOR_VERSION,
                 details=lock_details,
             )
 
+    task_description = _environment_task_description(
+        record, dataset, observation, adapter
+    )
     trace: list[dict[str, Any]] = []
     terminal = False
     terminal_reward = 0.0
     terminal_info: Mapping[str, Any] = {}
     for step_index in range(max_environment_steps):
-        legal_actions = list(getattr(adapter, "available_actions", ()) or ())
+        available_actions = getattr(adapter, "available_actions", ()) or ()
+        legal_actions, webshop_has_search_bar = _environment_actions(
+            dataset, available_actions
+        )
         if not legal_actions:
             return _invalid(
                 "environment_has_no_legal_actions",
                 evaluator_version=RAGEN_EVALUATOR_VERSION,
                 details={"trace": trace, "observation": observation, **lock_details},
             )
-        prompt = _environment_prompt(observation, legal_actions)
+        prompt = _environment_prompt(
+            dataset=dataset,
+            task_description=task_description,
+            observation=observation,
+            legal_actions=legal_actions,
+            trace=trace,
+            step_index=step_index,
+        )
         try:
             callback_result = run_graph(prompt)
-            action = await callback_result if inspect.isawaitable(callback_result) else callback_result
+            raw_action = (
+                await callback_result
+                if inspect.isawaitable(callback_result)
+                else callback_result
+            )
         except Exception as exc:
             return _invalid(
                 "environment_graph_callback_failed",
@@ -752,13 +1019,39 @@ async def _evaluate_environment(
                     **lock_details,
                 },
             )
-        if not isinstance(action, str) or not action.strip():
-            return _invalid(
-                "environment_graph_action_invalid",
-                evaluator_version=RAGEN_EVALUATOR_VERSION,
-                details={"trace": trace, **lock_details},
+        action = _parse_environment_action(
+            raw_action,
+            dataset=dataset,
+            legal_actions=legal_actions,
+            webshop_has_search_bar=webshop_has_search_bar,
+        )
+        if action is None:
+            # SkillFlow ``GenericTaskEnvironment._react_step`` treats a parse
+            # miss as a zero-reward, non-terminal turn: it records the failed
+            # turn, leaves the RAGEN state untouched, and lets the policy try
+            # again until the episode budget is exhausted.  ``run_graph`` is a
+            # stateless callback here, so retain the same parse feedback in the
+            # local trace and render it into the next callback prompt.
+            feedback = "[INVALID] No valid <action> tag found."
+            trace.append(
+                {
+                    "step": step_index,
+                    "observation": observation,
+                    "legal_actions": _detail_value(legal_actions),
+                    "action": "<INVALID>",
+                    "raw_graph_output": _detail_value(raw_action),
+                    "next_observation": observation,
+                    "feedback": feedback,
+                    "reward": 0.0,
+                    "done": False,
+                    "state_advanced": False,
+                    "parse_error": True,
+                    "info": {"parse_error": True},
+                }
             )
-        action = action.strip()
+            terminal_reward = 0.0
+            terminal_info = {}
+            continue
         try:
             next_observation, raw_reward, done, info = adapter.step(action)
             reward_value = float(raw_reward)
@@ -780,12 +1073,15 @@ async def _evaluate_environment(
                 details={"trace": trace, **lock_details},
             )
         info = info if isinstance(info, Mapping) else {}
+        next_observation_text = str(next_observation)
         trace.append(
             {
                 "step": step_index,
                 "observation": observation,
                 "legal_actions": _detail_value(legal_actions),
                 "action": action,
+                "raw_graph_output": _detail_value(raw_action),
+                "next_observation": next_observation_text,
                 "reward": reward_value,
                 "done": bool(done),
                 "info": _detail_value(info),
@@ -797,7 +1093,16 @@ async def _evaluate_environment(
                 evaluator_version=RAGEN_EVALUATOR_VERSION,
                 details={"trace": trace, **lock_details},
             )
-        observation = str(next_observation)
+        # RAGENAdapter.step uses this exact sentinel when its live environment
+        # is absent.  Upstream returns an empty info mapping on that path, so it
+        # must be checked explicitly rather than accepted as a task failure.
+        if next_observation_text.startswith("[ENV_UNAVAILABLE]"):
+            return _invalid(
+                "environment_unavailable",
+                evaluator_version=RAGEN_EVALUATOR_VERSION,
+                details={"trace": trace, **lock_details},
+            )
+        observation = next_observation_text
         terminal_reward = reward_value
         terminal_info = info
         if bool(done):

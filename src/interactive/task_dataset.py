@@ -20,6 +20,19 @@ REQUIRED_FIELDS = frozenset(
 )
 
 
+def build_hotpotqa_question(question: str, passages: List[str]) -> str:
+    """Render SkillFlow-style multi-hop QA input with all supplied passages."""
+
+    if not isinstance(question, str) or not question.strip():
+        raise ValueError("HotpotQA question must be non-empty")
+    if not passages or any(not isinstance(item, str) or not item.strip() for item in passages):
+        raise ValueError("HotpotQA passages must contain non-empty text")
+    parts = ["Based on the following passages, answer the question."]
+    parts.extend(f"[{passage}]" for passage in passages[:10])
+    parts.append(f"Question: {question.strip()}")
+    return "\n\n".join(parts)
+
+
 def task_record_from_mapping(
     item: Mapping[str, Any], *, expected_split: Optional[str] = None
 ) -> TaskRecord:
@@ -65,9 +78,28 @@ def task_record_from_mapping(
     if skillflow_fields:
         metadata["skillflow"] = skillflow_fields
 
+    question = str(item["question"])
+    if metadata.get("dataset_key") == "hotpotqa":
+        raw_context = skillflow_fields.get("context")
+        marker = "\n\nQuestion:"
+        if (
+            isinstance(raw_context, list)
+            and raw_context
+            and all(isinstance(value, str) for value in raw_context)
+            and marker in question
+        ):
+            # Older aligned files truncated each passage to 300 characters even
+            # though their canonical top-level context retained the full text.
+            # Rehydrate only evidence, never evaluator payload or ground truth.
+            question = build_hotpotqa_question(
+                question.rsplit(marker, 1)[1],
+                list(raw_context),
+            )
+            metadata["hotpot_context_mode"] = "full_passages_v1"
+
     return TaskRecord(
         task_id=str(item["task_id"]),
-        question=str(item["question"]),
+        question=question,
         ground_truth=item["ground_truth"],
         split=split,
         metadata=metadata,
@@ -112,3 +144,12 @@ def load_task_records(
     """Materialize a split for callers that retain FlowSteer's list API."""
 
     return list(iter_task_records(path, expected_split=expected_split, limit=limit))
+
+
+__all__ = [
+    "TASK_SCHEMA_VERSION",
+    "build_hotpotqa_question",
+    "iter_task_records",
+    "load_task_records",
+    "task_record_from_mapping",
+]

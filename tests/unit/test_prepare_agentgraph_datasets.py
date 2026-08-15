@@ -13,6 +13,7 @@ _SPEC.loader.exec_module(_MODULE)
 TASK_SCHEMA_VERSION = _MODULE.TASK_SCHEMA_VERSION
 _compat_record = _MODULE._compat_record
 _conversation_prompt = _MODULE._conversation_prompt
+_hotpot_records = _MODULE._hotpot_records
 
 
 def test_compat_record_exposes_both_upstream_field_sets():
@@ -47,3 +48,29 @@ def test_healthbench_prompt_contains_only_conversation_messages():
         "Conversation:\n\n[user] first\n\n[assistant] second\n\n"
         "[user] third\n\n[assistant]"
     )
+
+
+def test_hotpot_alignment_keeps_evidence_after_300_characters(monkeypatch, tmp_path):
+    tail = "decisive evidence after the former boundary"
+    row = {
+        "id": "item-1",
+        "question": "Who wrote it?",
+        "answer": "Author",
+        "context": {
+            "title": ["Book"],
+            "sentences": [["x" * 350, tail]],
+        },
+    }
+    monkeypatch.setattr(_MODULE, "_iter_parquet_rows", lambda _: iter([row]))
+    config = {
+        "path": str(tmp_path),
+        "display_name": "HotpotQA",
+        "task_type": "multi_hop_qa",
+        "metric": "token_f1",
+        "files": {"train": "unused.parquet"},
+    }
+
+    record = next(_hotpot_records(config))
+
+    assert tail in record["question"]
+    assert tail in record["context"][0]

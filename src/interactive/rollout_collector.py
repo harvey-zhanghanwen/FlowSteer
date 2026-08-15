@@ -39,6 +39,7 @@ from .director import (
     DirectorError,
     DirectorResponse,
 )
+from .openai_gateway import build_agent_messages
 from .persistence import EvidenceStore, GraphSnapshotEvent, stable_id
 from .records import (
     EvaluationReceipt,
@@ -46,6 +47,7 @@ from .records import (
     TaskRecord,
     TrajectoryRecord,
     TurnRecord,
+    VALID_SPLITS,
 )
 from .versioning import VersionBundle
 
@@ -383,7 +385,12 @@ class SGLangReceiptDirectorClient:
         self,
         prompt: str,
         adapter_name: Optional[str],
+        seed: Optional[int] = None,
     ) -> Mapping[str, Any]:
+        if seed is not None and (
+            isinstance(seed, bool) or not isinstance(seed, int) or seed < 0
+        ):
+            raise ValueError("Director seed must be a non-negative integer or None")
         prompt_ids = self.prompt_token_ids(prompt)
         payload: dict[str, Any] = {
             "input_ids": list(prompt_ids),
@@ -402,22 +409,38 @@ class SGLangReceiptDirectorClient:
             "return_text_in_logprobs": True,
             "stream": False,
         }
+        if seed is not None:
+            # SkillFlow's OpenAI boundary calls this field ``seed``.  The
+            # deployed SGLang 0.5.15 native /generate SamplingParams exposes
+            # the equivalent field as ``sampling_seed``.
+            payload["sampling_params"]["sampling_seed"] = seed
         if adapter_name is not None:
             payload["lora_path"] = adapter_name
         return payload
 
-    def request_payload(self, prompt: str) -> Mapping[str, Any]:
+    def request_payload(
+        self,
+        prompt: str,
+        *,
+        seed: Optional[int] = None,
+    ) -> Mapping[str, Any]:
         _, adapter_name, _ = self._policy_route()
-        return self._request_payload(prompt, adapter_name)
+        return self._request_payload(prompt, adapter_name, seed)
 
-    async def propose(self, prompt: str) -> DirectorResponse:
+    async def propose(
+        self,
+        prompt: str,
+        *,
+        seed: Optional[int] = None,
+    ) -> DirectorResponse:
         await self.rollout_gate.acquire()
         try:
             policy_version, adapter_name, expected_server_weight_version = (
                 self._policy_route()
             )
-            payload = self._request_payload(prompt, adapter_name)
+            payload = self._request_payload(prompt, adapter_name, seed)
             last_error: BaseException | None = None
+            started_at = time.monotonic()
             for attempt in range(self.max_retries + 1):
                 try:
                     value = await asyncio.to_thread(self._post_json, payload)
@@ -428,6 +451,11 @@ class SGLangReceiptDirectorClient:
                         policy_version=policy_version,
                         adapter_name=adapter_name,
                         expected_server_weight_version=expected_server_weight_version,
+                        latency_ms=max(
+                            (time.monotonic() - started_at) * 1000.0,
+                            0.0,
+                        ),
+                        attempt_count=attempt + 1,
                     )
                 except HTTPError as exc:
                     last_error = exc
@@ -488,6 +516,8 @@ class SGLangReceiptDirectorClient:
         policy_version: str,
         adapter_name: Optional[str],
         expected_server_weight_version: Optional[str],
+        latency_ms: float,
+        attempt_count: int,
     ) -> DirectorResponse:
         text = value.get("text")
         meta_info = value.get("meta_info")
@@ -551,6 +581,11 @@ class SGLangReceiptDirectorClient:
                 "finish_reason": meta_info.get("finish_reason"),
                 "prompt_tokens": len(prompt_ids),
                 "completion_tokens": len(output_ids),
+                "latency_ms": latency_ms,
+                "attempt_count": attempt_count,
+                "generation_seed": payload.get("sampling_params", {}).get(
+                    "sampling_seed"
+                ),
                 "receipt_verified": True,
             },
         )
@@ -751,6 +786,7 @@ def _request_record(call: AgentCallRecord) -> Mapping[str, Any]:
                 "content": request.peer_draft.content,
             }
         ),
+        "rendered_messages": build_agent_messages(request),
     }
 
 
@@ -794,6 +830,8 @@ def _execution_record(call: AgentCallRecord) -> ExecutionRecord:
         "provider_request_id": metadata.get("provider_request_id"),
         "provider_model": provider_model,
         "finish_reason": metadata.get("finish_reason"),
+        "attempt_count": _optional_int(metadata.get("attempt_count")),
+        "generation_seed": _optional_int(metadata.get("generation_seed")),
     }
     return ExecutionRecord(
         execution_id=execution_id,
@@ -815,6 +853,29 @@ def _execution_record(call: AgentCallRecord) -> ExecutionRecord:
     )
 
 
+def execution_record_from_call(call: AgentCallRecord) -> ExecutionRecord:
+    """Expose the collector's canonical Agent call receipt to eval drivers."""
+
+    return _execution_record(call)
+
+
+def _runtime_summary(runtime: Optional[AgentRuntimeResult]) -> Mapping[str, Any]:
+    """Persist the existing runtime result without duplicating call receipts."""
+
+    if runtime is None:
+        return {}
+    return {
+        "run_id": runtime.run_id,
+        "graph_revision": runtime.graph_revision,
+        "output_agent_id": runtime.output_agent_id,
+        "final_answer": runtime.final_answer,
+        "outputs": dict(runtime.outputs),
+        "block_completion_order": [
+            list(component) for component in runtime.block_completion_order
+        ],
+    }
+
+
 class AgentGraphRolloutCollector:
     """Collect one exact-receipt natural-policy AgentGraph trajectory."""
 
@@ -831,11 +892,16 @@ class AgentGraphRolloutCollector:
         forced_probe: bool = False,
         api_fallback_used: bool = False,
         manual_repair_used: bool = False,
+        expected_task_split: str = "train",
     ) -> None:
         if orchestrator.registry is not environment.model_registry:
             raise ValueError("orchestrator and environment must share the model registry")
         if not condition_id.strip():
             raise ValueError("condition_id must be non-empty")
+        if expected_task_split not in VALID_SPLITS:
+            raise ValueError(
+                f"expected_task_split must be one of {sorted(VALID_SPLITS)}"
+            )
         prefix_resolver = getattr(orchestrator.client, "executed_prefix_tokens", None)
         if not callable(prefix_resolver):
             raise TypeError("Director client must expose exact executed_prefix_tokens()")
@@ -858,6 +924,7 @@ class AgentGraphRolloutCollector:
         self.forced_probe = forced_probe
         self.api_fallback_used = api_fallback_used
         self.manual_repair_used = manual_repair_used
+        self.expected_task_split = expected_task_split
         self._lock = asyncio.Lock()
 
     async def collect(
@@ -869,13 +936,16 @@ class AgentGraphRolloutCollector:
         """Collect, evaluate, and optionally persist one rollout.
 
         A policy that reaches ``max_rounds`` without a valid ``finish`` action
-        still returns a complete trajectory with an empty final answer.  The
-        evaluator remains the only authority over whether that terminal failure
-        has a valid reward.
+        still returns an explicit terminal-failure trajectory with an empty
+        final answer.  The evaluator remains the only authority over whether
+        that terminal failure has a valid zero reward.
         """
 
-        if task.split != "train":
-            raise ValueError("smoke-training rollouts require train tasks")
+        if task.split != self.expected_task_split:
+            raise ValueError(
+                "rollout task split mismatch: "
+                f"expected {self.expected_task_split!r}, got {task.split!r}"
+            )
         if (
             isinstance(rollout_index, bool)
             or not isinstance(rollout_index, int)
@@ -917,7 +987,10 @@ class AgentGraphRolloutCollector:
 
         for round_index in range(self.orchestrator.max_rounds):
             prompt = self.orchestrator.build_prompt(env, round_index, self.skills)
-            response = await self.orchestrator.client.propose(prompt)
+            response = await self.orchestrator.client.propose(
+                prompt,
+                seed=self.orchestrator.seed + round_index,
+            )
             canvas = await env.step(response.text)
             metadata = response.metadata
 
@@ -959,6 +1032,13 @@ class AgentGraphRolloutCollector:
                 raise ReceiptValidationError(
                     "Director receipt has no SGLang server_weight_version"
                 )
+            raw_director_request_id = metadata.get("request_id")
+            director_request_id = (
+                raw_director_request_id.strip()
+                if isinstance(raw_director_request_id, str)
+                and raw_director_request_id.strip()
+                else None
+            )
 
             action = canvas.action
             executed_prefix_tokens = 0
@@ -974,7 +1054,7 @@ class AgentGraphRolloutCollector:
             )
             execution_records = (
                 tuple(_execution_record(call) for call in canvas.execution.calls)
-                if canvas.execution is not None
+                if canvas.execution is not None and not canvas.execution_reused
                 else ()
             )
             turn = TurnRecord(
@@ -999,6 +1079,14 @@ class AgentGraphRolloutCollector:
                 graph_snapshot_id=snapshot.snapshot_id,
                 previous_graph_snapshot_id=previous_snapshot_id,
                 executions=execution_records,
+                runtime_summary=_runtime_summary(canvas.execution),
+                execution_reused=canvas.execution_reused,
+                director_request_id=director_request_id,
+                director_latency_ms=_optional_float(metadata.get("latency_ms")),
+                director_attempt_count=_optional_int(metadata.get("attempt_count")),
+                director_generation_seed=_optional_int(
+                    metadata.get("generation_seed")
+                ),
                 policy_version=policy_version,
                 policy_adapter=adapter_name,
                 server_weight_version=server_weight_version,
@@ -1014,6 +1102,14 @@ class AgentGraphRolloutCollector:
                 final_answer = canvas.final_answer
                 final_runtime = canvas.execution
                 break
+
+        termination_reason = "finish" if explicit_finish else "max_rounds"
+        if termination_reason == "max_rounds":
+            # A progressive execute-on-edit result is Canvas feedback, not an
+            # implicit finish.  Preserve the natural truncation as a terminal
+            # task failure and let the real evaluator judge the empty answer.
+            final_answer = None
+            final_runtime = None
 
         final_graph = env.graph.to_dict()
         raw_evaluation = evaluator_callback(
@@ -1035,7 +1131,7 @@ class AgentGraphRolloutCollector:
             turns=tuple(turns),
             final_answer=final_answer,
             evaluation=evaluation,
-            termination_reason="finish" if explicit_finish else "max_rounds",
+            termination_reason=termination_reason,
             explicit_finish=explicit_finish,
             condition_satisfied=self.condition_satisfied,
             forced_probe=self.forced_probe,
@@ -1057,5 +1153,6 @@ __all__ = [
     "ReceiptValidationError",
     "RolloutGate",
     "SGLangReceiptDirectorClient",
+    "execution_record_from_call",
     "select_balanced_tasks",
 ]

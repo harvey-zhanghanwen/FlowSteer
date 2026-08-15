@@ -64,6 +64,21 @@ class GRPOObjectiveTests(unittest.TestCase):
         self.assertEqual(result.eligible_trajectories, 1)
         self.assertEqual(set(result.advantages), {"a"})
 
+    def test_natural_max_round_zero_reward_is_a_terminal_sample(self) -> None:
+        failure = trajectory("failure", 0.0, explicit_finish=False)
+        nonzero_truncation = trajectory("invalid", 0.5, explicit_finish=False)
+        forced_failure = trajectory(
+            "forced",
+            0.0,
+            explicit_finish=False,
+            forced_probe=True,
+        )
+        result = action_masked_one_pass_loss(
+            [failure, nonzero_truncation, forced_failure]
+        )
+        self.assertEqual(result.eligible_trajectories, 1)
+        self.assertEqual(set(result.advantages), {"failure"})
+
     def test_group_mismatch_is_rejected(self) -> None:
         with self.assertRaises(ValueError):
             same_condition_advantages(

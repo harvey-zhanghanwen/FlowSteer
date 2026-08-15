@@ -7,8 +7,10 @@ from dataclasses import dataclass, field
 import json
 import os
 import socket
+import time
 from typing import Any, Mapping, Optional, Protocol, Sequence, Tuple
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 from .agent_workflow_env import AgentWorkflowEnv, AgentWorkflowStepResult
@@ -39,7 +41,12 @@ class DirectorResponse:
 
 
 class DirectorClient(Protocol):
-    async def propose(self, prompt: str) -> DirectorResponse:
+    async def propose(
+        self,
+        prompt: str,
+        *,
+        seed: Optional[int] = None,
+    ) -> DirectorResponse:
         ...
 
 
@@ -61,6 +68,10 @@ class OpenAIDirectorClient:
     ) -> None:
         if not base_url.startswith(("http://", "https://")):
             raise ValueError("base_url must be absolute HTTP(S)")
+        if urlsplit(base_url).hostname not in {"127.0.0.1", "localhost", "::1"}:
+            raise ValueError("Flow-Director must use the local Qwen3.5-9B endpoint")
+        if model != "supervisor_theta":
+            raise ValueError("Flow-Director model must be supervisor_theta")
         if not model.strip() or not policy_version.strip():
             raise ValueError("model and policy_version must be non-empty")
         if temperature < 0 or not 0 < top_p <= 1:
@@ -77,7 +88,16 @@ class OpenAIDirectorClient:
         self.timeout_seconds = float(timeout_seconds)
         self.max_retries = int(max_retries)
 
-    async def propose(self, prompt: str) -> DirectorResponse:
+    async def propose(
+        self,
+        prompt: str,
+        *,
+        seed: Optional[int] = None,
+    ) -> DirectorResponse:
+        if seed is not None and (
+            isinstance(seed, bool) or not isinstance(seed, int) or seed < 0
+        ):
+            raise ValueError("Director seed must be a non-negative integer or None")
         api_key = "EMPTY"
         if self.api_key_env:
             api_key = os.getenv(self.api_key_env, "")
@@ -93,11 +113,27 @@ class OpenAIDirectorClient:
             "top_p": self.top_p,
             "max_tokens": self.max_tokens,
         }
+        if seed is not None:
+            # SkillFlow sends the generation seed through the provider payload.
+            payload["seed"] = seed
         last_error: BaseException | None = None
+        started_at = time.monotonic()
         for attempt in range(self.max_retries + 1):
             try:
                 value = await asyncio.to_thread(self._post, api_key, payload)
-                return self._parse(value)
+                parsed = self._parse(value)
+                metadata = dict(parsed.metadata)
+                metadata.update(
+                    {
+                        "latency_ms": max(
+                            (time.monotonic() - started_at) * 1000.0,
+                            0.0,
+                        ),
+                        "attempt_count": attempt + 1,
+                        "generation_seed": seed,
+                    }
+                )
+                return DirectorResponse(parsed.text, metadata)
             except HTTPError as exc:
                 last_error = exc
                 if not (exc.code in {408, 409, 425, 429} or exc.code >= 500):
@@ -157,9 +193,11 @@ class DirectorTurn:
 
 @dataclass(frozen=True, slots=True)
 class OrchestrationResult:
-    final_answer: str
+    final_answer: Optional[str]
     turns: Tuple[DirectorTurn, ...]
     final_graph: Mapping[str, Any]
+    termination_reason: str
+    explicit_finish: bool
 
 
 class AgentGraphOrchestrator:
@@ -170,13 +208,17 @@ class AgentGraphOrchestrator:
         *,
         max_rounds: int = 20,
         seed: int = 42,
+        history_window: int = 4,
     ) -> None:
         if max_rounds < 1:
             raise ValueError("max_rounds must be positive")
+        if isinstance(history_window, bool) or not isinstance(history_window, int) or history_window < 1:
+            raise ValueError("history_window must be a positive integer")
         self.registry = registry
         self.client = client
         self.max_rounds = max_rounds
         self.seed = seed
+        self.history_window = history_window
 
     def build_prompt(
         self,
@@ -198,14 +240,38 @@ class AgentGraphOrchestrator:
             }
             for model_id in self.registry.model_ids
         ]
+        complete_validation = env.graph.validate(
+            self.registry,
+            require_complete=True,
+        )
+        snapshot = env.snapshot()
         payload = {
             "task": env.problem,
             "turn": turn_index,
+            "max_rounds": self.max_rounds,
+            "remaining_rounds": max(self.max_rounds - env.turn_count, 0),
             "current_graph": env.graph.to_dict(),
-            "canvas_feedback": env.snapshot().last_feedback,
+            "canvas_feedback": snapshot.last_feedback,
+            # SkillFlow presents a bounded visible action-history tail to its
+            # ReAct policy; keep the same boundary without adding role recipes.
+            "recent_canvas_history": [
+                entry.to_dict() for entry in snapshot.history[-self.history_window :]
+            ],
+            "complete_validation": {
+                "valid": complete_validation.valid,
+                "issues": [
+                    {
+                        "code": issue.code,
+                        "message": issue.message,
+                    }
+                    for issue in complete_validation.issues
+                ],
+            },
             "model_catalog": catalog,
             "weighted_preferred_model": preferred.model_id,
         }
+        if env.max_agents is not None:
+            payload["max_agents"] = env.max_agents
         if skills:
             payload["available_skills"] = list(skills)
         return (
@@ -224,7 +290,10 @@ class AgentGraphOrchestrator:
         turns: list[DirectorTurn] = []
         for index in range(self.max_rounds):
             prompt = self.build_prompt(env, index, skills)
-            response = await self.client.propose(prompt)
+            response = await self.client.propose(
+                prompt,
+                seed=self.seed + index,
+            )
             canvas = await env.step(response.text)
             turns.append(DirectorTurn(index, prompt, response, canvas))
             if canvas.done and canvas.final_answer is not None:
@@ -232,8 +301,16 @@ class AgentGraphOrchestrator:
                     final_answer=canvas.final_answer,
                     turns=tuple(turns),
                     final_graph=env.graph.to_dict(),
+                    termination_reason="finish",
+                    explicit_finish=True,
                 )
-        raise DirectorError(f"Director did not finish within {self.max_rounds} turns")
+        return OrchestrationResult(
+            final_answer=None,
+            turns=tuple(turns),
+            final_graph=env.graph.to_dict(),
+            termination_reason="max_rounds",
+            explicit_finish=False,
+        )
 
 
 __all__ = [

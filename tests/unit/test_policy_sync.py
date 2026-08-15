@@ -158,6 +158,29 @@ class PolicySyncTests(unittest.TestCase):
         canary_payload = control.calls[canary_index][2]["json"]
         self.assertEqual(canary_payload["model"], "theta_smoke_step_000001")
 
+    def test_existing_evaluation_adapter_load_has_no_policy_publication(self) -> None:
+        control = _SGLangControl(set())
+        receipt = self.publisher(control).ensure_loaded_adapter(
+            checkpoint_path=self.checkpoint,
+            adapter_name="theta_smoke_step_000001",
+        )
+
+        self.assertTrue(receipt["success"])
+        self.assertTrue(receipt["loaded_now"])
+        self.assertFalse(receipt["training_performed"])
+        self.assertFalse(receipt["policy_published"])
+        self.assertIn("theta_smoke_step_000001", control.adapters)
+        operations = [(method, operation) for method, operation, _ in control.calls]
+        self.assertEqual(
+            operations,
+            [
+                ("get", "models"),
+                ("post", "load_lora_adapter"),
+                ("get", "models"),
+                ("post", "completions"),
+            ],
+        )
+
     def test_failed_canary_unloads_candidate_and_preserves_behavior_adapter(self) -> None:
         previous = "theta_smoke_step_000000"
         control = _SGLangControl({previous})

@@ -237,7 +237,9 @@ def _hotpot_records(config: Mapping[str, Any]) -> Iterator[dict[str, Any]]:
                 )
 
             prompt_parts = ["Based on the following passages, answer the question."]
-            prompt_parts.extend(f"[{passage[:300]}]" for passage in passages[:10])
+            # SkillFlow keeps the multi-hop evidence intact.  Truncating each
+            # passage here made some gold evidence unreachable to every model.
+            prompt_parts.extend(f"[{passage}]" for passage in passages[:10])
             prompt_parts.append(f"Question: {row['question']}")
             yield _compat_record(
                 dataset_key="hotpotqa",

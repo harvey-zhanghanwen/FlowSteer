@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import re
 from typing import Any, Dict, Mapping
+from urllib.parse import urlsplit
 
 import yaml
 
@@ -98,6 +99,21 @@ def validate_agent_graph_config(value: Mapping[str, Any]) -> None:
         raise ConfigurationError("SGLang served_model_name must be supervisor_theta")
     if director.get("prompt_profile") != "minimal":
         raise ConfigurationError("the architecture baseline requires the minimal Director prompt")
+    base_model = str(director.get("base_model", "")).lower().replace("_", "-")
+    if not (("qwen3.5" in base_model or "qwen35" in base_model) and "9b" in base_model):
+        raise ConfigurationError("the Flow-Director base model must be Qwen3.5-9B")
+    director_host = urlsplit(str(director.get("api_base", ""))).hostname
+    if director_host not in {"127.0.0.1", "localhost", "::1"}:
+        raise ConfigurationError("the Qwen3.5-9B Flow-Director endpoint must be local")
+    if director.get("execute_on_edit") is not True:
+        raise ConfigurationError("the progressive Canvas requires execute_on_edit=true")
+    history_window = director.get("history_window")
+    if (
+        isinstance(history_window, bool)
+        or not isinstance(history_window, int)
+        or history_window < 1
+    ):
+        raise ConfigurationError("director.history_window must be a positive integer")
 
     graph = value["agent_graph"]
     expected_actions = [
@@ -112,6 +128,17 @@ def validate_agent_graph_config(value: Mapping[str, Any]) -> None:
         raise ConfigurationError("AgentGraph search space must contain the six atomic actions")
     if graph.get("contract_type") != "free_text" or graph.get("relation_encoding") != "two_bit":
         raise ConfigurationError("AgentGraph requires free-text contracts and two-bit relations")
+    max_agents = graph.get("max_agents")
+    if isinstance(max_agents, bool) or not isinstance(max_agents, int) or max_agents < 1:
+        raise ConfigurationError("agent_graph.max_agents must be a positive integer")
+    if graph.get("executor_selection") != "seeded_weighted_random":
+        raise ConfigurationError("Agent executors require seeded_weighted_random selection")
+    if graph.get("max_bidirectional_block_size") != 2:
+        raise ConfigurationError("AgentGraph v1 supports bidirectional blocks of size two")
+    if graph.get("require_unique_output") is not True:
+        raise ConfigurationError("AgentGraph requires exactly one output Agent")
+    if graph.get("require_all_agents_reach_output") is not True:
+        raise ConfigurationError("every Agent must reach the output Agent")
 
     experiment = value["experiment"]
     if experiment.get("phase") == "architecture_only":
