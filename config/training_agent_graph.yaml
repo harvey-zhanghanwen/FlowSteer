@@ -4,6 +4,8 @@
 schema_version: "flowsteer.agentgraph.config.v1"
 experiment:
   name: "flowsteer_qwen35_9b_bayesian_skills"
+  phase: "architecture_only"
+  training_enabled: false
   seed: 42
   output_dir: "artifacts/agent_graph"
 
@@ -26,11 +28,15 @@ storage:
   persist_exact_policy_receipts: true
 
 director:
-  # Resolve this placeholder from the environment before launching training.
+  # SkillFlow runtime profile: Qwen3.5-9B Supervisor served by SGLang.
   base_model: "${QWEN35_9B_MODEL_PATH:-Qwen/Qwen3.5-9B}"
-  served_model_name: "qwen3.5-9b-director"
+  backend: "sglang"
+  api_base: "http://127.0.0.1:${FLOWSTEER_SUPERVISOR_PORT:-8005}/v1"
+  served_model_name: "supervisor_theta"
+  live_adapter_name: "theta_live"
+  prompt_profile: "minimal"
   dtype: "bfloat16"
-  max_context_tokens: 16384
+  max_context_tokens: 32768
   max_action_tokens: 768
   temperature: 0.6
   top_p: 0.95
@@ -39,18 +45,27 @@ director:
   lora:
     enabled: true
     rank: 64
-    alpha: 64
+    alpha: 128
     dropout: 0.05
     target_modules: [q_proj, k_proj, v_proj, o_proj]
+    backward_adapter:
+      rank: 16
+      alpha: 32
+      target_modules: [q_proj, v_proj]
 
 agent_graph:
   max_agents: 10
+  contract_type: "free_text"
+  relation_encoding: "two_bit"
+  actions: [add_agent, modify_agent, delete_agent, set_relation, set_output, finish]
+  executor_selection: "seeded_weighted_random"
   max_bidirectional_block_size: 2
   require_unique_output: true
   require_all_agents_reach_output: true
   model_catalog_path: "config/model_catalog.yaml"
 
 grpo:
+  enabled: false
   objective: "action_masked_one_pass"
   group_key: [task_id, condition_id, policy_version]
   samples_per_problem: 6
@@ -71,7 +86,7 @@ grpo:
   max_grad_norm: 1.0
 
 exploration:
-  enabled: true
+  enabled: false
   strategy: "linucb"  # random | greedy | linucb | ucb | thompson | evsi
   frozen_epoch_tasks: 128
   probe_budget_per_epoch: 32
@@ -100,7 +115,8 @@ exploration:
     stop_threshold: 0.005
 
 skills:
-  enabled: true
+  enabled: false
+  initial_library: []
   retrieval_top_k: 3
   activation_delay_epochs: 1
   # Starter preregistration values; tune on validation, never on test.
@@ -112,14 +128,25 @@ skills:
   suspend_on_version_change: true
 
 gpu:
-  # Physical GPU IDs on worker09; each process sees its assigned card as cuda:0.
-  director_training_physical: 3
-  director_inference_physical: 4
-  probe_skill_training_physical: 5
-  director_training_device: "cuda:0"
-  director_inference_device: "cuda:0"
-  probe_skill_training_device: "cuda:0"
-  inference_base_url: "http://127.0.0.1:8003/v1"
+  # SkillFlow mapping. Do not combine this with a CUDA_VISIBLE_DEVICES remap.
+  learner_physical: 3
+  rollout_physical: 4
+  gradient_replica_physical: 5
+  learner_device: "cuda:3"
+  rollout_engine: "sglang"
+  gradient_replica_device: "cuda:5"
+  supervisor_gpu_id: 4
+  supervisor_api_base: "http://127.0.0.1:8005/v1"
+  training_enabled: false
+  # Future trainer knobs copied from SkillFlow's two-copy backward path. They
+  # are configuration only in this phase; no optimizer/backward is launched.
+  oom_policy:
+    status: "configured_not_active"
+    micro_batch_size: 4
+    minimum_micro_batch_size: 1
+    split_items_across_learner_and_replica: true
+    gradient_accumulation_steps: 1
+    gradient_checkpointing: true
 
 deployment:
   exploration_beta: 0.0

@@ -52,6 +52,7 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.final_answer, "answer from solver")
         self.assertEqual(len(result.turns), 3)
         self.assertIn("weighted_preferred_model", client.prompts[0])
+        self.assertNotIn("available_skills", client.prompts[0])
         self.assertEqual(result.final_graph["output_agent_id"], "solver")
 
     async def test_round_limit_is_explicit_failure(self) -> None:

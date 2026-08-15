@@ -4,7 +4,7 @@
 set -euo pipefail
 
 if [[ $# -lt 2 ]]; then
-  echo "usage: $0 <train|inference|probe> <command> [args...]" >&2
+  echo "usage: $0 <learner|rollout|gradient> <command> [args...]" >&2
   exit 2
 fi
 
@@ -12,14 +12,14 @@ role="$1"
 shift
 
 case "$role" in
-  train)
-    gpu="${FLOWSTEER_TRAIN_GPU:-3}"
+  learner|train)
+    gpu="${FLOWSTEER_LEARNER_GPU:-${FLOWSTEER_TRAIN_GPU:-3}}"
     ;;
-  inference)
-    gpu="${FLOWSTEER_INFERENCE_GPU:-4}"
+  rollout|inference)
+    gpu="${FLOWSTEER_ROLLOUT_GPU:-${FLOWSTEER_INFERENCE_GPU:-4}}"
     ;;
-  probe)
-    gpu="${FLOWSTEER_PROBE_GPU:-5}"
+  gradient|backward|probe)
+    gpu="${FLOWSTEER_GRADIENT_GPU:-${FLOWSTEER_PROBE_GPU:-5}}"
     ;;
   *)
     echo "unknown role: $role" >&2

@@ -39,7 +39,7 @@ def main() -> int:
         return 2
 
     print(f"configuration: OK ({config_path})")
-    print(f"model catalog: OK ({len(registry)} aliases, id={registry.catalog_id[:12]})")
+    print(f"model catalog: OK ({len(registry)} aliases)")
     print("catalog model IDs: " + ", ".join(registry.model_ids))
     if shutil.which("nvidia-smi"):
         result = subprocess.run(

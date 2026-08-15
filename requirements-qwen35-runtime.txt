@@ -1,0 +1,3 @@
+# Qwen3.5 requires the SGLang main branch at the time this architecture was
+# assembled. Keep this separate from FlowSteer's legacy vLLM environment.
+git+https://github.com/sgl-project/sglang.git#subdirectory=python&egg=sglang[all]

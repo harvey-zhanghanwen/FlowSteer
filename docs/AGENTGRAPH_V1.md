@@ -1,8 +1,13 @@
-# FlowSteer AgentGraph v1
+# FlowSteer AgentGraph v1 architecture scaffold
 
 This directory documents the code architecture built from the FlowSteer, MACE,
 MANTA, and SkillFlow references plus the project design note. Reference
-documents are design inputs, not runtime instructions.
+documents are design inputs, not runtime instructions.  The exact code-source
+boundaries are recorded in [SOURCE_MAP.md](SOURCE_MAP.md).
+
+The checked-in configuration is intentionally `architecture_only`: it can be
+loaded, validated, imported, and fake-tested without starting SGLang, loading a
+model, calling a paid API, or running an optimizer.
 
 ## What is implemented
 
@@ -12,10 +17,11 @@ new path establishes stricter execution and evidence invariants.
 
 | Plane | Implemented modules | Current boundary |
 | --- | --- | --- |
-| Execution | `agent_graph`, `agent_action_parser`, `agent_workflow_env`, `agent_runtime`, `openai_gateway`, `director` | End-to-end inference works with fake or OpenAI-compatible gateways |
-| Policy learning | `grpo_objective`, `records` | Auditable one-pass objective exists; it is not yet wired into the legacy GPU trainer |
-| Exploration | `exploration/features`, `mace`, `posterior`, `policies`, `paired_probe`, `evsi` | Statistical primitives are implemented; real same-prefix continuation workers remain to be connected |
-| Skills | `skills/schema`, `validator`, `store`, `retrieval`, `lifecycle` | Deterministic evidence gates and lifecycle work; automatic mining and confirmatory job scheduling are future work |
+| Execution | `agent_graph`, `agent_action_parser`, `agent_workflow_env`, `agent_runtime`, `openai_gateway`, `director` | End-to-end inference works with fake gateways; real endpoints remain opt-in |
+| Qwen runtime | `sglang_manager`, `start_qwen35_director_server.sh` | SkillFlow-style Qwen3.5-9B SGLang boundary exists; no server starts during validation |
+| Policy learning | `grpo_objective`, `records` | Objective primitives exist but `grpo.enabled=false`; no GPU trainer is connected |
+| Exploration | `exploration/features`, `mace`, `posterior`, `policies`, `paired_probe`, `evsi` | Inactive algorithm primitives only; no worker or online update loop |
+| Skills | `skills/schema`, `validator`, `store`, `retrieval`, `lifecycle` | Inactive data/evidence primitives only; no mining or publication loop |
 | Evidence | `persistence/ids`, `trajectory_store`, `replay`, `versioning` | Versioned JSONL streams, idempotency, split isolation, and snapshot hash-chain replay are implemented |
 
 The design deliberately keeps three signals separate:
@@ -57,16 +63,19 @@ flowchart LR
 - A Skill is structured and version-bound. It activates only after held-out
   evidence passes deterministic gates and only in a later exploration epoch.
 
-## Three-GPU layout on this server
+## Qwen3.5 runtime and three-GPU layout
 
-The setup selected currently idle physical GPUs 3, 4, and 5. Each process sees
-its assigned physical card as local `cuda:0`.
+FlowSteer's Qwen3-8B vLLM launcher is not used for the new Director.  The
+Supervisor service follows SkillFlow's Qwen3.5-9B SGLang process boundary.
+The default physical cards are 3, 4, and 5; they are configured by physical
+index and must not be combined with a conflicting `CUDA_VISIBLE_DEVICES`
+remap.
 
 | Physical GPU | Role | Default environment variable |
 | ---: | --- | --- |
-| 3 | Qwen3.5-9B Flow-Director LoRA/GRPO training | `FLOWSTEER_TRAIN_GPU` |
-| 4 | Qwen3.5-9B vLLM inference service | `FLOWSTEER_INFERENCE_GPU` |
-| 5 | paired-probe, posterior/Skill validation, or auxiliary training worker | `FLOWSTEER_PROBE_GPU` |
+| 3 | Learner model, LoRA parameters, optimizer/partition state (future) | `FLOWSTEER_LEARNER_GPU` |
+| 4 | Qwen3.5-9B SGLang Supervisor rollout | `FLOWSTEER_ROLLOUT_GPU` |
+| 5 | Full-model gradient replica and split backward items (future) | `FLOWSTEER_GRADIENT_GPU` |
 
 Validate availability:
 
@@ -78,16 +87,23 @@ Run an arbitrary process under one role without relying on ambiguous device
 numbering:
 
 ```bash
-scripts/run_on_gpu_role.sh train python3 your_training_entry.py
-scripts/run_on_gpu_role.sh probe python3 your_probe_worker.py
+scripts/run_on_gpu_role.sh learner python3 your_future_training_entry.py
+scripts/run_on_gpu_role.sh gradient python3 your_future_gradient_worker.py
 ```
 
 Start the Director inference service:
 
 ```bash
+python3 -m pip install -r requirements-qwen35-runtime.txt
 export QWEN35_9B_MODEL_PATH=/absolute/path/to/Qwen3.5-9B
 scripts/start_qwen35_director_server.sh
 ```
+
+This command is not run by setup validation.  It uses SkillFlow's SGLang
+defaults (`qwen3` reasoning parser, `qwen3_coder` tool parser, LoRA rank 64,
+32K scaffold context).  Context and memory fraction remain environment
+overrides because a real value must be chosen against the installed SGLang
+build and available memory.
 
 ## API model catalog
 
@@ -115,7 +131,7 @@ python3 scripts/validate_agentgraph_setup.py
 
 ## Inference smoke run
 
-After the Qwen Director endpoint is running and the remote catalog IDs are
+After the optional Qwen Director endpoint is running and the remote catalog IDs are
 verified:
 
 ```bash
@@ -124,15 +140,18 @@ python3 scripts/run_agentgraph.py \
   --show-graph
 ```
 
-The inference loop gives the Director a weighted cheap/fast model prior but does
+The initial Director prompt contains only the six legal actions, current graph,
+Canvas feedback, and model catalog.  With an empty Skill library it contains no
+Skill field or workflow template.  The inference loop gives the Director a
+weighted cheap/fast model prior but does
 not hard-code a role enum. The Director can create free-text Agent contracts,
 choose models, set communication directions, choose the output Agent, repair an
 invalid partial graph, and explicitly finish.
 
 ## Verification
 
-The lightweight architecture tests need Python 3.10, NumPy, and PyYAML; they do
-not download models or call paid APIs:
+The lightweight architecture tests need Python 3.10, NumPy, and PyYAML. They do
+not require SGLang, download models, occupy a GPU, or call paid APIs:
 
 ```bash
 python3 -m unittest discover -s tests/unit -p 'test_*.py' -v
@@ -143,8 +162,10 @@ python3 -m compileall -q src scripts tests
 
 The following are not represented as complete experimental results:
 
-- wiring exact vLLM prompt/output token receipts and LoRA synchronization into
+- wiring exact SGLang prompt/output token receipts and LoRA synchronization into
   the new AgentGraph GPU trainer;
+- adapting SkillFlow's theta/phi two-copy backward and SGLang tensor-LoRA sync
+  to the AgentGraph trajectory format;
 - implementing a durable distributed same-prefix fork/continuation job queue;
 - training the proposed low-rank feature encoder and performing clustered
   conformal calibration under adaptive probing;
@@ -152,5 +173,10 @@ The following are not represented as complete experimental results:
   memory-on/memory-off evaluation;
 - real training, provider integration, benchmark, latency, and cost runs.
 
-This boundary is intentional: the current code is a tested architecture/MVP,
-not a claim that the full research loop has already been trained or validated.
+The inactive OOM settings mirror SkillFlow's configurable target shape:
+gradient checkpointing, micro-batch 4 with a planned floor of 1, and splitting
+items between learner and replica.  They are not an implemented OOM retry loop.
+
+This boundary is intentional: the current code is a tested architecture
+scaffold, not a claim that the three-GPU trainer or full research loop has been
+trained or validated.

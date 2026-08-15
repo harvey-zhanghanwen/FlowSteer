@@ -11,9 +11,9 @@ import sys
 
 
 ROLES = (
-    ("director training", "FLOWSTEER_TRAIN_GPU", "3"),
-    ("director inference", "FLOWSTEER_INFERENCE_GPU", "4"),
-    ("probe/skill training", "FLOWSTEER_PROBE_GPU", "5"),
+    ("learner model/optimizer", "FLOWSTEER_LEARNER_GPU", "3"),
+    ("SGLang Supervisor rollout", "FLOWSTEER_ROLLOUT_GPU", "4"),
+    ("gradient replica/backward", "FLOWSTEER_GRADIENT_GPU", "5"),
 )
 
 

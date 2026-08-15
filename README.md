@@ -30,11 +30,14 @@ relations, finite bidirectional execution, MACE/Bayesian exploration, and
 versioned Skill evidence. It preserves the original Operator-DSL path while the
 new training integration is completed.
 
-The new path includes a Qwen3.5-9B Director configuration, a weighted cheap/fast
-API model pool, strict terminal-only one-pass GRPO primitives, three-GPU role
-mapping, evidence persistence, and a fully fake-testable inference runtime. See
+The new path includes a SkillFlow-derived Qwen3.5-9B SGLang Supervisor profile,
+a weighted cheap/fast API model pool, strict terminal-only one-pass GRPO
+primitives, three-GPU role mapping, evidence persistence, and a fully
+fake-testable inference runtime. Training, exploration, and Skill evolution are
+disabled in the architecture-only configuration. See
 [the AgentGraph v1 guide](docs/AGENTGRAPH_V1.md) for setup, invariants, current
-status, and explicit unfinished boundaries.
+status, explicit unfinished boundaries, and the
+[source map](docs/SOURCE_MAP.md) for FlowSteer/SkillFlow provenance.
 
 ## Method
 

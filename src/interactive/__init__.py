@@ -91,6 +91,7 @@ from .agent_action_parser import AgentAction, AgentActionParser, AgentActionType
 from .agent_runtime import AgentRuntime, AgentRuntimeResult
 from .agent_workflow_env import AgentWorkflowEnv, AgentWorkflowStepResult
 from .director import AgentGraphOrchestrator, OpenAIDirectorClient
+from .sglang_manager import SGLangSupervisorManager
 from .openai_gateway import OpenAICompatibleGateway
 from .model_registry import ModelRegistry, ModelSpec, ProviderSpec
 from .records import TrajectoryRecord as AgentTrajectoryRecord, TurnRecord as AgentTurnRecord
@@ -155,6 +156,7 @@ __all__ = [
     'AgentWorkflowStepResult',
     'AgentGraphOrchestrator',
     'OpenAIDirectorClient',
+    'SGLangSupervisorManager',
     'OpenAICompatibleGateway',
     'ModelRegistry',
     'ModelSpec',

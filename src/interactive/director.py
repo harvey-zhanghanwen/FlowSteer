@@ -15,9 +15,9 @@ from .agent_workflow_env import AgentWorkflowEnv, AgentWorkflowStepResult
 from .model_registry import ModelRegistry
 
 
-DIRECTOR_SYSTEM_PROMPT = """You are the Flow-Director. Build an executable AgentGraph by emitting exactly one JSON object per turn. Do not emit two actions. Agent contracts are free text; model_id must come from the supplied catalog.
+DIRECTOR_SYSTEM_PROMPT = """You are the Flow-Director. Build an executable AgentGraph for the task, one edit at a time. Follow the latest Canvas feedback and return exactly one JSON object each turn.
 
-Allowed actions:
+Actions:
 {"action":"add_agent","agent_id":"...","model_id":"...","contract":"..."}
 {"action":"modify_agent","agent_id":"...","model_id":"...","contract":"..."}
 {"action":"delete_agent","agent_id":"..."}
@@ -25,7 +25,7 @@ Allowed actions:
 {"action":"set_output","agent_id":"..."}
 {"action":"finish"}
 
-Use bidirectional relations sparingly. A complete graph must be acyclic after contracting a two-agent bidirectional pair, every Agent must reach the output Agent, and the output block must be a sink."""
+Use a model_id from the supplied catalog and describe each Agent's job in ordinary free text. Finish only after the Canvas accepts a complete graph."""
 
 
 class DirectorError(RuntimeError):
@@ -49,10 +49,10 @@ class OpenAIDirectorClient:
     def __init__(
         self,
         *,
-        base_url: str = "http://127.0.0.1:8003/v1",
-        model: str = "qwen3.5-9b-director",
+        base_url: str = "http://127.0.0.1:8005/v1",
+        model: str = "supervisor_theta",
         api_key_env: Optional[str] = None,
-        policy_version: str = "qwen3.5-9b-unversioned",
+        policy_version: str = "qwen3.5-9b-sglang-unversioned",
         temperature: float = 0.6,
         top_p: float = 0.95,
         max_tokens: int = 768,
@@ -205,11 +205,11 @@ class AgentGraphOrchestrator:
             "canvas_feedback": env.snapshot().last_feedback,
             "model_catalog": catalog,
             "weighted_preferred_model": preferred.model_id,
-            "validated_skills": list(skills),
         }
+        if skills:
+            payload["available_skills"] = list(skills)
         return (
-            "Choose the next single atomic edit. The weighted preferred model is a cheap/fast "
-            "prior, not a hard constraint. Return exactly one JSON object.\n\n"
+            "Choose one next edit. The preferred model is only a cheap/fast suggestion.\n\n"
             + json.dumps(payload, ensure_ascii=False, sort_keys=True)
         )
 
