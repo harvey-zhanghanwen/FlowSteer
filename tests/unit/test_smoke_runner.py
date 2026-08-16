@@ -17,6 +17,14 @@ from src.interactive.records import (
     TrajectoryRecord,
     TurnRecord,
 )
+from src.interactive.scientific_sampling import (
+    GenerationPhase,
+    SCIENTIFIC_SAMPLING_ALGORITHM,
+    ScientificSamplingCoordinate,
+    derive_generation_seed,
+    scientific_sampling_schedule_hash,
+    stable_hash,
+)
 
 
 _SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "train_agentgraph_smoke.py"
@@ -72,6 +80,17 @@ def trajectory(task: TaskRecord, rollout_index: int, versions) -> TrajectoryReco
         "snapshot",
         {"revision": 0, "graph": graph, "previous_snapshot_id": None},
     )
+    base_seed = 42
+    coordinate = ScientificSamplingCoordinate(
+        sampling_schedule_hash=scientific_sampling_schedule_hash(
+            base_seed=base_seed
+        ),
+        schedule_purpose="natural_smoke",
+        ordered_sequence_hash=stable_hash([task.task_id]),
+        sequence_position=rollout_index,
+        task_id=task.task_id,
+        optimizer_step_or_anchor_ordinal=0,
+    )
     turn = TurnRecord(
         turn_id=f"turn:{task.task_id}:{rollout_index}",
         round_index=0,
@@ -93,6 +112,12 @@ def trajectory(task: TaskRecord, rollout_index: int, versions) -> TrajectoryReco
         policy_adapter=(
             "theta_smoke_step_000001" if rollout_index >= 10_000 else None
         ),
+        director_generation_seed=derive_generation_seed(
+            base_seed=base_seed,
+            coordinate=coordinate,
+            step_index=1,
+            phase=GenerationPhase.ACTION,
+        ),
     )
     reward = float(rollout_index % 2)
     return TrajectoryRecord(
@@ -112,6 +137,12 @@ def trajectory(task: TaskRecord, rollout_index: int, versions) -> TrajectoryReco
         ),
         termination_reason="finish",
         explicit_finish=True,
+        director_sampling={
+            "algorithm": SCIENTIFIC_SAMPLING_ALGORITHM,
+            "base_seed": base_seed,
+            "coordinate": coordinate.to_value(),
+            "phase": GenerationPhase.ACTION.value,
+        },
     )
 
 

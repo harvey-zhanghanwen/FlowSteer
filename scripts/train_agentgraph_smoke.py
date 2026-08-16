@@ -45,6 +45,11 @@ from src.interactive.rollout_collector import (
     RolloutGate,
     SGLangReceiptDirectorClient,
 )
+from src.interactive.scientific_sampling import (
+    ScientificSamplingCoordinate,
+    scientific_sampling_schedule_hash,
+    stable_hash,
+)
 from src.interactive.smoke_trainer import (
     Qwen35OnePassSmokeTrainer,
     SmokeTrainerConfig,
@@ -606,16 +611,39 @@ class LiveSmokeBackend:
         ).strip()
         if not catalog_order_namespace:
             raise ConfigurationError("experiment.catalog_order_namespace must be non-empty")
+        base_seed = int(experiment["seed"])
+        sampling_anchor_ordinal = int(
+            experiment.get(
+                "sampling_anchor_ordinal",
+                experiment.get("update_step", 0),
+            )
+        )
+        sampling_coordinate = ScientificSamplingCoordinate(
+            sampling_schedule_hash=scientific_sampling_schedule_hash(
+                base_seed=base_seed
+            ),
+            schedule_purpose=str(
+                experiment.get("condition_id", "natural_smoke")
+            ),
+            ordered_sequence_hash=stable_hash([task.task_id]),
+            # SkillFlow's position is a rollout coordinate.  It must be the
+            # ordinal within this task, never the task's selected-list index.
+            sequence_position=rollout_index,
+            task_id=task.task_id,
+            optimizer_step_or_anchor_ordinal=sampling_anchor_ordinal,
+        )
         orchestrator = AgentGraphOrchestrator(
             self.registry,
             self.director_client,
             max_rounds=int(director["max_rounds"]),
-            seed=int(experiment["seed"]) + rollout_index,
+            seed=base_seed,
             catalog_order_seed=(
                 f"{experiment['seed']}:{catalog_order_namespace}:"
                 f"{task.task_id}"
             ),
             history_window=int(director["history_window"]),
+            sampling_base_seed=base_seed,
+            sampling_coordinate=sampling_coordinate,
         )
         environment = AgentWorkflowEnv(
             self.registry,

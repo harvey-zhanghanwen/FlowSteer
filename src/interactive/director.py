@@ -16,6 +16,12 @@ from urllib.request import Request, urlopen
 
 from .agent_workflow_env import AgentWorkflowEnv, AgentWorkflowStepResult
 from .model_registry import ModelRegistry
+from .scientific_sampling import (
+    GenerationPhase,
+    SCIENTIFIC_SAMPLING_ALGORITHM,
+    ScientificSamplingCoordinate,
+    derive_generation_seed,
+)
 
 
 DIRECTOR_SYSTEM_PROMPT = """You are the Flow-Director. Build an executable AgentGraph for the task, one edit at a time. Follow the latest Canvas feedback and return exactly one JSON object each turn.
@@ -215,6 +221,8 @@ class AgentGraphOrchestrator:
         seed: int = 42,
         catalog_order_seed: int | str | None = None,
         history_window: int = 4,
+        sampling_base_seed: int | None = None,
+        sampling_coordinate: ScientificSamplingCoordinate | None = None,
     ) -> None:
         if max_rounds < 1:
             raise ValueError("max_rounds must be positive")
@@ -224,10 +232,50 @@ class AgentGraphOrchestrator:
         self.client = client
         self.max_rounds = max_rounds
         self.seed = seed
+        if (sampling_base_seed is None) != (sampling_coordinate is None):
+            raise ValueError(
+                "sampling_base_seed and sampling_coordinate must be supplied together"
+            )
+        if sampling_base_seed is not None and (
+            type(sampling_base_seed) is not int
+            or not 0 <= sampling_base_seed < 2**64
+        ):
+            raise ValueError("sampling_base_seed must be an unsigned 64-bit integer")
+        self.sampling_base_seed = sampling_base_seed
+        self.sampling_coordinate = sampling_coordinate
         # Sampling varies across rollouts, while a same-task/same-condition
         # group must see the same catalog presentation in its exact prompt.
         self.catalog_order_seed = seed if catalog_order_seed is None else catalog_order_seed
         self.history_window = history_window
+
+    def generation_seed(self, round_index: int) -> int:
+        """Return the exact Director action seed for one zero-based Canvas round."""
+
+        if type(round_index) is not int or round_index < 0:
+            raise ValueError("round_index must be a non-negative integer")
+        if self.sampling_coordinate is None:
+            return self.seed + round_index
+        assert self.sampling_base_seed is not None
+        return derive_generation_seed(
+            base_seed=self.sampling_base_seed,
+            coordinate=self.sampling_coordinate,
+            step_index=round_index + 1,
+            phase=GenerationPhase.ACTION,
+        )
+
+    @property
+    def sampling_receipt(self) -> Mapping[str, Any]:
+        """Return the trajectory-level SkillFlow scientific sampling receipt."""
+
+        if self.sampling_coordinate is None:
+            return {}
+        assert self.sampling_base_seed is not None
+        return {
+            "algorithm": SCIENTIFIC_SAMPLING_ALGORITHM,
+            "base_seed": self.sampling_base_seed,
+            "coordinate": self.sampling_coordinate.to_value(),
+            "phase": GenerationPhase.ACTION.value,
+        }
 
     def build_prompt(
         self,
@@ -313,7 +361,7 @@ class AgentGraphOrchestrator:
             prompt = self.build_prompt(env, index, skills)
             response = await self.client.propose(
                 prompt,
-                seed=self.seed + index,
+                seed=self.generation_seed(index),
             )
             canvas = await env.step(response.text)
             turns.append(DirectorTurn(index, prompt, response, canvas))

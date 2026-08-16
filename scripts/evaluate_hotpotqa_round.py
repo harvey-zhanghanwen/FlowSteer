@@ -546,12 +546,12 @@ async def _collect_graph(
     _write_json(manifest_path, manifest)
     semaphore = asyncio.Semaphore(int(bounded["concurrency"]))
 
-    async def run(index: int, task: TaskRecord) -> tuple[TaskRecord, Any]:
+    async def run(task: TaskRecord) -> tuple[TaskRecord, Any]:
         async with semaphore:
             try:
                 trajectory = await backend.collect(
                     task,
-                    index,
+                    0,
                     versions[task.task_id],
                     expected_task_split="validation",
                 )
@@ -560,8 +560,8 @@ async def _collect_graph(
                 return task, exc
 
     jobs = [
-        asyncio.create_task(run(index, task))
-        for index, task in enumerate(selected)
+        asyncio.create_task(run(task))
+        for task in selected
         if task.task_id not in by_task
     ]
     for completed in asyncio.as_completed(jobs):

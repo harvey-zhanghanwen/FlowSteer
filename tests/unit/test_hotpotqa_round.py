@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 
 from src.interactive.config_loader import load_yaml
+from src.interactive.records import EvaluationReceipt
 
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -94,6 +95,85 @@ def test_declared_direct_reuse_is_copied_without_gateway_call(tmp_path):
     assert manifest["direct_progress"]["reused_from"] == str(source)
     assert manifest["direct_progress"]["reused_records"] == 1
     assert manifest["direct_progress"]["newly_collected_records"] == 0
+
+
+def test_graph_evaluation_uses_task_local_rollout_zero(tmp_path):
+    tasks = tuple(
+        _MODULE.TaskRecord(
+            task_id=f"hotpotqa:{index}",
+            question=f"question {index}",
+            ground_truth="answer",
+            split="validation",
+            metadata={"dataset_key": "hotpotqa"},
+        )
+        for index in range(3)
+    )
+
+    class EmptyTrajectoryStore:
+        def payloads(self):
+            return ()
+
+    class Backend:
+        model_catalog_version = "catalog-v1"
+        evidence_store = type("Evidence", (), {"trajectories": EmptyTrajectoryStore()})()
+
+        def __init__(self):
+            self.rollout_indices = []
+
+        async def collect(
+            self,
+            task,
+            rollout_index,
+            versions,
+            *,
+            expected_task_split="train",
+        ):
+            assert expected_task_split == "validation"
+            self.rollout_indices.append(rollout_index)
+            return _MODULE.TrajectoryRecord(
+                trajectory_id=f"trajectory:{task.task_id}",
+                task=task,
+                group_id=f"{task.task_id}:condition:{versions.policy}",
+                condition_id="condition",
+                rollout_id=f"{task.task_id}:rollout:0000",
+                versions=versions,
+                turns=(),
+                final_answer="answer",
+                evaluation=EvaluationReceipt(
+                    versions.evaluator,
+                    True,
+                    1.0,
+                    metrics={"exact_match": 1.0, "token_f1": 1.0},
+                ),
+                termination_reason="finish",
+                explicit_finish=True,
+            )
+
+    backend = Backend()
+    config = {
+        "experiment": {
+            "condition_id": "condition",
+            "prompt_version": "prompt-v1",
+            "tool_version": "tool-v1",
+        },
+        "director": {"behavior_policy_version": "policy-v1"},
+        "hotpotqa_evaluation": {"concurrency": 2},
+    }
+    manifest_path = tmp_path / "manifest.json"
+    result = asyncio.run(
+        _MODULE._collect_graph(
+            backend,
+            tasks,
+            config,
+            tmp_path / "trajectories.jsonl",
+            [],
+            {},
+            manifest_path,
+        )
+    )
+
+    assert set(result) == {task.task_id for task in tasks}
+    assert backend.rollout_indices == [0, 0, 0]
 
 
 def test_strict_aggregate_keeps_failed_task_in_denominator():

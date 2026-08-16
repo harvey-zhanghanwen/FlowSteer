@@ -21,6 +21,13 @@ from src.interactive.rollout_collector import (
     SGLangReceiptDirectorClient,
     select_balanced_tasks,
 )
+from src.interactive.scientific_sampling import (
+    GenerationPhase,
+    ScientificSamplingCoordinate,
+    derive_generation_seed,
+    scientific_sampling_schedule_hash,
+    stable_hash,
+)
 from src.interactive.versioning import VersionBundle
 
 
@@ -124,6 +131,34 @@ def _task(
         ground_truth="final answer",
         split=split,
         metadata={"source": source},
+    )
+
+
+def _orchestrator(
+    registry: ModelRegistry,
+    client: SGLangReceiptDirectorClient,
+    *,
+    max_rounds: int,
+    base_seed: int = 7,
+    rollout_ordinal: int = 0,
+) -> AgentGraphOrchestrator:
+    coordinate = ScientificSamplingCoordinate(
+        sampling_schedule_hash=scientific_sampling_schedule_hash(
+            base_seed=base_seed
+        ),
+        schedule_purpose="exploit",
+        ordered_sequence_hash=stable_hash(["hotpotqa:first"]),
+        sequence_position=rollout_ordinal,
+        task_id="hotpotqa:first",
+        optimizer_step_or_anchor_ordinal=0,
+    )
+    return AgentGraphOrchestrator(
+        registry,
+        client,
+        max_rounds=max_rounds,
+        seed=base_seed,
+        sampling_base_seed=base_seed,
+        sampling_coordinate=coordinate,
     )
 
 
@@ -250,7 +285,7 @@ def test_collector_materializes_exact_finish_trajectory_and_evidence(tmp_path):
         adapter_name="theta_live",
         expected_server_weight_version="default",
     )
-    orchestrator = AgentGraphOrchestrator(registry, client, max_rounds=3, seed=7)
+    orchestrator = _orchestrator(registry, client, max_rounds=3)
     environment = AgentWorkflowEnv(registry, gateway=FakeGateway())
     evidence = EvidenceStore(tmp_path)
     collector = AgentGraphRolloutCollector(
@@ -289,7 +324,19 @@ def test_collector_materializes_exact_finish_trajectory_and_evidence(tmp_path):
     assert all(turn.director_request_id for turn in trajectory.turns)
     assert all((turn.director_latency_ms or 0.0) >= 0.0 for turn in trajectory.turns)
     assert all(turn.director_attempt_count == 1 for turn in trajectory.turns)
-    assert [turn.director_generation_seed for turn in trajectory.turns] == [7, 8, 9]
+    coordinate = ScientificSamplingCoordinate.from_value(
+        trajectory.director_sampling["coordinate"]
+    )
+    assert [turn.director_generation_seed for turn in trajectory.turns] == [
+        derive_generation_seed(
+            base_seed=7,
+            coordinate=coordinate,
+            step_index=index,
+            phase=GenerationPhase.ACTION,
+        )
+        for index in (1, 2, 3)
+    ]
+    assert trajectory.sampling_receipt_verified is True
     assert all(
         turn.executed_prefix_tokens < len(turn.output_token_ids)
         for turn in trajectory.turns
@@ -326,7 +373,7 @@ def test_collector_does_not_duplicate_reused_progressive_execution():
         expected_server_weight_version="default",
     )
     collector = AgentGraphRolloutCollector(
-        AgentGraphOrchestrator(registry, client, max_rounds=3),
+        _orchestrator(registry, client, max_rounds=3),
         AgentWorkflowEnv(
             registry,
             gateway=FakeGateway(),
@@ -365,7 +412,7 @@ def test_collector_returns_complete_max_rounds_trajectory():
         expected_server_weight_version="default",
     )
     collector = AgentGraphRolloutCollector(
-        AgentGraphOrchestrator(registry, client, max_rounds=1),
+        _orchestrator(registry, client, max_rounds=1, rollout_ordinal=1),
         AgentWorkflowEnv(registry, gateway=FakeGateway()),
         _versions(),
     )
@@ -414,7 +461,7 @@ def test_collector_allows_explicit_heldout_split_without_grpo_admission():
         expected_server_weight_version="default",
     )
     collector = AgentGraphRolloutCollector(
-        AgentGraphOrchestrator(registry, client, max_rounds=3),
+        _orchestrator(registry, client, max_rounds=3),
         AgentWorkflowEnv(registry, gateway=FakeGateway()),
         _versions(),
         expected_task_split="validation",

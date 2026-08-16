@@ -12,10 +12,17 @@ import math
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
 from .persistence.ids import stable_id
+from .scientific_sampling import (
+    GenerationPhase,
+    SCIENTIFIC_SAMPLING_ALGORITHM,
+    ScientificSamplingCoordinate,
+    derive_generation_seed,
+    scientific_sampling_schedule_hash,
+)
 from .versioning import VersionBundle
 
 
-SCHEMA_VERSION = "flowsteer.agentgraph.v1"
+SCHEMA_VERSION = "flowsteer.agentgraph.v2"
 VALID_SPLITS = frozenset({"train", "validation", "test"})
 
 
@@ -198,12 +205,17 @@ class TrajectoryRecord:
     evaluation: EvaluationReceipt
     termination_reason: str
     explicit_finish: bool
+    director_sampling: Mapping[str, Any] = field(default_factory=dict)
     condition_satisfied: bool = True
     forced_probe: bool = False
     api_fallback_used: bool = False
     manual_repair_used: bool = False
     created_at: str = field(default_factory=utc_now)
     schema_version: str = SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.director_sampling, Mapping):
+            raise ValueError("director_sampling must be a mapping")
 
     @property
     def group_key(self) -> Tuple[str, str, str]:
@@ -224,6 +236,41 @@ class TrajectoryRecord:
         return bool(
             (self.explicit_finish and self.termination_reason == "finish")
             or self.terminal_failure
+        )
+
+    @property
+    def sampling_receipt_verified(self) -> bool:
+        receipt = self.director_sampling
+        if set(receipt) != {"algorithm", "base_seed", "coordinate", "phase"}:
+            return False
+        if receipt.get("algorithm") != SCIENTIFIC_SAMPLING_ALGORITHM:
+            return False
+        if receipt.get("phase") != GenerationPhase.ACTION.value:
+            return False
+        base_seed = receipt.get("base_seed")
+        if type(base_seed) is not int or not 0 <= base_seed < 2**64:
+            return False
+        try:
+            coordinate = ScientificSamplingCoordinate.from_value(
+                receipt.get("coordinate")
+            )
+        except (TypeError, ValueError):
+            return False
+        if coordinate.task_id != self.task.task_id:
+            return False
+        if coordinate.sampling_schedule_hash != scientific_sampling_schedule_hash(
+            base_seed=base_seed
+        ):
+            return False
+        return all(
+            turn.director_generation_seed
+            == derive_generation_seed(
+                base_seed=base_seed,
+                coordinate=coordinate,
+                step_index=turn.round_index + 1,
+                phase=GenerationPhase.ACTION,
+            )
+            for turn in self.turns
         )
 
     def _snapshot_chain_valid(self) -> bool:
@@ -248,6 +295,7 @@ class TrajectoryRecord:
                 or float(self.evaluation.reward) == 0.0
             )
             and self.evaluation.evaluator_version == self.versions.evaluator
+            and self.sampling_receipt_verified
             and not self.forced_probe
             and not self.api_fallback_used
             and not self.manual_repair_used
@@ -277,6 +325,8 @@ class TrajectoryRecord:
             "termination_reason": self.termination_reason,
             "explicit_finish": self.explicit_finish,
             "terminal_failure": self.terminal_failure,
+            "director_sampling": dict(self.director_sampling),
+            "sampling_receipt_verified": self.sampling_receipt_verified,
             "condition_satisfied": self.condition_satisfied,
             "forced_probe": self.forced_probe,
             "api_fallback_used": self.api_fallback_used,

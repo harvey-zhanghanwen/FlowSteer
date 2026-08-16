@@ -425,22 +425,18 @@ async def run_architecture_evaluation(
         selected,
         trajectories_by_task,
     )
-    missing = [
-        (index, task)
-        for index, task in enumerate(selected)
-        if task.task_id not in trajectories_by_task
-    ]
+    missing = [task for task in selected if task.task_id not in trajectories_by_task]
     failures: dict[str, str] = {}
     fresh_collected = 0
 
-    async def collect_one(index: int, task: Any) -> tuple[Any, Any]:
+    async def collect_one(task: Any) -> tuple[Any, Any]:
         try:
-            result = await backend.collect(task, index, expected_versions[task.task_id])
+            result = await backend.collect(task, 0, expected_versions[task.task_id])
         except BaseException as exc:  # preserve independent task failure isolation
             return task, exc
         return task, result
 
-    jobs = [asyncio.create_task(collect_one(index, task)) for index, task in missing]
+    jobs = [asyncio.create_task(collect_one(task)) for task in missing]
     for completed in asyncio.as_completed(jobs):
         task, result = await completed
         if isinstance(result, BaseException):

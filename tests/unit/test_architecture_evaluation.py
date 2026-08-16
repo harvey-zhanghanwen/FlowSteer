@@ -93,12 +93,14 @@ class FakeBackend:
 
     def __init__(self, *, fail_sources=("triviaqa",)) -> None:
         self.collected_task_ids: list[str] = []
+        self.rollout_indices: list[int] = []
         self.train_calls = 0
         self.publish_calls = 0
         self.fail_sources = frozenset(fail_sources)
 
     async def collect(self, task, rollout_index, versions):
         self.collected_task_ids.append(task.task_id)
+        self.rollout_indices.append(rollout_index)
         source = task.metadata["dataset_key"]
         if source in self.fail_sources:
             raise RuntimeError("synthetic collection failure")
@@ -180,6 +182,7 @@ class ArchitectureEvaluationTests(unittest.IsolatedAsyncioTestCase):
                 [row["task_id"] for row in selected],
             )
             self.assertEqual(7, len(backend.collected_task_ids))
+            self.assertEqual([0] * 7, backend.rollout_indices)
             self.assertEqual(0, backend.train_calls)
             self.assertEqual(0, backend.publish_calls)
 

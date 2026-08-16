@@ -15,6 +15,14 @@ from src.interactive.records import (
     TrajectoryRecord,
     TurnRecord,
 )
+from src.interactive.scientific_sampling import (
+    GenerationPhase,
+    SCIENTIFIC_SAMPLING_ALGORITHM,
+    ScientificSamplingCoordinate,
+    derive_generation_seed,
+    scientific_sampling_schedule_hash,
+    stable_hash,
+)
 from src.interactive.smoke_trainer import (
     Qwen35OnePassSmokeTrainer,
     SmokeTrainerConfig,
@@ -84,6 +92,26 @@ def _trajectory(index: int, turn: TurnRecord) -> TrajectoryRecord:
         split="train",
         metadata={"dataset_key": "hotpotqa", "source": "HotpotQA"},
     )
+    base_seed = 17
+    coordinate = ScientificSamplingCoordinate(
+        sampling_schedule_hash=scientific_sampling_schedule_hash(
+            base_seed=base_seed
+        ),
+        schedule_purpose="natural_smoke",
+        ordered_sequence_hash=stable_hash([task.task_id]),
+        sequence_position=index,
+        task_id=task.task_id,
+        optimizer_step_or_anchor_ordinal=0,
+    )
+    turn = replace(
+        turn,
+        director_generation_seed=derive_generation_seed(
+            base_seed=base_seed,
+            coordinate=coordinate,
+            step_index=turn.round_index + 1,
+            phase=GenerationPhase.ACTION,
+        ),
+    )
     return TrajectoryRecord(
         trajectory_id=f"trajectory-{index}",
         task=task,
@@ -96,6 +124,12 @@ def _trajectory(index: int, turn: TurnRecord) -> TrajectoryRecord:
         evaluation=EvaluationReceipt("evaluator-v1", True, float(index)),
         termination_reason="finish",
         explicit_finish=True,
+        director_sampling={
+            "algorithm": SCIENTIFIC_SAMPLING_ALGORITHM,
+            "base_seed": base_seed,
+            "coordinate": coordinate.to_value(),
+            "phase": GenerationPhase.ACTION.value,
+        },
     )
 
 

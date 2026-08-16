@@ -13,6 +13,14 @@ from src.interactive.records import (
     TrajectoryRecord,
     TurnRecord,
 )
+from src.interactive.scientific_sampling import (
+    GenerationPhase,
+    SCIENTIFIC_SAMPLING_ALGORITHM,
+    ScientificSamplingCoordinate,
+    derive_generation_seed,
+    scientific_sampling_schedule_hash,
+    stable_hash,
+)
 from src.interactive.versioning import VersionBundle
 
 
@@ -26,8 +34,32 @@ def versions(prompt: str = "prompt-v1") -> VersionBundle:
     )
 
 
+def sampling(task_id: str = "q1", position: int = 0) -> dict:
+    base_seed = 17
+    coordinate = ScientificSamplingCoordinate(
+        sampling_schedule_hash=scientific_sampling_schedule_hash(
+            base_seed=base_seed
+        ),
+        schedule_purpose="exploit",
+        ordered_sequence_hash=stable_hash([task_id]),
+        sequence_position=position,
+        task_id=task_id,
+        optimizer_step_or_anchor_ordinal=0,
+    )
+    return {
+        "algorithm": SCIENTIFIC_SAMPLING_ALGORITHM,
+        "base_seed": base_seed,
+        "coordinate": coordinate.to_value(),
+        "phase": GenerationPhase.ACTION.value,
+    }
+
+
 def turn(*, receipt: bool = True, policy: str = "policy-v1") -> TurnRecord:
     snapshot = GraphSnapshotEvent.create(1, {"nodes": [{"id": "a"}]})
+    director_sampling = sampling()
+    coordinate = ScientificSamplingCoordinate.from_value(
+        director_sampling["coordinate"]
+    )
     return TurnRecord(
         turn_id="turn-1",
         round_index=0,
@@ -44,6 +76,12 @@ def turn(*, receipt: bool = True, policy: str = "policy-v1") -> TurnRecord:
         policy_version=policy,
         graph_snapshot_id=snapshot.snapshot_id,
         previous_graph_snapshot_id=None,
+        director_generation_seed=derive_generation_seed(
+            base_seed=director_sampling["base_seed"],
+            coordinate=coordinate,
+            step_index=1,
+            phase=GenerationPhase.ACTION,
+        ),
         receipt_verified=receipt,
     )
 
@@ -61,6 +99,7 @@ def trajectory(task_split: str = "train", **changes: object) -> TrajectoryRecord
         evaluation=EvaluationReceipt("eval-v1", True, 1.0),
         termination_reason="finish",
         explicit_finish=True,
+        director_sampling=sampling(),
     )
     values.update(changes)
     return TrajectoryRecord(**values)
@@ -121,6 +160,9 @@ class RecordTests(unittest.TestCase):
         )
         tampered = replace(turn(), graph_snapshot={"nodes": [{"id": "tampered"}]})
         self.assertFalse(trajectory(turns=[tampered]).grpo_eligible)
+        self.assertFalse(trajectory(director_sampling={}).grpo_eligible)
+        wrong_seed = replace(turn(), director_generation_seed=1)
+        self.assertFalse(trajectory(turns=[wrong_seed]).grpo_eligible)
 
     def test_group_key_fingerprints_full_external_regime(self) -> None:
         left = trajectory()

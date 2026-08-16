@@ -974,14 +974,16 @@ class AgentGraphRolloutCollector:
                 "group_id": group_id,
                 "rollout_id": rollout_id,
                 "versions": self.versions.to_dict(),
+                "director_sampling": dict(self.orchestrator.sampling_receipt),
             },
         )
 
         for round_index in range(self.orchestrator.max_rounds):
             prompt = self.orchestrator.build_prompt(env, round_index, self.skills)
+            generation_seed = self.orchestrator.generation_seed(round_index)
             response = await self.orchestrator.client.propose(
                 prompt,
-                seed=self.orchestrator.seed + round_index,
+                seed=generation_seed,
             )
             canvas = await env.step(response.text)
             metadata = response.metadata
@@ -990,6 +992,10 @@ class AgentGraphRolloutCollector:
                 raise ReceiptValidationError("Director turn lacks an exact behavior receipt")
             if metadata.get("prompt_text") != prompt:
                 raise ReceiptValidationError("Director receipt is bound to a different prompt")
+            if _optional_int(metadata.get("generation_seed")) != generation_seed:
+                raise ReceiptValidationError(
+                    "Director receipt generation seed differs from the request"
+                )
             prompt_ids = _token_ids(metadata.get("prompt_token_ids"), "prompt_token_ids")
             output_ids = _token_ids(metadata.get("output_token_ids"), "output_token_ids")
             raw_behavior_log_probs = metadata.get("behavior_log_probs")
@@ -1076,9 +1082,7 @@ class AgentGraphRolloutCollector:
                 director_request_id=director_request_id,
                 director_latency_ms=_optional_float(metadata.get("latency_ms")),
                 director_attempt_count=_optional_int(metadata.get("attempt_count")),
-                director_generation_seed=_optional_int(
-                    metadata.get("generation_seed")
-                ),
+                director_generation_seed=generation_seed,
                 policy_version=policy_version,
                 policy_adapter=adapter_name,
                 server_weight_version=server_weight_version,
@@ -1125,6 +1129,7 @@ class AgentGraphRolloutCollector:
             evaluation=evaluation,
             termination_reason=termination_reason,
             explicit_finish=explicit_finish,
+            director_sampling=dict(self.orchestrator.sampling_receipt),
             condition_satisfied=self.condition_satisfied,
             forced_probe=self.forced_probe,
             api_fallback_used=self.api_fallback_used,

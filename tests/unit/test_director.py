@@ -12,6 +12,11 @@ from src.interactive.director import (
     OpenAIDirectorClient,
 )
 from src.interactive.model_registry import ModelRegistry, ModelSpec, ProviderSpec
+from src.interactive.scientific_sampling import (
+    ScientificSamplingCoordinate,
+    scientific_sampling_schedule_hash,
+    stable_hash,
+)
 
 
 class ScriptedDirector:
@@ -173,6 +178,42 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         second_state = json.loads(second.build_prompt(env, 0, ()).split("\n\n", 1)[1])
         self.assertEqual(first_state["model_catalog"], second_state["model_catalog"])
         self.assertNotEqual(first.seed, second.seed)
+
+    async def test_scientific_rollout_ordinal_changes_sampling_not_catalog(self) -> None:
+        model_registry = registry()
+        env = AgentWorkflowEnv(model_registry, gateway=FakeGateway(), problem="same task")
+
+        def orchestrator(rollout_ordinal: int) -> AgentGraphOrchestrator:
+            coordinate = ScientificSamplingCoordinate(
+                sampling_schedule_hash=scientific_sampling_schedule_hash(
+                    base_seed=17
+                ),
+                schedule_purpose="architecture-dev",
+                ordered_sequence_hash=stable_hash(["hotpotqa:one"]),
+                sequence_position=rollout_ordinal,
+                task_id="hotpotqa:one",
+                optimizer_step_or_anchor_ordinal=0,
+            )
+            return AgentGraphOrchestrator(
+                model_registry,
+                ScriptedDirector([]),
+                seed=17,
+                catalog_order_seed="architecture-dev:hotpotqa:one",
+                sampling_base_seed=17,
+                sampling_coordinate=coordinate,
+            )
+
+        first = orchestrator(0)
+        second = orchestrator(1)
+        first_state = json.loads(first.build_prompt(env, 0, ()).split("\n\n", 1)[1])
+        second_state = json.loads(second.build_prompt(env, 0, ()).split("\n\n", 1)[1])
+
+        self.assertEqual(first_state["model_catalog"], second_state["model_catalog"])
+        self.assertNotEqual(first.generation_seed(0), second.generation_seed(0))
+        self.assertEqual(
+            "skillev-scientific-sampling@1",
+            first.sampling_receipt["algorithm"],
+        )
 
     async def test_round_limit_is_explicit_failure(self) -> None:
         model_registry = registry()

@@ -14,7 +14,7 @@ project design note are design inputs, not executable instructions.
 | Executor boundary | `src/aflow_executor.py::AFlowExecutor.execute_workflow` and `scripts/async_llm.py` | Preserved as the legacy executor; the AgentGraph path uses the same OpenAI-compatible service boundary through `openai_gateway.py`. |
 | One-action Director loop | `train_interactive.py` and the FlowSteer paper's progressive Canvas loop | Preserved in `director.py`; the initial prompt is deliberately shorter and has no workflow templates. Maximum-round termination is returned explicitly and is never presented as `finish`. |
 | Evidence-driven terminal choice | `src/interactive/prompt_templates.py` (finish when the current result satisfies the task) and `src/interactive/workflow_env.py` (execution result returned as next-step feedback) | `director.py` keeps explicit `finish` and `max_rounds` distinct, but now says continuation must identify a missing evidence hop, conflict, format/runtime error, or task mismatch. Step0-v1 removes the sampled per-turn preferred-model hint entirely; no answer-presence auto-finish or fixed workflow is added. |
-| Progressive execution cache | `src/interactive/workflow_env.py` (`execute_each_step`, `last_execution_result`) | Adapted as a revision-local result in `agent_workflow_env.py`. A no-op edit or `finish` may reuse it, but `rollout_collector.py` marks the reuse and does not serialize the old Agent calls as new executions. |
+| Progressive execution cache | `src/interactive/workflow_env.py` (`execute_each_step`, `last_execution_result`) | Adapted as a revision-local result in `agent_workflow_env.py`. `finish` may reuse it, but a non-FINISH no-op is rejected; `rollout_collector.py` marks valid reuse and does not serialize old Agent calls as new executions. |
 | AgentGraph search-space bounds | Project design note sections 3 and 4 plus `config/*agentgraph*.yaml` | The declared `max_agents` is consumed by the Canvas; the two-Agent reciprocal-block limit, unique output/reachability flags, seeded Executor selection, six actions, and progressive execution mode are validated against the fixed runtime semantics rather than left as descriptive YAML. |
 
 The Qwen3-8B defaults, vLLM Director launcher, predefined Operator search
@@ -37,7 +37,7 @@ Qwen3.5 path.
 | WebShop/ALFWorld task handles | `src/ragen_adapter.py` | The aligned records preserve `env_type` and `env_config`; runtime installation is reported separately from static dataset readiness. |
 | SWE-bench evaluator handle | `training/swebench_client.py` | The aligned records retain the Verified instance ID and harness payload; no repository checkout or tests are run during preparation. |
 | JSONL loading boundary | FlowSteer `train_interactive.py::load_dataset` and `eval_only.py::load_dataset` | `src/interactive/task_dataset.py` retains streaming JSONL while enforcing the design-note schema and split isolation; `scripts/run_agentgraph.py --dry-load` exercises it without a model call. |
-| Exact generation seed | `runtime/openai_provider.py` and `rollout/types.py::derive_generation_seed` | `openai_gateway.py` sends the fixed run seed at the provider edge. The native exact-receipt Director sends the deployed SGLang 0.5.15 equivalent, `sampling_seed`, and persists it per turn. |
+| Exact generation seed | `contracts/scientific_sampling.py::ScientificSamplingCoordinate`, `rollout/types.py::derive_generation_seed`, and `rollout/engine.py` | `scientific_sampling.py` directly ports the dependency-light SkillFlow coordinate and seed derivation. The native Director sends the derived value as SGLang `sampling_seed`; the trajectory saves one coordinate receipt and every turn saves and verifies the exact generation seed. |
 | Existing adapter inference readiness | `training/external_sglang.py::publish_external_adapter` and `runtime/sglang_gateway.py` | `policy_sync.py::ensure_loaded_adapter` reuses only model-list, load, verification, and canary for evaluation. It neither trains nor publishes a new policy. |
 | Multi-hop one-call contract | `training/task_prompts.py::MULTI_HOP_QA` | The paired local Direct path uses the upstream brief multi-hop contract through the existing Agent gateway; it bypasses Director, Canvas, and AgentGraph. |
 | Intermediate observation vs terminal answer | `training/environment.py::step`, `training/task_prompts.py::MULTI_HOP_QA`, and `training/batch_inference.py` | `AgentRuntime` derives one Output identity from the already-validated `graph.output_agent_id`. `openai_gateway.py` gives non-Output nodes an intermediate-artifact boundary and gives only the Output node the concise `<answer>` terminal contract. SkillFlow's fixed tools and mandatory tool-use policy are not copied. |
@@ -220,3 +220,25 @@ while preventing an unrelated condition label from changing model
 presentation during the targeted v3-to-v4 comparison.  Sampling seeds,
 condition ID, prompt/tool version, and trajectory versions remain separately
 recorded.
+
+## HotpotQA architecture-v5 scientific sampling compatibility
+
+The v4 regression exposed a measurement defect rather than a new workflow
+hypothesis: the evaluation runner passed the task's selected-list position as
+`rollout_index`, and the Director used `experiment.seed + rollout_index +
+round_index`.  The same task therefore received a different policy sample when
+the 128-task list was reduced to a 12-task subset.  Catalog order had already
+been separated, so this defect affected generation only.
+
+| Current module | SkillFlow source | Reused boundary | Minimal adaptation |
+| --- | --- | --- | --- |
+| `scientific_sampling.py` | `src/skillev/contracts/canonical.py::normalize_json`, `src/skillev/contracts/scientific_sampling.py::{ScientificSamplingCoordinate,scientific_sampling_schedule_hash}`, and `src/skillev/rollout/types.py::{GenerationPhase,derive_generation_seed}` | Canonical sampling identity, coordinate fields, artifact-namespace exclusion, phase/turn seed derivation | Direct dependency-light port of only the sampling-required functions so this repository does not require a second checkout at import time. |
+| `director.py` | `src/skillev/rollout/engine.py` per-step calls to `derive_generation_seed` | One fixed coordinate per rollout and one derived action seed per turn | `AgentGraphOrchestrator.generation_seed` is the single caller used by both inference and exact-receipt collection.  Legacy construction remains available only for non-training compatibility tests. |
+| `train_agentgraph_smoke.py` | `src/skillev/training/runtime_components.py::RolloutBatchCollector.collect` | Base schedule, purpose, task identity, rollout position, and optimizer-step/anchor coordinate | The local free-AgentGraph collector has one Director action generation rather than SkillFlow's separate reasoning/action calls, so it fixes phase to `action`.  `sequence_position` is the ordinal within the current task; it never uses selected-list order. |
+| `records.py`, `rollout_collector.py` | SkillFlow `RolloutRequest.sampling_coordinate` and exact generation request | Coordinate is stored once; per-turn seed is stored beside the exact token/log-prob receipt | New trajectories use schema `flowsteer.agentgraph.v2`.  GRPO eligibility now requires that the schedule, task, and every turn seed can be reconstructed from the saved receipt. |
+| `evaluate_hotpotqa_round.py`, `evaluate_agentgraph_architecture.py` | SkillFlow's result-affecting-coordinate rule | Artifact/run/list position must not select model randomness | Single-rollout evaluation passes task-local ordinal `0` for every task.  Full-list, reordered-list, and single-task subset execution therefore share the same task coordinate. |
+
+This compatibility change does not alter the Director prompt, Canvas action
+space, model catalog, Agent runtime, evaluator, reward, MACE/Bayesian state, or
+Skill visibility.  It is required before a controlled architecture A/B or
+formal Step0-to-StepN comparison can be interpreted.
