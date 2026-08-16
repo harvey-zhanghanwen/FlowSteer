@@ -1,0 +1,74 @@
+{
+  "agentgraph": {
+    "completed": 32,
+    "completed_only_exact_match": 0.71875,
+    "completed_only_token_f1": 0.8361607142857143,
+    "denominator": 32,
+    "evaluator_valid": 32,
+    "strict_exact_match": 0.71875,
+    "strict_token_f1": 0.8361607142857143
+  },
+  "agentgraph_minus_direct": {
+    "exact_match": -0.0625,
+    "token_f1": -0.04151785714285716
+  },
+  "completed_at": "2026-08-16T02:12:23.129637+00:00",
+  "dataset": "HotpotQA",
+  "direct_local_baseline": {
+    "completed": 32,
+    "completed_only_exact_match": 0.78125,
+    "completed_only_token_f1": 0.8776785714285714,
+    "denominator": 32,
+    "evaluator_valid": 32,
+    "strict_exact_match": 0.78125,
+    "strict_token_f1": 0.8776785714285714
+  },
+  "evaluation_name": "hotpotqa_training_ready_step0_untouched32",
+  "failure_types": {
+    "architecture_gain": 2,
+    "architecture_regression_candidate": 4,
+    "correct": 21,
+    "partial_or_overlong_answer": 5
+  },
+  "input_context": "full_10_passages",
+  "known_limitations": [
+    "A Director/API exception before terminal collection may not preserve partial turns.",
+    "Paper references use a different published evaluation setup and are not a paired baseline."
+  ],
+  "method_level_changes_performed": false,
+  "model_catalog_path": "config/model_catalog.yaml",
+  "native_source_split": "train",
+  "paper_references_percent": {
+    "comparability_note": "Reference numbers are contextual only; the paired Local Direct baseline on these fixed project-held-out samples is primary.",
+    "flowsteer": {
+      "exact_match": 89.84,
+      "token_f1": 91.2
+    },
+    "qwen3.5_9b_direct": {
+      "exact_match": 60.94,
+      "token_f1": 75.7
+    },
+    "skillflow": {
+      "exact_match": 92.19,
+      "token_f1": 93.95
+    }
+  },
+  "policy_adapter": "theta_smoke_step_000001",
+  "policy_version": "qwen35-9b-training-ready-step0",
+  "project_split": "validation",
+  "sample_count": 32,
+  "schema_version": "flowsteer.hotpotqa.round_report.v1",
+  "training_performed": false,
+  "typical_wrong_demo_task_ids": [
+    "hotpotqa:5ae3deb35542992e3233c488",
+    "hotpotqa:5a772aae5542994aec3b7203",
+    "hotpotqa:5a7a39655542990198eaf0f4",
+    "hotpotqa:5a7936af55429907847277f3",
+    "hotpotqa:5a89d9b455429946c8d6e9e2",
+    "hotpotqa:5a823d4b55429903bc27ba4f",
+    "hotpotqa:5ab94a1e55429934fafe6e78",
+    "hotpotqa:5a77f88a5542995d8318133c",
+    "hotpotqa:5a8f964355429918e830d285"
+  ],
+  "wrong_demo_count": 9
+}

@@ -3,16 +3,16 @@
 ## 结论
 
 Round-01 Stable Zero 推理链已完成。Training-ready Step 0 的协议修正、版本
-配置、独立通信消融入口和 untouched confirmation 集也已完成静态冻结；新的
-128 条真实运行尚未在本报告阶段启动：
+配置、独立通信消融和 untouched confirmation 也已完成真实复验：
 
 `Question → local Qwen3.5-9B Director → Canvas/AgentGraph → AgentRuntime`
 `→ Agent communication → Output Agent → Hotpot evaluator → Trajectory`
 
-Round-01 的两条 canary 均显式 `finish`，均保存 Output Agent 实际收件箱、完整
-Director 回执和 Executor 回执；Direct 与 AgentGraph 的 EM/F1 在这两条上均为
-1.0。这只证明历史链路完整。Step-0 的最终结论必须以后续固定 128 条、独立
-communication diagnostic 与一次性 untouched-32 结果为准。
+固定 development-128 与一次性 untouched-32 共 160/160 条 AgentGraph 都显式
+`finish`，均保存 Output Agent 实际收件箱、完整 Director/Executor 回执和有效
+evaluator receipt；没有 collection failure 或 `max_rounds` 终止。因此 Stable Zero
+仍成立。任务表现、通信利用率和 GRPO 放行判断见
+`reports/hotpotqa_training_ready_step0/TRAINING_READY_STEP0_REPORT.md`。
 
 ## 1. 已完成
 
@@ -46,7 +46,15 @@ communication diagnostic 与一次性 untouched-32 结果为准。
 
 ## 2. 已验证模块
 
-- 全量 unit test：169 passed；本轮修改文件的 Ruff 检查通过。
+- 固定 development-128：128/128 完成全链，AgentGraph EM/F1 为
+  73.44/81.62；复用的同题 Direct 为 72.66/82.08。
+- 一次性 untouched-32：32/32 完成全链，AgentGraph EM/F1 为
+  71.88/83.62；同题 Direct 为 78.12/87.77。该集合在看到结果后没有被重跑或
+  用于调 prompt/search space。
+- 独立 communication diagnostic：16 个冻结多 Agent 图、32 个执行 arm 全部
+  完成；遮蔽 upstream 后 EM 不降、F1 反而增加 1.11 个百分点。它证明遮蔽入口和
+  记录边界工作，但没有提供下游行为依赖 upstream 的证据。
+- 全量 unit test：170 passed；本轮修改文件的 Ruff 检查通过。
 - 固定数据：128 条、128 个唯一 task ID，输入标记为 `full_passages_v1`。
 - SGLang base model `supervisor_theta` 可服务；既有
   `theta_smoke_step_000001` adapter 加载成功且 canary 通过。
@@ -56,9 +64,8 @@ communication diagnostic 与一次性 untouched-32 结果为准。
   OpenAI 边界的 `seed` 在部署的 SGLang 0.5.15 `/generate` 中对应
   `sampling_seed`。修复后只补采失败的 AgentGraph 条目，没有重调成功 Direct。
 
-运行证据保存在 `artifacts/hotpotqa_round_01/`；该目录包含 frozen tasks、
-preflight receipt、Direct records、AgentGraph trajectories、失败历史、paired rows
-和 SGLang log。
+Round-01 运行证据保存在 `artifacts/hotpotqa_round_01/`；新的复评、通信消融和
+untouched confirmation 证据保存在 `artifacts/hotpotqa_training_ready_step0/`。
 
 ## 3. 仅预留/本轮关闭
 
@@ -83,7 +90,7 @@ preflight receipt、Direct records、AgentGraph trajectories、失败历史、pa
 
 ## 5. Stable Zero
 
-**Round-01 历史 Stable Zero 已达到；Training-ready Step 0 尚待真实复验。**
-新的 runner 将更严格要求固定批次的每条任务都完成整条无训练推理链并保存可核对
-证据。最终是否达到 Training-ready Step 0、是否 `READY_FOR_GRPO`，只能由本轮
-复验后的 `TRAINING_READY_STEP0_REPORT.md` 判定。
+**Stable Zero 仍达到；当前尚不放行 GRPO。** 工程链、版本冻结与可观测性已经形成
+可复现的 `step_000000 / training_ready_step0` 基线，但通信遮蔽没有显示多 Agent
+结果依赖 upstream，且 untouched-32 的 AgentGraph 成对低于 Direct。最终阻塞项和
+判定以 `TRAINING_READY_STEP0_REPORT.md` 为准。
