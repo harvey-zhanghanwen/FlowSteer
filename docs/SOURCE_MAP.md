@@ -183,3 +183,19 @@ training result.
 The v2 fixed-task run is evaluation-only.  Its saved behavior is tied to the
 warm-start `theta_smoke_step_000001` adapter and cannot be labelled formal
 HotpotQA `policy_step_000000`.
+
+## HotpotQA Multi-Agent architecture-v3 compatibility fixes
+
+V3 changes no action, graph, role, routing, reward, or Skill method.  It fixes
+only execution-condition and receipt defects proven by v2:
+
+| Current module | Reference source | Reused boundary | Minimal compatibility fix |
+| --- | --- | --- | --- |
+| `director.py`, `train_agentgraph_smoke.py` | FlowSteer same-task rollout grouping and exact prompt receipts | Rollout sampling seed still varies exactly as before | Catalog presentation now receives a separate task/condition-stable seed.  Same-task/same-condition rollouts therefore see one catalog order while retaining different sampling seeds. |
+| `agent_workflow_env.py` | FlowSteer environment-side FINISH constraints | FINISH remains an environment hard gate, not a reward | Feedback and acceptance share one parser requiring exactly one opening tag, one closing tag, a full wrapper, and non-empty content.  Multiple, nested, and empty wrappers are rejected. |
+| `evaluate_hotpotqa_round.py` | Existing resumable Round-01 evaluation driver | Direct records are still copied without another provider call | Copied records receive a reuse receipt, and final manifest materialization preserves the source plus reused/newly-collected counts. |
+| `evaluation_hotpotqa_multiagent_v3_dev128.yaml` | Existing fixed 128-task Hotpot development view | Same task order, evaluator, full context, frozen catalog, policy, adapter, and Direct baseline | The config removes unused `max_context_tokens` and `live_adapter_name` claims; actual serving context and loaded adapter remain preflight receipts. |
+
+This remains a warm-start architecture-development evaluation.  GRPO,
+backward, optimizer work, policy publication, MACE, Bayesian updates, and
+Skills are disabled.

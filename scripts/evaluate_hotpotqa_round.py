@@ -387,7 +387,13 @@ async def _collect_direct(
                 f"declared Direct reuse source does not exist: {reuse_path}"
             )
         if reuse_path.resolve() != path.resolve():
-            direct_candidates.extend(_read_jsonl(reuse_path))
+            for value in _read_jsonl(reuse_path):
+                copied = dict(value)
+                copied["reuse_receipt"] = {
+                    "reused": True,
+                    "source": str(reuse_path),
+                }
+                direct_candidates.append(copied)
     by_task = {
         task_id: value
         for task_id, value in _by_task(direct_candidates).items()
@@ -405,6 +411,14 @@ async def _collect_direct(
     manifest["direct_progress"] = {
         "completed": len(by_task),
         "reused_from": None if reuse_path is None else str(reuse_path),
+        "reused_records": sum(
+            value.get("reuse_receipt", {}).get("reused") is True
+            for value in by_task.values()
+        ),
+        "newly_collected_records": sum(
+            value.get("reuse_receipt", {}).get("reused") is not True
+            for value in by_task.values()
+        ),
         "failed_attempts": sum(
             item.get("condition") == "direct_local_qwen35_9b" for item in failures
         ),
@@ -449,6 +463,15 @@ async def _collect_direct(
             _persist_ordered(path, selected, by_task)
         manifest["direct_progress"] = {
             "completed": len(by_task),
+            "reused_from": None if reuse_path is None else str(reuse_path),
+            "reused_records": sum(
+                value.get("reuse_receipt", {}).get("reused") is True
+                for value in by_task.values()
+            ),
+            "newly_collected_records": sum(
+                value.get("reuse_receipt", {}).get("reused") is not True
+                for value in by_task.values()
+            ),
             "failed_attempts": sum(
                 item.get("condition") == "direct_local_qwen35_9b" for item in failures
             ),
@@ -1073,9 +1096,11 @@ async def run_hotpot_round(
     _write_json(paths["report_json"], report)
     paths["report_markdown"].parent.mkdir(parents=True, exist_ok=True)
     paths["report_markdown"].write_text(_report_markdown(report), encoding="utf-8")
+    direct_progress = dict(manifest.get("direct_progress", {}))
+    direct_progress["completed"] = len(direct)
     manifest.update(
         status="completed",
-        direct_progress={"completed": len(direct)},
+        direct_progress=direct_progress,
         agentgraph_progress={"completed": len(trajectories)},
         metrics={
             "direct": report["direct_local_baseline"],

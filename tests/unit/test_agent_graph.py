@@ -371,6 +371,35 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("<answer>Paris</answer>", finished.final_answer)
         self.assertEqual(2, len(gateway.requests))
 
+    async def test_exact_answer_protocol_rejects_multiple_and_nested_wrappers(self) -> None:
+        for answer, tag_count in (
+            ("<answer>Paris</answer><answer>Lyon</answer>", 2),
+            ("<answer><answer>Paris</answer></answer>", 2),
+            ("<answer>   </answer>", 1),
+        ):
+            with self.subTest(answer=answer):
+                registry = make_registry()
+                gateway = _SequenceGateway([answer])
+                env = AgentWorkflowEnv(
+                    registry,
+                    gateway,
+                    problem="question",
+                    execute_on_edit=True,
+                    require_exact_answer_tag=True,
+                )
+                await env.step(
+                    '{"action":"add_agent","agent_id":"a","model_id":"balanced",'
+                    '"contract":"answer"}'
+                )
+                progressive = await env.step('{"action":"set_output","agent_id":"a"}')
+                self.assertIn(f'"answer_tag_count":{tag_count}', progressive.feedback)
+                if tag_count > 1:
+                    self.assertIn('"exact_single_answer_tag":false', progressive.feedback)
+
+                rejected = await env.step('{"action":"finish"}')
+                self.assertFalse(rejected.accepted)
+                self.assertFalse(env.finished)
+
     async def test_transactional_edits_finish_and_fork(self) -> None:
         registry = make_registry()
         gateway = _ImmediateGateway()

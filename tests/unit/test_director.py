@@ -153,6 +153,27 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Researcher", DIRECTOR_SYSTEM_PROMPT)
         self.assertNotIn("Critic", DIRECTOR_SYSTEM_PROMPT)
 
+    async def test_catalog_order_is_decoupled_from_rollout_sampling_seed(self) -> None:
+        model_registry = registry()
+        env = AgentWorkflowEnv(model_registry, gateway=FakeGateway(), problem="same task")
+        first = AgentGraphOrchestrator(
+            model_registry,
+            ScriptedDirector([]),
+            seed=101,
+            catalog_order_seed="condition:same-task",
+        )
+        second = AgentGraphOrchestrator(
+            model_registry,
+            ScriptedDirector([]),
+            seed=202,
+            catalog_order_seed="condition:same-task",
+        )
+
+        first_state = json.loads(first.build_prompt(env, 0, ()).split("\n\n", 1)[1])
+        second_state = json.loads(second.build_prompt(env, 0, ()).split("\n\n", 1)[1])
+        self.assertEqual(first_state["model_catalog"], second_state["model_catalog"])
+        self.assertNotEqual(first.seed, second.seed)
+
     async def test_round_limit_is_explicit_failure(self) -> None:
         model_registry = registry()
         client = ScriptedDirector(

@@ -603,6 +603,10 @@ class LiveSmokeBackend:
             self.director_client,
             max_rounds=int(director["max_rounds"]),
             seed=int(experiment["seed"]) + rollout_index,
+            catalog_order_seed=(
+                f"{experiment['seed']}:{experiment.get('condition_id', 'natural_smoke')}:"
+                f"{task.task_id}"
+            ),
             history_window=int(director["history_window"]),
         )
         environment = AgentWorkflowEnv(

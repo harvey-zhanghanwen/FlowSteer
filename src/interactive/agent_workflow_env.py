@@ -35,6 +35,17 @@ class AgentWorkflowStateError(RuntimeError):
     """Raised for invalid environment construction or restoration."""
 
 
+def _answer_protocol_state(answer: str) -> tuple[int, bool, bool]:
+    """Return tag count, exact-single-wrapper state, and non-empty state."""
+
+    opening_count = answer.count("<answer>")
+    closing_count = answer.count("</answer>")
+    match = re.fullmatch(r"\s*<answer>(.*?)</answer>\s*", answer, flags=re.DOTALL)
+    exact_single = opening_count == 1 and closing_count == 1 and match is not None
+    non_empty = exact_single and bool(match.group(1).strip())
+    return opening_count, exact_single, non_empty
+
+
 @dataclass(frozen=True, slots=True)
 class AgentWorkflowHistoryEntry:
     """Canonical adaptation of FlowSteer's per-step Canvas history entry."""
@@ -369,10 +380,7 @@ class AgentWorkflowEnv:
         # result to the policy after an edit.  Keep this receipt deliberately
         # compact: it is state feedback, not a task-specific Director template.
         answer = execution.final_answer
-        tag_count = len(re.findall(r"<answer>.*?</answer>", answer, flags=re.DOTALL))
-        exact_single_tag = bool(
-            re.fullmatch(r"\s*<answer>.*?</answer>\s*", answer, flags=re.DOTALL)
-        )
+        tag_count, exact_single_tag, _ = _answer_protocol_state(answer)
         if len(answer) > 400:
             answer = answer[:397] + "..."
         output_calls = [
@@ -446,16 +454,12 @@ class AgentWorkflowEnv:
 
         if not self.require_exact_answer_tag:
             return None
-        matches = re.findall(r"<answer>(.*?)</answer>", answer, flags=re.DOTALL)
-        exact_wrapper = bool(
-            re.fullmatch(r"\s*<answer>.*?</answer>\s*", answer, flags=re.DOTALL)
-        )
-        non_empty = len(matches) == 1 and bool(matches[0].strip())
-        if len(matches) == 1 and exact_wrapper and non_empty:
+        tag_count, exact_wrapper, non_empty = _answer_protocol_state(answer)
+        if exact_wrapper and non_empty:
             return None
         return (
             "terminal answer must be exactly one non-empty "
-            f"<answer>...</answer> wrapper; answer_tag_count={len(matches)}, "
+            f"<answer>...</answer> wrapper; answer_tag_count={tag_count}, "
             f"exact_single_answer_tag={exact_wrapper}, non_empty={non_empty}"
         )
 

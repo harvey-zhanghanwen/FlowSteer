@@ -213,6 +213,7 @@ class AgentGraphOrchestrator:
         *,
         max_rounds: int = 20,
         seed: int = 42,
+        catalog_order_seed: int | str | None = None,
         history_window: int = 4,
     ) -> None:
         if max_rounds < 1:
@@ -223,6 +224,9 @@ class AgentGraphOrchestrator:
         self.client = client
         self.max_rounds = max_rounds
         self.seed = seed
+        # Sampling varies across rollouts, while a same-task/same-condition
+        # group must see the same catalog presentation in its exact prompt.
+        self.catalog_order_seed = seed if catalog_order_seed is None else catalog_order_seed
         self.history_window = history_window
 
     def build_prompt(
@@ -231,12 +235,12 @@ class AgentGraphOrchestrator:
         turn_index: int,
         skills: Sequence[Mapping[str, Any]],
     ) -> str:
-        # Present the frozen set in a deterministic per-trajectory order.  The
+        # Present the frozen set in a deterministic per-condition order.  The
         # previous sorted order made the alphabetically first family the de
         # facto default after the preferred-model hint was removed.  This does
         # not select a model; every action still names the Director's choice.
         catalog_model_ids = list(self.registry.model_ids)
-        random.Random(self.seed).shuffle(catalog_model_ids)
+        random.Random(self.catalog_order_seed).shuffle(catalog_model_ids)
         catalog = [
             {
                 "model_id": model_id,

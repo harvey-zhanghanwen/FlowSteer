@@ -85,9 +85,15 @@ def test_declared_direct_reuse_is_copied_without_gateway_call(tmp_path):
     )
 
     assert result[task.task_id]["execution"]["execution_id"] == "existing"
+    assert result[task.task_id]["reuse_receipt"] == {
+        "reused": True,
+        "source": str(source),
+    }
     assert len(destination.read_text(encoding="utf-8").splitlines()) == 1
     assert manifest["direct_progress"]["completed"] == 1
     assert manifest["direct_progress"]["reused_from"] == str(source)
+    assert manifest["direct_progress"]["reused_records"] == 1
+    assert manifest["direct_progress"]["newly_collected_records"] == 0
 
 
 def test_strict_aggregate_keeps_failed_task_in_denominator():
