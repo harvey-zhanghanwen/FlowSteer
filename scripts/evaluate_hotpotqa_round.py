@@ -16,6 +16,7 @@ from collections import Counter
 from dataclasses import asdict
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -916,6 +917,11 @@ async def run_hotpot_round(
     paths = _paths(config, root)
     selected = _select_tasks(config, root, paths["selected"])
     failures = _read_jsonl(paths["failures"])
+    gpu = _mapping(config["gpu"], "gpu")
+    configured_rollout_gpu = int(gpu["rollout_physical"])
+    effective_rollout_gpu = int(
+        os.environ.get("FLOWSTEER_ROLLOUT_GPU", configured_rollout_gpu)
+    )
     manifest: dict[str, Any] = {
         "schema_version": "flowsteer.hotpotqa.round_manifest.v1",
         "status": "prepared" if prepare_only else "runtime_preflight",
@@ -928,6 +934,18 @@ async def run_hotpot_round(
         "input_context": "full_10_passages",
         "training_enabled": False,
         "optimizer_updates": 0,
+        "runtime_resource": {
+            "configured_rollout_physical": configured_rollout_gpu,
+            "effective_rollout_physical": effective_rollout_gpu,
+            "resource_adaptation": effective_rollout_gpu != configured_rollout_gpu,
+            "supervisor_port": int(os.environ.get("FLOWSTEER_SUPERVISOR_PORT", "8015")),
+            "context_length": int(
+                os.environ.get("FLOWSTEER_SUPERVISOR_CONTEXT_LENGTH", "32768")
+            ),
+            "mem_fraction_static": float(
+                os.environ.get("FLOWSTEER_SUPERVISOR_MEM_FRACTION", "0.82")
+            ),
+        },
         "artifacts": {name: str(path) for name, path in paths.items()},
     }
     _write_json(paths["manifest"], manifest)

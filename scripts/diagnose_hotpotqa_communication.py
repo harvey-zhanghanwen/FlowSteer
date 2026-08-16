@@ -14,6 +14,7 @@ import argparse
 import asyncio
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
 import sys
 from typing import Any, Mapping, Optional, Sequence
@@ -338,6 +339,18 @@ async def run_diagnostic(
         "direct_baseline_calls": 0,
         "training_enabled": False,
         "optimizer_updates": 0,
+        "runtime_resource": {
+            "configured_rollout_physical": int(base["gpu"]["rollout_physical"]),
+            "effective_rollout_physical": int(
+                os.environ.get(
+                    "FLOWSTEER_ROLLOUT_GPU",
+                    str(base["gpu"]["rollout_physical"]),
+                )
+            ),
+            "supervisor_port": int(
+                os.environ.get("FLOWSTEER_SUPERVISOR_PORT", "8015")
+            ),
+        },
     }
     _write_json(manifest_path, manifest)
     backend = LiveSmokeBackend.from_config(base, project_root, evaluation_only=True)
