@@ -846,6 +846,21 @@ def _report(rows: Sequence[Mapping[str, Any]], config: Mapping[str, Any]) -> Map
     graph = _aggregate(rows, "agentgraph")
     failure_counts = Counter(str(row["failure_type"]) for row in rows)
     wrong = [row for row in rows if float(row["agentgraph"]["exact_match"]) < 1.0]
+    explicit_finished = sum(
+        row["agentgraph"].get("explicit_finish") is True for row in rows
+    )
+    terminal_failures = sum(
+        row["agentgraph"].get("available") is True
+        and row["agentgraph"].get("termination_reason") == "max_rounds"
+        for row in rows
+    )
+    operational_failures = sum(
+        row["direct"].get("available") is not True
+        or row["direct"].get("valid") is not True
+        or row["agentgraph"].get("available") is not True
+        or row["agentgraph"].get("valid") is not True
+        for row in rows
+    )
     return {
         "schema_version": "flowsteer.hotpotqa.round_report.v1",
         "dataset": "HotpotQA",
@@ -871,6 +886,9 @@ def _report(rows: Sequence[Mapping[str, Any]], config: Mapping[str, Any]) -> Map
         },
         "failure_types": dict(sorted(failure_counts.items())),
         "wrong_demo_count": len(wrong),
+        "explicit_finished_count": explicit_finished,
+        "terminal_failure_count": terminal_failures,
+        "operational_failure_count": operational_failures,
         "typical_wrong_demo_task_ids": [row["task_id"] for row in wrong[:10]],
         "policy_version": config["director"]["behavior_policy_version"],
         "policy_adapter": config["director"]["behavior_adapter_name"],
@@ -894,6 +912,8 @@ def _report_markdown(report: Mapping[str, Any]) -> str:
     return f"""# HotpotQA Architecture Validation — {report['evaluation_name']}
 
 Fixed project-held-out samples: **{report['sample_count']}**. The model input uses all ten supplied passages. No training, backward pass, optimizer step, policy update, MACE, Bayesian, or Skill loop ran.
+
+AgentGraph explicit FINISH: **{report['explicit_finished_count']}/{report['sample_count']}**; natural max-round terminal failures: **{report['terminal_failure_count']}**; operational/evaluator failures: **{report['operational_failure_count']}**.
 
 | Condition | Completed | Valid | Strict EM | Strict F1 |
 |---|---:|---:|---:|---:|
@@ -1078,10 +1098,10 @@ async def run_hotpot_round(
     _atomic_jsonl(paths["wrong"], wrong)
     stable_zero = _stable_zero_check(active, direct, trajectories)
     manifest["stable_zero"] = stable_zero
-    if not stable_zero["passed"]:
+    if canary_only and not stable_zero["passed"]:
         manifest.update(status="failed_stable_zero", completed_at=_utc_now())
         _write_json(paths["manifest"], manifest)
-        raise HotpotRoundError("no canary task completed the full Stable Zero chain")
+        raise HotpotRoundError("one or more canary tasks failed the Stable Zero chain")
 
     if canary_only:
         manifest.update(
@@ -1098,8 +1118,14 @@ async def run_hotpot_round(
     paths["report_markdown"].write_text(_report_markdown(report), encoding="utf-8")
     direct_progress = dict(manifest.get("direct_progress", {}))
     direct_progress["completed"] = len(direct)
+    if report["operational_failure_count"]:
+        final_status = "completed_with_operational_failures"
+    elif report["terminal_failure_count"]:
+        final_status = "completed_with_terminal_failures"
+    else:
+        final_status = "completed"
     manifest.update(
-        status="completed",
+        status=final_status,
         direct_progress=direct_progress,
         agentgraph_progress={"completed": len(trajectories)},
         metrics={

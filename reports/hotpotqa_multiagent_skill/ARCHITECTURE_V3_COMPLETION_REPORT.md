@@ -30,18 +30,35 @@ evidence-driven compatibility repairs:
 - targeted Director, Canvas, Direct-reuse, Hotpot runner, and trajectory tests:
   39 passed;
 - complete unit/regression suite excluding the unrelated optional pandas-only
-  dataset-preparation module: 175 passed;
+  dataset-preparation module: 176 passed after the final reporting fix;
 - Ruff on the changed runtime, runner, and tests: passed;
 - v2 already demonstrated the complete live chain on 14/14 tasks.  The v3
-  changes are protocol/receipt repairs and will next be checked by canary then
-  resumed across the fixed 128-task architecture-development view.
+  changes are protocol/receipt repairs.  Canary completed 2/2, then the same
+  output directory resumed across all 128 fixed development tasks without
+  repeating the successful canary calls.
+
+## Live development result
+
+- Direct: 93/128, 72.66 EM, 82.08 F1;
+- AgentGraph: 87/128, 67.97 EM, 80.23 F1;
+- paired delta: -4.69 EM and -1.85 F1 percentage points;
+- 127/128 explicit FINISH, one natural `max_rounds` failure retained as zero;
+- 128/128 evaluator receipts valid; 0 collection failures;
+- 128/128 Direct records reused from Round-01; 0 new Direct calls.
+
+The live interfaces are complete, but v3 does not meet the architecture
+performance baseline and does not validate broad multi-Agent collaboration.
+The detailed evidence is in `ARCHITECTURE_V3_DEV128_ANALYSIS.md`.
 
 ## Status boundary
 
 ```text
 ARCHITECTURE_INTERFACES_COMPLETE = YES
 V3_STATIC_AND_UNIT_VERIFICATION = YES
-V3_LIVE_DEV128_COMPLETE = NO
+V3_LIVE_DEV128_RECORDED = YES
+V3_ALL_TASKS_EXPLICIT_FINISH = NO
+V3_OUTPERFORMS_LOCAL_DIRECT = NO
+MULTI_AGENT_COLLABORATION_VALIDATED = NO
 FORMAL_POLICY_STEP_000000 = NO
 TRAINING_PERFORMED = NO
 SKILL_PIPELINE_ACTIVE = NO

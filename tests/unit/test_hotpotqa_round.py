@@ -124,3 +124,43 @@ def test_strict_aggregate_keeps_failed_task_in_denominator():
     assert result["strict_exact_match"] == 0.5
     assert result["strict_token_f1"] == 0.4
     assert result["completed_only_exact_match"] == 1.0
+
+
+def test_report_counts_terminal_failure_without_dropping_evaluator_result():
+    rows = [
+        {
+            "task_id": "hotpotqa:one",
+            "direct": {
+                "available": True,
+                "valid": True,
+                "exact_match": 1.0,
+                "token_f1": 1.0,
+            },
+            "agentgraph": {
+                "available": True,
+                "valid": True,
+                "exact_match": 0.0,
+                "token_f1": 0.0,
+                "explicit_finish": False,
+                "termination_reason": "max_rounds",
+            },
+            "failure_type": "architecture_regression_candidate",
+        }
+    ]
+    config = {
+        "experiment": {"name": "terminal-failure"},
+        "director": {
+            "behavior_policy_version": "policy",
+            "behavior_adapter_name": "adapter",
+        },
+        "agent_graph": {"model_catalog_path": "catalog.yaml"},
+    }
+
+    report = _MODULE._report(rows, config)
+
+    assert report["terminal_failure_count"] == 1
+    assert report["explicit_finished_count"] == 0
+    assert report["operational_failure_count"] == 0
+    assert report["agentgraph"]["completed"] == 1
+    assert report["agentgraph"]["evaluator_valid"] == 1
+    assert report["agentgraph"]["strict_exact_match"] == 0.0
