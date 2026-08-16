@@ -264,3 +264,25 @@ layer described above and are not activated here.  Real Step-0 materialization,
 live SGLang activation, frozen experiment-schedule publication, rollout,
 GRPO/backward, optimizer update, and Step-1+ policy publication remain
 unexecuted until a later explicitly authorized training phase.
+
+## HotpotQA architecture-v6 deep/multi-model/Skill phase
+
+This later phase is explicitly authorized by the user's deep HotpotQA task.
+It retains FlowSteer's atomic Canvas and SkillFlow's Qwen3.5/SGLang/checkpoint
+transactions. It adds no graph-shape reward, macro workflow action, fixed
+role set, topology quota, or model-family routing rule.
+
+| Current module | Classification | Reference source | Reused boundary | Incompatibility and minimal adaptation |
+| --- | --- | --- | --- | --- |
+| `model_catalog_hotpotqa_deep_v6.yaml`, `test_model_catalog_v6.py` | Necessary configuration adaptation | Existing `ModelRegistry`, `AgentGraphOrchestrator.build_prompt`, `scripts/discover_models.py`, and `OpenAICompatibleGateway` | Exact provider IDs, the same Output contract, bounded routing metadata, equal priors, and one canary receipt per newly proposed model | The provider list changes over time and neither upstream ships this account's catalog. Ten receipt-backed arms are versioned with neutral provider/capability facts; no router, role recipe, model reward, or Director replacement is added. |
+| `AgentGraph.topology_statistics`, `construction_progress`, `effective_dependency_statistics`, `graph_diagnostics.py` | FlowSteer-derived diagnostic adaptation | FlowSteer `WorkflowGraph.get_statistics`, progressive `WorkflowEnv.step` feedback, and the existing reciprocal-component validator | Read-only structural statistics and one-edit-at-a-time Canvas state | FlowSteer's fixed Operator graph cannot express arbitrary model-labelled relations. The adapter contracts finite reciprocal pairs, reports neutral remaining atomic-edit cost, and grades dependency evidence as unverified/weak/verified. Runtime delivery is at most weak; verified requires an explicit independent paired intervention. |
+| `director.py` architecture-v6 text/state | Necessary minimal adaptation | FlowSteer's one-action Director loop and current AgentGraph legal actions | Short neutral system prompt, current state, feedback, and model boundary | Historical v3/v4 evidence showed policy stopping after the first complete singleton, not a max-round limit. One sentence names optional abstract relation shapes and one state object reports construction progress; there is no Hotpot workflow, role enum, minimum Agent count, or complexity preference. |
+| `skills/pipeline.py`, `skills/validator.py` | Project algorithm integration required by the user MD | SkillFlow `evidence/schema.py`, `evidence/store.py`, `runtime/skill_library.py`, and `evolution/retriever.py`; existing `TrajectoryRecord`, `ProbeRecord`, `EvidenceStore`, lifecycle/store/retriever | Split evidence, immutable ACTIVE library, task-conditioned retrieval, and append-only evidence receipts | SkillFlow does not implement this project's paired AgentGraph effect gate. The thin orchestration layer enforces discovery/validation problem isolation, forced-probe GRPO exclusion, runtime/executor/version binding, delayed activation, and deterministic rejectable prompt-prior rendering. It does not mutate Canvas. |
+| `train_agentgraph_smoke.py` Hotpot micro scope | Necessary runner adaptation | Existing one-pass FlowSteer rollout/trajectory path; SkillFlow frozen schedule/cursor, exact optimizer continuation, publish, and canary sequence | Same collector, terminal evaluator reward, action-masked one-pass learner, one optimizer update, atomic adapter sync, and post-update canary | The legacy runner selected seven datasets by source. Formal Hotpot mode resolves exactly one predeclared schedule step and its frozen rollout ordinals, then commits a new write-once cursor only after update, sync, and canary. The legacy 7x2 path remains unchanged. |
+| `evaluate_hotpotqa_round.py` v6 receipts | Necessary evaluation/reporting adaptation | Existing fixed held-out runner and `graph_diagnostics.py` | Strict EM/F1, saved full trajectory, resumability, and fixed Direct comparator | The Director condition may use a new sampling seed while the Local Direct comparator must retain its original seed. `direct_generation_seed` freezes that comparator independently, and the manifest takes its declared server context from the Director config. Graph diagnostics are added without changing evaluator reward. |
+
+Formal Step 0 has now been materialized at policy
+`qwen35-9b-hotpot-step-000000` / adapter `theta_hotpot_step_000000` with the
+fixed seed and zero optimizer updates. Its SGLang activation and two-task
+Stable Zero chain are recorded as runtime receipts; this does not imply that
+deep behavior, Skill gain, or any Step-1 optimizer update has occurred yet.

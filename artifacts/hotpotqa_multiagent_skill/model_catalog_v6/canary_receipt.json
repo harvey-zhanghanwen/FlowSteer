@@ -1,0 +1,45 @@
+{
+  "canaries": [
+    {
+      "attempt_count": 1,
+      "compatible": true,
+      "completed_at": "2026-08-16T07:51:55.762242+00:00",
+      "completion_tokens": 264,
+      "expected": "<answer>Paris</answer>",
+      "finish_reason": "stop",
+      "latency_ms": 28493.270403705537,
+      "model_id": "glm-4.5-flash",
+      "prompt_tokens": 193,
+      "provider": "vectorengine",
+      "provider_model": "glm-4.5-flash",
+      "request_id": "chatcmpl-89DHC97MsxC9bRQdCR2t54itDEvdG",
+      "response": "<answer>Paris</answer>",
+      "started_at": "2026-08-16T07:51:27.268913+00:00",
+      "status": "passed",
+      "total_tokens": 457
+    },
+    {
+      "attempt_count": 1,
+      "compatible": true,
+      "completed_at": "2026-08-16T07:51:32.888691+00:00",
+      "completion_tokens": 6,
+      "expected": "<answer>Paris</answer>",
+      "finish_reason": "stop",
+      "latency_ms": 5618.967772461474,
+      "model_id": "kimi-k2",
+      "prompt_tokens": 252,
+      "provider": "vectorengine",
+      "provider_model": "kimi-k2",
+      "request_id": "chatcmpl-3vh4skncd4q",
+      "response": "<answer>Paris</answer>",
+      "started_at": "2026-08-16T07:51:27.269680+00:00",
+      "status": "passed",
+      "total_tokens": 258
+    }
+  ],
+  "completed_at": "2026-08-16T07:51:55.780636+00:00",
+  "endpoint": "https://api.vectorengine.ai/v1/chat/completions",
+  "expected": "<answer>Paris</answer>",
+  "prompt": "Context: Ada's destination country is France. The capital of France is Paris.\nQuestion: Which city is the capital of Ada's destination country?",
+  "schema_version": "flowsteer.model_catalog.canary_receipt.v1"
+}

@@ -11,6 +11,10 @@ from unittest.mock import patch
 import yaml
 
 from src.interactive.persistence import stable_id
+from src.interactive.hotpot_training_schedule import (
+    HotpotTrainingCursorState,
+    freeze_hotpot_training_schedule,
+)
 from src.interactive.records import (
     EvaluationReceipt,
     TaskRecord,
@@ -234,6 +238,72 @@ def create_project(tmp_path: Path) -> tuple[Path, Path]:
     return root, config_path
 
 
+def create_hotpot_micro_project(tmp_path: Path) -> tuple[Path, Path, Path]:
+    root, config_path = create_project(tmp_path)
+    validation_path = root / "data" / "validation.jsonl"
+    test_path = root / "data" / "test.jsonl"
+    for path, split, index in (
+        (validation_path, "validation", 100),
+        (test_path, "test", 101),
+    ):
+        task = TaskRecord(
+            task_id=f"hotpotqa:{split}-{index}",
+            question="Held-out question?",
+            ground_truth="answer",
+            split=split,
+            metadata={"dataset_key": "hotpotqa", "source": "HotpotQA"},
+        )
+        path.write_text(json.dumps(aligned_row(task)) + "\n", encoding="utf-8")
+
+    schedule = freeze_hotpot_training_schedule(
+        train_path=root / "data" / "train.jsonl",
+        validation_path=validation_path,
+        test_path=test_path,
+        task_positions=(0,),
+        rollouts_per_task=2,
+    )
+    schedule_path = root / "artifacts" / "schedule.json"
+    cursor_path = root / "artifacts" / "cursor0.json"
+    schedule_path.parent.mkdir(parents=True, exist_ok=True)
+    schedule.write_once(schedule_path)
+    HotpotTrainingCursorState.fresh(schedule).write_once(cursor_path)
+
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["experiment"].update(
+        phase="hotpotqa_micro_training",
+        update_step=1,
+        output_dir="artifacts/hotpot_step1/training",
+    )
+    config["data"].update(
+        validation_path="data/validation.jsonl",
+        test_path="data/test.jsonl",
+        hotpot_micro={
+            "split": "train",
+            "dataset_key": "hotpotqa",
+            "selection": "frozen_hotpot_schedule",
+            "expected_total_tasks": 1,
+            "schedule_path": "artifacts/schedule.json",
+            "cursor_path": "artifacts/cursor0.json",
+            "next_cursor_path": "artifacts/cursor1.json",
+        },
+    )
+    config["evaluation"]["healthbench_judge_model"] = ""
+    config["grpo"].update(samples_per_problem=2, expected_rollout_count=2)
+    for field in (
+        "root",
+        "selected_tasks_path",
+        "trajectories_path",
+        "grpo_groups_path",
+        "manifest_path",
+        "sync_receipt_path",
+        "post_update_trajectories_path",
+    ):
+        leaf = Path(str(config["storage"][field])).name
+        config["storage"][field] = f"artifacts/hotpot_step1/{leaf}"
+    config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+    return root, config_path, root / "artifacts" / "cursor1.json"
+
+
 def read_jsonl(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
@@ -260,6 +330,17 @@ class SelectionTests(unittest.TestCase):
         config["evaluation"]["healthbench_judge_model"] = ""
         with self.assertRaisesRegex(Exception, "healthbench_judge_model"):
             validate_smoke_bounds(config)
+
+    def test_hotpot_micro_bounds_require_zero_shaping_rewards(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            _, config_path, _ = create_hotpot_micro_project(Path(directory))
+            config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            validate_smoke_bounds(config)
+            config["grpo"]["structural_reward"] = 0.1
+            with self.assertRaisesRegex(Exception, "structural_reward"):
+                validate_smoke_bounds(config)
 
     def test_source_order_and_unique_base_task_are_enforced(self) -> None:
         tasks = [
@@ -337,6 +418,30 @@ class SmokeRunnerTests(unittest.IsolatedAsyncioTestCase):
         groups = read_jsonl(root / "artifacts/smoke/data/grpo_groups.jsonl")
         self.assertEqual(14, len(groups))
         self.assertTrue(all(row["informative"] for row in groups))
+
+    async def test_hotpot_micro_executes_only_current_frozen_step_and_commits_cursor(
+        self,
+    ) -> None:
+        root, config_path, next_cursor_path = create_hotpot_micro_project(
+            Path(self._temp_dir.name)
+        )
+        backend = FakeBackend()
+        manifest = await run_smoke(
+            config_path,
+            backend=backend,
+            project_root=root,
+        )
+        self.assertEqual("completed", manifest["status"])
+        self.assertEqual(1, manifest["bounds"]["selected_tasks"])
+        self.assertEqual(2, manifest["bounds"]["expected_initial_rollouts"])
+        self.assertEqual(["collect:0", "collect:1"], backend.events[:2])
+        self.assertEqual(2, len(backend.train_inputs))
+        committed = HotpotTrainingCursorState.read(next_cursor_path)
+        self.assertEqual(1, committed.cursor)
+        self.assertEqual(
+            committed.to_value(),
+            manifest["selection_receipt"]["cursor_after"],
+        )
 
     async def test_zero_update_is_a_failed_run_and_never_publishes(self) -> None:
         root, config_path = create_project(Path(self._temp_dir.name))

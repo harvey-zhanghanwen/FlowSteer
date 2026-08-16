@@ -1,0 +1,129 @@
+{
+  "catalog_order_seed": "hotpotqa-architecture-v6",
+  "catalog_path": "config/model_catalog_hotpotqa_deep_v6.yaml",
+  "model_catalog": [
+    {
+      "cheap_weight": 1.0,
+      "fast_weight": 1.0,
+      "model_id": "glm-4.5-flash",
+      "routing_metadata": {
+        "canary_source": "hotpotqa_multiagent_skill/model_catalog_v6/evidence_manifest.json",
+        "family": "glm",
+        "profile": "text_qa;provider=vectorengine;locality=remote;reasoning=provider-tagged-thinking;latency=canary-28.49s;context=provider-default;instruction=chat;concise=exact-tag;availability=current-list-and-canary",
+        "text_qa_canary": "passed_2026-08-16"
+      },
+      "selection_weight": 1.0
+    },
+    {
+      "cheap_weight": 1.0,
+      "fast_weight": 1.0,
+      "model_id": "deepseek-v4-flash",
+      "routing_metadata": {
+        "canary_source": "hotpotqa_multiagent_skill/model_catalog_v6/evidence_manifest.json",
+        "family": "deepseek",
+        "profile": "text_qa;provider=vectorengine;locality=remote;reasoning=general;latency=canary-10.62s;context=provider-declared-1m;instruction=chat;concise=exact-tag;availability=current-list-and-canary",
+        "text_qa_canary": "passed_2026-08-16"
+      },
+      "selection_weight": 1.0
+    },
+    {
+      "cheap_weight": 1.0,
+      "fast_weight": 1.0,
+      "model_id": "qwen3.5-plus",
+      "routing_metadata": {
+        "canary_source": "hotpotqa_multiagent_skill/model_catalog_v6/evidence_manifest.json",
+        "family": "qwen",
+        "profile": "text_qa;provider=vectorengine;locality=remote;reasoning=provider-tagged-thinking;latency=canary-8.28s;context=provider-default;instruction=chat;concise=exact-tag;availability=current-list-and-canary",
+        "text_qa_canary": "passed_2026-08-16"
+      },
+      "selection_weight": 1.0
+    },
+    {
+      "cheap_weight": 1.0,
+      "fast_weight": 1.0,
+      "model_id": "qwen3.5-flash",
+      "routing_metadata": {
+        "canary_source": "hotpotqa_multiagent_skill/model_catalog_v6/evidence_manifest.json",
+        "family": "qwen",
+        "profile": "text_qa;provider=vectorengine;locality=remote;reasoning=provider-tagged-thinking;latency=historical-run-observed;context=provider-default;instruction=chat;concise=exact-tag;availability=current-list-and-existing-execution-evidence",
+        "text_qa_canary": "passed_existing_execution_2026-08-16"
+      },
+      "selection_weight": 1.0
+    },
+    {
+      "cheap_weight": 1.0,
+      "fast_weight": 1.0,
+      "model_id": "MiniMax-M3",
+      "routing_metadata": {
+        "canary_source": "hotpotqa_multiagent_skill/model_catalog_v6/evidence_manifest.json",
+        "family": "minimax",
+        "profile": "text_qa;provider=vectorengine;locality=remote;reasoning=provider-described-agent;latency=canary-19.37s;context=provider-declared-long;instruction=chat;concise=exact-tag;availability=current-list-and-canary",
+        "text_qa_canary": "passed_2026-08-16"
+      },
+      "selection_weight": 1.0
+    },
+    {
+      "cheap_weight": 1.0,
+      "fast_weight": 1.0,
+      "model_id": "gpt-4o-mini",
+      "routing_metadata": {
+        "canary_source": "hotpotqa_multiagent_skill/model_catalog_v6/evidence_manifest.json",
+        "family": "gpt",
+        "profile": "text_qa;provider=vectorengine;locality=remote;reasoning=general;latency=historical-run-observed;context=provider-default;instruction=chat;concise=exact-tag;availability=current-list-and-existing-execution-evidence",
+        "text_qa_canary": "passed_existing_execution_2026-08-16"
+      },
+      "selection_weight": 1.0
+    },
+    {
+      "cheap_weight": 1.0,
+      "fast_weight": 1.0,
+      "model_id": "kimi-k2",
+      "routing_metadata": {
+        "canary_source": "hotpotqa_multiagent_skill/model_catalog_v6/evidence_manifest.json",
+        "family": "kimi",
+        "profile": "text_qa;provider=vectorengine;locality=remote;reasoning=provider-described-reasoning;latency=canary-5.62s;context=provider-default;instruction=chat;concise=exact-tag;availability=current-list-and-canary",
+        "text_qa_canary": "passed_2026-08-16"
+      },
+      "selection_weight": 1.0
+    },
+    {
+      "cheap_weight": 1.0,
+      "fast_weight": 1.0,
+      "model_id": "MiniMax-M2.5",
+      "routing_metadata": {
+        "canary_source": "hotpotqa_multiagent_skill/model_catalog_v6/evidence_manifest.json",
+        "family": "minimax",
+        "profile": "text_qa;provider=vectorengine;locality=remote;reasoning=general;latency=historical-run-observed;context=provider-default;instruction=chat;concise=exact-tag;availability=current-list-and-existing-execution-evidence",
+        "text_qa_canary": "passed_existing_execution_2026-08-16"
+      },
+      "selection_weight": 1.0
+    },
+    {
+      "cheap_weight": 1.0,
+      "fast_weight": 1.0,
+      "model_id": "qwen3.5-9b-local",
+      "routing_metadata": {
+        "canary_source": "hotpotqa_multiagent_skill/model_catalog_v6/evidence_manifest.json",
+        "family": "qwen",
+        "profile": "text_qa;provider=local-director;locality=local;reasoning=general;latency=historical-run-observed;context=8192;instruction=chat;concise=exact-tag;availability=existing-execution-evidence",
+        "text_qa_canary": "passed_existing_execution_2026-08-16"
+      },
+      "selection_weight": 1.0
+    },
+    {
+      "cheap_weight": 1.0,
+      "fast_weight": 1.0,
+      "model_id": "deepseek-v4-pro",
+      "routing_metadata": {
+        "canary_source": "hotpotqa_multiagent_skill/model_catalog_v6/evidence_manifest.json",
+        "family": "deepseek",
+        "profile": "text_qa;provider=vectorengine;locality=remote;reasoning=provider-tagged-thinking;latency=canary-14.37s;context=provider-declared-long;instruction=chat;concise=exact-tag;availability=current-list-and-canary",
+        "text_qa_canary": "passed_2026-08-16"
+      },
+      "selection_weight": 1.0
+    }
+  ],
+  "renderer": "src.interactive.director.AgentGraphOrchestrator.build_prompt",
+  "schema_version": "flowsteer.director_visible_model_catalog_receipt.v1",
+  "task": "A neutral prompt-rendering test."
+}

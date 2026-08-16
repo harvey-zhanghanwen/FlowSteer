@@ -1,0 +1,148 @@
+providers:
+  - provider_id: "local-director"
+    kind: "openai-compatible"
+    endpoint: "http://127.0.0.1:8015/v1"
+    max_concurrency: 32
+
+  - provider_id: "vectorengine"
+    kind: "openai-compatible"
+    endpoint: "${VECTOR_ENGINE_BASE_URL:-https://api.vectorengine.ai/v1}"
+    max_concurrency: 64
+    api_key_env: "VECTOR_ENGINE_API_KEY"
+
+# Architecture-v6 keeps equal numeric priors. The Director receives the exact
+# model arm plus neutral, receipt-backed capability facts; there is no
+# role-to-model recipe or family bonus. Remote model_id/model_name values match
+# the case-sensitive IDs returned by the 2026-08-16 v6 /v1/models receipt.
+models:
+  - model_id: "qwen3.5-9b-local"
+    provider_id: "local-director"
+    model_name: "supervisor_theta"
+    selection_weight: 1.0
+    cheap_weight: 1.0
+    fast_weight: 1.0
+    context_window: 8192
+    metadata:
+      family: "qwen"
+      profile: "text_qa;provider=local-director;locality=local;reasoning=general;latency=historical-run-observed;context=8192;instruction=chat;concise=exact-tag;availability=existing-execution-evidence"
+      text_qa_canary: "passed_existing_execution_2026-08-16"
+      canary_source: "hotpotqa_multiagent_skill/model_catalog_v6/evidence_manifest.json"
+      chat_template_enable_thinking: "false"
+      max_tokens: "4096"
+
+  - model_id: "qwen3.5-flash"
+    provider_id: "vectorengine"
+    model_name: "qwen3.5-flash"
+    selection_weight: 1.0
+    cheap_weight: 1.0
+    fast_weight: 1.0
+    metadata:
+      family: "qwen"
+      profile: "text_qa;provider=vectorengine;locality=remote;reasoning=provider-tagged-thinking;latency=historical-run-observed;context=provider-default;instruction=chat;concise=exact-tag;availability=current-list-and-existing-execution-evidence"
+      text_qa_canary: "passed_existing_execution_2026-08-16"
+      canary_source: "hotpotqa_multiagent_skill/model_catalog_v6/evidence_manifest.json"
+      max_tokens: "4096"
+
+  - model_id: "qwen3.5-plus"
+    provider_id: "vectorengine"
+    model_name: "qwen3.5-plus"
+    selection_weight: 1.0
+    cheap_weight: 1.0
+    fast_weight: 1.0
+    metadata:
+      family: "qwen"
+      profile: "text_qa;provider=vectorengine;locality=remote;reasoning=provider-tagged-thinking;latency=canary-8.28s;context=provider-default;instruction=chat;concise=exact-tag;availability=current-list-and-canary"
+      text_qa_canary: "passed_2026-08-16"
+      canary_source: "hotpotqa_multiagent_skill/model_catalog_v6/evidence_manifest.json"
+      max_tokens: "4096"
+
+  - model_id: "deepseek-v4-flash"
+    provider_id: "vectorengine"
+    model_name: "deepseek-v4-flash"
+    selection_weight: 1.0
+    cheap_weight: 1.0
+    fast_weight: 1.0
+    metadata:
+      family: "deepseek"
+      profile: "text_qa;provider=vectorengine;locality=remote;reasoning=general;latency=canary-10.62s;context=provider-declared-1m;instruction=chat;concise=exact-tag;availability=current-list-and-canary"
+      text_qa_canary: "passed_2026-08-16"
+      canary_source: "hotpotqa_multiagent_skill/model_catalog_v6/evidence_manifest.json"
+      max_tokens: "4096"
+
+  - model_id: "deepseek-v4-pro"
+    provider_id: "vectorengine"
+    model_name: "deepseek-v4-pro"
+    selection_weight: 1.0
+    cheap_weight: 1.0
+    fast_weight: 1.0
+    metadata:
+      family: "deepseek"
+      profile: "text_qa;provider=vectorengine;locality=remote;reasoning=provider-tagged-thinking;latency=canary-14.37s;context=provider-declared-long;instruction=chat;concise=exact-tag;availability=current-list-and-canary"
+      text_qa_canary: "passed_2026-08-16"
+      canary_source: "hotpotqa_multiagent_skill/model_catalog_v6/evidence_manifest.json"
+      max_tokens: "4096"
+
+  - model_id: "gpt-4o-mini"
+    provider_id: "vectorengine"
+    model_name: "gpt-4o-mini"
+    selection_weight: 1.0
+    cheap_weight: 1.0
+    fast_weight: 1.0
+    metadata:
+      family: "gpt"
+      profile: "text_qa;provider=vectorengine;locality=remote;reasoning=general;latency=historical-run-observed;context=provider-default;instruction=chat;concise=exact-tag;availability=current-list-and-existing-execution-evidence"
+      text_qa_canary: "passed_existing_execution_2026-08-16"
+      canary_source: "hotpotqa_multiagent_skill/model_catalog_v6/evidence_manifest.json"
+      max_tokens: "4096"
+
+  - model_id: "MiniMax-M2.5"
+    provider_id: "vectorengine"
+    model_name: "MiniMax-M2.5"
+    selection_weight: 1.0
+    cheap_weight: 1.0
+    fast_weight: 1.0
+    metadata:
+      family: "minimax"
+      profile: "text_qa;provider=vectorengine;locality=remote;reasoning=general;latency=historical-run-observed;context=provider-default;instruction=chat;concise=exact-tag;availability=current-list-and-existing-execution-evidence"
+      text_qa_canary: "passed_existing_execution_2026-08-16"
+      canary_source: "hotpotqa_multiagent_skill/model_catalog_v6/evidence_manifest.json"
+      max_tokens: "4096"
+
+  - model_id: "MiniMax-M3"
+    provider_id: "vectorengine"
+    model_name: "MiniMax-M3"
+    selection_weight: 1.0
+    cheap_weight: 1.0
+    fast_weight: 1.0
+    metadata:
+      family: "minimax"
+      profile: "text_qa;provider=vectorengine;locality=remote;reasoning=provider-described-agent;latency=canary-19.37s;context=provider-declared-long;instruction=chat;concise=exact-tag;availability=current-list-and-canary"
+      text_qa_canary: "passed_2026-08-16"
+      canary_source: "hotpotqa_multiagent_skill/model_catalog_v6/evidence_manifest.json"
+      max_tokens: "4096"
+
+  - model_id: "glm-4.5-flash"
+    provider_id: "vectorengine"
+    model_name: "glm-4.5-flash"
+    selection_weight: 1.0
+    cheap_weight: 1.0
+    fast_weight: 1.0
+    metadata:
+      family: "glm"
+      profile: "text_qa;provider=vectorengine;locality=remote;reasoning=provider-tagged-thinking;latency=canary-28.49s;context=provider-default;instruction=chat;concise=exact-tag;availability=current-list-and-canary"
+      text_qa_canary: "passed_2026-08-16"
+      canary_source: "hotpotqa_multiagent_skill/model_catalog_v6/evidence_manifest.json"
+      max_tokens: "4096"
+
+  - model_id: "kimi-k2"
+    provider_id: "vectorengine"
+    model_name: "kimi-k2"
+    selection_weight: 1.0
+    cheap_weight: 1.0
+    fast_weight: 1.0
+    metadata:
+      family: "kimi"
+      profile: "text_qa;provider=vectorengine;locality=remote;reasoning=provider-described-reasoning;latency=canary-5.62s;context=provider-default;instruction=chat;concise=exact-tag;availability=current-list-and-canary"
+      text_qa_canary: "passed_2026-08-16"
+      canary_source: "hotpotqa_multiagent_skill/model_catalog_v6/evidence_manifest.json"
+      max_tokens: "4096"

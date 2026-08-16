@@ -14,6 +14,7 @@ from src.interactive.agent_graph import (
     AgentGraph,
     AgentNode,
     AgentRelation,
+    DependencyEdgeEvidence,
     GraphMutationError,
 )
 from src.interactive.agent_runtime import AgentRequest
@@ -121,9 +122,92 @@ class AgentGraphTests(unittest.TestCase):
         self.assertEqual(4, stats["agent_count"])
         self.assertEqual(3, stats["directed_edge_count"])
         self.assertEqual(3, stats["max_depth"])
+        self.assertEqual(3, stats["structural_depth"])
         self.assertEqual(2, stats["max_width"])
+        self.assertEqual("fan_in", stats["topology_family"])
+        self.assertEqual(["parallel", "fan_in"], stats["topology_motifs"])
         self.assertEqual(["c"], stats["fan_in_agent_ids"])
         self.assertEqual(["a", "b"], stats["root_agent_ids"])
+
+    def test_structural_depth_contracts_reciprocal_pair(self) -> None:
+        graph = AgentGraph(
+            [AgentNode(name, "balanced", name) for name in ("a", "b", "c", "d")],
+            [
+                AgentRelation("a", "b", True, True),
+                AgentRelation("b", "c", True, False),
+                AgentRelation("c", "d", True, False),
+            ],
+            output_agent_id="d",
+        )
+
+        stats = graph.topology_statistics()
+
+        self.assertEqual(3, stats["structural_depth"])
+        self.assertEqual(3, stats["component_count"])
+        self.assertEqual("serial_3_plus", stats["topology_family"])
+        self.assertEqual(["serial_3_plus", "reciprocal"], stats["topology_motifs"])
+
+    def test_construction_progress_is_neutral_atomic_lower_bound(self) -> None:
+        empty = AgentGraph()
+        self.assertEqual(3, empty.construction_progress()["minimum_remaining_actions"])
+
+        disconnected = AgentGraph(
+            [AgentNode(name, "balanced", name) for name in ("a", "b", "c")]
+        )
+        progress = disconnected.construction_progress()
+        self.assertEqual(4, progress["minimum_remaining_actions"])
+        self.assertEqual(
+            {"add_agent": 0, "set_relation": 2, "set_output": 1, "finish": 1},
+            progress["minimum_remaining_breakdown"],
+        )
+
+        chain = AgentGraph(
+            [AgentNode(name, "balanced", name) for name in ("a", "b", "c")],
+            [
+                AgentRelation("a", "b", True, False),
+                AgentRelation("b", "c", True, False),
+            ],
+            output_agent_id="c",
+        )
+        self.assertEqual(1, chain.construction_progress()["minimum_remaining_actions"])
+
+    def test_effective_depth_requires_explicit_graded_evidence(self) -> None:
+        graph = AgentGraph(
+            [AgentNode(name, "balanced", name) for name in ("a", "b", "c")],
+            [
+                AgentRelation("a", "b", True, False),
+                AgentRelation("b", "c", True, False),
+            ],
+            output_agent_id="c",
+        )
+
+        unverified = graph.effective_dependency_statistics()
+        self.assertEqual(3, unverified["structural_depth"])
+        self.assertEqual(1, unverified["effective_dependency_depth"])
+        self.assertEqual("unverified", unverified["evidence_status"])
+
+        partial = graph.effective_dependency_statistics(
+            [DependencyEdgeEvidence("a", "b", "weak", "delivery:a:b")]
+        )
+        self.assertEqual(2, partial["effective_dependency_depth"])
+        self.assertEqual("weak", partial["evidence_status"])
+        self.assertEqual(
+            "unverified", partial["full_structural_depth_evidence_status"]
+        )
+
+        verified = graph.effective_dependency_statistics(
+            [
+                DependencyEdgeEvidence("a", "b", "verified", "pair:a:b"),
+                DependencyEdgeEvidence("b", "c", "verified", "pair:b:c"),
+            ]
+        )
+        self.assertEqual(3, verified["effective_dependency_depth"])
+        self.assertEqual(3, verified["verified_dependency_depth"])
+        self.assertEqual("verified", verified["evidence_status"])
+        with self.assertRaises(ValueError):
+            graph.effective_dependency_statistics(
+                [DependencyEdgeEvidence("a", "c", "weak")]
+            )
 
     def test_all_validation_invariants(self) -> None:
         duplicate = AgentGraph(

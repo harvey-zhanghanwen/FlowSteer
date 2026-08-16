@@ -46,6 +46,10 @@ from src.interactive.config_loader import (
     load_yaml,
     validate_agent_graph_config,
 )
+from src.interactive.graph_diagnostics import (
+    aggregate_trajectory_diagnostics,
+    diagnose_trajectory,
+)
 from src.interactive.records import TaskRecord, TrajectoryRecord
 from src.interactive.rollout_collector import execution_record_from_call
 from src.interactive.task_dataset import iter_task_records
@@ -374,7 +378,10 @@ async def _collect_direct(
     experiment = _mapping(config["experiment"], "experiment")
     model_id = str(bounded["direct_model_id"])
     protocol = str(bounded["direct_protocol"])
-    seed = int(experiment["seed"])
+    # The paired Direct baseline has its own frozen sampling seed.  A new
+    # Director/Canvas condition may change the policy sampling seed without
+    # repaying or silently replacing the fixed Local Direct comparator.
+    seed = int(bounded.get("direct_generation_seed", experiment["seed"]))
     run_label = str(experiment["name"])
     concurrency = int(bounded["concurrency"])
     direct_candidates = _read_jsonl(path)
@@ -795,6 +802,11 @@ def _paired_rows(
                     ),
                     "output_agent_inbox": _output_inbox(graph_value),
                     "telemetry": _graph_telemetry(graph_value),
+                    "graph_diagnostic": (
+                        diagnose_trajectory(graph_value).to_dict()
+                        if graph_value is not None
+                        else None
+                    ),
                 },
                 "delta_exact_match": graph_em - direct_em,
                 "delta_token_f1": graph_f1 - direct_f1,
@@ -841,7 +853,11 @@ def _aggregate(rows: Sequence[Mapping[str, Any]], condition: str) -> Mapping[str
     }
 
 
-def _report(rows: Sequence[Mapping[str, Any]], config: Mapping[str, Any]) -> Mapping[str, Any]:
+def _report(
+    rows: Sequence[Mapping[str, Any]],
+    config: Mapping[str, Any],
+    trajectories: Sequence[Mapping[str, Any]] = (),
+) -> Mapping[str, Any]:
     direct = _aggregate(rows, "direct")
     graph = _aggregate(rows, "agentgraph")
     failure_counts = Counter(str(row["failure_type"]) for row in rows)
@@ -871,6 +887,7 @@ def _report(rows: Sequence[Mapping[str, Any]], config: Mapping[str, Any]) -> Map
         "evaluation_name": config["experiment"]["name"],
         "direct_local_baseline": direct,
         "agentgraph": graph,
+        "graph_search_diagnostics": aggregate_trajectory_diagnostics(trajectories),
         "agentgraph_minus_direct": {
             "exact_match": graph["strict_exact_match"] - direct["strict_exact_match"],
             "token_f1": graph["strict_token_f1"] - direct["strict_token_f1"],
@@ -997,6 +1014,7 @@ async def run_hotpot_round(
     selected = _select_tasks(config, root, paths["selected"])
     failures = _read_jsonl(paths["failures"])
     gpu = _mapping(config["gpu"], "gpu")
+    director_config = _mapping(config["director"], "director")
     configured_rollout_gpu = int(gpu["rollout_physical"])
     effective_rollout_gpu = int(
         os.environ.get("FLOWSTEER_ROLLOUT_GPU", configured_rollout_gpu)
@@ -1019,7 +1037,10 @@ async def run_hotpot_round(
             "resource_adaptation": effective_rollout_gpu != configured_rollout_gpu,
             "supervisor_port": int(os.environ.get("FLOWSTEER_SUPERVISOR_PORT", "8015")),
             "context_length": int(
-                os.environ.get("FLOWSTEER_SUPERVISOR_CONTEXT_LENGTH", "32768")
+                os.environ.get(
+                    "FLOWSTEER_SUPERVISOR_CONTEXT_LENGTH",
+                    str(director_config.get("max_context_tokens", 8192)),
+                )
             ),
             "mem_fraction_static": float(
                 os.environ.get("FLOWSTEER_SUPERVISOR_MEM_FRACTION", "0.82")
@@ -1112,7 +1133,7 @@ async def run_hotpot_round(
         _write_json(paths["manifest"], manifest)
         return manifest
 
-    report = _report(rows, config)
+    report = _report(rows, config, tuple(trajectories.values()))
     _write_json(paths["report_json"], report)
     paths["report_markdown"].parent.mkdir(parents=True, exist_ok=True)
     paths["report_markdown"].write_text(_report_markdown(report), encoding="utf-8")

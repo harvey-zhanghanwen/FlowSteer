@@ -36,6 +36,8 @@ Actions:
 
 Use a model_id from the supplied catalog and describe each Agent's job in concise ordinary free text. A useful contract states its objective, expected input or dependency, artifact to produce, and completion condition; do not prefill an upstream result that has not been produced. A relation's two booleans are the two message directions; no relation means independent work, and a bidirectional pair performs one finite draft-and-revision exchange. Choose decomposition and models only when the task needs them, not to make the graph larger.
 
+Directed relations can express a sequence of dependent artifacts, independent artifacts that later converge, one artifact sent to multiple consumers, or a finite critique/revision exchange. These are optional shapes in the same atomic search space, not templates or requirements.
+
 Only the graph's Output Agent owns the final task answer; other Agents produce intermediate artifacts. Before finish, check whether distinct evidence dependencies visible in the task are actually covered rather than hidden inside one all-purpose contract. When a relation exists, its target contract should name the upstream artifact it consumes. The Output contract should request only the concise answer span, never JSON or explanation.
 
 Finish only after the Canvas accepts a complete graph. When the latest execution is format-valid and shows no concrete defect after that dependency check, prefer finish. Continue only to address a specific missing evidence hop, unresolved dependency, conflict, format error, execution error, or task mismatch; unused rounds or another catalog model alone are not reasons to edit."""
@@ -314,6 +316,14 @@ class AgentGraphOrchestrator:
             require_complete=True,
         )
         snapshot = env.snapshot()
+        construction_progress = env.graph.construction_progress()
+        construction_progress["remaining_rounds"] = max(
+            self.max_rounds - env.turn_count, 0
+        )
+        construction_progress["minimum_actions_fit_remaining_rounds"] = (
+            construction_progress["minimum_remaining_actions"]
+            <= construction_progress["remaining_rounds"]
+        )
         payload = {
             "task": env.problem,
             "turn": turn_index,
@@ -321,6 +331,7 @@ class AgentGraphOrchestrator:
             "remaining_rounds": max(self.max_rounds - env.turn_count, 0),
             "current_graph": env.graph.to_dict(),
             "topology_statistics": env.graph.topology_statistics(),
+            "construction_progress": construction_progress,
             "canvas_feedback": snapshot.last_feedback,
             # SkillFlow presents a bounded visible action-history tail to its
             # ReAct policy; keep the same boundary without adding role recipes.

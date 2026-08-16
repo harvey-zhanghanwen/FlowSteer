@@ -32,6 +32,11 @@ from src.interactive.config_loader import (
 )
 from src.interactive.director import AgentGraphOrchestrator
 from src.interactive.grpo_objective import same_condition_advantages
+from src.interactive.hotpot_training_schedule import (
+    FrozenHotpotTrainingSchedule,
+    HotpotTrainingCursorState,
+    HotpotTrainingProgress,
+)
 from src.interactive.openai_gateway import OpenAICompatibleGateway
 from src.interactive.persistence import EvidenceStore
 from src.interactive.policy_sync import (
@@ -95,13 +100,23 @@ def _mapping(value: Any, name: str) -> Mapping[str, Any]:
     return value
 
 
+def _is_hotpot_micro(config: Mapping[str, Any]) -> bool:
+    experiment = _mapping(config.get("experiment"), "experiment")
+    return experiment.get("phase") == "hotpotqa_micro_training"
+
+
 def validate_smoke_bounds(config: Mapping[str, Any]) -> None:
-    """Reject any config that silently expands this one-update smoke run."""
+    """Reject configs that expand either supported one-update transaction."""
 
     validate_agent_graph_config(config)
     experiment = _mapping(config.get("experiment"), "experiment")
     data = _mapping(config.get("data"), "data")
-    smoke = _mapping(data.get("smoke"), "data.smoke")
+    hotpot_micro = _is_hotpot_micro(config)
+    selection_name = "data.hotpot_micro" if hotpot_micro else "data.smoke"
+    selection = _mapping(
+        data.get("hotpot_micro" if hotpot_micro else "smoke"),
+        selection_name,
+    )
     grpo = _mapping(config.get("grpo"), "grpo")
     director = _mapping(config.get("director"), "director")
     policy_sync = _mapping(config.get("policy_sync"), "policy_sync")
@@ -110,15 +125,22 @@ def validate_smoke_bounds(config: Mapping[str, Any]) -> None:
     skills = _mapping(config.get("skills"), "skills")
 
     checks = {
-        "experiment.phase": experiment.get("phase") == "smoke_training",
+        "experiment.phase": experiment.get("phase")
+        == ("hotpotqa_micro_training" if hotpot_micro else "smoke_training"),
         "experiment.training_enabled": experiment.get("training_enabled") is True,
-        "data.smoke.split": smoke.get("split") == "train",
-        "data.smoke.selection": smoke.get("selection") == "sequential_per_source",
-        "data.smoke.tasks_per_dataset": smoke.get("tasks_per_dataset") == 2,
-        "data.smoke.expected_total_tasks": smoke.get("expected_total_tasks") == 14,
+        f"{selection_name}.split": selection.get("split") == "train",
+        f"{selection_name}.selection": selection.get("selection")
+        == ("frozen_hotpot_schedule" if hotpot_micro else "sequential_per_source"),
+        f"{selection_name}.expected_total_tasks": selection.get(
+            "expected_total_tasks"
+        )
+        == (1 if hotpot_micro else 14),
         "grpo.enabled": grpo.get("enabled") is True,
-        "grpo.samples_per_problem": grpo.get("samples_per_problem") == 2,
-        "grpo.expected_rollout_count": grpo.get("expected_rollout_count") == 28,
+        "grpo.samples_per_problem": type(grpo.get("samples_per_problem")) is int
+        and int(grpo["samples_per_problem"]) >= 2
+        and (hotpot_micro or grpo.get("samples_per_problem") == 2),
+        "grpo.expected_rollout_count": grpo.get("expected_rollout_count")
+        == (grpo.get("samples_per_problem") if hotpot_micro else 28),
         "grpo.optimization_passes_per_rollout_batch": (
             grpo.get("optimization_passes_per_rollout_batch") == 1
         ),
@@ -128,9 +150,8 @@ def validate_smoke_bounds(config: Mapping[str, Any]) -> None:
         "policy_sync.post_update_canary_count": (
             policy_sync.get("post_update_canary_count") == 1
         ),
-        "evaluation.healthbench_judge_model": bool(
-            str(evaluation.get("healthbench_judge_model", "")).strip()
-        ),
+        "evaluation.healthbench_judge_model": hotpot_micro
+        or bool(str(evaluation.get("healthbench_judge_model", "")).strip()),
         "evaluation.max_environment_steps": (
             evaluation.get("max_environment_steps") == 12
         ),
@@ -139,7 +160,13 @@ def validate_smoke_bounds(config: Mapping[str, Any]) -> None:
         "director.top_p": float(director.get("top_p", -1)) == 1.0,
         "director.top_k": director.get("top_k") == -1,
         "exploration.enabled": exploration.get("enabled") is False,
-        "skills.enabled": skills.get("enabled") is False,
+        "grpo.structural_reward": float(grpo.get("structural_reward", -1.0))
+        == 0.0,
+        "grpo.exploration_reward": float(grpo.get("exploration_reward", -1.0))
+        == 0.0,
+        "grpo.skill_usage_reward": float(grpo.get("skill_usage_reward", -1.0))
+        == 0.0,
+        "skills.enabled": hotpot_micro or skills.get("enabled") is False,
     }
     failed = [name for name, valid in checks.items() if not valid]
     if failed:
@@ -147,11 +174,34 @@ def validate_smoke_bounds(config: Mapping[str, Any]) -> None:
             "smoke config violates fixed bounds: " + ", ".join(failed)
         )
 
-    source_order = tuple(str(value) for value in smoke.get("source_order", ()))
-    if source_order != EXPECTED_SOURCE_ORDER:
-        raise ConfigurationError(
-            "data.smoke.source_order must contain the fixed seven-source order"
+    if hotpot_micro:
+        if selection.get("dataset_key") != "hotpotqa":
+            raise ConfigurationError("data.hotpot_micro.dataset_key must be hotpotqa")
+        for field_name in ("schedule_path", "cursor_path", "next_cursor_path"):
+            if not str(selection.get(field_name, "")).strip():
+                raise ConfigurationError(
+                    f"data.hotpot_micro.{field_name} must be non-empty"
+                )
+        if len(
+            {
+                str(selection["schedule_path"]),
+                str(selection["cursor_path"]),
+                str(selection["next_cursor_path"]),
+            }
+        ) != 3:
+            raise ConfigurationError(
+                "HotpotQA schedule, cursor, and next cursor paths must differ"
+            )
+    else:
+        if selection.get("tasks_per_dataset") != 2:
+            raise ConfigurationError("data.smoke.tasks_per_dataset must be 2")
+        source_order = tuple(
+            str(value) for value in selection.get("source_order", ())
         )
+        if source_order != EXPECTED_SOURCE_ORDER:
+            raise ConfigurationError(
+                "data.smoke.source_order must contain the fixed seven-source order"
+            )
     for field_name in (
         "behavior_policy_version",
         "updated_policy_version",
@@ -529,7 +579,7 @@ class LiveSmokeBackend:
         )
         judge: Optional[JudgeCallback] = None
         judge_model = ""
-        if not evaluation_only:
+        if not evaluation_only and not _is_hotpot_micro(config):
             judge, judge_model = cls._build_healthbench_judge(
                 registry,
                 secret,
@@ -837,6 +887,72 @@ def _artifact_paths(config: Mapping[str, Any], root: Path) -> dict[str, Path]:
     }
 
 
+def _select_run_scope(
+    config: Mapping[str, Any],
+    root: Path,
+) -> tuple[
+    tuple[TaskRecord, ...],
+    tuple[int, ...],
+    Optional[HotpotTrainingProgress],
+    Optional[Path],
+    Mapping[str, Any],
+]:
+    """Resolve either the legacy 7x2 scope or one exact frozen HotpotQA step."""
+
+    data = _mapping(config["data"], "data")
+    train_path = _resolve(root, str(data["train_path"]))
+    if not _is_hotpot_micro(config):
+        smoke = _mapping(data["smoke"], "data.smoke")
+        selected = select_smoke_tasks(
+            iter_task_records(train_path, expected_split="train"),
+            source_order=tuple(str(value) for value in smoke["source_order"]),
+            per_source=int(smoke["tasks_per_dataset"]),
+            require_unique_base_tasks=bool(smoke["require_unique_base_tasks"]),
+        )
+        rollout_ordinals = tuple(
+            range(int(_mapping(config["grpo"], "grpo")["samples_per_problem"]))
+        )
+        return selected, rollout_ordinals, None, None, {
+            "selection": "sequential_per_source",
+        }
+
+    hotpot = _mapping(data["hotpot_micro"], "data.hotpot_micro")
+    schedule_path = _resolve(root, str(hotpot["schedule_path"]))
+    cursor_path = _resolve(root, str(hotpot["cursor_path"]))
+    next_cursor_path = _resolve(root, str(hotpot["next_cursor_path"]))
+    if next_cursor_path.exists():
+        raise FileExistsError(
+            f"write-once next HotpotQA cursor already exists: {next_cursor_path}"
+        )
+    schedule = FrozenHotpotTrainingSchedule.read(schedule_path)
+    cursor = HotpotTrainingCursorState.read(cursor_path)
+    progress = HotpotTrainingProgress.from_state(schedule, cursor)
+    resolved = schedule.resolve(
+        train_path=train_path,
+        validation_path=_resolve(root, str(data["validation_path"])),
+        test_path=_resolve(root, str(data["test_path"])),
+    )
+    step = progress.current_step
+    task = resolved[cursor.cursor]
+    if task.task_id != step.task_id:
+        raise SmokeRunError("current frozen HotpotQA task does not match its cursor")
+    rollout_ordinals = step.rollout_ordinals
+    grpo = _mapping(config["grpo"], "grpo")
+    if len(rollout_ordinals) != int(grpo["samples_per_problem"]):
+        raise ConfigurationError(
+            "frozen rollout ordinals differ from grpo.samples_per_problem"
+        )
+    return (task,), rollout_ordinals, progress, next_cursor_path, {
+        "selection": "frozen_hotpot_schedule",
+        "schedule_path": str(schedule_path),
+        "schedule_id": schedule.content_hash,
+        "cursor_path": str(cursor_path),
+        "cursor_before": cursor.to_value(),
+        "step": step.to_value(),
+        "next_cursor_path": str(next_cursor_path),
+    }
+
+
 async def run_smoke(
     config_path: str | Path,
     *,
@@ -856,16 +972,17 @@ async def run_smoke(
     validate_smoke_bounds(config)
     paths = _artifact_paths(config, root)
 
-    smoke = _mapping(_mapping(config["data"], "data")["smoke"], "data.smoke")
-    train_path = _resolve(root, str(_mapping(config["data"], "data")["train_path"]))
-    selected = select_smoke_tasks(
-        iter_task_records(train_path, expected_split="train"),
-        source_order=tuple(str(value) for value in smoke["source_order"]),
-        per_source=int(smoke["tasks_per_dataset"]),
-        require_unique_base_tasks=bool(smoke["require_unique_base_tasks"]),
+    data = _mapping(config["data"], "data")
+    train_path = _resolve(root, str(data["train_path"]))
+    selected, rollout_ordinals, progress, next_cursor_path, scope_receipt = (
+        _select_run_scope(config, root)
     )
-    if len(selected) != int(smoke["expected_total_tasks"]):
-        raise SmokeRunError("selected task count differs from the fixed smoke bound")
+    selection = _mapping(
+        data["hotpot_micro" if _is_hotpot_micro(config) else "smoke"],
+        "data selection",
+    )
+    if len(selected) != int(selection["expected_total_tasks"]):
+        raise SmokeRunError("selected task count differs from the fixed run bound")
     _write_jsonl(
         paths["selected"],
         [
@@ -882,17 +999,18 @@ async def run_smoke(
         "train_path": str(train_path),
         "started_at": _utc_now(),
         "bounds": {
-            "tasks_per_dataset": 2,
-            "selected_tasks": 14,
-            "rollouts_per_task": 2,
-            "expected_initial_rollouts": 28,
+            "tasks_per_dataset": (None if _is_hotpot_micro(config) else 2),
+            "selected_tasks": len(selected),
+            "rollouts_per_task": len(rollout_ordinals),
+            "expected_initial_rollouts": len(selected) * len(rollout_ordinals),
             "max_optimizer_updates": 1,
             "post_update_canaries": 1,
         },
+        "selection_receipt": dict(scope_receipt),
         "selected_by_source": dict(sorted(source_counts.items())),
         "artifacts": {name: str(path) for name, path in paths.items() if name != "training_root"},
         "exploration_enabled": False,
-        "skills_enabled": False,
+        "skills_enabled": bool(_mapping(config["skills"], "skills")["enabled"]),
     }
     if prepare_only:
         manifest["completed_at"] = _utc_now()
@@ -912,8 +1030,6 @@ async def run_smoke(
     grpo = _mapping(config["grpo"], "grpo")
     behavior_policy = str(director["behavior_policy_version"])
     updated_policy = str(director["updated_policy_version"])
-    rollout_count = int(grpo["samples_per_problem"])
-
     initial_jobs = []
     for task in selected:
         versions = version_bundle_for(
@@ -921,7 +1037,7 @@ async def run_smoke(
             policy_version=behavior_policy,
             model_catalog_version=live_backend.model_catalog_version,
         )
-        for rollout_index in range(rollout_count):
+        for rollout_index in rollout_ordinals:
             initial_jobs.append(live_backend.collect(task, rollout_index, versions))
     try:
         initial = tuple(await asyncio.gather(*initial_jobs))
@@ -1049,6 +1165,26 @@ async def run_smoke(
         raise SmokeRunError("post-update canary did not use the published adapter")
     _write_jsonl(paths["post_update"], canaries)
 
+    cursor_value: Optional[Mapping[str, Any]] = None
+    if progress is not None:
+        assert next_cursor_path is not None
+        step = progress.current_step
+        next_state = progress.preview_step(step_ordinal=step.step_ordinal)
+        try:
+            next_cursor_path.parent.mkdir(parents=True, exist_ok=True)
+            next_state.write_once(next_cursor_path)
+        except Exception as exc:
+            manifest["status"] = "failed_cursor_commit"
+            manifest["policy_sync"] = sync_value
+            manifest["error"] = _safe_error(exc)
+            manifest["completed_at"] = _utc_now()
+            _write_json(paths["manifest"], manifest)
+            raise SmokeRunError(
+                "policy was updated but the exact HotpotQA cursor could not commit"
+            ) from exc
+        progress.commit_step_state(next_state)
+        cursor_value = next_state.to_value()
+
     manifest.update(
         status="completed",
         policy_sync=sync_value,
@@ -1060,6 +1196,8 @@ async def run_smoke(
         },
         completed_at=_utc_now(),
     )
+    if cursor_value is not None:
+        manifest["selection_receipt"]["cursor_after"] = dict(cursor_value)
     _write_json(paths["manifest"], manifest)
     return manifest
 

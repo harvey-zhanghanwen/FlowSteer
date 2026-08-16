@@ -122,6 +122,15 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(initial_state["recent_canvas_history"], [])
         self.assertFalse(initial_state["complete_validation"]["valid"])
         self.assertEqual(0, initial_state["topology_statistics"]["agent_count"])
+        self.assertEqual(
+            3,
+            initial_state["construction_progress"]["minimum_remaining_actions"],
+        )
+        self.assertTrue(
+            initial_state["construction_progress"][
+                "minimum_actions_fit_remaining_rounds"
+            ]
+        )
         qwen_catalog = next(
             item for item in initial_state["model_catalog"] if item["model_id"] == "qwen"
         )
@@ -139,6 +148,10 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(complete_state["remaining_rounds"], 18)
         self.assertTrue(complete_state["complete_validation"]["valid"])
+        self.assertEqual(
+            1,
+            complete_state["construction_progress"]["minimum_remaining_actions"],
+        )
         self.assertNotIn("weighted_preferred_model", complete_state)
         self.assertIn("execution_result=", complete_state["canvas_feedback"])
         self.assertEqual(2, len(complete_state["recent_canvas_history"]))
@@ -152,11 +165,15 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("specific missing evidence hop", DIRECTOR_SYSTEM_PROMPT)
         self.assertIn("expected input or dependency", DIRECTOR_SYSTEM_PROMPT)
         self.assertIn("two message directions", DIRECTOR_SYSTEM_PROMPT)
+        self.assertIn("independent artifacts that later converge", DIRECTOR_SYSTEM_PROMPT)
+        self.assertIn("one artifact sent to multiple consumers", DIRECTOR_SYSTEM_PROMPT)
+        self.assertIn("optional shapes", DIRECTOR_SYSTEM_PROMPT)
         self.assertIn("distinct evidence dependencies", DIRECTOR_SYSTEM_PROMPT)
         self.assertIn("never JSON or explanation", DIRECTOR_SYSTEM_PROMPT)
         self.assertIn("unused rounds", DIRECTOR_SYSTEM_PROMPT)
         self.assertNotIn("Researcher", DIRECTOR_SYSTEM_PROMPT)
         self.assertNotIn("Critic", DIRECTOR_SYSTEM_PROMPT)
+        self.assertNotIn("must use three", DIRECTOR_SYSTEM_PROMPT.lower())
 
     async def test_catalog_order_is_decoupled_from_rollout_sampling_seed(self) -> None:
         model_registry = registry()

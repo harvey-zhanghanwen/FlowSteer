@@ -64,6 +64,12 @@ class SkillEvidenceGate:
                 "evidence": skill.evidence.to_dict(),
                 "versions": skill.versions.to_dict(),
                 "failure_scope": list(skill.failure_scope),
+                # Runtime/executor identities live in provenance because the
+                # shared VersionBundle intentionally describes the Director
+                # execution regime.  Binding provenance here prevents an
+                # otherwise valid receipt from being replayed after those
+                # Skill-evidence identities change.
+                "provenance": skill.to_dict()["provenance"],
             },
         )
 
@@ -133,6 +139,36 @@ class SkillEvidenceGate:
                     reasons.append("resolved evidence has no finite paired_effect")
                 else:
                     effects.append(effect)
+
+            protocol = skill.provenance.get("evidence_protocol")
+            if protocol is not None:
+                if protocol != "flowsteer.skill-evidence.v1":
+                    reasons.append("unsupported Skill evidence protocol")
+                expected_runtime = skill.provenance.get("runtime_version")
+                expected_executors = skill.provenance.get("executor_versions")
+                if not isinstance(expected_runtime, str) or not expected_runtime.strip():
+                    reasons.append("Skill provenance is missing runtime version")
+                if not isinstance(expected_executors, Mapping) or not expected_executors:
+                    reasons.append("Skill provenance is missing executor model versions")
+                expected_condition = skill.to_dict()["condition"]
+                expected_action = skill.to_dict()["action"]
+                for record in resolved:
+                    if record.get("evidence_protocol") != protocol:
+                        reasons.append("probe evidence protocol does not match Skill")
+                    if record.get("forced_probe") is not True:
+                        reasons.append("Skill evidence must be a forced paired probe")
+                    if record.get("grpo_eligible") is not False:
+                        reasons.append("forced Skill probe must be excluded from GRPO")
+                    if record.get("condition") != expected_condition:
+                        reasons.append("probe condition does not match Skill")
+                    if record.get("candidate_action") != expected_action:
+                        reasons.append("probe candidate action does not match Skill")
+                    if record.get("runtime_version") != expected_runtime:
+                        reasons.append("probe runtime version does not match Skill")
+                    if record.get("model_catalog_version") != skill.versions.model_catalog:
+                        reasons.append("probe model catalog version does not match Skill")
+                    if record.get("executor_versions") != expected_executors:
+                        reasons.append("probe executor model versions do not match Skill")
             if effects:
                 resolved_mean = sum(effects) / len(effects)
                 if not math.isclose(
