@@ -131,8 +131,28 @@ def validate_agent_graph_config(value: Mapping[str, Any]) -> None:
     max_agents = graph.get("max_agents")
     if isinstance(max_agents, bool) or not isinstance(max_agents, int) or max_agents < 1:
         raise ConfigurationError("agent_graph.max_agents must be a positive integer")
-    if graph.get("executor_selection") != "seeded_weighted_random":
-        raise ConfigurationError("Agent executors require seeded_weighted_random selection")
+    if graph.get("executor_selection") not in {
+        "seeded_weighted_random",
+        "director_catalog_choice",
+    }:
+        raise ConfigurationError(
+            "Agent executor selection must be seeded_weighted_random or "
+            "director_catalog_choice"
+        )
+    terminal_protocols = graph.get("terminal_protocol_by_source", {})
+    if not isinstance(terminal_protocols, Mapping):
+        raise ConfigurationError(
+            "agent_graph.terminal_protocol_by_source must be a mapping"
+        )
+    invalid_terminal_protocols = {
+        str(source): protocol
+        for source, protocol in terminal_protocols.items()
+        if protocol not in {"none", "exact_single_answer_tag"}
+    }
+    if invalid_terminal_protocols:
+        raise ConfigurationError(
+            "terminal protocols must be none or exact_single_answer_tag"
+        )
     if graph.get("max_bidirectional_block_size") != 2:
         raise ConfigurationError("AgentGraph v1 supports bidirectional blocks of size two")
     if graph.get("require_unique_output") is not True:

@@ -65,11 +65,28 @@ def _format_upstream(
 ) -> str:
     if not messages:
         return "(none)"
-    return "\n\n".join(
-        f"[Message from {item.source_agent_id}]\n"
-        f"{_visible_message_content(item.content, condition)}"
-        for item in messages
-    )
+    rendered = []
+    for item in messages:
+        envelope = [
+            "[Upstream artifact]",
+            f"source_agent: {item.source_agent_id}",
+            f"target_agent: {item.target_agent_id}",
+            f"message_type: {item.message_type}",
+        ]
+        if item.graph_revision is not None:
+            envelope.append(f"graph_revision: {item.graph_revision}")
+        if item.request_or_dependency is not None:
+            envelope.append(
+                f"request_or_dependency: {item.request_or_dependency}"
+            )
+        envelope.extend(
+            [
+                "artifact:",
+                _visible_message_content(item.artifact, condition),
+            ]
+        )
+        rendered.append("\n".join(envelope))
+    return "\n\n".join(rendered)
 
 
 def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
@@ -117,7 +134,12 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
             "This is the revision phase. Revise your own draft after reading the peer's "
             "previous-phase draft. You cannot observe the peer's current revision.\n\n"
             f"Your draft:\n{request.own_draft}\n\n"
-            f"Peer draft from {request.peer_draft.source_agent_id}:\n"
+            "Peer artifact envelope:\n"
+            f"source_agent: {request.peer_draft.source_agent_id}\n"
+            f"target_agent: {request.peer_draft.target_agent_id}\n"
+            f"message_type: {request.peer_draft.message_type}\n"
+            f"graph_revision: {request.peer_draft.graph_revision}\n"
+            "artifact:\n"
             f"{_visible_message_content(request.peer_draft.content, request.communication_condition)}"
         )
     else:  # pragma: no cover - enum exhaustiveness guard

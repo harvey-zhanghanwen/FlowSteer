@@ -121,6 +121,38 @@ class ConfigLoaderTests(unittest.TestCase):
         self.assertEqual(actual_names, expected_names)
         self.assertFalse(any("gemini" in model_id.lower() for model_id in registry.model_ids))
 
+    def test_hotpot_multiagent_catalog_uses_only_canary_backed_exact_ids(self) -> None:
+        registry = load_model_registry(
+            "config/model_catalog_hotpotqa_multiagent_v1.yaml"
+        )
+        self.assertEqual(
+            {
+                "qwen3.5-9b-local",
+                "qwen3.5-flash",
+                "qwen3.5-plus",
+                "deepseek-v4-flash",
+                "deepseek-v4-pro",
+                "gpt-4o-mini",
+                "minimax-m2.5",
+                "minimax-m3",
+            },
+            set(registry.model_ids),
+        )
+        self.assertFalse(any("gemini" in model_id.lower() for model_id in registry.model_ids))
+        self.assertFalse(any("grok" in model_id.lower() for model_id in registry.model_ids))
+
+    def test_terminal_protocol_map_is_fail_closed(self) -> None:
+        config = load_yaml("config/training_agent_graph.yaml")
+        config["agent_graph"]["terminal_protocol_by_source"] = {
+            "hotpotqa": "exact_single_answer_tag"
+        }
+        validate_agent_graph_config(config)
+        config["agent_graph"]["terminal_protocol_by_source"] = {
+            "hotpotqa": "prompt_only"
+        }
+        with self.assertRaises(ConfigurationError):
+            validate_agent_graph_config(config)
+
 
 if __name__ == "__main__":
     unittest.main()

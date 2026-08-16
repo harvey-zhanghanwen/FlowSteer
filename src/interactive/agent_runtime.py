@@ -51,6 +51,47 @@ class UpstreamMessage:
     source_agent_id: str
     target_agent_id: str
     content: str
+    message_type: str = "artifact"
+    graph_revision: Optional[int] = None
+    request_or_dependency: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        for value, name in (
+            (self.source_agent_id, "source_agent_id"),
+            (self.target_agent_id, "target_agent_id"),
+            (self.content, "content"),
+            (self.message_type, "message_type"),
+        ):
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{name} must be a non-empty string")
+        if self.graph_revision is not None and (
+            isinstance(self.graph_revision, bool)
+            or not isinstance(self.graph_revision, int)
+            or self.graph_revision < 0
+        ):
+            raise ValueError("graph_revision must be non-negative when supplied")
+        if self.request_or_dependency is not None and (
+            not isinstance(self.request_or_dependency, str)
+            or not self.request_or_dependency.strip()
+        ):
+            raise ValueError(
+                "request_or_dependency must be non-empty when supplied"
+            )
+
+    @property
+    def artifact(self) -> str:
+        return self.content
+
+    def to_dict(self) -> Dict[str, object]:
+        return {
+            "source_agent_id": self.source_agent_id,
+            "target_agent_id": self.target_agent_id,
+            "message_type": self.message_type,
+            "artifact": self.content,
+            "content": self.content,
+            "graph_revision": self.graph_revision,
+            "request_or_dependency": self.request_or_dependency,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -345,7 +386,13 @@ class AgentRuntime:
             request = self._request(
                 agent=nodes[agent_id],
                 phase=ExecutionPhase.SINGLE,
-                upstream=self._upstream(agent_id, plan, outputs),
+                upstream=self._upstream(
+                    agent_id,
+                    plan,
+                    outputs,
+                    nodes=nodes,
+                    graph_revision=graph_revision,
+                ),
                 problem=problem,
                 run_id=run_id,
                 graph_revision=graph_revision,
@@ -358,8 +405,20 @@ class AgentRuntime:
         if len(component) != 2:
             raise AgentRuntimeError(f"unsupported reciprocal block size: {len(component)}")
         left_id, right_id = component
-        left_upstream = self._upstream(left_id, plan, outputs)
-        right_upstream = self._upstream(right_id, plan, outputs)
+        left_upstream = self._upstream(
+            left_id,
+            plan,
+            outputs,
+            nodes=nodes,
+            graph_revision=graph_revision,
+        )
+        right_upstream = self._upstream(
+            right_id,
+            plan,
+            outputs,
+            nodes=nodes,
+            graph_revision=graph_revision,
+        )
         left_draft_request = self._request(
             agent=nodes[left_id],
             phase=ExecutionPhase.DRAFT,
@@ -390,7 +449,14 @@ class AgentRuntime:
             phase=ExecutionPhase.REVISION,
             upstream=left_upstream,
             own_draft=left_draft.text,
-            peer_draft=UpstreamMessage(right_id, left_id, right_draft.text),
+            peer_draft=UpstreamMessage(
+                right_id,
+                left_id,
+                right_draft.text,
+                message_type="candidate",
+                graph_revision=graph_revision,
+                request_or_dependency=nodes[left_id].contract,
+            ),
             problem=problem,
             run_id=run_id,
             graph_revision=graph_revision,
@@ -402,7 +468,14 @@ class AgentRuntime:
             phase=ExecutionPhase.REVISION,
             upstream=right_upstream,
             own_draft=right_draft.text,
-            peer_draft=UpstreamMessage(left_id, right_id, left_draft.text),
+            peer_draft=UpstreamMessage(
+                left_id,
+                right_id,
+                left_draft.text,
+                message_type="candidate",
+                graph_revision=graph_revision,
+                request_or_dependency=nodes[right_id].contract,
+            ),
             problem=problem,
             run_id=run_id,
             graph_revision=graph_revision,
@@ -420,6 +493,9 @@ class AgentRuntime:
         target_agent_id: str,
         plan: _ExecutionPlan,
         outputs: Mapping[str, str],
+        *,
+        nodes: Mapping[str, AgentNode],
+        graph_revision: int,
     ) -> Tuple[UpstreamMessage, ...]:
         target_component = plan.component_for[target_agent_id]
         messages = []
@@ -436,7 +512,16 @@ class AgentRuntime:
                 # Keep the canonical routed message intact. Diagnostic masking is
                 # applied only when the provider prompt is rendered so receipts
                 # retain both the true upstream and what the model actually saw.
-                messages.append(UpstreamMessage(source_id, target_id, outputs[source_id]))
+                messages.append(
+                    UpstreamMessage(
+                        source_id,
+                        target_id,
+                        outputs[source_id],
+                        message_type="artifact",
+                        graph_revision=graph_revision,
+                        request_or_dependency=nodes[target_id].contract,
+                    )
+                )
         return tuple(
             sorted(messages, key=lambda item: (item.source_agent_id, item.target_agent_id))
         )

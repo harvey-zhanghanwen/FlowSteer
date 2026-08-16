@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+from copy import deepcopy
 
 from src.interactive.config_loader import load_yaml
 
@@ -17,6 +18,24 @@ _SPEC.loader.exec_module(_MODULE)
 def test_round_config_is_fixed_heldout_and_training_disabled():
     config = load_yaml(_ROOT / "config" / "evaluation_hotpotqa_round_01.yaml")
     _MODULE.validate_hotpot_config(config)
+
+
+def test_task_id_diagnostic_selection_is_explicit_and_bounded():
+    config = load_yaml(
+        _ROOT / "config" / "evaluation_hotpotqa_multiagent_v1_diagnostic.yaml"
+    )
+    _MODULE.validate_hotpot_config(config)
+
+    invalid = deepcopy(config)
+    invalid["hotpotqa_evaluation"]["task_ids"] = [
+        invalid["hotpotqa_evaluation"]["task_ids"][0]
+    ] * 14
+    try:
+        _MODULE.validate_hotpot_config(invalid)
+    except Exception as exc:
+        assert "task_ids selection" in str(exc)
+    else:  # pragma: no cover - fail-closed guard
+        raise AssertionError("duplicate task IDs were accepted")
 
 
 def test_strict_aggregate_keeps_failed_task_in_denominator():

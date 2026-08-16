@@ -770,23 +770,12 @@ def _request_record(call: AgentCallRecord) -> Mapping[str, Any]:
         "phase": request.phase.value,
         "is_output_agent": request.is_output_agent,
         "communication_condition": request.communication_condition.value,
-        "upstream": [
-            {
-                "source_agent_id": item.source_agent_id,
-                "target_agent_id": item.target_agent_id,
-                "content": item.content,
-            }
-            for item in request.upstream
-        ],
+        "upstream": [item.to_dict() for item in request.upstream],
         "own_draft": request.own_draft,
         "peer_draft": (
             None
             if request.peer_draft is None
-            else {
-                "source_agent_id": request.peer_draft.source_agent_id,
-                "target_agent_id": request.peer_draft.target_agent_id,
-                "content": request.peer_draft.content,
-            }
+            else request.peer_draft.to_dict()
         ),
         "rendered_messages": build_agent_messages(request),
     }

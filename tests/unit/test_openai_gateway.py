@@ -50,10 +50,25 @@ def request(
         phase=phase,
         is_output_agent=is_output_agent,
         communication_condition=communication_condition,
-        upstream=(UpstreamMessage("source", "agent", "evidence"),),
+        upstream=(
+            UpstreamMessage(
+                "source",
+                "agent",
+                "evidence",
+                graph_revision=1,
+                request_or_dependency="verify carefully",
+            ),
+        ),
         own_draft="own" if phase is ExecutionPhase.REVISION else None,
         peer_draft=(
-            UpstreamMessage("peer", "agent", "peer draft")
+            UpstreamMessage(
+                "peer",
+                "agent",
+                "peer draft",
+                message_type="candidate",
+                graph_revision=1,
+                request_or_dependency="verify carefully",
+            )
             if phase is ExecutionPhase.REVISION
             else None
         ),
@@ -65,8 +80,14 @@ class MessageTests(unittest.TestCase):
         messages = build_agent_messages(request(ExecutionPhase.REVISION))
         text = messages[1]["content"]
         self.assertIn("Your draft:\nown", text)
-        self.assertIn("Peer draft from peer:\npeer draft", text)
+        self.assertIn("Peer artifact envelope", text)
+        self.assertIn("source_agent: peer", text)
+        self.assertIn("message_type: candidate", text)
+        self.assertIn("artifact:\npeer draft", text)
         self.assertIn("External upstream messages", text)
+        self.assertIn("source_agent: source", text)
+        self.assertIn("target_agent: agent", text)
+        self.assertIn("request_or_dependency: verify carefully", text)
         self.assertIn("exactly <answer>answer span</answer>", messages[0]["content"])
         self.assertIn("exactly one listed executable action", messages[0]["content"])
 
@@ -87,10 +108,10 @@ class MessageTests(unittest.TestCase):
         self.assertEqual("evidence", item.upstream[0].content)
         self.assertEqual("peer draft", item.peer_draft.content)  # type: ignore[union-attr]
         self.assertNotIn("\nevidence", visible)
-        self.assertNotIn("peer draft\npeer draft", visible)
+        self.assertNotIn("artifact:\npeer draft", visible)
         self.assertEqual(2, visible.count(MASKED_UPSTREAM_CONTENT))
-        self.assertIn("Message from source", visible)
-        self.assertIn("Peer draft from peer", visible)
+        self.assertIn("source_agent: source", visible)
+        self.assertIn("source_agent: peer", visible)
         self.assertIn("Your draft:\nown", visible)
 
     def test_revision_without_drafts_is_rejected(self) -> None:

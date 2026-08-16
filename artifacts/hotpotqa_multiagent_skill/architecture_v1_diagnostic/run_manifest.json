@@ -1,0 +1,85 @@
+{
+  "agentgraph_progress": {
+    "completed": 2,
+    "failed_attempts": 0
+  },
+  "artifacts": {
+    "direct": "/ssd1/iclr/1/FlowSteer/artifacts/hotpotqa_round_01/direct_predictions.jsonl",
+    "failures": "/ssd1/iclr/1/FlowSteer/artifacts/hotpotqa_multiagent_skill/architecture_v1_diagnostic/collection_failures.jsonl",
+    "manifest": "/ssd1/iclr/1/FlowSteer/artifacts/hotpotqa_multiagent_skill/architecture_v1_diagnostic/run_manifest.json",
+    "paired": "/ssd1/iclr/1/FlowSteer/artifacts/hotpotqa_multiagent_skill/architecture_v1_diagnostic/paired_results.jsonl",
+    "preflight": "/ssd1/iclr/1/FlowSteer/artifacts/hotpotqa_multiagent_skill/architecture_v1_diagnostic/preflight_receipt.json",
+    "report_json": "/ssd1/iclr/1/FlowSteer/reports/hotpotqa_multiagent_skill/architecture_v1_diagnostic.json",
+    "report_markdown": "/ssd1/iclr/1/FlowSteer/reports/hotpotqa_multiagent_skill/architecture_v1_diagnostic.md",
+    "selected": "/ssd1/iclr/1/FlowSteer/artifacts/hotpotqa_multiagent_skill/architecture_v1_diagnostic/selected_tasks.jsonl",
+    "trajectories": "/ssd1/iclr/1/FlowSteer/artifacts/hotpotqa_multiagent_skill/architecture_v1_diagnostic/agentgraph_trajectories.jsonl",
+    "wrong": "/ssd1/iclr/1/FlowSteer/artifacts/hotpotqa_multiagent_skill/architecture_v1_diagnostic/wrong_demos.jsonl"
+  },
+  "canary_task_count": 2,
+  "completed_at": "2026-08-16T03:39:01.304041+00:00",
+  "config_path": "/ssd1/iclr/1/FlowSteer/config/evaluation_hotpotqa_multiagent_v1_diagnostic.yaml",
+  "direct_progress": {
+    "completed": 2,
+    "failed_attempts": 0
+  },
+  "fixed_split": "validation",
+  "git_start": {
+    "branch": "dataset/hotpotqa-multiagent-skill-step0-to-n",
+    "commit": "fc298ae74d7b8939f8bae49f1c0f7f4cdc5c7f37"
+  },
+  "input_context": "full_10_passages",
+  "optimizer_updates": 0,
+  "runtime_resource": {
+    "configured_rollout_physical": 4,
+    "context_length": 8192,
+    "effective_rollout_physical": 4,
+    "mem_fraction_static": 0.6,
+    "resource_adaptation": false,
+    "supervisor_port": 8015
+  },
+  "sample_count": 14,
+  "schema_version": "flowsteer.hotpotqa.round_manifest.v1",
+  "selected_task_ids": [
+    "hotpotqa:5ac2a912554299218029dae8",
+    "hotpotqa:5ac3e8c65542997ea680c993",
+    "hotpotqa:5ab93287554299753720f78f",
+    "hotpotqa:5a7daae35542990b8f503a1d",
+    "hotpotqa:5a736bfa5542991f29ee2e03",
+    "hotpotqa:5a7a06935542990198eaf050",
+    "hotpotqa:5a82171f5542990a1d231f4a",
+    "hotpotqa:5ab345db55429969a97a8122",
+    "hotpotqa:5ae7a9c8554299540e5a5631",
+    "hotpotqa:5ae27edc5542992decbdcd2d",
+    "hotpotqa:5abee5e25542994516f45473",
+    "hotpotqa:5a8d7341554299441c6b9fe5",
+    "hotpotqa:5a7a0a965542996c55b2dce7",
+    "hotpotqa:5a7a52745542996c55b2dd4f"
+  ],
+  "stable_zero": {
+    "checks": [
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "hotpotqa:5ac2a912554299218029dae8"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "hotpotqa:5ac3e8c65542997ea680c993"
+      }
+    ],
+    "criterion": "every_fixed_task_completed_the_full_chain",
+    "passed": true
+  },
+  "started_at": "2026-08-16T03:38:53.420452+00:00",
+  "status": "stable_zero_confirmed",
+  "training_enabled": false
+}

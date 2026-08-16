@@ -27,7 +27,9 @@ Actions:
 {"action":"set_output","agent_id":"..."}
 {"action":"finish"}
 
-Use a model_id from the supplied catalog and describe each Agent's job in ordinary free text. Only the graph's Output Agent owns the final task answer; other Agents produce intermediate artifacts. Finish only after the Canvas accepts a complete graph. When the latest execution is format-valid and shows no concrete defect, prefer finish. Continue only to address a specific missing evidence hop, conflict, format error, execution error, or task mismatch; unused rounds or another catalog model alone are not reasons to edit."""
+Use a model_id from the supplied catalog and describe each Agent's job in concise ordinary free text. A useful contract states its objective, expected input or dependency, artifact to produce, and completion condition; do not prefill an upstream result that has not been produced. A relation's two booleans are the two message directions; no relation means independent work, and a bidirectional pair performs one finite draft-and-revision exchange. Choose decomposition and models only when the task needs them, not to make the graph larger.
+
+Only the graph's Output Agent owns the final task answer; other Agents produce intermediate artifacts. Finish only after the Canvas accepts a complete graph. When the latest execution is format-valid and shows no concrete defect, prefer finish. Continue only to address a specific missing evidence hop, unresolved dependency, conflict, format error, execution error, or task mismatch; unused rounds or another catalog model alone are not reasons to edit."""
 
 
 class DirectorError(RuntimeError):
@@ -226,17 +228,23 @@ class AgentGraphOrchestrator:
         turn_index: int,
         skills: Sequence[Mapping[str, Any]],
     ) -> str:
-        preferred = self.registry.select_weighted(
-            seed=self.seed + turn_index,
-            cheap_bias=1.0,
-            fast_bias=1.0,
-        )
         catalog = [
             {
                 "model_id": model_id,
                 "selection_weight": self.registry.require_model(model_id).selection_weight,
                 "cheap_weight": self.registry.require_model(model_id).cheap_weight,
                 "fast_weight": self.registry.require_model(model_id).fast_weight,
+                "routing_metadata": {
+                    key: value
+                    for key, value in self.registry.require_model(model_id).metadata.items()
+                    if key
+                    in {
+                        "family",
+                        "profile",
+                        "text_qa_canary",
+                        "canary_source",
+                    }
+                },
             }
             for model_id in self.registry.model_ids
         ]
@@ -251,6 +259,7 @@ class AgentGraphOrchestrator:
             "max_rounds": self.max_rounds,
             "remaining_rounds": max(self.max_rounds - env.turn_count, 0),
             "current_graph": env.graph.to_dict(),
+            "topology_statistics": env.graph.topology_statistics(),
             "canvas_feedback": snapshot.last_feedback,
             # SkillFlow presents a bounded visible action-history tail to its
             # ReAct policy; keep the same boundary without adding role recipes.
@@ -269,17 +278,12 @@ class AgentGraphOrchestrator:
             },
             "model_catalog": catalog,
         }
-        # The cheap/fast suggestion helps the Director instantiate an empty
-        # Canvas. Once a valid workflow has executed, repeating a fresh model
-        # suggestion can spur an evidence-free edit instead of explicit finish.
-        if "execution_result=" not in snapshot.last_feedback:
-            payload["weighted_preferred_model"] = preferred.model_id
         if env.max_agents is not None:
             payload["max_agents"] = env.max_agents
         if skills:
             payload["available_skills"] = list(skills)
         return (
-            "Choose exactly one next action. A preferred model, when present, is only a cheap/fast suggestion.\n\n"
+            "Choose exactly one next action. Use only observed task, Canvas, and catalog facts.\n\n"
             + json.dumps(payload, ensure_ascii=False, sort_keys=True)
         )
 

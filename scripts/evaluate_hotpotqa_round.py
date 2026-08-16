@@ -111,7 +111,7 @@ def validate_hotpot_config(config: Mapping[str, Any]) -> None:
         "experiment.training_enabled": experiment.get("training_enabled") is False,
         "dataset_key": bounded.get("dataset_key") == "hotpotqa",
         "split": bounded.get("split") == "validation",
-        "selection": bounded.get("selection") == "sequential",
+        "selection": bounded.get("selection") in {"sequential", "task_ids"},
         "rollouts_per_task": bounded.get("rollouts_per_task") == 1,
         "direct_model_id": bounded.get("direct_model_id") == "qwen3.5-9b-local",
         "director.prompt_profile": director.get("prompt_profile") == "minimal",
@@ -136,6 +136,17 @@ def validate_hotpot_config(config: Mapping[str, Any]) -> None:
         raise ConfigurationError(
             "hotpotqa_evaluation.sample_count must be between 1 and 128"
         )
+    if bounded.get("selection") == "task_ids":
+        task_ids = bounded.get("task_ids")
+        if (
+            not isinstance(task_ids, list)
+            or len(task_ids) != sample_count
+            or not all(isinstance(item, str) and item.strip() for item in task_ids)
+            or len(set(task_ids)) != len(task_ids)
+        ):
+            raise ConfigurationError(
+                "task_ids selection requires sample_count unique non-empty task IDs"
+            )
     concurrency = bounded.get("concurrency")
     if isinstance(concurrency, bool) or not isinstance(concurrency, int) or concurrency < 1:
         raise ConfigurationError("hotpotqa_evaluation.concurrency must be positive")
@@ -204,7 +215,18 @@ def _select_tasks(config: Mapping[str, Any], root: Path, selected_path: Path) ->
         raise HotpotRoundError(
             f"validation contains only {len(candidates)} HotpotQA tasks; expected {count}"
         )
-    expected = candidates[:count]
+    if bounded.get("selection") == "task_ids":
+        candidates_by_id = {task.task_id: task for task in candidates}
+        requested = [str(task_id) for task_id in bounded["task_ids"]]
+        missing = [task_id for task_id in requested if task_id not in candidates_by_id]
+        if missing:
+            raise HotpotRoundError(
+                "requested HotpotQA task IDs are absent from validation: "
+                + ", ".join(missing)
+            )
+        expected = tuple(candidates_by_id[task_id] for task_id in requested)
+    else:
+        expected = candidates[:count]
     if selected_path.exists():
         frozen = tuple(iter_task_records(selected_path, expected_split="validation"))
         if len(frozen) != count:

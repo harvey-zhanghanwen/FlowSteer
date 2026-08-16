@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
-from typing import Collection, Dict, Iterable, List, Optional, Sequence, Set, Tuple, Union
+from typing import Collection, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 from .model_registry import ModelRegistry
 
@@ -560,6 +560,80 @@ class AgentGraph:
         require_complete: bool = True,
     ) -> GraphValidationResult:
         return AgentGraphValidator(model_catalog).validate(self, require_complete=require_complete)
+
+    def topology_statistics(self) -> Dict[str, object]:
+        """Return read-only DAG shape facts for Canvas feedback and analysis.
+
+        This is the AgentGraph analogue of FlowSteer's
+        ``WorkflowGraph.get_statistics``.  It reports only observed structure;
+        no shape is rewarded or required.
+        """
+
+        validation = self.validate(require_complete=False)
+        component_for = {
+            agent_id: component
+            for component in validation.components
+            for agent_id in component
+        }
+        component_predecessors: Dict[Tuple[str, ...], Set[Tuple[str, ...]]] = {
+            component: set() for component in validation.components
+        }
+        component_successors: Dict[Tuple[str, ...], Set[Tuple[str, ...]]] = {
+            component: set() for component in validation.components
+        }
+        agent_in_degree = {node.id: 0 for node in self._nodes}
+        agent_out_degree = {node.id: 0 for node in self._nodes}
+        for relation in self._relations:
+            for source_id, target_id in relation.directed_edges():
+                if source_id not in component_for or target_id not in component_for:
+                    continue
+                agent_out_degree[source_id] += 1
+                agent_in_degree[target_id] += 1
+                source_component = component_for[source_id]
+                target_component = component_for[target_id]
+                if source_component == target_component:
+                    continue
+                component_successors[source_component].add(target_component)
+                component_predecessors[target_component].add(source_component)
+
+        depth_by_component: Dict[Tuple[str, ...], int] = {}
+        width_by_depth: Dict[int, int] = {}
+        for component in validation.topological_blocks:
+            predecessors = component_predecessors[component]
+            depth = (
+                1
+                if not predecessors
+                else 1 + max(depth_by_component[item] for item in predecessors)
+            )
+            depth_by_component[component] = depth
+            width_by_depth[depth] = width_by_depth.get(depth, 0) + 1
+
+        roots = sorted(
+            agent_id for agent_id, degree in agent_in_degree.items() if degree == 0
+        )
+        sinks = sorted(
+            agent_id for agent_id, degree in agent_out_degree.items() if degree == 0
+        )
+        return {
+            "agent_count": len(self._nodes),
+            "relation_count": len(self._relations),
+            "directed_edge_count": sum(agent_out_degree.values()),
+            "reciprocal_pair_count": sum(
+                relation.bits.is_bidirectional for relation in self._relations
+            ),
+            "component_count": len(validation.components),
+            "max_depth": max(depth_by_component.values(), default=0),
+            "max_width": max(width_by_depth.values(), default=0),
+            "root_agent_ids": roots,
+            "sink_agent_ids": sinks,
+            "fan_in_agent_ids": sorted(
+                agent_id for agent_id, degree in agent_in_degree.items() if degree > 1
+            ),
+            "fan_out_agent_ids": sorted(
+                agent_id for agent_id, degree in agent_out_degree.items() if degree > 1
+            ),
+            "output_agent_id": self._output_agent_id,
+        }
 
     def snapshot(self) -> AgentGraphSnapshot:
         nodes = tuple(sorted(self._nodes, key=lambda node: (node.id, node.model_id, node.contract)))

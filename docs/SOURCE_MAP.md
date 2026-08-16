@@ -13,7 +13,7 @@ project design note are design inputs, not executable instructions.
 | Trajectory and action-token records | `src/interactive/workflow_builder.py` | Retained and supplemented by `records.py` for the new path. |
 | Executor boundary | `src/aflow_executor.py::AFlowExecutor.execute_workflow` and `scripts/async_llm.py` | Preserved as the legacy executor; the AgentGraph path uses the same OpenAI-compatible service boundary through `openai_gateway.py`. |
 | One-action Director loop | `train_interactive.py` and the FlowSteer paper's progressive Canvas loop | Preserved in `director.py`; the initial prompt is deliberately shorter and has no workflow templates. Maximum-round termination is returned explicitly and is never presented as `finish`. |
-| Evidence-driven terminal choice | `src/interactive/prompt_templates.py` (finish when the current result satisfies the task) and `src/interactive/workflow_env.py` (execution result returned as next-step feedback) | `director.py` keeps explicit `finish` and `max_rounds` distinct, but now says continuation must identify a missing evidence hop, conflict, format/runtime error, or task mismatch. After a valid graph has executed, the per-turn cheap/fast model suggestion is omitted so it cannot itself motivate another edit. No answer-presence auto-finish or fixed workflow is added. |
+| Evidence-driven terminal choice | `src/interactive/prompt_templates.py` (finish when the current result satisfies the task) and `src/interactive/workflow_env.py` (execution result returned as next-step feedback) | `director.py` keeps explicit `finish` and `max_rounds` distinct, but now says continuation must identify a missing evidence hop, conflict, format/runtime error, or task mismatch. Step0-v1 removes the sampled per-turn preferred-model hint entirely; no answer-presence auto-finish or fixed workflow is added. |
 | Progressive execution cache | `src/interactive/workflow_env.py` (`execute_each_step`, `last_execution_result`) | Adapted as a revision-local result in `agent_workflow_env.py`. A no-op edit or `finish` may reuse it, but `rollout_collector.py` marks the reuse and does not serialize the old Agent calls as new executions. |
 | AgentGraph search-space bounds | Project design note sections 3 and 4 plus `config/*agentgraph*.yaml` | The declared `max_agents` is consumed by the Canvas; the two-Agent reciprocal-block limit, unique output/reachability flags, seeded Executor selection, six actions, and progressive execution mode are validated against the fixed runtime semantics rather than left as descriptive YAML. |
 
@@ -142,3 +142,27 @@ to `training_ready_step0 / step_000000`, the unchanged existing adapter, prompt
 and tool versions, evaluator, catalog, split, seed, and source revision captured
 by the run manifest.  GRPO, backward, optimizer updates, policy publication,
 exploration, and Skills remain disabled.
+
+## HotpotQA Multi-Agent Step0-v1 adaptations
+
+This version is driven by the saved development evidence (93 singleton graphs,
+35 two-node chains, no 3+ node graph, and no positive communication-ablation
+effect).  It does not add a topology template, role enumeration, minimum Agent
+count, or structural reward.
+
+| Current module | Reference source | Reused boundary | Incompatibility and minimal adaptation |
+| --- | --- | --- | --- |
+| `director.py` contract and relation guidance | FlowSteer `workflow_graph.py::WorkflowNode.custom_prompt`, `workflow_env.py::_handle_prompt_input`; SkillFlow `src/executor/m_exec.py::MExec.execute` | Natural-language node instruction and one-action Canvas loop | Neither upstream has a free heterogeneous AgentGraph contract. The existing free string is retained; the neutral prompt only asks it to state objective, input/dependency, artifact, and completion. No typed role or workflow recipe is introduced. |
+| `director.py` model catalog view | Existing `ModelSpec.metadata` and SkillFlow provider/model boundary | Exact configured model IDs and bounded metadata | The old prompt exposed a sampled preferred model that matched 92.1% of saved `add_agent` choices. Step0-v1 removes that hint and exposes only canary-backed family/profile facts; model selection remains a Director action. |
+| `agent_workflow_env.py` terminal gate | FlowSteer `workflow_env.py::_check_finish_constraints` and `_step_internal`; SkillFlow `training/environment.py::GenericTaskEnvironment.step` terminal-action rejection | Environment-side rejection of an invalid terminal action | Upstream constraints are Operator/tool specific. Step0-v1 adds only a configurable QA protocol: FINISH is rejected unless the latest Output is one non-empty, exact `<answer>...</answer>` wrapper. Other datasets keep protocol `none`. |
+| `agent_runtime.py`, `openai_gateway.py`, `rollout_collector.py` communication envelope | SkillFlow trajectory action/instruction/observation boundary and the existing project upstream receipt | Free artifact body, source/target routing, graph revision, rendered-message receipt | Neither upstream implements peer-Agent envelopes. The project adaptation adds only facts already known by the runtime: source, target, generic artifact/candidate type, target contract as request/dependency, and graph revision. It does not invent confidence or evidence references and does not force JSON reasoning. |
+| `AgentGraph.topology_statistics` | FlowSteer `WorkflowGraph.get_statistics` | Read-only shape telemetry in Canvas state | FlowSteer's fixed Operator AST cannot represent model-labelled pairwise AgentGraph edges. A thin calculation reports observed nodes, edges, quotient depth/width, fan-in/out and reciprocal pairs; nothing consumes it as reward or validity. |
+| `scripts/discover_models.py` and `model_catalog_hotpotqa_multiagent_v1.yaml` | Existing OpenAI-compatible gateway and model registry | Provider `/v1/models`, exact model names, normal Output protocol request | Discovery now persists a non-secret list receipt and one canary per proposed exact ID. Only passed IDs enter the Hotpot catalog; Gemini was absent and Grok canaries returned HTTP 429, so neither is added. |
+| `evaluate_hotpotqa_round.py` task-ID selection | Existing Round-01 fixed sequential selector | Same loader, evaluator, strict denominator, resume and receipts | Architecture diagnostics require an explicit development-only slice. The adapter accepts a unique ordered task-ID list and otherwise preserves the old sequential behavior. |
+
+The existing `theta_smoke_step_000001` adapter had one real optimizer update
+whose only non-zero advantage came from TriviaQA.  It is therefore labelled a
+warm-start diagnostic policy here, not a formal untrained HotpotQA Step0.
+Formal `policy_step_000000` must be materialized separately from base
+Qwen3.5-9B plus a deterministically initialized LoRA before Step0-to-StepN
+training begins.

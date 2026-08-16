@@ -586,6 +586,18 @@ class LiveSmokeBackend:
         director = _mapping(self.config["director"], "director")
         graph_config = _mapping(self.config["agent_graph"], "agent_graph")
         experiment = _mapping(self.config["experiment"], "experiment")
+        terminal_protocols = graph_config.get("terminal_protocol_by_source", {})
+        if not isinstance(terminal_protocols, Mapping):
+            raise ConfigurationError(
+                "agent_graph.terminal_protocol_by_source must be a mapping"
+            )
+        terminal_protocol = str(
+            terminal_protocols.get(_dataset_key(task), "none")
+        ).strip()
+        if terminal_protocol not in {"none", "exact_single_answer_tag"}:
+            raise ConfigurationError(
+                "terminal protocol must be none or exact_single_answer_tag"
+            )
         orchestrator = AgentGraphOrchestrator(
             self.registry,
             self.director_client,
@@ -598,6 +610,9 @@ class LiveSmokeBackend:
             runtime=self.runtime,
             execute_on_edit=bool(director["execute_on_edit"]),
             max_agents=int(graph_config["max_agents"]),
+            require_exact_answer_tag=(
+                terminal_protocol == "exact_single_answer_tag"
+            ),
         )
         collector = AgentGraphRolloutCollector(
             orchestrator,

@@ -116,6 +116,7 @@ class AgentWorkflowEnv:
         graph: Optional[AgentGraph] = None,
         execute_on_edit: bool = False,
         max_agents: Optional[int] = None,
+        require_exact_answer_tag: bool = False,
     ) -> None:
         if runtime is None and gateway is None:
             raise AgentWorkflowStateError("gateway or runtime is required")
@@ -125,10 +126,13 @@ class AgentWorkflowEnv:
             isinstance(max_agents, bool) or not isinstance(max_agents, int) or max_agents < 1
         ):
             raise AgentWorkflowStateError("max_agents must be a positive integer or None")
+        if type(require_exact_answer_tag) is not bool:
+            raise AgentWorkflowStateError("require_exact_answer_tag must be bool")
         self.model_registry = model_registry
         self.runtime = runtime or AgentRuntime(model_registry, gateway)  # type: ignore[arg-type]
         self.execute_on_edit = execute_on_edit
         self.max_agents = max_agents
+        self.require_exact_answer_tag = require_exact_answer_tag
         self.parser = AgentActionParser()
         self._problem = problem.strip()
         self._graph = graph.fork() if graph is not None else AgentGraph()
@@ -220,6 +224,7 @@ class AgentWorkflowEnv:
             graph=AgentGraph.from_snapshot(state.graph),
             execute_on_edit=self.execute_on_edit,
             max_agents=self.max_agents,
+            require_exact_answer_tag=self.require_exact_answer_tag,
         )
         result._turn_count = state.turn_count
         result._finished = state.finished
@@ -262,6 +267,12 @@ class AgentWorkflowEnv:
                         action,
                         "cannot finish: " + self._execution_error_feedback(exc),
                     )
+            terminal_issue = self._terminal_validation_error(execution.final_answer)
+            if terminal_issue is not None:
+                return self._reject_after_count(
+                    action,
+                    "cannot finish: " + terminal_issue,
+                )
             self._finished = True
             self._last_feedback = "workflow finished"
             self._record_history(
@@ -379,9 +390,35 @@ class AgentWorkflowEnv:
                 output_inbox.append(
                     {
                         "source_agent_id": message.source_agent_id,
+                        "target_agent_id": message.target_agent_id,
+                        "message_type": message.message_type,
+                        "graph_revision": message.graph_revision,
+                        "request_or_dependency": message.request_or_dependency,
                         "content_preview": content,
                     }
                 )
+        calls_by_agent = {
+            call.request.agent.id: call for call in execution.calls
+        }
+        agent_artifacts = []
+        for agent_id, artifact in sorted(execution.outputs.items()):
+            call = calls_by_agent.get(agent_id)
+            preview = " ".join(artifact.split())
+            if len(preview) > 160:
+                preview = preview[:157] + "..."
+            agent_artifacts.append(
+                {
+                    "agent_id": agent_id,
+                    "model_id": None if call is None else call.request.model.model_id,
+                    "is_output_agent": agent_id == execution.output_agent_id,
+                    "upstream_source_ids": (
+                        []
+                        if call is None
+                        else [item.source_agent_id for item in call.request.upstream]
+                    ),
+                    "artifact_preview": preview,
+                }
+            )
         result = json.dumps(
             {
                 "output_agent_id": execution.output_agent_id,
@@ -391,11 +428,36 @@ class AgentWorkflowEnv:
                     "exact_single_answer_tag": exact_single_tag,
                 },
                 "output_inbox": output_inbox,
+                "agent_artifacts": agent_artifacts,
             },
             ensure_ascii=False,
             separators=(",", ":"),
         )
         return f"{feedback}; execution_result={result}"
+
+    def _terminal_validation_error(self, answer: str) -> Optional[str]:
+        """Apply the configured task terminal protocol before accepting FINISH.
+
+        FlowSteer rejects FINISH at the Canvas boundary when a terminal
+        constraint is unmet.  The exact answer wrapper is enabled only for QA
+        tasks because SkillFlow's interactive environments may terminate with
+        an admissible action instead of an XML answer.
+        """
+
+        if not self.require_exact_answer_tag:
+            return None
+        matches = re.findall(r"<answer>(.*?)</answer>", answer, flags=re.DOTALL)
+        exact_wrapper = bool(
+            re.fullmatch(r"\s*<answer>.*?</answer>\s*", answer, flags=re.DOTALL)
+        )
+        non_empty = len(matches) == 1 and bool(matches[0].strip())
+        if len(matches) == 1 and exact_wrapper and non_empty:
+            return None
+        return (
+            "terminal answer must be exactly one non-empty "
+            f"<answer>...</answer> wrapper; answer_tag_count={len(matches)}, "
+            f"exact_single_answer_tag={exact_wrapper}, non_empty={non_empty}"
+        )
 
     def _cached_progressive_execution(self) -> Optional[AgentRuntimeResult]:
         if self._progressive_execution_revision != self._graph.revision:

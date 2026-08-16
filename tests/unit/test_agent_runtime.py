@@ -58,6 +58,11 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(["m1", "m2"], [request.model.model_id for request in gateway.requests])
         self.assertFalse(gateway.requests[0].is_output_agent)
         self.assertTrue(gateway.requests[1].is_output_agent)
+        routed = gateway.requests[1].upstream[0]
+        self.assertEqual("artifact", routed.message_type)
+        self.assertEqual(snapshot.revision, routed.graph_revision)
+        self.assertEqual("answer", routed.request_or_dependency)
+        self.assertEqual(routed.content, routed.artifact)
         self.assertEqual(snapshot.to_dict(), graph.snapshot().to_dict())
 
     async def test_masked_condition_keeps_canonical_upstream_and_marks_requests(self) -> None:

@@ -39,7 +39,18 @@ def registry() -> ModelRegistry:
     return ModelRegistry(
         [ProviderSpec("provider", endpoint="http://local/v1")],
         [
-            ModelSpec("qwen", "provider", cheap_weight=10, fast_weight=10),
+            ModelSpec(
+                "qwen",
+                "provider",
+                cheap_weight=10,
+                fast_weight=10,
+                metadata={
+                    "family": "qwen",
+                    "profile": "text_qa",
+                    "text_qa_canary": "passed",
+                    "max_tokens": "512",
+                },
+            ),
             ModelSpec("other", "provider", cheap_weight=1, fast_weight=1),
         ],
     )
@@ -81,7 +92,7 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         result = await AgentGraphOrchestrator(model_registry, client, seed=1).run(env, "2+2?")
         self.assertEqual(result.final_answer, "answer from solver")
         self.assertEqual(len(result.turns), 3)
-        self.assertIn("weighted_preferred_model", client.prompts[0])
+        self.assertNotIn("weighted_preferred_model", client.prompts[0])
         self.assertNotIn("available_skills", client.prompts[0])
         self.assertEqual(result.final_graph["output_agent_id"], "solver")
         self.assertEqual(client.seeds, [1, 2, 3])
@@ -105,6 +116,18 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(initial_state["max_agents"], 10)
         self.assertEqual(initial_state["recent_canvas_history"], [])
         self.assertFalse(initial_state["complete_validation"]["valid"])
+        self.assertEqual(0, initial_state["topology_statistics"]["agent_count"])
+        qwen_catalog = next(
+            item for item in initial_state["model_catalog"] if item["model_id"] == "qwen"
+        )
+        self.assertEqual(
+            {
+                "family": "qwen",
+                "profile": "text_qa",
+                "text_qa_canary": "passed",
+            },
+            qwen_catalog["routing_metadata"],
+        )
         self.assertEqual(complete_state["remaining_rounds"], 18)
         self.assertTrue(complete_state["complete_validation"]["valid"])
         self.assertNotIn("weighted_preferred_model", complete_state)
@@ -118,6 +141,8 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
     async def test_director_terminal_policy_is_issue_driven_without_role_template(self) -> None:
         self.assertIn("Only the graph's Output Agent", DIRECTOR_SYSTEM_PROMPT)
         self.assertIn("specific missing evidence hop", DIRECTOR_SYSTEM_PROMPT)
+        self.assertIn("expected input or dependency", DIRECTOR_SYSTEM_PROMPT)
+        self.assertIn("two message directions", DIRECTOR_SYSTEM_PROMPT)
         self.assertIn("unused rounds", DIRECTOR_SYSTEM_PROMPT)
         self.assertNotIn("Researcher", DIRECTOR_SYSTEM_PROMPT)
         self.assertNotIn("Critic", DIRECTOR_SYSTEM_PROMPT)

@@ -100,6 +100,31 @@ class AgentGraphTests(unittest.TestCase):
         )
         self.assertTrue(reciprocal.validate(self.registry).valid)
 
+    def test_topology_statistics_report_observed_shape_without_requiring_it(self) -> None:
+        graph = AgentGraph(
+            [
+                AgentNode("a", "cheap", "left evidence"),
+                AgentNode("b", "fast", "right evidence"),
+                AgentNode("c", "balanced", "synthesize"),
+                AgentNode("out", "balanced", "answer"),
+            ],
+            [
+                AgentRelation("a", "c", True, False),
+                AgentRelation("b", "c", True, False),
+                AgentRelation("c", "out", True, False),
+            ],
+            output_agent_id="out",
+        )
+
+        stats = graph.topology_statistics()
+
+        self.assertEqual(4, stats["agent_count"])
+        self.assertEqual(3, stats["directed_edge_count"])
+        self.assertEqual(3, stats["max_depth"])
+        self.assertEqual(2, stats["max_width"])
+        self.assertEqual(["c"], stats["fan_in_agent_ids"])
+        self.assertEqual(["a", "b"], stats["root_agent_ids"])
+
     def test_all_validation_invariants(self) -> None:
         duplicate = AgentGraph(
             [AgentNode("a", "balanced", "one"), AgentNode("a", "balanced", "two")],
@@ -305,7 +330,47 @@ class _FailOnceGateway(_ImmediateGateway):
         return f"answer:{request.agent.id}"
 
 
+class _SequenceGateway(_ImmediateGateway):
+    def __init__(self, responses: list[str]) -> None:
+        super().__init__()
+        self.responses = list(responses)
+
+    async def generate(self, request: AgentRequest) -> str:
+        self.requests.append(request)
+        return self.responses.pop(0)
+
+
 class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
+    async def test_exact_answer_terminal_protocol_rejects_malformed_finish(self) -> None:
+        registry = make_registry()
+        gateway = _SequenceGateway(["Paris", "<answer>Paris</answer>"])
+        env = AgentWorkflowEnv(
+            registry,
+            gateway,
+            problem="question",
+            execute_on_edit=True,
+            require_exact_answer_tag=True,
+        )
+        await env.step(
+            '{"action":"add_agent","agent_id":"a","model_id":"balanced","contract":"answer"}'
+        )
+        progressive = await env.step('{"action":"set_output","agent_id":"a"}')
+        self.assertIn('"answer_tag_count":0', progressive.feedback)
+
+        rejected = await env.step('{"action":"finish"}')
+        self.assertFalse(rejected.accepted)
+        self.assertFalse(env.finished)
+        self.assertIn("terminal answer must be exactly one", rejected.feedback)
+        self.assertEqual(1, len(gateway.requests))
+
+        await env.step(
+            '{"action":"modify_agent","agent_id":"a","contract":"answer with exact wrapper"}'
+        )
+        finished = await env.step('{"action":"finish"}')
+        self.assertTrue(finished.accepted)
+        self.assertEqual("<answer>Paris</answer>", finished.final_answer)
+        self.assertEqual(2, len(gateway.requests))
+
     async def test_transactional_edits_finish_and_fork(self) -> None:
         registry = make_registry()
         gateway = _ImmediateGateway()
