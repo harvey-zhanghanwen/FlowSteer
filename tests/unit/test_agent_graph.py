@@ -400,6 +400,33 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(rejected.accepted)
                 self.assertFalse(env.finished)
 
+    async def test_revision_preserving_edit_is_rejected_without_reexecution(self) -> None:
+        registry = make_registry()
+        gateway = _SequenceGateway(["not wrapped"])
+        env = AgentWorkflowEnv(
+            registry,
+            gateway,
+            problem="question",
+            execute_on_edit=True,
+            require_exact_answer_tag=True,
+        )
+        await env.step(
+            '{"action":"add_agent","agent_id":"a","model_id":"balanced",'
+            '"contract":"answer"}'
+        )
+        selected = await env.step('{"action":"set_output","agent_id":"a"}')
+        self.assertTrue(selected.accepted)
+        self.assertEqual(1, len(gateway.requests))
+
+        repeated = await env.step('{"action":"set_output","agent_id":"a"}')
+        self.assertFalse(repeated.accepted)
+        self.assertIn("action made no graph change", repeated.feedback)
+        self.assertEqual(1, len(gateway.requests))
+
+        finish = await env.step('{"action":"finish"}')
+        self.assertFalse(finish.accepted)
+        self.assertIn("modify the Output Agent contract/model", finish.feedback)
+
     async def test_transactional_edits_finish_and_fork(self) -> None:
         registry = make_registry()
         gateway = _ImmediateGateway()
@@ -484,7 +511,7 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(finished.execution_reused)
         self.assertEqual(1, len(gateway.requests))
 
-    async def test_noop_edit_reuses_same_revision_execution(self) -> None:
+    async def test_noop_edit_is_rejected_without_reusing_execution(self) -> None:
         registry = make_registry()
         gateway = _ImmediateGateway()
         env = AgentWorkflowEnv(
@@ -500,9 +527,11 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         repeated = await env.step('{"action":"set_output","agent_id":"a"}')
 
         self.assertEqual(first.revision, repeated.revision)
-        self.assertIs(first.execution, repeated.execution)
-        self.assertTrue(repeated.execution_reused)
-        self.assertTrue(repeated.snapshot.history[-1].execution_reused)
+        self.assertFalse(repeated.accepted)
+        self.assertIsNone(repeated.execution)
+        self.assertFalse(repeated.execution_reused)
+        self.assertFalse(repeated.snapshot.history[-1].execution_reused)
+        self.assertIn("action made no graph change", repeated.feedback)
         self.assertEqual(1, len(gateway.requests))
 
     async def test_history_survives_snapshot_restore_and_fork(self) -> None:

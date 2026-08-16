@@ -199,3 +199,24 @@ only execution-condition and receipt defects proven by v2:
 This remains a warm-start architecture-development evaluation.  GRPO,
 backward, optimizer work, policy publication, MACE, Bayesian updates, and
 Skills are disabled.
+
+## HotpotQA Multi-Agent architecture-v4 no-op feedback repair
+
+V3 saved one 20-turn failure in which the Director repeatedly selected the
+already-selected Output Agent.  `AgentGraph` correctly left its revision
+unchanged, but the Canvas labelled the edit accepted and replayed the cached
+invalid Output.  FlowSteer's existing
+`workflow_env.py::_format_pending_modify_prompt_request` explicitly requires a
+different prompt after failure to prevent the same execution loop.  V4 applies
+that boundary to the free AgentGraph Canvas: any non-FINISH action that changes
+no graph revision is rejected with a compact instruction to change the Agent
+contract/model or graph before expecting another execution.  Terminal-format
+feedback carries the same hint.  No action, role, topology, reward, evaluator,
+or model-selection rule is added.
+
+The v4 regression config supplies an explicit catalog-order namespace equal to
+the v3 development namespace.  This reuses the existing task-stable shuffle
+while preventing an unrelated condition label from changing model
+presentation during the targeted v3-to-v4 comparison.  Sampling seeds,
+condition ID, prompt/tool version, and trajectory versions remain separately
+recorded.

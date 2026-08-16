@@ -310,6 +310,12 @@ class AgentWorkflowEnv:
             self._apply_mutation(candidate, action)
         except (GraphMutationError, TypeError, ValueError) as exc:
             return self._reject_after_count(action, f"edit rejected: {exc}")
+        if candidate.revision == previous_revision:
+            return self._reject_after_count(
+                action,
+                "edit rejected: action made no graph change; modify an Agent "
+                "contract/model or another graph field before expecting a new execution",
+            )
         validation = candidate.validate(self.model_registry, require_complete=False)
         if not validation.valid:
             return self._reject_after_count(
@@ -460,7 +466,8 @@ class AgentWorkflowEnv:
         return (
             "terminal answer must be exactly one non-empty "
             f"<answer>...</answer> wrapper; answer_tag_count={tag_count}, "
-            f"exact_single_answer_tag={exact_wrapper}, non_empty={non_empty}"
+            f"exact_single_answer_tag={exact_wrapper}, non_empty={non_empty}; "
+            "modify the Output Agent contract/model or graph before retrying"
         )
 
     def _cached_progressive_execution(self) -> Optional[AgentRuntimeResult]:

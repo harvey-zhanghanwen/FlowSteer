@@ -598,13 +598,21 @@ class LiveSmokeBackend:
             raise ConfigurationError(
                 "terminal protocol must be none or exact_single_answer_tag"
             )
+        catalog_order_namespace = str(
+            experiment.get(
+                "catalog_order_namespace",
+                experiment.get("condition_id", "natural_smoke"),
+            )
+        ).strip()
+        if not catalog_order_namespace:
+            raise ConfigurationError("experiment.catalog_order_namespace must be non-empty")
         orchestrator = AgentGraphOrchestrator(
             self.registry,
             self.director_client,
             max_rounds=int(director["max_rounds"]),
             seed=int(experiment["seed"]) + rollout_index,
             catalog_order_seed=(
-                f"{experiment['seed']}:{experiment.get('condition_id', 'natural_smoke')}:"
+                f"{experiment['seed']}:{catalog_order_namespace}:"
                 f"{task.task_id}"
             ),
             history_window=int(director["history_window"]),
