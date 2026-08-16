@@ -497,6 +497,9 @@ class LiveSmokeBackend:
                         if director.get("optimizer_state_checkpoint")
                         else None
                     ),
+                    exact_optimizer_continuation=bool(
+                        grpo.get("exact_optimizer_continuation", False)
+                    ),
                     learner_device=str(gpu["learner_device"]),
                     gradient_replica_device=str(gpu["gradient_replica_device"]),
                     lora_rank=int(lora["rank"]),
@@ -737,6 +740,28 @@ class LiveSmokeBackend:
         director = _mapping(self.config["director"], "director")
         experiment = _mapping(self.config["experiment"], "experiment")
         checkpoint_version = f"checkpoint:{summary.updated_policy_version}"
+        previous_policy_version = self.director_client.policy_version
+        previous_adapter = self.director_client.adapter_name
+        previous_server_weight_version = (
+            self.director_client.expected_server_weight_version
+        )
+
+        def switch_route(policy_version: str, adapter_name: str) -> None:
+            self.director_client.update_policy_route(
+                policy_version=policy_version,
+                adapter_name=adapter_name,
+                expected_server_weight_version=str(
+                    director["expected_server_weight_version"]
+                ),
+            )
+
+        def restore_route() -> None:
+            self.director_client.update_policy_route(
+                policy_version=previous_policy_version,
+                adapter_name=previous_adapter,
+                expected_server_weight_version=previous_server_weight_version,
+            )
+
         try:
             receipt = await asyncio.to_thread(
                 self.publisher.publish,
@@ -745,31 +770,13 @@ class LiveSmokeBackend:
                 behavior_policy_version=summary.behavior_policy_version,
                 candidate_policy_version=summary.updated_policy_version,
                 step=int(experiment.get("update_step", 1)),
-                previous_adapter=(
-                    str(director["behavior_adapter_name"])
-                    if director.get("behavior_adapter_name")
-                    else None
-                ),
+                previous_adapter=previous_adapter,
                 gate=self.rollout_gate,
+                route_switch=switch_route,
+                route_rollback=restore_route,
             )
         except PolicySyncError:
             raise
-
-        # The publisher has proven and committed the adapter. Bind subsequent
-        # native /generate calls to both its registered name and logical policy
-        # version under a second pause/drain boundary before any canary starts.
-        self.rollout_gate.pause()
-        try:
-            self.rollout_gate.drain()
-            self.director_client.update_policy_route(
-                policy_version=str(receipt.new_policy_version),
-                adapter_name=receipt.adapter_name,
-                expected_server_weight_version=str(
-                    director["expected_server_weight_version"]
-                ),
-            )
-        finally:
-            self.rollout_gate.resume()
         return receipt
 
 

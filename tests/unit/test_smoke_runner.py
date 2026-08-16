@@ -357,6 +357,102 @@ class SmokeRunnerTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual("failed_no_optimizer_update", manifest["status"])
 
+    async def test_live_backend_switches_director_route_inside_publisher_gate(
+        self,
+    ) -> None:
+        class RecordingGate(_MODULE.RolloutGate):
+            def __init__(self) -> None:
+                super().__init__(poll_interval_seconds=0.001)
+                self.events: list[str] = []
+
+            def pause(self) -> None:
+                self.events.append("pause")
+                super().pause()
+
+            def drain(self, timeout_seconds=None) -> None:
+                self.events.append("drain")
+                super().drain(timeout_seconds)
+
+            def resume(self) -> None:
+                self.events.append("resume")
+                super().resume()
+
+        class RouteClient:
+            def __init__(self, gate) -> None:
+                self.gate = gate
+                self.policy_version = "behavior-v0"
+                self.adapter_name = "theta_smoke_step_000000"
+                self.expected_server_weight_version = "server-v0"
+                self.updates: list[tuple[str, str | None, str | None]] = []
+
+            def update_policy_route(
+                self,
+                *,
+                policy_version,
+                adapter_name,
+                expected_server_weight_version,
+            ) -> None:
+                self.gate.require_paused_and_drained()
+                self.policy_version = policy_version
+                self.adapter_name = adapter_name
+                self.expected_server_weight_version = expected_server_weight_version
+                self.updates.append(
+                    (
+                        policy_version,
+                        adapter_name,
+                        expected_server_weight_version,
+                    )
+                )
+
+        class TransactionalPublisher:
+            def __init__(self, client) -> None:
+                self.client = client
+
+            def publish(self, **kwargs):
+                gate = kwargs["gate"]
+                gate.pause()
+                try:
+                    gate.drain()
+                    kwargs["route_switch"](
+                        "qwen35-9b-smoke-step-0001",
+                        "theta_smoke_step_000001",
+                    )
+                    assert self.client.adapter_name == "theta_smoke_step_000001"
+                finally:
+                    gate.resume()
+                return Receipt()
+
+        gate = RecordingGate()
+        client = RouteClient(gate)
+        backend = object.__new__(_MODULE.LiveSmokeBackend)
+        backend.config = {
+            "director": {
+                "behavior_adapter_name": "theta_smoke_step_000000",
+                "expected_server_weight_version": "server-v1",
+            },
+            "experiment": {"update_step": 1},
+        }
+        backend.director_client = client
+        backend.rollout_gate = gate
+        backend.publisher = TransactionalPublisher(client)
+
+        summary = Summary(Path(self._temp_dir.name))
+        receipt = await backend.publish(summary)
+
+        self.assertIsInstance(receipt, Receipt)
+        self.assertEqual(gate.events, ["pause", "drain", "resume"])
+        self.assertFalse(gate.paused)
+        self.assertEqual(
+            client.updates,
+            [
+                (
+                    "qwen35-9b-smoke-step-0001",
+                    "theta_smoke_step_000001",
+                    "server-v1",
+                )
+            ],
+        )
+
     def setUp(self) -> None:
         import tempfile
 

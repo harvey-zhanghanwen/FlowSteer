@@ -118,6 +118,16 @@ class PolicySyncTests(unittest.TestCase):
         stale = "theta_smoke_step_999999"
         control = _SGLangControl({previous, stale})
         gate = _Gate()
+        route = {"policy": previous, "adapter": previous}
+
+        def switch_route(policy_version: str, adapter_name: str) -> None:
+            self.assertEqual(gate.events, ["pause", "drain"])
+            self.assertIn(previous, control.adapters)
+            self.assertIn(adapter_name, control.adapters)
+            route.update(policy=policy_version, adapter=adapter_name)
+
+        def restore_route() -> None:
+            route.update(policy=previous, adapter=previous)
 
         receipt = self.publisher(control).publish(
             checkpoint_path=self.checkpoint,
@@ -127,6 +137,8 @@ class PolicySyncTests(unittest.TestCase):
             step=1,
             previous_adapter=previous,
             gate=gate,
+            route_switch=switch_route,
+            route_rollback=restore_route,
         )
 
         self.assertTrue(receipt.success)
@@ -144,6 +156,18 @@ class PolicySyncTests(unittest.TestCase):
         )
         self.assertEqual(control.adapters, {"theta_smoke_step_000001"})
         self.assertEqual(gate.events, ["pause", "drain", "resume"])
+        self.assertEqual(
+            route,
+            {
+                "policy": "qwen35-9b-smoke-step-0001",
+                "adapter": "theta_smoke_step_000001",
+            },
+        )
+        self.assertTrue(receipt.route_switch_requested)
+        self.assertTrue(receipt.route_switch_succeeded)
+        self.assertIsNone(receipt.route_rollback_succeeded)
+        self.assertTrue(receipt.training_performed)
+        self.assertTrue(receipt.policy_published)
 
         operations = [(method, operation) for method, operation, _ in control.calls]
         canary_index = operations.index(("post", "completions"))
@@ -181,7 +205,9 @@ class PolicySyncTests(unittest.TestCase):
             ],
         )
 
-    def test_failed_canary_unloads_candidate_and_preserves_behavior_adapter(self) -> None:
+    def test_failed_canary_unloads_candidate_and_preserves_behavior_adapter(
+        self,
+    ) -> None:
         previous = "theta_smoke_step_000000"
         control = _SGLangControl({previous})
         control.fail_canary = True
@@ -226,6 +252,16 @@ class PolicySyncTests(unittest.TestCase):
         previous = "theta_smoke_step_000000"
         control = _SGLangControl({previous})
         control.rejected_unloads.add(previous)
+        gate = _Gate()
+        route = {"policy": "qwen35-9b-smoke-step-0000", "adapter": previous}
+
+        def switch_route(policy_version: str, adapter_name: str) -> None:
+            route.update(policy=policy_version, adapter=adapter_name)
+
+        def restore_route() -> None:
+            self.assertEqual(gate.events, ["pause", "drain"])
+            self.assertIn(previous, control.adapters)
+            route.update(policy="qwen35-9b-smoke-step-0000", adapter=previous)
 
         with self.assertRaises(PolicySyncError) as caught:
             self.publisher(control).publish(
@@ -235,6 +271,9 @@ class PolicySyncTests(unittest.TestCase):
                 candidate_policy_version="qwen35-9b-smoke-step-0001",
                 step=1,
                 previous_adapter=previous,
+                gate=gate,
+                route_switch=switch_route,
+                route_rollback=restore_route,
             )
 
         receipt = caught.exception.receipt
@@ -242,6 +281,145 @@ class PolicySyncTests(unittest.TestCase):
         self.assertTrue(receipt.rollback_succeeded)
         self.assertIsNone(receipt.new_policy_version)
         self.assertEqual(control.adapters, {previous})
+        self.assertTrue(receipt.route_switch_succeeded)
+        self.assertTrue(receipt.route_rollback_succeeded)
+        self.assertEqual(
+            route,
+            {"policy": "qwen35-9b-smoke-step-0000", "adapter": previous},
+        )
+        self.assertEqual(gate.events, ["pause", "drain", "resume"])
+
+    def test_existing_initial_adapter_activation_is_not_training_publication(
+        self,
+    ) -> None:
+        previous = "theta_smoke_step_000001"
+        initial = "theta_initial_step_000000"
+        # Both slots may already be occupied when formal Step0 attaches the
+        # deterministic initial adapter; activation must not load it twice.
+        control = _SGLangControl({previous, initial})
+        gate = _Gate()
+        route = {"policy": "warm-policy", "adapter": previous}
+
+        def switch_route(policy_version: str, adapter_name: str) -> None:
+            self.assertEqual(gate.events, ["pause", "drain"])
+            self.assertEqual(control.adapters, {previous, initial})
+            route.update(policy=policy_version, adapter=adapter_name)
+
+        receipt = self.publisher(control).activate_existing_policy(
+            checkpoint_path=self.checkpoint,
+            checkpoint_version="initial-checkpoint-v1",
+            behavior_policy_version="warm-policy",
+            active_policy_version="qwen35-9b-initial-step-0000",
+            adapter_name=initial,
+            previous_adapter=previous,
+            gate=gate,
+            route_switch=switch_route,
+            route_rollback=lambda: route.update(
+                policy="warm-policy",
+                adapter=previous,
+            ),
+        )
+
+        self.assertTrue(receipt.success)
+        self.assertEqual(receipt.status, "activated_existing")
+        self.assertFalse(receipt.training_performed)
+        self.assertFalse(receipt.policy_published)
+        self.assertTrue(receipt.route_switch_succeeded)
+        self.assertEqual(control.adapters, {initial})
+        self.assertEqual(
+            route,
+            {"policy": "qwen35-9b-initial-step-0000", "adapter": initial},
+        )
+        self.assertEqual(gate.events, ["pause", "drain", "resume"])
+        candidate_loads = [
+            kwargs["json"]["lora_name"]
+            for method, operation, kwargs in control.calls
+            if method == "post" and operation == "load_lora_adapter"
+        ]
+        self.assertEqual(candidate_loads, [])
+
+    def test_existing_initial_checkpoint_loads_then_releases_warm_adapter(
+        self,
+    ) -> None:
+        previous = "theta_smoke_step_000001"
+        initial = "theta_hotpot_step_000000"
+        control = _SGLangControl({previous})
+        gate = _Gate()
+        route = {"policy": "warm-policy", "adapter": previous}
+
+        receipt = self.publisher(control).activate_existing_policy(
+            checkpoint_path=self.checkpoint,
+            checkpoint_version="initial-checkpoint-v1",
+            behavior_policy_version="warm-policy",
+            active_policy_version="qwen35-9b-hotpot-step-000000",
+            adapter_name=initial,
+            previous_adapter=previous,
+            gate=gate,
+            route_switch=lambda policy, adapter: route.update(
+                policy=policy,
+                adapter=adapter,
+            ),
+            route_rollback=lambda: route.update(
+                policy="warm-policy",
+                adapter=previous,
+            ),
+        )
+
+        self.assertTrue(receipt.success)
+        self.assertFalse(receipt.training_performed)
+        self.assertFalse(receipt.policy_published)
+        self.assertEqual(control.adapters, {initial})
+        self.assertEqual(
+            route,
+            {"policy": "qwen35-9b-hotpot-step-000000", "adapter": initial},
+        )
+        loads = [
+            kwargs["json"]["lora_name"]
+            for method, operation, kwargs in control.calls
+            if method == "post" and operation == "load_lora_adapter"
+        ]
+        self.assertEqual(loads, [initial])
+        self.assertEqual(gate.events, ["pause", "drain", "resume"])
+
+    def test_existing_initial_activation_rolls_route_back_before_candidate_cleanup(
+        self,
+    ) -> None:
+        previous = "theta_smoke_step_000001"
+        initial = "theta_initial_step_000000"
+        control = _SGLangControl({previous})
+        control.rejected_unloads.add(previous)
+        gate = _Gate()
+        route = {"policy": "warm-policy", "adapter": previous}
+
+        def switch_route(policy_version: str, adapter_name: str) -> None:
+            route.update(policy=policy_version, adapter=adapter_name)
+
+        def restore_route() -> None:
+            self.assertIn(initial, control.adapters)
+            route.update(policy="warm-policy", adapter=previous)
+
+        with self.assertRaises(PolicySyncError) as caught:
+            self.publisher(control).activate_existing_policy(
+                checkpoint_path=self.checkpoint,
+                checkpoint_version="initial-checkpoint-v1",
+                behavior_policy_version="warm-policy",
+                active_policy_version="qwen35-9b-initial-step-0000",
+                adapter_name=initial,
+                previous_adapter=previous,
+                gate=gate,
+                route_switch=switch_route,
+                route_rollback=restore_route,
+            )
+
+        receipt = caught.exception.receipt
+        self.assertFalse(receipt.success)
+        self.assertFalse(receipt.training_performed)
+        self.assertFalse(receipt.policy_published)
+        self.assertTrue(receipt.route_rollback_succeeded)
+        self.assertTrue(receipt.rollback_succeeded)
+        self.assertEqual(control.adapters, {previous})
+        self.assertEqual(route, {"policy": "warm-policy", "adapter": previous})
+        self.assertEqual(gate.events, ["pause", "drain", "resume"])
 
     def test_receipt_contains_versions_and_times_but_no_checkpoint_hash(self) -> None:
         control = _SGLangControl(set())

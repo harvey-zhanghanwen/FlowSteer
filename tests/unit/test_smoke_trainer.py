@@ -178,6 +178,14 @@ class SmokeTrainerConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "optimizer continuation"):
             _config(optimizer_state_checkpoint="/checkpoints/optimizer_state.pt")
 
+    def test_formal_step_two_requires_exact_optimizer_continuation(self) -> None:
+        with self.assertRaisesRegex(ValueError, r"formal step 2\+"):
+            _config(
+                update_step=2,
+                behavior_adapter_checkpoint="/checkpoints/step-1/theta",
+                exact_optimizer_continuation=True,
+            )
+
 
 class CostBalancedPartitionTests(unittest.TestCase):
     def test_exact_groups_use_skillflow_greedy_token_cost_partition(self) -> None:
@@ -235,6 +243,7 @@ class ContinuationStateTests(unittest.TestCase):
         torch.load.return_value = {
             "format": "flowsteer-smoke-optimizer-v1",
             "committed_step": 2,
+            "updated_policy_version": BEHAVIOR_POLICY,
             "optimizer_state_dict": {"state": {}, "param_groups": []},
         }
         optimizer = MagicMock()
@@ -263,6 +272,59 @@ class ContinuationStateTests(unittest.TestCase):
         torch.load.return_value["committed_step"] = 1
         with self.assertRaisesRegex(ValueError, "immediately precede"):
             trainer._restore_optimizer_state(torch, optimizer)
+
+        torch.load.return_value["committed_step"] = 2
+        torch.load.return_value["updated_policy_version"] = "wrong-policy"
+        with self.assertRaisesRegex(ValueError, "must equal the behavior policy"):
+            trainer._restore_optimizer_state(torch, optimizer)
+
+    def test_formal_step_one_saves_optimizer_state(self) -> None:
+        torch = MagicMock()
+        optimizer = MagicMock()
+        optimizer.state_dict.return_value = {"state": {}}
+        trainer = Qwen35OnePassSmokeTrainer(
+            _config(
+                update_step=1,
+                exact_optimizer_continuation=True,
+                behavior_adapter_checkpoint="/checkpoints/step-0/theta",
+            )
+        )
+        with TemporaryDirectory() as directory:
+            path, saved = trainer._save_optimizer_state(
+                torch,
+                optimizer,
+                Path(directory),
+            )
+
+        self.assertTrue(saved)
+        self.assertTrue(path.endswith("optimizer_state.pt"))
+        payload, _ = torch.save.call_args.args
+        self.assertEqual(payload["committed_step"], 1)
+
+    def test_formal_behavior_adapter_metadata_binds_previous_step_and_policy(self) -> None:
+        with TemporaryDirectory() as directory:
+            checkpoint = Path(directory)
+            metadata = checkpoint / "policy_version.json"
+            metadata.write_text(
+                '{"committed_step": 0, '
+                f'"policy_version": "{BEHAVIOR_POLICY}"}}',
+                encoding="utf-8",
+            )
+            trainer = Qwen35OnePassSmokeTrainer(
+                _config(
+                    update_step=1,
+                    exact_optimizer_continuation=True,
+                    behavior_adapter_checkpoint=str(checkpoint),
+                )
+            )
+            trainer._validate_behavior_checkpoint_metadata()
+
+            metadata.write_text(
+                '{"committed_step": 0, "policy_version": "wrong"}',
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "policy metadata differs"):
+                trainer._validate_behavior_checkpoint_metadata()
 
     def test_step_two_saves_optimizer_state_and_committed_step(self) -> None:
         torch = MagicMock()

@@ -242,3 +242,25 @@ This compatibility change does not alter the Director prompt, Canvas action
 space, model catalog, Agent runtime, evaluator, reward, MACE/Bayesian state, or
 Skill visibility.  It is required before a controlled architecture A/B or
 formal Step0-to-StepN comparison can be interpreted.
+
+## HotpotQA formal Step-0 static training preconditions
+
+These modules close the four static compatibility gaps listed by the v5
+report.  They do not execute a rollout, optimizer, policy publication, or
+Skill evolution loop.  The upstream implementation remains the source of the
+transactional boundaries; the local code is limited to this repository's
+single-`theta` AgentGraph policy and already-aligned HotpotQA records.
+
+| Current module | Classification | Reference source | Reused boundary | Incompatibility and minimal adaptation |
+| --- | --- | --- | --- | --- |
+| `hotpot_step0.py`, `materialize_hotpotqa_step0.py` | Necessary adaptation | SkillFlow `scripts/build_gate_4c_initial_policy.py::main`; `src/skillev/policy/hf_backbone.py::{bind_initial_trainable_state,save_checkpoint}`; existing `smoke_trainer.py::Qwen35OnePassSmokeTrainer._load_models` | Fixed initialization seed, deterministic algorithms, bind-before-save, fresh output, and immutable initial-policy receipt | SkillFlow persists forward/backward adapters and a Z head.  This Director has one SGLang-facing PEFT adapter named `theta`, so the adapter reuses the existing Qwen3.5 multimodal/PEFT loader and saves only untouched `theta` tensors.  Its default command is a no-model, no-write preflight; materialization is explicit and was not run in this phase. |
+| `hotpot_training_schedule.py`, `freeze_hotpot_training_schedule.py` | Necessary adaptation | SkillFlow `packages/private-evaluation/.../curriculum.py::{PrivateFrozenTaskSequence,frozen_sequence_from_task_ids}`; `src/skillev/benchmarks/static.py::OrderedBenchmarkTaskProvider`; `src/skillev/runtime/execution_state.py::OrderedTaskCursorState`; `src/skillev/runtime/attempt_run_plan.py::AttemptRunProgress` | Immutable task order, exact cursor, write-once artifacts, and one-step-at-a-time progress | SkillFlow's private provider is not this project's aligned JSONL loader and does not carry the local grouped-rollout ordinal.  The adapter binds existing HotpotQA train positions and task-local rollout ordinals, rejects validation/test membership, and never re-splits data.  It does not collect or train. |
+| `smoke_trainer.py`, `train_agentgraph_smoke.py` exact-continuation flag | Necessary adaptation | SkillFlow `src/skillev/training/checkpoint.py::FilesystemTrainingCheckpointStore::{save,restore}` and `src/skillev/training/runtime_components.py::TTBOptimizerKernel.restore_policy_optimizer_exact` | Save policy plus optimizer continuation state and require the immediately preceding runtime identity before the next update | The local one-pass learner already has a PEFT checkpoint layout rather than SkillFlow's forward/backward/Z checkpoint.  Formal mode now saves AdamW state from Step 1, requires it for Step 2+, and binds adapter/optimizer metadata to the immediately preceding policy.  Legacy smoke behavior remains available only when the formal flag is false.  No optimizer step was run for this change. |
+| `policy_sync.py`, `train_agentgraph_smoke.py::LiveSmokeBackend.publish` | Necessary adaptation | SkillFlow `src/skillev/runtime/sglang_gateway.py::{_swap_supervisor_adapter_sync,_validate_adapter}` and `training/external_sglang.py::publish_external_adapter` | Pause admission, drain in-flight calls, load, model-list verification, canary, generation-route switch, old-adapter unload, rollback, and resume | SkillFlow owns the active generation route inside its gateway; this repository stores it in `SGLangReceiptDirectorClient`.  Two small callbacks move route switch/rollback into the same publisher transaction.  `activate_existing_policy` applies the same boundary to an already-materialized untrained Step 0 while recording `training_performed=false` and `policy_published=false`. |
+
+There is no project-algorithm addition in these four modules.  AgentGraph,
+MACE, Bayesian exploration, and Skill lifecycle remain the project/design-note
+layer described above and are not activated here.  Real Step-0 materialization,
+live SGLang activation, frozen experiment-schedule publication, rollout,
+GRPO/backward, optimizer update, and Step-1+ policy publication remain
+unexecuted until a later explicitly authorized training phase.

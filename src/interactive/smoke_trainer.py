@@ -50,6 +50,7 @@ class SmokeTrainerConfig:
     learning_rate: float = 1.0e-5
     update_step: int = 1
     optimizer_state_checkpoint: str | None = None
+    exact_optimizer_continuation: bool = False
     max_grad_norm: float = 1.0
     advantage_epsilon: float = 1.0e-8
     behavior_logprob_tolerance: float = 0.25
@@ -103,8 +104,25 @@ class SmokeTrainerConfig:
                 raise ValueError(f"{name} must be non-empty when supplied")
         if type(self.update_step) is not int or self.update_step <= 0:
             raise ValueError("update_step must be a positive integer")
+        if type(self.exact_optimizer_continuation) is not bool:
+            raise ValueError("exact_optimizer_continuation must be bool")
+        if (
+            self.exact_optimizer_continuation
+            and self.behavior_adapter_checkpoint is None
+        ):
+            raise ValueError(
+                "formal optimization requires an explicit behavior adapter checkpoint"
+            )
         if self.update_step > 1 and self.behavior_adapter_checkpoint is None:
             raise ValueError("step 2+ requires a behavior adapter checkpoint")
+        if (
+            self.exact_optimizer_continuation
+            and self.update_step > 1
+            and self.optimizer_state_checkpoint is None
+        ):
+            raise ValueError(
+                "formal step 2+ requires the immediately preceding optimizer state"
+            )
         if (
             self.optimizer_state_checkpoint is not None
             and self.behavior_adapter_checkpoint is None
@@ -405,6 +423,7 @@ class Qwen35OnePassSmokeTrainer:
             self._write_summary(output_path, summary)
             return summary
 
+        self._validate_behavior_checkpoint_metadata()
         torch, learner, replica = self._load_models()
         group_partitions, _ = _partition_groups_by_token_cost(
             informative,
@@ -737,6 +756,37 @@ class Qwen35OnePassSmokeTrainer:
         self._sync_lora_weights(learner, replica)
         return torch, learner, replica
 
+    def _validate_behavior_checkpoint_metadata(self) -> None:
+        """Bind a formal update to the immediately preceding adapter receipt."""
+
+        if not self.config.exact_optimizer_continuation:
+            return
+        assert self.config.behavior_adapter_checkpoint is not None
+        metadata_path = (
+            Path(self.config.behavior_adapter_checkpoint) / "policy_version.json"
+        )
+        if not metadata_path.is_file():
+            raise ValueError(
+                "formal behavior adapter is missing policy_version.json"
+            )
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+        if not isinstance(payload, Mapping):
+            raise ValueError("formal behavior policy metadata must be a mapping")
+        committed_step = payload.get("committed_step")
+        if committed_step != self.config.update_step - 1:
+            raise ValueError(
+                "behavior adapter committed step must immediately precede update_step"
+            )
+        behavior_policy = (
+            payload.get("policy_version")
+            if committed_step == 0
+            else payload.get("updated_policy_version")
+        )
+        if behavior_policy != self.config.behavior_policy_version:
+            raise ValueError(
+                "behavior adapter policy metadata differs from the configured policy"
+            )
+
     def _restore_optimizer_state(self, torch, optimizer) -> str:
         state_checkpoint = self.config.optimizer_state_checkpoint
         if state_checkpoint is None:
@@ -768,14 +818,17 @@ class Qwen35OnePassSmokeTrainer:
         optimizer_state = payload.get("optimizer_state_dict")
         if not isinstance(optimizer_state, Mapping):
             raise ValueError("optimizer checkpoint is missing optimizer_state_dict")
+        if payload.get("updated_policy_version") != self.config.behavior_policy_version:
+            raise ValueError(
+                "optimizer checkpoint updated policy must equal the behavior policy"
+            )
         optimizer.load_state_dict(optimizer_state)
         return "restored_optimizer"
 
     def _save_optimizer_state(self, torch, optimizer, checkpoint: Path) -> tuple[str, bool]:
-        # Step 1 remains compatible with the already-materialized smoke
-        # checkpoint.  Starting at step 2, every committed adapter carries the
-        # AdamW state needed for exact continuation at the next update.
-        if self.config.update_step < 2:
+        # Keep the historical smoke profile compatible, while the formal
+        # profile saves AdamW state from Step 1 onward for exact continuation.
+        if self.config.update_step < 2 and not self.config.exact_optimizer_continuation:
             return "", False
         state_path = checkpoint / "optimizer_state.pt"
         torch.save(

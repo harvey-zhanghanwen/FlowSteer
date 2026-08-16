@@ -3,13 +3,14 @@
 Source classification for this smoke-training module:
 
 * **Direct reuse** -- request retry, managed-adapter draining, candidate load,
-  ``/v1/models`` verification, chat canary, old-adapter unload, and failed
-  candidate cleanup follow SkillFlow's
+  ``/v1/models`` verification, chat canary, route/generation switch ordering,
+  old-adapter unload, and failed candidate cleanup follow SkillFlow's
   ``training/external_sglang.py::publish_external_adapter`` and
   ``runtime/sglang_gateway.py::_swap_supervisor_adapter_sync``.
-* **Necessary adaptation** -- FlowSteer records explicit behavior/checkpoint/
-  policy versions in a sync receipt and optionally cooperates with an external
-  rollout pause/drain/resume gate.
+* **Necessary adaptation** -- SkillFlow owns its generation route inside the
+  gateway, while FlowSteer keeps it in ``SGLangReceiptDirectorClient``.  An
+  optional callback bridges that split inside the same pause/drain transaction;
+  receipts also distinguish trained publication from untrained Step0 activation.
 * **Project algorithm addition** -- none; this is a runtime publication
   boundary, not a learning algorithm.
 * **Not implemented here** -- distributed worker rendezvous and concurrent
@@ -79,7 +80,8 @@ class PolicySyncConfig:
         if not self.adapter_name_prefix.strip():
             raise ValueError("adapter_name_prefix must be non-empty")
         if any(
-            character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
+            character
+            not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
             for character in self.adapter_name_prefix
         ):
             raise ValueError("adapter_name_prefix contains an unsupported character")
@@ -121,6 +123,11 @@ class PolicySyncReceipt:
     rollback_succeeded: Optional[bool]
     gate_used: bool
     gate_drained: bool
+    route_switch_requested: bool = False
+    route_switch_succeeded: bool = False
+    route_rollback_succeeded: Optional[bool] = None
+    training_performed: bool = True
+    policy_published: bool = True
     request_attempts: Mapping[str, int] = field(default_factory=dict)
     error: str = ""
     started_at: str = field(default_factory=_utc_now)
@@ -140,9 +147,24 @@ class PolicySyncReceipt:
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"{name} must be a non-empty string")
         if self.success and self.new_policy_version != self.candidate_policy_version:
-            raise ValueError("successful sync must publish the candidate policy version")
+            raise ValueError(
+                "successful sync must publish the candidate policy version"
+            )
         if not self.success and self.new_policy_version is not None:
             raise ValueError("failed sync cannot claim a new active policy version")
+        if (
+            self.success
+            and self.route_switch_requested
+            and not self.route_switch_succeeded
+        ):
+            raise ValueError("successful sync must complete its requested route switch")
+        if self.route_switch_succeeded and not self.route_switch_requested:
+            raise ValueError("route switch success requires a requested route switch")
+        if (
+            type(self.training_performed) is not bool
+            or type(self.policy_published) is not bool
+        ):
+            raise ValueError("training_performed and policy_published must be booleans")
         if self.duration_seconds < 0:
             raise ValueError("duration_seconds must be non-negative")
 
@@ -206,50 +228,11 @@ class SGLangPolicyPublisher:
         started_at = _utc_now()
         started_monotonic = time.monotonic()
         attempts: dict[str, int] = {}
-        before = self._model_ids(attempts, "models_before")
-        loaded_now = adapter_name not in before
-        try:
-            if loaded_now:
-                self._expect_success_flag(
-                    self._request(
-                        "post",
-                        "/load_lora_adapter",
-                        operation="load_adapter",
-                        attempts=attempts,
-                        json={
-                            "lora_name": adapter_name,
-                            "lora_path": str(checkpoint),
-                        },
-                    ),
-                    "external SGLang rejected the inference adapter",
-                )
-            after = self._model_ids(attempts, "models_after")
-            if adapter_name not in after:
-                raise _RequestFailure("inference adapter is absent from /v1/models")
-            validation = self._request(
-                "post",
-                "/v1/chat/completions",
-                operation="canary",
-                attempts=attempts,
-                json={
-                    "max_tokens": self.config.canary_max_tokens,
-                    "messages": [
-                        {"content": self.config.canary_prompt, "role": "user"}
-                    ],
-                    "model": adapter_name,
-                    "temperature": 0,
-                },
-            )
-            choices = self._json_object(validation, "canary response").get("choices")
-            if not isinstance(choices, list) or not choices:
-                raise _RequestFailure("inference adapter failed its chat canary")
-        except Exception:
-            if loaded_now:
-                try:
-                    self._unload(adapter_name, attempts, "rollback_adapter", retry=False)
-                except Exception:  # pragma: no cover - best-effort failure cleanup
-                    logger.exception("failed to unload rejected inference adapter")
-            raise
+        before, after, loaded_now = self._load_and_validate_adapter(
+            checkpoint=checkpoint,
+            adapter_name=adapter_name,
+            attempts=attempts,
+        )
         return {
             "status": "ready",
             "success": True,
@@ -267,6 +250,265 @@ class SGLangPolicyPublisher:
             "duration_seconds": max(time.monotonic() - started_monotonic, 0.0),
         }
 
+    def activate_existing_policy(
+        self,
+        *,
+        checkpoint_path: str | Path,
+        checkpoint_version: str,
+        behavior_policy_version: str,
+        active_policy_version: str,
+        adapter_name: str,
+        previous_adapter: Optional[str],
+        gate: PolicySyncGate,
+        route_switch: Callable[[str, str], None],
+        route_rollback: Callable[[], None],
+    ) -> PolicySyncReceipt:
+        """Activate an already-materialized, untrained adapter transactionally.
+
+        Formal Step0 needs the same SkillFlow Supervisor swap boundary as a
+        trained update without claiming that an optimizer or policy publication
+        occurred.  Candidate load, model-list verification, canary, Director
+        route switch, and old-adapter unload all happen under one pause/drain.
+        """
+
+        checkpoint = Path(checkpoint_path).expanduser().resolve()
+        if not checkpoint.is_dir():
+            raise ValueError("checkpoint_path must be an existing adapter directory")
+        versions = {
+            "checkpoint_version": checkpoint_version,
+            "behavior_policy_version": behavior_policy_version,
+            "active_policy_version": active_policy_version,
+            "adapter_name": adapter_name,
+        }
+        if any(
+            not isinstance(value, str) or not value.strip()
+            for value in versions.values()
+        ):
+            raise ValueError("checkpoint, policy, and adapter names must be non-empty")
+        if active_policy_version == behavior_policy_version:
+            raise ValueError("active policy version must differ from behavior policy")
+        adapter_name = adapter_name.strip()
+        if previous_adapter is not None:
+            previous_adapter = previous_adapter.strip()
+            if not previous_adapter:
+                raise ValueError("previous_adapter must be non-empty when provided")
+        if previous_adapter == adapter_name:
+            raise ValueError("active adapter must differ from the previous adapter")
+
+        started_at = _utc_now()
+        started_monotonic = time.monotonic()
+        attempts: dict[str, int] = {}
+        models_before: tuple[str, ...] = ()
+        models_after: tuple[str, ...] = ()
+        loaded_now = False
+        canary_succeeded = False
+        rollback_succeeded: Optional[bool] = None
+        route_switch_attempted = False
+        route_switch_succeeded = False
+        route_rollback_succeeded: Optional[bool] = None
+        gate_paused = False
+        gate_drained = False
+
+        try:
+            gate.pause()
+            gate_paused = True
+            gate.drain()
+            gate_drained = True
+            models_before = self._model_ids(
+                attempts,
+                "activation_models_before",
+            )
+            self._drain_stale_managed_adapters(
+                models_before,
+                candidate=adapter_name,
+                previous_adapter=previous_adapter,
+                attempts=attempts,
+                remove_candidate_collision=False,
+            )
+            _, candidate_models, loaded_now = self._load_and_validate_adapter(
+                checkpoint=checkpoint,
+                adapter_name=adapter_name,
+                attempts=attempts,
+                operation_prefix="candidate_",
+            )
+            canary_succeeded = True
+
+            route_switch_attempted = True
+            route_switch(active_policy_version, adapter_name)
+            route_switch_succeeded = True
+            if previous_adapter is not None and previous_adapter in candidate_models:
+                self._unload(previous_adapter, attempts, "unload_previous")
+                models_after = tuple(
+                    model for model in candidate_models if model != previous_adapter
+                )
+            else:
+                models_after = candidate_models
+
+            return PolicySyncReceipt(
+                behavior_policy_version=behavior_policy_version,
+                candidate_policy_version=active_policy_version,
+                new_policy_version=active_policy_version,
+                adapter_name=adapter_name,
+                previous_adapter=previous_adapter,
+                checkpoint_version=checkpoint_version,
+                checkpoint_path=str(checkpoint),
+                models_before=models_before,
+                models_after=models_after,
+                success=True,
+                status="activated_existing",
+                canary_succeeded=True,
+                rollback_succeeded=None,
+                gate_used=True,
+                gate_drained=gate_drained,
+                route_switch_requested=True,
+                route_switch_succeeded=True,
+                route_rollback_succeeded=None,
+                training_performed=False,
+                policy_published=False,
+                request_attempts=dict(attempts),
+                started_at=started_at,
+                completed_at=_utc_now(),
+                duration_seconds=max(time.monotonic() - started_monotonic, 0.0),
+            )
+        except Exception as error:
+            rollback_error = ""
+            if route_switch_attempted:
+                try:
+                    route_rollback()
+                    route_rollback_succeeded = True
+                except Exception as route_error:  # pragma: no cover - rare double fault
+                    route_rollback_succeeded = False
+                    rollback_error = f"; route rollback failed: {route_error}"
+                    logger.exception("failed to restore previous Director route")
+            if loaded_now and route_rollback_succeeded is not False:
+                try:
+                    self._unload(
+                        adapter_name,
+                        attempts,
+                        "rollback_candidate",
+                        retry=False,
+                    )
+                    rollback_succeeded = True
+                except Exception as candidate_error:  # pragma: no cover
+                    rollback_succeeded = False
+                    rollback_error += f"; candidate rollback failed: {candidate_error}"
+                    logger.exception("failed to unload rejected initial adapter")
+            elif loaded_now:
+                rollback_succeeded = False
+                rollback_error += "; candidate retained because route rollback failed"
+            try:
+                models_after = self._model_ids(
+                    attempts,
+                    "models_after_rollback",
+                    retry=False,
+                )
+            except Exception as model_error:
+                rollback_error += f"; post-rollback model query failed: {model_error}"
+
+            receipt = PolicySyncReceipt(
+                behavior_policy_version=behavior_policy_version,
+                candidate_policy_version=active_policy_version,
+                new_policy_version=None,
+                adapter_name=adapter_name,
+                previous_adapter=previous_adapter,
+                checkpoint_version=checkpoint_version,
+                checkpoint_path=str(checkpoint),
+                models_before=models_before,
+                models_after=models_after,
+                success=False,
+                status=(
+                    "rollback_failed"
+                    if (
+                        rollback_succeeded is False or route_rollback_succeeded is False
+                    )
+                    else "rolled_back"
+                    if (rollback_succeeded is True or route_rollback_succeeded is True)
+                    else "failed_before_load"
+                ),
+                canary_succeeded=canary_succeeded,
+                rollback_succeeded=rollback_succeeded,
+                gate_used=True,
+                gate_drained=gate_drained,
+                route_switch_requested=True,
+                route_switch_succeeded=route_switch_succeeded,
+                route_rollback_succeeded=route_rollback_succeeded,
+                training_performed=False,
+                policy_published=False,
+                request_attempts=dict(attempts),
+                error=f"{type(error).__name__}: {error}{rollback_error}",
+                started_at=started_at,
+                completed_at=_utc_now(),
+                duration_seconds=max(time.monotonic() - started_monotonic, 0.0),
+            )
+            raise PolicySyncError(
+                "existing SGLang policy activation failed",
+                receipt,
+            ) from error
+        finally:
+            if gate_paused:
+                gate.resume()
+
+    def _load_and_validate_adapter(
+        self,
+        *,
+        checkpoint: Path,
+        adapter_name: str,
+        attempts: dict[str, int],
+        operation_prefix: str = "",
+    ) -> tuple[tuple[str, ...], tuple[str, ...], bool]:
+        """Reuse SkillFlow's load/models/canary candidate validation boundary."""
+
+        before = self._model_ids(attempts, f"{operation_prefix}models_before")
+        loaded_now = adapter_name not in before
+        try:
+            if loaded_now:
+                self._expect_success_flag(
+                    self._request(
+                        "post",
+                        "/load_lora_adapter",
+                        operation=f"{operation_prefix}load_adapter",
+                        attempts=attempts,
+                        json={
+                            "lora_name": adapter_name,
+                            "lora_path": str(checkpoint),
+                        },
+                    ),
+                    "external SGLang rejected the inference adapter",
+                )
+            after = self._model_ids(attempts, f"{operation_prefix}models_after")
+            if adapter_name not in after:
+                raise _RequestFailure("inference adapter is absent from /v1/models")
+            validation = self._request(
+                "post",
+                "/v1/chat/completions",
+                operation=f"{operation_prefix}canary",
+                attempts=attempts,
+                json={
+                    "max_tokens": self.config.canary_max_tokens,
+                    "messages": [
+                        {"content": self.config.canary_prompt, "role": "user"}
+                    ],
+                    "model": adapter_name,
+                    "temperature": 0,
+                },
+            )
+            choices = self._json_object(validation, "canary response").get("choices")
+            if not isinstance(choices, list) or not choices:
+                raise _RequestFailure("inference adapter failed its chat canary")
+        except Exception:
+            if loaded_now:
+                try:
+                    self._unload(
+                        adapter_name,
+                        attempts,
+                        f"{operation_prefix}rollback_adapter",
+                        retry=False,
+                    )
+                except Exception:  # pragma: no cover - best-effort failure cleanup
+                    logger.exception("failed to unload rejected inference adapter")
+            raise
+        return before, after, loaded_now
+
     def publish(
         self,
         *,
@@ -277,13 +519,18 @@ class SGLangPolicyPublisher:
         step: int,
         previous_adapter: Optional[str] = None,
         gate: Optional[PolicySyncGate] = None,
+        route_switch: Optional[Callable[[str, str], None]] = None,
+        route_rollback: Optional[Callable[[], None]] = None,
     ) -> PolicySyncReceipt:
         """Load, verify, canary, and commit one trained adapter.
 
-        The caller must not change its active policy selector until this method
-        returns successfully.  On failure, :class:`PolicySyncError` carries a
-        receipt and the candidate is removed while the previous adapter stays
-        resident.
+        When ``route_switch`` and ``route_rollback`` are supplied, the
+        publisher mirrors SkillFlow's internal generation swap while the same
+        gate remains paused and drained: validate the candidate, switch the
+        client route, unload the previous adapter, and only then resume.  On
+        failure the route is restored before the rejected candidate is
+        removed.  Omitting both callbacks preserves the standalone publisher
+        interface used by existing callers.
         """
 
         checkpoint = Path(checkpoint_path).expanduser().resolve()
@@ -297,9 +544,17 @@ class SGLangPolicyPublisher:
         if any(not value.strip() for value in versions.values()):
             raise ValueError("checkpoint and policy versions must be non-empty")
         if candidate_policy_version == behavior_policy_version:
-            raise ValueError("candidate policy version must differ from behavior policy")
+            raise ValueError(
+                "candidate policy version must differ from behavior policy"
+            )
         if previous_adapter is not None and not previous_adapter.strip():
             raise ValueError("previous_adapter must be non-empty when provided")
+        if (route_switch is None) != (route_rollback is None):
+            raise ValueError(
+                "route_switch and route_rollback must be supplied together"
+            )
+        if route_switch is not None and gate is None:
+            raise ValueError("a route switch requires a publication gate")
 
         candidate = self.adapter_name(step)
         if previous_adapter == candidate:
@@ -313,6 +568,9 @@ class SGLangPolicyPublisher:
         loaded = False
         canary_succeeded = False
         rollback_succeeded: Optional[bool] = None
+        route_switch_attempted = False
+        route_switch_succeeded = False
+        route_rollback_succeeded: Optional[bool] = None
         gate_drained = False
         gate_paused = False
 
@@ -367,8 +625,18 @@ class SGLangPolicyPublisher:
                 raise _RequestFailure("candidate adapter failed its chat canary")
             canary_succeeded = True
 
+            # SkillFlow updates its in-gateway AdapterGeneration at this exact
+            # boundary: after load/models/canary and before unloading the old
+            # adapter.  FlowSteer's Director route lives in a separate client,
+            # so inject that same state transition without opening the gate.
+            if route_switch is not None:
+                route_switch_attempted = True
+                route_switch(candidate_policy_version, candidate)
+                route_switch_succeeded = True
+
             # The previous behavior adapter remains available until the new
-            # candidate has both appeared in /v1/models and answered canary.
+            # candidate has appeared, answered canary, and become the Director
+            # route.  No rollout can enter until the finally block resumes.
             if previous_adapter is not None and previous_adapter in candidate_models:
                 self._unload(previous_adapter, attempts, "unload_previous")
                 # All fallible verification happens before this irreversible
@@ -398,6 +666,9 @@ class SGLangPolicyPublisher:
                 rollback_succeeded=None,
                 gate_used=gate is not None,
                 gate_drained=gate_drained,
+                route_switch_requested=route_switch is not None,
+                route_switch_succeeded=route_switch_succeeded,
+                route_rollback_succeeded=None,
                 request_attempts=dict(attempts),
                 started_at=started_at,
                 completed_at=_utc_now(),
@@ -405,14 +676,31 @@ class SGLangPolicyPublisher:
             )
         except Exception as error:
             rollback_error = ""
-            if loaded:
+            # Match SkillFlow's rollback order: restore the previous logical
+            # generation first, then remove the failed candidate.  If route
+            # restoration itself fails, leave the candidate resident so the
+            # client cannot be resumed while pointing at an unloaded adapter.
+            if route_switch_attempted and route_rollback is not None:
+                try:
+                    route_rollback()
+                    route_rollback_succeeded = True
+                except Exception as route_error:  # pragma: no cover - rare double fault
+                    route_rollback_succeeded = False
+                    rollback_error = f"; route rollback failed: {route_error}"
+                    logger.exception("failed to restore previous Director route")
+            if loaded and route_rollback_succeeded is not False:
                 try:
                     self._unload(candidate, attempts, "rollback_candidate", retry=False)
                     rollback_succeeded = True
-                except Exception as candidate_error:  # pragma: no cover - rare double fault
+                except (
+                    Exception
+                ) as candidate_error:  # pragma: no cover - rare double fault
                     rollback_succeeded = False
                     rollback_error = f"; candidate rollback failed: {candidate_error}"
                     logger.exception("failed to unload rejected SGLang adapter")
+            elif loaded:
+                rollback_succeeded = False
+                rollback_error += "; candidate retained because route rollback failed"
             try:
                 models_after = self._model_ids(
                     attempts,
@@ -436,22 +724,29 @@ class SGLangPolicyPublisher:
                 success=False,
                 status=(
                     "rollback_failed"
-                    if rollback_succeeded is False
+                    if (
+                        rollback_succeeded is False or route_rollback_succeeded is False
+                    )
                     else "rolled_back"
-                    if rollback_succeeded is True
+                    if (rollback_succeeded is True or route_rollback_succeeded is True)
                     else "failed_before_load"
                 ),
                 canary_succeeded=canary_succeeded,
                 rollback_succeeded=rollback_succeeded,
                 gate_used=gate is not None,
                 gate_drained=gate_drained,
+                route_switch_requested=route_switch is not None,
+                route_switch_succeeded=route_switch_succeeded,
+                route_rollback_succeeded=route_rollback_succeeded,
                 request_attempts=dict(attempts),
                 error=message,
                 started_at=started_at,
                 completed_at=_utc_now(),
                 duration_seconds=max(time.monotonic() - started_monotonic, 0.0),
             )
-            raise PolicySyncError("SGLang policy publication failed", receipt) from error
+            raise PolicySyncError(
+                "SGLang policy publication failed", receipt
+            ) from error
         finally:
             if gate is not None and gate_paused:
                 gate.resume()
@@ -463,6 +758,7 @@ class SGLangPolicyPublisher:
         candidate: str,
         previous_adapter: Optional[str],
         attempts: dict[str, int],
+        remove_candidate_collision: bool = True,
     ) -> None:
         stale = sorted(
             model
@@ -475,7 +771,7 @@ class SGLangPolicyPublisher:
         # A retried step may have left an uncommitted name behind.  The caller
         # cannot also declare it as the previous behavior adapter (checked
         # above), so removing the collision is safe and follows SkillFlow.
-        if candidate in models:
+        if remove_candidate_collision and candidate in models:
             self._unload(candidate, attempts, "unload_candidate_collision")
 
     def _model_ids(
@@ -572,7 +868,10 @@ class SGLangPolicyPublisher:
 
     @classmethod
     def _expect_success_flag(cls, response: Any, message: str) -> None:
-        if cls._json_object(response, "adapter control response").get("success") is not True:
+        if (
+            cls._json_object(response, "adapter control response").get("success")
+            is not True
+        ):
             raise _RequestFailure(message)
 
 
