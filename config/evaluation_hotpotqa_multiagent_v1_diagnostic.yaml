@@ -43,13 +43,12 @@ hotpotqa_evaluation:
   concurrency: 4
   direct_model_id: "qwen3.5-9b-local"
   direct_protocol: "agent_runtime_single_call_skillflow_multihop_prompt_v1"
-  direct_reused_from: "artifacts/hotpotqa_round_01/direct_predictions.jsonl"
 
 storage:
   schema_version: "flowsteer.agentgraph.hotpotqa_round.v1"
   root: "artifacts/hotpotqa_multiagent_skill/architecture_v1_diagnostic/evidence"
   selected_tasks_path: "artifacts/hotpotqa_multiagent_skill/architecture_v1_diagnostic/selected_tasks.jsonl"
-  direct_predictions_path: "artifacts/hotpotqa_round_01/direct_predictions.jsonl"
+  direct_predictions_path: "artifacts/hotpotqa_multiagent_skill/architecture_v1_diagnostic/direct_predictions.jsonl"
   trajectories_path: "artifacts/hotpotqa_multiagent_skill/architecture_v1_diagnostic/agentgraph_trajectories.jsonl"
   failures_path: "artifacts/hotpotqa_multiagent_skill/architecture_v1_diagnostic/collection_failures.jsonl"
   paired_results_path: "artifacts/hotpotqa_multiagent_skill/architecture_v1_diagnostic/paired_results.jsonl"

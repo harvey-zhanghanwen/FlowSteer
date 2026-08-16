@@ -1,0 +1,75 @@
+{
+  "agentgraph": {
+    "completed": 14,
+    "completed_only_exact_match": 0.35714285714285715,
+    "completed_only_token_f1": 0.5285714285714286,
+    "denominator": 14,
+    "evaluator_valid": 14,
+    "strict_exact_match": 0.35714285714285715,
+    "strict_token_f1": 0.5285714285714286
+  },
+  "agentgraph_minus_direct": {
+    "exact_match": -0.0714285714285714,
+    "token_f1": 0.06428571428571428
+  },
+  "completed_at": "2026-08-16T03:41:06.794670+00:00",
+  "dataset": "HotpotQA",
+  "direct_local_baseline": {
+    "completed": 14,
+    "completed_only_exact_match": 0.42857142857142855,
+    "completed_only_token_f1": 0.4642857142857143,
+    "denominator": 14,
+    "evaluator_valid": 14,
+    "strict_exact_match": 0.42857142857142855,
+    "strict_token_f1": 0.4642857142857143
+  },
+  "evaluation_name": "hotpotqa_multiagent_v1_architecture_diagnostic",
+  "failure_types": {
+    "architecture_gain": 1,
+    "architecture_regression_candidate": 2,
+    "correct": 4,
+    "partial_or_overlong_answer": 2,
+    "shared_reasoning_or_model_failure_candidate": 5
+  },
+  "input_context": "full_10_passages",
+  "known_limitations": [
+    "A Director/API exception before terminal collection may not preserve partial turns.",
+    "Paper references use a different published evaluation setup and are not a paired baseline."
+  ],
+  "method_level_changes_performed": false,
+  "model_catalog_path": "config/model_catalog_hotpotqa_multiagent_v1.yaml",
+  "native_source_split": "train",
+  "paper_references_percent": {
+    "comparability_note": "Reference numbers are contextual only; the paired Local Direct baseline on these fixed project-held-out samples is primary.",
+    "flowsteer": {
+      "exact_match": 89.84,
+      "token_f1": 91.2
+    },
+    "qwen3.5_9b_direct": {
+      "exact_match": 60.94,
+      "token_f1": 75.7
+    },
+    "skillflow": {
+      "exact_match": 92.19,
+      "token_f1": 93.95
+    }
+  },
+  "policy_adapter": "theta_smoke_step_000001",
+  "policy_version": "qwen35-9b-smoke-step-0001-warm-start-diagnostic",
+  "project_split": "validation",
+  "sample_count": 14,
+  "schema_version": "flowsteer.hotpotqa.round_report.v1",
+  "training_performed": false,
+  "typical_wrong_demo_task_ids": [
+    "hotpotqa:5ac2a912554299218029dae8",
+    "hotpotqa:5ac3e8c65542997ea680c993",
+    "hotpotqa:5ab93287554299753720f78f",
+    "hotpotqa:5ab345db55429969a97a8122",
+    "hotpotqa:5ae27edc5542992decbdcd2d",
+    "hotpotqa:5abee5e25542994516f45473",
+    "hotpotqa:5a8d7341554299441c6b9fe5",
+    "hotpotqa:5a7a0a965542996c55b2dce7",
+    "hotpotqa:5a7a52745542996c55b2dd4f"
+  ],
+  "wrong_demo_count": 9
+}

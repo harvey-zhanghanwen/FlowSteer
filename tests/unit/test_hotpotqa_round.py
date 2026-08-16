@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-import importlib.util
-from pathlib import Path
+import asyncio
 from copy import deepcopy
+import importlib.util
+import json
+from pathlib import Path
 
 from src.interactive.config_loader import load_yaml
 
@@ -36,6 +38,56 @@ def test_task_id_diagnostic_selection_is_explicit_and_bounded():
         assert "task_ids selection" in str(exc)
     else:  # pragma: no cover - fail-closed guard
         raise AssertionError("duplicate task IDs were accepted")
+
+
+def test_declared_direct_reuse_is_copied_without_gateway_call(tmp_path):
+    task = _MODULE.TaskRecord(
+        task_id="hotpotqa:one",
+        question="question",
+        ground_truth="answer",
+        split="validation",
+        metadata={"dataset_key": "hotpotqa"},
+    )
+    record = {
+        "task_id": task.task_id,
+        "model_id": "qwen3.5-9b-local",
+        "protocol": "direct-v1",
+        "generation_seed": 17,
+        "evaluation": {"valid": True},
+        "execution": {"execution_id": "existing"},
+    }
+    source = tmp_path / "source.jsonl"
+    source.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    destination = tmp_path / "destination.jsonl"
+    manifest_path = tmp_path / "manifest.json"
+    config = {
+        "experiment": {"name": "test", "seed": 17},
+        "hotpotqa_evaluation": {
+            "direct_model_id": "qwen3.5-9b-local",
+            "direct_protocol": "direct-v1",
+            "direct_reused_from": source.name,
+            "concurrency": 1,
+        },
+    }
+    manifest = {}
+
+    result = asyncio.run(
+        _MODULE._collect_direct(
+            None,
+            (task,),
+            config,
+            tmp_path,
+            destination,
+            [],
+            manifest,
+            manifest_path,
+        )
+    )
+
+    assert result[task.task_id]["execution"]["execution_id"] == "existing"
+    assert len(destination.read_text(encoding="utf-8").splitlines()) == 1
+    assert manifest["direct_progress"]["completed"] == 1
+    assert manifest["direct_progress"]["reused_from"] == str(source)
 
 
 def test_strict_aggregate_keeps_failed_task_in_denominator():

@@ -1,10 +1,9 @@
 {
   "agentgraph_progress": {
-    "completed": 2,
-    "failed_attempts": 0
+    "completed": 14
   },
   "artifacts": {
-    "direct": "/ssd1/iclr/1/FlowSteer/artifacts/hotpotqa_round_01/direct_predictions.jsonl",
+    "direct": "/ssd1/iclr/1/FlowSteer/artifacts/hotpotqa_multiagent_skill/architecture_v1_diagnostic/direct_predictions.jsonl",
     "failures": "/ssd1/iclr/1/FlowSteer/artifacts/hotpotqa_multiagent_skill/architecture_v1_diagnostic/collection_failures.jsonl",
     "manifest": "/ssd1/iclr/1/FlowSteer/artifacts/hotpotqa_multiagent_skill/architecture_v1_diagnostic/run_manifest.json",
     "paired": "/ssd1/iclr/1/FlowSteer/artifacts/hotpotqa_multiagent_skill/architecture_v1_diagnostic/paired_results.jsonl",
@@ -15,19 +14,52 @@
     "trajectories": "/ssd1/iclr/1/FlowSteer/artifacts/hotpotqa_multiagent_skill/architecture_v1_diagnostic/agentgraph_trajectories.jsonl",
     "wrong": "/ssd1/iclr/1/FlowSteer/artifacts/hotpotqa_multiagent_skill/architecture_v1_diagnostic/wrong_demos.jsonl"
   },
-  "canary_task_count": 2,
-  "completed_at": "2026-08-16T03:39:01.304041+00:00",
+  "completed_at": "2026-08-16T03:41:06.798189+00:00",
   "config_path": "/ssd1/iclr/1/FlowSteer/config/evaluation_hotpotqa_multiagent_v1_diagnostic.yaml",
   "direct_progress": {
-    "completed": 2,
-    "failed_attempts": 0
+    "completed": 14
+  },
+  "failure_type_counts": {
+    "architecture_gain": 1,
+    "architecture_regression_candidate": 2,
+    "correct": 4,
+    "partial_or_overlong_answer": 2,
+    "shared_reasoning_or_model_failure_candidate": 5
   },
   "fixed_split": "validation",
+  "git_end": {
+    "branch": "dataset/hotpotqa-multiagent-skill-step0-to-n",
+    "commit": "68f1443e39b8b98035d90ac9763bdad9f53f419a"
+  },
   "git_start": {
     "branch": "dataset/hotpotqa-multiagent-skill-step0-to-n",
-    "commit": "fc298ae74d7b8939f8bae49f1c0f7f4cdc5c7f37"
+    "commit": "68f1443e39b8b98035d90ac9763bdad9f53f419a"
   },
   "input_context": "full_10_passages",
+  "metrics": {
+    "agentgraph": {
+      "completed": 14,
+      "completed_only_exact_match": 0.35714285714285715,
+      "completed_only_token_f1": 0.5285714285714286,
+      "denominator": 14,
+      "evaluator_valid": 14,
+      "strict_exact_match": 0.35714285714285715,
+      "strict_token_f1": 0.5285714285714286
+    },
+    "delta": {
+      "exact_match": -0.0714285714285714,
+      "token_f1": 0.06428571428571428
+    },
+    "direct": {
+      "completed": 14,
+      "completed_only_exact_match": 0.42857142857142855,
+      "completed_only_token_f1": 0.4642857142857143,
+      "denominator": 14,
+      "evaluator_valid": 14,
+      "strict_exact_match": 0.42857142857142855,
+      "strict_token_f1": 0.4642857142857143
+    }
+  },
   "optimizer_updates": 0,
   "runtime_resource": {
     "configured_rollout_physical": 4,
@@ -74,12 +106,120 @@
         "output_inbox_saved": true,
         "passed": true,
         "task_id": "hotpotqa:5ac3e8c65542997ea680c993"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "hotpotqa:5ab93287554299753720f78f"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "hotpotqa:5a7daae35542990b8f503a1d"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "hotpotqa:5a736bfa5542991f29ee2e03"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "hotpotqa:5a7a06935542990198eaf050"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "hotpotqa:5a82171f5542990a1d231f4a"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "hotpotqa:5ab345db55429969a97a8122"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "hotpotqa:5ae7a9c8554299540e5a5631"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "hotpotqa:5ae27edc5542992decbdcd2d"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "hotpotqa:5abee5e25542994516f45473"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "hotpotqa:5a8d7341554299441c6b9fe5"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "hotpotqa:5a7a0a965542996c55b2dce7"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "hotpotqa:5a7a52745542996c55b2dd4f"
       }
     ],
     "criterion": "every_fixed_task_completed_the_full_chain",
     "passed": true
   },
-  "started_at": "2026-08-16T03:38:53.420452+00:00",
-  "status": "stable_zero_confirmed",
+  "started_at": "2026-08-16T03:40:42.794381+00:00",
+  "status": "completed",
   "training_enabled": false
 }

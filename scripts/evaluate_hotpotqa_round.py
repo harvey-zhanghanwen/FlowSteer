@@ -364,6 +364,7 @@ async def _collect_direct(
     backend: LiveSmokeBackend,
     selected: Sequence[TaskRecord],
     config: Mapping[str, Any],
+    root: Path,
     path: Path,
     failures: list[dict[str, Any]],
     manifest: dict[str, Any],
@@ -376,9 +377,20 @@ async def _collect_direct(
     seed = int(experiment["seed"])
     run_label = str(experiment["name"])
     concurrency = int(bounded["concurrency"])
+    direct_candidates = _read_jsonl(path)
+    reuse_source = bounded.get("direct_reused_from")
+    reuse_path: Optional[Path] = None
+    if isinstance(reuse_source, str) and reuse_source.strip():
+        reuse_path = _resolve(root, reuse_source)
+        if not reuse_path.is_file():
+            raise HotpotRoundError(
+                f"declared Direct reuse source does not exist: {reuse_path}"
+            )
+        if reuse_path.resolve() != path.resolve():
+            direct_candidates.extend(_read_jsonl(reuse_path))
     by_task = {
         task_id: value
-        for task_id, value in _by_task(_read_jsonl(path)).items()
+        for task_id, value in _by_task(direct_candidates).items()
         for task in selected
         if task.task_id == task_id
         and _direct_resume_matches(
@@ -389,8 +401,10 @@ async def _collect_direct(
             seed=seed,
         )
     }
+    _persist_ordered(path, selected, by_task)
     manifest["direct_progress"] = {
         "completed": len(by_task),
+        "reused_from": None if reuse_path is None else str(reuse_path),
         "failed_attempts": sum(
             item.get("condition") == "direct_local_qwen35_9b" for item in failures
         ),
@@ -1014,6 +1028,7 @@ async def run_hotpot_round(
         backend,
         active,
         config,
+        root,
         paths["direct"],
         failures,
         manifest,
