@@ -375,7 +375,7 @@ async def run_diagnostic(
         )
         source_id = str(source["trajectory_id"])
         pair_id = stable_id(
-            "communication-pair",
+            "communication_pair",
             {
                 "source_trajectory_id": source_id,
                 "graph": graph_value,
@@ -388,7 +388,7 @@ async def run_diagnostic(
             CommunicationCondition.UPSTREAM_MASKED,
         ):
             diagnostic_id = stable_id(
-                "communication-diagnostic",
+                "communication_diagnostic",
                 {"pair_id": pair_id, "condition": condition.value},
             )
             arm_order.append(diagnostic_id)

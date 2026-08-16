@@ -59,6 +59,14 @@ def arm(diagnostic_id: str, answer: str, em: float, f1: float) -> dict:
 
 
 class CommunicationDiagnosticTests(unittest.TestCase):
+    def test_record_id_prefixes_are_accepted_by_project_stable_id(self) -> None:
+        self.assertTrue(MODULE.stable_id("communication_pair", {"x": 1}).startswith("communication_pair_"))
+        self.assertTrue(
+            MODULE.stable_id("communication_diagnostic", {"x": 1}).startswith(
+                "communication_diagnostic_"
+            )
+        )
+
     def test_selection_is_structural_and_preserves_source_order(self) -> None:
         values = [
             trajectory("single", multi_agent=False),
