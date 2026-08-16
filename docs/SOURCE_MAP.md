@@ -28,9 +28,9 @@ Qwen3.5 path.
 | Qwen3.5-9B Supervisor default | `configs/skillflow.yaml` | Mirrored in `config/training_agent_graph.yaml`. |
 | SGLang Supervisor child | `training/sglang_manager.py::SGLangSupervisorManager` | Adapted in `src/interactive/sglang_manager.py`; import remains side-effect free. |
 | Standalone SGLang launch arguments | `scripts/restart_sglang.sh` | Adapted in `scripts/start_qwen35_director_server.sh`; only one rollout service is declared. |
-| Forward/backward LoRA profile | `training/gflownet_trainer.py::setup` | Configuration only: theta rank 64 and phi rank 16. No optimizer is connected. |
-| Three-role GPU topology | `device`, `supervisor_gpu_id`, and `extra_device` in SkillFlow | Mapped to physical GPUs 3, 4, and 5 in `training_agent_graph.yaml`. |
-| Split micro-batch backward | `GFlowNetTrainer._batched_logprob_backward` | Represented only by inactive OOM/micro-batch configuration. No backward code is claimed in this phase. |
+| Forward/backward LoRA profile | `training/gflownet_trainer.py::setup` | The original architecture-only configuration mirrored theta rank 64 and phi rank 16.  Architecture-v6 later activates only the single Director `theta` adapter through the one-pass GRPO adaptation documented below; SkillFlow's backward policy and Z head are not claimed. |
+| Three-role GPU topology | `device`, `supervisor_gpu_id`, and `extra_device` in SkillFlow | The declared topology maps learner, rollout Supervisor, and gradient replica separately.  Formal Step 1 used physical GPUs 3/4/5.  When an unrelated service later occupied physical GPU 5, Step 2/3 moved only the replica to the free physical GPU 7 and recorded that runtime adaptation; the external service was not touched. |
+| Split micro-batch backward | `GFlowNetTrainer._batched_logprob_backward` | The initial architecture config was inactive.  Architecture-v6 later uses the existing local one-pass action-masked learner with a fixed two-way group partition and OOM backoff.  This is not SkillFlow's TTB backward algorithm, and the one-group micro runs placed no effective work on the second partition. |
 | Skill injection after bootstrap | `GenericTaskEnvironment` and `SkillWorkspace` | The Director prompt omits the Skill field when the validated Skill list is empty. |
 | Bounded visible interaction history | `training/react_prompts.py` (`action_history`, `history_length`) and `training/environment.py::_build_react_prompt` | The Director receives only the configured recent Canvas-history window. Entries contain canonical action, acceptance/terminal state, graph revision, compact feedback, and whether execution was reused; no role template or unvalidated Skill is injected. |
 | Dataset preparation fields | `data/prepare_v3.py` | Adapted in `scripts/prepare_agentgraph_datasets.py`: retains `question`, `answer`, `task_type`, `context`, `extra`, and environment fields while adding the design-note `TaskRecord` keys. |
@@ -42,10 +42,11 @@ Qwen3.5 path.
 | Multi-hop one-call contract | `training/task_prompts.py::MULTI_HOP_QA` | The paired local Direct path uses the upstream brief multi-hop contract through the existing Agent gateway; it bypasses Director, Canvas, and AgentGraph. |
 | Intermediate observation vs terminal answer | `training/environment.py::step`, `training/task_prompts.py::MULTI_HOP_QA`, and `training/batch_inference.py` | `AgentRuntime` derives one Output identity from the already-validated `graph.output_agent_id`. `openai_gateway.py` gives non-Output nodes an intermediate-artifact boundary and gives only the Output node the concise `<answer>` terminal contract. SkillFlow's fixed tools and mandatory tool-use policy are not copied. |
 
-SkillFlow's TTB objective, backward policy training, partition head, skill
-evolution loop, benchmark environment, and local multi-executor launcher are
-not copied into this phase.  The project continues to reserve terminal-only
-GRPO as specified by the design note, but GRPO is disabled.
+SkillFlow's TTB objective, backward policy training, partition head, benchmark
+environment, and local multi-executor launcher are not copied.  The historical
+architecture phase kept GRPO disabled; the later architecture-v6 Hotpot micro
+phase explicitly activated the project's terminal-only, action-masked one-pass
+GRPO adaptation for three bounded updates.
 
 ## Project-specific algorithm modules
 
@@ -58,9 +59,11 @@ claims of upstream FlowSteer or SkillFlow functionality:
 - same-prefix paired-probe and EVSI primitives;
 - version-bound Skill evidence schemas, lifecycle, and persistence records.
 
-Those modules are isolated from the runtime reward path.  In the checked-in
-architecture configuration, exploration, Skills, GRPO, optimizer work, and
-all GPU training are disabled.
+Those modules are isolated from the runtime reward path.  MACE/Bayesian
+exploration and production Skills stayed disabled throughout the architecture-v6
+run.  Only the explicitly versioned Hotpot micro configs enable the local
+terminal-only GRPO learner; the architecture/evaluation configs remain
+inference-only.
 
 ## Dataset-specific adaptations required by the requested benchmark list
 
@@ -260,10 +263,9 @@ single-`theta` AgentGraph policy and already-aligned HotpotQA records.
 
 There is no project-algorithm addition in these four modules.  AgentGraph,
 MACE, Bayesian exploration, and Skill lifecycle remain the project/design-note
-layer described above and are not activated here.  Real Step-0 materialization,
-live SGLang activation, frozen experiment-schedule publication, rollout,
-GRPO/backward, optimizer update, and Step-1+ policy publication remain
-unexecuted until a later explicitly authorized training phase.
+layer described above.  This paragraph records the static precondition phase;
+the later explicitly authorized architecture-v6 run materialized Step 0 and
+executed the bounded Step 1--3 rollout/update/publish chain documented below.
 
 ## HotpotQA architecture-v6 deep/multi-model/Skill phase
 
@@ -283,6 +285,43 @@ role set, topology quota, or model-family routing rule.
 
 Formal Step 0 has now been materialized at policy
 `qwen35-9b-hotpot-step-000000` / adapter `theta_hotpot_step_000000` with the
-fixed seed and zero optimizer updates. Its SGLang activation and two-task
-Stable Zero chain are recorded as runtime receipts; this does not imply that
-deep behavior, Skill gain, or any Step-1 optimizer update has occurred yet.
+fixed seed and zero optimizer updates.  Its adapter presence and canary plus a
+two-task Stable Zero chain are recorded; the surviving Step-0 receipt is not a
+full pause/drain/route-switch activation transaction and must not be described
+as one.  The subsequent Step 1--3 policy chain performed one real optimizer
+update per step, saved/restored optimizer state, published each new adapter,
+switched the Director route, and passed the post-update canary.
+
+## HotpotQA architecture-v6 exact-resume and micro-training runtime repairs
+
+These changes were made only to complete the already-authorized, frozen
+Step 0--3 experiment without recollecting successful paid behavior rollouts.
+They do not change the Director prompt, AgentGraph action language, terminal
+reward, model catalog, or graph-shape distribution.
+
+| Current module | Classification | Reference source | Reused boundary | Incompatibility and minimal adaptation |
+| --- | --- | --- | --- | --- |
+| `records.py::{TaskRecord,ExecutionRecord,TurnRecord,EvaluationRecord,TrajectoryRecord}.from_dict` | Necessary persistence adaptation | SkillFlow immutable rollout/request records and exact receipt validation | Reload persisted behavior through the same typed invariants and rederive admission fields | The local dataclasses previously serialized but could not reconstruct a frozen batch.  Deserialization now rejects unknown/tampered derived state rather than trusting JSON. |
+| `train_agentgraph_smoke.py --resume-initial-rollouts` | SkillFlow lifecycle reuse plus necessary runner adaptation | SkillFlow frozen schedule/cursor, attempt progress, exact batch identity, checkpoint-before-resume, and write-once continuation boundaries | Require the exact task/version/condition/group/rollout/coordinate/adapter/server/evaluator/evidence batch and prove zero checkpoint, optimizer, publish, canary, and cursor persistence before resume | This repository has a single-theta AgentGraph batch and local artifact layout rather than SkillFlow's TTB attempt runtime.  Resume is therefore restricted to frozen Hotpot micro steps and never recollects any already-successful initial rollout. |
+| `smoke_trainer.py` provider-logprob diagnostic | Direct scientific boundary reuse | SkillFlow `rollout/generator.py` excludes serving policy scores; `policy/hf_backbone.py` teacher-forces exact sampled action token IDs; FlowSteer masks policy/action tokens | Original sampled IDs, action mask, route/version/evaluator receipts, and learner teacher-forcing remain the optimization inputs | Provider/SGLang logprob numerical drift is retained as a mean/p95/max diagnostic but no longer rejects an exact group merely for exceeding a tolerance.  Presence, shape, and finiteness are still receipt/admission requirements; non-finite learner scores remain fail-closed. |
+| `evaluate_hotpotqa_round.py` fixed Direct reuse ordering | Necessary evaluation repair | Existing fixed comparator and resume boundary in the same runner | Reuse the declared Step-0 Direct records without another model call | A stale destination canary was previously considered before the authoritative fixed source.  The declared source is now ordered first, while successful records are still never overwritten during normal resume. |
+| `diagnostic_hotpotqa_deep_v6_step3_communication.yaml` and saved diagnostic receipts | Existing diagnostic path, no new method | Existing `diagnose_hotpotqa_communication.py` normal/upstream-masked replay | Frozen final graphs, same tasks/models, no Director/direct/training, `diagnostic_only=true`, `grpo_eligible=false` | Only five Step-3 multi-Agent graphs had executable Output paths; all ten arms completed.  No score or answer change was observed, so transport is proven but causal communication utility is not. |
+
+### Remaining upstream-compatibility gaps after Step 3
+
+- SkillFlow pins `flash-linear-attention==0.5.2` and verifies the Qwen3.5
+  gated-delta kernel.  The local loader does not call that enforcement helper,
+  so FLA compatibility is **not proven by project code** even though the
+  training environment supplied the dependency.
+- One Step-2 trajectory began with a legal malformed sampled action
+  (`executed_prefix_tokens=0`) and later finished with reward 1.  It was kept in
+  the frozen artifact but the current all-turn admission rule excluded the
+  whole trajectory.  This differs from SkillFlow's "invalid actions remain
+  data" boundary and FlowSteer's model-response masking; it remains a known
+  adaptation gap rather than being silently relabelled as direct reuse.
+- Provider logprob *values* do not enter the loss or threshold rejection, but
+  their receipt presence and finiteness still participate in local admission.
+- The Skill orchestration code and tests are wired, but the formal Step 0--3
+  runs produced no paired probes, validated candidates, ACTIVE Skills, or
+  retrieval gain.  Production Skill end-to-end readiness is therefore not
+  claimed.

@@ -60,12 +60,17 @@ def test_declared_direct_reuse_is_copied_without_gateway_call(tmp_path):
     source = tmp_path / "source.jsonl"
     source.write_text(json.dumps(record) + "\n", encoding="utf-8")
     destination = tmp_path / "destination.jsonl"
+    stale = dict(record)
+    stale["generation_seed"] = 99
+    stale["execution"] = {"execution_id": "stale-canary"}
+    destination.write_text(json.dumps(stale) + "\n", encoding="utf-8")
     manifest_path = tmp_path / "manifest.json"
     config = {
-        "experiment": {"name": "test", "seed": 17},
+        "experiment": {"name": "test", "seed": 99},
         "hotpotqa_evaluation": {
             "direct_model_id": "qwen3.5-9b-local",
             "direct_protocol": "direct-v1",
+            "direct_generation_seed": 17,
             "direct_reused_from": source.name,
             "concurrency": 1,
         },

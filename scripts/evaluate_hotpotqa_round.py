@@ -394,13 +394,19 @@ async def _collect_direct(
                 f"declared Direct reuse source does not exist: {reuse_path}"
             )
         if reuse_path.resolve() != path.resolve():
+            reused_candidates = []
             for value in _read_jsonl(reuse_path):
                 copied = dict(value)
                 copied["reuse_receipt"] = {
                     "reused": True,
                     "source": str(reuse_path),
                 }
-                direct_candidates.append(copied)
+                reused_candidates.append(copied)
+            # ``_by_task`` intentionally keeps the first complete record so a
+            # resume cannot silently replace a successful request.  A declared
+            # fixed comparator is more authoritative than stale records from a
+            # prior canary with another Direct seed, so place it first.
+            direct_candidates = reused_candidates + direct_candidates
     by_task = {
         task_id: value
         for task_id, value in _by_task(direct_candidates).items()

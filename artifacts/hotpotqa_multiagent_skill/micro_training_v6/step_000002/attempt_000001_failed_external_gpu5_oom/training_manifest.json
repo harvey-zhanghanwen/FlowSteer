@@ -1,0 +1,64 @@
+{
+  "artifacts": {
+    "groups": "/ssd1/iclr/1/FlowSteer/artifacts/hotpotqa_multiagent_skill/micro_training_v6/step_000002/grpo_groups.jsonl",
+    "manifest": "/ssd1/iclr/1/FlowSteer/artifacts/hotpotqa_multiagent_skill/micro_training_v6/step_000002/training_manifest.json",
+    "post_update": "/ssd1/iclr/1/FlowSteer/artifacts/hotpotqa_multiagent_skill/micro_training_v6/step_000002/post_update_trajectories.jsonl",
+    "selected": "/ssd1/iclr/1/FlowSteer/artifacts/hotpotqa_multiagent_skill/micro_training_v6/step_000002/selected_tasks.jsonl",
+    "sync": "/ssd1/iclr/1/FlowSteer/artifacts/hotpotqa_multiagent_skill/micro_training_v6/step_000002/sync_receipt.json",
+    "trajectories": "/ssd1/iclr/1/FlowSteer/artifacts/hotpotqa_multiagent_skill/micro_training_v6/step_000002/trajectories.jsonl"
+  },
+  "bounds": {
+    "expected_initial_rollouts": 8,
+    "max_optimizer_updates": 1,
+    "post_update_canaries": 1,
+    "rollouts_per_task": 8,
+    "selected_tasks": 1,
+    "tasks_per_dataset": null
+  },
+  "completed_at": "2026-08-16T09:03:51.068091+00:00",
+  "config_path": "/ssd1/iclr/1/FlowSteer/config/training_hotpotqa_deep_v6_step2.yaml",
+  "error": "OutOfMemoryError: CUDA out of memory. Tried to allocate 17.53 GiB. GPU 1 has a total capacity of 79.18 GiB of which 12.34 GiB is free. Process 60533 has 66.32 GiB memory in use. Process 16803 has 516.00 MiB memory in use. Of the allocated memory 0 bytes is allocated by PyTorch, and 0 bytes is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)",
+  "exploration_enabled": false,
+  "initial_rollout_source": {
+    "mode": "live_collection",
+    "new_collections": 8,
+    "reused": 0
+  },
+  "resume_initial_rollouts_requested": false,
+  "schema_version": "flowsteer.agentgraph.smoke_manifest.v1",
+  "selected_by_source": {
+    "hotpotqa": 1
+  },
+  "selection_receipt": {
+    "cursor_before": {
+      "curriculum_id": "sha256:fd4b68995611ec788bcec3082fff5e169407e51894e4591e6ab5819eee45021c",
+      "cursor": 1,
+      "format": "flowsteer-hotpot-training-cursor@1"
+    },
+    "cursor_path": "/ssd1/iclr/1/FlowSteer/artifacts/hotpotqa_multiagent_skill/micro_training_v6/cursor_step_000001.json",
+    "next_cursor_path": "/ssd1/iclr/1/FlowSteer/artifacts/hotpotqa_multiagent_skill/micro_training_v6/cursor_step_000002.json",
+    "schedule_id": "sha256:fd4b68995611ec788bcec3082fff5e169407e51894e4591e6ab5819eee45021c",
+    "schedule_path": "/ssd1/iclr/1/FlowSteer/artifacts/hotpotqa_multiagent_skill/micro_training_v6/formal_schedule.json",
+    "selection": "frozen_hotpot_schedule",
+    "step": {
+      "format": "flowsteer-hotpot-training-step@1",
+      "rollout_ordinals": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ],
+      "step_ordinal": 2,
+      "task_id": "hotpotqa:5a7e567b55429949594199a0",
+      "task_position": 1
+    }
+  },
+  "skills_enabled": false,
+  "started_at": "2026-08-16T09:02:54.369591+00:00",
+  "status": "failed_training",
+  "train_path": "/ssd1/iclr/1/FlowSteer/data/agentgraph_v1/train.jsonl"
+}

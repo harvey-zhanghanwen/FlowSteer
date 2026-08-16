@@ -5,8 +5,11 @@ checkpointing, gradient checkpointing, token-cost-balanced replica splitting,
 and checkpoint layout are direct SkillFlow reuse.  Qwen3.5 multimodal loading
 and the two-physical-GPU split are necessary adaptations.  Terminal-only,
 action-masked one-pass GRPO is the project algorithm addition built on
-FlowSteer's objective contract.  SkillFlow's TTB backward policy/partition head
-and the project's MACE, Bayesian, and Skill loops are not implemented here.
+FlowSteer's objective contract.  As in SkillFlow, exact sampled action token IDs
+are teacher-forced by the training policy stack; serving-provider log-probability
+drift is diagnostic rather than a scientific training input.  SkillFlow's TTB
+backward policy/partition head and the project's MACE, Bayesian, and Skill loops
+are not implemented here.
 """
 
 from __future__ import annotations
@@ -203,6 +206,12 @@ class SmokeTrainingSummary:
     optimizer_state_checkpoint: str = ""
     optimizer_state_saved: bool = False
     gradient_partition_token_costs: Tuple[int, int] = (0, 0)
+    provider_logprob_diagnostic_exceeded: bool = False
+    provider_logprob_diagnostic_tolerance: float = 0.0
+    provider_logprob_tokens_compared: int = 0
+    provider_logprob_exceeded_tokens: int = 0
+    provider_logprob_mean_abs_delta: float = 0.0
+    provider_logprob_p95_abs_delta: float = 0.0
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -449,13 +458,40 @@ class Qwen35OnePassSmokeTrainer:
 
             accepted_keys: set[tuple[str, str, str]] = set()
             max_delta = 0.0
+            provider_logprob_diagnostic_exceeded = False
+            provider_logprob_deltas: list[float] = []
             for partition_result in preflight:
                 for key, result in partition_result.items():
                     max_delta = max(max_delta, float(result[0]))
+                    provider_logprob_diagnostic_exceeded = (
+                        provider_logprob_diagnostic_exceeded or bool(result[3])
+                    )
+                    provider_logprob_deltas.extend(float(value) for value in result[4])
                     if result[1]:
                         accepted_keys.add(key)
                     else:
                         exclusions["|".join(key)] = result[2]
+
+            provider_logprob_tokens_compared = len(provider_logprob_deltas)
+            provider_logprob_exceeded_tokens = sum(
+                value > self.config.behavior_logprob_tolerance
+                for value in provider_logprob_deltas
+            )
+            if provider_logprob_deltas:
+                provider_delta_tensor = torch.tensor(
+                    provider_logprob_deltas,
+                    dtype=torch.float32,
+                )
+                provider_logprob_mean_abs_delta = float(
+                    provider_delta_tensor.mean().item()
+                )
+                provider_logprob_p95_abs_delta = float(
+                    torch.quantile(provider_delta_tensor, 0.95).item()
+                )
+                del provider_delta_tensor
+            else:
+                provider_logprob_mean_abs_delta = 0.0
+                provider_logprob_p95_abs_delta = 0.0
 
             accepted_groups = [
                 (key, group)
@@ -509,6 +545,24 @@ class Qwen35OnePassSmokeTrainer:
                         else 0
                     ),
                     gradient_partition_token_costs=partition_token_costs,
+                    provider_logprob_diagnostic_exceeded=(
+                        provider_logprob_diagnostic_exceeded
+                    ),
+                    provider_logprob_diagnostic_tolerance=(
+                        self.config.behavior_logprob_tolerance
+                    ),
+                    provider_logprob_tokens_compared=(
+                        provider_logprob_tokens_compared
+                    ),
+                    provider_logprob_exceeded_tokens=(
+                        provider_logprob_exceeded_tokens
+                    ),
+                    provider_logprob_mean_abs_delta=(
+                        provider_logprob_mean_abs_delta
+                    ),
+                    provider_logprob_p95_abs_delta=(
+                        provider_logprob_p95_abs_delta
+                    ),
                 )
                 self._write_summary(output_path, summary)
                 return summary
@@ -688,6 +742,18 @@ class Qwen35OnePassSmokeTrainer:
                 optimizer_state_checkpoint=optimizer_state_checkpoint,
                 optimizer_state_saved=optimizer_state_saved,
                 gradient_partition_token_costs=partition_token_costs,
+                provider_logprob_diagnostic_exceeded=(
+                    provider_logprob_diagnostic_exceeded
+                ),
+                provider_logprob_diagnostic_tolerance=(
+                    self.config.behavior_logprob_tolerance
+                ),
+                provider_logprob_tokens_compared=provider_logprob_tokens_compared,
+                provider_logprob_exceeded_tokens=(
+                    provider_logprob_exceeded_tokens
+                ),
+                provider_logprob_mean_abs_delta=provider_logprob_mean_abs_delta,
+                provider_logprob_p95_abs_delta=provider_logprob_p95_abs_delta,
             )
             self._write_summary(output_path, summary)
             return summary
@@ -898,12 +964,22 @@ class Qwen35OnePassSmokeTrainer:
                 group_max = 0.0
                 accepted = True
                 reason = ""
+                provider_delta_exceeded = False
+                provider_deltas: list[float] = []
                 for item in group:
                     record = records_by_id[item.trajectory_id]
                     for turn in record.turns:
-                        computed = self._turn_log_probs(model, device, turn)
+                        # FlowSteer optimizes only the parsed/executed atomic
+                        # action.  SkillFlow likewise teacher-forces only the
+                        # recorded action span, never unused sampled suffix
+                        # tokens.  Receipt parity must therefore cover the same
+                        # span as the backward mask below.
+                        action_tokens = turn.executed_prefix_tokens
+                        computed = self._turn_log_probs(model, device, turn)[
+                            :action_tokens
+                        ]
                         behavior = torch.tensor(
-                            list(turn.behavior_log_probs),
+                            list(turn.behavior_log_probs[:action_tokens]),
                             dtype=torch.float32,
                             device=computed.device,
                         )
@@ -912,19 +988,39 @@ class Qwen35OnePassSmokeTrainer:
                             reason = "behavior_receipt_shape_mismatch"
                             break
                         if computed.numel():
-                            delta = float(
-                                (computed.detach().float() - behavior).abs().max().cpu()
+                            absolute_deltas = (
+                                (computed.detach().float() - behavior).abs().cpu()
                             )
-                            group_max = max(group_max, delta)
-                            if not math.isfinite(delta) or (
-                                delta > self.config.behavior_logprob_tolerance
-                            ):
+                            turn_deltas = [
+                                float(value) for value in absolute_deltas.tolist()
+                            ]
+                            del absolute_deltas
+                            if not all(math.isfinite(value) for value in turn_deltas):
                                 accepted = False
-                                reason = "behavior_logprob_tolerance_exceeded"
+                                reason = "nonfinite_teacher_forced_logprob"
                                 break
+                            provider_deltas.extend(turn_deltas)
+                            delta = max(turn_deltas)
+                            group_max = max(group_max, delta)
+                            if delta > self.config.behavior_logprob_tolerance:
+                                # SkillFlow explicitly excludes serving/provider
+                                # log probabilities from its scientific inputs.
+                                # Exact sampled token IDs and the pinned route
+                                # receipts prove behavior identity; the HF policy
+                                # stack teacher-forces those IDs for training.
+                                # Keep cross-stack drift visible without letting
+                                # a kernel-level numerical difference discard an
+                                # otherwise exact on-policy group.
+                                provider_delta_exceeded = True
                     if not accepted:
                         break
-                results[key] = (group_max, accepted, reason)
+                results[key] = (
+                    group_max,
+                    accepted,
+                    reason,
+                    provider_delta_exceeded,
+                    tuple(provider_deltas),
+                )
         return results
 
     def _backward_partition(

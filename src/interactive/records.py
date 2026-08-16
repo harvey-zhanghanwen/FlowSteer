@@ -49,6 +49,23 @@ class TaskRecord:
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "TaskRecord":
+        """Rebuild one persisted task using the same immutable contract."""
+
+        if not isinstance(value, Mapping):
+            raise ValueError("serialized task must be a mapping")
+        metadata = value.get("metadata", {})
+        if not isinstance(metadata, Mapping):
+            raise ValueError("serialized task metadata must be a mapping")
+        return cls(
+            task_id=value["task_id"],
+            question=value["question"],
+            ground_truth=value.get("ground_truth"),
+            split=value["split"],
+            metadata=dict(metadata),
+        )
+
 
 @dataclass(frozen=True)
 class ExecutionRecord:
@@ -83,6 +100,34 @@ class ExecutionRecord:
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "ExecutionRecord":
+        if not isinstance(value, Mapping):
+            raise ValueError("serialized execution must be a mapping")
+        metadata = value.get("metadata", {})
+        if not isinstance(metadata, Mapping):
+            raise ValueError("serialized execution metadata must be a mapping")
+        return cls(
+            execution_id=value["execution_id"],
+            experiment_id=value["experiment_id"],
+            graph_revision=value["graph_revision"],
+            agent_id=value["agent_id"],
+            model_id=value["model_id"],
+            model_fingerprint=value["model_fingerprint"],
+            provider=value["provider"],
+            request_hash=value["request_hash"],
+            output=value["output"],
+            temperature=value["temperature"],
+            top_p=value["top_p"],
+            max_tokens=value["max_tokens"],
+            input_tokens=value.get("input_tokens"),
+            output_tokens=value.get("output_tokens"),
+            latency_ms=value.get("latency_ms"),
+            error_type=value.get("error_type"),
+            created_at=value.get("created_at", utc_now()),
+            metadata=dict(metadata),
+        )
 
 
 @dataclass(frozen=True)
@@ -170,6 +215,56 @@ class TurnRecord:
         result["executions"] = [item.to_dict() for item in self.executions]
         return result
 
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "TurnRecord":
+        if not isinstance(value, Mapping):
+            raise ValueError("serialized turn must be a mapping")
+        action = value.get("action", {})
+        graph_snapshot = value.get("graph_snapshot", {})
+        runtime_summary = value.get("runtime_summary", {})
+        if not isinstance(action, Mapping):
+            raise ValueError("serialized turn action must be a mapping")
+        if not isinstance(graph_snapshot, Mapping):
+            raise ValueError("serialized turn graph snapshot must be a mapping")
+        if not isinstance(runtime_summary, Mapping):
+            raise ValueError("serialized turn runtime summary must be a mapping")
+        raw_executions = value.get("executions", ())
+        if not isinstance(raw_executions, Sequence) or isinstance(
+            raw_executions, (str, bytes)
+        ):
+            raise ValueError("serialized turn executions must be a sequence")
+        return cls(
+            turn_id=value["turn_id"],
+            round_index=value["round_index"],
+            prompt=value["prompt"],
+            policy_response=value["policy_response"],
+            prompt_token_ids=tuple(value.get("prompt_token_ids", ())),
+            output_token_ids=tuple(value.get("output_token_ids", ())),
+            behavior_log_probs=tuple(value.get("behavior_log_probs", ())),
+            executed_prefix_tokens=value["executed_prefix_tokens"],
+            action=dict(action),
+            canvas_feedback=value["canvas_feedback"],
+            graph_revision=value["graph_revision"],
+            graph_snapshot=dict(graph_snapshot),
+            policy_version=value["policy_version"],
+            policy_adapter=value.get("policy_adapter"),
+            server_weight_version=value.get("server_weight_version"),
+            graph_snapshot_id=value.get("graph_snapshot_id", ""),
+            previous_graph_snapshot_id=value.get("previous_graph_snapshot_id"),
+            executions=tuple(
+                ExecutionRecord.from_dict(item) for item in raw_executions
+            ),
+            runtime_summary=dict(runtime_summary),
+            execution_reused=value.get("execution_reused", False),
+            director_request_id=value.get("director_request_id"),
+            director_latency_ms=value.get("director_latency_ms"),
+            director_attempt_count=value.get("director_attempt_count"),
+            director_generation_seed=value.get("director_generation_seed"),
+            reconstructed_context=value.get("reconstructed_context", False),
+            receipt_verified=value.get("receipt_verified", False),
+            created_at=value.get("created_at", utc_now()),
+        )
+
 
 @dataclass(frozen=True)
 class EvaluationReceipt:
@@ -190,6 +285,25 @@ class EvaluationReceipt:
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "EvaluationReceipt":
+        if not isinstance(value, Mapping):
+            raise ValueError("serialized evaluation receipt must be a mapping")
+        metrics = value.get("metrics", {})
+        details = value.get("details", {})
+        if not isinstance(metrics, Mapping):
+            raise ValueError("serialized evaluation metrics must be a mapping")
+        if not isinstance(details, Mapping):
+            raise ValueError("serialized evaluation details must be a mapping")
+        return cls(
+            evaluator_version=value["evaluator_version"],
+            valid=value["valid"],
+            reward=value.get("reward"),
+            metrics=dict(metrics),
+            reason=value.get("reason", ""),
+            details=dict(details),
+        )
 
 
 @dataclass(frozen=True)
@@ -334,6 +448,55 @@ class TrajectoryRecord:
             "grpo_eligible": self.grpo_eligible,
             "created_at": self.created_at,
         }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "TrajectoryRecord":
+        """Rebuild and revalidate a persisted rollout for exact resume.
+
+        SkillFlow resumes persisted trajectories through an explicit
+        deserialization boundary.  This project adaptation additionally checks
+        every serialized derived eligibility flag instead of trusting it.
+        """
+
+        if not isinstance(value, Mapping):
+            raise ValueError("serialized trajectory must be a mapping")
+        if value.get("schema_version") != SCHEMA_VERSION:
+            raise ValueError("serialized trajectory schema version differs")
+        raw_turns = value.get("turns", ())
+        if not isinstance(raw_turns, Sequence) or isinstance(raw_turns, (str, bytes)):
+            raise ValueError("serialized trajectory turns must be a sequence")
+        director_sampling = value.get("director_sampling", {})
+        if not isinstance(director_sampling, Mapping):
+            raise ValueError("serialized Director sampling receipt must be a mapping")
+        record = cls(
+            trajectory_id=value["trajectory_id"],
+            task=TaskRecord.from_dict(value["task"]),
+            group_id=value["group_id"],
+            condition_id=value["condition_id"],
+            rollout_id=value["rollout_id"],
+            versions=VersionBundle.from_dict(value["versions"]),
+            turns=tuple(TurnRecord.from_dict(item) for item in raw_turns),
+            final_answer=value.get("final_answer"),
+            evaluation=EvaluationReceipt.from_dict(value["evaluation"]),
+            termination_reason=value["termination_reason"],
+            explicit_finish=value["explicit_finish"],
+            director_sampling=dict(director_sampling),
+            condition_satisfied=value.get("condition_satisfied", True),
+            forced_probe=value.get("forced_probe", False),
+            api_fallback_used=value.get("api_fallback_used", False),
+            manual_repair_used=value.get("manual_repair_used", False),
+            created_at=value.get("created_at", utc_now()),
+            schema_version=value["schema_version"],
+        )
+        derived = {
+            "terminal_failure": record.terminal_failure,
+            "sampling_receipt_verified": record.sampling_receipt_verified,
+            "grpo_eligible": record.grpo_eligible,
+        }
+        for name, expected in derived.items():
+            if name in value and value[name] != expected:
+                raise ValueError(f"serialized trajectory derived field {name!r} differs")
+        return record
 
 
 @dataclass(frozen=True)

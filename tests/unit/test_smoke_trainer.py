@@ -460,5 +460,79 @@ class BehaviorRouteGateTests(unittest.TestCase):
         )
 
 
+class ProviderLogprobDiagnosticTests(unittest.TestCase):
+    @staticmethod
+    def _run_preflight(turn: TurnRecord, computed):
+        trainer = Qwen35OnePassSmokeTrainer(
+            _config(behavior_logprob_tolerance=0.25)
+        )
+        record = _trajectory(0, turn)
+        key = ("hotpotqa:0", "natural_smoke", "versions")
+        partition = [(key, [SimpleNamespace(trajectory_id=record.trajectory_id)])]
+        with patch.object(trainer, "_turn_log_probs", return_value=computed):
+            result = trainer._preflight_partition(
+                MagicMock(),
+                "cpu",
+                partition,
+                {record.trajectory_id: record},
+            )
+        return result[key]
+
+    def test_provider_delta_above_tolerance_is_diagnostic_not_rejection(self) -> None:
+        import torch
+
+        result = self._run_preflight(
+            _turn("turn-0"),
+            torch.tensor([-0.5], dtype=torch.float32),
+        )
+
+        self.assertTrue(result[1])
+        self.assertEqual("", result[2])
+        self.assertTrue(result[3])
+        self.assertAlmostEqual(0.4, result[0], places=6)
+        self.assertEqual(1, len(result[4]))
+
+    def test_unused_sampled_suffix_is_outside_the_action_receipt(self) -> None:
+        import torch
+
+        turn = replace(
+            _turn("turn-0"),
+            output_token_ids=(2, 3),
+            behavior_log_probs=(-0.1, -100.0),
+            executed_prefix_tokens=1,
+        )
+        result = self._run_preflight(
+            turn,
+            torch.tensor([-0.1, 100.0], dtype=torch.float32),
+        )
+
+        self.assertTrue(result[1])
+        self.assertFalse(result[3])
+        self.assertEqual((0.0,), result[4])
+
+    def test_shape_and_nonfinite_teacher_forced_scores_are_hard_rejected(self) -> None:
+        import torch
+
+        two_token_turn = replace(
+            _turn("turn-0"),
+            output_token_ids=(2, 3),
+            behavior_log_probs=(-0.1, -0.2),
+            executed_prefix_tokens=2,
+        )
+        shape = self._run_preflight(
+            two_token_turn,
+            torch.tensor([-0.1], dtype=torch.float32),
+        )
+        nonfinite = self._run_preflight(
+            _turn("turn-1"),
+            torch.tensor([float("nan")], dtype=torch.float32),
+        )
+
+        self.assertFalse(shape[1])
+        self.assertEqual("behavior_receipt_shape_mismatch", shape[2])
+        self.assertFalse(nonfinite[1])
+        self.assertEqual("nonfinite_teacher_forced_logprob", nonfinite[2])
+
+
 if __name__ == "__main__":
     unittest.main()

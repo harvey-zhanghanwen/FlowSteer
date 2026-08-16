@@ -4,6 +4,7 @@ import json
 import importlib.util
 import os
 import copy
+from dataclasses import replace
 from pathlib import Path
 import unittest
 from unittest.mock import patch
@@ -43,6 +44,7 @@ evaluator_version_for = _MODULE.evaluator_version_for
 run_smoke = _MODULE.run_smoke
 select_smoke_tasks = _MODULE.select_smoke_tasks
 validate_smoke_bounds = _MODULE.validate_smoke_bounds
+validate_resumed_initial_rollouts = _MODULE._validate_resumed_initial_rollouts
 
 
 SOURCE_NAMES = {
@@ -129,7 +131,10 @@ def trajectory(task: TaskRecord, rollout_index: int, versions) -> TrajectoryReco
         task=task,
         group_id=f"{task.task_id}:natural_smoke:{versions.policy}",
         condition_id="natural_smoke",
-        rollout_id=f"rollout:{rollout_index}",
+        rollout_id=(
+            f"{task.task_id}:natural_smoke:{versions.policy}:"
+            f"rollout:{rollout_index:04d}"
+        ),
         versions=versions,
         turns=(turn,),
         final_answer="answer",
@@ -165,6 +170,8 @@ class Summary:
             "behavior_policy_version": self.behavior_policy_version,
             "updated_policy_version": self.updated_policy_version,
             "checkpoint_dir": self.checkpoint_dir,
+            "optimizer_state_saved": False,
+            "trainable_update_l2": 1.0 if self.optimizer_updates else 0.0,
         }
 
 
@@ -202,7 +209,13 @@ class FakeBackend:
         checkpoint = output_dir / "checkpoint_final" / "supervisor_lora"
         if self.updates:
             checkpoint.mkdir(parents=True, exist_ok=True)
-        return Summary(checkpoint, self.updates)
+        summary = Summary(checkpoint, self.updates)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "training_summary.json").write_text(
+            json.dumps(summary.to_dict()) + "\n",
+            encoding="utf-8",
+        )
+        return summary
 
     async def publish(self, summary):
         self.events.append("publish")
@@ -308,6 +321,25 @@ def read_jsonl(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
 
+def write_fake_evidence(trajectory_path: Path, evidence_path: Path) -> None:
+    trajectory_rows = read_jsonl(trajectory_path)
+    evidence_path.parent.mkdir(parents=True, exist_ok=True)
+    evidence_path.write_text(
+        "".join(
+            json.dumps(
+                {
+                    "record_kind": "trajectory",
+                    "event_id": row["trajectory_id"],
+                    "payload": row,
+                }
+            )
+            + "\n"
+            for row in trajectory_rows
+        ),
+        encoding="utf-8",
+    )
+
+
 class SelectionTests(unittest.TestCase):
     def test_bounds_require_raw_on_policy_sampling_and_fixed_oom_schedule(self) -> None:
         config = yaml.safe_load(
@@ -369,6 +401,36 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(versions["hotpotqa"], versions["aime_2026"])
         self.assertEqual(versions["webshop"], versions["alfworld"])
         self.assertEqual(4, len(set(versions.values())))
+
+    def test_exact_resume_preserves_but_excludes_a_malformed_atomic_action(self) -> None:
+        task = make_task("hotpotqa", 0)
+        versions = _MODULE.version_bundle_for(
+            task,
+            policy_version="qwen35-9b-base-step-0000",
+            model_catalog_version="catalog-test-v1",
+        )
+        invalid = trajectory(task, 0, versions)
+        invalid_turn = replace(
+            invalid.turns[0],
+            executed_prefix_tokens=0,
+            action={},
+            canvas_feedback="invalid action: malformed JSON",
+        )
+        invalid = replace(invalid, turns=(invalid_turn,))
+        valid = trajectory(task, 1, versions)
+        third = trajectory(task, 2, versions)
+
+        validate_resumed_initial_rollouts(
+            (invalid, valid, third),
+            ((task, 0, versions), (task, 1, versions), (task, 2, versions)),
+            condition_id="natural_smoke",
+            sampling_anchor_ordinal=0,
+            behavior_adapter_name=None,
+            expected_server_weight_version="default",
+        )
+
+        self.assertFalse(invalid.grpo_eligible)
+        self.assertTrue(valid.grpo_eligible)
 
 
 class SmokeRunnerTests(unittest.IsolatedAsyncioTestCase):
@@ -441,6 +503,103 @@ class SmokeRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             committed.to_value(),
             manifest["selection_receipt"]["cursor_after"],
+        )
+
+    async def test_hotpot_micro_strict_resume_skips_initial_collection(self) -> None:
+        root, config_path, _ = create_hotpot_micro_project(
+            Path(self._temp_dir.name)
+        )
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        # The fake trajectory helper predates formal step ordinals; pin its
+        # existing sampling anchor explicitly for this persistence test.
+        config["experiment"]["sampling_anchor_ordinal"] = 0
+        config_path.write_text(
+            yaml.safe_dump(config, sort_keys=False), encoding="utf-8"
+        )
+
+        failed_backend = FakeBackend(updates=0)
+        with self.assertRaisesRegex(SmokeRunError, "zero optimizer updates"):
+            await run_smoke(
+                config_path,
+                backend=failed_backend,
+                project_root=root,
+            )
+        self.assertEqual(
+            ["collect:0", "collect:1", "train"], failed_backend.events
+        )
+        write_fake_evidence(
+            root / "artifacts/hotpot_step1/trajectories.jsonl",
+            root / "artifacts/hotpot_step1/evidence/trajectories.jsonl",
+        )
+
+        resumed_backend = FakeBackend()
+        manifest = await run_smoke(
+            config_path,
+            resume_initial_rollouts=True,
+            backend=resumed_backend,
+            project_root=root,
+        )
+        self.assertEqual("completed", manifest["status"])
+        self.assertEqual(
+            ["train", "publish", "collect:10000"], resumed_backend.events
+        )
+        self.assertEqual(
+            {
+                "mode": "strict_persisted_resume",
+                "path": str(
+                    root / "artifacts/hotpot_step1/trajectories.jsonl"
+                ),
+                "reused": 2,
+                "new_collections": 0,
+            },
+            manifest["initial_rollout_source"],
+        )
+
+    async def test_hotpot_micro_resume_after_precheckpoint_runtime_failure(
+        self,
+    ) -> None:
+        class PrecheckpointFailureBackend(FakeBackend):
+            def train(self, trajectories, output_dir):
+                del output_dir
+                self.events.append("train")
+                self.train_inputs = list(trajectories)
+                raise RuntimeError("replica unavailable before checkpoint")
+
+        root, config_path, _ = create_hotpot_micro_project(
+            Path(self._temp_dir.name)
+        )
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        config["experiment"]["sampling_anchor_ordinal"] = 0
+        config_path.write_text(
+            yaml.safe_dump(config, sort_keys=False), encoding="utf-8"
+        )
+        failed_backend = PrecheckpointFailureBackend()
+        with self.assertRaisesRegex(SmokeRunError, "one-pass smoke training failed"):
+            await run_smoke(
+                config_path,
+                backend=failed_backend,
+                project_root=root,
+            )
+        write_fake_evidence(
+            root / "artifacts/hotpot_step1/trajectories.jsonl",
+            root / "artifacts/hotpot_step1/evidence/trajectories.jsonl",
+        )
+
+        resumed_backend = FakeBackend()
+        manifest = await run_smoke(
+            config_path,
+            resume_initial_rollouts=True,
+            backend=resumed_backend,
+            project_root=root,
+        )
+
+        self.assertEqual("completed", manifest["status"])
+        self.assertEqual(
+            ["train", "publish", "collect:10000"], resumed_backend.events
+        )
+        self.assertEqual(
+            "failed_training_before_persistence",
+            manifest["resume_preconditions"]["root_zero_update_status"],
         )
 
     async def test_zero_update_is_a_failed_run_and_never_publishes(self) -> None:

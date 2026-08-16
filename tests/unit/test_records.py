@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import json
 import math
 import unittest
 
@@ -106,6 +107,19 @@ def trajectory(task_split: str = "train", **changes: object) -> TrajectoryRecord
 
 
 class RecordTests(unittest.TestCase):
+    def test_persisted_trajectory_round_trip_revalidates_derived_fields(self) -> None:
+        original = trajectory()
+        restored = TrajectoryRecord.from_dict(original.to_dict())
+        self.assertEqual(
+            json.dumps(original.to_dict(), sort_keys=True),
+            json.dumps(restored.to_dict(), sort_keys=True),
+        )
+
+        tampered = original.to_dict()
+        tampered["grpo_eligible"] = False
+        with self.assertRaisesRegex(ValueError, "derived field"):
+            TrajectoryRecord.from_dict(tampered)
+
     def test_communication_diagnostic_is_structurally_excluded_from_grpo(self) -> None:
         record = CommunicationDiagnosticRecord(
             diagnostic_id="diag-1",

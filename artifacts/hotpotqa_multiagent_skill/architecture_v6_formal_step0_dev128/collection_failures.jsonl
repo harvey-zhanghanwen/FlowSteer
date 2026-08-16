@@ -1,0 +1,2 @@
+{"condition": "direct_local_qwen35_9b", "error": "HotpotRoundError: Direct generation seed receipt differs from config", "recorded_at": "2026-08-16T08:09:48.402462+00:00", "stage": "generation_or_evaluator", "task_id": "hotpotqa:5a879ab05542996e4f30887e"}
+{"condition": "direct_local_qwen35_9b", "error": "HotpotRoundError: Direct generation seed receipt differs from config", "recorded_at": "2026-08-16T08:09:48.408753+00:00", "stage": "generation_or_evaluator", "task_id": "hotpotqa:5a7a06935542990198eaf050"}

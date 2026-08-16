@@ -1,0 +1,27 @@
+{
+  "completed_at": "2026-08-16T09:41:10.610818+00:00",
+  "completed_normal_arms": 5,
+  "completed_pairs": 5,
+  "completed_upstream_masked_arms": 5,
+  "delta_masked_minus_normal": {
+    "exact_match": 0.0,
+    "token_f1": 0.0
+  },
+  "diagnostic_only": true,
+  "failure_count": 0,
+  "grpo_eligible": false,
+  "interpretation": "A masked-score drop demonstrates behavioral dependence on upstream content. No change does not prove non-use because Question and Context remain intact.",
+  "normal": {
+    "exact_match": 0.4,
+    "token_f1": 0.5599999999999999
+  },
+  "normal_correct_to_masked_wrong": 0,
+  "normalized_answer_changed_pairs": 0,
+  "raw_answer_changed_pairs": 0,
+  "schema_version": "flowsteer.agentgraph.communication_summary.v1",
+  "selected_frozen_multi_agent_graphs": 5,
+  "upstream_masked": {
+    "exact_match": 0.4,
+    "token_f1": 0.5599999999999999
+  }
+}

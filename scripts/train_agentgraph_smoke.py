@@ -324,6 +324,284 @@ def version_bundle_for(
     )
 
 
+def _validate_resumed_initial_rollouts(
+    records: Sequence[TrajectoryRecord],
+    expected_jobs: Sequence[tuple[TaskRecord, int, VersionBundle]],
+    *,
+    condition_id: str,
+    sampling_anchor_ordinal: int,
+    behavior_adapter_name: Optional[str],
+    expected_server_weight_version: str,
+) -> None:
+    """Fail closed unless persisted rollouts are the exact frozen job list."""
+
+    if len(records) != len(expected_jobs):
+        raise SmokeRunError("resumed rollout count differs from the frozen job list")
+    if len({record.trajectory_id for record in records}) != len(records):
+        raise SmokeRunError("resumed rollout artifact contains duplicate trajectories")
+    if len({record.rollout_id for record in records}) != len(records):
+        raise SmokeRunError("resumed rollout artifact contains duplicate rollout IDs")
+    for index, (record, expected) in enumerate(
+        zip(records, expected_jobs, strict=True)
+    ):
+        task, rollout_ordinal, versions = expected
+        if record.task.to_dict() != task.to_dict():
+            raise SmokeRunError(f"resumed rollout {index} has the wrong frozen task")
+        if record.versions != versions:
+            raise SmokeRunError(f"resumed rollout {index} has the wrong version bundle")
+        if record.condition_id != condition_id:
+            raise SmokeRunError(f"resumed rollout {index} has the wrong condition")
+        expected_group = f"{task.task_id}:{condition_id}:{versions.policy}"
+        if record.group_id != expected_group:
+            raise SmokeRunError(f"resumed rollout {index} has the wrong GRPO group")
+        expected_rollout_id = f"{expected_group}:rollout:{rollout_ordinal:04d}"
+        if record.rollout_id != expected_rollout_id:
+            raise SmokeRunError(f"resumed rollout {index} has the wrong rollout ID")
+        if task.split != "train":
+            raise SmokeRunError(f"resumed rollout {index} is not a training sample")
+        if not record.natural_policy_terminal:
+            raise SmokeRunError(f"resumed rollout {index} is not a natural terminal")
+        if (
+            not record.condition_satisfied
+            or record.forced_probe
+            or record.api_fallback_used
+            or record.manual_repair_used
+        ):
+            raise SmokeRunError(
+                f"resumed rollout {index} is not an unmodified natural-policy sample"
+            )
+        if (
+            not record.evaluation.valid
+            or record.evaluation.reward is None
+            or record.evaluation.evaluator_version != versions.evaluator
+        ):
+            raise SmokeRunError(f"resumed rollout {index} has an invalid evaluator")
+        if not record.sampling_receipt_verified:
+            raise SmokeRunError(f"resumed rollout {index} has an invalid sampling receipt")
+        if not record.turns:
+            raise SmokeRunError(f"resumed rollout {index} contains no policy turns")
+        for turn in record.turns:
+            if (
+                not turn.prompt
+                or not turn.policy_response
+                or not turn.output_token_ids
+                or not turn.receipt_verified
+                or turn.reconstructed_context
+                or turn.policy_version != versions.policy
+                or turn.policy_adapter != behavior_adapter_name
+                or turn.server_weight_version != expected_server_weight_version
+            ):
+                raise SmokeRunError(
+                    f"resumed rollout {index} has an invalid exact policy receipt"
+                )
+            if turn.executed_prefix_tokens == 0 and (
+                bool(turn.action)
+                or not turn.canvas_feedback.startswith("invalid action:")
+            ):
+                raise SmokeRunError(
+                    f"resumed rollout {index} has an unexplained zero action mask"
+                )
+        coordinate = ScientificSamplingCoordinate.from_value(
+            record.director_sampling["coordinate"]
+        )
+        if (
+            coordinate.task_id != task.task_id
+            or coordinate.sequence_position != rollout_ordinal
+            or coordinate.schedule_purpose != condition_id
+            or coordinate.optimizer_step_or_anchor_ordinal
+            != sampling_anchor_ordinal
+        ):
+            raise SmokeRunError(
+                f"resumed rollout {index} has the wrong frozen sampling coordinate"
+            )
+    if sum(record.grpo_eligible for record in records) < 2:
+        raise SmokeRunError("resumed rollout batch has fewer than two eligible samples")
+
+
+def _read_json_mapping(path: Path, *, label: str) -> Mapping[str, Any]:
+    if not path.is_file():
+        raise FileNotFoundError(f"{label} does not exist: {path}")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise SmokeRunError(f"{label} is not valid JSON") from exc
+    if not isinstance(value, Mapping):
+        raise SmokeRunError(f"{label} must be a mapping")
+    return value
+
+
+def _validate_resume_preconditions(
+    *,
+    paths: Mapping[str, Path],
+    next_cursor_path: Optional[Path],
+) -> Mapping[str, Any]:
+    """Prove the prior attempt persisted no model or schedule state change.
+
+    SkillFlow resumes only from an explicit persisted boundary.  This bounded
+    adaptation accepts exactly the known zero-update failure state: no learner
+    checkpoint, optimizer state, policy publication, canary, or next cursor.
+    """
+
+    prior_manifest = _read_json_mapping(
+        paths["manifest"], label="prior failed training manifest"
+    )
+    prior_status = prior_manifest.get("status")
+    retry_after_runtime_failure = prior_status == "failed_training"
+    if prior_status not in {"failed_no_optimizer_update", "failed_training"}:
+        raise SmokeRunError(
+            "strict rollout resume requires a proven zero-persistence failure manifest"
+        )
+    embedded_preconditions = prior_manifest.get("resume_preconditions")
+    fresh_runtime_failure = False
+    if retry_after_runtime_failure:
+        initial_source = prior_manifest.get("initial_rollout_source")
+        nested_strict_resume_failure = (
+            prior_manifest.get("resume_initial_rollouts_requested") is True
+            and isinstance(initial_source, Mapping)
+            and initial_source.get("mode") == "strict_persisted_resume"
+            and isinstance(embedded_preconditions, Mapping)
+            and embedded_preconditions.get("optimizer_updates") == 0
+        )
+        fresh_runtime_failure = bool(
+            prior_manifest.get("resume_initial_rollouts_requested") is False
+            and isinstance(initial_source, Mapping)
+            and initial_source.get("mode") == "live_collection"
+            and int(initial_source.get("new_collections", 0)) > 0
+            and embedded_preconditions is None
+        )
+        if (
+            prior_manifest.get("training") is not None
+            or prior_manifest.get("policy_sync") is not None
+            or not (nested_strict_resume_failure or fresh_runtime_failure)
+        ):
+            raise SmokeRunError(
+                "failed training manifest does not preserve a strict zero-update resume proof"
+            )
+        manifest_training: Optional[Mapping[str, Any]] = None
+    else:
+        raw_training = prior_manifest.get("training")
+        if not isinstance(raw_training, Mapping):
+            raise SmokeRunError("prior failed manifest has no training receipt")
+        manifest_training = raw_training
+    summary_path = paths["training_root"] / "training_summary.json"
+    receipts: list[tuple[str, Mapping[str, Any]]] = []
+    if fresh_runtime_failure:
+        if summary_path.exists():
+            raise SmokeRunError(
+                "fresh runtime failure unexpectedly contains a training summary"
+            )
+    else:
+        persisted_summary = _read_json_mapping(
+            summary_path, label="prior failed training summary"
+        )
+        receipts.append(("summary", persisted_summary))
+    if manifest_training is not None:
+        receipts.insert(0, ("manifest", manifest_training))
+    for receipt_name, receipt in receipts:
+        if (
+            receipt.get("optimizer_updates") != 0
+            or float(receipt.get("trainable_update_l2", 0.0)) != 0.0
+            or receipt.get("checkpoint_dir") not in (None, "")
+            or receipt.get("optimizer_state_saved", False) is not False
+        ):
+            raise SmokeRunError(
+                f"prior {receipt_name} does not prove a zero-update failure"
+            )
+    if fresh_runtime_failure:
+        if paths["sync"].exists():
+            raise SmokeRunError(
+                "fresh runtime failure unexpectedly contains a policy sync receipt"
+            )
+        sync: Mapping[str, Any] = {
+            "success": False,
+            "status": "absent_before_training_completed",
+        }
+    else:
+        sync = _read_json_mapping(paths["sync"], label="prior policy sync receipt")
+        if (
+            sync.get("success") is not False
+            or sync.get("status") != "not_attempted_no_optimizer_update"
+        ):
+            raise SmokeRunError("prior attempt may have published a policy adapter")
+    manifest_sync = prior_manifest.get("policy_sync")
+    if fresh_runtime_failure:
+        pass
+    elif retry_after_runtime_failure:
+        if embedded_preconditions.get("policy_sync_status") != sync.get("status"):
+            raise SmokeRunError("retry manifest and policy sync receipts disagree")
+    elif not isinstance(manifest_sync, Mapping) or dict(manifest_sync) != dict(sync):
+        raise SmokeRunError("prior manifest and policy sync receipts disagree")
+    if (paths["training_root"] / "checkpoint_final").exists():
+        raise SmokeRunError("prior attempt already contains a final learner checkpoint")
+    if tuple(paths["training_root"].rglob("optimizer_state.pt")):
+        raise SmokeRunError("prior attempt already contains optimizer state")
+    if paths["post_update"].exists():
+        raise SmokeRunError("prior attempt already contains a post-update canary")
+    if next_cursor_path is not None and next_cursor_path.exists():
+        raise SmokeRunError("prior attempt already committed the next training cursor")
+    return {
+        "source_manifest_status": prior_status,
+        "root_zero_update_status": (
+            "failed_training_before_persistence"
+            if fresh_runtime_failure
+            else embedded_preconditions.get("source_manifest_status")
+            if retry_after_runtime_failure
+            else prior_status
+        ),
+        "optimizer_updates": 0,
+        "policy_sync_status": sync["status"],
+        "checkpoint_absent": True,
+        "optimizer_state_absent": True,
+        "post_update_canary_absent": True,
+        "next_cursor_absent": next_cursor_path is None or not next_cursor_path.exists(),
+    }
+
+
+def _validate_resume_evidence_stream(
+    records: Sequence[TrajectoryRecord],
+    *,
+    evidence_path: Path,
+) -> None:
+    """Require the EvidenceStore stream to contain the same frozen batch."""
+
+    if not evidence_path.is_file():
+        raise FileNotFoundError(
+            f"resume EvidenceStore trajectory stream does not exist: {evidence_path}"
+        )
+    event_ids: list[str] = []
+    with evidence_path.open("r", encoding="utf-8") as handle:
+        for line_number, raw_line in enumerate(handle, start=1):
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise SmokeRunError(
+                    f"resume evidence line {line_number} is not valid JSON"
+                ) from exc
+            if not isinstance(value, Mapping):
+                raise SmokeRunError(
+                    f"resume evidence line {line_number} is not a mapping"
+                )
+            payload = value.get("payload")
+            event_id = value.get("event_id")
+            if not isinstance(payload, Mapping) or payload.get("trajectory_id") != event_id:
+                raise SmokeRunError(
+                    f"resume evidence line {line_number} has an invalid trajectory envelope"
+                )
+            if not isinstance(event_id, str) or not event_id:
+                raise SmokeRunError(
+                    f"resume evidence line {line_number} has no trajectory event ID"
+                )
+            event_ids.append(event_id)
+    expected_ids = [record.trajectory_id for record in records]
+    if len(event_ids) != len(set(event_ids)) or set(event_ids) != set(expected_ids):
+        raise SmokeRunError(
+            "resume EvidenceStore stream differs from the frozen trajectory batch"
+        )
+
+
 def _json_value(value: Any) -> Any:
     if hasattr(value, "to_dict"):
         return value.to_dict()
@@ -351,6 +629,36 @@ def _write_jsonl(path: Path, values: Sequence[Any]) -> None:
             handle.write(
                 json.dumps(_json_value(value), ensure_ascii=False, sort_keys=True) + "\n"
             )
+
+
+def _read_trajectory_records(path: Path) -> tuple[TrajectoryRecord, ...]:
+    """Load persisted rollouts through the immutable record contract."""
+
+    if not path.is_file():
+        raise FileNotFoundError(f"resume trajectory artifact does not exist: {path}")
+    records: list[TrajectoryRecord] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for line_number, raw_line in enumerate(handle, start=1):
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise SmokeRunError(
+                    f"resume trajectory line {line_number} is not valid JSON"
+                ) from exc
+            if not isinstance(value, Mapping):
+                raise SmokeRunError(
+                    f"resume trajectory line {line_number} is not a mapping"
+                )
+            try:
+                records.append(TrajectoryRecord.from_dict(value))
+            except (KeyError, TypeError, ValueError) as exc:
+                raise SmokeRunError(
+                    f"resume trajectory line {line_number} violates its record contract"
+                ) from exc
+    return tuple(records)
 
 
 def _safe_error(error: BaseException) -> str:
@@ -957,6 +1265,7 @@ async def run_smoke(
     config_path: str | Path,
     *,
     prepare_only: bool = False,
+    resume_initial_rollouts: bool = False,
     backend: Optional[SmokeBackend] = None,
     project_root: Optional[str | Path] = None,
 ) -> Mapping[str, Any]:
@@ -970,6 +1279,10 @@ async def run_smoke(
     )
     config = load_yaml(resolved_config)
     validate_smoke_bounds(config)
+    if resume_initial_rollouts and not _is_hotpot_micro(config):
+        raise ConfigurationError(
+            "exact initial-rollout resume is limited to frozen HotpotQA micro steps"
+        )
     paths = _artifact_paths(config, root)
 
     data = _mapping(config["data"], "data")
@@ -977,6 +1290,12 @@ async def run_smoke(
     selected, rollout_ordinals, progress, next_cursor_path, scope_receipt = (
         _select_run_scope(config, root)
     )
+    resume_preconditions: Optional[Mapping[str, Any]] = None
+    if resume_initial_rollouts:
+        resume_preconditions = _validate_resume_preconditions(
+            paths=paths,
+            next_cursor_path=next_cursor_path,
+        )
     selection = _mapping(
         data["hotpot_micro" if _is_hotpot_micro(config) else "smoke"],
         "data selection",
@@ -1011,26 +1330,33 @@ async def run_smoke(
         "artifacts": {name: str(path) for name, path in paths.items() if name != "training_root"},
         "exploration_enabled": False,
         "skills_enabled": bool(_mapping(config["skills"], "skills")["enabled"]),
+        "resume_initial_rollouts_requested": bool(resume_initial_rollouts),
     }
+    if resume_preconditions is not None:
+        manifest["resume_preconditions"] = dict(resume_preconditions)
     if prepare_only:
         manifest["completed_at"] = _utc_now()
         _write_json(paths["manifest"], manifest)
         return manifest
 
-    _write_json(paths["manifest"], manifest)
+    if not resume_initial_rollouts:
+        _write_json(paths["manifest"], manifest)
     try:
         live_backend = backend or LiveSmokeBackend.from_config(config, root)
     except Exception as exc:
-        manifest["status"] = "failed_runtime_setup"
-        manifest["error"] = _safe_error(exc)
-        manifest["completed_at"] = _utc_now()
-        _write_json(paths["manifest"], manifest)
+        # Do not destroy the only persisted proof of a zero-update attempt
+        # merely because a strict resume could not construct its runtime.
+        if not resume_initial_rollouts:
+            manifest["status"] = "failed_runtime_setup"
+            manifest["error"] = _safe_error(exc)
+            manifest["completed_at"] = _utc_now()
+            _write_json(paths["manifest"], manifest)
         raise SmokeRunError("smoke runtime setup failed") from exc
     director = _mapping(config["director"], "director")
     grpo = _mapping(config["grpo"], "grpo")
     behavior_policy = str(director["behavior_policy_version"])
     updated_policy = str(director["updated_policy_version"])
-    initial_jobs = []
+    expected_jobs: list[tuple[TaskRecord, int, VersionBundle]] = []
     for task in selected:
         versions = version_bundle_for(
             task,
@@ -1038,15 +1364,58 @@ async def run_smoke(
             model_catalog_version=live_backend.model_catalog_version,
         )
         for rollout_index in rollout_ordinals:
-            initial_jobs.append(live_backend.collect(task, rollout_index, versions))
-    try:
-        initial = tuple(await asyncio.gather(*initial_jobs))
-    except Exception as exc:
-        manifest["status"] = "failed_initial_rollout"
-        manifest["error"] = _safe_error(exc)
-        manifest["completed_at"] = _utc_now()
+            expected_jobs.append((task, rollout_index, versions))
+    if resume_initial_rollouts:
+        initial = _read_trajectory_records(paths["trajectories"])
+        experiment = _mapping(config["experiment"], "experiment")
+        storage = _mapping(config["storage"], "storage")
+        behavior_adapter = director.get("behavior_adapter_name")
+        if behavior_adapter is not None:
+            behavior_adapter = str(behavior_adapter).strip() or None
+        _validate_resumed_initial_rollouts(
+            initial,
+            expected_jobs,
+            condition_id=str(experiment.get("condition_id", "natural_smoke")),
+            sampling_anchor_ordinal=int(
+                experiment.get(
+                    "sampling_anchor_ordinal",
+                    experiment.get("update_step", 0),
+                )
+            ),
+            behavior_adapter_name=behavior_adapter,
+            expected_server_weight_version=str(
+                director["expected_server_weight_version"]
+            ),
+        )
+        _validate_resume_evidence_stream(
+            initial,
+            evidence_path=_resolve(root, str(storage["root"])) / "trajectories.jsonl",
+        )
+        manifest["initial_rollout_source"] = {
+            "mode": "strict_persisted_resume",
+            "path": str(paths["trajectories"]),
+            "reused": len(initial),
+            "new_collections": 0,
+        }
         _write_json(paths["manifest"], manifest)
-        raise SmokeRunError("initial rollout collection failed") from exc
+    else:
+        initial_jobs = [
+            live_backend.collect(task, rollout_index, versions)
+            for task, rollout_index, versions in expected_jobs
+        ]
+        try:
+            initial = tuple(await asyncio.gather(*initial_jobs))
+        except Exception as exc:
+            manifest["status"] = "failed_initial_rollout"
+            manifest["error"] = _safe_error(exc)
+            manifest["completed_at"] = _utc_now()
+            _write_json(paths["manifest"], manifest)
+            raise SmokeRunError("initial rollout collection failed") from exc
+        manifest["initial_rollout_source"] = {
+            "mode": "live_collection",
+            "reused": 0,
+            "new_collections": len(initial),
+        }
     if len(initial) != int(grpo["expected_rollout_count"]):
         raise SmokeRunError("initial rollout count differs from the fixed smoke bound")
     if any(record.versions.policy != behavior_policy for record in initial):
@@ -1214,6 +1583,14 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="select and persist the 14 tasks without model, API, or GPU work",
     )
+    parser.add_argument(
+        "--resume-initial-rollouts",
+        action="store_true",
+        help=(
+            "strictly reuse the persisted frozen HotpotQA rollout batch; "
+            "never recollect its paid Executor calls"
+        ),
+    )
     return parser
 
 
@@ -1225,6 +1602,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             run_smoke(
                 config_path,
                 prepare_only=bool(args.prepare_only),
+                resume_initial_rollouts=bool(args.resume_initial_rollouts),
                 project_root=PROJECT_ROOT,
             )
         )

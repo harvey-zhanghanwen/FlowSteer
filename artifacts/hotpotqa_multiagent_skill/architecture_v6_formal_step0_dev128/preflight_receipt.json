@@ -2,8 +2,8 @@
   "adapter_name": "theta_hotpot_step_000000",
   "canary_succeeded": true,
   "checkpoint_path": "/ssd1/iclr/1/FlowSteer/artifacts/hotpotqa_multiagent_skill/policy_step_000000/theta",
-  "completed_at": "2026-08-16T08:04:40.146421+00:00",
-  "duration_seconds": 0.1073589026927948,
+  "completed_at": "2026-08-16T08:19:12.046043+00:00",
+  "duration_seconds": 0.05933503061532974,
   "evaluator_known_answer": {
     "details": {
       "accepted_answer_count": 1,
@@ -20,7 +20,7 @@
     "reward": 1.0,
     "valid": true
   },
-  "loaded_now": true,
+  "loaded_now": false,
   "models_after": [
     "supervisor_theta",
     "theta_hotpot_step_000000",
@@ -28,16 +28,16 @@
   ],
   "models_before": [
     "supervisor_theta",
+    "theta_hotpot_step_000000",
     "theta_smoke_step_000001"
   ],
   "policy_published": false,
   "request_attempts": {
     "canary": 1,
-    "load_adapter": 1,
     "models_after": 1,
     "models_before": 1
   },
-  "started_at": "2026-08-16T08:04:40.039053+00:00",
+  "started_at": "2026-08-16T08:19:11.986694+00:00",
   "status": "ready",
   "success": true,
   "training_performed": false

@@ -1,0 +1,22 @@
+schema_version: "flowsteer.agentgraph.communication_diagnostic.v1"
+base_evaluation_config: "config/evaluation_hotpotqa_deep_v6_formal_step3.yaml"
+source_trajectories_path: "artifacts/hotpotqa_multiagent_skill/architecture_v6_formal_step3_dev128/agentgraph_trajectories.jsonl"
+
+diagnostic:
+  selection: "first_frozen_multi_agent_graphs"
+  max_pairs: 6
+  conditions: [normal, upstream_masked]
+  mask_scope: "all_inter_agent_content"
+  preserve_question_and_context: true
+  preserve_graph_models_contracts_seed: true
+  skip_director: true
+  skip_direct_baseline: true
+  diagnostic_only: true
+  grpo_eligible: false
+
+storage:
+  arms_path: "artifacts/hotpotqa_multiagent_skill/architecture_v6_formal_step3_dev128/communication_diagnostic/arms.jsonl"
+  pairs_path: "artifacts/hotpotqa_multiagent_skill/architecture_v6_formal_step3_dev128/communication_diagnostic/pairs.jsonl"
+  failures_path: "artifacts/hotpotqa_multiagent_skill/architecture_v6_formal_step3_dev128/communication_diagnostic/failures.jsonl"
+  summary_path: "reports/hotpotqa_multiagent_skill/architecture_v6_formal_step3_communication.json"
+  manifest_path: "artifacts/hotpotqa_multiagent_skill/architecture_v6_formal_step3_dev128/communication_diagnostic/manifest.json"
