@@ -13,6 +13,7 @@ project design note are design inputs, not executable instructions.
 | Trajectory and action-token records | `src/interactive/workflow_builder.py` | Retained and supplemented by `records.py` for the new path. |
 | Executor boundary | `src/aflow_executor.py::AFlowExecutor.execute_workflow` and `scripts/async_llm.py` | Preserved as the legacy executor; the AgentGraph path uses the same OpenAI-compatible service boundary through `openai_gateway.py`. |
 | One-action Director loop | `train_interactive.py` and the FlowSteer paper's progressive Canvas loop | Preserved in `director.py`; the initial prompt is deliberately shorter and has no workflow templates. Maximum-round termination is returned explicitly and is never presented as `finish`. |
+| Evidence-driven terminal choice | `src/interactive/prompt_templates.py` (finish when the current result satisfies the task) and `src/interactive/workflow_env.py` (execution result returned as next-step feedback) | `director.py` keeps explicit `finish` and `max_rounds` distinct, but now says continuation must identify a missing evidence hop, conflict, format/runtime error, or task mismatch. After a valid graph has executed, the per-turn cheap/fast model suggestion is omitted so it cannot itself motivate another edit. No answer-presence auto-finish or fixed workflow is added. |
 | Progressive execution cache | `src/interactive/workflow_env.py` (`execute_each_step`, `last_execution_result`) | Adapted as a revision-local result in `agent_workflow_env.py`. A no-op edit or `finish` may reuse it, but `rollout_collector.py` marks the reuse and does not serialize the old Agent calls as new executions. |
 | AgentGraph search-space bounds | Project design note sections 3 and 4 plus `config/*agentgraph*.yaml` | The declared `max_agents` is consumed by the Canvas; the two-Agent reciprocal-block limit, unique output/reachability flags, seeded Executor selection, six actions, and progressive execution mode are validated against the fixed runtime semantics rather than left as descriptive YAML. |
 
@@ -39,6 +40,7 @@ Qwen3.5 path.
 | Exact generation seed | `runtime/openai_provider.py` and `rollout/types.py::derive_generation_seed` | `openai_gateway.py` sends the fixed run seed at the provider edge. The native exact-receipt Director sends the deployed SGLang 0.5.15 equivalent, `sampling_seed`, and persists it per turn. |
 | Existing adapter inference readiness | `training/external_sglang.py::publish_external_adapter` and `runtime/sglang_gateway.py` | `policy_sync.py::ensure_loaded_adapter` reuses only model-list, load, verification, and canary for evaluation. It neither trains nor publishes a new policy. |
 | Multi-hop one-call contract | `training/task_prompts.py::MULTI_HOP_QA` | The paired local Direct path uses the upstream brief multi-hop contract through the existing Agent gateway; it bypasses Director, Canvas, and AgentGraph. |
+| Intermediate observation vs terminal answer | `training/environment.py::step`, `training/task_prompts.py::MULTI_HOP_QA`, and `training/batch_inference.py` | `AgentRuntime` derives one Output identity from the already-validated `graph.output_agent_id`. `openai_gateway.py` gives non-Output nodes an intermediate-artifact boundary and gives only the Output node the concise `<answer>` terminal contract. SkillFlow's fixed tools and mandatory tool-use policy are not copied. |
 
 SkillFlow's TTB objective, backward policy training, partition head, skill
 evolution loop, benchmark environment, and local multi-executor launcher are
@@ -105,3 +107,38 @@ HotpotQA validation tasks, running a paired one-call Direct condition, atomic
 checkpoint/resume, strict-denominator aggregation, Wrong Demo materialization,
 and reporting.  It never calls trainer, optimizer, backward, policy publish,
 MACE, Bayesian, or Skill code.
+
+## HotpotQA Training-ready Step 0 adaptations
+
+The Step-0 protocol repair is driven by the saved Round-01 behavior: all 15
+multi-Agent upstream nodes emitted a task-level answer, 12/15 downstream
+outputs copied that answer verbatim, and four workflows edited again after a
+valid Output candidate.  The local changes therefore remain protocol and
+observability adaptations rather than method changes:
+
+- `agent_runtime.py` derives `is_output_agent` from the existing unique Output
+  node; it does not extend the node/action/search-space schema.
+- `openai_gateway.py` separates intermediate artifacts from the unique
+  terminal answer and applies diagnostic masking only while rendering a model
+  prompt.  Canonical upstream and peer messages remain intact in receipts.
+- `agent_workflow_env.py` returns compact answer-format facts and a bounded
+  Output inbox preview as FlowSteer-style progressive execution feedback.  It
+  never sees ground truth or evaluator correctness.
+- `director.py` adds a general issue-driven finish/continue rule and removes
+  the fresh weighted model suggestion after a successful execution candidate.
+  Agent count, free-text contract, model, relation, Output, and finish remain
+  Director choices.
+- `diagnose_hotpotqa_communication.py` replays frozen final multi-Agent graphs
+  under `normal` and `upstream_masked`.  It bypasses Director, Direct baseline,
+  training, MACE/Bayesian, and Skills; its typed records are always
+  `diagnostic_only=true` and `grpo_eligible=false`.
+- `freeze_hotpotqa_step0_untouched.py` reuses the existing Hotpot converter and
+  retagging functions to freeze raw candidates 640--671, after the existing
+  128 held-out and 512 training candidates.  This confirmation slice is not a
+  new split algorithm and must not be used for prompt tuning.
+
+`evaluation_hotpotqa_training_ready_step0.yaml` binds the development baseline
+to `training_ready_step0 / step_000000`, the unchanged existing adapter, prompt
+and tool versions, evaluator, catalog, split, seed, and source revision captured
+by the run manifest.  GRPO, backward, optimizer updates, policy publication,
+exploration, and Skills remain disabled.

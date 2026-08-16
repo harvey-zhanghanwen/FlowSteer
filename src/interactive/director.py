@@ -27,7 +27,7 @@ Actions:
 {"action":"set_output","agent_id":"..."}
 {"action":"finish"}
 
-Use a model_id from the supplied catalog and describe each Agent's job in ordinary free text. Finish only after the Canvas accepts a complete graph."""
+Use a model_id from the supplied catalog and describe each Agent's job in ordinary free text. Only the graph's Output Agent owns the final task answer; other Agents produce intermediate artifacts. Finish only after the Canvas accepts a complete graph. When the latest execution is format-valid and shows no concrete defect, prefer finish. Continue only to address a specific missing evidence hop, conflict, format error, execution error, or task mismatch; unused rounds or another catalog model alone are not reasons to edit."""
 
 
 class DirectorError(RuntimeError):
@@ -268,14 +268,18 @@ class AgentGraphOrchestrator:
                 ],
             },
             "model_catalog": catalog,
-            "weighted_preferred_model": preferred.model_id,
         }
+        # The cheap/fast suggestion helps the Director instantiate an empty
+        # Canvas. Once a valid workflow has executed, repeating a fresh model
+        # suggestion can spur an evidence-free edit instead of explicit finish.
+        if "execution_result=" not in snapshot.last_feedback:
+            payload["weighted_preferred_model"] = preferred.model_id
         if env.max_agents is not None:
             payload["max_agents"] = env.max_agents
         if skills:
             payload["available_skills"] = list(skills)
         return (
-            "Choose one next edit. The preferred model is only a cheap/fast suggestion.\n\n"
+            "Choose exactly one next action. A preferred model, when present, is only a cheap/fast suggestion.\n\n"
             + json.dumps(payload, ensure_ascii=False, sort_keys=True)
         )
 

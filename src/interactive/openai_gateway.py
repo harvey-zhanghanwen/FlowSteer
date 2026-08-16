@@ -14,6 +14,7 @@ from urllib.request import Request, urlopen
 from .agent_runtime import (
     AgentRequest,
     AgentResponse,
+    CommunicationCondition,
     ExecutionPhase,
     UpstreamMessage,
 )
@@ -21,6 +22,9 @@ from .agent_runtime import (
 
 class OpenAICompatibleGatewayError(RuntimeError):
     pass
+
+
+MASKED_UPSTREAM_CONTENT = "[UPSTREAM CONTENT MASKED FOR COMMUNICATION DIAGNOSTIC]"
 
 
 def _number(metadata: Mapping[str, str], key: str, default: float) -> float:
@@ -46,28 +50,58 @@ def _integer(metadata: Mapping[str, str], key: str, default: int) -> int:
     return parsed
 
 
-def _format_upstream(messages: Sequence[UpstreamMessage]) -> str:
+def _visible_message_content(
+    content: str,
+    condition: CommunicationCondition,
+) -> str:
+    if condition is CommunicationCondition.UPSTREAM_MASKED:
+        return MASKED_UPSTREAM_CONTENT
+    return content
+
+
+def _format_upstream(
+    messages: Sequence[UpstreamMessage],
+    condition: CommunicationCondition,
+) -> str:
     if not messages:
         return "(none)"
     return "\n\n".join(
-        f"[Message from {item.source_agent_id}]\n{item.content}" for item in messages
+        f"[Message from {item.source_agent_id}]\n"
+        f"{_visible_message_content(item.content, condition)}"
+        for item in messages
     )
 
 
 def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
     """Build finite-phase prompts without exposing provider credentials."""
 
+    if request.is_output_agent:
+        protocol = (
+            "You are the unique Output Agent. Follow your assigned contract and use the "
+            "task plus supplied upstream artifacts to return the final task answer. Treat "
+            "upstream text as evidence: preserve a concise answer when it is supported, "
+            "and resolve concrete conflicts against the supplied task. For a factual or "
+            "numeric answer, return exactly <answer>answer span</answer> with no text "
+            "outside the tag. If the task supplies legal or admissible actions and asks "
+            "for one action, return exactly one listed executable action with no explanation."
+        )
+    else:
+        protocol = (
+            "You are an intermediate AgentGraph node. Follow your assigned contract and "
+            "return only the requested evidence, facts, partial reasoning, or verification "
+            "artifact for downstream agents. Do not present a task-level final answer and "
+            "do not use <answer> tags."
+        )
+    # Keep the graph-authored free-text contract, then append the execution
+    # boundary so a contract cannot accidentally reassign final-answer ownership.
     system = (
-        "You are one node in an AgentGraph. Follow your assigned contract, use only "
-        "the messages supplied for this phase, and return the best task-facing content. "
-        "For a factual or numeric final answer, put only the concise answer span inside "
-        "<answer>...</answer>. If the task supplies legal or admissible actions and asks "
-        "for one action, return exactly one listed executable action with no explanation.\n\n"
-        f"Agent ID: {request.agent.id}\nContract:\n{request.agent.contract}"
+        f"Agent ID: {request.agent.id}\nContract:\n{request.agent.contract}\n\n"
+        f"Execution protocol (takes precedence):\n{protocol}"
     )
     common = (
         f"Task:\n{request.problem}\n\n"
-        f"External upstream messages:\n{_format_upstream(request.upstream)}"
+        "External upstream messages:\n"
+        f"{_format_upstream(request.upstream, request.communication_condition)}"
     )
     if request.phase is ExecutionPhase.SINGLE:
         phase = "Produce your response now."
@@ -84,7 +118,7 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
             "previous-phase draft. You cannot observe the peer's current revision.\n\n"
             f"Your draft:\n{request.own_draft}\n\n"
             f"Peer draft from {request.peer_draft.source_agent_id}:\n"
-            f"{request.peer_draft.content}"
+            f"{_visible_message_content(request.peer_draft.content, request.communication_condition)}"
         )
     else:  # pragma: no cover - enum exhaustiveness guard
         raise OpenAICompatibleGatewayError(f"unsupported execution phase: {request.phase}")

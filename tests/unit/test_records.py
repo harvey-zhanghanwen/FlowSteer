@@ -6,7 +6,9 @@ import unittest
 
 from src.interactive.persistence import GraphSnapshotEvent
 from src.interactive.records import (
+    CommunicationDiagnosticRecord,
     EvaluationReceipt,
+    ExecutionRecord,
     TaskRecord,
     TrajectoryRecord,
     TurnRecord,
@@ -65,6 +67,51 @@ def trajectory(task_split: str = "train", **changes: object) -> TrajectoryRecord
 
 
 class RecordTests(unittest.TestCase):
+    def test_communication_diagnostic_is_structurally_excluded_from_grpo(self) -> None:
+        record = CommunicationDiagnosticRecord(
+            diagnostic_id="diag-1",
+            pair_id="pair-1",
+            source_trajectory_id="trajectory-source",
+            task=TaskRecord("q-heldout", "question", "answer", "validation"),
+            condition_id="upstream_masked",
+            communication_condition="upstream_masked",
+            versions=versions(),
+            graph_snapshot={"nodes": [], "relations": [], "output_agent_id": "out"},
+            output_agent_id="out",
+            runtime_run_id="diag-run",
+            executions=[
+                ExecutionRecord(
+                    execution_id="execution-1",
+                    experiment_id="diag-run",
+                    graph_revision=1,
+                    agent_id="out",
+                    model_id="m1",
+                    model_fingerprint="model-1",
+                    provider="fake",
+                    request_hash="request-1",
+                    output="<answer>answer</answer>",
+                    temperature=0.0,
+                    top_p=1.0,
+                    max_tokens=64,
+                )
+            ],
+            final_answer="<answer>answer</answer>",
+            evaluation=EvaluationReceipt(
+                "eval-v1",
+                True,
+                1.0,
+                metrics={"exact_match": 1.0},
+            ),
+            mask_applied_call_ids=["execution-1"],
+        )
+
+        serialized = record.to_dict()
+        self.assertTrue(serialized["diagnostic_only"])
+        self.assertFalse(serialized["grpo_eligible"])
+        self.assertEqual("upstream_masked", serialized["communication_condition"])
+        with self.assertRaises(ValueError):
+            replace(record, task=TaskRecord("q-train", "q", "a", "train"))
+
     def test_eligible_trajectory_requires_exact_receipts_and_snapshot_hash(self) -> None:
         self.assertTrue(trajectory().grpo_eligible)
         self.assertFalse(trajectory(turns=[turn(receipt=False)]).grpo_eligible)

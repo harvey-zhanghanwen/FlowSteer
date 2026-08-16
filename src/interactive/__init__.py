@@ -88,13 +88,17 @@ from .prompt_templates import (
 # Operator-DSL Trajectory/TurnRecord API above.
 from .agent_graph import AgentGraph, AgentGraphValidator, AgentNode, RelationBits
 from .agent_action_parser import AgentAction, AgentActionParser, AgentActionType
-from .agent_runtime import AgentRuntime, AgentRuntimeResult
+from .agent_runtime import AgentRuntime, AgentRuntimeResult, CommunicationCondition
 from .agent_workflow_env import AgentWorkflowEnv, AgentWorkflowStepResult
 from .director import AgentGraphOrchestrator, OpenAIDirectorClient
 from .sglang_manager import SGLangSupervisorManager
 from .openai_gateway import OpenAICompatibleGateway
 from .model_registry import ModelRegistry, ModelSpec, ProviderSpec
-from .records import TrajectoryRecord as AgentTrajectoryRecord, TurnRecord as AgentTurnRecord
+from .records import (
+    CommunicationDiagnosticRecord,
+    TrajectoryRecord as AgentTrajectoryRecord,
+    TurnRecord as AgentTurnRecord,
+)
 from .grpo_objective import GRPOTrajectory, action_masked_one_pass_loss
 from .exploration import BayesianLinearPosterior, DisjointLinUCB, MACEFeatureExtractor
 from .skills import SkillEvidenceGate, SkillLifecycleManager, SkillRecord, SkillStore
@@ -152,6 +156,7 @@ __all__ = [
     'AgentActionType',
     'AgentRuntime',
     'AgentRuntimeResult',
+    'CommunicationCondition',
     'AgentWorkflowEnv',
     'AgentWorkflowStepResult',
     'AgentGraphOrchestrator',
@@ -163,6 +168,7 @@ __all__ = [
     'ProviderSpec',
     'AgentTrajectoryRecord',
     'AgentTurnRecord',
+    'CommunicationDiagnosticRecord',
     'GRPOTrajectory',
     'action_masked_one_pass_loss',
     'BayesianLinearPosterior',

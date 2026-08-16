@@ -7,6 +7,7 @@ from unittest.mock import patch
 from src.interactive.agent_graph import AgentNode
 from src.interactive.agent_runtime import (
     AgentRequest,
+    CommunicationCondition,
     ExecutionPhase,
     UpstreamMessage,
 )
@@ -14,11 +15,18 @@ from src.interactive.model_registry import ModelSpec, ProviderSpec
 from src.interactive.openai_gateway import (
     OpenAICompatibleGateway,
     OpenAICompatibleGatewayError,
+    MASKED_UPSTREAM_CONTENT,
     build_agent_messages,
 )
 
 
-def request(phase: ExecutionPhase = ExecutionPhase.SINGLE, *, keyed: bool = False) -> AgentRequest:
+def request(
+    phase: ExecutionPhase = ExecutionPhase.SINGLE,
+    *,
+    keyed: bool = False,
+    is_output_agent: bool = True,
+    communication_condition: CommunicationCondition = CommunicationCondition.NORMAL,
+) -> AgentRequest:
     provider = ProviderSpec(
         "provider",
         kind="openai-compatible",
@@ -40,6 +48,8 @@ def request(phase: ExecutionPhase = ExecutionPhase.SINGLE, *, keyed: bool = Fals
         model=model,
         provider=provider,
         phase=phase,
+        is_output_agent=is_output_agent,
+        communication_condition=communication_condition,
         upstream=(UpstreamMessage("source", "agent", "evidence"),),
         own_draft="own" if phase is ExecutionPhase.REVISION else None,
         peer_draft=(
@@ -57,8 +67,31 @@ class MessageTests(unittest.TestCase):
         self.assertIn("Your draft:\nown", text)
         self.assertIn("Peer draft from peer:\npeer draft", text)
         self.assertIn("External upstream messages", text)
-        self.assertIn("<answer>...</answer>", messages[0]["content"])
+        self.assertIn("exactly <answer>answer span</answer>", messages[0]["content"])
         self.assertIn("exactly one listed executable action", messages[0]["content"])
+
+    def test_intermediate_contract_forbids_task_level_answer_tag(self) -> None:
+        messages = build_agent_messages(request(is_output_agent=False))
+        system = messages[0]["content"]
+        self.assertIn("intermediate AgentGraph node", system)
+        self.assertIn("do not use <answer> tags", system)
+        self.assertNotIn("unique Output Agent", system)
+
+    def test_masked_condition_preserves_receipt_but_masks_visible_messages(self) -> None:
+        item = request(
+            ExecutionPhase.REVISION,
+            communication_condition=CommunicationCondition.UPSTREAM_MASKED,
+        )
+        messages = build_agent_messages(item)
+        visible = messages[1]["content"]
+        self.assertEqual("evidence", item.upstream[0].content)
+        self.assertEqual("peer draft", item.peer_draft.content)  # type: ignore[union-attr]
+        self.assertNotIn("\nevidence", visible)
+        self.assertNotIn("peer draft\npeer draft", visible)
+        self.assertEqual(2, visible.count(MASKED_UPSTREAM_CONTENT))
+        self.assertIn("Message from source", visible)
+        self.assertIn("Peer draft from peer", visible)
+        self.assertIn("Your draft:\nown", visible)
 
     def test_revision_without_drafts_is_rejected(self) -> None:
         broken = request(ExecutionPhase.SINGLE)

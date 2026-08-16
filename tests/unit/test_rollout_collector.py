@@ -304,8 +304,11 @@ def test_collector_materializes_exact_finish_trajectory_and_evidence(tmp_path):
         ["solver"]
     ]
     request_receipt = trajectory.turns[-1].executions[0].metadata["request"]
+    assert request_receipt["is_output_agent"] is True
+    assert request_receipt["communication_condition"] == "normal"
     assert request_receipt["rendered_messages"][0]["role"] == "system"
     assert request_receipt["rendered_messages"][1]["role"] == "user"
+    assert trajectory.turns[-1].runtime_summary["communication_condition"] == "normal"
     assert len(evidence.snapshots) == 3
     assert len(evidence.trajectories) == 1
 

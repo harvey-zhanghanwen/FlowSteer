@@ -8,6 +8,7 @@ from src.interactive.agent_runtime import (
     AgentRequest,
     AgentRuntime,
     AgentRuntimeError,
+    CommunicationCondition,
     ExecutionPhase,
 )
 from src.interactive.model_registry import ModelRegistry, ModelSpec, ProviderSpec
@@ -55,7 +56,28 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("b[a:a[]]", result.final_answer)
         self.assertEqual(["a", "b"], [request.agent.id for request in gateway.requests])
         self.assertEqual(["m1", "m2"], [request.model.model_id for request in gateway.requests])
+        self.assertFalse(gateway.requests[0].is_output_agent)
+        self.assertTrue(gateway.requests[1].is_output_agent)
         self.assertEqual(snapshot.to_dict(), graph.snapshot().to_dict())
+
+    async def test_masked_condition_keeps_canonical_upstream_and_marks_requests(self) -> None:
+        catalog = registry()
+        gateway = RecordingGateway()
+        graph = AgentGraph(
+            [AgentNode("a", "m1", "evidence"), AgentNode("b", "m2", "answer")],
+            [AgentRelation("a", "b", True, False)],
+            output_agent_id="b",
+        )
+        result = await AgentRuntime(catalog, gateway).execute(
+            graph,
+            "question",
+            run_id="masked",
+            communication_condition=CommunicationCondition.UPSTREAM_MASKED,
+        )
+        target = next(item for item in gateway.requests if item.agent.id == "b")
+        self.assertEqual(CommunicationCondition.UPSTREAM_MASKED, result.communication_condition)
+        self.assertEqual(CommunicationCondition.UPSTREAM_MASKED, target.communication_condition)
+        self.assertEqual("a[]", target.upstream[0].content)
 
     async def test_fanin_has_sorted_inputs(self) -> None:
         catalog = registry()

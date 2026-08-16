@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
+import re
 from typing import Optional, Tuple, Union
 
 from .agent_action_parser import (
@@ -357,12 +358,39 @@ class AgentWorkflowEnv:
         # result to the policy after an edit.  Keep this receipt deliberately
         # compact: it is state feedback, not a task-specific Director template.
         answer = execution.final_answer
+        tag_count = len(re.findall(r"<answer>.*?</answer>", answer, flags=re.DOTALL))
+        exact_single_tag = bool(
+            re.fullmatch(r"\s*<answer>.*?</answer>\s*", answer, flags=re.DOTALL)
+        )
         if len(answer) > 400:
             answer = answer[:397] + "..."
+        output_calls = [
+            call
+            for call in execution.calls
+            if call.request.agent.id == execution.output_agent_id
+        ]
+        output_request = output_calls[-1].request if output_calls else None
+        output_inbox = []
+        if output_request is not None:
+            for message in output_request.upstream[:4]:
+                content = " ".join(message.content.split())
+                if len(content) > 160:
+                    content = content[:157] + "..."
+                output_inbox.append(
+                    {
+                        "source_agent_id": message.source_agent_id,
+                        "content_preview": content,
+                    }
+                )
         result = json.dumps(
             {
                 "output_agent_id": execution.output_agent_id,
                 "final_answer": answer,
+                "answer_protocol": {
+                    "answer_tag_count": tag_count,
+                    "exact_single_answer_tag": exact_single_tag,
+                },
+                "output_inbox": output_inbox,
             },
             ensure_ascii=False,
             separators=(",", ":"),

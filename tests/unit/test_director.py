@@ -7,6 +7,7 @@ from src.interactive.agent_runtime import AgentResponse
 from src.interactive.agent_workflow_env import AgentWorkflowEnv
 from src.interactive.director import (
     AgentGraphOrchestrator,
+    DIRECTOR_SYSTEM_PROMPT,
     DirectorResponse,
     OpenAIDirectorClient,
 )
@@ -92,6 +93,8 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(result.turns[1].canvas_result.execution)
         self.assertIn("execution_result=", result.turns[1].canvas_result.feedback)
         self.assertIn("answer from solver", result.turns[1].canvas_result.feedback)
+        self.assertIn("answer_protocol", result.turns[1].canvas_result.feedback)
+        self.assertIn("output_inbox", result.turns[1].canvas_result.feedback)
         # Finish reuses the successful result for the unchanged graph revision.
         self.assertEqual(len(gateway.requests), 1)
 
@@ -104,12 +107,20 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(initial_state["complete_validation"]["valid"])
         self.assertEqual(complete_state["remaining_rounds"], 18)
         self.assertTrue(complete_state["complete_validation"]["valid"])
+        self.assertNotIn("weighted_preferred_model", complete_state)
         self.assertIn("execution_result=", complete_state["canvas_feedback"])
         self.assertEqual(2, len(complete_state["recent_canvas_history"]))
         self.assertEqual(
             "set_output",
             complete_state["recent_canvas_history"][-1]["action"]["action"],
         )
+
+    async def test_director_terminal_policy_is_issue_driven_without_role_template(self) -> None:
+        self.assertIn("Only the graph's Output Agent", DIRECTOR_SYSTEM_PROMPT)
+        self.assertIn("specific missing evidence hop", DIRECTOR_SYSTEM_PROMPT)
+        self.assertIn("unused rounds", DIRECTOR_SYSTEM_PROMPT)
+        self.assertNotIn("Researcher", DIRECTOR_SYSTEM_PROMPT)
+        self.assertNotIn("Critic", DIRECTOR_SYSTEM_PROMPT)
 
     async def test_round_limit_is_explicit_failure(self) -> None:
         model_registry = registry()

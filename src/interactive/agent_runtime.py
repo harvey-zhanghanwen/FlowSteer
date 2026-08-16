@@ -24,6 +24,28 @@ class ExecutionPhase(str, Enum):
     REVISION = "revision"
 
 
+class CommunicationCondition(str, Enum):
+    """Execution-only communication condition, never a task reward signal."""
+
+    NORMAL = "normal"
+    UPSTREAM_MASKED = "upstream_masked"
+
+
+def _communication_condition(
+    value: Union[CommunicationCondition, str],
+) -> CommunicationCondition:
+    if isinstance(value, CommunicationCondition):
+        return value
+    if not isinstance(value, str):
+        raise TypeError("communication_condition must be a string or CommunicationCondition")
+    try:
+        return CommunicationCondition(value.strip())
+    except ValueError as exc:
+        raise ValueError(
+            "communication_condition must be normal or upstream_masked"
+        ) from exc
+
+
 @dataclass(frozen=True, slots=True)
 class UpstreamMessage:
     source_agent_id: str
@@ -41,9 +63,20 @@ class AgentRequest:
     model: ModelSpec
     provider: ProviderSpec
     phase: ExecutionPhase
+    is_output_agent: bool = False
+    communication_condition: CommunicationCondition = CommunicationCondition.NORMAL
     upstream: Tuple[UpstreamMessage, ...] = ()
     own_draft: Optional[str] = None
     peer_draft: Optional[UpstreamMessage] = None
+
+    def __post_init__(self) -> None:
+        if type(self.is_output_agent) is not bool:
+            raise TypeError("is_output_agent must be bool")
+        object.__setattr__(
+            self,
+            "communication_condition",
+            _communication_condition(self.communication_condition),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,9 +115,15 @@ class AgentRuntimeResult:
     outputs: Mapping[str, str]
     calls: Tuple[AgentCallRecord, ...]
     block_completion_order: Tuple[Tuple[str, ...], ...]
+    communication_condition: CommunicationCondition = CommunicationCondition.NORMAL
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "outputs", MappingProxyType(dict(self.outputs)))
+        object.__setattr__(
+            self,
+            "communication_condition",
+            _communication_condition(self.communication_condition),
+        )
 
 
 class AgentRuntimeError(RuntimeError):
@@ -158,6 +197,9 @@ class AgentRuntime:
         problem: str,
         *,
         run_id: Optional[str] = None,
+        communication_condition: Union[
+            CommunicationCondition, str
+        ] = CommunicationCondition.NORMAL,
     ) -> AgentRuntimeResult:
         if not isinstance(problem, str) or not problem.strip():
             raise ValueError("problem must be a non-empty string")
@@ -172,6 +214,7 @@ class AgentRuntime:
         if not isinstance(resolved_run_id, str) or not resolved_run_id.strip():
             raise ValueError("run_id must be a non-empty string")
         resolved_run_id = resolved_run_id.strip()
+        resolved_condition = _communication_condition(communication_condition)
         plan = self._build_plan(execution_graph, validation.components)
         nodes = {node.id: node for node in execution_graph.nodes}
         outputs: Dict[str, str] = {}
@@ -194,6 +237,8 @@ class AgentRuntime:
                         resolved_run_id,
                         snapshot.revision,
                         calls,
+                        output_agent_id=execution_graph.output_agent_id,
+                        communication_condition=resolved_condition,
                     )
                 )
                 active[task] = component
@@ -246,6 +291,7 @@ class AgentRuntime:
             outputs=outputs,
             calls=tuple(sorted(calls, key=lambda record: record.request.request_id)),
             block_completion_order=tuple(completion_order),
+            communication_condition=resolved_condition,
         )
 
     def _build_plan(
@@ -290,6 +336,9 @@ class AgentRuntime:
         run_id: str,
         graph_revision: int,
         calls: List[AgentCallRecord],
+        *,
+        output_agent_id: str,
+        communication_condition: CommunicationCondition,
     ) -> Dict[str, str]:
         if len(component) == 1:
             agent_id = component[0]
@@ -300,6 +349,8 @@ class AgentRuntime:
                 problem=problem,
                 run_id=run_id,
                 graph_revision=graph_revision,
+                output_agent_id=output_agent_id,
+                communication_condition=communication_condition,
             )
             response = await self._invoke(request, calls)
             return {agent_id: response.text}
@@ -316,6 +367,8 @@ class AgentRuntime:
             problem=problem,
             run_id=run_id,
             graph_revision=graph_revision,
+            output_agent_id=output_agent_id,
+            communication_condition=communication_condition,
         )
         right_draft_request = self._request(
             agent=nodes[right_id],
@@ -324,6 +377,8 @@ class AgentRuntime:
             problem=problem,
             run_id=run_id,
             graph_revision=graph_revision,
+            output_agent_id=output_agent_id,
+            communication_condition=communication_condition,
         )
         left_draft, right_draft = await _gather_pair(
             self._invoke(left_draft_request, calls),
@@ -339,6 +394,8 @@ class AgentRuntime:
             problem=problem,
             run_id=run_id,
             graph_revision=graph_revision,
+            output_agent_id=output_agent_id,
+            communication_condition=communication_condition,
         )
         right_revision_request = self._request(
             agent=nodes[right_id],
@@ -349,6 +406,8 @@ class AgentRuntime:
             problem=problem,
             run_id=run_id,
             graph_revision=graph_revision,
+            output_agent_id=output_agent_id,
+            communication_condition=communication_condition,
         )
         left_revision, right_revision = await _gather_pair(
             self._invoke(left_revision_request, calls),
@@ -374,6 +433,9 @@ class AgentRuntime:
                     raise AgentRuntimeError(
                         f"upstream output {source_id!r} was not ready for {target_agent_id!r}"
                     )
+                # Keep the canonical routed message intact. Diagnostic masking is
+                # applied only when the provider prompt is rendered so receipts
+                # retain both the true upstream and what the model actually saw.
                 messages.append(UpstreamMessage(source_id, target_id, outputs[source_id]))
         return tuple(
             sorted(messages, key=lambda item: (item.source_agent_id, item.target_agent_id))
@@ -390,6 +452,8 @@ class AgentRuntime:
         graph_revision: int,
         own_draft: Optional[str] = None,
         peer_draft: Optional[UpstreamMessage] = None,
+        output_agent_id: str,
+        communication_condition: CommunicationCondition,
     ) -> AgentRequest:
         model = self.model_registry.require_model(agent.model_id)
         provider = self.model_registry.provider_for(agent.model_id)
@@ -403,6 +467,8 @@ class AgentRuntime:
             model=model,
             provider=provider,
             phase=phase,
+            is_output_agent=agent.id == output_agent_id,
+            communication_condition=communication_condition,
             upstream=upstream,
             own_draft=own_draft,
             peer_draft=peer_draft,
@@ -455,6 +521,7 @@ __all__ = [
     "AgentRuntime",
     "AgentRuntimeError",
     "AgentRuntimeResult",
+    "CommunicationCondition",
     "ExecutionPhase",
     "GatewayResponse",
     "UpstreamMessage",

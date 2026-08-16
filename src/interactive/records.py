@@ -287,6 +287,77 @@ class TrajectoryRecord:
 
 
 @dataclass(frozen=True)
+class CommunicationDiagnosticRecord:
+    """Execution-only communication ablation, never a policy trajectory."""
+
+    diagnostic_id: str
+    pair_id: str
+    source_trajectory_id: str
+    task: TaskRecord
+    condition_id: str
+    communication_condition: str
+    versions: VersionBundle
+    graph_snapshot: Mapping[str, Any]
+    output_agent_id: str
+    runtime_run_id: str
+    executions: Sequence[ExecutionRecord]
+    final_answer: str
+    evaluation: EvaluationReceipt
+    mask_applied_call_ids: Sequence[str] = field(default_factory=tuple)
+    mask_scope: str = "all_inter_agent_content"
+    created_at: str = field(default_factory=utc_now)
+    schema_version: str = "flowsteer.agentgraph.communication_diagnostic.v1"
+    diagnostic_only: bool = field(default=True, init=False)
+
+    def __post_init__(self) -> None:
+        for name, value in (
+            ("diagnostic_id", self.diagnostic_id),
+            ("pair_id", self.pair_id),
+            ("source_trajectory_id", self.source_trajectory_id),
+            ("condition_id", self.condition_id),
+            ("output_agent_id", self.output_agent_id),
+            ("runtime_run_id", self.runtime_run_id),
+        ):
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{name} must be non-empty")
+        if self.communication_condition not in {"normal", "upstream_masked"}:
+            raise ValueError(
+                "communication_condition must be normal or upstream_masked"
+            )
+        if self.condition_id != self.communication_condition:
+            raise ValueError("condition_id must match communication_condition")
+        if self.task.split not in {"validation", "test"}:
+            raise ValueError("communication diagnostics require a held-out task")
+
+    @property
+    def grpo_eligible(self) -> bool:
+        return False
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "diagnostic_id": self.diagnostic_id,
+            "pair_id": self.pair_id,
+            "source_trajectory_id": self.source_trajectory_id,
+            "task": self.task.to_dict(),
+            "condition_id": self.condition_id,
+            "communication_condition": self.communication_condition,
+            "versions": self.versions.to_dict(),
+            "graph_snapshot": dict(self.graph_snapshot),
+            "output_agent_id": self.output_agent_id,
+            "runtime_run_id": self.runtime_run_id,
+            "executions": [item.to_dict() for item in self.executions],
+            "final_answer": self.final_answer,
+            "evaluation": self.evaluation.to_dict(),
+            "mask_applied_call_ids": list(self.mask_applied_call_ids),
+            "mask_scope": self.mask_scope,
+            "diagnostic_only": self.diagnostic_only,
+            "grpo_eligible": self.grpo_eligible,
+            "created_at": self.created_at,
+        }
+
+
+@dataclass(frozen=True)
 class SelectionReceipt:
     selection_id: str
     snapshot_id: str

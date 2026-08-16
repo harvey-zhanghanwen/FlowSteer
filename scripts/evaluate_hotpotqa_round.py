@@ -111,7 +111,6 @@ def validate_hotpot_config(config: Mapping[str, Any]) -> None:
         "dataset_key": bounded.get("dataset_key") == "hotpotqa",
         "split": bounded.get("split") == "validation",
         "selection": bounded.get("selection") == "sequential",
-        "sample_count": bounded.get("sample_count") == 128,
         "rollouts_per_task": bounded.get("rollouts_per_task") == 1,
         "direct_model_id": bounded.get("direct_model_id") == "qwen3.5-9b-local",
         "director.prompt_profile": director.get("prompt_profile") == "minimal",
@@ -126,6 +125,15 @@ def validate_hotpot_config(config: Mapping[str, Any]) -> None:
     if failed:
         raise ConfigurationError(
             "HotpotQA round violates fixed evaluation bounds: " + ", ".join(failed)
+        )
+    sample_count = bounded.get("sample_count")
+    if (
+        isinstance(sample_count, bool)
+        or not isinstance(sample_count, int)
+        or not 1 <= sample_count <= 128
+    ):
+        raise ConfigurationError(
+            "hotpotqa_evaluation.sample_count must be between 1 and 128"
         )
     concurrency = bounded.get("concurrency")
     if isinstance(concurrency, bool) or not isinstance(concurrency, int) or concurrency < 1:
@@ -248,10 +256,11 @@ async def _direct_one(
     model_id: str,
     protocol: str,
     seed: int,
+    run_label: str,
 ) -> Mapping[str, Any]:
     model = backend.registry.require_model(model_id)
     provider = backend.registry.provider_for(model_id)
-    run_id = f"hotpotqa-round-01-direct-{index:04d}"
+    run_id = f"{run_label}-direct-{index:04d}"
     request = AgentRequest(
         request_id=f"{run_id}:direct:single",
         run_id=run_id,
@@ -261,6 +270,7 @@ async def _direct_one(
         model=model,
         provider=provider,
         phase=ExecutionPhase.SINGLE,
+        is_output_agent=True,
     )
     started_at = _utc_now()
     response = await backend.runtime.gateway.generate(request)
@@ -341,6 +351,7 @@ async def _collect_direct(
     model_id = str(bounded["direct_model_id"])
     protocol = str(bounded["direct_protocol"])
     seed = int(experiment["seed"])
+    run_label = str(experiment["name"])
     concurrency = int(bounded["concurrency"])
     by_task = {
         task_id: value
@@ -374,6 +385,7 @@ async def _collect_direct(
                     model_id=model_id,
                     protocol=protocol,
                     seed=seed,
+                    run_label=run_label,
                 )
             except BaseException as exc:
                 return task, exc
@@ -781,6 +793,7 @@ def _report(rows: Sequence[Mapping[str, Any]], config: Mapping[str, Any]) -> Map
         "native_source_split": "train",
         "input_context": "full_10_passages",
         "sample_count": len(rows),
+        "evaluation_name": config["experiment"]["name"],
         "direct_local_baseline": direct,
         "agentgraph": graph,
         "agentgraph_minus_direct": {
@@ -818,7 +831,7 @@ def _report_markdown(report: Mapping[str, Any]) -> str:
     delta = report["agentgraph_minus_direct"]
     failures = report["failure_types"]
     failure_lines = "\n".join(f"- `{name}`: {count}" for name, count in failures.items())
-    return f"""# HotpotQA Architecture Validation — Round 01
+    return f"""# HotpotQA Architecture Validation — {report['evaluation_name']}
 
 Fixed project-held-out samples: **{report['sample_count']}**. The model input uses all ten supplied passages. No training, backward pass, optimizer step, policy update, MACE, Bayesian, or Skill loop ran.
 
@@ -877,10 +890,10 @@ def _stable_zero_check(
                 "full_turn_receipts": full_turn_receipts,
             }
         )
-    passed = any(check["passed"] for check in checks)
+    passed = bool(checks) and all(check["passed"] for check in checks)
     return {
         "passed": passed,
-        "criterion": "at_least_one_real_fixed_task_completed_the_full_chain",
+        "criterion": "every_fixed_task_completed_the_full_chain",
         "checks": checks,
     }
 

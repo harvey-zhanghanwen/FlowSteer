@@ -768,6 +768,8 @@ def _request_record(call: AgentCallRecord) -> Mapping[str, Any]:
         "model": request.model.to_dict(),
         "provider_id": request.provider.provider_id,
         "phase": request.phase.value,
+        "is_output_agent": request.is_output_agent,
+        "communication_condition": request.communication_condition.value,
         "upstream": [
             {
                 "source_agent_id": item.source_agent_id,
@@ -869,6 +871,7 @@ def _runtime_summary(runtime: Optional[AgentRuntimeResult]) -> Mapping[str, Any]
         "graph_revision": runtime.graph_revision,
         "output_agent_id": runtime.output_agent_id,
         "final_answer": runtime.final_answer,
+        "communication_condition": runtime.communication_condition.value,
         "outputs": dict(runtime.outputs),
         "block_completion_order": [
             list(component) for component in runtime.block_completion_order
