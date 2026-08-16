@@ -166,3 +166,20 @@ warm-start diagnostic policy here, not a formal untrained HotpotQA Step0.
 Formal `policy_step_000000` must be materialized separately from base
 Qwen3.5-9B plus a deterministically initialized LoRA before Step0-to-StepN
 training begins.
+
+## HotpotQA Multi-Agent architecture-v2 diagnostic adaptations
+
+Architecture-v2 is a versioned development hypothesis derived from the saved
+v1 trajectories.  It is not an upstream Skill, a topology template, or a
+training result.
+
+| Current module | Reference source | Reused boundary | Incompatibility and minimal adaptation |
+| --- | --- | --- | --- |
+| `director.py` catalog presentation | Existing `ModelRegistry` plus SkillFlow's explicit provider/model boundary | The same frozen exact model IDs and metadata are shown on every turn | v1 placed one sorted family first and selected that family for 14/15 nodes.  v2 changes only presentation order with a deterministic seed; it does not select a model or alter priors.  The diagnostic exposed that this order seed must be separated from rollout sampling before grouped training so same-task/same-condition rollouts see the same prompt. |
+| `director.py` dependency-coverage sentence | FlowSteer progressive Canvas state/feedback and the user design note's free contract fields | One atomic edit per turn, free-text contracts, and unrestricted legal AgentGraph topology remain unchanged | v1 produced 13 singleton graphs on the fixed 14-task diagnostic.  v2 asks the Director to check visible evidence dependencies and name consumed upstream artifacts, without naming roles, requiring an Agent count, or rewarding complexity.  This is a project hypothesis supported by diagnostic evidence, not direct upstream code or an ACTIVE Skill. |
+| `openai_gateway.py` Output span clarification | SkillFlow's terminal answer versus intermediate observation boundary and the existing project Output-only protocol | Only the graph Output Agent may emit the task answer | Some v1 outputs placed structured reports inside the answer wrapper.  v2 adds only that the span itself is not JSON, a key-value report, or an explanation. |
+| `evaluation_hotpotqa_multiagent_v2_diagnostic.yaml` | Existing Hotpot round driver and v1 fixed task-ID diagnostic | Same 14 development task IDs, evaluator, warm-start policy, frozen catalog, full-context input, and strict denominator | The Director action budget is raised from 256 to 512 because v1 saved truncated/malformed actions.  Direct predictions are copied from the already completed Round-01 file; no new Direct request is made. |
+
+The v2 fixed-task run is evaluation-only.  Its saved behavior is tied to the
+warm-start `theta_smoke_step_000001` adapter and cannot be labelled formal
+HotpotQA `policy_step_000000`.

@@ -89,6 +89,7 @@ class MessageTests(unittest.TestCase):
         self.assertIn("target_agent: agent", text)
         self.assertIn("request_or_dependency: verify carefully", text)
         self.assertIn("exactly <answer>answer span</answer>", messages[0]["content"])
+        self.assertIn("must not be JSON", messages[0]["content"])
         self.assertIn("exactly one listed executable action", messages[0]["content"])
 
     def test_intermediate_contract_forbids_task_level_answer_tag(self) -> None:

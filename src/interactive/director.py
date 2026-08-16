@@ -6,6 +6,7 @@ import asyncio
 from dataclasses import dataclass, field
 import json
 import os
+import random
 import socket
 import time
 from typing import Any, Mapping, Optional, Protocol, Sequence, Tuple
@@ -29,7 +30,9 @@ Actions:
 
 Use a model_id from the supplied catalog and describe each Agent's job in concise ordinary free text. A useful contract states its objective, expected input or dependency, artifact to produce, and completion condition; do not prefill an upstream result that has not been produced. A relation's two booleans are the two message directions; no relation means independent work, and a bidirectional pair performs one finite draft-and-revision exchange. Choose decomposition and models only when the task needs them, not to make the graph larger.
 
-Only the graph's Output Agent owns the final task answer; other Agents produce intermediate artifacts. Finish only after the Canvas accepts a complete graph. When the latest execution is format-valid and shows no concrete defect, prefer finish. Continue only to address a specific missing evidence hop, unresolved dependency, conflict, format error, execution error, or task mismatch; unused rounds or another catalog model alone are not reasons to edit."""
+Only the graph's Output Agent owns the final task answer; other Agents produce intermediate artifacts. Before finish, check whether distinct evidence dependencies visible in the task are actually covered rather than hidden inside one all-purpose contract. When a relation exists, its target contract should name the upstream artifact it consumes. The Output contract should request only the concise answer span, never JSON or explanation.
+
+Finish only after the Canvas accepts a complete graph. When the latest execution is format-valid and shows no concrete defect after that dependency check, prefer finish. Continue only to address a specific missing evidence hop, unresolved dependency, conflict, format error, execution error, or task mismatch; unused rounds or another catalog model alone are not reasons to edit."""
 
 
 class DirectorError(RuntimeError):
@@ -228,6 +231,12 @@ class AgentGraphOrchestrator:
         turn_index: int,
         skills: Sequence[Mapping[str, Any]],
     ) -> str:
+        # Present the frozen set in a deterministic per-trajectory order.  The
+        # previous sorted order made the alphabetically first family the de
+        # facto default after the preferred-model hint was removed.  This does
+        # not select a model; every action still names the Director's choice.
+        catalog_model_ids = list(self.registry.model_ids)
+        random.Random(self.seed).shuffle(catalog_model_ids)
         catalog = [
             {
                 "model_id": model_id,
@@ -246,7 +255,7 @@ class AgentGraphOrchestrator:
                     }
                 },
             }
-            for model_id in self.registry.model_ids
+            for model_id in catalog_model_ids
         ]
         complete_validation = env.graph.validate(
             self.registry,

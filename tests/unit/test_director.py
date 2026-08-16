@@ -121,6 +121,10 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
             item for item in initial_state["model_catalog"] if item["model_id"] == "qwen"
         )
         self.assertEqual(
+            [item["model_id"] for item in initial_state["model_catalog"]],
+            [item["model_id"] for item in complete_state["model_catalog"]],
+        )
+        self.assertEqual(
             {
                 "family": "qwen",
                 "profile": "text_qa",
@@ -143,6 +147,8 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("specific missing evidence hop", DIRECTOR_SYSTEM_PROMPT)
         self.assertIn("expected input or dependency", DIRECTOR_SYSTEM_PROMPT)
         self.assertIn("two message directions", DIRECTOR_SYSTEM_PROMPT)
+        self.assertIn("distinct evidence dependencies", DIRECTOR_SYSTEM_PROMPT)
+        self.assertIn("never JSON or explanation", DIRECTOR_SYSTEM_PROMPT)
         self.assertIn("unused rounds", DIRECTOR_SYSTEM_PROMPT)
         self.assertNotIn("Researcher", DIRECTOR_SYSTEM_PROMPT)
         self.assertNotIn("Critic", DIRECTOR_SYSTEM_PROMPT)

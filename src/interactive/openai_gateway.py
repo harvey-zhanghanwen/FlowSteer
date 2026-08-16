@@ -99,7 +99,8 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
             "upstream text as evidence: preserve a concise answer when it is supported, "
             "and resolve concrete conflicts against the supplied task. For a factual or "
             "numeric answer, return exactly <answer>answer span</answer> with no text "
-            "outside the tag. If the task supplies legal or admissible actions and asks "
+            "outside the tag; the span itself must not be JSON, a key-value report, or an "
+            "explanation. If the task supplies legal or admissible actions and asks "
             "for one action, return exactly one listed executable action with no explanation."
         )
     else:
