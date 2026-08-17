@@ -109,7 +109,8 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(result.turns[1].canvas_result.execution)
         self.assertIn("execution_result=", result.turns[1].canvas_result.feedback)
         self.assertIn("answer from solver", result.turns[1].canvas_result.feedback)
-        self.assertIn("answer_protocol", result.turns[1].canvas_result.feedback)
+        self.assertIn("output_format", result.turns[1].canvas_result.feedback)
+        self.assertNotIn('"final_answer"', result.turns[1].canvas_result.feedback)
         self.assertIn("output_inbox", result.turns[1].canvas_result.feedback)
         # Finish reuses the successful result for the unchanged graph revision.
         self.assertEqual(len(gateway.requests), 1)
@@ -120,17 +121,10 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(initial_state["remaining_rounds"], 20)
         self.assertEqual(initial_state["max_agents"], 10)
         self.assertEqual(initial_state["recent_canvas_history"], [])
-        self.assertFalse(initial_state["complete_validation"]["valid"])
+        self.assertFalse(initial_state["graph_validation"]["structurally_complete"])
+        self.assertNotIn("complete_validation", initial_state)
         self.assertEqual(0, initial_state["topology_statistics"]["agent_count"])
-        self.assertEqual(
-            3,
-            initial_state["construction_progress"]["minimum_remaining_actions"],
-        )
-        self.assertTrue(
-            initial_state["construction_progress"][
-                "minimum_actions_fit_remaining_rounds"
-            ]
-        )
+        self.assertNotIn("construction_progress", initial_state)
         qwen_catalog = next(
             item for item in initial_state["model_catalog"] if item["model_id"] == "qwen"
         )
@@ -147,11 +141,9 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
             qwen_catalog["routing_metadata"],
         )
         self.assertEqual(complete_state["remaining_rounds"], 18)
-        self.assertTrue(complete_state["complete_validation"]["valid"])
-        self.assertEqual(
-            1,
-            complete_state["construction_progress"]["minimum_remaining_actions"],
-        )
+        self.assertTrue(complete_state["graph_validation"]["structurally_complete"])
+        self.assertNotIn("complete_validation", complete_state)
+        self.assertNotIn("construction_progress", complete_state)
         self.assertNotIn("weighted_preferred_model", complete_state)
         self.assertIn("execution_result=", complete_state["canvas_feedback"])
         self.assertEqual(2, len(complete_state["recent_canvas_history"]))
@@ -159,6 +151,16 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
             "set_output",
             complete_state["recent_canvas_history"][-1]["action"]["action"],
         )
+        self.assertNotIn("feedback", complete_state["recent_canvas_history"][-1])
+        self.assertEqual(
+            "accepted add_agent at revision 1",
+            complete_state["recent_canvas_history"][-1][
+                "observation_before_action"
+            ],
+        )
+        # The latest progressive result is the current observation exactly
+        # once, not duplicated inside the history tail.
+        self.assertEqual(1, client.prompts[2].count("execution_result="))
 
     async def test_director_terminal_policy_is_issue_driven_without_role_template(self) -> None:
         self.assertIn("Only the graph's Output Agent", DIRECTOR_SYSTEM_PROMPT)
@@ -171,6 +173,11 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("distinct evidence dependencies", DIRECTOR_SYSTEM_PROMPT)
         self.assertIn("never JSON or explanation", DIRECTOR_SYSTEM_PROMPT)
         self.assertIn("unused rounds", DIRECTOR_SYSTEM_PROMPT)
+        self.assertIn("graph size alone is neither a benefit nor a cost", DIRECTOR_SYSTEM_PROMPT)
+        self.assertIn("only a terminal protocol check", DIRECTOR_SYSTEM_PROMPT)
+        self.assertIn("complete singleton may be sufficient", DIRECTOR_SYSTEM_PROMPT)
+        self.assertNotIn("prefer finish", DIRECTOR_SYSTEM_PROMPT.lower())
+        self.assertNotIn("not to make the graph larger", DIRECTOR_SYSTEM_PROMPT)
         self.assertNotIn("Researcher", DIRECTOR_SYSTEM_PROMPT)
         self.assertNotIn("Critic", DIRECTOR_SYSTEM_PROMPT)
         self.assertNotIn("must use three", DIRECTOR_SYSTEM_PROMPT.lower())

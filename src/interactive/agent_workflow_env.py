@@ -436,8 +436,12 @@ class AgentWorkflowEnv:
         result = json.dumps(
             {
                 "output_agent_id": execution.output_agent_id,
-                "final_answer": answer,
-                "answer_protocol": {
+                # This is a progressive execution observation.  Only an
+                # accepted FINISH produces the trajectory's terminal answer;
+                # calling this value ``final_answer`` prematurely made a
+                # format-valid singleton look semantically terminal.
+                "output": answer,
+                "output_format": {
                     "answer_tag_count": tag_count,
                     "exact_single_answer_tag": exact_single_tag,
                 },
