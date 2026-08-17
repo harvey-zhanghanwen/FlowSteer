@@ -1,0 +1,545 @@
+{
+  "comparison_type": "fixed_graph_controlled_topology_comparison",
+  "conditions": {
+    "fan_in": {
+      "api_calls": 4,
+      "block_completion_order": [
+        [
+          "documentary_evidence"
+        ],
+        [
+          "founder_candidates"
+        ],
+        [
+          "synthesis"
+        ],
+        [
+          "format"
+        ]
+      ],
+      "calls": [
+        {
+          "agent_id": "documentary_evidence",
+          "contract": "Independently identify the website or company featured in the documentary named 24 Hours on Craigslist. Return that entity and supporting passage evidence; do not identify its founder.",
+          "is_format_agent": false,
+          "is_output_agent": false,
+          "model_id": "qwen3.5-9b-local",
+          "output": "Entity: Craigslist\nSupporting Passage Evidence: \"24 Hours on Craigslist is a 2005 American feature-length documentary that captures the people and stories behind a single day's posts on the classified ad website Craigslist. The film, made with the approval of Craigslist's founder Craig Newmark...\"\n\"[[Craig Newmark] Craig Alexander Newmark (born December 6, 1952) is an American Internet entrepreneur best known for being the founder of the San Francisco-based international website Craigslist.]\"",
+          "phase": "single",
+          "provider_model": "supervisor_theta",
+          "response_metadata": {
+            "attempt_count": 1,
+            "completion_tokens": 105,
+            "finish_reason": "stop",
+            "generation_seed": 20260816,
+            "latency_ms": 902.2302133962512,
+            "model_id": "qwen3.5-9b-local",
+            "prompt_tokens": 1541,
+            "provider_id": "local-director",
+            "provider_model": "supervisor_theta",
+            "provider_request_id": "494f1438ce014339b5c2137e027c4fb9",
+            "total_tokens": 1646
+          },
+          "role_family": "evidence",
+          "upstream": []
+        },
+        {
+          "agent_id": "format",
+          "contract": "Extract and serialize the routed semantic answer.",
+          "is_format_agent": true,
+          "is_output_agent": true,
+          "model_id": "qwen3.5-9b-local",
+          "output": "<answer>Craig Newmark</answer>",
+          "phase": "single",
+          "provider_model": "supervisor_theta",
+          "response_metadata": {
+            "attempt_count": 1,
+            "completion_tokens": 10,
+            "finish_reason": "stop",
+            "generation_seed": 20260816,
+            "latency_ms": 211.94640826433897,
+            "model_id": "qwen3.5-9b-local",
+            "prompt_tokens": 1817,
+            "provider_id": "local-director",
+            "provider_model": "supervisor_theta",
+            "provider_request_id": "3cde5fe9226149a68f632dfd86d8d66a",
+            "total_tokens": 1827
+          },
+          "role_family": "format",
+          "upstream": [
+            {
+              "artifact": "The American internet entrepreneur who founded the company featured on the documentary *24 Hours on Craigslist* is Craig Newmark.\n\n**Verification of Constraints:**\n*   **Nationality:** The evidence states Craig Newmark is \"American\" (born December 6, 1952).\n*   **Occupation:** The evidence identifies him as an \"Internet entrepreneur\" and the \"founder\" of Craigslist.\n*   **Entity Match:** The documentary *24 Hours on Craigslist* is explicitly described as being made with the approval of \"Craigslist's founder Craig Newmark.\"\n\n**Supported Semantic Answer:**\nCraig Newmark",
+              "content": "The American internet entrepreneur who founded the company featured on the documentary *24 Hours on Craigslist* is Craig Newmark.\n\n**Verification of Constraints:**\n*   **Nationality:** The evidence states Craig Newmark is \"American\" (born December 6, 1952).\n*   **Occupation:** The evidence identifies him as an \"Internet entrepreneur\" and the \"founder\" of Craigslist.\n*   **Entity Match:** The documentary *24 Hours on Craigslist* is explicitly described as being made with the approval of \"Craigslist's founder Craig Newmark.\"\n\n**Supported Semantic Answer:**\nCraig Newmark",
+              "graph_revision": 0,
+              "message_type": "artifact",
+              "request_or_dependency": "Extract and serialize the routed semantic answer.",
+              "source_agent_id": "synthesis",
+              "target_agent_id": "format"
+            }
+          ]
+        },
+        {
+          "agent_id": "founder_candidates",
+          "contract": "Independently inspect the passages for American internet entrepreneurs and the websites or companies they founded. Return candidate founder-entity pairs with supporting passage evidence; do not use the documentary title alone to select the final answer.",
+          "is_format_agent": false,
+          "is_output_agent": false,
+          "model_id": "qwen3.5-9b-local",
+          "output": "Candidate: Craig Newmark\nCompany Founded: Craigslist\nSupporting Evidence:\n- Passage \"[[Craig Newmark]]\" states: \"Craig Alexander Newmark... is an American Internet entrepreneur best known for being the founder of the San Francisco-based international website Craigslist.\"\n- Passage \"[[24 Hours on Craigslist]]\" states: \"24 Hours on Craigslist is a 2005 American feature-length documentary that captures the people and stories behind a single day's posts on the classified ad website Craigslist... made with the approval of Craigslist's founder Craig Newmark.\"",
+          "phase": "single",
+          "provider_model": "supervisor_theta",
+          "response_metadata": {
+            "attempt_count": 1,
+            "completion_tokens": 116,
+            "finish_reason": "stop",
+            "generation_seed": 20260816,
+            "latency_ms": 975.4693992435932,
+            "model_id": "qwen3.5-9b-local",
+            "prompt_tokens": 1547,
+            "provider_id": "local-director",
+            "provider_model": "supervisor_theta",
+            "provider_request_id": "066251f3b3d14eddb02948529627a400",
+            "total_tokens": 1663
+          },
+          "role_family": "evidence",
+          "upstream": []
+        },
+        {
+          "agent_id": "synthesis",
+          "contract": "Combine both routed evidence artifacts. Match the entity identified from the documentary to the corresponding founder, verify the nationality and occupation constraints, and return the supported semantic answer.",
+          "is_format_agent": false,
+          "is_output_agent": false,
+          "model_id": "qwen3.5-9b-local",
+          "output": "The American internet entrepreneur who founded the company featured on the documentary *24 Hours on Craigslist* is Craig Newmark.\n\n**Verification of Constraints:**\n*   **Nationality:** The evidence states Craig Newmark is \"American\" (born December 6, 1952).\n*   **Occupation:** The evidence identifies him as an \"Internet entrepreneur\" and the \"founder\" of Craigslist.\n*   **Entity Match:** The documentary *24 Hours on Craigslist* is explicitly described as being made with the approval of \"Craigslist's founder Craig Newmark.\"\n\n**Supported Semantic Answer:**\nCraig Newmark",
+          "phase": "single",
+          "provider_model": "supervisor_theta",
+          "response_metadata": {
+            "attempt_count": 1,
+            "completion_tokens": 132,
+            "finish_reason": "stop",
+            "generation_seed": 20260816,
+            "latency_ms": 942.3716319724917,
+            "model_id": "qwen3.5-9b-local",
+            "prompt_tokens": 1892,
+            "provider_id": "local-director",
+            "provider_model": "supervisor_theta",
+            "provider_request_id": "50a8881db41c412db4981d58e11f2f88",
+            "total_tokens": 2024
+          },
+          "role_family": "synthesis",
+          "upstream": [
+            {
+              "artifact": "Entity: Craigslist\nSupporting Passage Evidence: \"24 Hours on Craigslist is a 2005 American feature-length documentary that captures the people and stories behind a single day's posts on the classified ad website Craigslist. The film, made with the approval of Craigslist's founder Craig Newmark...\"\n\"[[Craig Newmark] Craig Alexander Newmark (born December 6, 1952) is an American Internet entrepreneur best known for being the founder of the San Francisco-based international website Craigslist.]\"",
+              "content": "Entity: Craigslist\nSupporting Passage Evidence: \"24 Hours on Craigslist is a 2005 American feature-length documentary that captures the people and stories behind a single day's posts on the classified ad website Craigslist. The film, made with the approval of Craigslist's founder Craig Newmark...\"\n\"[[Craig Newmark] Craig Alexander Newmark (born December 6, 1952) is an American Internet entrepreneur best known for being the founder of the San Francisco-based international website Craigslist.]\"",
+              "graph_revision": 0,
+              "message_type": "artifact",
+              "request_or_dependency": "Combine both routed evidence artifacts. Match the entity identified from the documentary to the corresponding founder, verify the nationality and occupation constraints, and return the supported semantic answer.",
+              "source_agent_id": "documentary_evidence",
+              "target_agent_id": "synthesis"
+            },
+            {
+              "artifact": "Candidate: Craig Newmark\nCompany Founded: Craigslist\nSupporting Evidence:\n- Passage \"[[Craig Newmark]]\" states: \"Craig Alexander Newmark... is an American Internet entrepreneur best known for being the founder of the San Francisco-based international website Craigslist.\"\n- Passage \"[[24 Hours on Craigslist]]\" states: \"24 Hours on Craigslist is a 2005 American feature-length documentary that captures the people and stories behind a single day's posts on the classified ad website Craigslist... made with the approval of Craigslist's founder Craig Newmark.\"",
+              "content": "Candidate: Craig Newmark\nCompany Founded: Craigslist\nSupporting Evidence:\n- Passage \"[[Craig Newmark]]\" states: \"Craig Alexander Newmark... is an American Internet entrepreneur best known for being the founder of the San Francisco-based international website Craigslist.\"\n- Passage \"[[24 Hours on Craigslist]]\" states: \"24 Hours on Craigslist is a 2005 American feature-length documentary that captures the people and stories behind a single day's posts on the classified ad website Craigslist... made with the approval of Craigslist's founder Craig Newmark.\"",
+              "graph_revision": 0,
+              "message_type": "artifact",
+              "request_or_dependency": "Combine both routed evidence artifacts. Match the entity identified from the documentary to the corresponding founder, verify the nationality and occupation constraints, and return the supported semantic answer.",
+              "source_agent_id": "founder_candidates",
+              "target_agent_id": "synthesis"
+            }
+          ]
+        }
+      ],
+      "completion_tokens": 363,
+      "evaluation": {
+        "details": {
+          "accepted_answer_count": 1,
+          "metric_scope": "answer_only",
+          "raw_prediction": "<answer>Craig Newmark</answer>",
+          "scored_prediction": "Craig Newmark",
+          "structured_answer_extracted": true
+        },
+        "evaluator_version": "hotpotqa.official.answer.v1",
+        "metrics": {
+          "exact_match": 1.0,
+          "token_f1": 1.0
+        },
+        "reason": "evaluated",
+        "reward": 1.0,
+        "valid": true
+      },
+      "executed_agent_ids": [
+        "documentary_evidence",
+        "format",
+        "founder_candidates",
+        "synthesis"
+      ],
+      "final_answer": "<answer>Craig Newmark</answer>",
+      "graph": {
+        "nodes": [
+          {
+            "contract": "Independently identify the website or company featured in the documentary named 24 Hours on Craigslist. Return that entity and supporting passage evidence; do not identify its founder.",
+            "id": "documentary_evidence",
+            "model_id": "qwen3.5-9b-local",
+            "role_family": "evidence"
+          },
+          {
+            "contract": "Extract and serialize the routed semantic answer.",
+            "id": "format",
+            "model_id": "qwen3.5-9b-local",
+            "role_family": "format"
+          },
+          {
+            "contract": "Independently inspect the passages for American internet entrepreneurs and the websites or companies they founded. Return candidate founder-entity pairs with supporting passage evidence; do not use the documentary title alone to select the final answer.",
+            "id": "founder_candidates",
+            "model_id": "qwen3.5-9b-local",
+            "role_family": "evidence"
+          },
+          {
+            "contract": "Combine both routed evidence artifacts. Match the entity identified from the documentary to the corresponding founder, verify the nationality and occupation constraints, and return the supported semantic answer.",
+            "id": "synthesis",
+            "model_id": "qwen3.5-9b-local",
+            "role_family": "synthesis"
+          }
+        ],
+        "output_agent_id": "format",
+        "relations": [
+          {
+            "source_id": "documentary_evidence",
+            "source_to_target": true,
+            "target_id": "synthesis",
+            "target_to_source": false
+          },
+          {
+            "source_id": "format",
+            "source_to_target": false,
+            "target_id": "synthesis",
+            "target_to_source": true
+          },
+          {
+            "source_id": "founder_candidates",
+            "source_to_target": true,
+            "target_id": "synthesis",
+            "target_to_source": false
+          }
+        ],
+        "revision": 0
+      },
+      "outputs": {
+        "documentary_evidence": "Entity: Craigslist\nSupporting Passage Evidence: \"24 Hours on Craigslist is a 2005 American feature-length documentary that captures the people and stories behind a single day's posts on the classified ad website Craigslist. The film, made with the approval of Craigslist's founder Craig Newmark...\"\n\"[[Craig Newmark] Craig Alexander Newmark (born December 6, 1952) is an American Internet entrepreneur best known for being the founder of the San Francisco-based international website Craigslist.]\"",
+        "format": "<answer>Craig Newmark</answer>",
+        "founder_candidates": "Candidate: Craig Newmark\nCompany Founded: Craigslist\nSupporting Evidence:\n- Passage \"[[Craig Newmark]]\" states: \"Craig Alexander Newmark... is an American Internet entrepreneur best known for being the founder of the San Francisco-based international website Craigslist.\"\n- Passage \"[[24 Hours on Craigslist]]\" states: \"24 Hours on Craigslist is a 2005 American feature-length documentary that captures the people and stories behind a single day's posts on the classified ad website Craigslist... made with the approval of Craigslist's founder Craig Newmark.\"",
+        "synthesis": "The American internet entrepreneur who founded the company featured on the documentary *24 Hours on Craigslist* is Craig Newmark.\n\n**Verification of Constraints:**\n*   **Nationality:** The evidence states Craig Newmark is \"American\" (born December 6, 1952).\n*   **Occupation:** The evidence identifies him as an \"Internet entrepreneur\" and the \"founder\" of Craigslist.\n*   **Entity Match:** The documentary *24 Hours on Craigslist* is explicitly described as being made with the approval of \"Craigslist's founder Craig Newmark.\"\n\n**Supported Semantic Answer:**\nCraig Newmark"
+      },
+      "prompt_tokens": 6797,
+      "topology_statistics": {
+        "agent_count": 4,
+        "component_count": 4,
+        "directed_edge_count": 3,
+        "fan_in_agent_ids": [
+          "synthesis"
+        ],
+        "fan_out_agent_ids": [],
+        "max_depth": 3,
+        "max_width": 2,
+        "output_agent_id": "format",
+        "quotient_directed_edge_count": 3,
+        "reciprocal_pair_count": 0,
+        "relation_count": 3,
+        "root_agent_ids": [
+          "documentary_evidence",
+          "founder_candidates"
+        ],
+        "root_component_count": 2,
+        "sink_agent_ids": [
+          "format"
+        ],
+        "sink_component_count": 1,
+        "structural_depth": 3,
+        "topology_family": "fan_in",
+        "topology_motifs": [
+          "parallel",
+          "fan_in"
+        ]
+      },
+      "wall_latency_ms": 2130.385549739003
+    },
+    "serial": {
+      "api_calls": 4,
+      "block_completion_order": [
+        [
+          "documentary_evidence"
+        ],
+        [
+          "founder_evidence"
+        ],
+        [
+          "verification"
+        ],
+        [
+          "format"
+        ]
+      ],
+      "calls": [
+        {
+          "agent_id": "documentary_evidence",
+          "contract": "Identify the website or company featured in the documentary named 24 Hours on Craigslist. Return that entity and the supporting passage evidence; do not identify its founder.",
+          "is_format_agent": false,
+          "is_output_agent": false,
+          "model_id": "qwen3.5-9b-local",
+          "output": "Entity: Craigslist\nSupporting Passage Evidence: \"24 Hours on Craigslist is a 2005 American feature-length documentary that captures the people and stories behind a single day's posts on the classified ad website Craigslist.\" and \"Craig Alexander Newmark (born December 6, 1952) is an American Internet entrepreneur best known for being the founder of the San Francisco-based international website Craigslist.\"",
+          "phase": "single",
+          "provider_model": "supervisor_theta",
+          "response_metadata": {
+            "attempt_count": 1,
+            "completion_tokens": 84,
+            "finish_reason": "stop",
+            "generation_seed": 20260816,
+            "latency_ms": 642.6534857600927,
+            "model_id": "qwen3.5-9b-local",
+            "prompt_tokens": 1541,
+            "provider_id": "local-director",
+            "provider_model": "supervisor_theta",
+            "provider_request_id": "b3ad9fe284d9492f860933e8edc9a733",
+            "total_tokens": 1625
+          },
+          "role_family": "evidence",
+          "upstream": []
+        },
+        {
+          "agent_id": "format",
+          "contract": "Extract and serialize the routed semantic answer.",
+          "is_format_agent": true,
+          "is_output_agent": true,
+          "model_id": "qwen3.5-9b-local",
+          "output": "<answer>Craig Newmark</answer>",
+          "phase": "single",
+          "provider_model": "supervisor_theta",
+          "response_metadata": {
+            "attempt_count": 1,
+            "completion_tokens": 10,
+            "finish_reason": "stop",
+            "generation_seed": 20260816,
+            "latency_ms": 126.45209766924381,
+            "model_id": "qwen3.5-9b-local",
+            "prompt_tokens": 1769,
+            "provider_id": "local-director",
+            "provider_model": "supervisor_theta",
+            "provider_request_id": "da71273bd4874285881618b38c4f51f7",
+            "total_tokens": 1779
+          },
+          "role_family": "format",
+          "upstream": [
+            {
+              "artifact": "Supported Semantic Answer: Craig Newmark\n\nConcise Evidence:\nThe upstream artifact correctly identifies the founder as Craig Newmark. The passage for [[Craig Newmark]] explicitly states he is \"best known for being the founder of the San Francisco-based international website Craigslist.\" Furthermore, the passage for [[24 Hours on Craigslist]] confirms the documentary was \"made with the approval of Craigslist's founder Craig Newmark.\"",
+              "content": "Supported Semantic Answer: Craig Newmark\n\nConcise Evidence:\nThe upstream artifact correctly identifies the founder as Craig Newmark. The passage for [[Craig Newmark]] explicitly states he is \"best known for being the founder of the San Francisco-based international website Craigslist.\" Furthermore, the passage for [[24 Hours on Craigslist]] confirms the documentary was \"made with the approval of Craigslist's founder Craig Newmark.\"",
+              "graph_revision": 0,
+              "message_type": "artifact",
+              "request_or_dependency": "Extract and serialize the routed semantic answer.",
+              "source_agent_id": "verification",
+              "target_agent_id": "format"
+            }
+          ]
+        },
+        {
+          "agent_id": "founder_evidence",
+          "contract": "Use the routed entity and the supplied passages to identify its founder. Return the founder's name and evidence that the person is the American internet entrepreneur requested by the question.",
+          "is_format_agent": false,
+          "is_output_agent": false,
+          "model_id": "qwen3.5-9b-local",
+          "output": "Founder: Craig Newmark\n\nEvidence:\nThe upstream artifact identifies the entity in question as \"Craigslist.\" The provided passage explicitly states: \"Craig Alexander Newmark (born December 6, 1952) is an American Internet entrepreneur best known for being the founder of the San Francisco-based international website Craigslist.\" Additionally, the documentary \"24 Hours on Craigslist\" was made with the approval of Craigslist's founder, Craig Newmark.",
+          "phase": "single",
+          "provider_model": "supervisor_theta",
+          "response_metadata": {
+            "attempt_count": 1,
+            "completion_tokens": 92,
+            "finish_reason": "stop",
+            "generation_seed": 20260816,
+            "latency_ms": 674.8590413480997,
+            "model_id": "qwen3.5-9b-local",
+            "prompt_tokens": 1693,
+            "provider_id": "local-director",
+            "provider_model": "supervisor_theta",
+            "provider_request_id": "575ed4389044489392a3fe8b013b9dfb",
+            "total_tokens": 1785
+          },
+          "role_family": "bridge",
+          "upstream": [
+            {
+              "artifact": "Entity: Craigslist\nSupporting Passage Evidence: \"24 Hours on Craigslist is a 2005 American feature-length documentary that captures the people and stories behind a single day's posts on the classified ad website Craigslist.\" and \"Craig Alexander Newmark (born December 6, 1952) is an American Internet entrepreneur best known for being the founder of the San Francisco-based international website Craigslist.\"",
+              "content": "Entity: Craigslist\nSupporting Passage Evidence: \"24 Hours on Craigslist is a 2005 American feature-length documentary that captures the people and stories behind a single day's posts on the classified ad website Craigslist.\" and \"Craig Alexander Newmark (born December 6, 1952) is an American Internet entrepreneur best known for being the founder of the San Francisco-based international website Craigslist.\"",
+              "graph_revision": 0,
+              "message_type": "artifact",
+              "request_or_dependency": "Use the routed entity and the supplied passages to identify its founder. Return the founder's name and evidence that the person is the American internet entrepreneur requested by the question.",
+              "source_agent_id": "documentary_evidence",
+              "target_agent_id": "founder_evidence"
+            }
+          ]
+        },
+        {
+          "agent_id": "verification",
+          "contract": "Verify the routed candidate against the question and passages. Return the supported semantic answer and concise evidence; reject an unsupported name.",
+          "is_format_agent": false,
+          "is_output_agent": false,
+          "model_id": "qwen3.5-9b-local",
+          "output": "Supported Semantic Answer: Craig Newmark\n\nConcise Evidence:\nThe upstream artifact correctly identifies the founder as Craig Newmark. The passage for [[Craig Newmark]] explicitly states he is \"best known for being the founder of the San Francisco-based international website Craigslist.\" Furthermore, the passage for [[24 Hours on Craigslist]] confirms the documentary was \"made with the approval of Craigslist's founder Craig Newmark.\"",
+          "phase": "single",
+          "provider_model": "supervisor_theta",
+          "response_metadata": {
+            "attempt_count": 1,
+            "completion_tokens": 84,
+            "finish_reason": "stop",
+            "generation_seed": 20260816,
+            "latency_ms": 608.690707013011,
+            "model_id": "qwen3.5-9b-local",
+            "prompt_tokens": 1679,
+            "provider_id": "local-director",
+            "provider_model": "supervisor_theta",
+            "provider_request_id": "d6e37935c0bc476ba11875263b2c2d4d",
+            "total_tokens": 1763
+          },
+          "role_family": "verification",
+          "upstream": [
+            {
+              "artifact": "Founder: Craig Newmark\n\nEvidence:\nThe upstream artifact identifies the entity in question as \"Craigslist.\" The provided passage explicitly states: \"Craig Alexander Newmark (born December 6, 1952) is an American Internet entrepreneur best known for being the founder of the San Francisco-based international website Craigslist.\" Additionally, the documentary \"24 Hours on Craigslist\" was made with the approval of Craigslist's founder, Craig Newmark.",
+              "content": "Founder: Craig Newmark\n\nEvidence:\nThe upstream artifact identifies the entity in question as \"Craigslist.\" The provided passage explicitly states: \"Craig Alexander Newmark (born December 6, 1952) is an American Internet entrepreneur best known for being the founder of the San Francisco-based international website Craigslist.\" Additionally, the documentary \"24 Hours on Craigslist\" was made with the approval of Craigslist's founder, Craig Newmark.",
+              "graph_revision": 0,
+              "message_type": "artifact",
+              "request_or_dependency": "Verify the routed candidate against the question and passages. Return the supported semantic answer and concise evidence; reject an unsupported name.",
+              "source_agent_id": "founder_evidence",
+              "target_agent_id": "verification"
+            }
+          ]
+        }
+      ],
+      "completion_tokens": 270,
+      "evaluation": {
+        "details": {
+          "accepted_answer_count": 1,
+          "metric_scope": "answer_only",
+          "raw_prediction": "<answer>Craig Newmark</answer>",
+          "scored_prediction": "Craig Newmark",
+          "structured_answer_extracted": true
+        },
+        "evaluator_version": "hotpotqa.official.answer.v1",
+        "metrics": {
+          "exact_match": 1.0,
+          "token_f1": 1.0
+        },
+        "reason": "evaluated",
+        "reward": 1.0,
+        "valid": true
+      },
+      "executed_agent_ids": [
+        "documentary_evidence",
+        "format",
+        "founder_evidence",
+        "verification"
+      ],
+      "final_answer": "<answer>Craig Newmark</answer>",
+      "graph": {
+        "nodes": [
+          {
+            "contract": "Identify the website or company featured in the documentary named 24 Hours on Craigslist. Return that entity and the supporting passage evidence; do not identify its founder.",
+            "id": "documentary_evidence",
+            "model_id": "qwen3.5-9b-local",
+            "role_family": "evidence"
+          },
+          {
+            "contract": "Extract and serialize the routed semantic answer.",
+            "id": "format",
+            "model_id": "qwen3.5-9b-local",
+            "role_family": "format"
+          },
+          {
+            "contract": "Use the routed entity and the supplied passages to identify its founder. Return the founder's name and evidence that the person is the American internet entrepreneur requested by the question.",
+            "id": "founder_evidence",
+            "model_id": "qwen3.5-9b-local",
+            "role_family": "bridge"
+          },
+          {
+            "contract": "Verify the routed candidate against the question and passages. Return the supported semantic answer and concise evidence; reject an unsupported name.",
+            "id": "verification",
+            "model_id": "qwen3.5-9b-local",
+            "role_family": "verification"
+          }
+        ],
+        "output_agent_id": "format",
+        "relations": [
+          {
+            "source_id": "documentary_evidence",
+            "source_to_target": true,
+            "target_id": "founder_evidence",
+            "target_to_source": false
+          },
+          {
+            "source_id": "format",
+            "source_to_target": false,
+            "target_id": "verification",
+            "target_to_source": true
+          },
+          {
+            "source_id": "founder_evidence",
+            "source_to_target": true,
+            "target_id": "verification",
+            "target_to_source": false
+          }
+        ],
+        "revision": 0
+      },
+      "outputs": {
+        "documentary_evidence": "Entity: Craigslist\nSupporting Passage Evidence: \"24 Hours on Craigslist is a 2005 American feature-length documentary that captures the people and stories behind a single day's posts on the classified ad website Craigslist.\" and \"Craig Alexander Newmark (born December 6, 1952) is an American Internet entrepreneur best known for being the founder of the San Francisco-based international website Craigslist.\"",
+        "format": "<answer>Craig Newmark</answer>",
+        "founder_evidence": "Founder: Craig Newmark\n\nEvidence:\nThe upstream artifact identifies the entity in question as \"Craigslist.\" The provided passage explicitly states: \"Craig Alexander Newmark (born December 6, 1952) is an American Internet entrepreneur best known for being the founder of the San Francisco-based international website Craigslist.\" Additionally, the documentary \"24 Hours on Craigslist\" was made with the approval of Craigslist's founder, Craig Newmark.",
+        "verification": "Supported Semantic Answer: Craig Newmark\n\nConcise Evidence:\nThe upstream artifact correctly identifies the founder as Craig Newmark. The passage for [[Craig Newmark]] explicitly states he is \"best known for being the founder of the San Francisco-based international website Craigslist.\" Furthermore, the passage for [[24 Hours on Craigslist]] confirms the documentary was \"made with the approval of Craigslist's founder Craig Newmark.\""
+      },
+      "prompt_tokens": 6682,
+      "topology_statistics": {
+        "agent_count": 4,
+        "component_count": 4,
+        "directed_edge_count": 3,
+        "fan_in_agent_ids": [],
+        "fan_out_agent_ids": [],
+        "max_depth": 4,
+        "max_width": 1,
+        "output_agent_id": "format",
+        "quotient_directed_edge_count": 3,
+        "reciprocal_pair_count": 0,
+        "relation_count": 3,
+        "root_agent_ids": [
+          "documentary_evidence"
+        ],
+        "root_component_count": 1,
+        "sink_agent_ids": [
+          "format"
+        ],
+        "sink_component_count": 1,
+        "structural_depth": 4,
+        "topology_family": "serial_3_plus",
+        "topology_motifs": [
+          "serial_3_plus"
+        ]
+      },
+      "wall_latency_ms": 2053.4924678504467
+    }
+  },
+  "controls": {
+    "only_intended_difference": "serial versus fan-in dependency structure and role contracts",
+    "same_agent_count": 4,
+    "same_api_call_count_target": 4,
+    "same_model_for_all_agents": "qwen3.5-9b-local",
+    "same_seed": 20260816,
+    "same_task": true,
+    "same_temperature": 0.0,
+    "same_top_p": 1.0
+  },
+  "created_at": "2026-08-17T13:17:37.671678+00:00",
+  "director_invoked": false,
+  "run_id": "hotpotqa-topology-demo-001",
+  "schema_version": "flowsteer.hotpotqa.topology_comparison.v1",
+  "task": {
+    "ground_truth": "Craig Newmark",
+    "question": "Based on the following passages, answer the question.\n\n[[Alexander Muse] Alexander Muse is an American internet entrepreneur who has founded several internet companies including LayerOne, ShopSavvy, Architel, and ViewMarket (among others).  His most recent endeavor, Sumo Ventures, invests in early-stage startups.]\n\n[[Vikas Gupta] Vikas Gupta is an Indian American internet entrepreneur.  He is known for having founded Jambool, an online company that was acquiredby Google in August 2010.  Gupta has also joined Google as the Head of Consumer Payments after the acquisition.  Prior to founding Jambool, Gupta worked at Amazon.com, where he led the payments and web services groups.  His newest venture is Play-i,which he started in November 2012.]\n\n[[Jeff Pulver] Jeff Pulver is an American Internet entrepreneur known for his work as founder and chief executive of pulver.com and co-founder of Free World Dialup, Vonage, MoNage and Zula (app).  Pulver has been called a Voice over Internet Protocol pioneer, and has written extensively on VoIP telephony, and the need to develop an alternative to government regulation of its applications layer.]\n\n[[Justin Waldron] Justin Waldron (June 18, 1988) is an American internet entrepreneur best known as the co-founder of Zynga, which makes online social and mobile games.  Zynga is considered to be the pioneer of the social and mobile gaming industries, responsible for creating many of the microtransaction and viral marketing business models which are now ubiquitous.  Within four years of its founding, Zynga grew to $1 billion in annual revenue, faster than any other internet company.  In 2011 Zynga held the largest IPO since Google, with a valuation of over $10 billion.  Waldron left Zynga in October 2013 and is currently an active angel investor and advisor in various other technology companies.]\n\n[[24 Hours on Craigslist] 24 Hours on Craigslist is a 2005 American feature-length documentary that captures the people and stories behind a single day's posts on the classified ad website Craigslist.  The film, made with the approval of Craigslist's founder Craig Newmark, is woven from interviews with the site's users, all of whom opted in to be contacted by the production when they submitted their posts on August 4, 2003.  The documentary screened in nine film festivals during 2004 and 2005, winning a 'best feature documentary', and played in a limited, self-distributed, theatrical release in 2005 and 2006.  The film was released on DVD on April 25, 2006.]\n\n[[Bret Curtis] Bret Curtis is an American auto racing driver and business entrepreneur.  Bret Curtis founded Spectra Resources in 2002 and United Steel Supply in 2007.  Curtis has been racing since 2009, and currently competes in the WeatherTech SportsCar Championship series for Turner Motorsport driving a BMW M6 GT3.  Curtis has competed around the world in some of the most prestigious endurance races including 24 hours of Le Mans, 24 hours of Daytona, Spa 24 hours, Dubai 24 hour; 12 hours of Sebring, 12 hours of Bathurst; Petit Le Mans; and the 6 hours of Laguna Seca.  Curtis placed second overall in the 2012 12 Hours of Bathurst driving for Erebus Racing/Black Falcon.  Curtis placed second in the P2 class at the 2012 12 Hours of Sebring driving an LMP2 class Lola for Black Swan Racing.  Curtis won the GTC class at the 2012 Six Hours of Laguna at Mazda Laguna Raceway.  Curtis also competed in 2012 for Black Falcon Racing in the 2012 Blancpain Endurance Championship driving a Mercedes SLS GT3.  Bret Curtis also contested the 2012 24 Hours of Le Mans in the GTE class for Prospeed, driving a Porsche 911 RSR (997).  Curtis placed 6th in the GTD class of the WeatherTech SportsCar championship in 2016 with a win at MOSPORT and a win at the Circuit of the Americas and a second place at the 12 hours of Sebring.]\n\n[[Kalev Leetaru] Kalev Hannes Leetaru is an American internet entrepreneur and academic, the Yahoo! Fellow in Residence of International Values, Communications Technology & the Global Internet at the Institute for the Study of Diplomacy in the Edmund A. Walsh School of Foreign Service at Georgetown University.]\n\n[[Naveen Selvadurai] Naveen Selvadurai (born January 27, 1982, Chennai, Tamil Nadu, India) is an American internet entrepreneur and co-founder of location-based social networking site Foursquare.com.  He is currently working at startup studio Expa which was founded by co-founder of Uber and StumbleUpon - Garret Camp , as a partner.  He was featured in Inc Magazine's 30 under 30 list in the year 2010.  He was also featured in Rediff. com's article - 4 NRIs among US's coolest young entrepreneurs.]\n\n[[Jay Adelson] Jay Adelson (born Jay Steven Adelson, September 7, 1970) is an American Internet entrepreneur.  In 2014 Jay co-founded Center Electric with Andy Smith.  In 2013 he founded Opsmatic, a technology company that improves productivity on operations teams.  In 2015 Opsmatic was bought by New Relic.  Adelson's Internet career includes Netcom, DEC's Palo Alto Internet Exchange, co-founder of Equinix, Revision3 and Digg, and CEO of SimpleGeo, Inc.  In 2008, Adelson was named a member of Time Magazine's Top 100 Most Influential People in the World and was listed as a finalist on the same list in 2009.]\n\n[[Craig Newmark] Craig Alexander Newmark (born December 6, 1952) is an American Internet entrepreneur best known for being the founder of the San Francisco-based international website Craigslist.]\n\nQuestion: Who is the American internet entrepreneur who founded the company featured on 24 Hours on Craigslist?",
+    "split": "train",
+    "task_id": "hotpotqa:5a7e567b55429949594199a0"
+  },
+  "training_enabled": false
+}
