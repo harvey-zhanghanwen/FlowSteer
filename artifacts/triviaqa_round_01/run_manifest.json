@@ -1,0 +1,1360 @@
+{
+  "active_task_count": 128,
+  "agentgraph_progress": {
+    "completed": 128
+  },
+  "artifacts": {
+    "direct": "/ssd1/iclr/1/FlowSteer/artifacts/triviaqa_round_01/direct_predictions.jsonl",
+    "failures": "/ssd1/iclr/1/FlowSteer/artifacts/triviaqa_round_01/collection_failures.jsonl",
+    "manifest": "/ssd1/iclr/1/FlowSteer/artifacts/triviaqa_round_01/run_manifest.json",
+    "paired": "/ssd1/iclr/1/FlowSteer/artifacts/triviaqa_round_01/paired_results.jsonl",
+    "preflight": "/ssd1/iclr/1/FlowSteer/artifacts/triviaqa_round_01/preflight_receipt.json",
+    "report_json": "/ssd1/iclr/1/FlowSteer/reports/triviaqa_round_01/report.json",
+    "report_markdown": "/ssd1/iclr/1/FlowSteer/reports/triviaqa_round_01/report.md",
+    "retrieval": "/ssd1/iclr/1/FlowSteer/artifacts/triviaqa_round_01/retrieval_receipts.jsonl",
+    "selected": "/ssd1/iclr/1/FlowSteer/artifacts/triviaqa_round_01/selected_tasks.jsonl",
+    "trajectories": "/ssd1/iclr/1/FlowSteer/artifacts/triviaqa_round_01/agentgraph_trajectories.jsonl",
+    "wrong": "/ssd1/iclr/1/FlowSteer/artifacts/triviaqa_round_01/wrong_demos.jsonl"
+  },
+  "completed_at": "2026-08-17T15:27:14.122875+00:00",
+  "config_path": "/ssd1/iclr/1/FlowSteer/config/evaluation_triviaqa_round_01.yaml",
+  "direct_progress": {
+    "completed": 128
+  },
+  "failure_type_counts": {
+    "architecture_gain": 6,
+    "architecture_regression_candidate": 5,
+    "correct": 61,
+    "director_max_rounds": 12,
+    "partial_or_overlong_answer": 17,
+    "shared_reasoning_or_model_failure_candidate": 27
+  },
+  "fixed_split": "validation",
+  "git_end": {
+    "branch": "dataset/triviaqa-progressive-round-01",
+    "commit": "1c2cf7a56a4b795b5348dfaf513bb68075031b27"
+  },
+  "git_start": {
+    "branch": "dataset/triviaqa-progressive-round-01",
+    "commit": "1c2cf7a56a4b795b5348dfaf513bb68075031b27"
+  },
+  "manifest_path": "/ssd1/iclr/1/FlowSteer/artifacts/triviaqa_round_01/run_manifest.json",
+  "metrics": {
+    "agentgraph": {
+      "completed": 128,
+      "completed_only_exact_match": 0.5234375,
+      "completed_only_token_f1": 0.617999751984127,
+      "denominator": 128,
+      "evaluator_valid": 128,
+      "strict_exact_match": 0.5234375,
+      "strict_token_f1": 0.617999751984127
+    },
+    "delta": {
+      "exact_match": 0.0078125,
+      "token_f1": 0.03901189676139283
+    },
+    "direct": {
+      "completed": 128,
+      "completed_only_exact_match": 0.515625,
+      "completed_only_token_f1": 0.5789878552227342,
+      "denominator": 128,
+      "evaluator_valid": 128,
+      "strict_exact_match": 0.515625,
+      "strict_token_f1": 0.5789878552227342
+    }
+  },
+  "optimizer_updates": 0,
+  "retrieval_receipts_completed": 128,
+  "schema_version": "flowsteer.triviaqa.round_manifest.v1",
+  "selected_task_ids": [
+    "triviaqa:tc_1",
+    "triviaqa:tc_3",
+    "triviaqa:tc_5",
+    "triviaqa:tc_8",
+    "triviaqa:tc_9",
+    "triviaqa:tc_10",
+    "triviaqa:tc_11",
+    "triviaqa:tc_15",
+    "triviaqa:tc_16",
+    "triviaqa:tc_17",
+    "triviaqa:tc_18",
+    "triviaqa:tc_19",
+    "triviaqa:tc_21",
+    "triviaqa:tc_22",
+    "triviaqa:tc_23",
+    "triviaqa:tc_24",
+    "triviaqa:tc_25",
+    "triviaqa:tc_26",
+    "triviaqa:tc_27",
+    "triviaqa:tc_28",
+    "triviaqa:tc_30",
+    "triviaqa:tc_31",
+    "triviaqa:tc_32",
+    "triviaqa:tc_36",
+    "triviaqa:tc_38",
+    "triviaqa:tc_39",
+    "triviaqa:tc_41",
+    "triviaqa:tc_43",
+    "triviaqa:tc_44",
+    "triviaqa:tc_45",
+    "triviaqa:tc_46",
+    "triviaqa:tc_47",
+    "triviaqa:tc_48",
+    "triviaqa:tc_50",
+    "triviaqa:tc_52",
+    "triviaqa:tc_53",
+    "triviaqa:tc_54",
+    "triviaqa:tc_55",
+    "triviaqa:tc_57",
+    "triviaqa:tc_58",
+    "triviaqa:tc_60",
+    "triviaqa:tc_61",
+    "triviaqa:tc_63",
+    "triviaqa:tc_65",
+    "triviaqa:tc_66",
+    "triviaqa:tc_67",
+    "triviaqa:tc_68",
+    "triviaqa:tc_70",
+    "triviaqa:tc_72",
+    "triviaqa:tc_77",
+    "triviaqa:tc_78",
+    "triviaqa:tc_80",
+    "triviaqa:tc_81",
+    "triviaqa:tc_82",
+    "triviaqa:tc_84",
+    "triviaqa:tc_85",
+    "triviaqa:tc_86",
+    "triviaqa:tc_87",
+    "triviaqa:tc_88",
+    "triviaqa:tc_90",
+    "triviaqa:tc_91",
+    "triviaqa:tc_94",
+    "triviaqa:tc_96",
+    "triviaqa:tc_97",
+    "triviaqa:tc_98",
+    "triviaqa:tc_99",
+    "triviaqa:tc_100",
+    "triviaqa:tc_101",
+    "triviaqa:tc_102",
+    "triviaqa:tc_103",
+    "triviaqa:tc_104",
+    "triviaqa:tc_107",
+    "triviaqa:tc_108",
+    "triviaqa:tc_109",
+    "triviaqa:tc_110",
+    "triviaqa:tc_111",
+    "triviaqa:tc_112",
+    "triviaqa:tc_113",
+    "triviaqa:tc_114",
+    "triviaqa:tc_115",
+    "triviaqa:tc_117",
+    "triviaqa:tc_120",
+    "triviaqa:tc_123",
+    "triviaqa:tc_124",
+    "triviaqa:tc_125",
+    "triviaqa:tc_126",
+    "triviaqa:tc_127",
+    "triviaqa:tc_128",
+    "triviaqa:tc_130",
+    "triviaqa:tc_131",
+    "triviaqa:tc_132",
+    "triviaqa:tc_134",
+    "triviaqa:tc_135",
+    "triviaqa:tc_136",
+    "triviaqa:tc_138",
+    "triviaqa:tc_139",
+    "triviaqa:tc_140",
+    "triviaqa:tc_141",
+    "triviaqa:tc_145",
+    "triviaqa:tc_146",
+    "triviaqa:tc_150",
+    "triviaqa:tc_154",
+    "triviaqa:tc_155",
+    "triviaqa:tc_164",
+    "triviaqa:tc_166",
+    "triviaqa:tc_168",
+    "triviaqa:tc_171",
+    "triviaqa:tc_175",
+    "triviaqa:tc_179",
+    "triviaqa:tc_184",
+    "triviaqa:tc_186",
+    "triviaqa:tc_190",
+    "triviaqa:tc_194",
+    "triviaqa:tc_196",
+    "triviaqa:tc_198",
+    "triviaqa:tc_199",
+    "triviaqa:tc_205",
+    "triviaqa:tc_206",
+    "triviaqa:tc_207",
+    "triviaqa:tc_209",
+    "triviaqa:tc_210",
+    "triviaqa:tc_211",
+    "triviaqa:tc_212",
+    "triviaqa:tc_215",
+    "triviaqa:tc_218",
+    "triviaqa:tc_220",
+    "triviaqa:tc_221",
+    "triviaqa:tc_223"
+  ],
+  "stable_zero": {
+    "checks": [
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_1"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_3"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_5"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_8"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_9"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_10"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_11"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_15"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_16"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_17"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_18"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_19"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_21"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_22"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_23"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_24"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_25"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_26"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_27"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_28"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": false,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": false,
+        "task_id": "triviaqa:tc_30"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_31"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": false,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": false,
+        "task_id": "triviaqa:tc_32"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_36"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_38"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": false,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": false,
+        "task_id": "triviaqa:tc_39"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_41"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_43"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_44"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_45"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_46"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_47"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_48"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_50"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_52"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_53"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_54"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_55"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_57"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_58"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_60"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_61"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_63"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_65"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_66"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_67"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_68"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": false,
+        "full_turn_receipts": true,
+        "output_inbox_saved": false,
+        "passed": false,
+        "task_id": "triviaqa:tc_70"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": false,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": false,
+        "task_id": "triviaqa:tc_72"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_77"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_78"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_80"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_81"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_82"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": false,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": false,
+        "task_id": "triviaqa:tc_84"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_85"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_86"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_87"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_88"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": false,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": false,
+        "task_id": "triviaqa:tc_90"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_91"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_94"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_96"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_97"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_98"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_99"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_100"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_101"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_102"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_103"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_104"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_107"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": false,
+        "full_turn_receipts": true,
+        "output_inbox_saved": false,
+        "passed": false,
+        "task_id": "triviaqa:tc_108"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_109"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_110"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_111"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_112"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_113"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_114"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_115"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_117"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_120"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_123"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_124"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_125"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_126"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_127"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_128"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_130"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_131"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_132"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_134"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": false,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": false,
+        "task_id": "triviaqa:tc_135"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_136"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_138"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_139"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_140"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_141"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_145"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_146"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_150"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_154"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": false,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": false,
+        "task_id": "triviaqa:tc_155"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": false,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": false,
+        "task_id": "triviaqa:tc_164"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_166"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": false,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": false,
+        "task_id": "triviaqa:tc_168"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_171"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_175"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_179"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_184"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_186"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_190"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_194"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_196"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_198"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_199"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_205"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_206"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_207"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_209"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_210"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_211"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_212"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_215"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_218"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_220"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_221"
+      },
+      {
+        "agentgraph_complete": true,
+        "direct_complete": true,
+        "explicit_finish": true,
+        "full_turn_receipts": true,
+        "output_inbox_saved": true,
+        "passed": true,
+        "task_id": "triviaqa:tc_223"
+      }
+    ],
+    "criterion": "every_fixed_task_completed_the_full_chain",
+    "passed": false
+  },
+  "started_at": "2026-08-17T15:27:11.089085+00:00",
+  "status": "completed",
+  "training_enabled": false
+}
