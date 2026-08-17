@@ -68,7 +68,36 @@ def _prompt_state(turn: Mapping[str, Any]) -> Mapping[str, Any]:
         parsed = json.loads(payload)
     except (TypeError, ValueError):
         return {}
-    return parsed if isinstance(parsed, Mapping) else {}
+    if not isinstance(parsed, Mapping):
+        return {}
+    if parsed.get("schema_version") != "flowsteer.director.transcript.v1":
+        return parsed
+    messages = parsed.get("messages")
+    if not isinstance(messages, list):
+        return {}
+    user_messages = [
+        message
+        for message in messages
+        if isinstance(message, Mapping)
+        and message.get("role") == "user"
+        and isinstance(message.get("content"), str)
+    ]
+    if not user_messages:
+        return {}
+    _, separator, observation = user_messages[-1]["content"].partition("\n\n")
+    if not separator:
+        return {}
+    try:
+        state = json.loads(observation)
+    except (TypeError, ValueError):
+        return {}
+    if not isinstance(state, dict):
+        return {}
+    state["_visible_history_count"] = sum(
+        isinstance(message, Mapping) and message.get("role") == "assistant"
+        for message in messages
+    )
+    return state
 
 
 def _action_name(turn: Mapping[str, Any]) -> str:
@@ -116,13 +145,19 @@ def _runtime_delivery_evidence(
             if request.get("graph_revision") != graph_revision:
                 continue
             upstream = request.get("upstream", ())
-            if not isinstance(upstream, Sequence) or isinstance(upstream, (str, bytes)):
-                continue
+            messages: list[Mapping[str, Any]] = []
+            if isinstance(upstream, Sequence) and not isinstance(
+                upstream, (str, bytes)
+            ):
+                messages.extend(
+                    message for message in upstream if isinstance(message, Mapping)
+                )
+            peer_draft = request.get("peer_draft")
+            if isinstance(peer_draft, Mapping):
+                messages.append(peer_draft)
             execution_id = execution.get("execution_id")
             evidence_id = execution_id if isinstance(execution_id, str) else None
-            for message in upstream:
-                if not isinstance(message, Mapping):
-                    continue
+            for message in messages:
                 source = message.get("source_agent_id")
                 target = message.get("target_agent_id")
                 content = message.get("content")
@@ -247,11 +282,12 @@ def diagnose_trajectory(record: Mapping[str, Any]) -> TrajectoryGraphDiagnostic:
         for turn in turns
         if isinstance(turn.get("prompt"), str)
     ]
-    history_lengths = [
-        len(state["recent_canvas_history"])
-        for state in prompt_states
-        if isinstance(state.get("recent_canvas_history"), list)
-    ]
+    history_lengths = []
+    for state in prompt_states:
+        if isinstance(state.get("_visible_history_count"), int):
+            history_lengths.append(state["_visible_history_count"])
+        elif isinstance(state.get("recent_canvas_history"), list):
+            history_lengths.append(len(state["recent_canvas_history"]))
     execution_counts = [
         len(turn["executions"])
         for turn in turns

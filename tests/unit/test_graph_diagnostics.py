@@ -3,8 +3,10 @@ from __future__ import annotations
 import unittest
 
 from src.interactive.graph_diagnostics import (
+    _runtime_delivery_evidence,
     aggregate_trajectory_diagnostics,
     diagnose_trajectory,
+    graph_from_receipt,
 )
 
 
@@ -90,6 +92,97 @@ def trajectory() -> dict[str, object]:
 
 
 class GraphDiagnosticTests(unittest.TestCase):
+    def test_peer_draft_delivery_uses_runtime_evidence_constraints(self) -> None:
+        graph = graph_from_receipt(
+            {
+                "nodes": [
+                    {"id": "a", "model_id": "m", "contract": ""},
+                    {"id": "b", "model_id": "m", "contract": ""},
+                ],
+                "relations": [
+                    {
+                        "source_id": "a",
+                        "target_id": "b",
+                        "source_to_target": True,
+                        "target_to_source": True,
+                    }
+                ],
+                "output_agent_id": "b",
+                "revision": 4,
+            }
+        )
+        def request(
+            peer_draft: dict[str, object], *, include_upstream: bool = True
+        ) -> dict[str, object]:
+            return {
+                "graph_revision": 4,
+                "upstream": (
+                    [
+                        {
+                            "source_agent_id": "a",
+                            "target_agent_id": "b",
+                            "graph_revision": 4,
+                            "content": "upstream artifact",
+                        },
+                        {
+                            "source_agent_id": "b",
+                            "target_agent_id": "a",
+                            "graph_revision": 4,
+                            "content": "duplicate peer artifact",
+                        },
+                    ]
+                    if include_upstream
+                    else []
+                ),
+                "peer_draft": peer_draft,
+            }
+
+        valid_peer = {
+            "source_agent_id": "b",
+            "target_agent_id": "a",
+            "graph_revision": 4,
+            "content": "peer artifact",
+        }
+        evidence = _runtime_delivery_evidence(
+            [
+                {
+                    "executions": [
+                        {
+                            "execution_id": "valid",
+                            "metadata": {"request": request(valid_peer)},
+                        },
+                        {
+                            "execution_id": "wrong-revision",
+                            "metadata": {
+                                "request": request(
+                                    {**valid_peer, "graph_revision": 3},
+                                    include_upstream=False,
+                                )
+                            },
+                        },
+                        {
+                            "execution_id": "non-edge",
+                            "metadata": {
+                                "request": request(
+                                    {**valid_peer, "target_agent_id": "missing"},
+                                    include_upstream=False,
+                                )
+                            },
+                        },
+                    ]
+                }
+            ],
+            graph,
+        )
+
+        self.assertEqual(
+            [("a", "b", "weak", "valid"), ("b", "a", "weak", "valid")],
+            [
+                (item.source_id, item.target_id, item.status, item.evidence_id)
+                for item in evidence
+            ],
+        )
+
     def test_runtime_delivery_is_weak_not_verified_dependency_evidence(self) -> None:
         item = diagnose_trajectory(trajectory())
 

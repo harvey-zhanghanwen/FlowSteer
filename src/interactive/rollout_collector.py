@@ -38,6 +38,7 @@ from .director import (
     DIRECTOR_SYSTEM_PROMPT,
     DirectorError,
     DirectorResponse,
+    decode_director_transcript,
 )
 from .openai_gateway import build_agent_messages
 from .persistence import EvidenceStore, GraphSnapshotEvent, stable_id
@@ -364,10 +365,15 @@ class SGLangReceiptDirectorClient:
     def prompt_token_ids(self, prompt: str) -> Tuple[int, ...]:
         if not isinstance(prompt, str) or not prompt:
             raise ReceiptValidationError("Director prompt must be non-empty")
-        messages = [
-            {"role": "system", "content": DIRECTOR_SYSTEM_PROMPT},
-            {"role": "user", "content": prompt},
-        ]
+        transcript = decode_director_transcript(prompt)
+        messages = (
+            list(transcript)
+            if transcript is not None
+            else [
+                {"role": "system", "content": DIRECTOR_SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ]
+        )
         try:
             encoded = self.tokenizer.apply_chat_template(
                 messages,
@@ -663,6 +669,10 @@ EvaluatorCallback = Callable[
     [TaskRecord, Optional[str], Mapping[str, Any], Optional[AgentRuntimeResult]],
     Union[EvaluationValue, Awaitable[EvaluationValue]],
 ]
+SkillPromptProvider = Callable[
+    [TaskRecord, AgentWorkflowEnv, VersionBundle],
+    Sequence[Mapping[str, Any]],
+]
 
 
 def _evaluation_receipt(value: EvaluationValue) -> EvaluationReceipt:
@@ -880,6 +890,7 @@ class AgentGraphRolloutCollector:
         *,
         condition_id: str = "exploit",
         skills: Sequence[Mapping[str, Any]] = (),
+        skill_provider: Optional[SkillPromptProvider] = None,
         condition_satisfied: bool = True,
         forced_probe: bool = False,
         api_fallback_used: bool = False,
@@ -911,7 +922,10 @@ class AgentGraphRolloutCollector:
         self.versions = versions
         self.evidence_store = evidence_store
         self.condition_id = condition_id.strip()
+        if skills and skill_provider is not None:
+            raise ValueError("static skills and a dynamic skill_provider are mutually exclusive")
         self.skills = tuple(dict(skill) for skill in skills)
+        self.skill_provider = skill_provider
         self.condition_satisfied = condition_satisfied
         self.forced_probe = forced_probe
         self.api_fallback_used = api_fallback_used
@@ -978,8 +992,17 @@ class AgentGraphRolloutCollector:
             },
         )
 
+        def visible_skills() -> tuple[Mapping[str, Any], ...]:
+            raw = (
+                self.skill_provider(task, env, self.versions)
+                if self.skill_provider is not None
+                else self.skills
+            )
+            return tuple(dict(skill) for skill in raw)
+
+        current_skills = visible_skills()
+        prompt = self.orchestrator.build_prompt(env, 0, current_skills)
         for round_index in range(self.orchestrator.max_rounds):
-            prompt = self.orchestrator.build_prompt(env, round_index, self.skills)
             generation_seed = self.orchestrator.generation_seed(round_index)
             response = await self.orchestrator.client.propose(
                 prompt,
@@ -1098,6 +1121,12 @@ class AgentGraphRolloutCollector:
                 final_answer = canvas.final_answer
                 final_runtime = canvas.execution
                 break
+            prompt = self.orchestrator.continue_prompt(
+                prompt,
+                self.orchestrator.consumed_assistant_content(response, canvas),
+                env,
+                visible_skills(),
+            )
 
         termination_reason = "finish" if explicit_finish else "max_rounds"
         if termination_reason == "max_rounds":
@@ -1150,6 +1179,7 @@ __all__ = [
     "ReceiptValidationError",
     "RolloutGate",
     "SGLangReceiptDirectorClient",
+    "SkillPromptProvider",
     "execution_record_from_call",
     "select_balanced_tasks",
 ]

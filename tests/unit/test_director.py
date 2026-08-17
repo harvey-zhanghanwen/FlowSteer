@@ -10,6 +10,8 @@ from src.interactive.director import (
     DIRECTOR_SYSTEM_PROMPT,
     DirectorResponse,
     OpenAIDirectorClient,
+    decode_director_transcript,
+    encode_director_transcript,
 )
 from src.interactive.model_registry import ModelRegistry, ModelSpec, ProviderSpec
 from src.interactive.scientific_sampling import (
@@ -61,6 +63,25 @@ def registry() -> ModelRegistry:
     )
 
 
+def transcript_messages(prompt: str) -> tuple[dict[str, str], ...]:
+    messages = decode_director_transcript(prompt)
+    if messages is None:
+        raise AssertionError("expected a canonical Director transcript")
+    return tuple(dict(message) for message in messages)
+
+
+def observation_payload(message: dict[str, str]) -> dict[str, object]:
+    if message["role"] != "user":
+        raise AssertionError("Canvas observation must be a user message")
+    heading, separator, raw_payload = message["content"].partition("\n\n")
+    if not separator or not heading.startswith("Canvas observation."):
+        raise AssertionError("Canvas observation message has no JSON payload")
+    payload = json.loads(raw_payload)
+    if not isinstance(payload, dict):
+        raise AssertionError("Canvas observation payload must be an object")
+    return payload
+
+
 class DirectorTests(unittest.IsolatedAsyncioTestCase):
     async def test_openai_director_boundary_is_local_qwen_supervisor(self) -> None:
         OpenAIDirectorClient(
@@ -78,11 +99,42 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
                 model="gpt-4o-mini",
             )
 
+    async def test_openai_director_submits_exact_transcript_messages(self) -> None:
+        messages = (
+            {"role": "system", "content": DIRECTOR_SYSTEM_PROMPT},
+            {"role": "user", "content": "initial Canvas observation"},
+            {"role": "assistant", "content": '{"action":"finish"}'},
+            {"role": "user", "content": "current Canvas observation"},
+        )
+        client = OpenAIDirectorClient(max_retries=0)
+        captured = {}
+
+        def fake_post(api_key, payload):
+            captured.update(api_key=api_key, payload=payload)
+            return {
+                "id": "director-request",
+                "model": "supervisor_theta",
+                "choices": [{"message": {"content": '{"action":"finish"}'}}],
+                "usage": {"prompt_tokens": 12, "completion_tokens": 3},
+            }
+
+        client._post = fake_post  # type: ignore[method-assign]
+        response = await client.propose(encode_director_transcript(messages), seed=9)
+
+        self.assertEqual(list(messages), captured["payload"]["messages"])
+        self.assertEqual(9, captured["payload"]["seed"])
+        self.assertEqual('{"action":"finish"}', response.text)
+
     async def test_end_to_end_scripted_canvas_and_execution(self) -> None:
         model_registry = registry()
+        add_action = (
+            '{"action":"add_agent","agent_id":"solver","model_id":"qwen",'
+            '"contract":"solve"}'
+        )
+        add_response = "preface\n" + add_action + "\ndiscarded suffix"
         client = ScriptedDirector(
             [
-                '{"action":"add_agent","agent_id":"solver","model_id":"qwen","contract":"solve"}',
+                add_response,
                 '{"action":"set_output","agent_id":"solver"}',
                 '{"action":"finish"}',
             ]
@@ -94,7 +146,9 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
             execute_on_edit=True,
             max_agents=10,
         )
-        result = await AgentGraphOrchestrator(model_registry, client, seed=1).run(env, "2+2?")
+        result = await AgentGraphOrchestrator(model_registry, client, seed=1).run(
+            env, "2+2?"
+        )
         self.assertEqual(result.final_answer, "answer from solver")
         self.assertEqual(len(result.turns), 3)
         self.assertNotIn("weighted_preferred_model", client.prompts[0])
@@ -109,28 +163,46 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(result.turns[1].canvas_result.execution)
         self.assertIn("execution_result=", result.turns[1].canvas_result.feedback)
         self.assertIn("answer from solver", result.turns[1].canvas_result.feedback)
-        self.assertIn("output_format", result.turns[1].canvas_result.feedback)
+        self.assertNotIn("output_format", result.turns[1].canvas_result.feedback)
         self.assertNotIn('"final_answer"', result.turns[1].canvas_result.feedback)
         self.assertIn("output_inbox", result.turns[1].canvas_result.feedback)
         # Finish reuses the successful result for the unchanged graph revision.
         self.assertEqual(len(gateway.requests), 1)
 
-        initial_state = json.loads(client.prompts[0].split("\n\n", 1)[1])
-        complete_state = json.loads(client.prompts[2].split("\n\n", 1)[1])
-        self.assertEqual(initial_state["max_rounds"], 20)
-        self.assertEqual(initial_state["remaining_rounds"], 20)
-        self.assertEqual(initial_state["max_agents"], 10)
-        self.assertEqual(initial_state["recent_canvas_history"], [])
-        self.assertFalse(initial_state["graph_validation"]["structurally_complete"])
-        self.assertNotIn("complete_validation", initial_state)
-        self.assertEqual(0, initial_state["topology_statistics"]["agent_count"])
-        self.assertNotIn("construction_progress", initial_state)
-        qwen_catalog = next(
-            item for item in initial_state["model_catalog"] if item["model_id"] == "qwen"
+        initial_messages = transcript_messages(client.prompts[0])
+        continued_messages = transcript_messages(client.prompts[1])
+        complete_messages = transcript_messages(client.prompts[2])
+        self.assertEqual(
+            ["system", "user"], [item["role"] for item in initial_messages]
         )
         self.assertEqual(
-            [item["model_id"] for item in initial_state["model_catalog"]],
-            [item["model_id"] for item in complete_state["model_catalog"]],
+            ["system", "user", "assistant", "user"],
+            [item["role"] for item in continued_messages],
+        )
+        self.assertEqual(
+            ["system", "user", "assistant", "user", "assistant", "user"],
+            [item["role"] for item in complete_messages],
+        )
+        self.assertEqual(initial_messages, complete_messages[:2])
+        first_action = result.turns[0].canvas_result.action
+        self.assertIsNotNone(first_action)
+        assert first_action is not None
+        self.assertEqual(
+            add_response[: first_action.consumed_end],
+            continued_messages[2]["content"],
+        )
+        self.assertNotIn("discarded suffix", continued_messages[2]["content"])
+
+        initial_state = observation_payload(initial_messages[-1])
+        complete_state = observation_payload(complete_messages[-1])
+        self.assertEqual(initial_state["max_agents"], 10)
+        self.assertEqual(initial_state["task"], "2+2?")
+        self.assertNotIn("directed_edges", initial_state)
+        self.assertTrue(initial_state["structural_issues"])
+        qwen_catalog = next(
+            item
+            for item in initial_state["model_catalog"]
+            if item["model_id"] == "qwen"
         )
         self.assertEqual(
             {
@@ -140,51 +212,87 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
             },
             qwen_catalog["routing_metadata"],
         )
-        self.assertEqual(complete_state["remaining_rounds"], 18)
-        self.assertTrue(complete_state["graph_validation"]["structurally_complete"])
-        self.assertNotIn("complete_validation", complete_state)
-        self.assertNotIn("construction_progress", complete_state)
-        self.assertNotIn("weighted_preferred_model", complete_state)
+        self.assertEqual("solver", complete_state["current_graph"]["output_agent_id"])
+        self.assertNotIn("directed_edges", complete_state)
+        self.assertNotIn("structural_issues", complete_state)
+        self.assertNotIn("task", complete_state)
+        self.assertNotIn("model_catalog", complete_state)
         self.assertIn("execution_result=", complete_state["canvas_feedback"])
-        self.assertEqual(2, len(complete_state["recent_canvas_history"]))
-        self.assertEqual(
-            "set_output",
-            complete_state["recent_canvas_history"][-1]["action"]["action"],
-        )
-        self.assertNotIn("feedback", complete_state["recent_canvas_history"][-1])
-        self.assertEqual(
-            "accepted add_agent at revision 1",
-            complete_state["recent_canvas_history"][-1][
-                "observation_before_action"
-            ],
-        )
-        # The latest progressive result is the current observation exactly
-        # once, not duplicated inside the history tail.
+        for state in (initial_state, complete_state):
+            for removed_cue in (
+                "max_rounds",
+                "remaining_rounds",
+                "topology_statistics",
+                "graph_validation",
+                "structurally_complete",
+                "recent_canvas_history",
+                "construction_progress",
+                "output_format",
+            ):
+                self.assertNotIn(removed_cue, state)
+        # The latest progressive result occurs only in the current user
+        # observation, rather than in a reconstructed history field.
         self.assertEqual(1, client.prompts[2].count("execution_result="))
 
-    async def test_director_terminal_policy_is_issue_driven_without_role_template(self) -> None:
-        self.assertIn("Only the graph's Output Agent", DIRECTOR_SYSTEM_PROMPT)
-        self.assertIn("specific missing evidence hop", DIRECTOR_SYSTEM_PROMPT)
-        self.assertIn("expected input or dependency", DIRECTOR_SYSTEM_PROMPT)
-        self.assertIn("two message directions", DIRECTOR_SYSTEM_PROMPT)
-        self.assertIn("independent artifacts that later converge", DIRECTOR_SYSTEM_PROMPT)
-        self.assertIn("one artifact sent to multiple consumers", DIRECTOR_SYSTEM_PROMPT)
-        self.assertIn("optional shapes", DIRECTOR_SYSTEM_PROMPT)
-        self.assertIn("distinct evidence dependencies", DIRECTOR_SYSTEM_PROMPT)
-        self.assertIn("never JSON or explanation", DIRECTOR_SYSTEM_PROMPT)
-        self.assertIn("unused rounds", DIRECTOR_SYSTEM_PROMPT)
-        self.assertIn("graph size alone is neither a benefit nor a cost", DIRECTOR_SYSTEM_PROMPT)
-        self.assertIn("only a terminal protocol check", DIRECTOR_SYSTEM_PROMPT)
-        self.assertIn("complete singleton may be sufficient", DIRECTOR_SYSTEM_PROMPT)
+    async def test_director_terminal_policy_is_issue_driven_without_role_template(
+        self,
+    ) -> None:
+        self.assertIn("one edit at a time", DIRECTOR_SYSTEM_PROMPT)
+        self.assertIn(
+            "A directed relation sends the source artifact to the target",
+            DIRECTOR_SYSTEM_PROMPT,
+        )
+        self.assertIn(
+            "target contract should name the artifact it consumes",
+            DIRECTOR_SYSTEM_PROMPT,
+        )
+        self.assertIn(
+            "Only the Output Agent returns the final task answer",
+            DIRECTOR_SYSTEM_PROMPT,
+        )
+        self.assertIn(
+            "structural or output-format validity alone does not establish task quality",
+            DIRECTOR_SYSTEM_PROMPT,
+        )
         self.assertNotIn("prefer finish", DIRECTOR_SYSTEM_PROMPT.lower())
-        self.assertNotIn("not to make the graph larger", DIRECTOR_SYSTEM_PROMPT)
         self.assertNotIn("Researcher", DIRECTOR_SYSTEM_PROMPT)
         self.assertNotIn("Critic", DIRECTOR_SYSTEM_PROMPT)
         self.assertNotIn("must use three", DIRECTOR_SYSTEM_PROMPT.lower())
+        self.assertNotIn("singleton", DIRECTOR_SYSTEM_PROMPT.lower())
+
+    async def test_history_window_keeps_real_recent_message_pairs(self) -> None:
+        model_registry = registry()
+        actions = [
+            '{"action":"add_agent","agent_id":"source","model_id":"qwen","contract":"produce evidence"}',
+            '{"action":"add_agent","agent_id":"sink","model_id":"other","contract":"consume source evidence"}',
+            '{"action":"set_relation","source_id":"source","target_id":"sink","source_to_target":true,"target_to_source":false}',
+            '{"action":"set_output","agent_id":"sink"}',
+        ]
+        client = ScriptedDirector(actions)
+        env = AgentWorkflowEnv(model_registry, gateway=FakeGateway())
+
+        await AgentGraphOrchestrator(
+            model_registry,
+            client,
+            max_rounds=4,
+            history_window=2,
+        ).run(env, "same task")
+
+        messages = transcript_messages(client.prompts[3])
+        self.assertEqual(
+            ["system", "user", "assistant", "user", "assistant", "user"],
+            [item["role"] for item in messages],
+        )
+        self.assertEqual(actions[1], messages[2]["content"])
+        self.assertEqual(actions[2], messages[4]["content"])
+        self.assertNotIn(actions[0], [item["content"] for item in messages[2:]])
+        self.assertNotIn("recent_canvas_history", client.prompts[3])
 
     async def test_catalog_order_is_decoupled_from_rollout_sampling_seed(self) -> None:
         model_registry = registry()
-        env = AgentWorkflowEnv(model_registry, gateway=FakeGateway(), problem="same task")
+        env = AgentWorkflowEnv(
+            model_registry, gateway=FakeGateway(), problem="same task"
+        )
         first = AgentGraphOrchestrator(
             model_registry,
             ScriptedDirector([]),
@@ -198,20 +306,26 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
             catalog_order_seed="condition:same-task",
         )
 
-        first_state = json.loads(first.build_prompt(env, 0, ()).split("\n\n", 1)[1])
-        second_state = json.loads(second.build_prompt(env, 0, ()).split("\n\n", 1)[1])
+        first_state = observation_payload(
+            transcript_messages(first.build_prompt(env, 0, ()))[-1]
+        )
+        second_state = observation_payload(
+            transcript_messages(second.build_prompt(env, 0, ()))[-1]
+        )
         self.assertEqual(first_state["model_catalog"], second_state["model_catalog"])
         self.assertNotEqual(first.seed, second.seed)
 
-    async def test_scientific_rollout_ordinal_changes_sampling_not_catalog(self) -> None:
+    async def test_scientific_rollout_ordinal_changes_sampling_not_catalog(
+        self,
+    ) -> None:
         model_registry = registry()
-        env = AgentWorkflowEnv(model_registry, gateway=FakeGateway(), problem="same task")
+        env = AgentWorkflowEnv(
+            model_registry, gateway=FakeGateway(), problem="same task"
+        )
 
         def orchestrator(rollout_ordinal: int) -> AgentGraphOrchestrator:
             coordinate = ScientificSamplingCoordinate(
-                sampling_schedule_hash=scientific_sampling_schedule_hash(
-                    base_seed=17
-                ),
+                sampling_schedule_hash=scientific_sampling_schedule_hash(base_seed=17),
                 schedule_purpose="architecture-dev",
                 ordered_sequence_hash=stable_hash(["hotpotqa:one"]),
                 sequence_position=rollout_ordinal,
@@ -229,8 +343,12 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
 
         first = orchestrator(0)
         second = orchestrator(1)
-        first_state = json.loads(first.build_prompt(env, 0, ()).split("\n\n", 1)[1])
-        second_state = json.loads(second.build_prompt(env, 0, ()).split("\n\n", 1)[1])
+        first_state = observation_payload(
+            transcript_messages(first.build_prompt(env, 0, ()))[-1]
+        )
+        second_state = observation_payload(
+            transcript_messages(second.build_prompt(env, 0, ()))[-1]
+        )
 
         self.assertEqual(first_state["model_catalog"], second_state["model_catalog"])
         self.assertNotEqual(first.generation_seed(0), second.generation_seed(0))
@@ -242,7 +360,9 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
     async def test_round_limit_is_explicit_failure(self) -> None:
         model_registry = registry()
         client = ScriptedDirector(
-            ['{"action":"add_agent","agent_id":"solver","model_id":"qwen","contract":"solve"}']
+            [
+                '{"action":"add_agent","agent_id":"solver","model_id":"qwen","contract":"solve"}'
+            ]
         )
         env = AgentWorkflowEnv(model_registry, gateway=FakeGateway())
         result = await AgentGraphOrchestrator(

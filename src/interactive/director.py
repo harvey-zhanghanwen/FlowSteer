@@ -24,7 +24,7 @@ from .scientific_sampling import (
 )
 
 
-DIRECTOR_SYSTEM_PROMPT = """You are the Flow-Director. Build an executable AgentGraph for the task, one edit at a time. Follow the latest Canvas feedback and return exactly one JSON object each turn.
+DIRECTOR_SYSTEM_PROMPT = """You are the Flow-Director. Build an executable AgentGraph for the task, one edit at a time. Follow the latest Canvas observation and return exactly one JSON object each turn.
 
 Actions:
 {"action":"add_agent","agent_id":"...","model_id":"...","contract":"..."}
@@ -34,13 +34,74 @@ Actions:
 {"action":"set_output","agent_id":"..."}
 {"action":"finish"}
 
-Use a model_id from the supplied catalog and describe each Agent's job in concise ordinary free text. A useful contract states its objective, expected input or dependency, artifact to produce, and completion condition; do not prefill an upstream result that has not been produced. A relation's two booleans are the two message directions; no relation means independent work, and a bidirectional pair performs one finite draft-and-revision exchange. Choose graph structure from the task's actual dependencies; graph size alone is neither a benefit nor a cost.
+Use a model_id from the supplied catalog. Before the first edit, inspect whether the task has distinct evidence dependencies and represent only dependencies that need separate artifacts. Describe each Agent's objective, inputs or dependencies, output artifact, and completion condition in concise ordinary text. A directed relation sends the source artifact to the target; the target contract should name the artifact it consumes. Only the Output Agent returns the final task answer, and its contract should request a concise answer span rather than JSON or explanation. Use execution evidence and Canvas issues to decide the next atomic edit or finish; structural or output-format validity alone does not establish task quality."""
 
-Directed relations can express a sequence of dependent artifacts, independent artifacts that later converge, one artifact sent to multiple consumers, or a finite critique/revision exchange. These are optional shapes in the same atomic search space, not templates or requirements.
 
-Only the graph's Output Agent owns the final task answer; other Agents produce intermediate artifacts. Before finish, check whether distinct evidence dependencies visible in the task are actually covered rather than hidden inside one all-purpose contract. When a relation exists, its target contract should name the upstream artifact it consumes. The Output contract should request only the concise answer span, never JSON or explanation.
+DIRECTOR_TRANSCRIPT_SCHEMA = "flowsteer.director.transcript.v1"
+DIRECTOR_TRANSCRIPT_HEADER = "Flow-Director chat transcript"
 
-Finish only after the Canvas accepts a complete graph and the current execution addresses the task's evidence dependencies. Output-format validity is only a terminal protocol check; it is not evidence that the answer or decomposition is sufficient. A complete singleton may be sufficient, or it may still hide distinct unresolved dependencies. Continue only for a specific missing evidence hop, unresolved dependency, conflict, format error, execution error, or task mismatch; unused rounds, graph size, or another catalog model alone are not reasons to edit."""
+
+def encode_director_transcript(
+    messages: Sequence[Mapping[str, str]],
+) -> str:
+    """Serialize the exact multi-turn Director messages into a receipt string."""
+
+    normalized: list[dict[str, str]] = []
+    for message in messages:
+        role = message.get("role")
+        content = message.get("content")
+        if role not in {"system", "user", "assistant"}:
+            raise ValueError("Director transcript has an unsupported role")
+        if not isinstance(content, str) or not content:
+            raise ValueError("Director transcript messages require non-empty content")
+        normalized.append({"role": role, "content": content})
+    if len(normalized) < 2 or normalized[0] != {
+        "role": "system",
+        "content": DIRECTOR_SYSTEM_PROMPT,
+    }:
+        raise ValueError("Director transcript must start with the fixed system prompt")
+    if normalized[1]["role"] != "user":
+        raise ValueError("Director transcript must start with a user task message")
+    payload = {
+        "schema_version": DIRECTOR_TRANSCRIPT_SCHEMA,
+        "messages": normalized,
+    }
+    return DIRECTOR_TRANSCRIPT_HEADER + "\n\n" + json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def decode_director_transcript(
+    prompt: str,
+) -> Optional[Tuple[Mapping[str, str], ...]]:
+    """Decode a canonical transcript, or return ``None`` for a legacy prompt."""
+
+    if not isinstance(prompt, str) or not prompt.startswith(
+        DIRECTOR_TRANSCRIPT_HEADER + "\n\n"
+    ):
+        return None
+    _, _, raw_payload = prompt.partition("\n\n")
+    try:
+        payload = json.loads(raw_payload)
+    except (TypeError, ValueError) as exc:
+        raise DirectorError("Director transcript is not valid JSON") from exc
+    if not isinstance(payload, Mapping) or payload.get(
+        "schema_version"
+    ) != DIRECTOR_TRANSCRIPT_SCHEMA:
+        raise DirectorError("Director transcript has an unsupported schema")
+    raw_messages = payload.get("messages")
+    if not isinstance(raw_messages, list):
+        raise DirectorError("Director transcript has no message list")
+    try:
+        canonical = encode_director_transcript(raw_messages)
+    except (TypeError, ValueError) as exc:
+        raise DirectorError("Director transcript violates its message contract") from exc
+    if canonical != prompt:
+        raise DirectorError("Director transcript is not canonical")
+    return tuple(dict(message) for message in raw_messages)
 
 
 class DirectorError(RuntimeError):
@@ -116,12 +177,17 @@ class OpenAIDirectorClient:
             api_key = os.getenv(self.api_key_env, "")
             if not api_key:
                 raise DirectorError(f"missing Director credential environment variable: {self.api_key_env}")
+        messages = decode_director_transcript(prompt)
         payload = {
             "model": self.model,
-            "messages": [
-                {"role": "system", "content": DIRECTOR_SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
-            ],
+            "messages": (
+                list(messages)
+                if messages is not None
+                else [
+                    {"role": "system", "content": DIRECTOR_SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt},
+                ]
+            ),
             "temperature": self.temperature,
             "top_p": self.top_p,
             "max_tokens": self.max_tokens,
@@ -279,19 +345,14 @@ class AgentGraphOrchestrator:
             "phase": GenerationPhase.ACTION.value,
         }
 
-    def build_prompt(
-        self,
-        env: AgentWorkflowEnv,
-        turn_index: int,
-        skills: Sequence[Mapping[str, Any]],
-    ) -> str:
+    def _model_catalog(self) -> list[dict[str, Any]]:
         # Present the frozen set in a deterministic per-condition order.  The
         # previous sorted order made the alphabetically first family the de
         # facto default after the preferred-model hint was removed.  This does
         # not select a model; every action still names the Director's choice.
         catalog_model_ids = list(self.registry.model_ids)
         random.Random(self.catalog_order_seed).shuffle(catalog_model_ids)
-        catalog = [
+        return [
             {
                 "model_id": model_id,
                 "selection_weight": self.registry.require_model(model_id).selection_weight,
@@ -311,69 +372,135 @@ class AgentGraphOrchestrator:
             }
             for model_id in catalog_model_ids
         ]
+
+    def _canvas_observation(
+        self,
+        env: AgentWorkflowEnv,
+        *,
+        include_task_context: bool,
+        skills: Sequence[Mapping[str, Any]],
+    ) -> dict[str, Any]:
         complete_validation = env.graph.validate(
             self.registry,
             require_complete=True,
         )
         snapshot = env.snapshot()
-        # SkillFlow keeps the current observation separate from the bounded
-        # action history.  AgentWorkflowHistoryEntry stores post-action Canvas
-        # feedback, so rendering ``entry.to_dict()`` here repeated the latest
-        # execution result both in ``canvas_feedback`` and in the history tail.
-        # Reconstruct the same observation-before-action boundary instead.
-        history = snapshot.history
-        history_start = max(len(history) - self.history_window, 0)
-        recent_canvas_history = []
-        for history_index in range(history_start, len(history)):
-            entry = history[history_index]
-            recent_canvas_history.append(
+        directed_edges = [
+            {"from": source_id, "to": target_id}
+            for relation in env.graph.relations
+            for source_id, target_id in relation.directed_edges()
+        ]
+        payload: dict[str, Any] = {
+            "current_graph": env.graph.to_dict(),
+            "canvas_feedback": snapshot.last_feedback,
+        }
+        if directed_edges:
+            # The two-bit relation remains the canonical mutation receipt.  A
+            # direct edge view avoids making the Director mentally invert a
+            # relation after AgentGraph canonicalizes endpoint order.
+            payload["directed_edges"] = directed_edges
+        if complete_validation.issues:
+            payload["structural_issues"] = [
                 {
-                    "turn_count": entry.turn_count,
-                    "observation_before_action": (
-                        "" if history_index == 0 else history[history_index - 1].feedback
-                    ),
-                    "action": None if entry.action is None else entry.action.to_dict(),
-                    "accepted": entry.accepted,
-                    "done": entry.done,
-                    "revision": entry.revision,
-                    "execution_reused": entry.execution_reused,
+                    "code": issue.code,
+                    "message": issue.message,
+                }
+                for issue in complete_validation.issues
+            ]
+        if include_task_context:
+            payload.update(
+                {
+                    "task": env.problem,
+                    "model_catalog": self._model_catalog(),
                 }
             )
-        payload = {
-            "task": env.problem,
-            "turn": turn_index,
-            "max_rounds": self.max_rounds,
-            "remaining_rounds": max(self.max_rounds - env.turn_count, 0),
-            "current_graph": env.graph.to_dict(),
-            "topology_statistics": env.graph.topology_statistics(),
-            "canvas_feedback": snapshot.last_feedback,
-            # SkillFlow presents prior observations/actions and the current
-            # observation as distinct fields.  Keep that boundary without role
-            # recipes or a duplicated latest execution result.
-            "recent_canvas_history": recent_canvas_history,
-            # Canvas validity is structural only.  Avoid the earlier generic
-            # ``complete_validation.valid`` label, which sat beside a
-            # format-valid execution and could be read as task correctness.
-            "graph_validation": {
-                "structurally_complete": complete_validation.valid,
-                "structural_issues": [
-                    {
-                        "code": issue.code,
-                        "message": issue.message,
-                    }
-                    for issue in complete_validation.issues
-                ],
-            },
-            "model_catalog": catalog,
-        }
-        if env.max_agents is not None:
-            payload["max_agents"] = env.max_agents
+            if env.max_agents is not None:
+                payload["max_agents"] = env.max_agents
         if skills:
             payload["available_skills"] = list(skills)
+        return payload
+
+    @staticmethod
+    def _observation_message(payload: Mapping[str, Any]) -> str:
         return (
-            "Choose exactly one next action. Use only observed task, Canvas, and catalog facts.\n\n"
-            + json.dumps(payload, ensure_ascii=False, sort_keys=True)
+            "Canvas observation. Choose exactly one next action using only the "
+            "task, messages, Canvas, catalog, and any supplied validated Skill facts.\n\n"
+            + json.dumps(
+                dict(payload),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
         )
+
+    def build_prompt(
+        self,
+        env: AgentWorkflowEnv,
+        turn_index: int,
+        skills: Sequence[Mapping[str, Any]],
+    ) -> str:
+        """Start one SkillFlow-style persistent Director conversation."""
+
+        if isinstance(turn_index, bool) or not isinstance(turn_index, int) or turn_index < 0:
+            raise ValueError("turn_index must be a non-negative integer")
+        initial = self._canvas_observation(
+            env,
+            include_task_context=True,
+            skills=skills,
+        )
+        return encode_director_transcript(
+            (
+                {"role": "system", "content": DIRECTOR_SYSTEM_PROMPT},
+                {"role": "user", "content": self._observation_message(initial)},
+            )
+        )
+
+    def continue_prompt(
+        self,
+        previous_prompt: str,
+        assistant_content: str,
+        env: AgentWorkflowEnv,
+        skills: Sequence[Mapping[str, Any]],
+    ) -> str:
+        """Append the real sampled action and current Canvas observation."""
+
+        messages = decode_director_transcript(previous_prompt)
+        if messages is None:
+            raise DirectorError("cannot continue a legacy single-user Director prompt")
+        if not isinstance(assistant_content, str) or not assistant_content:
+            raise DirectorError("Director continuation requires sampled assistant content")
+        observation = self._canvas_observation(
+            env,
+            include_task_context=False,
+            skills=skills,
+        )
+        continuation = list(messages[2:])
+        continuation.extend(
+            (
+                {"role": "assistant", "content": assistant_content},
+                {
+                    "role": "user",
+                    "content": self._observation_message(observation),
+                },
+            )
+        )
+        # Keep the immutable task/catalog context and a bounded real message
+        # continuation.  Unlike the former reconstructed history JSON, these
+        # are the exact assistant actions and Canvas observations seen by Qwen.
+        continuation = continuation[-2 * self.history_window :]
+        return encode_director_transcript(
+            (messages[0], messages[1], *continuation)
+        )
+
+    @staticmethod
+    def consumed_assistant_content(
+        response: DirectorResponse,
+        canvas: AgentWorkflowStepResult,
+    ) -> str:
+        action = canvas.action
+        if action is None:
+            return response.text
+        return response.text[: action.consumed_end]
 
     async def run(
         self,
@@ -384,8 +511,8 @@ class AgentGraphOrchestrator:
     ) -> OrchestrationResult:
         env.reset(problem)
         turns: list[DirectorTurn] = []
+        prompt = self.build_prompt(env, 0, skills)
         for index in range(self.max_rounds):
-            prompt = self.build_prompt(env, index, skills)
             response = await self.client.propose(
                 prompt,
                 seed=self.generation_seed(index),
@@ -400,6 +527,12 @@ class AgentGraphOrchestrator:
                     termination_reason="finish",
                     explicit_finish=True,
                 )
+            prompt = self.continue_prompt(
+                prompt,
+                self.consumed_assistant_content(response, canvas),
+                env,
+                skills,
+            )
         return OrchestrationResult(
             final_answer=None,
             turns=tuple(turns),
@@ -412,10 +545,13 @@ class AgentGraphOrchestrator:
 __all__ = [
     "AgentGraphOrchestrator",
     "DIRECTOR_SYSTEM_PROMPT",
+    "DIRECTOR_TRANSCRIPT_SCHEMA",
     "DirectorClient",
     "DirectorError",
     "DirectorResponse",
     "DirectorTurn",
     "OpenAIDirectorClient",
     "OrchestrationResult",
+    "decode_director_transcript",
+    "encode_director_transcript",
 ]

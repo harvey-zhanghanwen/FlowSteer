@@ -386,7 +386,6 @@ class AgentWorkflowEnv:
         # result to the policy after an edit.  Keep this receipt deliberately
         # compact: it is state feedback, not a task-specific Director template.
         answer = execution.final_answer
-        tag_count, exact_single_tag, _ = _answer_protocol_state(answer)
         if len(answer) > 400:
             answer = answer[:397] + "..."
         output_calls = [
@@ -441,10 +440,6 @@ class AgentWorkflowEnv:
                 # calling this value ``final_answer`` prematurely made a
                 # format-valid singleton look semantically terminal.
                 "output": answer,
-                "output_format": {
-                    "answer_tag_count": tag_count,
-                    "exact_single_answer_tag": exact_single_tag,
-                },
                 "output_inbox": output_inbox,
                 "agent_artifacts": agent_artifacts,
             },

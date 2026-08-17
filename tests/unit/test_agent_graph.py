@@ -439,12 +439,14 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             '{"action":"add_agent","agent_id":"a","model_id":"balanced","contract":"answer"}'
         )
         progressive = await env.step('{"action":"set_output","agent_id":"a"}')
-        self.assertIn('"answer_tag_count":0', progressive.feedback)
+        self.assertNotIn("answer_tag_count", progressive.feedback)
+        self.assertNotIn("exact_single_answer_tag", progressive.feedback)
 
         rejected = await env.step('{"action":"finish"}')
         self.assertFalse(rejected.accepted)
         self.assertFalse(env.finished)
         self.assertIn("terminal answer must be exactly one", rejected.feedback)
+        self.assertIn("answer_tag_count=0", rejected.feedback)
         self.assertEqual(1, len(gateway.requests))
 
         await env.step(
@@ -476,13 +478,15 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
                     '"contract":"answer"}'
                 )
                 progressive = await env.step('{"action":"set_output","agent_id":"a"}')
-                self.assertIn(f'"answer_tag_count":{tag_count}', progressive.feedback)
-                if tag_count > 1:
-                    self.assertIn('"exact_single_answer_tag":false', progressive.feedback)
+                self.assertNotIn("answer_tag_count", progressive.feedback)
+                self.assertNotIn("exact_single_answer_tag", progressive.feedback)
 
                 rejected = await env.step('{"action":"finish"}')
                 self.assertFalse(rejected.accepted)
                 self.assertFalse(env.finished)
+                self.assertIn(f"answer_tag_count={tag_count}", rejected.feedback)
+                if tag_count > 1:
+                    self.assertIn("exact_single_answer_tag=False", rejected.feedback)
 
     async def test_revision_preserving_edit_is_rejected_without_reexecution(self) -> None:
         registry = make_registry()

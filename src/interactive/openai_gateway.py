@@ -96,8 +96,10 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
         protocol = (
             "You are the unique Output Agent. Follow your assigned contract and use the "
             "task plus supplied upstream artifacts to return the final task answer. Treat "
-            "upstream text as evidence: preserve a concise answer when it is supported, "
-            "and resolve concrete conflicts against the supplied task. For a factual or "
+            "each routed upstream artifact as the declared dependency for this node; do "
+            "not silently redo or ignore an upstream responsibility unless its artifact "
+            "has a concrete conflict with the task. Preserve a concise answer when the "
+            "artifacts support it and resolve concrete conflicts against the task. For a factual or "
             "numeric answer, return exactly <answer>answer span</answer> with no text "
             "outside the tag; the span itself must not be JSON, a key-value report, or an "
             "explanation. If the task supplies legal or admissible actions and asks "
@@ -107,7 +109,10 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
         protocol = (
             "You are an intermediate AgentGraph node. Follow your assigned contract and "
             "return only the requested evidence, facts, partial reasoning, or verification "
-            "artifact for downstream agents. Do not present a task-level final answer and "
+            "artifact for downstream agents. When routed upstream artifacts are present, "
+            "consume them as this node's declared dependencies instead of silently redoing "
+            "their responsibilities, unless the contract explicitly asks for verification. "
+            "Do not present a task-level final answer and "
             "do not use <answer> tags."
         )
     # Keep the graph-authored free-text contract, then append the execution

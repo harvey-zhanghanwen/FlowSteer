@@ -6,15 +6,14 @@ It reuses :class:`TrajectoryRecord`, :class:`ProbeRecord`,
 :class:`SkillLifecycleManager`, and :class:`SkillRetriever` unchanged at their
 ownership boundaries.
 
-The separation of train and validation evidence follows SkillFlow
-``evidence/schema.py::EvidenceRecord`` and
-``evidence/store.py::SplitEvidenceStores``.  ACTIVE-only, task-conditioned
-retrieval follows SkillFlow
-``evolution/retriever.py::TaskConditionedSkillRetriever``.  The necessary
-FlowSteer adaptation is the paired-effect publication protocol specified in
-``FlowSteer_MACE_Bayesian_Skill_Design.md`` sections 10 and 11: a natural
-trajectory may propose only a CANDIDATE; forced paired probes are excluded
-from GRPO; independent validation problems alone support activation.
+SkillFlow's concrete source pattern is ``src/skills/workspace.py::retrieve``
+plus the policy-visible Skill catalog in ``training/environment.py``.  The
+stricter ACTIVE status, task/graph-stage conditions, split evidence, version
+binding, and paired-effect publication gate are project adaptations specified
+in ``FlowSteer_MACE_Bayesian_Skill_Design.md`` sections 10 and 11, not classes
+copied from SkillFlow: a natural trajectory may propose only a CANDIDATE;
+forced paired probes are excluded from GRPO; independent validation problems
+alone support activation.
 """
 
 from __future__ import annotations

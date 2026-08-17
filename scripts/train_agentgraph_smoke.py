@@ -55,6 +55,7 @@ from src.interactive.scientific_sampling import (
     scientific_sampling_schedule_hash,
     stable_hash,
 )
+from src.interactive.skills import SkillEvidencePipeline, SkillQuery, SkillStore
 from src.interactive.smoke_trainer import (
     Qwen35OnePassSmokeTrainer,
     SmokeTrainerConfig,
@@ -751,6 +752,8 @@ class LiveSmokeBackend:
         publisher: SGLangPolicyPublisher,
         judge: Optional[JudgeCallback],
         judge_model: str,
+        skill_pipeline: Optional[SkillEvidencePipeline] = None,
+        skill_epoch: int = 0,
     ) -> None:
         self.config = config
         self.registry = registry
@@ -762,6 +765,8 @@ class LiveSmokeBackend:
         self.publisher = publisher
         self.judge = judge
         self.judge_model = judge_model
+        self.skill_pipeline = skill_pipeline
+        self.skill_epoch = skill_epoch
 
     @property
     def model_catalog_version(self) -> str:
@@ -790,6 +795,7 @@ class LiveSmokeBackend:
         storage = _mapping(config["storage"], "storage")
         sync = _mapping(config["policy_sync"], "policy_sync")
         evaluation = _mapping(config["evaluation"], "evaluation")
+        skills_config = _mapping(config["skills"], "skills")
 
         catalog_path = _resolve(root, str(graph_config["model_catalog_path"]))
         if not catalog_path.is_file():
@@ -830,6 +836,36 @@ class LiveSmokeBackend:
         gateway = OpenAICompatibleGateway(default_seed=int(experiment["seed"]))
         runtime = AgentRuntime(registry, gateway)
         evidence_store = EvidenceStore(_resolve(root, str(storage["root"])))
+        skill_pipeline: Optional[SkillEvidencePipeline] = None
+        skill_epoch = int(skills_config.get("current_epoch", 0))
+        if bool(skills_config.get("enabled", False)):
+            raw_store_path = skills_config.get("store_path")
+            if not isinstance(raw_store_path, str) or not raw_store_path.strip():
+                raise ConfigurationError(
+                    "skills.store_path is required when validated Skill retrieval is enabled"
+                )
+            store_path = _resolve(root, raw_store_path)
+            if not store_path.is_file():
+                raise ConfigurationError(
+                    "enabled Skill retrieval requires an existing evidence-gated store: "
+                    f"{store_path}"
+                )
+            retrieval_top_k = skills_config.get("retrieval_top_k")
+            if (
+                isinstance(retrieval_top_k, bool)
+                or not isinstance(retrieval_top_k, int)
+                or retrieval_top_k < 1
+            ):
+                raise ConfigurationError(
+                    "skills.retrieval_top_k must be positive when Skill retrieval is enabled"
+                )
+            if skill_epoch < 0:
+                raise ConfigurationError("skills.current_epoch must be non-negative")
+            skill_pipeline = SkillEvidencePipeline(
+                evidence_store=evidence_store,
+                skill_store=SkillStore(store_path),
+                retrieval_top_k=retrieval_top_k,
+            )
 
         trainer: Optional[Qwen35OnePassSmokeTrainer] = None
         if not evaluation_only:
@@ -904,6 +940,8 @@ class LiveSmokeBackend:
             publisher=publisher,
             judge=judge,
             judge_model=judge_model,
+            skill_pipeline=skill_pipeline,
+            skill_epoch=skill_epoch,
         )
 
     @staticmethod
@@ -940,6 +978,49 @@ class LiveSmokeBackend:
             return response.choices[0].message.content
 
         return judge, model.model_name
+
+    def _visible_skill_priors(
+        self,
+        task: TaskRecord,
+        environment: AgentWorkflowEnv,
+        versions: VersionBundle,
+    ) -> Sequence[Mapping[str, Any]]:
+        """Retrieve only ACTIVE, evidence-gated Skills for the current graph stage."""
+
+        if self.skill_pipeline is None:
+            return ()
+        graph = environment.graph
+        if not graph.nodes:
+            graph_stage = "empty_graph"
+        elif graph.validate(self.registry, require_complete=True).valid:
+            graph_stage = "before_final_answer"
+        else:
+            graph_stage = "construction"
+        task_family = str(
+            task.metadata.get("task_family", _dataset_key(task))
+        ).strip()
+        if not task_family:
+            task_family = _dataset_key(task)
+        issue_tags = tuple(
+            sorted(
+                issue.code
+                for issue in graph.validate(
+                    self.registry,
+                    require_complete=True,
+                ).issues
+            )
+        )
+        priors = self.skill_pipeline.retrieve_prompt_priors(
+            SkillQuery(
+                task_family=task_family,
+                graph_stage=graph_stage,
+                tags=issue_tags,
+                available_models=tuple(self.registry.model_ids),
+                current_epoch=self.skill_epoch,
+            ),
+            versions,
+        )
+        return tuple(prior.to_dict() for prior in priors)
 
     async def collect(
         self,
@@ -1022,6 +1103,11 @@ class LiveSmokeBackend:
             self.evidence_store,
             condition_id=str(experiment.get("condition_id", "natural_smoke")),
             skills=(),
+            skill_provider=(
+                self._visible_skill_priors
+                if self.skill_pipeline is not None
+                else None
+            ),
             forced_probe=False,
             expected_task_split=expected_task_split,
         )

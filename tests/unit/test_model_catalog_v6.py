@@ -8,7 +8,7 @@ import unittest
 from src.interactive.agent_graph import AgentGraph, AgentNode
 from src.interactive.agent_workflow_env import AgentWorkflowEnv
 from src.interactive.config_loader import load_model_registry
-from src.interactive.director import AgentGraphOrchestrator
+from src.interactive.director import AgentGraphOrchestrator, decode_director_transcript
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -147,7 +147,10 @@ class ModelCatalogV6Tests(unittest.TestCase):
             catalog_order_seed="hotpotqa-architecture-v6",
         )
         rendered = orchestrator.build_prompt(env, 0, ())
-        state = json.loads(rendered.split("\n\n", 1)[1])
+        messages = decode_director_transcript(rendered)
+        self.assertIsNotNone(messages)
+        assert messages is not None
+        state = json.loads(messages[-1]["content"].split("\n\n", 1)[1])
         visible = {item["model_id"]: item for item in state["model_catalog"]}
         self.assertEqual(ALL_IDS, set(visible))
         self.assertEqual(state["model_catalog"], self.visible_receipt["model_catalog"])

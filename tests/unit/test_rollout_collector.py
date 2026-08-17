@@ -9,7 +9,11 @@ import pytest
 from src.interactive.agent_action_parser import AgentActionParser
 from src.interactive.agent_runtime import AgentResponse
 from src.interactive.agent_workflow_env import AgentWorkflowEnv
-from src.interactive.director import AgentGraphOrchestrator
+from src.interactive.director import (
+    AgentGraphOrchestrator,
+    DIRECTOR_SYSTEM_PROMPT,
+    encode_director_transcript,
+)
 from src.interactive.model_registry import ModelRegistry, ModelSpec, ProviderSpec
 from src.interactive.persistence import EvidenceStore
 from src.interactive.records import TaskRecord
@@ -143,9 +147,7 @@ def _orchestrator(
     rollout_ordinal: int = 0,
 ) -> AgentGraphOrchestrator:
     coordinate = ScientificSamplingCoordinate(
-        sampling_schedule_hash=scientific_sampling_schedule_hash(
-            base_seed=base_seed
-        ),
+        sampling_schedule_hash=scientific_sampling_schedule_hash(base_seed=base_seed),
         schedule_purpose="exploit",
         ordered_sequence_hash=stable_hash(["hotpotqa:first"]),
         sequence_position=rollout_ordinal,
@@ -201,6 +203,30 @@ def test_native_sglang_receipt_uses_real_input_ids_and_separates_versions():
     consumed = client.executed_prefix_tokens(response, action)
     assert consumed == action.consumed_end
     assert consumed < len(response.metadata["output_token_ids"])
+
+
+def test_native_sglang_receipt_submits_exact_transcript_messages():
+    messages = (
+        {"role": "system", "content": DIRECTOR_SYSTEM_PROMPT},
+        {"role": "user", "content": "initial Canvas observation"},
+        {"role": "assistant", "content": '{"action":"finish"}'},
+        {"role": "user", "content": "current Canvas observation"},
+    )
+    client = ScriptedSGLangClient(
+        ['{"action":"finish"}'],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+    )
+
+    asyncio.run(client.propose(encode_director_transcript(messages), seed=29))
+
+    rendered_messages, template_kwargs = client.tokenizer.chat_calls[0]
+    assert rendered_messages == list(messages)
+    assert template_kwargs == {
+        "tokenize": True,
+        "add_generation_prompt": True,
+        "enable_thinking": False,
+    }
 
 
 def test_sglang_client_rejects_disagreeing_token_receipts():
@@ -274,11 +300,15 @@ def test_balanced_selector_fails_instead_of_silently_underfilling():
 
 def test_collector_materializes_exact_finish_trajectory_and_evidence(tmp_path):
     registry = _registry()
+    first_sample = (
+        '{"action":"add_agent","agent_id":"solver","model_id":"cheap-model",'
+        '"contract":"solve directly"}\n{"action":"finish"}'
+    )
+    second_sample = '{"action":"set_output","agent_id":"solver"} trailing'
     client = ScriptedSGLangClient(
         [
-            '{"action":"add_agent","agent_id":"solver","model_id":"cheap-model",'
-            '"contract":"solve directly"}\n{"action":"finish"}',
-            '{"action":"set_output","agent_id":"solver"} trailing',
+            first_sample,
+            second_sample,
             '{"action":"finish"} trailing',
         ],
         policy_version=POLICY_VERSION,
@@ -341,12 +371,29 @@ def test_collector_materializes_exact_finish_trajectory_and_evidence(tmp_path):
         turn.executed_prefix_tokens < len(turn.output_token_ids)
         for turn in trajectory.turns
     )
+    second_round_messages = client.tokenizer.chat_calls[1][0]
+    third_round_messages = client.tokenizer.chat_calls[2][0]
+    assert [item["role"] for item in second_round_messages] == [
+        "system",
+        "user",
+        "assistant",
+        "user",
+    ]
+    assert second_round_messages[0]["content"] == DIRECTOR_SYSTEM_PROMPT
+    assert second_round_messages[2]["content"] == first_sample.split("\n", 1)[0]
+    assert [item["role"] for item in third_round_messages] == [
+        "system",
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+        "user",
+    ]
+    assert third_round_messages[4]["content"] == second_sample.removesuffix(" trailing")
     assert len(trajectory.turns[-1].executions) == 1
     assert trajectory.turns[-1].executions[0].output == "final answer"
     assert trajectory.turns[-1].runtime_summary["output_agent_id"] == "solver"
-    assert trajectory.turns[-1].runtime_summary["outputs"] == {
-        "solver": "final answer"
-    }
+    assert trajectory.turns[-1].runtime_summary["outputs"] == {"solver": "final answer"}
     assert trajectory.turns[-1].runtime_summary["block_completion_order"] == [
         ["solver"]
     ]
@@ -399,6 +446,63 @@ def test_collector_does_not_duplicate_reused_progressive_execution():
     assert trajectory.turns[1].execution_reused is False
     assert trajectory.turns[2].executions == ()
     assert trajectory.turns[2].execution_reused is True
+
+
+def test_collector_refreshes_skill_priors_at_each_graph_stage():
+    registry = _registry()
+    client = ScriptedSGLangClient(
+        [
+            '{"action":"add_agent","agent_id":"solver","model_id":"cheap-model",'
+            '"contract":"solve directly"}',
+            '{"action":"set_output","agent_id":"solver"}',
+            '{"action":"finish"}',
+        ],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+    )
+    observed_stages = []
+
+    def skill_provider(task, environment, versions):
+        assert task.task_id == "hotpotqa:first"
+        assert versions == _versions()
+        stage = (
+            "empty_graph"
+            if not environment.graph.nodes
+            else (
+                "before_final_answer"
+                if environment.graph.output_agent_id is not None
+                else "construction"
+            )
+        )
+        observed_stages.append(stage)
+        return ({"skill_id": f"validated-{stage}"},)
+
+    collector = AgentGraphRolloutCollector(
+        _orchestrator(registry, client, max_rounds=3),
+        AgentWorkflowEnv(registry, gateway=FakeGateway(), execute_on_edit=True),
+        _versions(),
+        skill_provider=skill_provider,
+    )
+
+    def evaluator(task, final_answer, final_graph, runtime):
+        return {
+            "evaluator_version": EVALUATOR_VERSION,
+            "valid": True,
+            "reward": 1.0,
+            "metrics": {"f1": 1.0},
+        }
+
+    trajectory = asyncio.run(collector.collect(_task(), 0, evaluator))
+
+    assert trajectory.explicit_finish is True
+    assert observed_stages == [
+        "empty_graph",
+        "construction",
+        "before_final_answer",
+    ]
+    assert "validated-empty_graph" in client.tokenizer.chat_calls[0][0][-1]["content"]
+    assert "validated-construction" in client.tokenizer.chat_calls[1][0][-1]["content"]
+    assert "validated-before_final_answer" in client.tokenizer.chat_calls[2][0][-1]["content"]
 
 
 def test_collector_returns_complete_max_rounds_trajectory():
@@ -476,9 +580,7 @@ def test_collector_allows_explicit_heldout_split_without_grpo_admission():
             "reason": "exact",
         }
 
-    trajectory = asyncio.run(
-        collector.collect(_task(split="validation"), 0, evaluator)
-    )
+    trajectory = asyncio.run(collector.collect(_task(split="validation"), 0, evaluator))
 
     assert trajectory.task.split == "validation"
     assert trajectory.explicit_finish is True
