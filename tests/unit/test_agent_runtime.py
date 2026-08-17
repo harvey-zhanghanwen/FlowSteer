@@ -101,6 +101,89 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(["a", "b"], [message.source_agent_id for message in request_c.upstream])
         self.assertEqual("c[a:a[],b:b[]]", result.final_answer)
 
+    async def test_partial_execution_reuses_clean_branch_and_recomputes_dirty_closure(self) -> None:
+        catalog = registry()
+        gateway = RecordingGateway()
+        runtime = AgentRuntime(catalog, gateway)
+        graph = AgentGraph(
+            [
+                AgentNode("a", "m1", "left"),
+                AgentNode("b", "m1", "right"),
+                AgentNode("c", "m2", "merge"),
+            ],
+            [
+                AgentRelation("a", "c", True, False),
+                AgentRelation("b", "c", True, False),
+            ],
+        )
+        initial = await runtime.execute(
+            graph,
+            "question",
+            require_complete=False,
+            run_id="partial-initial",
+        )
+        graph.modify_agent("a", contract="revised left")
+        gateway.requests.clear()
+
+        updated = await runtime.execute(
+            graph,
+            "question",
+            require_complete=False,
+            prior_outputs=initial.outputs,
+            dirty_agents={"a"},
+            run_id="partial-updated",
+        )
+
+        self.assertIsNone(updated.output_agent_id)
+        self.assertIsNone(updated.final_answer)
+        self.assertEqual(("a", "c"), updated.executed_agent_ids)
+        self.assertEqual(("b",), updated.reused_agent_ids)
+        self.assertEqual(["a", "c"], [item.agent.id for item in gateway.requests])
+        request_c = next(item for item in gateway.requests if item.agent.id == "c")
+        self.assertEqual(
+            ["a", "b"],
+            [message.source_agent_id for message in request_c.upstream],
+        )
+
+    async def test_format_execution_role_is_explicit_and_terminal(self) -> None:
+        catalog = registry()
+        gateway = RecordingGateway()
+        graph = AgentGraph(
+            [
+                AgentNode("solver", "m1", "solve", role_family="reasoning"),
+                AgentNode("fmt", "m2", "extract", role_family="format"),
+            ],
+            [AgentRelation("solver", "fmt", True, False)],
+            output_agent_id="fmt",
+        )
+
+        result = await AgentRuntime(catalog, gateway).execute(
+            graph,
+            "question",
+            format_output_agent=True,
+        )
+        formatter = next(item for item in gateway.requests if item.agent.id == "fmt")
+
+        self.assertTrue(formatter.is_output_agent)
+        self.assertTrue(formatter.is_format_agent)
+        self.assertFalse(next(item for item in gateway.requests if item.agent.id == "solver").is_format_agent)
+        self.assertEqual("fmt[solver:solver[]]", result.final_answer)
+
+    async def test_format_execution_rejects_non_format_output_metadata(self) -> None:
+        catalog = registry()
+        graph = AgentGraph(
+            [AgentNode("solver", "m1", "solve"), AgentNode("out", "m2", "solve again")],
+            [AgentRelation("solver", "out", True, False)],
+            output_agent_id="out",
+        )
+
+        with self.assertRaisesRegex(AgentRuntimeError, "role_family='format'"):
+            await AgentRuntime(catalog, RecordingGateway()).execute(
+                graph,
+                "question",
+                format_output_agent=True,
+            )
+
     async def test_event_driven_successor_starts_while_unrelated_branch_is_slow(self) -> None:
         catalog = registry()
 

@@ -34,6 +34,11 @@ def graph_from_receipt(value: Mapping[str, Any]) -> AgentGraph:
                 str(raw.get("id", "")),
                 str(raw.get("model_id", "")),
                 contract=str(raw.get("contract", raw.get("prompt", ""))),
+                role_family=(
+                    str(raw["role_family"])
+                    if raw.get("role_family") is not None
+                    else None
+                ),
             )
         )
     relations = []
@@ -198,6 +203,7 @@ class TrajectoryGraphDiagnostic:
     structural_depth: int
     topology_family: str
     topology_motifs: tuple[str, ...]
+    role_families: tuple[str, ...]
     effective_dependency_depth: int
     effective_dependency_status: str
     full_structural_depth_evidence_status: str
@@ -227,6 +233,7 @@ class TrajectoryGraphDiagnostic:
             "structural_depth": self.structural_depth,
             "topology_family": self.topology_family,
             "topology_motifs": list(self.topology_motifs),
+            "role_families": list(self.role_families),
             "effective_dependency_depth": self.effective_dependency_depth,
             "effective_dependency_status": self.effective_dependency_status,
             "full_structural_depth_evidence_status": (
@@ -317,6 +324,10 @@ def diagnose_trajectory(record: Mapping[str, Any]) -> TrajectoryGraphDiagnostic:
         structural_depth=int(topology["structural_depth"]),
         topology_family=str(topology["topology_family"]),
         topology_motifs=tuple(str(item) for item in topology["topology_motifs"]),
+        role_families=tuple(
+            node.role_family if node.role_family is not None else "unspecified"
+            for node in graph.nodes
+        ),
         effective_dependency_depth=int(dependency["effective_dependency_depth"]),
         effective_dependency_status=str(dependency["evidence_status"]),
         full_structural_depth_evidence_status=str(
@@ -379,6 +390,9 @@ def aggregate_trajectory_diagnostics(
         ),
         "topology_family_distribution": _distribution(
             item.topology_family for item in items
+        ),
+        "role_family_distribution": _distribution(
+            role_family for item in items for role_family in item.role_families
         ),
         "action_counts": dict(sorted(actions.items())),
         "action_sequence_counts": dict(sequences.most_common()),

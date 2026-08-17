@@ -33,6 +33,7 @@ from train_agentgraph_smoke import (
     _safe_error,
     _write_json,
     _write_jsonl,
+    evaluator_version_for,
     version_bundle_for,
 )
 from src.interactive.agent_graph import AgentNode
@@ -114,7 +115,7 @@ def validate_hotpot_config(config: Mapping[str, Any]) -> None:
         "experiment.phase": experiment.get("phase") == "hotpotqa_evaluation",
         "experiment.training_enabled": experiment.get("training_enabled") is False,
         "dataset_key": bounded.get("dataset_key") == "hotpotqa",
-        "split": bounded.get("split") == "validation",
+        "split": bounded.get("split") in {"train", "validation"},
         "selection": bounded.get("selection") in {"sequential", "task_ids"},
         "rollouts_per_task": bounded.get("rollouts_per_task") == 1,
         "direct_model_id": bounded.get("direct_model_id") == "qwen3.5-9b-local",
@@ -209,15 +210,17 @@ def _select_tasks(config: Mapping[str, Any], root: Path, selected_path: Path) ->
     data = _mapping(config["data"], "data")
     bounded = _mapping(config["hotpotqa_evaluation"], "hotpotqa_evaluation")
     count = int(bounded["sample_count"])
-    source_path = _resolve(root, str(data["validation_path"]))
+    split = str(bounded["split"])
+    source_field = "train_path" if split == "train" else "validation_path"
+    source_path = _resolve(root, str(data[source_field]))
     candidates = tuple(
         task
-        for task in iter_task_records(source_path, expected_split="validation")
+        for task in iter_task_records(source_path, expected_split=split)
         if _dataset_key(task) == "hotpotqa"
     )
     if len(candidates) < count:
         raise HotpotRoundError(
-            f"validation contains only {len(candidates)} HotpotQA tasks; expected {count}"
+            f"{split} contains only {len(candidates)} HotpotQA tasks; expected {count}"
         )
     if bounded.get("selection") == "task_ids":
         candidates_by_id = {task.task_id: task for task in candidates}
@@ -232,7 +235,7 @@ def _select_tasks(config: Mapping[str, Any], root: Path, selected_path: Path) ->
     else:
         expected = candidates[:count]
     if selected_path.exists():
-        frozen = tuple(iter_task_records(selected_path, expected_split="validation"))
+        frozen = tuple(iter_task_records(selected_path, expected_split=split))
         if len(frozen) != count:
             raise HotpotRoundError("frozen HotpotQA selection has the wrong size")
         for expected_task, frozen_task in zip(expected, frozen, strict=True):
@@ -340,6 +343,7 @@ def _direct_resume_matches(
         and value.get("protocol") == protocol
         and value.get("generation_seed") == seed
         and isinstance(evaluation, Mapping)
+        and evaluation.get("evaluator_version") == evaluator_version_for(task)
         and isinstance(execution, Mapping)
         and evaluation.get("valid") is True
     )
@@ -407,6 +411,40 @@ async def _collect_direct(
             # fixed comparator is more authoritative than stale records from a
             # prior canary with another Direct seed, so place it first.
             direct_candidates = reused_candidates + direct_candidates
+    selected_by_id = {task.task_id: task for task in selected}
+    rescored_candidates: list[dict[str, Any]] = []
+    for candidate in direct_candidates:
+        task = selected_by_id.get(candidate.get("task_id"))
+        evaluation = candidate.get("evaluation")
+        if (
+            task is not None
+            and candidate.get("model_id") == model_id
+            and candidate.get("protocol") == protocol
+            and candidate.get("generation_seed") == seed
+            and isinstance(candidate.get("final_answer"), str)
+            and (
+                not isinstance(evaluation, Mapping)
+                or evaluation.get("evaluator_version")
+                != evaluator_version_for(task)
+            )
+        ):
+            updated = dict(candidate)
+            updated["evaluation"] = asdict(
+                await evaluate_task(task, str(candidate["final_answer"]))
+            )
+            updated["rescore_receipt"] = {
+                "mode": "offline_existing_prediction",
+                "source_evaluator_version": (
+                    evaluation.get("evaluator_version")
+                    if isinstance(evaluation, Mapping)
+                    else None
+                ),
+                "target_evaluator_version": evaluator_version_for(task),
+            }
+            rescored_candidates.append(updated)
+        else:
+            rescored_candidates.append(dict(candidate))
+    direct_candidates = rescored_candidates
     by_task = {
         task_id: value
         for task_id, value in _by_task(direct_candidates).items()
@@ -566,7 +604,7 @@ async def _collect_graph(
                     task,
                     0,
                     versions[task.task_id],
-                    expected_task_split="validation",
+                    expected_task_split=str(bounded.get("split", "validation")),
                 )
                 return task, trajectory
             except BaseException as exc:
@@ -730,6 +768,11 @@ def _failure_type(
         for turn in turns
         if isinstance(turn, Mapping)
     )
+    # A transient execution error can be followed by a valid graph edit and a
+    # correct terminal answer.  Keep that receipt in the trajectory, but do
+    # not classify a recovered, correct task as an evaluation failure.
+    if graph_em == 1.0:
+        return "correct"
     if "execution_error=" in feedback:
         return "executor_or_provider_failure"
     if direct is None:
@@ -885,8 +928,12 @@ def _report(
     )
     return {
         "schema_version": "flowsteer.hotpotqa.round_report.v1",
+        "metric_scope": "official_compatible_answer_only",
+        "supporting_fact_metrics_available": False,
         "dataset": "HotpotQA",
-        "project_split": "validation",
+        "project_split": str(
+            config.get("hotpotqa_evaluation", {}).get("split", "validation")
+        ),
         "native_source_split": "train",
         "input_context": "full_10_passages",
         "sample_count": len(rows),
@@ -919,6 +966,7 @@ def _report(
         "training_performed": False,
         "method_level_changes_performed": False,
         "known_limitations": [
+            "Only answer EM/F1 is available; supporting-fact and joint metrics are not emitted.",
             "A Director/API exception before terminal collection may not preserve partial turns.",
             "Paper references use a different published evaluation setup and are not a paired baseline.",
         ],
@@ -932,9 +980,17 @@ def _report_markdown(report: Mapping[str, Any]) -> str:
     delta = report["agentgraph_minus_direct"]
     failures = report["failure_types"]
     failure_lines = "\n".join(f"- `{name}`: {count}" for name, count in failures.items())
+    split = str(report.get("project_split", "validation"))
+    sample_role = (
+        "frozen architecture-development samples"
+        if split == "train"
+        else "fixed project validation samples"
+    )
     return f"""# HotpotQA Architecture Validation — {report['evaluation_name']}
 
-Fixed project-held-out samples: **{report['sample_count']}**. The model input uses all ten supplied passages. No training, backward pass, optimizer step, policy update, MACE, Bayesian, or Skill loop ran.
+Evaluation split: **{split}**; {sample_role}: **{report['sample_count']}**. The model input uses all ten supplied passages. No training, backward pass, optimizer step, policy update, MACE, Bayesian, or Skill loop ran.
+
+Metric scope: **official-compatible answer-only EM/F1**. Supporting-fact and joint metrics are unavailable because this run does not emit formal supporting-fact predictions.
 
 AgentGraph explicit FINISH: **{report['explicit_finished_count']}/{report['sample_count']}**; natural max-round terminal failures: **{report['terminal_failure_count']}**; operational/evaluator failures: **{report['operational_failure_count']}**.
 
@@ -1016,6 +1072,7 @@ async def run_hotpot_round(
     )
     config = load_yaml(resolved_config)
     validate_hotpot_config(config)
+    bounded = _mapping(config["hotpotqa_evaluation"], "hotpotqa_evaluation")
     paths = _paths(config, root)
     selected = _select_tasks(config, root, paths["selected"])
     failures = _read_jsonl(paths["failures"])
@@ -1033,7 +1090,7 @@ async def run_hotpot_round(
         "git_start": _git_state(root),
         "selected_task_ids": [task.task_id for task in selected],
         "sample_count": len(selected),
-        "fixed_split": "validation",
+        "fixed_split": str(bounded["split"]),
         "input_context": "full_10_passages",
         "training_enabled": False,
         "optimizer_updates": 0,

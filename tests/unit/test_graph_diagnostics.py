@@ -13,8 +13,18 @@ from src.interactive.graph_diagnostics import (
 def trajectory() -> dict[str, object]:
     graph = {
         "nodes": [
-            {"id": "a", "model_id": "m", "contract": "produce evidence"},
-            {"id": "b", "model_id": "m", "contract": "consume a evidence"},
+            {
+                "id": "a",
+                "model_id": "m",
+                "contract": "produce evidence",
+                "role_family": "evidence",
+            },
+            {
+                "id": "b",
+                "model_id": "m",
+                "contract": "consume a evidence",
+                "role_family": "format",
+            },
         ],
         "relations": [
             {
@@ -187,6 +197,7 @@ class GraphDiagnosticTests(unittest.TestCase):
         item = diagnose_trajectory(trajectory())
 
         self.assertEqual(2, item.structural_depth)
+        self.assertEqual(("evidence", "format"), item.role_families)
         self.assertEqual(2, item.effective_dependency_depth)
         self.assertEqual("weak", item.effective_dependency_status)
         self.assertEqual("weak", item.full_structural_depth_evidence_status)
@@ -202,6 +213,10 @@ class GraphDiagnosticTests(unittest.TestCase):
         self.assertEqual({"2": 1}, report["agent_count_distribution"])
         self.assertEqual({"2": 1}, report["structural_depth_distribution"])
         self.assertEqual({"serial_2": 1}, report["topology_family_distribution"])
+        self.assertEqual(
+            {"evidence": 1, "format": 1},
+            report["role_family_distribution"],
+        )
         self.assertEqual(0, report["rejected_turn_count"])
         self.assertEqual(0, report["three_plus_agent_count"])
         self.assertEqual(

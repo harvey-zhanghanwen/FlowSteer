@@ -25,6 +25,7 @@ def request(
     *,
     keyed: bool = False,
     is_output_agent: bool = True,
+    is_format_agent: bool = False,
     communication_condition: CommunicationCondition = CommunicationCondition.NORMAL,
 ) -> AgentRequest:
     provider = ProviderSpec(
@@ -49,6 +50,7 @@ def request(
         provider=provider,
         phase=phase,
         is_output_agent=is_output_agent,
+        is_format_agent=is_format_agent,
         communication_condition=communication_condition,
         upstream=(
             UpstreamMessage(
@@ -98,6 +100,22 @@ class MessageTests(unittest.TestCase):
         self.assertIn("intermediate AgentGraph node", system)
         self.assertIn("do not use <answer> tags", system)
         self.assertNotIn("unique Output Agent", system)
+
+    def test_format_agent_extracts_one_upstream_solution_without_resolving(self) -> None:
+        messages = build_agent_messages(request(is_format_agent=True))
+        system = messages[0]["content"]
+        user = messages[1]["content"]
+
+        self.assertIn("terminal Format Agent", system)
+        self.assertIn("exactly one routed upstream artifact", system)
+        self.assertIn("Do not solve the task again", system)
+        self.assertIn("shortest value that directly answers", system)
+        self.assertIn("emit only yes or no", system)
+        self.assertIn("omit surrounding relations and modifiers", system)
+        self.assertIn("return exactly <answer></answer>", system)
+        self.assertNotIn("Contract:\nverify carefully", system)
+        self.assertNotIn("request_or_dependency: verify carefully", user)
+        self.assertIn("artifact:\nevidence", user)
 
     def test_masked_condition_preserves_receipt_but_masks_visible_messages(self) -> None:
         item = request(

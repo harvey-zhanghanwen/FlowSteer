@@ -398,9 +398,10 @@ class SelectionTests(unittest.TestCase):
             source: evaluator_version_for(make_task(source, 0))
             for source in EXPECTED_SOURCE_ORDER
         }
-        self.assertEqual(versions["hotpotqa"], versions["aime_2026"])
+        self.assertEqual("hotpotqa.official.answer.v1", versions["hotpotqa"])
+        self.assertEqual("skillflow.training.reward.v1", versions["aime_2026"])
         self.assertEqual(versions["webshop"], versions["alfworld"])
-        self.assertEqual(4, len(set(versions.values())))
+        self.assertEqual(5, len(set(versions.values())))
 
     def test_exact_resume_preserves_but_excludes_a_malformed_atomic_action(self) -> None:
         task = make_task("hotpotqa", 0)

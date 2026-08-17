@@ -27,14 +27,14 @@ from .scientific_sampling import (
 DIRECTOR_SYSTEM_PROMPT = """You are the Flow-Director. Build an executable AgentGraph for the task, one edit at a time. Follow the latest Canvas observation and return exactly one JSON object each turn.
 
 Actions:
-{"action":"add_agent","agent_id":"...","model_id":"...","contract":"..."}
-{"action":"modify_agent","agent_id":"...","model_id":"...","contract":"..."}
+{"action":"add_agent","agent_id":"...","model_id":"...","contract":"...","role_family":"..."}
+{"action":"modify_agent","agent_id":"...","model_id":"...","contract":"...","role_family":"..."}
 {"action":"delete_agent","agent_id":"..."}
 {"action":"set_relation","source_id":"...","target_id":"...","source_to_target":true,"target_to_source":false}
 {"action":"set_output","agent_id":"..."}
 {"action":"finish"}
 
-Use a model_id from the supplied catalog. Before the first edit, inspect whether the task has distinct evidence dependencies and represent only dependencies that need separate artifacts. Describe each Agent's objective, inputs or dependencies, output artifact, and completion condition in concise ordinary text. A directed relation sends the source artifact to the target; the target contract should name the artifact it consumes. Only the Output Agent returns the final task answer, and its contract should request a concise answer span rather than JSON or explanation. Use execution evidence and Canvas issues to decide the next atomic edit or finish; structural or output-format validity alone does not establish task quality."""
+Use a model_id from the supplied catalog. role_family is optional analysis metadata, not a fixed Operator type; when used, give it a concise conventional label such as evidence, bridge, comparison, reasoning, synthesis, verification, critique, or format. Represent task dependencies, not a fixed workflow template. Independent evidence dependencies can execute in parallel and converge through fan-in; one artifact can serve multiple consumers through fan-out; a bidirectional relation is one bounded draft-and-revision block. Use these relations only when the task requires them. Give each Agent one cohesive dependency: do not bundle independent evidence subproblems into one contract when their artifacts must be combined downstream, and do not split a cohesive dependency merely to increase graph size. Describe each Agent's objective, input dependencies, output artifact, and completion condition in concise ordinary text. A directed relation routes the source artifact to the target. After each accepted edit, inspect the executed or reused topological blocks and their artifacts before choosing the next edit. For factual QA, create a distinct terminal Agent with role_family "format" after an upstream Agent has computed the semantic answer. Its contract only extracts and serializes that one routed solution artifact; it does not solve, verify, or aggregate. SET_OUTPUT selects this Format Agent. Use execution evidence and Canvas issues to decide the next atomic edit or finish; structural or output-format validity alone does not establish task quality."""
 
 
 DIRECTOR_TRANSCRIPT_SCHEMA = "flowsteer.director.transcript.v1"
@@ -392,6 +392,7 @@ class AgentGraphOrchestrator:
         ]
         payload: dict[str, Any] = {
             "current_graph": env.graph.to_dict(),
+            "topology_statistics": env.graph.topology_statistics(),
             "canvas_feedback": snapshot.last_feedback,
         }
         if directed_edges:
@@ -407,6 +408,9 @@ class AgentGraphOrchestrator:
                 }
                 for issue in complete_validation.issues
             ]
+        format_issue = env.format_agent_issue()
+        if format_issue is not None:
+            payload["terminal_format_issue"] = format_issue
         if include_task_context:
             payload.update(
                 {

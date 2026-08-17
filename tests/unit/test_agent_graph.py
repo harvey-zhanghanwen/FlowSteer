@@ -147,6 +147,20 @@ class AgentGraphTests(unittest.TestCase):
         self.assertEqual("serial_3_plus", stats["topology_family"])
         self.assertEqual(["serial_3_plus", "reciprocal"], stats["topology_motifs"])
 
+    def test_dirty_closure_expands_reciprocal_block_and_directed_descendants(self) -> None:
+        graph = AgentGraph(
+            [AgentNode(name, "balanced", name) for name in ("a", "b", "c", "d")],
+            [
+                AgentRelation("a", "b", True, True),
+                AgentRelation("b", "c", True, False),
+                AgentRelation("d", "c", True, False),
+            ],
+        )
+
+        self.assertEqual({"a", "b", "c"}, graph.dirty_closure({"a"}))
+        self.assertEqual({"d", "c"}, graph.dirty_closure({"d"}))
+        self.assertEqual(("b", "d"), graph.directed_predecessors("c"))
+
     def test_construction_progress_is_neutral_atomic_lower_bound(self) -> None:
         empty = AgentGraph()
         self.assertEqual(3, empty.construction_progress()["minimum_remaining_actions"])
@@ -266,22 +280,58 @@ class AgentGraphTests(unittest.TestCase):
 
     def test_revisions_snapshot_round_trip_and_fork_isolation(self) -> None:
         graph = AgentGraph()
-        graph.add_agent(AgentNode("a", "balanced", "one"))
+        graph.add_agent(
+            AgentNode("a", "balanced", "one", role_family="  evidence retrieval  ")
+        )
         self.assertEqual(1, graph.revision)
         with self.assertRaises(GraphMutationError):
             graph.add_agent(AgentNode("a", "fast", "duplicate"))
         self.assertEqual(1, graph.revision)
-        graph.modify_agent("a", contract="one")
+        graph.modify_agent("a", contract="one", role_family="evidence retrieval")
         self.assertEqual(1, graph.revision)
+        graph.modify_agent("a", role_family="bridge reasoning")
+        self.assertEqual(2, graph.revision)
         graph.set_output("a")
         snapshot = graph.snapshot()
+        self.assertEqual("bridge reasoning", snapshot.nodes[0].role_family)
+        self.assertEqual("bridge reasoning", snapshot.to_dict()["nodes"][0]["role_family"])
         restored = AgentGraph.from_snapshot(snapshot)
         self.assertEqual(snapshot.to_dict(), restored.snapshot().to_dict())
         self.assertEqual(snapshot.snapshot_id, restored.snapshot().snapshot_id)
         fork = graph.fork()
-        fork.modify_agent("a", model_id="fast")
+        fork.modify_agent("a", model_id="fast", role_family="format")
         self.assertEqual("balanced", graph.get_node("a").model_id)
         self.assertEqual("fast", fork.get_node("a").model_id)
+        self.assertEqual("bridge reasoning", graph.get_node("a").role_family)
+        self.assertEqual("format", fork.get_node("a").role_family)
+
+    def test_role_family_is_optional_free_text_metadata(self) -> None:
+        legacy = AgentNode("legacy", "balanced", "answer")
+        self.assertIsNone(legacy.role_family)
+        self.assertNotIn("role_family", legacy.to_dict())
+
+        free_text = AgentNode(
+            "analyst",
+            "balanced",
+            "compare evidence",
+            role_family="cross-document comparison",
+        )
+        self.assertEqual("cross-document comparison", free_text.role_family)
+        self.assertEqual(
+            "cross-document comparison",
+            free_text.to_dict()["role_family"],
+        )
+        with self.assertRaises(ValueError):
+            AgentNode("empty", "balanced", "answer", role_family="  ")
+        with self.assertRaises(TypeError):
+            AgentNode("typed", "balanced", "answer", role_family=1)  # type: ignore[arg-type]
+
+    def test_has_node_reads_current_canvas_membership(self) -> None:
+        graph = AgentGraph([AgentNode("a", "balanced", "answer")])
+        self.assertTrue(graph.has_node("a"))
+        self.assertFalse(graph.has_node("missing"))
+        graph.delete_agent("a")
+        self.assertFalse(graph.has_node("a"))
 
     def test_delete_cleans_relations_and_output(self) -> None:
         graph = AgentGraph([AgentNode("a", "balanced", "A"), AgentNode("b", "fast", "B")])
@@ -309,6 +359,29 @@ class ParserTests(unittest.TestCase):
             with self.subTest(expected=expected):
                 self.assertIs(self.parser.parse(raw).action_type, expected)
 
+    def test_add_and_modify_accept_optional_free_text_role_family(self) -> None:
+        added = self.parser.parse(
+            '{"action":"add_agent","agent_id":"a","model_id":"m",'
+            '"contract":"collect evidence","role_family":" evidence retrieval "}'
+        )
+        self.assertEqual("evidence retrieval", added.role_family)
+        self.assertEqual("evidence retrieval", added.to_dict()["role_family"])
+
+        modified = self.parser.parse(
+            '{"action":"modify_agent","agent_id":"a",'
+            '"role_family":"cross-document comparison"}'
+        )
+        self.assertEqual("cross-document comparison", modified.role_family)
+        self.assertIsNone(modified.contract)
+        self.assertIsNone(modified.model_id)
+
+        legacy = self.parser.parse(
+            '{"action":"add_agent","agent_id":"b","model_id":"m",'
+            '"contract":"answer"}'
+        )
+        self.assertIsNone(legacy.role_family)
+        self.assertNotIn("role_family", legacy.to_dict())
+
     def test_first_object_span_and_no_second_action(self) -> None:
         text = 'Reasoning first.\n```json\n{"action":"finish"}\n```\n{"action":"delete_agent","agent_id":"a"}'
         action = self.parser.parse(text)
@@ -325,6 +398,8 @@ class ParserTests(unittest.TestCase):
             '{"action":"set_output","agent_id":null}',
             '{"action":"set_relation","source_id":"a","target_id":"b","source_to_target":1,"target_to_source":false}',
             '{"action":"modify_agent","agent_id":"a"}',
+            '{"action":"add_agent","agent_id":"a","model_id":"m","contract":"x","role_family":""}',
+            '{"action":"modify_agent","agent_id":"a","role_family":null}',
             '{"action":"finish","extra":NaN}',
         ]
         for raw in invalid:
@@ -427,7 +502,7 @@ class _SequenceGateway(_ImmediateGateway):
 class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
     async def test_exact_answer_terminal_protocol_rejects_malformed_finish(self) -> None:
         registry = make_registry()
-        gateway = _SequenceGateway(["Paris", "<answer>Paris</answer>"])
+        gateway = _SequenceGateway(["draft", "Paris", "<answer>Paris</answer>"])
         env = AgentWorkflowEnv(
             registry,
             gateway,
@@ -447,7 +522,7 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(env.finished)
         self.assertIn("terminal answer must be exactly one", rejected.feedback)
         self.assertIn("answer_tag_count=0", rejected.feedback)
-        self.assertEqual(1, len(gateway.requests))
+        self.assertEqual(2, len(gateway.requests))
 
         await env.step(
             '{"action":"modify_agent","agent_id":"a","contract":"answer with exact wrapper"}'
@@ -455,7 +530,7 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         finished = await env.step('{"action":"finish"}')
         self.assertTrue(finished.accepted)
         self.assertEqual("<answer>Paris</answer>", finished.final_answer)
-        self.assertEqual(2, len(gateway.requests))
+        self.assertEqual(3, len(gateway.requests))
 
     async def test_exact_answer_protocol_rejects_multiple_and_nested_wrappers(self) -> None:
         for answer, tag_count in (
@@ -465,7 +540,7 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         ):
             with self.subTest(answer=answer):
                 registry = make_registry()
-                gateway = _SequenceGateway([answer])
+                gateway = _SequenceGateway(["draft", answer])
                 env = AgentWorkflowEnv(
                     registry,
                     gateway,
@@ -490,7 +565,7 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_revision_preserving_edit_is_rejected_without_reexecution(self) -> None:
         registry = make_registry()
-        gateway = _SequenceGateway(["not wrapped"])
+        gateway = _SequenceGateway(["draft", "not wrapped"])
         env = AgentWorkflowEnv(
             registry,
             gateway,
@@ -504,12 +579,12 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         )
         selected = await env.step('{"action":"set_output","agent_id":"a"}')
         self.assertTrue(selected.accepted)
-        self.assertEqual(1, len(gateway.requests))
+        self.assertEqual(2, len(gateway.requests))
 
         repeated = await env.step('{"action":"set_output","agent_id":"a"}')
         self.assertFalse(repeated.accepted)
         self.assertIn("action made no graph change", repeated.feedback)
-        self.assertEqual(1, len(gateway.requests))
+        self.assertEqual(2, len(gateway.requests))
 
         finish = await env.step('{"action":"finish"}')
         self.assertFalse(finish.accepted)
@@ -559,17 +634,21 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             problem="question",
             execute_on_edit=True,
         )
-        await env.step(
+        added = await env.step(
             '{"action":"add_agent","agent_id":"a","model_id":"balanced","contract":"answer"}'
         )
+
+        self.assertTrue(added.accepted)
+        self.assertIsNone(added.execution)
+        self.assertIn("execution_error=", added.feedback)
+        self.assertIn("temporary executor failure", added.feedback)
 
         edited = await env.step('{"action":"set_output","agent_id":"a"}')
 
         self.assertTrue(edited.accepted)
         self.assertFalse(edited.done)
-        self.assertIsNone(edited.execution)
-        self.assertIn("execution_error=", edited.feedback)
-        self.assertIn("temporary executor failure", edited.feedback)
+        self.assertIsNotNone(edited.execution)
+        self.assertIn("execution_result=", edited.feedback)
         self.assertEqual("a", env.graph.output_agent_id)
 
         retried = await env.step('{"action":"finish"}')
@@ -597,7 +676,7 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(finished.accepted)
         self.assertIs(progressive.execution, finished.execution)
         self.assertTrue(finished.execution_reused)
-        self.assertEqual(1, len(gateway.requests))
+        self.assertEqual(2, len(gateway.requests))
 
     async def test_noop_edit_is_rejected_without_reusing_execution(self) -> None:
         registry = make_registry()
@@ -620,7 +699,113 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(repeated.execution_reused)
         self.assertFalse(repeated.snapshot.history[-1].execution_reused)
         self.assertIn("action made no graph change", repeated.feedback)
-        self.assertEqual(1, len(gateway.requests))
+        self.assertEqual(2, len(gateway.requests))
+
+    async def test_each_edit_executes_only_dirty_topological_blocks(self) -> None:
+        registry = make_registry()
+        gateway = _ImmediateGateway()
+        env = AgentWorkflowEnv(
+            registry,
+            gateway,
+            problem="question",
+            execute_on_edit=True,
+        )
+
+        first = await env.step(
+            '{"action":"add_agent","agent_id":"a","model_id":"balanced","contract":"evidence"}'
+        )
+        second = await env.step(
+            '{"action":"add_agent","agent_id":"b","model_id":"fast","contract":"consume a"}'
+        )
+        related = await env.step(
+            '{"action":"set_relation","source_id":"a","target_id":"b",'
+            '"source_to_target":true,"target_to_source":false}'
+        )
+
+        self.assertEqual(("a",), first.execution.executed_agent_ids)
+        self.assertEqual(("b",), second.execution.executed_agent_ids)
+        self.assertEqual(("a",), second.execution.reused_agent_ids)
+        self.assertEqual(("b",), related.execution.executed_agent_ids)
+        self.assertEqual(("a",), related.execution.reused_agent_ids)
+        self.assertEqual(["a", "b", "b"], [item.agent.id for item in gateway.requests])
+
+    async def test_reciprocal_edit_executes_one_bounded_two_agent_block(self) -> None:
+        registry = make_registry()
+        gateway = _ImmediateGateway()
+        env = AgentWorkflowEnv(
+            registry,
+            gateway,
+            problem="question",
+            execute_on_edit=True,
+        )
+        await env.step(
+            '{"action":"add_agent","agent_id":"a","model_id":"balanced","contract":"proposal"}'
+        )
+        await env.step(
+            '{"action":"add_agent","agent_id":"b","model_id":"fast","contract":"peer review"}'
+        )
+        reciprocal = await env.step(
+            '{"action":"set_relation","source_id":"a","target_id":"b",'
+            '"source_to_target":true,"target_to_source":true}'
+        )
+
+        self.assertEqual(("a", "b"), reciprocal.execution.executed_agent_ids)
+        block_calls = reciprocal.execution.calls
+        self.assertEqual(4, len(block_calls))
+        self.assertEqual(
+            {"draft", "revision"},
+            {call.request.phase.value for call in block_calls},
+        )
+
+    async def test_format_agent_is_terminal_singleton_with_one_semantic_input(self) -> None:
+        registry = make_registry()
+
+        class FormatGateway(_ImmediateGateway):
+            async def generate(self, request: AgentRequest) -> str:
+                self.requests.append(request)
+                if request.is_format_agent:
+                    return "<answer>Paris</answer>"
+                return "semantic answer: Paris"
+
+        gateway = FormatGateway()
+        env = AgentWorkflowEnv(
+            registry,
+            gateway,
+            problem="question",
+            execute_on_edit=True,
+            require_exact_answer_tag=True,
+            require_format_agent=True,
+        )
+        await env.step(
+            '{"action":"add_agent","agent_id":"solver","model_id":"balanced","contract":"compute semantic answer"}'
+        )
+        await env.step(
+            '{"action":"add_agent","agent_id":"formatter","model_id":"fast",'
+            '"contract":"extract upstream answer only","role_family":"format"}'
+        )
+        self.assertEqual("format", env.graph.get_node("formatter").role_family)
+        premature = await env.step(
+            '{"action":"set_output","agent_id":"formatter"}'
+        )
+        self.assertFalse(premature.accepted)
+        self.assertIn("exactly one upstream semantic-answer artifact", premature.feedback)
+        self.assertIsNone(env.graph.output_agent_id)
+        await env.step(
+            '{"action":"set_relation","source_id":"solver","target_id":"formatter",'
+            '"source_to_target":true,"target_to_source":false}'
+        )
+        selected = await env.step(
+            '{"action":"set_output","agent_id":"formatter"}'
+        )
+        finished = await env.step('{"action":"finish"}')
+
+        format_request = selected.execution.calls[-1].request
+        self.assertTrue(format_request.is_output_agent)
+        self.assertTrue(format_request.is_format_agent)
+        self.assertEqual(["solver"], [item.source_agent_id for item in format_request.upstream])
+        self.assertIsNone(env.format_agent_issue())
+        self.assertTrue(finished.accepted)
+        self.assertEqual("<answer>Paris</answer>", finished.final_answer)
 
     async def test_history_survives_snapshot_restore_and_fork(self) -> None:
         registry = make_registry()

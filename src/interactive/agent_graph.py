@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
+from collections import deque
 from typing import Collection, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 from .model_registry import ModelRegistry
@@ -65,11 +66,14 @@ class AgentNode:
 
     ``prompt`` is accepted as an initialization alias for ``contract`` and is
     exposed as a read-only property for callers that use prompt terminology.
+    ``role_family`` is optional free-text analysis metadata and has no graph
+    execution or topology semantics.
     """
 
     id: str
     model_id: str
     contract: str
+    role_family: Optional[str]
 
     def __init__(
         self,
@@ -78,6 +82,7 @@ class AgentNode:
         contract: Optional[str] = None,
         *,
         prompt: Optional[str] = None,
+        role_family: Optional[str] = None,
     ) -> None:
         if not isinstance(id, str) or not isinstance(model_id, str):
             raise TypeError("AgentNode id and model_id must be strings")
@@ -88,16 +93,26 @@ class AgentNode:
             raise ValueError("AgentNode requires contract or prompt")
         if not isinstance(resolved_contract, str):
             raise TypeError("AgentNode contract must be a string")
+        if role_family is not None:
+            if not isinstance(role_family, str):
+                raise TypeError("AgentNode role_family must be a string when supplied")
+            role_family = role_family.strip()
+            if not role_family:
+                raise ValueError("AgentNode role_family must be non-empty when supplied")
         object.__setattr__(self, "id", id.strip())
         object.__setattr__(self, "model_id", model_id.strip())
         object.__setattr__(self, "contract", resolved_contract.strip())
+        object.__setattr__(self, "role_family", role_family)
 
     @property
     def prompt(self) -> str:
         return self.contract
 
     def to_dict(self) -> Dict[str, str]:
-        return {"id": self.id, "model_id": self.model_id, "contract": self.contract}
+        result = {"id": self.id, "model_id": self.model_id, "contract": self.contract}
+        if self.role_family is not None:
+            result["role_family"] = self.role_family
+        return result
 
 
 @dataclass(frozen=True, slots=True)
@@ -516,6 +531,11 @@ class AgentGraph:
             raise GraphMutationError(f"agent_id is not unique: {agent_id}")
         return matches[0]
 
+    def has_node(self, agent_id: str) -> bool:
+        """Return whether the current Canvas contains ``agent_id``."""
+
+        return any(node.id == agent_id for node in self._nodes)
+
     def add_agent(self, node: AgentNode) -> None:
         if any(existing.id == node.id for existing in self._nodes):
             raise GraphMutationError(f"duplicate agent_id: {node.id}")
@@ -529,6 +549,7 @@ class AgentGraph:
         model_id: Optional[str] = None,
         contract: Optional[str] = None,
         prompt: Optional[str] = None,
+        role_family: Optional[str] = None,
     ) -> None:
         current = self.get_node(agent_id)
         if contract is not None and prompt is not None and contract != prompt:
@@ -538,6 +559,7 @@ class AgentGraph:
             id=current.id,
             model_id=current.model_id if model_id is None else model_id,
             contract=current.contract if resolved_contract is None else resolved_contract,
+            role_family=current.role_family if role_family is None else role_family,
         )
         if replacement == current:
             return
@@ -639,6 +661,59 @@ class AgentGraph:
                 successors[source_component].add(target_component)
                 predecessors[target_component].add(source_component)
         return validation, component_for, predecessors, successors
+
+    def dirty_closure(self, seeds: Iterable[str]) -> Set[str]:
+        """Return changed Agents, reciprocal peers, and directed descendants.
+
+        This is the free-AgentGraph adaptation of SelfPlayGraphFlowSteer's
+        ``MultiAgentGraph.dirty_closure``.  A reciprocal component is one
+        bounded execution block, while a directed successor consumes the
+        changed artifact and must therefore be recomputed.
+        """
+
+        validation = self.validate(require_complete=False)
+        validation.raise_if_invalid()
+        component_for = {
+            agent_id: component
+            for component in validation.components
+            for agent_id in component
+        }
+        successors: Dict[str, Set[str]] = {node.id: set() for node in self._nodes}
+        for relation in self._relations:
+            for source_id, target_id in relation.directed_edges():
+                if source_id not in successors or target_id not in successors:
+                    continue
+                if component_for[source_id] != component_for[target_id]:
+                    successors[source_id].add(target_id)
+
+        dirty: Set[str] = set()
+        queue = deque(
+            agent_id for agent_id in seeds if agent_id in component_for
+        )
+        while queue:
+            agent_id = queue.popleft()
+            for peer_id in component_for[agent_id]:
+                if peer_id not in dirty:
+                    dirty.add(peer_id)
+                    queue.append(peer_id)
+            for target_id in successors[agent_id]:
+                if target_id not in dirty:
+                    dirty.add(target_id)
+                    queue.append(target_id)
+        return dirty
+
+    def directed_predecessors(self, agent_id: str) -> Tuple[str, ...]:
+        """Return external Agents whose artifacts are routed into ``agent_id``."""
+
+        self.get_node(agent_id)
+        return tuple(
+            sorted(
+                source_id
+                for relation in self._relations
+                for source_id, target_id in relation.directed_edges()
+                if target_id == agent_id
+            )
+        )
 
     def topology_statistics(self) -> Dict[str, object]:
         """Return read-only DAG shape facts for Canvas feedback and analysis.
@@ -903,7 +978,17 @@ class AgentGraph:
         }
 
     def snapshot(self) -> AgentGraphSnapshot:
-        nodes = tuple(sorted(self._nodes, key=lambda node: (node.id, node.model_id, node.contract)))
+        nodes = tuple(
+            sorted(
+                self._nodes,
+                key=lambda node: (
+                    node.id,
+                    node.model_id,
+                    node.contract,
+                    node.role_family or "",
+                ),
+            )
+        )
         relations = tuple(
             sorted(
                 (relation.canonical() for relation in self._relations),

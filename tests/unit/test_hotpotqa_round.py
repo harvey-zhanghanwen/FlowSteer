@@ -54,7 +54,11 @@ def test_declared_direct_reuse_is_copied_without_gateway_call(tmp_path):
         "model_id": "qwen3.5-9b-local",
         "protocol": "direct-v1",
         "generation_seed": 17,
-        "evaluation": {"valid": True},
+        "final_answer": "answer",
+        "evaluation": {
+            "valid": True,
+            "evaluator_version": "hotpotqa.official.answer.v1",
+        },
         "execution": {"execution_id": "existing"},
     }
     source = tmp_path / "source.jsonl"
@@ -209,6 +213,27 @@ def test_strict_aggregate_keeps_failed_task_in_denominator():
     assert result["strict_exact_match"] == 0.5
     assert result["strict_token_f1"] == 0.4
     assert result["completed_only_exact_match"] == 1.0
+
+
+def test_correct_terminal_answer_is_not_relabelled_by_recovered_execution_error():
+    trajectory = {
+        "explicit_finish": True,
+        "turns": [
+            {"canvas_feedback": "execution_error=temporary provider timeout"},
+            {"canvas_feedback": "accepted set_output"},
+        ],
+    }
+
+    assert (
+        _MODULE._failure_type(
+            {"available": True},
+            trajectory,
+            direct_em=1.0,
+            graph_em=1.0,
+            graph_f1=1.0,
+        )
+        == "correct"
+    )
 
 
 def test_report_counts_terminal_failure_without_dropping_evaluator_result():

@@ -217,6 +217,54 @@ class SkillTests(unittest.TestCase):
             self.assertEqual(mismatched, [])
             self.assertEqual(len(store.history(active.skill_id)), 2)
 
+    def test_context_product_tags_are_conjunctive_retrieval_conditions(self) -> None:
+        context_tags = (
+            'task_context.task_subtype="comparison"',
+            'graph_prefix.topology_family="fan_in"',
+            'role_family.value="cross-document comparison"',
+            'model.model_id="qwen35"',
+            'relation_motif.kind="unidirectional"',
+            'graph_position.kind="sink"',
+        )
+        contextual_candidate = replace(
+            candidate_skill(),
+            condition={
+                "task_family": "math",
+                "graph_stage": "before_final",
+                "tags": context_tags,
+            },
+        )
+        active = SkillLifecycleManager(self.gate()).activate(
+            contextual_candidate,
+            2,
+        )
+
+        matched = SkillRetriever().retrieve(
+            [active],
+            SkillQuery(
+                "math",
+                "before_final",
+                tags=context_tags,
+                available_models=("qwen35",),
+                current_epoch=2,
+            ),
+            versions(),
+        )
+        missing_position = SkillRetriever().retrieve(
+            [active],
+            SkillQuery(
+                "math",
+                "before_final",
+                tags=context_tags[:-1],
+                available_models=("qwen35",),
+                current_epoch=2,
+            ),
+            versions(),
+        )
+
+        self.assertEqual([active.skill_id], [skill.skill_id for skill in matched])
+        self.assertEqual([], missing_position)
+
     def test_forged_active_receipt_is_not_retrieved_and_retirement_keeps_reason(self) -> None:
         forged = replace(
             candidate_skill(),

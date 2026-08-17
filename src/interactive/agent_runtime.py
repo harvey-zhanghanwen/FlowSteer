@@ -6,7 +6,7 @@ import asyncio
 from dataclasses import dataclass, field
 from enum import Enum
 from types import MappingProxyType
-from typing import Awaitable, Dict, List, Mapping, Optional, Protocol, Set, Tuple, Union
+from typing import Awaitable, Collection, Dict, List, Mapping, Optional, Protocol, Set, Tuple, Union
 import uuid
 
 from .agent_graph import (
@@ -105,6 +105,7 @@ class AgentRequest:
     provider: ProviderSpec
     phase: ExecutionPhase
     is_output_agent: bool = False
+    is_format_agent: bool = False
     communication_condition: CommunicationCondition = CommunicationCondition.NORMAL
     upstream: Tuple[UpstreamMessage, ...] = ()
     own_draft: Optional[str] = None
@@ -113,6 +114,10 @@ class AgentRequest:
     def __post_init__(self) -> None:
         if type(self.is_output_agent) is not bool:
             raise TypeError("is_output_agent must be bool")
+        if type(self.is_format_agent) is not bool:
+            raise TypeError("is_format_agent must be bool")
+        if self.is_format_agent and not self.is_output_agent:
+            raise ValueError("Format Agent must be the Output Agent")
         object.__setattr__(
             self,
             "communication_condition",
@@ -151,11 +156,13 @@ class AgentCallRecord:
 class AgentRuntimeResult:
     run_id: str
     graph_revision: int
-    output_agent_id: str
-    final_answer: str
+    output_agent_id: Optional[str]
+    final_answer: Optional[str]
     outputs: Mapping[str, str]
     calls: Tuple[AgentCallRecord, ...]
     block_completion_order: Tuple[Tuple[str, ...], ...]
+    executed_agent_ids: Tuple[str, ...] = ()
+    reused_agent_ids: Tuple[str, ...] = ()
     communication_condition: CommunicationCondition = CommunicationCondition.NORMAL
 
     def __post_init__(self) -> None:
@@ -238,17 +245,26 @@ class AgentRuntime:
         problem: str,
         *,
         run_id: Optional[str] = None,
+        require_complete: bool = True,
+        prior_outputs: Optional[Mapping[str, str]] = None,
+        dirty_agents: Optional[Collection[str]] = None,
+        format_output_agent: bool = False,
         communication_condition: Union[
             CommunicationCondition, str
         ] = CommunicationCondition.NORMAL,
     ) -> AgentRuntimeResult:
         if not isinstance(problem, str) or not problem.strip():
             raise ValueError("problem must be a non-empty string")
+        if type(format_output_agent) is not bool:
+            raise TypeError("format_output_agent must be bool")
         snapshot = graph.snapshot()
         execution_graph = AgentGraph.from_snapshot(snapshot)
-        validation = execution_graph.validate(self.model_registry, require_complete=True)
+        validation = execution_graph.validate(
+            self.model_registry,
+            require_complete=require_complete,
+        )
         validation.raise_if_invalid()
-        if execution_graph.output_agent_id is None:  # narrowed by validation
+        if require_complete and execution_graph.output_agent_id is None:
             raise AgentGraphValidationError(validation)
 
         resolved_run_id = run_id or uuid.uuid4().hex
@@ -258,30 +274,70 @@ class AgentRuntime:
         resolved_condition = _communication_condition(communication_condition)
         plan = self._build_plan(execution_graph, validation.components)
         nodes = {node.id: node for node in execution_graph.nodes}
+        if format_output_agent and execution_graph.output_agent_id is not None:
+            format_node = nodes[execution_graph.output_agent_id]
+            if (format_node.role_family or "").casefold() != "format":
+                raise AgentRuntimeError(
+                    "format_output_agent requires the Output Agent to carry "
+                    "role_family='format'"
+                )
         outputs: Dict[str, str] = {}
+        for agent_id, output in dict(prior_outputs or {}).items():
+            if agent_id in nodes:
+                if not isinstance(output, str):
+                    raise TypeError("prior_outputs values must be strings")
+                outputs[agent_id] = output
+        if dirty_agents is None:
+            dirty = set(nodes)
+        else:
+            if any(not isinstance(agent_id, str) for agent_id in dirty_agents):
+                raise TypeError("dirty_agents must contain strings")
+            dirty = execution_graph.dirty_closure(dirty_agents)
+        dirty.update(agent_id for agent_id in nodes if agent_id not in outputs)
+        dirty_components = {
+            plan.component_for[agent_id]
+            for agent_id in dirty
+            if agent_id in plan.component_for
+        }
         calls: List[AgentCallRecord] = []
         completion_order: List[Tuple[str, ...]] = []
+        executed_agents: Set[str] = set()
+        reused_agents: Set[str] = set()
         indegree = dict(plan.indegree)
         ready = sorted(component for component, degree in indegree.items() if degree == 0)
-        active: Dict["asyncio.Task[Dict[str, str]]", Tuple[str, ...]] = {}
+        active: Dict[
+            "asyncio.Task[Tuple[Dict[str, str], bool]]",
+            Tuple[str, ...],
+        ] = {}
+
+        async def execute_or_reuse(
+            component: Tuple[str, ...],
+        ) -> Tuple[Dict[str, str], bool]:
+            if component not in dirty_components and all(
+                agent_id in outputs for agent_id in component
+            ):
+                return ({agent_id: outputs[agent_id] for agent_id in component}, True)
+            return (
+                await self._execute_block(
+                    component,
+                    nodes,
+                    plan,
+                    outputs,
+                    problem.strip(),
+                    resolved_run_id,
+                    snapshot.revision,
+                    calls,
+                    output_agent_id=execution_graph.output_agent_id,
+                    format_output_agent=format_output_agent,
+                    communication_condition=resolved_condition,
+                ),
+                False,
+            )
 
         def start_ready() -> None:
             while ready:
                 component = ready.pop(0)
-                task = asyncio.create_task(
-                    self._execute_block(
-                        component,
-                        nodes,
-                        plan,
-                        outputs,
-                        problem.strip(),
-                        resolved_run_id,
-                        snapshot.revision,
-                        calls,
-                        output_agent_id=execution_graph.output_agent_id,
-                        communication_condition=resolved_condition,
-                    )
-                )
+                task = asyncio.create_task(execute_or_reuse(component))
                 active[task] = component
 
         start_ready()
@@ -290,12 +346,15 @@ class AgentRuntime:
                 done, _ = await asyncio.wait(
                     tuple(active), return_when=asyncio.FIRST_COMPLETED
                 )
-                completed: List[Tuple[Tuple[str, ...], Dict[str, str]]] = []
+                completed: List[
+                    Tuple[Tuple[str, ...], Dict[str, str], bool]
+                ] = []
                 failure: Optional[BaseException] = None
                 for task in sorted(done, key=lambda item: active[item]):
                     component = active.pop(task)
                     try:
-                        completed.append((component, task.result()))
+                        block_outputs, reused = task.result()
+                        completed.append((component, block_outputs, reused))
                     except BaseException as exc:
                         failure = exc
                         break
@@ -307,11 +366,15 @@ class AgentRuntime:
                         raise failure
                     raise AgentRuntimeError(f"AgentGraph block execution failed: {failure}") from failure
 
-                for component, block_outputs in completed:
+                for component, block_outputs, reused in completed:
                     outputs.update(block_outputs)
                     completion_order.append(component)
+                    if reused:
+                        reused_agents.update(component)
+                    else:
+                        executed_agents.update(component)
                 newly_ready: Set[Tuple[str, ...]] = set()
-                for component, _ in completed:
+                for component, _, _ in completed:
                     for successor in plan.successors[component]:
                         indegree[successor] -= 1
                         if indegree[successor] == 0:
@@ -324,14 +387,19 @@ class AgentRuntime:
             raise
 
         output_id = execution_graph.output_agent_id
+        final_answer = outputs.get(output_id) if output_id is not None else None
+        if require_complete and final_answer is None:
+            raise AgentRuntimeError("complete AgentGraph produced no Output Agent artifact")
         return AgentRuntimeResult(
             run_id=resolved_run_id,
             graph_revision=snapshot.revision,
             output_agent_id=output_id,
-            final_answer=outputs[output_id],
+            final_answer=final_answer,
             outputs=outputs,
             calls=tuple(sorted(calls, key=lambda record: record.request.request_id)),
             block_completion_order=tuple(completion_order),
+            executed_agent_ids=tuple(sorted(executed_agents)),
+            reused_agent_ids=tuple(sorted(reused_agents)),
             communication_condition=resolved_condition,
         )
 
@@ -378,7 +446,8 @@ class AgentRuntime:
         graph_revision: int,
         calls: List[AgentCallRecord],
         *,
-        output_agent_id: str,
+        output_agent_id: Optional[str],
+        format_output_agent: bool,
         communication_condition: CommunicationCondition,
     ) -> Dict[str, str]:
         if len(component) == 1:
@@ -397,6 +466,7 @@ class AgentRuntime:
                 run_id=run_id,
                 graph_revision=graph_revision,
                 output_agent_id=output_agent_id,
+                format_output_agent=format_output_agent,
                 communication_condition=communication_condition,
             )
             response = await self._invoke(request, calls)
@@ -427,6 +497,7 @@ class AgentRuntime:
             run_id=run_id,
             graph_revision=graph_revision,
             output_agent_id=output_agent_id,
+            format_output_agent=format_output_agent,
             communication_condition=communication_condition,
         )
         right_draft_request = self._request(
@@ -437,6 +508,7 @@ class AgentRuntime:
             run_id=run_id,
             graph_revision=graph_revision,
             output_agent_id=output_agent_id,
+            format_output_agent=format_output_agent,
             communication_condition=communication_condition,
         )
         left_draft, right_draft = await _gather_pair(
@@ -461,6 +533,7 @@ class AgentRuntime:
             run_id=run_id,
             graph_revision=graph_revision,
             output_agent_id=output_agent_id,
+            format_output_agent=format_output_agent,
             communication_condition=communication_condition,
         )
         right_revision_request = self._request(
@@ -480,6 +553,7 @@ class AgentRuntime:
             run_id=run_id,
             graph_revision=graph_revision,
             output_agent_id=output_agent_id,
+            format_output_agent=format_output_agent,
             communication_condition=communication_condition,
         )
         left_revision, right_revision = await _gather_pair(
@@ -537,7 +611,8 @@ class AgentRuntime:
         graph_revision: int,
         own_draft: Optional[str] = None,
         peer_draft: Optional[UpstreamMessage] = None,
-        output_agent_id: str,
+        output_agent_id: Optional[str],
+        format_output_agent: bool,
         communication_condition: CommunicationCondition,
     ) -> AgentRequest:
         model = self.model_registry.require_model(agent.model_id)
@@ -553,6 +628,9 @@ class AgentRuntime:
             provider=provider,
             phase=phase,
             is_output_agent=agent.id == output_agent_id,
+            is_format_agent=(
+                format_output_agent and agent.id == output_agent_id
+            ),
             communication_condition=communication_condition,
             upstream=upstream,
             own_draft=own_draft,

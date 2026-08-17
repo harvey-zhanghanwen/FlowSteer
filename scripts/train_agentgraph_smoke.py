@@ -65,6 +65,7 @@ from src.interactive.task_dataset import iter_task_records
 from src.interactive.task_evaluator import (
     EvaluationOutcome,
     HEALTHBENCH_EVALUATOR_VERSION,
+    HOTPOTQA_ANSWER_EVALUATOR_VERSION,
     RAGEN_EVALUATOR_VERSION,
     SKILLFLOW_REWARD_VERSION,
     SWEBENCH_EVALUATOR_VERSION,
@@ -230,6 +231,147 @@ def _dataset_key(task: TaskRecord) -> str:
     return value.strip()
 
 
+def _skill_context_tag(namespace: str, field_name: str, value: Any) -> str:
+    """Encode one exact, decision-time Skill condition as a namespaced tag."""
+
+    return (
+        f"{namespace}.{field_name}="
+        + json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    )
+
+
+def _skill_query_tags(
+    task: TaskRecord,
+    graph: AgentGraph,
+    *,
+    task_family: str,
+    graph_stage: str,
+    validation_issue_codes: Sequence[str],
+) -> tuple[str, ...]:
+    """Describe only the task context and current AgentGraph prefix.
+
+    SkillFlow retrieves against the current task query and task type.  This
+    evidence-gated path keeps its existing exact ``SkillQuery.tags`` matching,
+    and supplies the context product required by the project design: task
+    context, prefix graph, optional ``role_family``, model, relation motif,
+    and graph position.  No final-graph or evaluator fields are read here.
+    """
+
+    tags = {str(code) for code in validation_issue_codes}
+
+    task_context: dict[str, Any] = {
+        "dataset_key": _dataset_key(task),
+        "task_family": task_family,
+    }
+    metadata_task_type = task.metadata.get("task_type")
+    if isinstance(metadata_task_type, str) and metadata_task_type.strip():
+        task_context["task_type"] = metadata_task_type.strip()
+    skillflow = task.metadata.get("skillflow")
+    if isinstance(skillflow, Mapping):
+        skillflow_task_type = skillflow.get("task_type")
+        if (
+            "task_type" not in task_context
+            and isinstance(skillflow_task_type, str)
+            and skillflow_task_type.strip()
+        ):
+            task_context["task_type"] = skillflow_task_type.strip()
+        extra = skillflow.get("extra")
+        if isinstance(extra, Mapping):
+            for source_key, condition_key in (
+                ("type", "task_subtype"),
+                ("level", "difficulty"),
+            ):
+                value = extra.get(source_key)
+                if isinstance(value, str) and value.strip():
+                    task_context[condition_key] = value.strip()
+    for field_name, value in task_context.items():
+        tags.add(_skill_context_tag("task_context", field_name, value))
+
+    statistics = graph.topology_statistics()
+    prefix_fields = {
+        "graph_stage": graph_stage,
+        "topology_family": statistics["topology_family"],
+        "structural_depth": statistics["structural_depth"],
+        "output_state": (
+            "set" if graph.output_agent_id is not None else "unset"
+        ),
+    }
+    for field_name, value in prefix_fields.items():
+        tags.add(_skill_context_tag("graph_prefix", field_name, value))
+    relation_motifs: set[str] = set()
+    pair_count = len(graph.nodes) * (len(graph.nodes) - 1) // 2
+    if pair_count > len(graph.relations):
+        relation_motifs.add("independent")
+    for relation in graph.relations:
+        relation_motifs.add(
+            "bidirectional" if relation.bits.is_bidirectional else "unidirectional"
+        )
+    for motif in relation_motifs:
+        tags.add(_skill_context_tag("relation_motif", "kind", motif))
+
+    roots = set(statistics["root_agent_ids"])
+    sinks = set(statistics["sink_agent_ids"])
+    fan_in = set(statistics["fan_in_agent_ids"])
+    fan_out = set(statistics["fan_out_agent_ids"])
+    for node in graph.nodes:
+        tags.add(_skill_context_tag("model", "model_id", node.model_id))
+        role_family = node.role_family
+        if role_family is not None:
+            tags.add(_skill_context_tag("role_family", "value", role_family))
+
+        positions: set[str] = set()
+        if node.id in roots:
+            positions.add("root")
+        if node.id in sinks:
+            positions.add("sink")
+        if node.id not in roots and node.id not in sinks:
+            positions.add("intermediate")
+        if node.id in fan_in:
+            positions.add("fan_in")
+        if node.id in fan_out:
+            positions.add("fan_out")
+        if node.id == graph.output_agent_id:
+            positions.add("output")
+        for position in positions:
+            tags.add(_skill_context_tag("graph_position", "kind", position))
+
+        local_relation_motifs: set[str] = set()
+        if len(graph.nodes) > 1:
+            related_ids = {
+                endpoint
+                for relation in graph.relations
+                if node.id in (relation.source_id, relation.target_id)
+                for endpoint in (relation.source_id, relation.target_id)
+                if endpoint != node.id
+            }
+            if len(related_ids) < len(graph.nodes) - 1:
+                local_relation_motifs.add("independent")
+        for relation in graph.relations:
+            if node.id in (relation.source_id, relation.target_id):
+                local_relation_motifs.add(
+                    "bidirectional"
+                    if relation.bits.is_bidirectional
+                    else "unidirectional"
+                )
+        if role_family is not None:
+            for relation_motif in local_relation_motifs:
+                for position in positions:
+                    tags.add(
+                        _skill_context_tag(
+                            "agent_context",
+                            "role_model_relation_position",
+                            {
+                                "role_family": role_family,
+                                "model_id": node.model_id,
+                                "relation_motif": relation_motif,
+                                "graph_position": position,
+                            },
+                        )
+                    )
+
+    return tuple(sorted(tags))
+
+
 def _base_task_id(task: TaskRecord) -> str:
     sampling = task.metadata.get("sampling", {})
     if isinstance(sampling, Mapping):
@@ -297,7 +439,9 @@ def select_smoke_tasks(
 
 def evaluator_version_for(task: TaskRecord) -> str:
     source = _dataset_key(task)
-    if source in {"hotpotqa", "triviaqa", "aime_2026"}:
+    if source == "hotpotqa":
+        return HOTPOTQA_ANSWER_EVALUATOR_VERSION
+    if source in {"triviaqa", "aime_2026"}:
         return SKILLFLOW_REWARD_VERSION
     if source == "healthbench_professional":
         return HEALTHBENCH_EVALUATOR_VERSION
@@ -1001,20 +1145,23 @@ class LiveSmokeBackend:
         ).strip()
         if not task_family:
             task_family = _dataset_key(task)
-        issue_tags = tuple(
-            sorted(
-                issue.code
-                for issue in graph.validate(
-                    self.registry,
-                    require_complete=True,
-                ).issues
-            )
+        complete_validation = graph.validate(
+            self.registry,
+            require_complete=True,
+        )
+        issue_tags = tuple(sorted(issue.code for issue in complete_validation.issues))
+        query_tags = _skill_query_tags(
+            task,
+            graph,
+            task_family=task_family,
+            graph_stage=graph_stage,
+            validation_issue_codes=issue_tags,
         )
         priors = self.skill_pipeline.retrieve_prompt_priors(
             SkillQuery(
                 task_family=task_family,
                 graph_stage=graph_stage,
-                tags=issue_tags,
+                tags=query_tags,
                 available_models=tuple(self.registry.model_ids),
                 current_epoch=self.skill_epoch,
             ),
@@ -1093,6 +1240,9 @@ class LiveSmokeBackend:
             execute_on_edit=bool(director["execute_on_edit"]),
             max_agents=int(graph_config["max_agents"]),
             require_exact_answer_tag=(
+                terminal_protocol == "exact_single_answer_tag"
+            ),
+            require_format_agent=(
                 terminal_protocol == "exact_single_answer_tag"
             ),
         )

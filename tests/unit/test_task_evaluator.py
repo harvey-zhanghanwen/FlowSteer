@@ -5,7 +5,11 @@ import unittest
 from unittest.mock import patch
 
 from src.interactive.records import TaskRecord
-from src.interactive.task_evaluator import GRADER_TEMPLATE, evaluate_task
+from src.interactive.task_evaluator import (
+    GRADER_TEMPLATE,
+    HOTPOTQA_ANSWER_EVALUATOR_VERSION,
+    evaluate_task,
+)
 
 
 def task(
@@ -33,7 +37,7 @@ def task(
 
 
 class StaticEvaluatorTests(unittest.IsolatedAsyncioTestCase):
-    async def test_hotpot_and_trivia_use_skillflow_token_f1(self) -> None:
+    async def test_hotpot_uses_official_answer_metrics_and_trivia_keeps_skillflow(self) -> None:
         hotpot = await evaluate_task(task("HotpotQA", ground_truth="the red fox"), "red fox")
         trivia = await evaluate_task(
             task(
@@ -47,9 +51,42 @@ class StaticEvaluatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1.0, hotpot.reward)
         self.assertEqual(1.0, hotpot.metrics["exact_match"])
         self.assertEqual(1.0, hotpot.metrics["token_f1"])
+        self.assertEqual(HOTPOTQA_ANSWER_EVALUATOR_VERSION, hotpot.evaluator_version)
+        self.assertEqual("answer_only", hotpot.details["metric_scope"])
         self.assertGreater(trivia.reward or 0.0, 0.6)
         self.assertEqual(0.0, trivia.metrics["exact_match"])
         self.assertEqual("skillflow.training.reward.v1", trivia.evaluator_version)
+
+    async def test_hotpot_yes_no_and_hyphen_rules_match_official_scorer(self) -> None:
+        yes_with_explanation = await evaluate_task(
+            task("HotpotQA", ground_truth="yes"),
+            "yes, because the passage says so",
+        )
+        no_with_explanation = await evaluate_task(
+            task("HotpotQA", ground_truth="no"),
+            "no, that is incorrect",
+        )
+        date = await evaluate_task(
+            task("HotpotQA", ground_truth="February 5, 1953"),
+            "1953-02-05",
+        )
+
+        self.assertEqual(0.0, yes_with_explanation.metrics["token_f1"])
+        self.assertEqual(0.0, no_with_explanation.metrics["token_f1"])
+        self.assertEqual(0.0, date.metrics["token_f1"])
+
+    async def test_hotpot_official_normalization_and_counter_overlap(self) -> None:
+        normalized = await evaluate_task(
+            task("HotpotQA", ground_truth="The F.E.A.R."),
+            "fear",
+        )
+        repeated = await evaluate_task(
+            task("HotpotQA", ground_truth="red red fox"),
+            "red fox fox",
+        )
+
+        self.assertEqual(1.0, normalized.metrics["exact_match"])
+        self.assertAlmostEqual(2.0 / 3.0, repeated.metrics["token_f1"])
 
     async def test_aime_uses_skillflow_exact_answer_extraction(self) -> None:
         outcome = await evaluate_task(task("AIME 2026", ground_truth="56"), "Thus \\boxed{56}.")

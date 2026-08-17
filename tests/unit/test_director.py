@@ -156,18 +156,18 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.final_graph["output_agent_id"], "solver")
         self.assertEqual(client.seeds, [1, 2, 3])
 
-        # An incomplete graph is not executed.  Once set_output makes the graph
-        # complete, FlowSteer's progressive result is returned in Canvas
-        # feedback and therefore appears in the next neutral Director state.
-        self.assertIsNone(result.turns[0].canvas_result.execution)
+        # Each completed Agent configuration executes immediately.  Changing
+        # the node to the Output role re-executes that dirty node.
+        self.assertIsNotNone(result.turns[0].canvas_result.execution)
         self.assertIsNotNone(result.turns[1].canvas_result.execution)
+        self.assertIn("execution_result=", result.turns[0].canvas_result.feedback)
         self.assertIn("execution_result=", result.turns[1].canvas_result.feedback)
         self.assertIn("answer from solver", result.turns[1].canvas_result.feedback)
         self.assertNotIn("output_format", result.turns[1].canvas_result.feedback)
         self.assertNotIn('"final_answer"', result.turns[1].canvas_result.feedback)
         self.assertIn("output_inbox", result.turns[1].canvas_result.feedback)
         # Finish reuses the successful result for the unchanged graph revision.
-        self.assertEqual(len(gateway.requests), 1)
+        self.assertEqual(len(gateway.requests), 2)
 
         initial_messages = transcript_messages(client.prompts[0])
         continued_messages = transcript_messages(client.prompts[1])
@@ -218,11 +218,12 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("task", complete_state)
         self.assertNotIn("model_catalog", complete_state)
         self.assertIn("execution_result=", complete_state["canvas_feedback"])
+        self.assertEqual("empty", initial_state["topology_statistics"]["topology_family"])
+        self.assertEqual("single", complete_state["topology_statistics"]["topology_family"])
         for state in (initial_state, complete_state):
             for removed_cue in (
                 "max_rounds",
                 "remaining_rounds",
-                "topology_statistics",
                 "graph_validation",
                 "structurally_complete",
                 "recent_canvas_history",
@@ -232,24 +233,30 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn(removed_cue, state)
         # The latest progressive result occurs only in the current user
         # observation, rather than in a reconstructed history field.
-        self.assertEqual(1, client.prompts[2].count("execution_result="))
+        self.assertEqual(2, client.prompts[2].count("execution_result="))
 
     async def test_director_terminal_policy_is_issue_driven_without_role_template(
         self,
     ) -> None:
         self.assertIn("one edit at a time", DIRECTOR_SYSTEM_PROMPT)
         self.assertIn(
-            "A directed relation sends the source artifact to the target",
+            "A directed relation routes the source artifact to the target",
             DIRECTOR_SYSTEM_PROMPT,
         )
         self.assertIn(
-            "target contract should name the artifact it consumes",
+            "Independent evidence dependencies can execute in parallel and converge through fan-in",
             DIRECTOR_SYSTEM_PROMPT,
         )
+        self.assertIn("one cohesive dependency", DIRECTOR_SYSTEM_PROMPT)
+        self.assertIn("do not bundle independent evidence subproblems", DIRECTOR_SYSTEM_PROMPT)
+        self.assertIn("do not split a cohesive dependency", DIRECTOR_SYSTEM_PROMPT)
         self.assertIn(
-            "Only the Output Agent returns the final task answer",
+            'create a distinct terminal Agent with role_family "format"',
             DIRECTOR_SYSTEM_PROMPT,
         )
+        self.assertIn("not a fixed Operator type", DIRECTOR_SYSTEM_PROMPT)
+        self.assertIn("does not solve, verify, or aggregate", DIRECTOR_SYSTEM_PROMPT)
+        self.assertIn("bidirectional relation is one bounded draft-and-revision block", DIRECTOR_SYSTEM_PROMPT)
         self.assertIn(
             "structural or output-format validity alone does not establish task quality",
             DIRECTOR_SYSTEM_PROMPT,

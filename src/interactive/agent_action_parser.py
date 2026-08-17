@@ -34,6 +34,8 @@ class AgentAction:
     raw_json: str = ""
     consumed_start: int = 0
     consumed_end: int = 0
+    # Optional free-text analysis metadata; it does not select an Operator.
+    role_family: Optional[str] = None
 
     @property
     def prompt(self) -> Optional[str]:
@@ -45,6 +47,7 @@ class AgentAction:
             "agent_id",
             "model_id",
             "contract",
+            "role_family",
             "source_id",
             "target_id",
             "source_to_target",
@@ -170,11 +173,16 @@ class AgentActionParser:
             if len(allowed_contracts) != 1:
                 raise AgentActionParseError("add_agent requires exactly one of contract or prompt")
             contract_key = next(iter(allowed_contracts))
-            _check_keys(data, {"action", "agent_id", "model_id", contract_key})
+            _check_keys(
+                data,
+                {"action", "agent_id", "model_id", contract_key},
+                {"role_family"},
+            )
             return AgentAction(
                 agent_id=_required_string(data, "agent_id"),
                 model_id=_required_string(data, "model_id"),
                 contract=_required_string(data, contract_key),
+                role_family=_optional_string(data, "role_family"),
                 **common,
             )
 
@@ -182,19 +190,23 @@ class AgentActionParser:
             _check_keys(
                 data,
                 {"action", "agent_id"},
-                {"model_id", "contract", "prompt"},
+                {"model_id", "contract", "prompt", "role_family"},
             )
             if "contract" in data and "prompt" in data:
                 raise AgentActionParseError("modify_agent accepts contract or prompt, not both")
             model_id = _optional_string(data, "model_id")
             contract_key = "contract" if "contract" in data else "prompt"
             contract = _optional_string(data, contract_key) if contract_key in data else None
-            if model_id is None and contract is None:
-                raise AgentActionParseError("modify_agent requires model_id, contract, or prompt")
+            role_family = _optional_string(data, "role_family")
+            if model_id is None and contract is None and role_family is None:
+                raise AgentActionParseError(
+                    "modify_agent requires model_id, contract, prompt, or role_family"
+                )
             return AgentAction(
                 agent_id=_required_string(data, "agent_id"),
                 model_id=model_id,
                 contract=contract,
+                role_family=role_family,
                 **common,
             )
 

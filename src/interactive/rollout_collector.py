@@ -779,6 +779,8 @@ def _request_record(call: AgentCallRecord) -> Mapping[str, Any]:
         "provider_id": request.provider.provider_id,
         "phase": request.phase.value,
         "is_output_agent": request.is_output_agent,
+        "execution_role": "format" if request.is_format_agent else "worker",
+        "is_format_agent": request.is_format_agent,
         "communication_condition": request.communication_condition.value,
         "upstream": [item.to_dict() for item in request.upstream],
         "own_draft": request.own_draft,
@@ -875,6 +877,8 @@ def _runtime_summary(runtime: Optional[AgentRuntimeResult]) -> Mapping[str, Any]
         "block_completion_order": [
             list(component) for component in runtime.block_completion_order
         ],
+        "executed_agent_ids": list(runtime.executed_agent_ids),
+        "reused_agent_ids": list(runtime.reused_agent_ids),
     }
 
 

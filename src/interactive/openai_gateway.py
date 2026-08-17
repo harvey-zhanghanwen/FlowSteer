@@ -62,6 +62,8 @@ def _visible_message_content(
 def _format_upstream(
     messages: Sequence[UpstreamMessage],
     condition: CommunicationCondition,
+    *,
+    include_dependency: bool = True,
 ) -> str:
     if not messages:
         return "(none)"
@@ -75,7 +77,7 @@ def _format_upstream(
         ]
         if item.graph_revision is not None:
             envelope.append(f"graph_revision: {item.graph_revision}")
-        if item.request_or_dependency is not None:
+        if include_dependency and item.request_or_dependency is not None:
             envelope.append(
                 f"request_or_dependency: {item.request_or_dependency}"
             )
@@ -92,17 +94,36 @@ def _format_upstream(
 def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
     """Build finite-phase prompts without exposing provider credentials."""
 
-    if request.is_output_agent:
+    if request.is_format_agent:
+        protocol = (
+            "You are the terminal Format Agent. The semantic answer must already have "
+            "been computed in exactly one routed upstream artifact. Your only task is to "
+            "extract that answer and serialize it for the task protocol. Do not solve the "
+            "task again, verify the answer, combine candidates, or add explanation. "
+            "The answer span must be the shortest value that directly answers the question, "
+            "not a restatement, sentence, equation, explanation, or key-value report. For a "
+            "yes/no question, emit only yes or no. For a requested name, entity, title, "
+            "category, property, location, or event, emit only that value; omit surrounding "
+            "relations and modifiers already supplied by the question unless they are part "
+            "of the answer's proper name. Preserve the solution's original spelling and "
+            "non-math date/name format. These extraction rules take precedence over any "
+            "free contract that asks for an explanatory sentence. If no upstream artifact "
+            "is present, return exactly <answer></answer>. For a factual or numeric task, "
+            "return exactly <answer>answer span</answer> with no text outside the tag. If "
+            "the task supplies legal or admissible actions and asks for one action, return "
+            "exactly one listed executable action with no explanation."
+        )
+    elif request.is_output_agent:
         protocol = (
             "You are the unique Output Agent. Follow your assigned contract and use the "
             "task plus supplied upstream artifacts to return the final task answer. Treat "
             "each routed upstream artifact as the declared dependency for this node; do "
             "not silently redo or ignore an upstream responsibility unless its artifact "
             "has a concrete conflict with the task. Preserve a concise answer when the "
-            "artifacts support it and resolve concrete conflicts against the task. For a factual or "
-            "numeric answer, return exactly <answer>answer span</answer> with no text "
-            "outside the tag; the span itself must not be JSON, a key-value report, or an "
-            "explanation. If the task supplies legal or admissible actions and asks "
+            "artifacts support it and resolve concrete conflicts against the task. For a "
+            "factual or numeric answer, return exactly <answer>answer span</answer> with no "
+            "text outside the tag; the span itself must not be JSON, a key-value report, "
+            "or an explanation. If the task supplies legal or admissible actions and asks "
             "for one action, return exactly one listed executable action with no explanation."
         )
     else:
@@ -115,16 +136,34 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
             "Do not present a task-level final answer and "
             "do not use <answer> tags."
         )
-    # Keep the graph-authored free-text contract, then append the execution
-    # boundary so a contract cannot accidentally reassign final-answer ownership.
-    system = (
-        f"Agent ID: {request.agent.id}\nContract:\n{request.agent.contract}\n\n"
-        f"Execution protocol (takes precedence):\n{protocol}"
+    if request.is_format_agent:
+        # FlowSteer's Format Operator normally receives the problem and the
+        # computed solution under its fixed extraction prompt.  Do not inject
+        # the graph-authored free-text contract into the terminal invocation:
+        # it is retained in the Canvas/trajectory receipt, but may contain an
+        # explanatory target sentence that conflicts with answer-span
+        # extraction.  This is the minimal free-AgentGraph adaptation of the
+        # upstream Operator boundary.
+        system = (
+            f"Agent ID: {request.agent.id}\nRole: Format\n\n"
+            f"Execution protocol:\n{protocol}"
+        )
+    else:
+        # Keep the graph-authored free-text contract, then append the execution
+        # boundary so a contract cannot accidentally reassign final-answer ownership.
+        system = (
+            f"Agent ID: {request.agent.id}\nContract:\n{request.agent.contract}\n\n"
+            f"Execution protocol (takes precedence):\n{protocol}"
+        )
+    upstream_text = _format_upstream(
+        request.upstream,
+        request.communication_condition,
+        include_dependency=not request.is_format_agent,
     )
     common = (
         f"Task:\n{request.problem}\n\n"
         "External upstream messages:\n"
-        f"{_format_upstream(request.upstream, request.communication_condition)}"
+        f"{upstream_text}"
     )
     if request.phase is ExecutionPhase.SINGLE:
         phase = "Produce your response now."
