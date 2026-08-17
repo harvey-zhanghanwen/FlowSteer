@@ -69,6 +69,7 @@ from src.interactive.task_evaluator import (
     RAGEN_EVALUATOR_VERSION,
     SKILLFLOW_REWARD_VERSION,
     SWEBENCH_EVALUATOR_VERSION,
+    TRIVIAQA_ANSWER_EVALUATOR_VERSION,
     evaluate_task,
 )
 from src.interactive.versioning import VersionBundle
@@ -441,7 +442,9 @@ def evaluator_version_for(task: TaskRecord) -> str:
     source = _dataset_key(task)
     if source == "hotpotqa":
         return HOTPOTQA_ANSWER_EVALUATOR_VERSION
-    if source in {"triviaqa", "aime_2026"}:
+    if source == "triviaqa":
+        return TRIVIAQA_ANSWER_EVALUATOR_VERSION
+    if source == "aime_2026":
         return SKILLFLOW_REWARD_VERSION
     if source == "healthbench_professional":
         return HEALTHBENCH_EVALUATOR_VERSION
@@ -925,7 +928,10 @@ class LiveSmokeBackend:
         evaluation_only: bool = False,
     ) -> "LiveSmokeBackend":
         secret = os.environ.get("VECTOR_ENGINE_API_KEY", "")
-        if not secret:
+        # Evaluation-only runs may intentionally freeze a local-only model
+        # catalog.  In that case neither the Agent gateway nor the disabled
+        # HealthBench judge needs the remote provider credential.
+        if not secret and not evaluation_only:
             raise ConfigurationError(
                 "missing required environment variable: VECTOR_ENGINE_API_KEY"
             )

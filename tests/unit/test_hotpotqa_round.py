@@ -236,6 +236,24 @@ def test_correct_terminal_answer_is_not_relabelled_by_recovered_execution_error(
     )
 
 
+def test_paired_agentgraph_gain_is_not_collapsed_into_correct():
+    trajectory = {
+        "explicit_finish": True,
+        "turns": [{"canvas_feedback": "workflow finished"}],
+    }
+
+    assert (
+        _MODULE._failure_type(
+            {"available": True},
+            trajectory,
+            direct_em=0.0,
+            graph_em=1.0,
+            graph_f1=1.0,
+        )
+        == "architecture_gain"
+    )
+
+
 def test_report_counts_terminal_failure_without_dropping_evaluator_result():
     rows = [
         {

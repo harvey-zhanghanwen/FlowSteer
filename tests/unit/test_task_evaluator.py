@@ -8,6 +8,7 @@ from src.interactive.records import TaskRecord
 from src.interactive.task_evaluator import (
     GRADER_TEMPLATE,
     HOTPOTQA_ANSWER_EVALUATOR_VERSION,
+    TRIVIAQA_ANSWER_EVALUATOR_VERSION,
     evaluate_task,
 )
 
@@ -37,7 +38,7 @@ def task(
 
 
 class StaticEvaluatorTests(unittest.IsolatedAsyncioTestCase):
-    async def test_hotpot_uses_official_answer_metrics_and_trivia_keeps_skillflow(self) -> None:
+    async def test_hotpot_and_trivia_use_their_official_answer_metrics(self) -> None:
         hotpot = await evaluate_task(task("HotpotQA", ground_truth="the red fox"), "red fox")
         trivia = await evaluate_task(
             task(
@@ -55,7 +56,35 @@ class StaticEvaluatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("answer_only", hotpot.details["metric_scope"])
         self.assertGreater(trivia.reward or 0.0, 0.6)
         self.assertEqual(0.0, trivia.metrics["exact_match"])
-        self.assertEqual("skillflow.training.reward.v1", trivia.evaluator_version)
+        self.assertEqual(TRIVIAQA_ANSWER_EVALUATOR_VERSION, trivia.evaluator_version)
+        self.assertEqual("answer_only", trivia.details["metric_scope"])
+
+    async def test_trivia_matches_skillflow_formal_protocol_normalization(self) -> None:
+        punctuation = await evaluate_task(
+            task("TriviaQA", ground_truth="The F.E.A.R."),
+            "fear",
+        )
+        hyphen = await evaluate_task(
+            task("TriviaQA", ground_truth="Jean-Luc Picard"),
+            "Jean Luc Picard",
+        )
+        alias = await evaluate_task(
+            task(
+                "TriviaQA",
+                ground_truth="wrong",
+                payload={"accepted_answers": ["Harry Sinclair Lewis", "Sinclair Lewis"]},
+            ),
+            "Sinclair Lewis",
+        )
+
+        self.assertEqual(1.0, punctuation.metrics["exact_match"])
+        self.assertEqual(1.0, punctuation.metrics["token_f1"])
+        # SkillFlow removes punctuation; it does not turn a hyphen into a
+        # whitespace boundary before removal.
+        self.assertEqual(0.0, hyphen.metrics["exact_match"])
+        self.assertAlmostEqual(0.4, hyphen.metrics["token_f1"])
+        self.assertEqual(1.0, alias.metrics["exact_match"])
+        self.assertEqual(1.0, alias.metrics["token_f1"])
 
     async def test_hotpot_yes_no_and_hyphen_rules_match_official_scorer(self) -> None:
         yes_with_explanation = await evaluate_task(

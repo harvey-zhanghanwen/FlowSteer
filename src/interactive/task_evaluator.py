@@ -40,6 +40,7 @@ DEFAULT_RAGEN_ADAPTER_PATH = Path(
 
 SKILLFLOW_REWARD_VERSION = "skillflow.training.reward.v1"
 HOTPOTQA_ANSWER_EVALUATOR_VERSION = "hotpotqa.official.answer.v1"
+TRIVIAQA_ANSWER_EVALUATOR_VERSION = "triviaqa.official.answer.v1"
 HEALTHBENCH_EVALUATOR_VERSION = "openai.simple-evals.healthbench.v1"
 RAGEN_EVALUATOR_VERSION = "skillflow.ragen_adapter.v1"
 SWEBENCH_EVALUATOR_VERSION = "swebench.harness.v1"
@@ -126,6 +127,33 @@ def _hotpotqa_answer_f1(prediction: str, gold: str) -> float:
     precision = same / len(prediction_tokens)
     recall = same / len(gold_tokens)
     return 2 * precision * recall / (precision + recall)
+
+
+# SkillFlow Formal Protocol 10 scorer from
+# ``skillev_private.benchmarks.static``.  TriviaQA and HotpotQA share the
+# standard lower/punctuation/article/whitespace normalization, while HotpotQA
+# additionally carries the benchmark's yes/no/noanswer special case above.
+def _normalize_triviaqa_answer(text: str) -> str:
+    lowered = text.lower()
+    without_punctuation = "".join(
+        character for character in lowered if character not in string.punctuation
+    )
+    without_articles = re.sub(r"\b(a|an|the)\b", " ", without_punctuation)
+    return " ".join(without_articles.split())
+
+
+def _triviaqa_answer_f1(prediction: str, gold: str) -> float:
+    prediction_tokens = _normalize_triviaqa_answer(prediction).split()
+    gold_tokens = _normalize_triviaqa_answer(gold).split()
+    if not prediction_tokens or not gold_tokens:
+        return float(prediction_tokens == gold_tokens)
+    common = Counter(prediction_tokens) & Counter(gold_tokens)
+    overlap = sum(common.values())
+    if overlap == 0:
+        return 0.0
+    precision = overlap / len(prediction_tokens)
+    recall = overlap / len(gold_tokens)
+    return 2.0 * precision * recall / (precision + recall)
 
 
 def _extract_math_answer(text: str) -> str:
@@ -419,7 +447,11 @@ def _evaluate_static(
     evaluator_version = (
         HOTPOTQA_ANSWER_EVALUATOR_VERSION
         if dataset == "hotpotqa"
-        else SKILLFLOW_REWARD_VERSION
+        else (
+            TRIVIAQA_ANSWER_EVALUATOR_VERSION
+            if dataset == "triviaqa"
+            else SKILLFLOW_REWARD_VERSION
+        )
     )
     if not answers:
         return _invalid(
@@ -450,12 +482,16 @@ def _evaluate_static(
         score = token_f1
         metrics = {"exact_match": exact_match, "token_f1": token_f1}
     elif dataset == "triviaqa":
-        # SkillFlow's terminal reward remains token F1.  FlowSteer's QA
-        # evaluator reports normalized EM alongside it; preserve both on the
-        # exact same extracted answer span for local baseline comparisons.
-        token_f1 = _token_f1_multi(scored_prediction, answers)
+        # SkillFlow Formal Protocol 10 uses maximum token F1 across accepted
+        # answers and reports normalized exact match as the companion metric.
+        token_f1 = max(
+            _triviaqa_answer_f1(scored_prediction, answer) for answer in answers
+        )
         exact_match = max(
-            float(_normalize_answer(scored_prediction) == _normalize_answer(answer))
+            float(
+                _normalize_triviaqa_answer(scored_prediction)
+                == _normalize_triviaqa_answer(answer)
+            )
             for answer in answers
         )
         score = token_f1
@@ -474,7 +510,9 @@ def _evaluate_static(
             "scored_prediction": scored_prediction,
             "structured_answer_extracted": bool(tagged_answers),
             "metric_scope": (
-                "answer_only" if dataset == "hotpotqa" else "task_answer"
+                "answer_only"
+                if dataset in {"hotpotqa", "triviaqa"}
+                else "task_answer"
             ),
         },
         evaluator_version=evaluator_version,
@@ -1285,5 +1323,6 @@ __all__ = [
     "EvaluationOutcome",
     "GRADER_TEMPLATE",
     "HOTPOTQA_ANSWER_EVALUATOR_VERSION",
+    "TRIVIAQA_ANSWER_EVALUATOR_VERSION",
     "evaluate_task",
 ]

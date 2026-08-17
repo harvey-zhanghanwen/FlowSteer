@@ -770,8 +770,12 @@ def _failure_type(
     )
     # A transient execution error can be followed by a valid graph edit and a
     # correct terminal answer.  Keep that receipt in the trajectory, but do
-    # not classify a recovered, correct task as an evaluation failure.
+    # not classify a recovered, correct task as an evaluation failure.  Keep
+    # paired gains distinct so the Direct-vs-AgentGraph diagnostic is not
+    # silently collapsed into the generic correct bucket.
     if graph_em == 1.0:
+        if direct is not None and direct_em == 0.0:
+            return "architecture_gain"
         return "correct"
     if "execution_error=" in feedback:
         return "executor_or_provider_failure"
@@ -779,8 +783,6 @@ def _failure_type(
         return "direct_operational_failure_comparison_unavailable"
     if direct_em == 1.0 and graph_em == 0.0:
         return "architecture_regression_candidate"
-    if direct_em == 0.0 and graph_em == 1.0:
-        return "architecture_gain"
     if graph_em == 0.0 and graph_f1 > 0.0:
         return "partial_or_overlong_answer"
     if direct_em == 0.0 and graph_em == 0.0:
