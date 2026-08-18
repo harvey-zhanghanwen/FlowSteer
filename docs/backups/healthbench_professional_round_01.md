@@ -30,6 +30,54 @@ The tracked `artifacts/` tree is deliberately absent from this clean branch.
 Restore the external Step-0 adapter and the dependencies listed below before
 running model-backed evaluation.
 
+## Runtime recovery prerequisites
+
+The saved Round 01 configuration is evaluation-only, but it intentionally
+binds inference to the frozen Step-0 adapter
+`theta_jointqa_progressive_step_000000`.  The clean branch excludes that
+62 MiB adapter.  Restore the exact three-file adapter directory from the
+project backup branch before running Stable Zero or evaluation:
+
+```bash
+git fetch --depth 1 origin experiment/joint-qa-progressive-skill-rl-02
+git restore --source FETCH_HEAD -- \
+  artifacts/hotpotqa_multiagent_skill/policy_step_000000/theta
+```
+
+Set the external runtime and dataset paths without committing them:
+
+```bash
+export FLOWSTEER_DATASETS_ROOT=/path/to/datasets
+# Expected source under that root:
+# HealthBench_Professional/healthbench_professional_eval.jsonl
+export QWEN35_9B_MODEL_PATH=/path/to/Qwen3.5-9B
+export QWEN35_9B_TOKENIZER_PATH=/path/to/Qwen3.5-9B-tokenizer
+export FLOWSTEER_PYTHON_BIN=/path/to/skillflow-runtime/bin/python
+export FLOWSTEER_ROLLOUT_GPU=4
+export FLOWSTEER_SUPERVISOR_PORT=8015
+export VECTOR_ENGINE_API_KEY=your-local-secret
+```
+
+`VECTOR_ENGINE_API_KEY` is required by the evaluator-only
+`healthbench-reference-judge` in
+`config/model_catalog_healthbench_reference_judge.yaml`; that judge is not in
+the Director-selectable Agent model catalog.  Keep the key only in the local
+environment or ignored `.env`.  Keep port `8015` for this frozen configuration
+because the local Agent model entry in
+`config/model_catalog_hotpotqa_deep_v6.yaml` uses that endpoint.
+
+Start the SkillFlow SGLang Supervisor in a separate terminal:
+
+```bash
+bash scripts/start_qwen35_director_server.sh
+```
+
+The evaluation runner calls SGLang `/load_lora_adapter` and performs its
+adapter canary automatically; no manual adapter-load request is required.
+`requirements-qwen35-runtime.txt` describes the runtime dependencies, while
+the local model, CUDA/SGLang environment, adapter, raw conversations/rubrics,
+and judge service remain external to this source backup.
+
 ## Population boundary
 
 - Public records: 525.
