@@ -5,13 +5,14 @@
   },
   "candidate_actions": {
     "evidence_grounded_component_transaction": {
-      "instruction": "First identify the requested answer type and the evidence dependency structure. When two evidence subquestions are conditionally independent, use one ADD_SUBGRAPH transaction for two evidence branches feeding their first semantic fan-in Agent, then execute that component without setting output_agent_id. Only after Canvas feedback exposes the combined semantic answer, add the Format Agent in the next transaction. For serial or single-hop dependencies, execute the smallest directed semantic component before adding Format. Each evidence artifact states subject, relation, answer, qualifiers, and a verbatim evidence span. The fan-in Agent rejects entity/relation drift, intermediate values, answer-type mismatch, and unsupported refusal; it preserves the evidence surface form and unit. The Format Agent only emits that verified candidate in one <answer> tag."
+      "instruction": "First identify the requested answer type and the evidence dependency structure. When two evidence subquestions are conditionally independent, use one ADD_SUBGRAPH transaction for two evidence branches feeding their first semantic fan-in Agent, then execute that component without setting output_agent_id. Only after Canvas feedback exposes the combined semantic answer, use the next transaction to add the Format Agent, add the directed fan-in-to-Format relation, set Format as output_agent_id, and execute it. For serial or single-hop dependencies, execute the smallest directed semantic component before adding Format. Each evidence artifact states subject, relation, answer, qualifiers, and a verbatim evidence span. The fan-in Agent rejects entity/relation drift, intermediate values, answer-type mismatch, and unsupported refusal; it preserves the evidence surface form and unit. The Format Agent only emits that verified candidate in one <answer> tag."
     },
     "evidence_span_answer_contract": {
       "instruction": "Before FINISH, bind one answer candidate to the question's subject, relation, qualifiers, and expected semantic type. Prefer the exact supported surface form, unit, and necessary proper-name modifiers; exclude an intermediate entity, a type noun already supplied by the question, translation, expanded alias, explanation, or multiple candidates. When retrieval is incomplete but a supported candidate can still be identified from the available evidence and model knowledge, verify that candidate instead of returning a generic refusal. Route it to a Format Agent that only emits one <answer> tag."
     }
   },
   "candidate_source_artifacts": [
+    "reports/joint_qa_progressive/skill_epoch_000002/publication_results.json",
     "reports/hotpotqa_multiagent_skill",
     "reports/joint_qa_curve",
     "reports/joint_qa_mace_skill",
@@ -93,7 +94,7 @@
   },
   "experiment_version": "jointqa.mace-skill-evidence.epoch3.v1",
   "feature_schema_version": "jointqa.skill-candidate-dataset-interaction.v1",
-  "final_test_block": "joint_qa_v2/test (not opened by this protocol)",
+  "final_test_block": "joint_qa_v2/test task IDs are read only for overlap exclusion; answers and metrics are excluded from evidence, posterior fitting, and training",
   "forced_probe_excluded_from_grpo_and_benchmark": true,
   "intervention_scope": "full trajectory from a shared empty-Canvas snapshot",
   "natural_candidate_tasks": {

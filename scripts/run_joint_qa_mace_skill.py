@@ -188,7 +188,9 @@ ROUND3_CANDIDATE_ACTIONS: Mapping[str, Mapping[str, Any]] = {
             "independent, use one ADD_SUBGRAPH transaction for two evidence "
             "branches feeding their first semantic fan-in Agent, then execute that "
             "component without setting output_agent_id. Only after Canvas feedback exposes the combined semantic "
-            "answer, add the Format Agent in the next transaction. For serial or "
+            "answer, use the next transaction to add the Format Agent, add the "
+            "directed fan-in-to-Format relation, set Format as output_agent_id, and "
+            "execute it. For serial or "
             "single-hop dependencies, execute the smallest directed semantic "
             "component before adding Format. Each evidence artifact states subject, "
             "relation, answer, qualifiers, and a verbatim evidence span. The fan-in Agent "
@@ -943,11 +945,15 @@ def _manifest(
                 "(zero-based, stop-exclusive)"
             )
         ),
-        "final_test_block": "joint_qa_v2/test (not opened by this protocol)",
+        "final_test_block": (
+            "joint_qa_v2/test task IDs are read only for overlap exclusion; "
+            "answers and metrics are excluded from evidence, posterior fitting, and training"
+        ),
         "candidate_actions": {
             key: dict(value) for key, value in spec.candidate_actions.items()
         },
         "candidate_source_artifacts": [
+            "reports/joint_qa_progressive/skill_epoch_000002/publication_results.json",
             "reports/hotpotqa_multiagent_skill",
             "reports/joint_qa_curve",
             "reports/joint_qa_mace_skill",

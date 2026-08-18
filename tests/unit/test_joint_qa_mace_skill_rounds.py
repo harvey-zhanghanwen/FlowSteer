@@ -386,7 +386,8 @@ def test_epoch3_uses_unopened_development_validation_and_component_prior() -> No
         "first semantic fan-in Agent",
         "without setting output_agent_id",
         "after Canvas feedback",
-        "next transaction",
+        "directed fan-in-to-Format relation",
+        "set Format as output_agent_id",
         "subject, relation, answer, qualifiers",
         "verbatim evidence span",
         "evidence surface form and unit",
@@ -398,6 +399,11 @@ def test_epoch3_uses_unopened_development_validation_and_component_prior() -> No
         "joint_qa_v2/development:[32:52]_per_dataset "
         "(zero-based, stop-exclusive)"
     )
+    assert (
+        "reports/joint_qa_progressive/skill_epoch_000002/publication_results.json"
+        in manifest["candidate_source_artifacts"]
+    )
+    assert "task IDs are read only for overlap exclusion" in manifest["final_test_block"]
     assert manifest["selection_coordinates"]["skill_confirmation"] == {
         "partition": "development",
         "start": 32,
