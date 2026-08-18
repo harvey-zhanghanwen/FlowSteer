@@ -463,7 +463,7 @@ def _report(
     return {
         "schema_version": "flowsteer.triviaqa.round_report.v1",
         "dataset": "TriviaQA",
-        "project_split": "validation",
+        "project_split": str(config["triviaqa_evaluation"]["split"]),
         "sample_count": len(rows),
         "metric_scope": "SkillFlow_Formal_Protocol_10_compatible_answer_EM_token_F1",
         "retrieval_boundary": {
@@ -511,9 +511,15 @@ def _report_markdown(report: Mapping[str, Any]) -> str:
         if report.get("skill_injection_performed")
         else "本轮没有注入 Skill。"
     )
+    split = str(report.get("project_split", "validation"))
+    sample_role = (
+        "固定项目 validation"
+        if split == "validation"
+        else "固定项目 held-out test"
+    )
     return f"""# TriviaQA 第一轮架构验证
 
-固定项目 validation：**{report['sample_count']}** 题。Direct 与 AgentGraph 使用同一批题、同一 Qwen3.5-9B、同一公开检索观察和同一终局 evaluator。本轮未执行训练、GRPO、反向传播、优化器更新、LoRA 发布、贝叶斯后验更新或 Skill 发布。{skill_sentence}
+{sample_role}：**{report['sample_count']}** 题。Direct 与 AgentGraph 使用同一批题、同一 Qwen3.5-9B、同一公开检索观察和同一终局 evaluator。本轮未执行训练、GRPO、反向传播、优化器更新、LoRA 发布、贝叶斯后验更新或 Skill 发布。{skill_sentence}
 
 评测采用 SkillFlow Formal Protocol 10 兼容的答案归一化：对 accepted answers 取最大 token F1，并报告 normalized exact match。检索复用 SkillFlow `RetrievalIndex.search/read`；当前适配采用确定性问题查询预取，不等同于 SkillFlow 的模型驱动多轮 `search/read/complete` 完整协议。
 
@@ -541,6 +547,7 @@ async def run_trivia_round(
     resolved_config = Path(config_path).expanduser().resolve()
     config = load_yaml(resolved_config)
     validate_trivia_config(config)
+    bounded = _mapping(config["triviaqa_evaluation"], "triviaqa_evaluation")
     paths = _paths(config, root)
     selected = _select_tasks(config, root, paths["selected"])
     active_original = selected[:2] if canary_only else selected
@@ -559,7 +566,7 @@ async def run_trivia_round(
         "git_start": _git_state(root),
         "selected_task_ids": [task.task_id for task in selected],
         "active_task_count": len(active),
-        "fixed_split": "validation",
+        "fixed_split": str(bounded["split"]),
         "training_enabled": False,
         "optimizer_updates": 0,
         "retrieval_receipts_completed": len(receipts),

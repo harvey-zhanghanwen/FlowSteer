@@ -11,8 +11,11 @@ to experiment evidence:
   LoRA checkpoint.
 
 This script only binds existing receipts into the four checked-in evaluation
-templates.  It does not call a model/API, collect a rollout, train, publish an
-adapter, or mutate any input receipt.
+templates.  An explicit ``test`` scope may then retarget the same upstream
+HotpotQA/TriviaQA evaluator path to the frozen project test JSONL and a
+separate write-once artifact namespace.  It does not call a model/API, collect
+a rollout, train, publish an adapter, update a posterior, publish a Skill, or
+mutate any input receipt.
 """
 
 from __future__ import annotations
@@ -71,6 +74,25 @@ DEFAULT_STEP1_OUTPUTS = {
     / f"artifacts/joint_qa_progressive/evaluation_configs/step_000001_skill_off/{dataset}.yaml"
     for dataset in DATASETS
 }
+DEFAULT_FIXED_TEST_SKILL_ON_OUTPUTS = {
+    dataset: PROJECT_ROOT
+    / (
+        "artifacts/joint_qa_progressive/evaluation_configs/fixed_test/"
+        f"step_000000_skill_on/{dataset}.yaml"
+    )
+    for dataset in DATASETS
+}
+DEFAULT_FIXED_TEST_STEP1_OUTPUTS = {
+    dataset: PROJECT_ROOT
+    / (
+        "artifacts/joint_qa_progressive/evaluation_configs/fixed_test/"
+        f"step_000001_skill_off/{dataset}.yaml"
+    )
+    for dataset in DATASETS
+}
+
+FIXED_TEST_PATH = "data/joint_qa_v2/test.jsonl"
+EVALUATION_SPLITS = ("validation", "test")
 
 
 def _mapping(value: object, field: str) -> Mapping[str, Any]:
@@ -163,19 +185,149 @@ def _evaluation_identity(config: Mapping[str, Any]) -> tuple[object, ...]:
     )
 
 
+def _sample_count(value: object, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 128:
+        raise ValueError(f"{field} must be an integer between 1 and 128")
+    return value
+
+
+def _fixed_test_storage(mode: str, dataset: str) -> dict[str, str]:
+    """Return an isolated namespace while preserving the upstream artifact schema."""
+
+    root = f"artifacts/joint_qa_progressive/fixed_test/{mode}/{dataset}"
+    report_root = f"reports/joint_qa_progressive/fixed_test/{mode}"
+    storage = {
+        "root": f"{root}/evidence",
+        "selected_tasks_path": f"{root}/selected_tasks.jsonl",
+        "direct_predictions_path": f"{root}/direct_predictions.jsonl",
+        "trajectories_path": f"{root}/agentgraph_trajectories.jsonl",
+        "failures_path": f"{root}/collection_failures.jsonl",
+        "paired_results_path": f"{root}/paired_results.jsonl",
+        "wrong_demos_path": f"{root}/wrong_demos.jsonl",
+        "manifest_path": f"{root}/run_manifest.json",
+        "preflight_receipt_path": f"{root}/preflight_receipt.json",
+        "report_json_path": f"{report_root}/{dataset}_report.json",
+        "report_markdown_path": f"{report_root}/{dataset}_report.md",
+    }
+    if dataset == "triviaqa":
+        storage["retrieval_receipts_path"] = f"{root}/retrieval_receipts.jsonl"
+    return storage
+
+
+def _require_fixed_test_evaluation_only(
+    config: Mapping[str, Any], dataset: str, sample_count: int
+) -> None:
+    """Fail closed if a test-scoped config can collect learning evidence.
+
+    This is a configuration boundary only.  Runtime/evaluator behavior remains
+    the existing FlowSteer/SkillFlow-derived evaluation path.
+    """
+
+    experiment = _mapping(config.get("experiment"), "experiment")
+    data = _mapping(config.get("data"), "data")
+    bounded = _mapping(config.get(f"{dataset}_evaluation"), f"{dataset}_evaluation")
+    grpo = _mapping(config.get("grpo"), "grpo")
+    exploration = _mapping(config.get("exploration"), "exploration")
+    policy_sync = _mapping(config.get("policy_sync"), "policy_sync")
+    gpu = _mapping(config.get("gpu"), "gpu")
+    deployment = _mapping(config.get("deployment"), "deployment")
+    checks = {
+        "experiment.training_enabled": experiment.get("training_enabled") is False,
+        "experiment.sampling_schedule_purpose": experiment.get(
+            "sampling_schedule_purpose"
+        )
+        == "joint_qa_progressive_fixed_test",
+        "data.test_path": data.get("test_path") == FIXED_TEST_PATH,
+        "data.enforce_split_isolation": data.get("enforce_split_isolation") is True,
+        "evaluation.split": bounded.get("split") == "test",
+        "evaluation.sample_count": bounded.get("sample_count") == sample_count,
+        "evaluation.rollouts_per_task": bounded.get("rollouts_per_task") == 1,
+        "grpo.enabled": grpo.get("enabled") is False,
+        "grpo.optimization_passes": grpo.get(
+            "optimization_passes_per_rollout_batch"
+        )
+        == 0,
+        "grpo.optimizer_updates": grpo.get("max_optimizer_updates") == 0,
+        "exploration.enabled": exploration.get("enabled") is False,
+        "exploration.forced_probe_rollouts": exploration.get(
+            "forced_probe_rollouts"
+        )
+        == 0,
+        "policy_sync.enabled": policy_sync.get("enabled") is False,
+        "gpu.training_enabled": gpu.get("training_enabled") is False,
+        "deployment.allow_forced_probes": deployment.get("allow_forced_probes")
+        is False,
+    }
+    failed = [name for name, passed in checks.items() if not passed]
+    if failed:
+        raise RuntimeError(
+            f"{dataset} fixed test is not evaluation-only: " + ", ".join(failed)
+        )
+
+
+def _apply_evaluation_scope(
+    config: Mapping[str, Any],
+    *,
+    dataset: str,
+    mode: str,
+    evaluation_split: str,
+    sample_count: int | None,
+) -> dict[str, Any]:
+    """Scope a resolved config without changing its policy/evaluator/runtime."""
+
+    if evaluation_split not in EVALUATION_SPLITS:
+        raise ValueError(f"evaluation_split must be one of {EVALUATION_SPLITS}")
+    resolved = deepcopy(dict(config))
+    if evaluation_split == "validation":
+        if sample_count is not None:
+            raise ValueError(
+                "sample_count override is reserved for explicit test materialization"
+            )
+        return resolved
+    if sample_count is None:
+        raise ValueError("explicit test materialization requires sample_count")
+    count = _sample_count(sample_count, "sample_count")
+
+    experiment = dict(_mapping(resolved.get("experiment"), "experiment"))
+    experiment["name"] = f"{experiment['name']}_fixed_test"
+    experiment["sampling_schedule_purpose"] = "joint_qa_progressive_fixed_test"
+    experiment["output_dir"] = (
+        f"artifacts/joint_qa_progressive/fixed_test/{mode}/{dataset}"
+    )
+    resolved["experiment"] = experiment
+
+    bounded_field = f"{dataset}_evaluation"
+    bounded = dict(_mapping(resolved.get(bounded_field), bounded_field))
+    bounded.update(split="test", sample_count=count)
+    resolved[bounded_field] = bounded
+
+    storage = dict(_mapping(resolved.get("storage"), "storage"))
+    storage.update(_fixed_test_storage(mode, dataset))
+    resolved["storage"] = storage
+    _require_fixed_test_evaluation_only(resolved, dataset, count)
+    return resolved
+
+
 def materialize_skill_on_evaluations(
     *,
     publication_path: Path = DEFAULT_PUBLICATION,
     skill_store_path: Path = DEFAULT_SKILL_STORE,
     template_paths: Mapping[str, Path] | None = None,
     output_paths: Mapping[str, Path] | None = None,
+    evaluation_split: str = "validation",
+    sample_count: int | None = None,
 ) -> dict[str, Any]:
     """Bind the two evidence-gated ACTIVE Skills into matched Step 0 configs."""
 
     publication_path = Path(publication_path).resolve()
     skill_store_path = Path(skill_store_path).resolve()
     templates = _paths(template_paths, DEFAULT_SKILL_ON_TEMPLATES, "template_paths")
-    outputs = _paths(output_paths, DEFAULT_SKILL_ON_OUTPUTS, "output_paths")
+    default_outputs = (
+        DEFAULT_FIXED_TEST_SKILL_ON_OUTPUTS
+        if evaluation_split == "test"
+        else DEFAULT_SKILL_ON_OUTPUTS
+    )
+    outputs = _paths(output_paths, default_outputs, "output_paths")
     _ensure_outputs_absent(outputs)
 
     publication = _json_mapping(publication_path, "publication")
@@ -258,7 +410,13 @@ def materialize_skill_on_evaluations(
                 f"{dataset} Skill materialization changed policy/adapter/catalog/seed"
             )
         _require_no_placeholders(config, dataset)
-        configs[dataset] = config
+        configs[dataset] = _apply_evaluation_scope(
+            config,
+            dataset=dataset,
+            mode="step_000000_skill_on",
+            evaluation_split=evaluation_split,
+            sample_count=sample_count,
+        )
         identities[dataset] = identity
 
     if identities["hotpotqa"] != identities["triviaqa"]:
@@ -270,6 +428,14 @@ def materialize_skill_on_evaluations(
     return {
         "status": "materialized",
         "mode": "step0_skill_on",
+        "evaluation_split": evaluation_split,
+        "sample_count": (
+            sample_count
+            if evaluation_split == "test"
+            else configs["hotpotqa"]["hotpotqa_evaluation"]["sample_count"]
+        ),
+        "formal_full_test": evaluation_split == "test" and sample_count == 128,
+        "test_excluded_from_training_and_skill_evidence": evaluation_split == "test",
         "publication": str(publication_path),
         "skill_store": str(skill_store_path),
         "policy_version": policy_version,
@@ -338,13 +504,20 @@ def materialize_step1_skill_off_evaluations(
     sync_receipt_path: Path = DEFAULT_SYNC_RECEIPT,
     template_paths: Mapping[str, Path] | None = None,
     output_paths: Mapping[str, Path] | None = None,
+    evaluation_split: str = "validation",
+    sample_count: int | None = None,
 ) -> dict[str, Any]:
     """Bind one real LoRA update and successful SGLang sync into Step 1."""
 
     training_manifest_path = Path(training_manifest_path).resolve()
     sync_receipt_path = Path(sync_receipt_path).resolve()
     templates = _paths(template_paths, DEFAULT_STEP1_TEMPLATES, "template_paths")
-    outputs = _paths(output_paths, DEFAULT_STEP1_OUTPUTS, "output_paths")
+    default_outputs = (
+        DEFAULT_FIXED_TEST_STEP1_OUTPUTS
+        if evaluation_split == "test"
+        else DEFAULT_STEP1_OUTPUTS
+    )
+    outputs = _paths(output_paths, default_outputs, "output_paths")
     _ensure_outputs_absent(outputs)
 
     manifest = _json_mapping(training_manifest_path, "training_manifest")
@@ -422,7 +595,13 @@ def materialize_step1_skill_off_evaluations(
         if skills.get("enabled") is not False or skills.get("retrieval_top_k") != 0:
             raise RuntimeError(f"{dataset} Step 1 Skill-off template enables Skill retrieval")
         _require_no_placeholders(config, dataset)
-        configs[dataset] = config
+        configs[dataset] = _apply_evaluation_scope(
+            config,
+            dataset=dataset,
+            mode="step_000001_skill_off",
+            evaluation_split=evaluation_split,
+            sample_count=sample_count,
+        )
 
     identity = {
         dataset: (
@@ -450,6 +629,14 @@ def materialize_step1_skill_off_evaluations(
         "server_weight_version": server_weight_version,
         "server_weight_source": server_weight_source,
         "optimizer_updates": 1,
+        "evaluation_split": evaluation_split,
+        "sample_count": (
+            sample_count
+            if evaluation_split == "test"
+            else configs["hotpotqa"]["hotpotqa_evaluation"]["sample_count"]
+        ),
+        "formal_full_test": evaluation_split == "test" and sample_count == 128,
+        "test_excluded_from_training_and_skill_evidence": evaluation_split == "test",
         "outputs": {dataset: str(outputs[dataset]) for dataset in DATASETS},
         "evaluation_started": False,
     }
@@ -472,11 +659,13 @@ def build_parser() -> argparse.ArgumentParser:
     skill.add_argument(
         "--trivia-template", default=str(DEFAULT_SKILL_ON_TEMPLATES["triviaqa"])
     )
+    skill.add_argument("--hotpot-output")
+    skill.add_argument("--trivia-output")
+    skill.add_argument("--split", choices=EVALUATION_SPLITS, default="validation")
     skill.add_argument(
-        "--hotpot-output", default=str(DEFAULT_SKILL_ON_OUTPUTS["hotpotqa"])
-    )
-    skill.add_argument(
-        "--trivia-output", default=str(DEFAULT_SKILL_ON_OUTPUTS["triviaqa"])
+        "--sample-count",
+        type=int,
+        help="required for explicit test scope; use 128 for the formal full test",
     )
 
     step1 = subparsers.add_parser(
@@ -490,21 +679,41 @@ def build_parser() -> argparse.ArgumentParser:
     step1.add_argument(
         "--trivia-template", default=str(DEFAULT_STEP1_TEMPLATES["triviaqa"])
     )
-    step1.add_argument("--hotpot-output", default=str(DEFAULT_STEP1_OUTPUTS["hotpotqa"]))
-    step1.add_argument("--trivia-output", default=str(DEFAULT_STEP1_OUTPUTS["triviaqa"]))
+    step1.add_argument("--hotpot-output")
+    step1.add_argument("--trivia-output")
+    step1.add_argument("--split", choices=EVALUATION_SPLITS, default="validation")
+    step1.add_argument(
+        "--sample-count",
+        type=int,
+        help="required for explicit test scope; use 128 for the formal full test",
+    )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     templates = _dataset_paths(args.hotpot_template, args.trivia_template)
-    outputs = _dataset_paths(args.hotpot_output, args.trivia_output)
+    defaults = (
+        DEFAULT_FIXED_TEST_SKILL_ON_OUTPUTS
+        if args.mode == "skill-on" and args.split == "test"
+        else DEFAULT_FIXED_TEST_STEP1_OUTPUTS
+        if args.mode == "step1-skill-off" and args.split == "test"
+        else DEFAULT_SKILL_ON_OUTPUTS
+        if args.mode == "skill-on"
+        else DEFAULT_STEP1_OUTPUTS
+    )
+    outputs = _dataset_paths(
+        args.hotpot_output or str(defaults["hotpotqa"]),
+        args.trivia_output or str(defaults["triviaqa"]),
+    )
     if args.mode == "skill-on":
         result = materialize_skill_on_evaluations(
             publication_path=Path(args.publication),
             skill_store_path=Path(args.skill_store),
             template_paths=templates,
             output_paths=outputs,
+            evaluation_split=args.split,
+            sample_count=args.sample_count,
         )
     else:
         result = materialize_step1_skill_off_evaluations(
@@ -512,6 +721,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             sync_receipt_path=Path(args.sync_receipt),
             template_paths=templates,
             output_paths=outputs,
+            evaluation_split=args.split,
+            sample_count=args.sample_count,
         )
     print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
     return 0
