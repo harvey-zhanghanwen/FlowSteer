@@ -1,9 +1,0 @@
-{
-  "adapter_checkpoint": "/ssd1/iclr/1/FlowSteer/artifacts/hotpotqa_multiagent_skill/policy_step_000000/theta",
-  "initialization_seed": 20260811,
-  "optimizer_or_backward_performed": false,
-  "policy_step": 0,
-  "policy_version": "qwen35-9b-hotpot-step-000000",
-  "status": "materialized",
-  "trainable_tensor_count": 64
-}

@@ -13,6 +13,23 @@ from the AgentGraph model catalog, so the judge is not selectable by
 Flow-Director. This is not the unavailable OpenAI private held-out evaluator
 and must not be reported as an official leaderboard score.
 
+## Clean backup reference
+
+This recovery snapshot is published on branch
+`backup/healthbench-professional-stable-zero-arch-clean-20260819`. Restore it
+in an isolated directory so an existing dirty worktree is not changed:
+
+```bash
+git clone --single-branch --depth 1 \
+  --branch backup/healthbench-professional-stable-zero-arch-clean-20260819 \
+  https://github.com/harvey-zhanghanwen/FlowSteer.git \
+  FlowSteer-healthbench-restore
+```
+
+The tracked `artifacts/` tree is deliberately absent from this clean branch.
+Restore the external Step-0 adapter and the dependencies listed below before
+running model-backed evaluation.
+
 ## Population boundary
 
 - Public records: 525.
