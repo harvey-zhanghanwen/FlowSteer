@@ -46,7 +46,7 @@ SKILLFLOW_REWARD_VERSION = "skillflow.training.reward.v1"
 HOTPOTQA_ANSWER_EVALUATOR_VERSION = "hotpotqa.official.answer.v1"
 TRIVIAQA_ANSWER_EVALUATOR_VERSION = "triviaqa.official.answer.v1"
 HEALTHBENCH_EVALUATOR_VERSION = "openai.simple-evals.healthbench.v1"
-RAGEN_EVALUATOR_VERSION = "skillflow.ragen_adapter.v1"
+RAGEN_EVALUATOR_VERSION = "skillflow.ragen_adapter.v2"
 SWEBENCH_EVALUATOR_VERSION = "swebench.harness.v1"
 UNAVAILABLE_EVALUATOR_VERSION = "agentgraph.evaluator.unavailable.v1"
 
@@ -741,6 +741,12 @@ def _load_ragen_module(path: Path) -> Any:
     if not source.is_file():
         raise FileNotFoundError(f"RAGEN adapter not found: {source}")
     module_name = "_flowsteer_deployed_ragen_adapter"
+    loaded = sys.modules.get(module_name)
+    loaded_source = getattr(loaded, "__file__", None) if loaded is not None else None
+    if loaded_source and Path(str(loaded_source)).expanduser().resolve() == source:
+        # Retain SkillFlow's process-local ALFWorld inventory across evaluator
+        # calls instead of reloading the upstream environment for every task.
+        return loaded
     spec = importlib.util.spec_from_file_location(module_name, source)
     if spec is None or spec.loader is None:
         raise ImportError(f"cannot load RAGEN adapter: {source}")
@@ -1020,6 +1026,39 @@ async def _evaluate_environment(
                 evaluator_version=RAGEN_EVALUATOR_VERSION,
                 details=lock_details,
             )
+        # The SkillFlow official bridge pins the public query to the canonical
+        # instruction returned by the exact game reset.  Keep the immutable
+        # TaskRecord boundary aligned before executing any AgentGraph action.
+        requested_instruction = str(_record_field(record, "question", "")).strip()
+        actual_instruction = _environment_task_description(
+            record, dataset, observation, adapter
+        ).strip()
+        lock_details.update(
+            requested_instruction=requested_instruction,
+            actual_instruction=actual_instruction,
+        )
+        if not requested_instruction or actual_instruction != requested_instruction:
+            return _invalid(
+                "alfworld_instruction_mismatch",
+                evaluator_version=RAGEN_EVALUATOR_VERSION,
+                details=lock_details,
+            )
+        if "max_steps" in config:
+            requested_max_steps = config["max_steps"]
+            lock_details.update(
+                requested_max_steps=requested_max_steps,
+                evaluator_max_steps=max_environment_steps,
+            )
+            if (
+                isinstance(requested_max_steps, bool)
+                or not isinstance(requested_max_steps, int)
+                or requested_max_steps != max_environment_steps
+            ):
+                return _invalid(
+                    "alfworld_step_limit_mismatch",
+                    evaluator_version=RAGEN_EVALUATOR_VERSION,
+                    details=lock_details,
+                )
     elif dataset == "webshop":
         webshop_env = adapter._env
         if "goal_index" in config:
@@ -1241,7 +1280,27 @@ async def _evaluate_environment(
             break
 
     if dataset == "alfworld":
-        success = bool(terminal_info.get("won", terminal_reward > 0.0))
+        # SkillFlow's terminal evaluator accepts only its boolean goal
+        # predicate after an actual simulator terminal.  Reward magnitude is
+        # not an official substitute; a public step-budget exhaustion is a
+        # valid zero-success episode, not a fabricated terminal result.
+        if terminal:
+            won = terminal_info.get("won")
+            if type(won) is not bool:
+                return _invalid(
+                    "alfworld_terminal_success_unavailable",
+                    evaluator_version=RAGEN_EVALUATOR_VERSION,
+                    details={
+                        "env_type": env_type,
+                        "terminal_observation": observation,
+                        "terminal_info": _detail_value(terminal_info),
+                        "trace": trace,
+                        **lock_details,
+                    },
+                )
+            success = won
+        else:
+            success = False
         reward = 1.0 if success else 0.0
     else:
         reward = _clip_unit(terminal_reward)

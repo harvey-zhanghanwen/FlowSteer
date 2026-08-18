@@ -80,6 +80,22 @@ def test_aime_and_health_configs_are_evaluation_only():
             raise AssertionError("an optimizer-enabled evaluation config was accepted")
 
 
+def test_alfworld_round01_configs_are_interactive_evaluation_only():
+    for name, split, sample_count in (
+        ("development_alfworld_round_01.yaml", "train", 16),
+        ("evaluation_alfworld_round_01.yaml", "validation", 128),
+    ):
+        config = load_yaml(_ROOT / "config" / name)
+        _MODULE.validate_completion_benchmark_config(config)
+        section = config["alfworld_evaluation"]
+        assert section["split"] == split
+        assert section["sample_count"] == sample_count
+        assert config["data"]["catalog_path"] == "config/datasets_alfworld.yaml"
+        assert config["evaluation"]["max_environment_steps_by_source"]["alfworld"] == 50
+        assert config["experiment"]["training_enabled"] is False
+        assert config["skills"]["enabled"] is False
+
+
 def test_aime_selection_filters_the_official_2026_slice(tmp_path):
     config = _evaluation_config("aime_2026")
     config["aime2026_evaluation"]["sample_count"] = 2

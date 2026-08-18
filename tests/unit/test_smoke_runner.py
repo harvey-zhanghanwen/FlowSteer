@@ -62,6 +62,7 @@ validate_resumed_initial_rollouts = _MODULE._validate_resumed_initial_rollouts
 audit_active_skills_after_policy_update = (
     _MODULE._audit_active_skills_after_policy_update
 )
+workflow_problem = _MODULE._workflow_problem
 
 
 SOURCE_NAMES = {
@@ -95,6 +96,29 @@ def aligned_row(task: TaskRecord) -> dict:
         "schema_version": "flowsteer.agentgraph.task.v1",
         **task.to_dict(),
     }
+
+
+def test_alfworld_workflow_problem_exposes_only_the_execution_contract():
+    task = make_task("alfworld", 0)
+    config = {
+        "alfworld_evaluation": {
+            "direct_contract": "Return exactly one ALFWorld admissible action."
+        }
+    }
+
+    value = workflow_problem(task, config)
+
+    assert value.startswith(task.question + "\n\nExecution interface:")
+    assert "invoked once per environment step" in value
+    assert "current observation" in value
+    assert "Return exactly one ALFWorld admissible action." in value
+    assert "topology" not in value.lower()
+    assert "skill" not in value.lower()
+
+
+def test_static_workflow_problem_remains_the_immutable_question():
+    task = make_task("hotpotqa", 0)
+    assert workflow_problem(task, {}) == task.question
 
 
 def trajectory(task: TaskRecord, rollout_index: int, versions) -> TrajectoryRecord:

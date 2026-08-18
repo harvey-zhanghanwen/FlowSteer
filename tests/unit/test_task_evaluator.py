@@ -672,6 +672,134 @@ class EnvironmentEvaluatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("alfworld_task_lock_mismatch", outcome.reason)
         self.assertFalse(callback_called)
 
+    async def test_alfworld_requires_exact_canonical_instruction(self) -> None:
+        target = "/games/game-a.tw-pddl"
+        callback_called = False
+
+        class AlfredEnvConfig:
+            config_file = ""
+
+        class Inventory:
+            def __init__(self, config, mode):
+                self.game_files = [target]
+
+        class Adapter:
+            def __init__(self):
+                self._env = None
+                self.available_actions = ["look"]
+
+            def reset(self, env_type, env_config, question="", extra=None):
+                self._env = SimpleNamespace(current_game_file=target)
+                return "Welcome. Your task is to: look at alarmclock under the desklamp."
+
+        async def run_graph(problem):
+            nonlocal callback_called
+            callback_called = True
+            return "look"
+
+        module = SimpleNamespace(
+            AlfredEnvConfig=AlfredEnvConfig,
+            ALFWorldEnv=Inventory,
+            RAGENAdapter=Adapter,
+        )
+        record = task(
+            "ALFWorld",
+            question="Look at an alarm clock by lamp light.",
+            environment={
+                "env_type": "alfworld",
+                "env_config": {"game_file": target, "max_steps": 50},
+            },
+        )
+        with patch("src.interactive.task_evaluator._load_ragen_module", return_value=module):
+            outcome = await evaluate_task(
+                record, "", run_graph=run_graph, max_environment_steps=50
+            )
+        self.assertFalse(outcome.valid)
+        self.assertEqual("alfworld_instruction_mismatch", outcome.reason)
+        self.assertFalse(callback_called)
+
+    async def test_alfworld_requires_boolean_terminal_won(self) -> None:
+        target = "/games/game-a.tw-pddl"
+
+        class AlfredEnvConfig:
+            config_file = ""
+
+        class Inventory:
+            def __init__(self, config, mode):
+                self.game_files = [target]
+
+        class Adapter:
+            def __init__(self):
+                self._env = None
+                self.available_actions = ["look"]
+
+            def reset(self, env_type, env_config, question="", extra=None):
+                self._env = SimpleNamespace(current_game_file=target)
+                return "Room"
+
+            def step(self, action):
+                return "Finished", 10.0, True, {}
+
+        module = SimpleNamespace(
+            AlfredEnvConfig=AlfredEnvConfig,
+            ALFWorldEnv=Inventory,
+            RAGENAdapter=Adapter,
+        )
+        record = task(
+            "ALFWorld",
+            question="look",
+            environment={
+                "env_type": "alfworld",
+                "env_config": {"game_file": target, "max_steps": 50},
+            },
+        )
+        with patch("src.interactive.task_evaluator._load_ragen_module", return_value=module):
+            outcome = await evaluate_task(
+                record, "", run_graph=lambda _: "look", max_environment_steps=50
+            )
+        self.assertFalse(outcome.valid)
+        self.assertEqual("alfworld_terminal_success_unavailable", outcome.reason)
+        self.assertIsNone(outcome.reward)
+
+    async def test_alfworld_pins_the_recorded_step_limit(self) -> None:
+        target = "/games/game-a.tw-pddl"
+
+        class AlfredEnvConfig:
+            config_file = ""
+
+        class Inventory:
+            def __init__(self, config, mode):
+                self.game_files = [target]
+
+        class Adapter:
+            def __init__(self):
+                self._env = None
+                self.available_actions = ["look"]
+
+            def reset(self, env_type, env_config, question="", extra=None):
+                self._env = SimpleNamespace(current_game_file=target)
+                return "Room"
+
+        module = SimpleNamespace(
+            AlfredEnvConfig=AlfredEnvConfig,
+            ALFWorldEnv=Inventory,
+            RAGENAdapter=Adapter,
+        )
+        record = task(
+            "ALFWorld",
+            question="look",
+            environment={
+                "env_type": "alfworld",
+                "env_config": {"game_file": target, "max_steps": 50},
+            },
+        )
+        with patch("src.interactive.task_evaluator._load_ragen_module", return_value=module):
+            outcome = await evaluate_task(
+                record, "", run_graph=lambda _: "look", max_environment_steps=20
+            )
+        self.assertFalse(outcome.valid)
+        self.assertEqual("alfworld_step_limit_mismatch", outcome.reason)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,0 +1,44 @@
+# Dedicated official-live ALFWorld alignment catalog.
+#
+# The preparer enumerates the deployed SkillFlow RAGENAdapter inventory and
+# verifies every selected game through reset.  It does not use Turk annotations
+# as task identity.  Output is isolated from the earlier agentgraph_v1 files.
+
+schema_version: "flowsteer.agentgraph.datasets.v1"
+
+aligned_dir: "data/alfworld_v2"
+aligned_files:
+  train: "data/alfworld_v2/train.jsonl"
+  validation: "data/alfworld_v2/validation.jsonl"
+  test: "data/alfworld_v2/test.jsonl"
+  manifest: "data/alfworld_v2/manifest.json"
+
+alignment_recipe:
+  heldout_split: "validation"
+  heldout_count_per_dataset: 128
+  train_count_per_dataset: 512
+  selection: "sequential"
+  cycle_training_only: true
+
+sources:
+  alfworld:
+    enabled: true
+    display_name: "ALFWorld"
+    task_type: "interactive_agent"
+    metric: "success_rate"
+    ragen_adapter_path: "${FLOWSTEER_RAGEN_ADAPTER_PATH:-/home/test/SKILLEV/skillflow-bayesian-improve-deploy/src/ragen_adapter.py}"
+    alfworld_path: "${SKILLRL_ALFWORLD_PATH:-/home/test/datasets/ALFWorld/repo}"
+    alfworld_data: "${ALFWORLD_DATA:-/home/test/datasets/ALFWorld/data}"
+    candidate_selection: "family_round_robin"
+    # Official base_config task-type IDs 1..6, in their published order.
+    task_families:
+      - "pick_and_place_simple"
+      - "look_at_obj_in_light"
+      - "pick_clean_then_place_in_recep"
+      - "pick_heat_then_place_in_recep"
+      - "pick_cool_then_place_in_recep"
+      - "pick_two_obj_and_place"
+    env_config:
+      config_file: "${ALFWORLD_CONFIG_FILE:-/home/test/datasets/ALFWorld/repo/configs/base_config.yaml}"
+      mode: "train"
+      max_steps: 50
