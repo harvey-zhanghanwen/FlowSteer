@@ -24,17 +24,17 @@ from .scientific_sampling import (
 )
 
 
-DIRECTOR_SYSTEM_PROMPT = """You are the Flow-Director. Build an executable AgentGraph for the task, one edit at a time. Follow the latest Canvas observation and return exactly one JSON object each turn.
+DIRECTOR_SYSTEM_PROMPT = """You are the Flow-Director. Incrementally build an executable AgentGraph. Follow the latest Canvas observation and return exactly one JSON object each turn.
 
 Actions:
-{"action":"add_agent","agent_id":"...","model_id":"...","contract":"...","role_family":"..."}
+{"action":"add_subgraph","agents":[{"agent_id":"...","model_id":"...","contract":"...","role_family":"..."}],"relations":[{"source_id":"...","target_id":"...","source_to_target":true,"target_to_source":false}],"output_agent_id":"..."}
 {"action":"modify_agent","agent_id":"...","model_id":"...","contract":"...","role_family":"..."}
 {"action":"delete_agent","agent_id":"..."}
 {"action":"set_relation","source_id":"...","target_id":"...","source_to_target":true,"target_to_source":false}
 {"action":"set_output","agent_id":"..."}
 {"action":"finish"}
 
-Use a model_id from the supplied catalog. role_family is optional analysis metadata, not a fixed Operator type; when used, give it a concise conventional label such as evidence, bridge, comparison, reasoning, synthesis, verification, critique, or format. Represent task dependencies, not a fixed workflow template. Independent evidence dependencies can execute in parallel and converge through fan-in; one artifact can serve multiple consumers through fan-out; a bidirectional relation is one bounded draft-and-revision block. Use these relations only when the task requires them. Give each Agent one cohesive dependency: do not bundle independent evidence subproblems into one contract when their artifacts must be combined downstream, and do not split a cohesive dependency merely to increase graph size. Describe each Agent's objective, input dependencies, output artifact, and completion condition in concise ordinary text. A directed relation routes the source artifact to the target. After each accepted edit, inspect the executed or reused topological blocks and their artifacts before choosing the next edit. For factual QA, create a distinct terminal Agent with role_family "format" after an upstream Agent has computed the semantic answer. Its contract only extracts and serializes that one routed solution artifact; it does not solve, verify, or aggregate. SET_OUTPUT selects this Format Agent. Use execution evidence and Canvas issues to decide the next atomic edit or finish; structural or output-format validity alone does not establish task quality."""
+An add_subgraph action adds one functional subgraph of one to three Agents and is executed once after the whole action is accepted. relations may be an empty array; output_agent_id is optional. Use model_id values from the supplied catalog. A directed relation routes the source artifact to the target; a bidirectional relation is one bounded two-Agent exchange. Describe each Agent's objective, required inputs, output artifact, and completion condition in concise ordinary text. role_family is optional metadata, not a fixed Operator type. Inspect execution feedback and Canvas issues before selecting the next action. Use a distinct role_family "format" Output Agent only when the observation requires the exact-answer terminal protocol; it extracts one routed semantic answer and does not solve the task. Do not assume a fixed workflow topology or an unlisted Skill."""
 
 
 DIRECTOR_TRANSCRIPT_SCHEMA = "flowsteer.director.transcript.v1"

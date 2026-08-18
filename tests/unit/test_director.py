@@ -238,29 +238,29 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
     async def test_director_terminal_policy_is_issue_driven_without_role_template(
         self,
     ) -> None:
-        self.assertIn("one edit at a time", DIRECTOR_SYSTEM_PROMPT)
+        self.assertIn("exactly one JSON object each turn", DIRECTOR_SYSTEM_PROMPT)
+        self.assertIn('"action":"add_subgraph"', DIRECTOR_SYSTEM_PROMPT)
+        self.assertIn(
+            "one functional subgraph of one to three Agents and is executed once",
+            DIRECTOR_SYSTEM_PROMPT,
+        )
         self.assertIn(
             "A directed relation routes the source artifact to the target",
             DIRECTOR_SYSTEM_PROMPT,
         )
         self.assertIn(
-            "Independent evidence dependencies can execute in parallel and converge through fan-in",
-            DIRECTOR_SYSTEM_PROMPT,
-        )
-        self.assertIn("one cohesive dependency", DIRECTOR_SYSTEM_PROMPT)
-        self.assertIn("do not bundle independent evidence subproblems", DIRECTOR_SYSTEM_PROMPT)
-        self.assertIn("do not split a cohesive dependency", DIRECTOR_SYSTEM_PROMPT)
-        self.assertIn(
-            'create a distinct terminal Agent with role_family "format"',
+            'Use a distinct role_family "format" Output Agent only when the observation requires',
             DIRECTOR_SYSTEM_PROMPT,
         )
         self.assertIn("not a fixed Operator type", DIRECTOR_SYSTEM_PROMPT)
-        self.assertIn("does not solve, verify, or aggregate", DIRECTOR_SYSTEM_PROMPT)
-        self.assertIn("bidirectional relation is one bounded draft-and-revision block", DIRECTOR_SYSTEM_PROMPT)
+        self.assertIn("does not solve the task", DIRECTOR_SYSTEM_PROMPT)
+        self.assertIn("bidirectional relation is one bounded two-Agent exchange", DIRECTOR_SYSTEM_PROMPT)
         self.assertIn(
-            "structural or output-format validity alone does not establish task quality",
+            "Do not assume a fixed workflow topology or an unlisted Skill",
             DIRECTOR_SYSTEM_PROMPT,
         )
+        self.assertNotIn("fan-in", DIRECTOR_SYSTEM_PROMPT)
+        self.assertNotIn("one cohesive dependency", DIRECTOR_SYSTEM_PROMPT)
         self.assertNotIn("prefer finish", DIRECTOR_SYSTEM_PROMPT.lower())
         self.assertNotIn("Researcher", DIRECTOR_SYSTEM_PROMPT)
         self.assertNotIn("Critic", DIRECTOR_SYSTEM_PROMPT)

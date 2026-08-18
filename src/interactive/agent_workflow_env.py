@@ -115,7 +115,7 @@ class AgentWorkflowStepResult:
 
 
 class AgentWorkflowEnv:
-    """Apply one atomic edit per turn and incrementally execute valid graph blocks."""
+    """Apply one Canvas action per turn and execute the accepted graph revision."""
 
     def __init__(
         self,
@@ -127,6 +127,7 @@ class AgentWorkflowEnv:
         graph: Optional[AgentGraph] = None,
         execute_on_edit: bool = False,
         max_agents: Optional[int] = None,
+        max_agents_per_subgraph: int = 3,
         require_exact_answer_tag: bool = False,
         require_format_agent: bool = False,
     ) -> None:
@@ -138,6 +139,14 @@ class AgentWorkflowEnv:
             isinstance(max_agents, bool) or not isinstance(max_agents, int) or max_agents < 1
         ):
             raise AgentWorkflowStateError("max_agents must be a positive integer or None")
+        if (
+            isinstance(max_agents_per_subgraph, bool)
+            or not isinstance(max_agents_per_subgraph, int)
+            or max_agents_per_subgraph < 1
+        ):
+            raise AgentWorkflowStateError(
+                "max_agents_per_subgraph must be a positive integer"
+            )
         if type(require_exact_answer_tag) is not bool:
             raise AgentWorkflowStateError("require_exact_answer_tag must be bool")
         if type(require_format_agent) is not bool:
@@ -146,6 +155,7 @@ class AgentWorkflowEnv:
         self.runtime = runtime or AgentRuntime(model_registry, gateway)  # type: ignore[arg-type]
         self.execute_on_edit = execute_on_edit
         self.max_agents = max_agents
+        self.max_agents_per_subgraph = max_agents_per_subgraph
         self.require_exact_answer_tag = require_exact_answer_tag
         self.require_format_agent = require_format_agent
         self.parser = AgentActionParser()
@@ -240,6 +250,7 @@ class AgentWorkflowEnv:
             graph=AgentGraph.from_snapshot(state.graph),
             execute_on_edit=self.execute_on_edit,
             max_agents=self.max_agents,
+            max_agents_per_subgraph=self.max_agents_per_subgraph,
             require_exact_answer_tag=self.require_exact_answer_tag,
             require_format_agent=self.require_format_agent,
         )
@@ -346,7 +357,11 @@ class AgentWorkflowEnv:
                 validation.issues,
             )
         if (
-            action.action_type is AgentActionType.SET_OUTPUT
+            action.action_type in {
+                AgentActionType.SET_OUTPUT,
+                AgentActionType.ADD_SUBGRAPH,
+            }
+            and candidate.output_agent_id is not None
             and self.require_format_agent
         ):
             format_issue = self._format_agent_issue_for(candidate)
@@ -599,6 +614,65 @@ class AgentWorkflowEnv:
         )
 
     def _apply_mutation(self, graph: AgentGraph, action: AgentAction) -> set[str]:
+        if action.action_type is AgentActionType.ADD_SUBGRAPH:
+            if not action.agents:
+                raise GraphMutationError("add_subgraph action has no Agents")
+            if len(action.agents) > self.max_agents_per_subgraph:
+                raise GraphMutationError(
+                    "add_subgraph agent limit reached: "
+                    f"max_agents_per_subgraph={self.max_agents_per_subgraph}"
+                )
+            new_ids = {item.agent_id for item in action.agents}
+            existing_ids = {item.id for item in graph.nodes}
+            if new_ids & existing_ids:
+                duplicate = sorted(new_ids & existing_ids)[0]
+                raise GraphMutationError(
+                    f"add_subgraph Agent already exists: {duplicate}"
+                )
+            if (
+                self.max_agents is not None
+                and len(existing_ids) + len(new_ids) > self.max_agents
+            ):
+                raise GraphMutationError(
+                    f"agent limit reached: max_agents={self.max_agents}"
+                )
+
+            # FlowSteer's structure ADD mutates one candidate Canvas, validates
+            # the complete structure, then executes once.  Reuse the existing
+            # AgentGraph scalar mutations inside that transaction so their
+            # validation and dirty-closure semantics remain unchanged.
+            dirty_agents: set[str] = set()
+            for item in action.agents:
+                dirty_agents |= self._apply_mutation(
+                    graph,
+                    AgentAction(
+                        action_type=AgentActionType.ADD_AGENT,
+                        agent_id=item.agent_id,
+                        model_id=item.model_id,
+                        contract=item.contract,
+                        role_family=item.role_family,
+                    ),
+                )
+            for item in action.relations:
+                dirty_agents |= self._apply_mutation(
+                    graph,
+                    AgentAction(
+                        action_type=AgentActionType.SET_RELATION,
+                        source_id=item.source_id,
+                        target_id=item.target_id,
+                        source_to_target=item.source_to_target,
+                        target_to_source=item.target_to_source,
+                    ),
+                )
+            if action.output_agent_id is not None:
+                dirty_agents |= self._apply_mutation(
+                    graph,
+                    AgentAction(
+                        action_type=AgentActionType.SET_OUTPUT,
+                        agent_id=action.output_agent_id,
+                    ),
+                )
+            return graph.dirty_closure(dirty_agents)
         if action.action_type is AgentActionType.ADD_AGENT:
             if action.agent_id is None or action.model_id is None or action.contract is None:
                 raise GraphMutationError("add_agent action is incomplete")

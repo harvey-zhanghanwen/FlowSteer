@@ -347,3 +347,43 @@ quota, role template, forced relation, exploration bonus, or evaluator change.
 It has passed no-model interface regression tests only.  A future controlled
 rollout must use a new prompt/condition version and the same fixed tasks before
 any change in graph-depth behavior can be claimed.
+
+## Joint-QA component-level progressive Canvas phase
+
+The HotpotQA/TriviaQA joint phase changes the Canvas transaction boundary, not
+the AgentGraph runtime or task reward.  FlowSteer's legacy implementation
+already lets one structure-level `ADD` action create several child Operators;
+`InteractiveWorkflowEnv` waits until that structure is fully configured and
+then executes the workflow once.  A free AgentGraph has no fixed
+parallel/conditional/loop Operator AST, so the smallest compatible adaptation
+is an explicit subgraph transaction.
+
+| Current module | Classification | Reference source | Reused boundary | Minimal adaptation |
+| --- | --- | --- | --- | --- |
+| `agent_action_parser.py::ADD_SUBGRAPH` | Necessary adaptation | FlowSteer `action_parser.py::_parse_add_parallel/_parse_add_conditional/_parse_add_loop` | One Director action can describe one multi-node structure | The action carries one to three free Agents, their two-bit relations, and an optional Output identity because the fixed Operator DSL cannot represent model-labelled Agent nodes. |
+| `agent_workflow_env.py::_apply_mutation` | Direct reuse plus necessary adaptation | FlowSteer `workflow_env.py::_handle_add/_handle_prompt_input`; existing `AgentGraph` scalar mutations | Mutate a candidate Canvas, validate the completed structure, execute once, return one feedback observation | Existing `add_agent`, `set_relation`, `set_output`, dirty closure, validation, rollback and Runtime are reused inside one transaction.  A failed internal mutation never commits the candidate graph. |
+| `agent_runtime.py` | Direct reuse | Existing quotient-DAG scheduler and finite reciprocal block | Parallel ready blocks, fan-in/fan-out routing, and two-Agent draft/revision exchange | No change.  A subgraph transaction still produces the normal per-Agent call and communication receipts inside one Runtime invocation. |
+| `director.py` | Necessary prompt/action-schema adaptation | FlowSteer progressive Director loop; project design note's neutral search-space requirement | One sampled action, execution feedback, next Canvas observation | The concise prompt lists the legal subgraph fields and execution boundary.  It does not prescribe fan-in, chains, roles, Agent count, model family, or an unvalidated Skill. |
+| `config_loader.py` | Compatibility adaptation | Existing versioned AgentGraph configuration | Fail-closed action search space | Both the legacy six-scalar-action profile and the new `add_subgraph` profile remain readable; new trajectories use a new prompt/tool/condition version and cannot be grouped with legacy rollouts. |
+
+The joint Executor catalog directly reuses
+`model_catalog_hotpotqa_deep_v6.yaml`: one local Qwen3.5-9B arm and nine
+previously canary-backed remote exact model IDs, all with equal numeric priors.
+A fresh `/v1/models` list check is a run precondition; it does not replace the
+local Qwen3.5-9B Flow-Director or add a role-to-model routing template.
+
+The experiment-specific partition adapter
+`scripts/prepare_joint_qa_partitions.py` directly reuses the existing HotpotQA
+and TriviaQA converters and record retagging.  It freezes each canonical
+candidate stream as development `[0:128]`, train `[128:640]`, quarantine
+`[640:672]`, independent Skill confirmation `[672:736]`, and final test
+`[736:864]`.  The quarantine accounts for prior diagnostic exposure.  Full
+ordered task IDs are persisted in the generated manifest; confirmation and
+test are admitted to neither optimizer schedules nor Skill discovery.
+
+This phase does not treat topology depth, reciprocal communication, model
+diversity, or Skill visibility as reward.  GRPO remains terminal token F1 only;
+forced paired interventions remain ineligible for GRPO.  MACE-style UCB/EVSI,
+the joint Bayesian posterior and evidence-gated Skill lifecycle remain the
+project-algorithm layer required by the design note and must be evaluated in a
+separate frozen exploration epoch before any Skill becomes ACTIVE.

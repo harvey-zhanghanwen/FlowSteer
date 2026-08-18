@@ -116,7 +116,7 @@ def validate_agent_graph_config(value: Mapping[str, Any]) -> None:
         raise ConfigurationError("director.history_window must be a positive integer")
 
     graph = value["agent_graph"]
-    expected_actions = [
+    legacy_actions = [
         "add_agent",
         "modify_agent",
         "delete_agent",
@@ -124,8 +124,25 @@ def validate_agent_graph_config(value: Mapping[str, Any]) -> None:
         "set_output",
         "finish",
     ]
-    if graph.get("actions") != expected_actions:
-        raise ConfigurationError("AgentGraph search space must contain the six atomic actions")
+    subgraph_actions = [
+        "add_subgraph",
+        "modify_agent",
+        "delete_agent",
+        "set_relation",
+        "set_output",
+        "finish",
+    ]
+    action_profile = graph.get("actions")
+    if action_profile != legacy_actions and action_profile != subgraph_actions:
+        raise ConfigurationError(
+            "AgentGraph actions must use the legacy scalar profile or the "
+            "FlowSteer-compatible add_subgraph profile"
+        )
+    if action_profile == subgraph_actions:
+        if graph.get("max_agents_per_subgraph") != 3:
+            raise ConfigurationError(
+                "add_subgraph profile requires max_agents_per_subgraph=3"
+            )
     if graph.get("contract_type") != "free_text" or graph.get("relation_encoding") != "two_bit":
         raise ConfigurationError("AgentGraph requires free-text contracts and two-bit relations")
     max_agents = graph.get("max_agents")

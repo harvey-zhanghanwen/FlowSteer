@@ -82,6 +82,45 @@ class ConfigLoaderTests(unittest.TestCase):
         with self.assertRaises(ConfigurationError):
             validate_agent_graph_config(config)
 
+    def test_flowsteer_add_subgraph_action_profile_is_strict(self) -> None:
+        subgraph_actions = [
+            "add_subgraph",
+            "modify_agent",
+            "delete_agent",
+            "set_relation",
+            "set_output",
+            "finish",
+        ]
+        config = load_yaml("config/training_agent_graph.yaml")
+        config["agent_graph"]["actions"] = subgraph_actions
+        config["agent_graph"]["max_agents_per_subgraph"] = 3
+        validate_agent_graph_config(config)
+
+        for invalid_limit in (None, 0, 2, 4, True):
+            with self.subTest(invalid_limit=invalid_limit):
+                invalid = load_yaml("config/training_agent_graph.yaml")
+                invalid["agent_graph"]["actions"] = subgraph_actions
+                if invalid_limit is None:
+                    invalid["agent_graph"].pop("max_agents_per_subgraph", None)
+                else:
+                    invalid["agent_graph"]["max_agents_per_subgraph"] = invalid_limit
+                with self.assertRaises(ConfigurationError):
+                    validate_agent_graph_config(invalid)
+
+        mixed = load_yaml("config/training_agent_graph.yaml")
+        mixed["agent_graph"]["actions"] = [
+            "add_subgraph",
+            "add_agent",
+            "modify_agent",
+            "delete_agent",
+            "set_relation",
+            "set_output",
+            "finish",
+        ]
+        mixed["agent_graph"]["max_agents_per_subgraph"] = 3
+        with self.assertRaises(ConfigurationError):
+            validate_agent_graph_config(mixed)
+
     def test_smoke_config_is_strictly_bounded(self) -> None:
         config = load_yaml("config/training_agentgraph_smoke.yaml")
         validate_agent_graph_config(config)

@@ -55,6 +55,7 @@ def _source_and_heldout(
     test_path: Path,
     *,
     dataset_key: str,
+    skill_confirmation_path: Path | None = None,
 ) -> tuple[tuple[TaskRecord, ...], frozenset[str]]:
     train = _dataset_records(
         train_path,
@@ -73,12 +74,36 @@ def _source_and_heldout(
         expected_split="test",
         dataset_key=dataset_key,
     )
-    heldout_ids = frozenset(record.task_id for record in (*validation, *test))
+    skill_confirmation = (
+        ()
+        if skill_confirmation_path is None
+        else _dataset_records(
+            skill_confirmation_path,
+            expected_split="validation",
+            dataset_key=dataset_key,
+        )
+    )
+    heldout_ids = frozenset(
+        record.task_id for record in (*validation, *skill_confirmation, *test)
+    )
+
+    def base_task_id(record: TaskRecord) -> str:
+        sampling = record.metadata.get("sampling")
+        if isinstance(sampling, Mapping):
+            value = sampling.get("base_task_id")
+            if isinstance(value, str) and value:
+                return value
+        return record.task_id
+
     overlap = sorted(
-        record.task_id for record in train if record.task_id in heldout_ids
+        record.task_id
+        for record in train
+        if record.task_id in heldout_ids or base_task_id(record) in heldout_ids
     )
     if overlap:
-        raise ValueError(f"{dataset_key} train IDs overlap validation/test IDs")
+        raise ValueError(
+            f"{dataset_key} train IDs overlap held-out IDs directly or through base_task_id"
+        )
     return train, heldout_ids
 
 
@@ -337,6 +362,7 @@ class FrozenJointQATrainingSchedule:
         train_path: Path,
         validation_path: Path,
         test_path: Path,
+        skill_confirmation_path: Path | None = None,
     ) -> tuple[tuple[TaskRecord, ...], ...]:
         """Resolve each paired step without changing either aligned split order."""
 
@@ -348,6 +374,7 @@ class FrozenJointQATrainingSchedule:
                 validation_path,
                 test_path,
                 dataset_key=source.dataset_key,
+                skill_confirmation_path=skill_confirmation_path,
             )
             train_ids = tuple(record.task_id for record in train)
             if len(train_ids) != source.source_task_count:
@@ -370,7 +397,7 @@ class FrozenJointQATrainingSchedule:
                     raise ValueError("frozen task position resolves to another task ID")
                 if record.task_id in heldout_by_dataset[task.dataset_key]:
                     raise ValueError(
-                        "frozen joint-QA schedule references validation/test task IDs"
+                        "frozen joint-QA schedule references held-out task IDs"
                     )
                 resolved_tasks.append(record)
             resolved_steps.append(tuple(resolved_tasks))
@@ -382,6 +409,7 @@ def freeze_joint_qa_training_schedule(
     train_path: Path,
     validation_path: Path,
     test_path: Path,
+    skill_confirmation_path: Path | None = None,
     task_positions_by_dataset: Mapping[str, Sequence[int]],
     rollouts_per_task: int,
 ) -> FrozenJointQATrainingSchedule:
@@ -414,13 +442,14 @@ def freeze_joint_qa_training_schedule(
             validation_path,
             test_path,
             dataset_key=dataset_key,
+            skill_confirmation_path=skill_confirmation_path,
         )
         if any(position >= len(train) for position in positions):
             raise ValueError(f"task position is outside the {dataset_key} train split")
         selected = tuple(train[position] for position in positions)
         if any(record.task_id in heldout_ids for record in selected):
             raise ValueError(
-                "joint-QA training schedule cannot contain validation/test task IDs"
+                "joint-QA training schedule cannot contain held-out task IDs"
             )
         positions_by_dataset[dataset_key] = positions
         source_records[dataset_key] = train

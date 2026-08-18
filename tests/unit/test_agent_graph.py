@@ -17,7 +17,7 @@ from src.interactive.agent_graph import (
     DependencyEdgeEvidence,
     GraphMutationError,
 )
-from src.interactive.agent_runtime import AgentRequest
+from src.interactive.agent_runtime import AgentRequest, AgentRuntime
 from src.interactive.agent_workflow_env import AgentWorkflowEnv, AgentWorkflowStateError
 from src.interactive.model_registry import (
     ModelRegistry,
@@ -388,6 +388,85 @@ class ParserTests(unittest.TestCase):
         self.assertIs(action.action_type, AgentActionType.FINISH)
         self.assertEqual('{"action":"finish"}', text[action.consumed_start:action.consumed_end])
 
+    def test_add_subgraph_accepts_one_to_three_agents_and_consumes_full_object(self) -> None:
+        payloads = [
+            '{"action":"add_subgraph","agents":['
+            '{"agent_id":"a","model_id":"m","contract":"answer"}'
+            '],"relations":[]}',
+            '{"action":"add_subgraph","agents":['
+            '{"agent_id":"a","model_id":"m","prompt":"draft"},'
+            '{"agent_id":"b","model_id":"m","contract":"revise"}'
+            '],"relations":['
+            '{"source_id":"a","target_id":"b",'
+            '"source_to_target":true,"target_to_source":true}'
+            '],"output_agent_id":"b"}',
+            '{"action":"add_subgraph","agents":['
+            '{"agent_id":"left","model_id":"m","contract":"left evidence"},'
+            '{"agent_id":"right","model_id":"m","contract":"right evidence"},'
+            '{"agent_id":"merge","model_id":"m","contract":"synthesize"}'
+            '],"relations":['
+            '{"source_id":"left","target_id":"merge",'
+            '"source_to_target":true,"target_to_source":false},'
+            '{"source_id":"right","target_id":"merge",'
+            '"source_to_target":true,"target_to_source":false}'
+            '],"output_agent_id":"merge"}',
+        ]
+
+        for expected_count, payload in enumerate(payloads, start=1):
+            with self.subTest(expected_count=expected_count):
+                text = f"Canvas analysis.\n{payload}\n" + '{"action":"finish"}'
+                action = self.parser.parse(text)
+                self.assertIs(action.action_type, AgentActionType.ADD_SUBGRAPH)
+                self.assertEqual(expected_count, len(action.agents))
+                self.assertEqual(
+                    payload,
+                    text[action.consumed_start : action.consumed_end],
+                )
+                self.assertEqual(payload, action.raw_json)
+
+        self.assertIsNone(self.parser.parse(payloads[0]).output_agent_id)
+        self.assertNotIn("output_agent_id", self.parser.parse(payloads[0]).to_dict())
+
+    def test_add_subgraph_rejects_agent_count_and_invalid_relations(self) -> None:
+        invalid = [
+            '{"action":"add_subgraph","agents":[],"relations":[]}',
+            '{"action":"add_subgraph","agents":['
+            '{"agent_id":"a","model_id":"m","contract":"a"},'
+            '{"agent_id":"b","model_id":"m","contract":"b"},'
+            '{"agent_id":"c","model_id":"m","contract":"c"},'
+            '{"agent_id":"d","model_id":"m","contract":"d"}'
+            '],"relations":[]}',
+            '{"action":"add_subgraph","agents":['
+            '{"agent_id":"a","model_id":"m","contract":"a"},'
+            '{"agent_id":"a","model_id":"m","contract":"duplicate"}'
+            '],"relations":[]}',
+            '{"action":"add_subgraph","agents":['
+            '{"agent_id":"a","model_id":"m","contract":"a"}'
+            '],"relations":['
+            '{"source_id":"a","target_id":"a",'
+            '"source_to_target":true,"target_to_source":false}'
+            ']}',
+            '{"action":"add_subgraph","agents":['
+            '{"agent_id":"a","model_id":"m","contract":"a"},'
+            '{"agent_id":"b","model_id":"m","contract":"b"}'
+            '],"relations":['
+            '{"source_id":"a","target_id":"b",'
+            '"source_to_target":false,"target_to_source":false}'
+            ']}',
+            '{"action":"add_subgraph","agents":['
+            '{"agent_id":"a","model_id":"m","contract":"a"},'
+            '{"agent_id":"b","model_id":"m","contract":"b"}'
+            '],"relations":['
+            '{"source_id":"a","target_id":"b",'
+            '"source_to_target":true,"target_to_source":false},'
+            '{"source_id":"b","target_id":"a",'
+            '"source_to_target":false,"target_to_source":true}'
+            ']}',
+        ]
+        for raw in invalid:
+            with self.subTest(raw=raw), self.assertRaises(AgentActionParseError):
+                self.parser.parse(raw)
+
     def test_strict_rejections(self) -> None:
         invalid = [
             '[{"action":"finish"}]',
@@ -499,7 +578,169 @@ class _SequenceGateway(_ImmediateGateway):
         return self.responses.pop(0)
 
 
+class _CountingRuntime(AgentRuntime):
+    """Count progressive execution boundaries without changing Executor calls."""
+
+    def __init__(self, model_registry: ModelRegistry, gateway: _ImmediateGateway) -> None:
+        super().__init__(model_registry, gateway)
+        self.execute_count = 0
+
+    async def execute(self, *args: object, **kwargs: object):  # type: ignore[no-untyped-def, override]
+        self.execute_count += 1
+        return await super().execute(*args, **kwargs)  # type: ignore[arg-type]
+
+
 class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
+    async def test_add_subgraph_rolls_back_the_whole_transaction(self) -> None:
+        registry = make_registry()
+        gateway = _ImmediateGateway()
+        runtime = _CountingRuntime(registry, gateway)
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=runtime,
+            problem="question",
+            execute_on_edit=True,
+        )
+
+        rejected = await env.step(
+            '{"action":"add_subgraph","agents":['
+            '{"agent_id":"a","model_id":"balanced","contract":"draft"},'
+            '{"agent_id":"b","model_id":"missing","contract":"verify"}'
+            '],"relations":['
+            '{"source_id":"a","target_id":"b",'
+            '"source_to_target":true,"target_to_source":false}'
+            '],"output_agent_id":"b"}'
+        )
+
+        self.assertFalse(rejected.accepted)
+        self.assertEqual(0, env.revision)
+        self.assertEqual((), env.graph.nodes)
+        self.assertEqual((), env.graph.relations)
+        self.assertIsNone(env.graph.output_agent_id)
+        self.assertEqual(0, runtime.execute_count)
+        self.assertEqual([], gateway.requests)
+
+    async def test_three_agent_fan_in_subgraph_has_one_runtime_execution_boundary(self) -> None:
+        registry = make_registry()
+        gateway = _ImmediateGateway()
+        runtime = _CountingRuntime(registry, gateway)
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=runtime,
+            problem="question",
+            execute_on_edit=True,
+        )
+
+        added = await env.step(
+            '{"action":"add_subgraph","agents":['
+            '{"agent_id":"left","model_id":"cheap","contract":"left evidence"},'
+            '{"agent_id":"right","model_id":"fast","contract":"right evidence"},'
+            '{"agent_id":"merge","model_id":"balanced","contract":"synthesize"}'
+            '],"relations":['
+            '{"source_id":"left","target_id":"merge",'
+            '"source_to_target":true,"target_to_source":false},'
+            '{"source_id":"right","target_id":"merge",'
+            '"source_to_target":true,"target_to_source":false}'
+            '],"output_agent_id":"merge"}'
+        )
+
+        self.assertTrue(added.accepted)
+        self.assertEqual(1, runtime.execute_count)
+        self.assertEqual({"left", "right", "merge"}, set(added.execution.executed_agent_ids))
+        self.assertEqual({"left", "right", "merge"}, {item.agent.id for item in gateway.requests})
+        self.assertEqual(3, len(gateway.requests))
+        self.assertEqual("fan_in", env.graph.topology_statistics()["topology_family"])
+
+        finished = await env.step('{"action":"finish"}')
+        self.assertTrue(finished.accepted)
+        self.assertTrue(finished.execution_reused)
+        self.assertEqual(1, runtime.execute_count)
+
+    async def test_two_agent_bidirectional_subgraph_executes_one_bounded_block(self) -> None:
+        registry = make_registry()
+        gateway = _ImmediateGateway()
+        runtime = _CountingRuntime(registry, gateway)
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=runtime,
+            problem="question",
+            execute_on_edit=True,
+        )
+
+        added = await env.step(
+            '{"action":"add_subgraph","agents":['
+            '{"agent_id":"draft","model_id":"cheap","contract":"propose"},'
+            '{"agent_id":"review","model_id":"fast","contract":"review and revise"}'
+            '],"relations":['
+            '{"source_id":"draft","target_id":"review",'
+            '"source_to_target":true,"target_to_source":true}'
+            '],"output_agent_id":"review"}'
+        )
+
+        self.assertTrue(added.accepted)
+        self.assertEqual(1, runtime.execute_count)
+        self.assertEqual(("draft", "review"), added.execution.executed_agent_ids)
+        self.assertEqual(4, len(added.execution.calls))
+        self.assertEqual(
+            {"draft", "revision"},
+            {call.request.phase.value for call in added.execution.calls},
+        )
+        self.assertIn("reciprocal", env.graph.topology_statistics()["topology_motifs"])
+
+    async def test_add_subgraph_can_select_a_distinct_format_output_agent(self) -> None:
+        registry = make_registry()
+
+        class FormatGateway(_ImmediateGateway):
+            async def generate(self, request: AgentRequest) -> str:
+                self.requests.append(request)
+                if request.is_format_agent:
+                    return "<answer>Paris</answer>"
+                return "semantic answer: Paris"
+
+        gateway = FormatGateway()
+        runtime = _CountingRuntime(registry, gateway)
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=runtime,
+            problem="question",
+            execute_on_edit=True,
+            require_exact_answer_tag=True,
+            require_format_agent=True,
+        )
+
+        added = await env.step(
+            '{"action":"add_subgraph","agents":['
+            '{"agent_id":"solver","model_id":"balanced",'
+            '"contract":"compute one semantic answer","role_family":"reasoning"},'
+            '{"agent_id":"formatter","model_id":"fast",'
+            '"contract":"extract the routed answer","role_family":"format"}'
+            '],"relations":['
+            '{"source_id":"solver","target_id":"formatter",'
+            '"source_to_target":true,"target_to_source":false}'
+            '],"output_agent_id":"formatter"}'
+        )
+
+        self.assertTrue(added.accepted)
+        self.assertEqual(1, runtime.execute_count)
+        self.assertEqual("formatter", env.graph.output_agent_id)
+        self.assertIsNone(env.format_agent_issue())
+        output_request = next(
+            call.request
+            for call in added.execution.calls
+            if call.request.agent.id == "formatter"
+        )
+        self.assertTrue(output_request.is_output_agent)
+        self.assertTrue(output_request.is_format_agent)
+        self.assertEqual(
+            ["solver"],
+            [message.source_agent_id for message in output_request.upstream],
+        )
+
+        finished = await env.step('{"action":"finish"}')
+        self.assertTrue(finished.accepted)
+        self.assertEqual("<answer>Paris</answer>", finished.final_answer)
+        self.assertEqual(1, runtime.execute_count)
+
     async def test_exact_answer_terminal_protocol_rejects_malformed_finish(self) -> None:
         registry = make_registry()
         gateway = _SequenceGateway(["draft", "Paris", "<answer>Paris</answer>"])

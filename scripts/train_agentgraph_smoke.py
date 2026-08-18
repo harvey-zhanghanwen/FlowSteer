@@ -1511,6 +1511,9 @@ class LiveSmokeBackend:
             runtime=self.runtime,
             execute_on_edit=bool(director["execute_on_edit"]),
             max_agents=int(graph_config["max_agents"]),
+            max_agents_per_subgraph=int(
+                graph_config.get("max_agents_per_subgraph", 3)
+            ),
             require_exact_answer_tag=(
                 terminal_protocol == "exact_single_answer_tag"
             ),

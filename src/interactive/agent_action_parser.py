@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Mapping, Optional, Set, Tuple
 
 
 class AgentActionType(str, Enum):
+    ADD_SUBGRAPH = "add_subgraph"
     ADD_AGENT = "add_agent"
     MODIFY_AGENT = "modify_agent"
     DELETE_AGENT = "delete_agent"
@@ -18,7 +19,41 @@ class AgentActionType(str, Enum):
 
 
 class AgentActionParseError(ValueError):
-    """Raised when the first JSON object is not one strict atomic action."""
+    """Raised when the first JSON object is not one strict Canvas action."""
+
+
+@dataclass(frozen=True, slots=True)
+class AgentSpec:
+    agent_id: str
+    model_id: str
+    contract: str
+    role_family: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, object]:
+        result: Dict[str, object] = {
+            "agent_id": self.agent_id,
+            "model_id": self.model_id,
+            "contract": self.contract,
+        }
+        if self.role_family is not None:
+            result["role_family"] = self.role_family
+        return result
+
+
+@dataclass(frozen=True, slots=True)
+class RelationSpec:
+    source_id: str
+    target_id: str
+    source_to_target: bool
+    target_to_source: bool
+
+    def to_dict(self) -> Dict[str, object]:
+        return {
+            "source_id": self.source_id,
+            "target_id": self.target_id,
+            "source_to_target": self.source_to_target,
+            "target_to_source": self.target_to_source,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,6 +71,9 @@ class AgentAction:
     consumed_end: int = 0
     # Optional free-text analysis metadata; it does not select an Operator.
     role_family: Optional[str] = None
+    agents: Tuple[AgentSpec, ...] = ()
+    relations: Tuple[RelationSpec, ...] = ()
+    output_agent_id: Optional[str] = None
 
     @property
     def prompt(self) -> Optional[str]:
@@ -43,6 +81,12 @@ class AgentAction:
 
     def to_dict(self) -> Dict[str, object]:
         result: Dict[str, object] = {"action": self.action_type.value}
+        if self.action_type is AgentActionType.ADD_SUBGRAPH:
+            result["agents"] = [item.to_dict() for item in self.agents]
+            result["relations"] = [item.to_dict() for item in self.relations]
+            if self.output_agent_id is not None:
+                result["output_agent_id"] = self.output_agent_id
+            return result
         for key in (
             "agent_id",
             "model_id",
@@ -90,6 +134,52 @@ def _strict_bool(data: Mapping[str, Any], key: str) -> bool:
     if type(value) is not bool:
         raise AgentActionParseError(f"{key} must be a JSON boolean")
     return value
+
+
+def _agent_spec(data: Any) -> AgentSpec:
+    if not isinstance(data, Mapping):
+        raise AgentActionParseError("each add_subgraph agent must be an object")
+    allowed_contracts = {"contract", "prompt"} & set(data)
+    if len(allowed_contracts) != 1:
+        raise AgentActionParseError(
+            "each add_subgraph agent requires exactly one of contract or prompt"
+        )
+    contract_key = next(iter(allowed_contracts))
+    _check_keys(
+        data,
+        {"agent_id", "model_id", contract_key},
+        {"role_family"},
+    )
+    return AgentSpec(
+        agent_id=_required_string(data, "agent_id"),
+        model_id=_required_string(data, "model_id"),
+        contract=_required_string(data, contract_key),
+        role_family=_optional_string(data, "role_family"),
+    )
+
+
+def _relation_spec(data: Any) -> RelationSpec:
+    if not isinstance(data, Mapping):
+        raise AgentActionParseError("each add_subgraph relation must be an object")
+    _check_keys(
+        data,
+        {"source_id", "target_id", "source_to_target", "target_to_source"},
+    )
+    source_id = _required_string(data, "source_id")
+    target_id = _required_string(data, "target_id")
+    if source_id == target_id:
+        raise AgentActionParseError("add_subgraph relation endpoints must be different")
+    relation = RelationSpec(
+        source_id=source_id,
+        target_id=target_id,
+        source_to_target=_strict_bool(data, "source_to_target"),
+        target_to_source=_strict_bool(data, "target_to_source"),
+    )
+    if not relation.source_to_target and not relation.target_to_source:
+        raise AgentActionParseError(
+            "add_subgraph relation must contain at least one directed edge"
+        )
+    return relation
 
 
 def _check_keys(data: Mapping[str, Any], required: Set[str], optional: Set[str] = set()) -> None:
@@ -168,6 +258,40 @@ class AgentActionParser:
             "consumed_start": start,
             "consumed_end": end,
         }
+        if action_type is AgentActionType.ADD_SUBGRAPH:
+            _check_keys(
+                data,
+                {"action", "agents", "relations"},
+                {"output_agent_id"},
+            )
+            raw_agents = data.get("agents")
+            raw_relations = data.get("relations")
+            if not isinstance(raw_agents, list) or not raw_agents:
+                raise AgentActionParseError("add_subgraph agents must be a non-empty array")
+            if not isinstance(raw_relations, list):
+                raise AgentActionParseError("add_subgraph relations must be an array")
+            agents = tuple(_agent_spec(item) for item in raw_agents)
+            if len(agents) > 3:
+                raise AgentActionParseError(
+                    "add_subgraph supports at most three Agents"
+                )
+            if len({item.agent_id for item in agents}) != len(agents):
+                raise AgentActionParseError("add_subgraph agent_id values must be unique")
+            relations = tuple(_relation_spec(item) for item in raw_relations)
+            relation_pairs = {
+                tuple(sorted((item.source_id, item.target_id))) for item in relations
+            }
+            if len(relation_pairs) != len(relations):
+                raise AgentActionParseError(
+                    "add_subgraph may contain at most one relation per endpoint pair"
+                )
+            return AgentAction(
+                agents=agents,
+                relations=relations,
+                output_agent_id=_optional_string(data, "output_agent_id"),
+                **common,
+            )
+
         if action_type is AgentActionType.ADD_AGENT:
             allowed_contracts = {"contract", "prompt"} & set(data)
             if len(allowed_contracts) != 1:
@@ -257,6 +381,8 @@ __all__ = [
     "AgentActionParseError",
     "AgentActionParser",
     "AgentActionType",
+    "AgentSpec",
+    "RelationSpec",
     "parse_agent_action",
     "parse_first_agent_action",
 ]

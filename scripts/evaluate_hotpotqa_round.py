@@ -133,7 +133,7 @@ def validate_hotpot_config(config: Mapping[str, Any]) -> None:
         "experiment.phase": experiment.get("phase") == "hotpotqa_evaluation",
         "experiment.training_enabled": experiment.get("training_enabled") is False,
         "dataset_key": bounded.get("dataset_key") == "hotpotqa",
-        "split": bounded.get("split") in {"train", "validation"},
+        "split": bounded.get("split") in {"train", "validation", "test"},
         "selection": bounded.get("selection") in {"sequential", "task_ids"},
         "rollouts_per_task": bounded.get("rollouts_per_task") == 1,
         "direct_model_id": bounded.get("direct_model_id") == "qwen3.5-9b-local",
@@ -229,7 +229,15 @@ def _select_tasks(config: Mapping[str, Any], root: Path, selected_path: Path) ->
     bounded = _mapping(config["hotpotqa_evaluation"], "hotpotqa_evaluation")
     count = int(bounded["sample_count"])
     split = str(bounded["split"])
-    source_field = "train_path" if split == "train" else "validation_path"
+    source_fields = {
+        "train": "train_path",
+        "validation": "validation_path",
+        "test": "test_path",
+    }
+    try:
+        source_field = source_fields[split]
+    except KeyError as exc:
+        raise HotpotRoundError(f"unsupported HotpotQA split: {split}") from exc
     source_path = _resolve(root, str(data[source_field]))
     candidates = tuple(
         task
@@ -246,7 +254,7 @@ def _select_tasks(config: Mapping[str, Any], root: Path, selected_path: Path) ->
         missing = [task_id for task_id in requested if task_id not in candidates_by_id]
         if missing:
             raise HotpotRoundError(
-                "requested HotpotQA task IDs are absent from validation: "
+                f"requested HotpotQA task IDs are absent from {split}: "
                 + ", ".join(missing)
             )
         expected = tuple(candidates_by_id[task_id] for task_id in requested)
@@ -263,7 +271,7 @@ def _select_tasks(config: Mapping[str, Any], root: Path, selected_path: Path) ->
                 or expected_task.ground_truth != frozen_task.ground_truth
             ):
                 raise HotpotRoundError(
-                    "frozen HotpotQA task batch differs from the aligned validation data"
+                    f"frozen HotpotQA task batch differs from the aligned {split} data"
                 )
         return frozen
     _atomic_jsonl(

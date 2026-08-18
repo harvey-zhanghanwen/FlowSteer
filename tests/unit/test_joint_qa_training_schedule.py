@@ -179,6 +179,51 @@ def test_freeze_rejects_heldout_overlap_for_either_dataset(tmp_path: Path) -> No
         )
 
 
+def test_freeze_rejects_skill_confirmation_base_task_overlap(tmp_path: Path) -> None:
+    train = tmp_path / "train.jsonl"
+    validation = tmp_path / "validation.jsonl"
+    confirmation = tmp_path / "skill-confirmation.jsonl"
+    test = tmp_path / "test.jsonl"
+    hotpot_cycle = _record(
+        "hotpotqa:heldout-c:cycle-0001",
+        "train",
+        dataset_key="hotpotqa",
+    )
+    hotpot_cycle["metadata"]["sampling"] = {
+        "base_task_id": "hotpotqa:heldout-c",
+        "cycled_training_sample": True,
+    }
+    _write(
+        train,
+        [
+            hotpot_cycle,
+            _record("triviaqa:train-a", "train", dataset_key="triviaqa"),
+        ],
+    )
+    _write(validation, [])
+    _write(
+        confirmation,
+        [
+            _record(
+                "hotpotqa:heldout-c",
+                "validation",
+                dataset_key="hotpotqa",
+            )
+        ],
+    )
+    _write(test, [])
+
+    with pytest.raises(ValueError, match="base_task_id"):
+        freeze_joint_qa_training_schedule(
+            train_path=train,
+            validation_path=validation,
+            skill_confirmation_path=confirmation,
+            test_path=test,
+            task_positions_by_dataset={"hotpotqa": (0,), "triviaqa": (0,)},
+            rollouts_per_task=2,
+        )
+
+
 def test_resolve_rejects_changed_source_order(
     aligned_paths: tuple[Path, Path, Path],
 ) -> None:

@@ -1,0 +1,29 @@
+schema_version: "flowsteer.joint-qa.partitions.v2"
+dataset_catalog_path: "config/datasets_agentgraph.yaml"
+output_dir: "data/joint_qa_v2"
+datasets: [hotpotqa, triviaqa]
+
+# The previous aligned validation128 and HotpotQA native[640:672] were used by
+# architecture diagnostics.  They remain development/quarantine data and are
+# never reused for confirmatory Skill evidence or the final test.
+partitions:
+  development:
+    start: 0
+    stop: 128
+    task_split: "validation"
+  train:
+    start: 128
+    stop: 640
+    task_split: "train"
+  quarantine:
+    start: 640
+    stop: 672
+    task_split: null
+  skill_confirmation:
+    start: 672
+    stop: 736
+    task_split: "validation"
+  test:
+    start: 736
+    stop: 864
+    task_split: "test"
