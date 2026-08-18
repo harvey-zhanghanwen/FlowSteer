@@ -4,6 +4,32 @@
   "baseline_action": {
     "instruction": "No additional prompt prior; use the frozen Director policy."
   },
+  "behavior_policy_preflight": {
+    "adapter_name": "theta_jointqa_progressive_step_000000",
+    "canary_succeeded": true,
+    "checkpoint_path": "/ssd1/iclr/1/FlowSteer/artifacts/hotpotqa_multiagent_skill/policy_step_000000/theta",
+    "completed_at": "2026-08-18T08:13:36.399310+00:00",
+    "duration_seconds": 0.06991824135184288,
+    "loaded_now": false,
+    "models_after": [
+      "supervisor_theta",
+      "theta_jointqa_progressive_step_000000"
+    ],
+    "models_before": [
+      "supervisor_theta",
+      "theta_jointqa_progressive_step_000000"
+    ],
+    "policy_published": false,
+    "request_attempts": {
+      "canary": 1,
+      "models_after": 1,
+      "models_before": 1
+    },
+    "started_at": "2026-08-18T08:13:36.329386+00:00",
+    "status": "ready",
+    "success": true,
+    "training_performed": false
+  },
   "candidate_actions": {
     "conditional_fan_in_deferred_format": {
       "instruction": "Only when two evidence subquestions are conditionally independent, first use one ADD_SUBGRAPH for the two evidence Agents and their semantic fan-in Agent. Omit output_agent_id at this stage, even if the empty Canvas reports that no Format Output is selected. After execution, use the next ADD_SUBGRAPH to add one Format Agent, connect fan-in to Format, set Format as output_agent_id, and then FINISH."
@@ -138,6 +164,19 @@
   "feature_schema_version": "jointqa.skill-candidate-dataset-interaction.v1",
   "final_test_block": "joint_qa_v2/test task IDs are read only for overlap exclusion; answers and metrics are excluded from evidence, posterior fitting, and training",
   "forced_probe_excluded_from_grpo_and_benchmark": true,
+  "frozen_executor_versions": {
+    "MiniMax-M2.5": "vectorengine:MiniMax-M2.5",
+    "MiniMax-M3": "vectorengine:MiniMax-M3",
+    "deepseek-v4-flash": "vectorengine:deepseek-v4-flash",
+    "deepseek-v4-pro": "vectorengine:deepseek-v4-pro",
+    "glm-4.5-flash": "vectorengine:glm-4.5-flash",
+    "gpt-4o-mini": "vectorengine:gpt-4o-mini",
+    "kimi-k2": "vectorengine:kimi-k2",
+    "qwen3.5-9b-local": "local-director:supervisor_theta",
+    "qwen3.5-flash": "vectorengine:qwen3.5-flash",
+    "qwen3.5-plus": "vectorengine:qwen3.5-plus"
+  },
+  "frozen_model_catalog_version": "c060a6f4209f5fbfe3ac44a7b21fb2b90593fe9b0ff394b63be23605f9ded147",
   "intervention_scope": "full trajectory from a shared empty-Canvas snapshot",
   "natural_candidate_tasks": {
     "hotpotqa": "hotpotqa:5a8edaa955429917b4a5bde3",
