@@ -70,6 +70,10 @@ def _execution(
                 "graph_revision": revision,
                 "model": {"metadata": {"family": family}},
                 "upstream": upstream or [],
+                "phase": "single",
+                "rendered_messages": [
+                    {"role": "user", "content": f"input-for-{agent_id}"}
+                ],
             }
         },
     }
@@ -123,7 +127,17 @@ def _trajectory(
             )
         )
     return {
-        "task": {"task_id": task_id},
+        "task": {
+            "task_id": task_id,
+            "question": f"question-for-{task_id}",
+            "ground_truth": f"ground-truth-for-{task_id}",
+        },
+        "final_answer": f"final-answer-for-{task_id}",
+        "evaluation": {
+            "valid": True,
+            "reason": "official answer evaluator",
+        },
+        "terminal_failure": False,
         "versions": {"policy": policy},
         "explicit_finish": True,
         "termination_reason": "finish",
@@ -246,12 +260,41 @@ def test_report_aggregates_metrics_graph_models_usage_skill_and_demos(tmp_path):
     assert hotpot["skill_effect"]["paired_task_ids_verified"] is True
     assert hotpot["demos"][0]["task_id"] == "hotpotqa:q1"
     assert hotpot["demos"][0]["trajectory_artifact"]["jsonl_line"] == 2
+    assert hotpot["demos"][0]["question"] == "question-for-hotpotqa:q1"
+    assert hotpot["demos"][0]["ground_truth"] == "ground-truth-for-hotpotqa:q1"
+    assert hotpot["demos"][0]["final_answer"] == "final-answer-for-hotpotqa:q1"
+    assert hotpot["demos"][0]["director_actions"][0]["action"] == {
+        "action": "add_subgraph"
+    }
+    assert hotpot["demos"][0]["agents"][-1] == {
+        "agent_id": "a2",
+        "role_family": "format",
+        "model_id": "model-qwen",
+        "contract": "contract-2",
+    }
+    assert hotpot["demos"][0]["directed_communication"][-1]["content"] == (
+        "artifact-a1"
+    )
+    assert hotpot["demos"][0]["output_agent_inbox"]["agent_id"] == "a2"
+    assert hotpot["demos"][0]["failure_origin"] == {
+        "observed_failure_boundary": "final_answer_vs_ground_truth",
+        "recorded_failure_type": "wrong",
+        "evaluation_valid": True,
+        "evaluation_reason": "official answer evaluator",
+        "terminal_failure": False,
+        "failed_execution_receipts": [],
+        "causal_root_cause": "unavailable",
+        "attribution_scope": (
+            "recorded_failure_signals_only; no causal root cause is inferred"
+        ),
+    }
 
 
 def test_missing_dataset_and_future_step_remain_unavailable(tmp_path):
     report = _MODULE.build_progressive_report(_spec(tmp_path), base_dir=tmp_path)
 
     assert report["steps"][0]["datasets"]["triviaqa"]["status"] == "unavailable"
+    assert report["steps"][0]["macro_metrics"]["status"] == "unavailable"
     assert report["steps"][1]["datasets"]["hotpotqa"]["metrics"]["status"] == (
         "unavailable"
     )
@@ -289,7 +332,178 @@ def test_outputs_include_json_csv_and_chinese_markdown(tmp_path):
     assert "policy_version" in csv_text
     assert "unavailable" in csv_text
     assert "Skill-on/off" in markdown
-    assert "完整 Demo artifact 引用" in markdown
+    assert "完整 Demo 展开" in markdown
+    assert "single-point training diagnostics" in markdown
+
+
+def test_macro_skill_and_single_point_training_receipts_are_projected(tmp_path):
+    spec = _spec(tmp_path)
+    trivia_metrics = tmp_path / "trivia_main.jsonl"
+    trivia_trajectories = tmp_path / "trivia_trajectories.jsonl"
+    _write_jsonl(trivia_metrics, _paired("triviaqa", [(1.0, 0.5), (1.0, 1.0)]))
+    _write_jsonl(
+        trivia_trajectories,
+        [
+            _trajectory(
+                task_id="triviaqa:q0",
+                policy="joint-step-0",
+                adapter="theta-step-0",
+                families=["qwen", "gpt"],
+            ),
+            _trajectory(
+                task_id="triviaqa:q1",
+                policy="joint-step-0",
+                adapter="theta-step-0",
+                families=["deepseek", "qwen"],
+            ),
+        ],
+    )
+    step = spec["steps"][0]
+    step["datasets"]["triviaqa"] = {
+        "metrics_path": trivia_metrics.name,
+        "trajectory_path": trivia_trajectories.name,
+        "demo_limit": 1,
+    }
+
+    publication = tmp_path / "publication_results.json"
+    store = tmp_path / "skills.json"
+    manifest = tmp_path / "training_manifest.json"
+    summary = tmp_path / "training_summary.json"
+    sync = tmp_path / "sync_receipt.json"
+    publications = {}
+    current = {}
+    for dataset in ("hotpotqa", "triviaqa"):
+        skill_id = f"jointqa.{dataset}.answer_span"
+        skill = {
+            "skill_id": skill_id,
+            "status": "active",
+            "version": 3,
+            "eligible_epoch": 4,
+            "activated_epoch": 4,
+            "condition": {"task_family": dataset, "graph_stage": "*"},
+            "evidence": {
+                "baseline": "frozen_step0",
+                "effective_pairs": 20,
+                "paired_effect_mean": 0.1,
+                "calibrated_lower": 0.04,
+                "calibrated_upper": 0.2,
+                "harm_probability": 0.01,
+                "empirical_coverage": 0.95,
+                "heldout_task_families": [dataset],
+                "validation_splits": ["skill_confirmation"],
+                "evidence_ids": [f"probe-{dataset}-0", f"probe-{dataset}-1"],
+            },
+        }
+        publications[dataset] = {
+            "selected_candidate": "answer_span",
+            "gate": {
+                "approved": True,
+                "no_practical_value": False,
+                "reasons": [],
+            },
+            "skill": skill,
+        }
+        current[skill_id] = skill
+    publication.write_text(
+        json.dumps(
+            {
+                "experiment_version": "skill-epoch-2",
+                "active_datasets": ["hotpotqa", "triviaqa"],
+                "causal_estimand": "paired prompt-prior intent-to-treat effect",
+                "publications": publications,
+            }
+        ),
+        encoding="utf-8",
+    )
+    store.write_text(json.dumps({"current": current}), encoding="utf-8")
+    manifest.write_text(
+        json.dumps(
+            {
+                "status": "completed",
+                "skills_enabled": True,
+                "post_update_canaries": {
+                    "collected": 2,
+                    "policy_version": "joint-step-1",
+                    "adapter_name": "theta-step-1",
+                    "trajectory_ids": ["canary-hotpot", "canary-trivia"],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    summary.write_text(
+        json.dumps(
+            {
+                "optimizer_updates": 1,
+                "loss": 0.25,
+                "grad_norm": 1.5,
+                "trainable_update_l2": 0.03,
+                "behavior_policy_version": "joint-step-0",
+                "updated_policy_version": "joint-step-1",
+                "informative_groups": 2,
+                "trained_groups": 2,
+                "trained_trajectories": 16,
+                "oom_backoff_count": 0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    sync.write_text(
+        json.dumps(
+            {
+                "status": "published",
+                "success": True,
+                "adapter_name": "theta-step-1",
+                "behavior_policy_version": "joint-step-0",
+                "candidate_policy_version": "joint-step-1",
+                "checkpoint_path": "/checkpoint/theta-step-1",
+                "canary_succeeded": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    step.update(
+        {
+            "skill_publication_path": publication.name,
+            "skill_store_path": store.name,
+            "training_manifest_path": manifest.name,
+            "training_summary_path": summary.name,
+            "sync_receipt_path": sync.name,
+        }
+    )
+
+    report = _MODULE.build_progressive_report(spec, base_dir=tmp_path)
+    step0 = report["steps"][0]
+    assert step0["macro_metrics"]["strict_exact_match"] == 0.75
+    assert step0["macro_metrics"]["strict_token_f1"] == 0.75
+    hotpot_skill = step0["skill"]["datasets"]["hotpotqa"]
+    assert hotpot_skill["skill_id"] == "jointqa.hotpotqa.answer_span"
+    assert hotpot_skill["skill_status"] == "active"
+    assert hotpot_skill["evidence"]["effective_pairs"] == 20
+    training = step0["training_diagnostics"]
+    assert training["optimizer"] == {
+        "optimizer_updates": 1,
+        "loss": 0.25,
+        "grad_norm": 1.5,
+        "trainable_update_l2": 0.03,
+        "behavior_policy_version": "joint-step-0",
+        "updated_policy_version": "joint-step-1",
+        "informative_groups": 2,
+        "trained_groups": 2,
+        "trained_trajectories": 16,
+        "oom_backoff_count": 0,
+        "status": "available",
+    }
+    assert training["synchronization"]["success"] is True
+    assert training["canary"]["sync_canary_succeeded"] is True
+    assert training["canary"]["post_update_collected"] == 2
+    assert training["multi_point_training_curve_claimed"] is False
+    assert report["multi_point_training_curve_claimed"] is False
+
+    rows = _MODULE._csv_rows(report)
+    assert rows[0]["macro_strict_exact_match"] == 0.75
+    assert rows[0]["optimizer_updates"] == 1
+    assert rows[0]["published_skill_status"] == "active"
 
 
 def test_declared_policy_must_match_trajectory_receipt(tmp_path):

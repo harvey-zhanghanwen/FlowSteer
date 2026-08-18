@@ -17,6 +17,11 @@ Input example::
           "label": "Step0",
           "policy_version": "joint-step-000000",
           "policy_adapter": "theta_joint_step_000000",
+          "skill_publication_path": ".../publication_results.json",
+          "skill_store_path": ".../skills.json",
+          "training_manifest_path": ".../training_manifest.json",
+          "training_summary_path": ".../checkpoint/training_summary.json",
+          "sync_receipt_path": ".../sync_receipt.json",
           "datasets": {
             "hotpotqa": {
               "metrics_path": ".../paired_results.jsonl",
@@ -39,6 +44,9 @@ JSONL used by ``evaluate_hotpotqa_round.py`` and
 denominator implementation.  Graph statistics reuse
 ``aggregate_trajectory_diagnostics`` and therefore preserve the distinction
 between structural depth and evidence-backed effective dependency depth.
+The optional Skill/training paths only project existing receipts.  One LoRA
+update is reported as a single-point training diagnostic, never as a
+multi-point training curve.
 """
 
 from __future__ import annotations
@@ -110,6 +118,21 @@ def _read_json(path: Path) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         raise ProgressiveReportError(f"{path}: expected a JSON object")
     return dict(value)
+
+
+def _optional_json_artifact(
+    base: Path, value: Any, *, name: str
+) -> tuple[dict[str, Any], Optional[Path]]:
+    """Read an optional JSON receipt without turning absence into zero values."""
+
+    path = _resolve(base, value, name)
+    if path is None:
+        return _unavailable(f"{name} 未配置"), None
+    if not path.is_file():
+        return _unavailable(f"{name} 文件不存在", source_path=path), path
+    result = _read_json(path)
+    result["_source_path"] = str(path)
+    return result, path
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -561,17 +584,238 @@ def _metric_rows_by_task(metrics: Mapping[str, Any]) -> dict[str, tuple[int, Map
     return result
 
 
-def _wrong_demo_lines(path: Optional[Path]) -> dict[str, int]:
+def _wrong_demo_rows(
+    path: Optional[Path],
+) -> dict[str, tuple[int, Mapping[str, Any]]]:
     if path is None or not path.is_file():
         return {}
-    result: dict[str, int] = {}
+    result: dict[str, tuple[int, Mapping[str, Any]]] = {}
     for line_number, row in enumerate(_read_jsonl(path), start=1):
         task_id = row.get("task_id")
         if not isinstance(task_id, str):
             task_id = _task_id(row)
         if task_id:
-            result[task_id] = line_number
+            result[task_id] = (line_number, row)
     return result
+
+
+def _final_graph_snapshot(record: Mapping[str, Any]) -> Mapping[str, Any]:
+    turns = record.get("turns", ())
+    if not isinstance(turns, Sequence) or isinstance(turns, (str, bytes)):
+        return {}
+    for turn in reversed(turns):
+        snapshot = turn.get("graph_snapshot") if isinstance(turn, Mapping) else None
+        if isinstance(snapshot, Mapping):
+            return snapshot
+    return {}
+
+
+def _director_actions(record: Mapping[str, Any]) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    turns = record.get("turns", ())
+    if not isinstance(turns, Sequence) or isinstance(turns, (str, bytes)):
+        return result
+    for turn_index, turn in enumerate(turns):
+        if not isinstance(turn, Mapping):
+            continue
+        result.append(
+            {
+                "turn_index": turn_index,
+                "round_index": turn.get("round_index", UNAVAILABLE),
+                "action": turn.get("action", UNAVAILABLE),
+                "policy_response": turn.get("policy_response", UNAVAILABLE),
+                "canvas_feedback": turn.get("canvas_feedback", UNAVAILABLE),
+                "graph_revision": turn.get("graph_revision", UNAVAILABLE),
+                "director_request_id": turn.get("director_request_id", UNAVAILABLE),
+            }
+        )
+    return result
+
+
+def _final_agents_and_relations(
+    record: Mapping[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], Optional[str]]:
+    snapshot = _final_graph_snapshot(record)
+    raw_nodes = snapshot.get("nodes", ())
+    nodes = raw_nodes if isinstance(raw_nodes, Sequence) and not isinstance(
+        raw_nodes, (str, bytes)
+    ) else ()
+    agents = [
+        {
+            "agent_id": node.get("id", UNAVAILABLE),
+            "role_family": node.get("role_family", UNAVAILABLE),
+            "model_id": node.get("model_id", UNAVAILABLE),
+            "contract": node.get("contract", UNAVAILABLE),
+        }
+        for node in nodes
+        if isinstance(node, Mapping)
+    ]
+    directed_relations: list[dict[str, Any]] = []
+    raw_relations = snapshot.get("relations", ())
+    relations = raw_relations if isinstance(raw_relations, Sequence) and not isinstance(
+        raw_relations, (str, bytes)
+    ) else ()
+    for relation in relations:
+        if not isinstance(relation, Mapping):
+            continue
+        source = relation.get("source_id")
+        target = relation.get("target_id")
+        if relation.get("source_to_target") is True:
+            directed_relations.append(
+                {"source_agent_id": source, "target_agent_id": target}
+            )
+        if relation.get("target_to_source") is True:
+            directed_relations.append(
+                {"source_agent_id": target, "target_agent_id": source}
+            )
+    output_agent_id = snapshot.get("output_agent_id")
+    return (
+        agents,
+        directed_relations,
+        output_agent_id if isinstance(output_agent_id, str) else None,
+    )
+
+
+def _communication_and_output_inbox(
+    record: Mapping[str, Any], *, output_agent_id: Optional[str]
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    communications: list[dict[str, Any]] = []
+    output_receipts: list[dict[str, Any]] = []
+    turns = record.get("turns", ())
+    if not isinstance(turns, Sequence) or isinstance(turns, (str, bytes)):
+        return communications, _unavailable("trajectory turns 不可用")
+    for turn_index, turn in enumerate(turns):
+        if not isinstance(turn, Mapping):
+            continue
+        executions = turn.get("executions", ())
+        if not isinstance(executions, Sequence) or isinstance(
+            executions, (str, bytes)
+        ):
+            continue
+        for execution in executions:
+            if not isinstance(execution, Mapping):
+                continue
+            metadata = execution.get("metadata")
+            request = metadata.get("request") if isinstance(metadata, Mapping) else None
+            request = request if isinstance(request, Mapping) else {}
+            upstream = request.get("upstream", ())
+            upstream = upstream if isinstance(upstream, Sequence) and not isinstance(
+                upstream, (str, bytes)
+            ) else ()
+            for message in upstream:
+                if not isinstance(message, Mapping):
+                    continue
+                communications.append(
+                    {
+                        "turn_index": turn_index,
+                        "execution_id": execution.get("execution_id", UNAVAILABLE),
+                        "consumer_agent_id": execution.get("agent_id", UNAVAILABLE),
+                        "source_agent_id": message.get(
+                            "source_agent_id", UNAVAILABLE
+                        ),
+                        "target_agent_id": message.get(
+                            "target_agent_id", UNAVAILABLE
+                        ),
+                        "message_type": message.get("message_type", UNAVAILABLE),
+                        "content": message.get(
+                            "content", message.get("artifact", UNAVAILABLE)
+                        ),
+                        "request_or_dependency": message.get(
+                            "request_or_dependency", UNAVAILABLE
+                        ),
+                        "graph_revision": message.get(
+                            "graph_revision", execution.get("graph_revision", UNAVAILABLE)
+                        ),
+                    }
+                )
+            if output_agent_id is not None and execution.get("agent_id") == output_agent_id:
+                rendered = request.get("rendered_messages", ())
+                output_receipts.append(
+                    {
+                        "turn_index": turn_index,
+                        "execution_id": execution.get("execution_id", UNAVAILABLE),
+                        "agent_id": execution.get("agent_id", UNAVAILABLE),
+                        "model_id": execution.get("model_id", UNAVAILABLE),
+                        "phase": request.get("phase", UNAVAILABLE),
+                        "upstream": [dict(item) for item in upstream if isinstance(item, Mapping)],
+                        "rendered_messages": (
+                            [dict(item) for item in rendered if isinstance(item, Mapping)]
+                            if isinstance(rendered, Sequence)
+                            and not isinstance(rendered, (str, bytes))
+                            else []
+                        ),
+                    }
+                )
+    if not output_receipts:
+        inbox = _unavailable("Output Agent execution receipt 不可用")
+    else:
+        inbox = {
+            "status": "available",
+            "selection": "last_output_agent_execution_receipt",
+            **output_receipts[-1],
+        }
+    return communications, inbox
+
+
+def _failure_origin(
+    record: Mapping[str, Any],
+    *,
+    metric_row: Optional[Mapping[str, Any]],
+    wrong_row: Optional[Mapping[str, Any]],
+) -> dict[str, Any]:
+    failed_executions: list[dict[str, Any]] = []
+    turns = record.get("turns", ())
+    if isinstance(turns, Sequence) and not isinstance(turns, (str, bytes)):
+        for turn_index, turn in enumerate(turns):
+            executions = turn.get("executions", ()) if isinstance(turn, Mapping) else ()
+            if not isinstance(executions, Sequence) or isinstance(
+                executions, (str, bytes)
+            ):
+                continue
+            for execution in executions:
+                if not isinstance(execution, Mapping):
+                    continue
+                error_type = execution.get("error_type")
+                if isinstance(error_type, str) and error_type.strip():
+                    failed_executions.append(
+                        {
+                            "turn_index": turn_index,
+                            "execution_id": execution.get("execution_id", UNAVAILABLE),
+                            "agent_id": execution.get("agent_id", UNAVAILABLE),
+                            "error_type": error_type,
+                        }
+                    )
+    evaluation = record.get("evaluation")
+    evaluation = evaluation if isinstance(evaluation, Mapping) else {}
+    graph_result = metric_row.get("agentgraph") if isinstance(metric_row, Mapping) else None
+    exact_match = graph_result.get("exact_match") if isinstance(graph_result, Mapping) else None
+    if failed_executions:
+        observed_boundary = "executor_execution_receipt"
+    elif evaluation.get("valid") is False:
+        observed_boundary = "evaluator_receipt"
+    elif exact_match == 0 or exact_match == 0.0:
+        observed_boundary = "final_answer_vs_ground_truth"
+    else:
+        observed_boundary = "no_failure_recorded"
+    failure_type = None
+    if isinstance(wrong_row, Mapping) and isinstance(wrong_row.get("failure_type"), str):
+        failure_type = str(wrong_row["failure_type"])
+    elif isinstance(metric_row, Mapping) and isinstance(
+        metric_row.get("failure_type"), str
+    ):
+        failure_type = str(metric_row["failure_type"])
+    return {
+        "observed_failure_boundary": observed_boundary,
+        "recorded_failure_type": failure_type or UNAVAILABLE,
+        "evaluation_valid": evaluation.get("valid", UNAVAILABLE),
+        "evaluation_reason": evaluation.get("reason", UNAVAILABLE),
+        "terminal_failure": record.get("terminal_failure", UNAVAILABLE),
+        "failed_execution_receipts": failed_executions,
+        "causal_root_cause": UNAVAILABLE,
+        "attribution_scope": (
+            "recorded_failure_signals_only; no causal root cause is inferred"
+        ),
+    }
 
 
 def _demo_references(
@@ -596,11 +840,14 @@ def _demo_references(
         for item in diagnostics
         if isinstance(item.get("task_id"), str)
     }
+    record_by_task = {
+        _task_id(record): record for record in records if _task_id(record)
+    }
     metric_rows = _metric_rows_by_task(metrics)
-    wrong_lines = _wrong_demo_lines(wrong_demos_path)
+    wrong_rows = _wrong_demo_rows(wrong_demos_path)
     candidates: list[str] = []
     candidates.extend(task_id for task_id in requested_task_ids if task_id in record_lines)
-    candidates.extend(task_id for task_id in wrong_lines if task_id in record_lines)
+    candidates.extend(task_id for task_id in wrong_rows if task_id in record_lines)
     candidates.extend(
         str(item.get("task_id"))
         for item in sorted(
@@ -623,8 +870,44 @@ def _demo_references(
     result: list[dict[str, Any]] = []
     for task_id in selected:
         diagnostic = diagnostic_by_task.get(task_id, {})
+        record = record_by_task[task_id]
+        task = record.get("task")
+        task = task if isinstance(task, Mapping) else {}
+        agents, directed_relations, output_agent_id = _final_agents_and_relations(
+            record
+        )
+        directed_communication, output_agent_inbox = (
+            _communication_and_output_inbox(
+                record, output_agent_id=output_agent_id
+            )
+        )
+        metric_entry = metric_rows.get(task_id)
+        metric_row = metric_entry[1] if metric_entry is not None else None
+        wrong_entry = wrong_rows.get(task_id)
+        wrong_row = wrong_entry[1] if wrong_entry is not None else None
+        graph_result = (
+            metric_row.get("agentgraph") if isinstance(metric_row, Mapping) else None
+        )
         value: dict[str, Any] = {
             "task_id": task_id,
+            "question": task.get(
+                "question",
+                metric_row.get("question", UNAVAILABLE)
+                if isinstance(metric_row, Mapping)
+                else UNAVAILABLE,
+            ),
+            "ground_truth": task.get(
+                "ground_truth",
+                metric_row.get("ground_truth", UNAVAILABLE)
+                if isinstance(metric_row, Mapping)
+                else UNAVAILABLE,
+            ),
+            "final_answer": record.get(
+                "final_answer",
+                graph_result.get("final_answer", UNAVAILABLE)
+                if isinstance(graph_result, Mapping)
+                else UNAVAILABLE,
+            ),
             "trajectory_artifact": {
                 "path": str(trajectory_path),
                 "jsonl_line": record_lines[task_id],
@@ -636,10 +919,17 @@ def _demo_references(
             "effective_dependency_depth": diagnostic.get(
                 "effective_dependency_depth", UNAVAILABLE
             ),
+            "director_actions": _director_actions(record),
+            "agents": agents,
+            "directed_relations": directed_relations,
+            "directed_communication": directed_communication,
+            "output_agent_inbox": output_agent_inbox,
+            "failure_origin": _failure_origin(
+                record, metric_row=metric_row, wrong_row=wrong_row
+            ),
         }
-        metric_line = metric_rows.get(task_id)
-        if metric_line is not None:
-            line_number, row = metric_line
+        if metric_entry is not None:
+            line_number, row = metric_entry
             graph = row.get("agentgraph")
             value["metrics_artifact"] = {
                 "path": metrics.get("source_path"),
@@ -648,10 +938,10 @@ def _demo_references(
             if isinstance(graph, Mapping):
                 value["exact_match"] = graph.get("exact_match", UNAVAILABLE)
                 value["token_f1"] = graph.get("token_f1", UNAVAILABLE)
-        if task_id in wrong_lines and wrong_demos_path is not None:
+        if wrong_entry is not None and wrong_demos_path is not None:
             value["wrong_demo_artifact"] = {
                 "path": str(wrong_demos_path),
-                "jsonl_line": wrong_lines[task_id],
+                "jsonl_line": wrong_entry[0],
             }
         result.append(value)
     return result
@@ -776,6 +1066,288 @@ def _resolve_step_version(
     return UNAVAILABLE, "conflicting_receipts"
 
 
+def _macro_metrics(datasets: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
+    available: list[str] = []
+    missing: list[str] = []
+    exact_matches: list[float] = []
+    token_f1s: list[float] = []
+    task_count = 0
+    for dataset in DATASETS:
+        metrics = datasets[dataset].get("metrics", {})
+        if not isinstance(metrics, Mapping) or metrics.get("status") != "available":
+            missing.append(dataset)
+            continue
+        available.append(dataset)
+        exact_matches.append(float(metrics["strict_exact_match"]))
+        token_f1s.append(float(metrics["strict_token_f1"]))
+        task_count += int(metrics["task_count"])
+    if missing:
+        return {
+            "status": UNAVAILABLE,
+            "reason": "HotpotQA 与 TriviaQA 两个数据集指标必须同时可用",
+            "available_datasets": available,
+            "missing_datasets": missing,
+            "weighting": "unweighted_dataset_macro",
+        }
+    exact_match = fmean(exact_matches)
+    token_f1 = fmean(token_f1s)
+    return {
+        "status": "available",
+        "dataset_count": len(DATASETS),
+        "component_datasets": list(DATASETS),
+        "component_task_count": task_count,
+        "strict_exact_match": exact_match,
+        "strict_token_f1": token_f1,
+        "strict_exact_match_percent": 100.0 * exact_match,
+        "strict_token_f1_percent": 100.0 * token_f1,
+        "weighting": "unweighted_dataset_macro",
+    }
+
+
+def _skill_evidence_projection(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return _unavailable("Skill evidence 不可用")
+    keys = (
+        "baseline",
+        "effective_pairs",
+        "paired_effect_mean",
+        "calibrated_lower",
+        "calibrated_upper",
+        "harm_probability",
+        "empirical_coverage",
+        "heldout_task_families",
+        "validation_splits",
+    )
+    result = {key: value.get(key, UNAVAILABLE) for key in keys}
+    result["status"] = "available"
+    result["evidence_id_count"] = (
+        len(value["evidence_ids"])
+        if isinstance(value.get("evidence_ids"), Sequence)
+        and not isinstance(value.get("evidence_ids"), (str, bytes))
+        else UNAVAILABLE
+    )
+    return result
+
+
+def _skill_projection(
+    step_config: Mapping[str, Any], *, base: Path, step_index: int
+) -> dict[str, Any]:
+    publication, publication_path = _optional_json_artifact(
+        base,
+        step_config.get("skill_publication_path"),
+        name=f"steps[{step_index}].skill_publication_path",
+    )
+    store, store_path = _optional_json_artifact(
+        base,
+        step_config.get("skill_store_path"),
+        name=f"steps[{step_index}].skill_store_path",
+    )
+    publication_available = publication_path is not None and publication_path.is_file()
+    store_available = store_path is not None and store_path.is_file()
+    if not publication_available and not store_available:
+        return _unavailable("Skill publication/store 未配置或不可用")
+
+    raw_publications = publication.get("publications", {})
+    publications = raw_publications if isinstance(raw_publications, Mapping) else {}
+    raw_current = store.get("current", {})
+    current = raw_current if isinstance(raw_current, Mapping) else {}
+    datasets: dict[str, dict[str, Any]] = {}
+    for dataset in DATASETS:
+        raw_publication = publications.get(dataset)
+        dataset_publication = (
+            raw_publication if isinstance(raw_publication, Mapping) else {}
+        )
+        embedded = dataset_publication.get("skill")
+        embedded = embedded if isinstance(embedded, Mapping) else {}
+        embedded_id = embedded.get("skill_id")
+        store_skill: Mapping[str, Any] = {}
+        if isinstance(embedded_id, str) and isinstance(current.get(embedded_id), Mapping):
+            store_skill = current[embedded_id]
+        else:
+            matches = [
+                candidate
+                for candidate in current.values()
+                if isinstance(candidate, Mapping)
+                and isinstance(candidate.get("condition"), Mapping)
+                and candidate["condition"].get("task_family") == dataset
+            ]
+            if len(matches) == 1:
+                store_skill = matches[0]
+        skill = store_skill or embedded
+        gate = dataset_publication.get("gate")
+        gate = gate if isinstance(gate, Mapping) else {}
+        if not skill and not dataset_publication:
+            datasets[dataset] = _unavailable(
+                f"{DATASET_LABELS[dataset]} Skill publication 不可用"
+            )
+            continue
+        datasets[dataset] = {
+            "status": "available",
+            "skill_id": skill.get("skill_id", embedded_id or UNAVAILABLE),
+            "skill_status": skill.get("status", UNAVAILABLE),
+            "skill_version": skill.get("version", UNAVAILABLE),
+            "selected_candidate": dataset_publication.get(
+                "selected_candidate", UNAVAILABLE
+            ),
+            "gate": {
+                "approved": gate.get("approved", UNAVAILABLE),
+                "no_practical_value": gate.get("no_practical_value", UNAVAILABLE),
+                "reasons": gate.get("reasons", []),
+            },
+            "activated_epoch": skill.get("activated_epoch", UNAVAILABLE),
+            "eligible_epoch": skill.get("eligible_epoch", UNAVAILABLE),
+            "condition": skill.get("condition", UNAVAILABLE),
+            "evidence": _skill_evidence_projection(skill.get("evidence")),
+        }
+    available_count = sum(
+        value.get("status") == "available" for value in datasets.values()
+    )
+    return {
+        "status": (
+            "available"
+            if available_count == len(DATASETS)
+            else "partial"
+            if available_count
+            else UNAVAILABLE
+        ),
+        "publication_source_path": (
+            str(publication_path) if publication_available else UNAVAILABLE
+        ),
+        "store_source_path": str(store_path) if store_available else UNAVAILABLE,
+        "experiment_version": publication.get("experiment_version", UNAVAILABLE),
+        "active_datasets": publication.get("active_datasets", UNAVAILABLE),
+        "causal_estimand": publication.get("causal_estimand", UNAVAILABLE),
+        "datasets": datasets,
+    }
+
+
+def _training_projection(
+    step_config: Mapping[str, Any], *, base: Path, step_index: int
+) -> dict[str, Any]:
+    manifest, manifest_path = _optional_json_artifact(
+        base,
+        step_config.get("training_manifest_path"),
+        name=f"steps[{step_index}].training_manifest_path",
+    )
+    summary, summary_path = _optional_json_artifact(
+        base,
+        step_config.get("training_summary_path"),
+        name=f"steps[{step_index}].training_summary_path",
+    )
+    sync, sync_path = _optional_json_artifact(
+        base,
+        step_config.get("sync_receipt_path"),
+        name=f"steps[{step_index}].sync_receipt_path",
+    )
+    manifest_available = manifest_path is not None and manifest_path.is_file()
+    summary_available = summary_path is not None and summary_path.is_file()
+    sync_available = sync_path is not None and sync_path.is_file()
+    embedded_training = manifest.get("training")
+    training = summary if summary_available else (
+        embedded_training if isinstance(embedded_training, Mapping) else {}
+    )
+    embedded_sync = manifest.get("policy_sync")
+    sync_receipt = sync if sync_available else (
+        embedded_sync if isinstance(embedded_sync, Mapping) else {}
+    )
+    post_update = manifest.get("post_update_canaries")
+    post_update = post_update if isinstance(post_update, Mapping) else {}
+    if not manifest_available and not summary_available and not sync_available:
+        return _unavailable("training/sync receipts 未配置或不可用")
+
+    diagnostic_keys = (
+        "optimizer_updates",
+        "loss",
+        "grad_norm",
+        "trainable_update_l2",
+        "behavior_policy_version",
+        "updated_policy_version",
+        "informative_groups",
+        "trained_groups",
+        "trained_trajectories",
+        "oom_backoff_count",
+    )
+    optimizer = {
+        key: training.get(key, UNAVAILABLE) if isinstance(training, Mapping) else UNAVAILABLE
+        for key in diagnostic_keys
+    }
+    optimizer["status"] = (
+        "available"
+        if isinstance(training, Mapping) and "optimizer_updates" in training
+        else UNAVAILABLE
+    )
+    synchronization = (
+        {
+            "status": sync_receipt.get("status", UNAVAILABLE),
+            "success": sync_receipt.get("success", UNAVAILABLE),
+            "adapter_name": sync_receipt.get("adapter_name", UNAVAILABLE),
+            "behavior_policy_version": sync_receipt.get(
+                "behavior_policy_version", UNAVAILABLE
+            ),
+            "candidate_policy_version": sync_receipt.get(
+                "candidate_policy_version",
+                sync_receipt.get("new_policy_version", UNAVAILABLE),
+            ),
+            "checkpoint_path": sync_receipt.get("checkpoint_path", UNAVAILABLE),
+            "canary_succeeded": sync_receipt.get("canary_succeeded", UNAVAILABLE),
+        }
+        if isinstance(sync_receipt, Mapping) and sync_receipt
+        else _unavailable("adapter synchronization receipt 不可用")
+    )
+    canary_available = (
+        isinstance(synchronization, Mapping)
+        and synchronization.get("canary_succeeded") != UNAVAILABLE
+    ) or bool(post_update)
+    canary = (
+        {
+            "status": "available",
+            "sync_canary_succeeded": synchronization.get(
+                "canary_succeeded", UNAVAILABLE
+            ),
+            "post_update_collected": post_update.get("collected", UNAVAILABLE),
+            "post_update_policy_version": post_update.get(
+                "policy_version", UNAVAILABLE
+            ),
+            "post_update_adapter_name": post_update.get(
+                "adapter_name", UNAVAILABLE
+            ),
+            "post_update_trajectory_ids": post_update.get(
+                "trajectory_ids", UNAVAILABLE
+            ),
+        }
+        if canary_available
+        else _unavailable("post-update canary receipt 不可用")
+    )
+    available_sections = sum(
+        (
+            optimizer.get("status") == "available",
+            synchronization.get("status") != UNAVAILABLE,
+            canary.get("status") == "available",
+        )
+    )
+    return {
+        "status": (
+            "available"
+            if available_sections == 3
+            else "partial"
+            if available_sections
+            else UNAVAILABLE
+        ),
+        "manifest_source_path": (
+            str(manifest_path) if manifest_available else UNAVAILABLE
+        ),
+        "summary_source_path": str(summary_path) if summary_available else UNAVAILABLE,
+        "sync_source_path": str(sync_path) if sync_available else UNAVAILABLE,
+        "manifest_status": manifest.get("status", UNAVAILABLE),
+        "skills_enabled": manifest.get("skills_enabled", UNAVAILABLE),
+        "optimizer": optimizer,
+        "synchronization": synchronization,
+        "canary": canary,
+        "interpretation": "single_point_training_diagnostics",
+        "multi_point_training_curve_claimed": False,
+    }
+
+
 def build_progressive_report(
     spec: Mapping[str, Any], *, base_dir: str | Path
 ) -> dict[str, Any]:
@@ -850,6 +1422,9 @@ def build_progressive_report(
             step=ordinal,
             name="policy_adapter",
         )
+        macro = _macro_metrics(values)
+        skill = _skill_projection(step_config, base=base, step_index=index)
+        training = _training_projection(step_config, base=base, step_index=index)
         steps.append(
             {
                 "step": ordinal,
@@ -863,6 +1438,9 @@ def build_progressive_report(
                     "policy": policy,
                     "adapter": adapter,
                 },
+                "macro_metrics": macro,
+                "skill": skill,
+                "training_diagnostics": training,
                 "datasets": values,
             }
         )
@@ -877,6 +1455,11 @@ def build_progressive_report(
         "graph_diagnostics_source": (
             "src.interactive.graph_diagnostics.aggregate_trajectory_diagnostics"
         ),
+        "training_diagnostic_scope": (
+            "each optimizer update is a single-point diagnostic; no multi-point "
+            "training curve is inferred"
+        ),
+        "multi_point_training_curve_claimed": False,
         "steps": steps,
         "generated_at": _utc_now(),
     }
@@ -898,9 +1481,35 @@ def _usage_value(section: Mapping[str, Any], key: str) -> Any:
     return UNAVAILABLE if value is None else value
 
 
+def _projection_value(section: Any, key: str) -> Any:
+    if not isinstance(section, Mapping) or section.get("status") == UNAVAILABLE:
+        return UNAVAILABLE
+    value = section.get(key)
+    return UNAVAILABLE if value is None else value
+
+
 def _csv_rows(report: Mapping[str, Any]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for step in report["steps"]:
+        macro = step["macro_metrics"]
+        step_skill = step["skill"]
+        skill_datasets = (
+            step_skill.get("datasets", {})
+            if isinstance(step_skill, Mapping)
+            else {}
+        )
+        training = step["training_diagnostics"]
+        optimizer = (
+            training.get("optimizer", {}) if isinstance(training, Mapping) else {}
+        )
+        synchronization = (
+            training.get("synchronization", {})
+            if isinstance(training, Mapping)
+            else {}
+        )
+        canary = (
+            training.get("canary", {}) if isinstance(training, Mapping) else {}
+        )
         for dataset in DATASETS:
             value = step["datasets"][dataset]
             metrics = value["metrics"]
@@ -908,6 +1517,12 @@ def _csv_rows(report: Mapping[str, Any]) -> list[dict[str, Any]]:
             models = value["models"]
             usage = value["usage"]
             skill = value["skill_effect"]
+            published_skill = skill_datasets.get(dataset, {})
+            skill_evidence = (
+                published_skill.get("evidence", {})
+                if isinstance(published_skill, Mapping)
+                else {}
+            )
             off = skill.get("skill_off", {}) if isinstance(skill, Mapping) else {}
             on = skill.get("skill_on", {}) if isinstance(skill, Mapping) else {}
             rows.append(
@@ -924,6 +1539,24 @@ def _csv_rows(report: Mapping[str, Any]) -> list[dict[str, Any]]:
                     ),
                     "strict_token_f1": _value_or_unavailable(
                         metrics, "strict_token_f1"
+                    ),
+                    "macro_strict_exact_match": _projection_value(
+                        macro, "strict_exact_match"
+                    ),
+                    "macro_strict_token_f1": _projection_value(
+                        macro, "strict_token_f1"
+                    ),
+                    "published_skill_id": _projection_value(
+                        published_skill, "skill_id"
+                    ),
+                    "published_skill_status": _projection_value(
+                        published_skill, "skill_status"
+                    ),
+                    "skill_evidence_effective_pairs": _projection_value(
+                        skill_evidence, "effective_pairs"
+                    ),
+                    "skill_evidence_paired_effect_mean": _projection_value(
+                        skill_evidence, "paired_effect_mean"
                     ),
                     "skill_off_exact_match": _value_or_unavailable(
                         off, "strict_exact_match"
@@ -1002,6 +1635,23 @@ def _csv_rows(report: Mapping[str, Any]) -> list[dict[str, Any]]:
                     "api_call_receipt_count": _usage_value(
                         usage, "api_call_receipt_count"
                     ),
+                    "optimizer_updates": _projection_value(
+                        optimizer, "optimizer_updates"
+                    ),
+                    "loss": _projection_value(optimizer, "loss"),
+                    "grad_norm": _projection_value(optimizer, "grad_norm"),
+                    "trainable_update_l2": _projection_value(
+                        optimizer, "trainable_update_l2"
+                    ),
+                    "sync_status": _projection_value(
+                        synchronization, "status"
+                    ),
+                    "sync_success": _projection_value(
+                        synchronization, "success"
+                    ),
+                    "canary_succeeded": _projection_value(
+                        canary, "sync_canary_succeeded"
+                    ),
                     "demo_artifact_references": json.dumps(
                         value.get("demos", []), ensure_ascii=False, sort_keys=True
                     ),
@@ -1026,9 +1676,11 @@ def _markdown(report: Mapping[str, Any]) -> str:
     lines = [
         f"# {report['title']}",
         "",
-        "本报告只聚合已保存的评测与 TrajectoryRecord；缺失文件或缺失字段标记为 `unavailable`，不按 0 计。EM/F1 使用现有固定评测脚本的严格分母。结构深度来自 AgentGraph，effective dependency depth 只反映 trajectory 中可核验的依赖传递证据。",
+        "本报告只聚合已保存的评测与 TrajectoryRecord；缺失文件或缺失字段标记为 `unavailable`，不按 0 计。EM/F1 使用现有固定评测脚本的严格分母。HotpotQA + TriviaQA 联合指标为两数据集等权宏平均。结构深度来自 AgentGraph，effective dependency depth 只反映 trajectory 中可核验的依赖传递证据。",
         "",
-        "## Step0–N 训练曲线坐标与任务指标",
+        "LoRA/GRPO 字段只是每个 optimizer update 的 single-point training diagnostics；本报告不将一次 update 表述为 multi-point training curve。",
+        "",
+        "## Step0–N 评测序列与任务指标",
         "",
         "| Step | Policy | Adapter | 数据集 | 状态 | N | EM | F1 | 平均 Agent 数 | structural depth | effective dependency depth | Skill ΔEM | Skill ΔF1 | API call receipts |",
         "|---:|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
@@ -1072,9 +1724,83 @@ def _markdown(report: Mapping[str, Any]) -> str:
                     calls=_usage_value(usage, "api_call_receipt_count"),
                 )
             )
+        macro = step["macro_metrics"]
+        lines.append(
+            "| {step} | `{policy}` | `{adapter}` | HotpotQA + TriviaQA macro | {status} | {n} | {em} | {f1} | — | — | — | — | — | — |".format(
+                step=step["step"],
+                policy=step["policy_version"],
+                adapter=step["policy_adapter"],
+                status=macro.get("status", UNAVAILABLE),
+                n=_projection_value(macro, "component_task_count"),
+                em=_fmt_percent(_projection_value(macro, "strict_exact_match")),
+                f1=_fmt_percent(_projection_value(macro, "strict_token_f1")),
+            )
+        )
 
     for step in report["steps"]:
         lines.extend(["", f"## {step['label']} 诊断", ""])
+        macro = step["macro_metrics"]
+        if macro.get("status") == "available":
+            lines.append(
+                "- HotpotQA + TriviaQA macro：EM {em}，F1 {f1}（两数据集等权）。".format(
+                    em=_fmt_percent(macro.get("strict_exact_match")),
+                    f1=_fmt_percent(macro.get("strict_token_f1")),
+                )
+            )
+        else:
+            lines.append(
+                f"- HotpotQA + TriviaQA macro：`unavailable`（{macro.get('reason', '')}）。"
+            )
+        training = step["training_diagnostics"]
+        if training.get("status") in {"available", "partial"}:
+            optimizer = training.get("optimizer", {})
+            synchronization = training.get("synchronization", {})
+            canary = training.get("canary", {})
+            lines.append(
+                "- single-point training diagnostics：optimizer_updates={updates}，loss={loss}，grad_norm={grad}，trainable_update_l2={update_l2}。".format(
+                    updates=_projection_value(optimizer, "optimizer_updates"),
+                    loss=_projection_value(optimizer, "loss"),
+                    grad=_projection_value(optimizer, "grad_norm"),
+                    update_l2=_projection_value(optimizer, "trainable_update_l2"),
+                )
+            )
+            lines.append(
+                "- adapter synchronization：status={status}，success={success}；post-update canary={canary}，collected={collected}。".format(
+                    status=_projection_value(synchronization, "status"),
+                    success=_projection_value(synchronization, "success"),
+                    canary=_projection_value(canary, "sync_canary_succeeded"),
+                    collected=_projection_value(canary, "post_update_collected"),
+                )
+            )
+        else:
+            lines.append("- single-point training diagnostics：`unavailable`。")
+        step_skill = step["skill"]
+        skill_datasets = (
+            step_skill.get("datasets", {})
+            if isinstance(step_skill, Mapping)
+            else {}
+        )
+        for dataset in DATASETS:
+            published = skill_datasets.get(dataset, {})
+            if isinstance(published, Mapping) and published.get("status") == "available":
+                evidence = published.get("evidence", {})
+                lines.append(
+                    "- {dataset} Skill：ID=`{skill_id}`，status=`{status}`，effective_pairs={pairs}，paired_effect_mean={effect}，calibrated interval=[{lower}, {upper}]，harm_probability={harm}。".format(
+                        dataset=DATASET_LABELS[dataset],
+                        skill_id=published.get("skill_id", UNAVAILABLE),
+                        status=published.get("skill_status", UNAVAILABLE),
+                        pairs=_projection_value(evidence, "effective_pairs"),
+                        effect=_projection_value(evidence, "paired_effect_mean"),
+                        lower=_projection_value(evidence, "calibrated_lower"),
+                        upper=_projection_value(evidence, "calibrated_upper"),
+                        harm=_projection_value(evidence, "harm_probability"),
+                    )
+                )
+            else:
+                lines.append(
+                    f"- {DATASET_LABELS[dataset]} Skill publication：`unavailable`。"
+                )
+        lines.append("")
         for dataset in DATASETS:
             value = step["datasets"][dataset]
             lines.extend([f"### {DATASET_LABELS[dataset]}", ""])
@@ -1155,20 +1881,97 @@ def _markdown(report: Mapping[str, Any]) -> str:
                     f"- Skill-on/off：`unavailable`（{skill.get('reason', '')}）。"
                 )
             if value.get("demos"):
-                lines.append("- 完整 Demo artifact 引用：")
+                lines.extend(["", "#### 完整 Demo 展开", ""])
                 for demo in value["demos"]:
                     trajectory = demo["trajectory_artifact"]
-                    lines.append(
-                        "  - `{task}`：`{path}:{line}`，topology=`{topology}`，structural depth=`{depth}`。".format(
+                    lines.extend(
+                        [
+                            "##### `{task}`".format(task=demo["task_id"]),
+                            "",
+                            "- TrajectoryRecord：`{path}:{line}`；topology=`{topology}`，structural depth=`{depth}`，effective dependency depth=`{effective}`。".format(
                             task=demo["task_id"],
                             path=trajectory["path"],
                             line=trajectory["jsonl_line"],
                             topology=demo["topology_family"],
                             depth=demo["structural_depth"],
-                        )
+                                effective=demo["effective_dependency_depth"],
+                            ),
+                            "- Ground Truth：`{}`。".format(
+                                json.dumps(demo.get("ground_truth"), ensure_ascii=False)
+                            ),
+                            "- Final Answer：`{}`；EM=`{}`，F1=`{}`。".format(
+                                json.dumps(demo.get("final_answer"), ensure_ascii=False),
+                                demo.get("exact_match", UNAVAILABLE),
+                                demo.get("token_f1", UNAVAILABLE),
+                            ),
+                            "",
+                            "<details><summary>Question</summary>",
+                            "",
+                            "```text",
+                            str(demo.get("question", UNAVAILABLE)),
+                            "```",
+                            "",
+                            "</details>",
+                            "",
+                            "Director actions：",
+                            "",
+                            "```json",
+                            json.dumps(
+                                demo.get("director_actions", []),
+                                ensure_ascii=False,
+                                indent=2,
+                            ),
+                            "```",
+                            "",
+                            "Agent roles/models 与 directed relations：",
+                            "",
+                            "```json",
+                            json.dumps(
+                                {
+                                    "agents": demo.get("agents", []),
+                                    "directed_relations": demo.get(
+                                        "directed_relations", []
+                                    ),
+                                },
+                                ensure_ascii=False,
+                                indent=2,
+                            ),
+                            "```",
+                            "",
+                            "Actual directed communication：",
+                            "",
+                            "```json",
+                            json.dumps(
+                                demo.get("directed_communication", []),
+                                ensure_ascii=False,
+                                indent=2,
+                            ),
+                            "```",
+                            "",
+                            "Output Agent inbox：",
+                            "",
+                            "```json",
+                            json.dumps(
+                                demo.get("output_agent_inbox", {}),
+                                ensure_ascii=False,
+                                indent=2,
+                            ),
+                            "```",
+                            "",
+                            "Failure origin receipt：",
+                            "",
+                            "```json",
+                            json.dumps(
+                                demo.get("failure_origin", {}),
+                                ensure_ascii=False,
+                                indent=2,
+                            ),
+                            "```",
+                            "",
+                        ]
                     )
             else:
-                lines.append("- 完整 Demo artifact 引用：`unavailable`。")
+                lines.append("- 完整 Demo 展开：`unavailable`。")
             lines.append("")
 
     lines.extend(
@@ -1179,6 +1982,8 @@ def _markdown(report: Mapping[str, Any]) -> str:
             "- `api_call_receipt_count` 是已保存的 Director request receipt 与 Executor ExecutionRecord 数量，不代表并行请求的 wall-clock 数量。",
             "- latency 是可用调用收据的求和与均值，不是端到端 wall-clock latency。",
             "- 模型 family 只读取 `execution.metadata.request.model.metadata.family`；缺失时不根据 model_id 猜测。",
+            "- Demo 的 failure origin 只展示 trajectory/evaluator/wrong-demo receipt 中的最早可观测失败边界，不自动归因为因果 root cause。",
+            "- optimizer_updates/loss/grad_norm/trainable_update_l2 是 single-point training diagnostics；只有多个完整、可比的 update 点时才能构成 training curve。",
             "",
         ]
     )
