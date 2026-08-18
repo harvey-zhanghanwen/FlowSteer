@@ -204,6 +204,29 @@ def test_wrong_evaluator_or_cross_dataset_policy_is_rejected(tmp_path):
         _MODULE.build_joint_curve(spec, base_dir=tmp_path)
 
 
+def test_expected_policy_adapter_is_checked_against_turn_receipts(tmp_path):
+    spec = _spec(tmp_path)
+    step = spec["steps"][0]
+    step["expected_policy_adapter"] = "theta-step-0"
+    for dataset in ("hotpotqa", "triviaqa"):
+        receipt_path = tmp_path / step["datasets"][dataset]["trajectory_receipts_path"]
+        receipts = [json.loads(line) for line in receipt_path.read_text().splitlines()]
+        for receipt in receipts:
+            receipt["turns"] = [{"policy_adapter": "theta-step-0"}]
+        _write_jsonl(receipt_path, receipts)
+
+    curve = _MODULE.build_joint_curve(spec, base_dir=tmp_path)
+    assert curve["steps"][0]["policy_adapter"] == "theta-step-0"
+    assert curve["steps"][0]["policy_adapter_receipts_verified"] is True
+
+    receipt_path = tmp_path / step["datasets"]["triviaqa"]["trajectory_receipts_path"]
+    receipts = [json.loads(line) for line in receipt_path.read_text().splitlines()]
+    receipts[0]["turns"][0]["policy_adapter"] = "wrong-adapter"
+    _write_jsonl(receipt_path, receipts)
+    with pytest.raises(_MODULE.JointCurveError, match="policy adapter"):
+        _MODULE.build_joint_curve(spec, base_dir=tmp_path)
+
+
 def test_outputs_include_json_csv_and_optional_png(tmp_path):
     curve = _MODULE.build_joint_curve(_spec(tmp_path), base_dir=tmp_path)
     output = _MODULE.write_curve_outputs(curve, tmp_path / "curve")

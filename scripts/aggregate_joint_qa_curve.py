@@ -148,10 +148,11 @@ def _validate_receipts(
     dataset: str,
     expected_task_ids: Sequence[str],
     name: str,
-) -> tuple[str, str]:
+) -> tuple[str, str, Optional[str]]:
     evaluator_version = EXPECTED_EVALUATORS[dataset]
     by_task: dict[str, Mapping[str, Any]] = {}
     policy_versions: set[str] = set()
+    policy_adapters: set[str] = set()
     for index, receipt in enumerate(receipts):
         location = f"{name}[{index}]"
         task_id = _task_id_from_receipt(receipt, location)
@@ -174,6 +175,13 @@ def _validate_receipts(
         if not isinstance(policy, str) or not policy.strip():
             raise JointCurveError(f"{location}: versions.policy must be non-empty")
         policy_versions.add(policy)
+        turns = receipt.get("turns")
+        if isinstance(turns, Sequence) and not isinstance(turns, (str, bytes)):
+            for turn_index, turn in enumerate(turns):
+                turn_value = _mapping(turn, f"{location}.turns[{turn_index}]")
+                adapter = turn_value.get("policy_adapter")
+                if isinstance(adapter, str) and adapter.strip():
+                    policy_adapters.add(adapter.strip())
         if receipt.get("sampling_receipt_verified") is not True:
             raise JointCurveError(f"{location}: sampling_receipt_verified must be true")
 
@@ -187,7 +195,13 @@ def _validate_receipts(
             f"{name}: expected exactly one policy version, got "
             f"{sorted(policy_versions)!r}"
         )
-    return next(iter(policy_versions)), evaluator_version
+    if len(policy_adapters) > 1:
+        raise JointCurveError(
+            f"{name}: expected at most one policy adapter, got "
+            f"{sorted(policy_adapters)!r}"
+        )
+    policy_adapter = next(iter(policy_adapters)) if policy_adapters else None
+    return next(iter(policy_versions)), evaluator_version, policy_adapter
 
 
 def _paired_metrics(
@@ -372,7 +386,7 @@ def _dataset_step(
             f"{metrics_path}: metrics_path must end in .jsonl or .json"
         )
 
-    policy, evaluator = _validate_receipts(
+    policy, evaluator, policy_adapter = _validate_receipts(
         receipts,
         dataset=dataset,
         expected_task_ids=task_ids,
@@ -401,6 +415,7 @@ def _dataset_step(
         "task_ids": list(task_ids),
         "evaluator_version": evaluator,
         "policy_version": policy,
+        "policy_adapter": policy_adapter,
         "strict_exact_match": exact_match,
         "strict_token_f1": token_f1,
         "strict_exact_match_percent": 100.0 * exact_match,
@@ -411,6 +426,7 @@ def _dataset_step(
         "metrics_path": str(metrics_path),
         "trajectory_receipts_path": str(receipt_path),
         "policy_receipt_verified": True,
+        "policy_adapter_receipt_available": policy_adapter is not None,
         "evaluator_receipts_verified": True,
     }
 
@@ -468,6 +484,28 @@ def build_joint_curve(
                 f"step {ordinal}: expected policy {expected_policy!r}, got "
                 f"{policy_version!r}"
             )
+        adapters = {
+            values[dataset]["policy_adapter"]
+            for dataset in DATASETS
+            if values[dataset]["policy_adapter"] is not None
+        }
+        if len(adapters) > 1:
+            raise JointCurveError(
+                f"step {ordinal}: HotpotQA and TriviaQA policy adapter receipts "
+                f"differ: {sorted(adapters)!r}"
+            )
+        actual_adapter = next(iter(adapters)) if adapters else None
+        expected_adapter = step.get("expected_policy_adapter")
+        if expected_adapter is not None:
+            if any(
+                values[dataset]["policy_adapter"] != expected_adapter
+                for dataset in DATASETS
+            ):
+                raise JointCurveError(
+                    f"step {ordinal}: expected policy adapter "
+                    f"{expected_adapter!r}, got "
+                    f"{[values[dataset]['policy_adapter'] for dataset in DATASETS]!r}"
+                )
         for dataset in DATASETS:
             task_ids = tuple(values[dataset].pop("task_ids"))
             if dataset not in fixed_task_ids:
@@ -488,7 +526,8 @@ def build_joint_curve(
                 "step": ordinal,
                 "label": str(step.get("label", f"step{ordinal}")),
                 "policy_version": policy_version,
-                "policy_adapter": step.get("expected_policy_adapter"),
+                "policy_adapter": actual_adapter,
+                "policy_adapter_receipts_verified": actual_adapter is not None,
                 "datasets": values,
                 "macro_average": {
                     "strict_exact_match": macro_em,
@@ -506,6 +545,9 @@ def build_joint_curve(
         "macro_average": "unweighted_mean_over_HotpotQA_and_TriviaQA",
         "fixed_task_ids_verified": True,
         "policy_receipts_verified": True,
+        "policy_adapter_receipts_verified": all(
+            step["policy_adapter_receipts_verified"] for step in steps
+        ),
         "evaluator_receipts_verified": True,
         "fixed_task_ids": {
             dataset: list(fixed_task_ids[dataset]) for dataset in DATASETS

@@ -1,0 +1,1553 @@
+{
+  "agentgraph": {
+    "completed": 32,
+    "completed_only_exact_match": 0.71875,
+    "completed_only_token_f1": 0.828125,
+    "denominator": 32,
+    "evaluator_valid": 32,
+    "strict_exact_match": 0.71875,
+    "strict_token_f1": 0.828125
+  },
+  "agentgraph_minus_direct": {
+    "exact_match": 0.03125,
+    "token_f1": 0.04632352941176476
+  },
+  "completed_at": "2026-08-18T00:35:38.195395+00:00",
+  "dataset": "HotpotQA",
+  "direct_local_baseline": {
+    "completed": 32,
+    "completed_only_exact_match": 0.6875,
+    "completed_only_token_f1": 0.7818014705882352,
+    "denominator": 32,
+    "evaluator_valid": 32,
+    "strict_exact_match": 0.6875,
+    "strict_token_f1": 0.7818014705882352
+  },
+  "evaluation_name": "joint_qa_matched_control_step0_hotpotqa",
+  "explicit_finished_count": 32,
+  "failure_types": {
+    "architecture_gain": 2,
+    "architecture_regression_candidate": 1,
+    "correct": 21,
+    "partial_or_overlong_answer": 5,
+    "shared_reasoning_or_model_failure_candidate": 3
+  },
+  "graph_search_diagnostics": {
+    "action_counts": {
+      "add_agent": 82,
+      "delete_agent": 5,
+      "finish": 33,
+      "modify_agent": 1,
+      "parse_failed": 4,
+      "set_output": 44,
+      "set_relation": 54
+    },
+    "action_sequence_counts": {
+      "add_agent -> add_agent -> add_agent -> set_relation -> set_relation -> add_agent -> set_relation -> set_output -> finish": 1,
+      "add_agent -> add_agent -> set_output -> add_agent -> set_relation -> set_output -> set_relation -> modify_agent -> delete_agent -> finish": 1,
+      "add_agent -> add_agent -> set_output -> set_relation -> set_output -> finish": 1,
+      "add_agent -> add_agent -> set_relation -> add_agent -> set_relation -> add_agent -> set_relation -> set_output -> finish": 2,
+      "add_agent -> add_agent -> set_relation -> add_agent -> set_relation -> add_agent -> set_relation -> set_output -> finish -> set_relation -> delete_agent -> finish": 1,
+      "add_agent -> add_agent -> set_relation -> add_agent -> set_relation -> set_output -> finish": 3,
+      "add_agent -> add_agent -> set_relation -> set_output -> finish": 8,
+      "add_agent -> parse_failed -> set_relation -> add_agent -> set_relation -> add_agent -> set_relation -> set_output -> add_agent -> set_relation -> delete_agent -> set_relation -> set_output -> delete_agent -> finish": 1,
+      "add_agent -> set_output -> add_agent -> add_agent -> add_agent -> set_relation -> set_output -> set_relation -> finish": 1,
+      "add_agent -> set_output -> add_agent -> set_relation -> add_agent -> set_relation -> set_output -> finish": 1,
+      "add_agent -> set_output -> add_agent -> set_relation -> set_output -> finish": 6,
+      "add_agent -> set_output -> delete_agent -> add_agent -> add_agent -> set_relation -> set_output -> finish": 1,
+      "add_agent -> set_relation -> add_agent -> set_relation -> set_output -> finish": 2,
+      "parse_failed -> add_agent -> add_agent -> set_relation -> set_output -> finish": 2,
+      "parse_failed -> add_agent -> set_relation -> add_agent -> set_relation -> set_output -> finish": 1
+    },
+    "agent_count_distribution": {
+      "2": 23,
+      "3": 6,
+      "4": 3
+    },
+    "atomic_cost_by_agent_count": {
+      "2": {
+        "mean_edit_overhead": 0.5652173913043478,
+        "mean_minimum_final_construction_actions": 5.0,
+        "mean_observed_turns": 6.3478260869565215,
+        "mean_turn_overhead": 1.3478260869565217,
+        "tasks": 23
+      },
+      "3": {
+        "mean_edit_overhead": 0.6666666666666666,
+        "mean_minimum_final_construction_actions": 7.0,
+        "mean_observed_turns": 8.333333333333334,
+        "mean_turn_overhead": 1.3333333333333333,
+        "tasks": 6
+      },
+      "4": {
+        "mean_edit_overhead": 0.0,
+        "mean_minimum_final_construction_actions": 9.0,
+        "mean_observed_turns": 9.0,
+        "mean_turn_overhead": 0.0,
+        "tasks": 3
+      }
+    },
+    "depth_three_plus_count": 9,
+    "effective_dependency_depth_distribution": {
+      "2": 31,
+      "3": 1
+    },
+    "effective_dependency_status_distribution": {
+      "weak": 32
+    },
+    "execution_turn_count": 168,
+    "executor_call_count": 172,
+    "explicit_finish_count": 32,
+    "full_structural_depth_evidence_status_distribution": {
+      "unverified": 8,
+      "weak": 24
+    },
+    "max_rounds_termination_count": 0,
+    "max_rounds_values_seen": {},
+    "maximum_prompt_characters": 32430,
+    "maximum_turn_count": 15,
+    "maximum_visible_history": 4,
+    "mean_prompt_characters": 17671.824181547618,
+    "mean_turn_count": 6.96875,
+    "parse_failure_count": 4,
+    "rejected_turn_count": 22,
+    "rejected_turn_rate": 0.09865470852017937,
+    "role_family_distribution": {
+      "comparison": 2,
+      "evidence": 29,
+      "format": 32,
+      "reasoning": 2,
+      "research": 1,
+      "synthesis": 9,
+      "verification": 1
+    },
+    "set_output_before_last_relation_count": 13,
+    "structural_depth_distribution": {
+      "2": 23,
+      "3": 7,
+      "4": 2
+    },
+    "task_count": 32,
+    "tasks_with_execution": 32,
+    "three_plus_agent_count": 9,
+    "topology_family_distribution": {
+      "fan_in": 1,
+      "serial_2": 23,
+      "serial_3_plus": 8
+    },
+    "trajectories": [
+      {
+        "action_sequence": [
+          "add_agent",
+          "add_agent",
+          "set_relation",
+          "set_output",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 4,
+        "executor_call_count": 4,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 26378,
+        "prompt_character_mean": 19534.6,
+        "rejected_turn_count": 0,
+        "relation_count": 1,
+        "role_families": [
+          "format",
+          "evidence"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "hotpotqa:5a8d7341554299441c6b9fe5",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 5,
+        "turn_overhead": 0,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "add_agent",
+          "set_relation",
+          "add_agent",
+          "set_relation",
+          "set_output",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 4,
+        "executor_call_count": 4,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 19124,
+        "prompt_character_mean": 14261.166666666666,
+        "rejected_turn_count": 1,
+        "relation_count": 1,
+        "role_families": [
+          "format",
+          "evidence"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "hotpotqa:5a879ab05542996e4f30887e",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 6,
+        "turn_overhead": 1,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "add_agent",
+          "set_output",
+          "add_agent",
+          "set_relation",
+          "set_output",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 4,
+        "executor_call_count": 4,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 19348,
+        "prompt_character_mean": 13571.0,
+        "rejected_turn_count": 1,
+        "relation_count": 1,
+        "role_families": [
+          "synthesis",
+          "format"
+        ],
+        "set_output_before_last_relation": true,
+        "structural_depth": 2,
+        "task_id": "hotpotqa:5a82171f5542990a1d231f4a",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 6,
+        "turn_overhead": 1,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "add_agent",
+          "set_output",
+          "add_agent",
+          "set_relation",
+          "add_agent",
+          "set_relation",
+          "set_output",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 6,
+        "executor_call_count": 6,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "unverified",
+        "graph_revision": 6,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 7,
+        "parse_failure_count": 0,
+        "prompt_character_max": 25673,
+        "prompt_character_mean": 18085.5,
+        "rejected_turn_count": 1,
+        "relation_count": 2,
+        "role_families": [
+          "synthesis",
+          "format",
+          "evidence"
+        ],
+        "set_output_before_last_relation": true,
+        "structural_depth": 3,
+        "task_id": "hotpotqa:5a7a06935542990198eaf050",
+        "termination_reason": "finish",
+        "topology_family": "serial_3_plus",
+        "topology_motifs": [
+          "serial_3_plus"
+        ],
+        "turn_count": 8,
+        "turn_overhead": 1,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "add_agent",
+          "add_agent",
+          "set_relation",
+          "set_output",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 4,
+        "executor_call_count": 4,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 22316,
+        "prompt_character_mean": 15492.8,
+        "rejected_turn_count": 0,
+        "relation_count": 1,
+        "role_families": [
+          "format",
+          "evidence"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "hotpotqa:5a84dd955542997b5ce3ff79",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 5,
+        "turn_overhead": 0,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "add_agent",
+          "add_agent",
+          "set_relation",
+          "set_output",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 4,
+        "executor_call_count": 4,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 22923,
+        "prompt_character_mean": 16595.0,
+        "rejected_turn_count": 0,
+        "relation_count": 1,
+        "role_families": [
+          "format",
+          "evidence"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "hotpotqa:5a832c3455429954d2e2ec41",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 5,
+        "turn_overhead": 0,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "add_agent",
+          "add_agent",
+          "set_relation",
+          "add_agent",
+          "set_relation",
+          "set_output",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 6,
+        "executor_call_count": 6,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "unverified",
+        "graph_revision": 6,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 7,
+        "parse_failure_count": 0,
+        "prompt_character_max": 23932,
+        "prompt_character_mean": 16613.571428571428,
+        "rejected_turn_count": 0,
+        "relation_count": 2,
+        "role_families": [
+          "format",
+          "synthesis",
+          "evidence"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 3,
+        "task_id": "hotpotqa:5adf44985542993a75d2646d",
+        "termination_reason": "finish",
+        "topology_family": "serial_3_plus",
+        "topology_motifs": [
+          "serial_3_plus"
+        ],
+        "turn_count": 7,
+        "turn_overhead": 0,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "add_agent",
+          "add_agent",
+          "add_agent",
+          "set_relation",
+          "set_relation",
+          "add_agent",
+          "set_relation",
+          "set_output",
+          "finish"
+        ],
+        "agent_count": 4,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 8,
+        "executor_call_count": 8,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "unverified",
+        "graph_revision": 8,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 9,
+        "parse_failure_count": 0,
+        "prompt_character_max": 32430,
+        "prompt_character_mean": 24030.666666666668,
+        "rejected_turn_count": 0,
+        "relation_count": 3,
+        "role_families": [
+          "comparison",
+          "evidence",
+          "evidence",
+          "format"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 3,
+        "task_id": "hotpotqa:5a7e36045542991319bc9440",
+        "termination_reason": "finish",
+        "topology_family": "fan_in",
+        "topology_motifs": [
+          "parallel",
+          "fan_in"
+        ],
+        "turn_count": 9,
+        "turn_overhead": 0,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "add_agent",
+          "set_output",
+          "add_agent",
+          "set_relation",
+          "set_output",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 4,
+        "executor_call_count": 4,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 21428,
+        "prompt_character_mean": 16154.333333333334,
+        "rejected_turn_count": 1,
+        "relation_count": 1,
+        "role_families": [
+          "format",
+          "evidence"
+        ],
+        "set_output_before_last_relation": true,
+        "structural_depth": 2,
+        "task_id": "hotpotqa:5a7d0db955429909bec76924",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 6,
+        "turn_overhead": 1,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "add_agent",
+          "set_relation",
+          "add_agent",
+          "set_relation",
+          "set_output",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 4,
+        "executor_call_count": 4,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 20926,
+        "prompt_character_mean": 15657.166666666666,
+        "rejected_turn_count": 1,
+        "relation_count": 1,
+        "role_families": [
+          "format",
+          "evidence"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "hotpotqa:5abd90545542996e802b47d7",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 6,
+        "turn_overhead": 1,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "add_agent",
+          "add_agent",
+          "set_relation",
+          "add_agent",
+          "set_relation",
+          "set_output",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 6,
+        "executor_call_count": 6,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "unverified",
+        "graph_revision": 6,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 7,
+        "parse_failure_count": 0,
+        "prompt_character_max": 25032,
+        "prompt_character_mean": 17890.85714285714,
+        "rejected_turn_count": 0,
+        "relation_count": 2,
+        "role_families": [
+          "format",
+          "evidence",
+          "synthesis"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 3,
+        "task_id": "hotpotqa:5a89372855429951533612e6",
+        "termination_reason": "finish",
+        "topology_family": "serial_3_plus",
+        "topology_motifs": [
+          "serial_3_plus"
+        ],
+        "turn_count": 7,
+        "turn_overhead": 0,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "add_agent",
+          "set_output",
+          "delete_agent",
+          "add_agent",
+          "add_agent",
+          "set_relation",
+          "set_output",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 2,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 5,
+        "executor_call_count": 5,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 6,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 22671,
+        "prompt_character_mean": 16101.75,
+        "rejected_turn_count": 1,
+        "relation_count": 1,
+        "role_families": [
+          "format",
+          "evidence"
+        ],
+        "set_output_before_last_relation": true,
+        "structural_depth": 2,
+        "task_id": "hotpotqa:5aba66c855429939ce03dcdb",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 8,
+        "turn_overhead": 3,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "parse_failed",
+          "add_agent",
+          "set_relation",
+          "add_agent",
+          "set_relation",
+          "set_output",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 4,
+        "executor_call_count": 4,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 1,
+        "prompt_character_max": 23037,
+        "prompt_character_mean": 17216.0,
+        "rejected_turn_count": 2,
+        "relation_count": 1,
+        "role_families": [
+          "format",
+          "evidence"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "hotpotqa:5a7722d655429966f1a36c99",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 7,
+        "turn_overhead": 2,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "add_agent",
+          "add_agent",
+          "set_relation",
+          "set_output",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 4,
+        "executor_call_count": 4,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 24576,
+        "prompt_character_mean": 17744.2,
+        "rejected_turn_count": 0,
+        "relation_count": 1,
+        "role_families": [
+          "format",
+          "evidence"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "hotpotqa:5ade025e5542997dc790711e",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 5,
+        "turn_overhead": 0,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "add_agent",
+          "add_agent",
+          "set_relation",
+          "set_output",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 4,
+        "executor_call_count": 4,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 23051,
+        "prompt_character_mean": 15883.2,
+        "rejected_turn_count": 0,
+        "relation_count": 1,
+        "role_families": [
+          "evidence",
+          "format"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "hotpotqa:5ab381b155429969a97a816b",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 5,
+        "turn_overhead": 0,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "parse_failed",
+          "add_agent",
+          "add_agent",
+          "set_relation",
+          "set_output",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 4,
+        "executor_call_count": 4,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 1,
+        "prompt_character_max": 22888,
+        "prompt_character_mean": 15874.5,
+        "rejected_turn_count": 1,
+        "relation_count": 1,
+        "role_families": [
+          "format",
+          "evidence"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "hotpotqa:5ae0d91e55429924de1b7198",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 6,
+        "turn_overhead": 1,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "add_agent",
+          "set_output",
+          "add_agent",
+          "set_relation",
+          "set_output",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 4,
+        "executor_call_count": 4,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 19593,
+        "prompt_character_mean": 14186.5,
+        "rejected_turn_count": 1,
+        "relation_count": 1,
+        "role_families": [
+          "evidence",
+          "format"
+        ],
+        "set_output_before_last_relation": true,
+        "structural_depth": 2,
+        "task_id": "hotpotqa:5a83168855429966c78a6b2e",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 6,
+        "turn_overhead": 1,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "add_agent",
+          "add_agent",
+          "set_relation",
+          "add_agent",
+          "set_relation",
+          "add_agent",
+          "set_relation",
+          "set_output",
+          "finish"
+        ],
+        "agent_count": 4,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 8,
+        "executor_call_count": 8,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "unverified",
+        "graph_revision": 8,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 9,
+        "parse_failure_count": 0,
+        "prompt_character_max": 32404,
+        "prompt_character_mean": 23422.222222222223,
+        "rejected_turn_count": 0,
+        "relation_count": 3,
+        "role_families": [
+          "format",
+          "evidence",
+          "synthesis",
+          "verification"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 4,
+        "task_id": "hotpotqa:5ac2a5d455429921a00ab01b",
+        "termination_reason": "finish",
+        "topology_family": "serial_3_plus",
+        "topology_motifs": [
+          "serial_3_plus"
+        ],
+        "turn_count": 9,
+        "turn_overhead": 0,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "add_agent",
+          "set_output",
+          "add_agent",
+          "set_relation",
+          "set_output",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 4,
+        "executor_call_count": 4,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 20183,
+        "prompt_character_mean": 15149.166666666666,
+        "rejected_turn_count": 1,
+        "relation_count": 1,
+        "role_families": [
+          "format",
+          "evidence"
+        ],
+        "set_output_before_last_relation": true,
+        "structural_depth": 2,
+        "task_id": "hotpotqa:5ab698885542995eadef002a",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 6,
+        "turn_overhead": 1,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "add_agent",
+          "add_agent",
+          "set_relation",
+          "set_output",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 4,
+        "executor_call_count": 4,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 21849,
+        "prompt_character_mean": 14684.6,
+        "rejected_turn_count": 0,
+        "relation_count": 1,
+        "role_families": [
+          "evidence",
+          "format"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "hotpotqa:5ab345db55429969a97a8122",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 5,
+        "turn_overhead": 0,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "add_agent",
+          "add_agent",
+          "set_output",
+          "set_relation",
+          "set_output",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 4,
+        "executor_call_count": 4,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 21890,
+        "prompt_character_mean": 16527.833333333332,
+        "rejected_turn_count": 1,
+        "relation_count": 1,
+        "role_families": [
+          "format",
+          "evidence"
+        ],
+        "set_output_before_last_relation": true,
+        "structural_depth": 2,
+        "task_id": "hotpotqa:5ac2a912554299218029dae8",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 6,
+        "turn_overhead": 1,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "parse_failed",
+          "add_agent",
+          "add_agent",
+          "set_relation",
+          "set_output",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 4,
+        "executor_call_count": 4,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 1,
+        "prompt_character_max": 21610,
+        "prompt_character_mean": 14375.666666666666,
+        "rejected_turn_count": 1,
+        "relation_count": 1,
+        "role_families": [
+          "format",
+          "evidence"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "hotpotqa:5adf732a5542993a75d264e9",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 6,
+        "turn_overhead": 1,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "add_agent",
+          "parse_failed",
+          "set_relation",
+          "add_agent",
+          "set_relation",
+          "add_agent",
+          "set_relation",
+          "set_output",
+          "add_agent",
+          "set_relation",
+          "delete_agent",
+          "set_relation",
+          "set_output",
+          "delete_agent",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 7,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 11,
+        "executor_call_count": 14,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 11,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 1,
+        "prompt_character_max": 31961,
+        "prompt_character_mean": 23919.333333333332,
+        "rejected_turn_count": 3,
+        "relation_count": 1,
+        "role_families": [
+          "synthesis",
+          "format"
+        ],
+        "set_output_before_last_relation": true,
+        "structural_depth": 2,
+        "task_id": "hotpotqa:5adc1309554299438c868d3b",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 15,
+        "turn_overhead": 10,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "add_agent",
+          "add_agent",
+          "set_relation",
+          "set_output",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 4,
+        "executor_call_count": 4,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 24208,
+        "prompt_character_mean": 17437.0,
+        "rejected_turn_count": 0,
+        "relation_count": 1,
+        "role_families": [
+          "format",
+          "evidence"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "hotpotqa:5a7272eb5542997f827839d7",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 5,
+        "turn_overhead": 0,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "add_agent",
+          "add_agent",
+          "set_relation",
+          "add_agent",
+          "set_relation",
+          "set_output",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 6,
+        "executor_call_count": 6,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "unverified",
+        "graph_revision": 6,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 7,
+        "parse_failure_count": 0,
+        "prompt_character_max": 26752,
+        "prompt_character_mean": 20116.428571428572,
+        "rejected_turn_count": 0,
+        "relation_count": 2,
+        "role_families": [
+          "format",
+          "evidence",
+          "synthesis"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 3,
+        "task_id": "hotpotqa:5ac2c3545542990b17b1548b",
+        "termination_reason": "finish",
+        "topology_family": "serial_3_plus",
+        "topology_motifs": [
+          "serial_3_plus"
+        ],
+        "turn_count": 7,
+        "turn_overhead": 0,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "add_agent",
+          "add_agent",
+          "set_relation",
+          "set_output",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 4,
+        "executor_call_count": 4,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 22515,
+        "prompt_character_mean": 15612.4,
+        "rejected_turn_count": 0,
+        "relation_count": 1,
+        "role_families": [
+          "evidence",
+          "format"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "hotpotqa:5a76a401554299373536012b",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 5,
+        "turn_overhead": 0,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "add_agent",
+          "set_output",
+          "add_agent",
+          "add_agent",
+          "add_agent",
+          "set_relation",
+          "set_output",
+          "set_relation",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 3,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 6,
+        "executor_call_count": 7,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 6,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 7,
+        "parse_failure_count": 0,
+        "prompt_character_max": 32199,
+        "prompt_character_mean": 23019.333333333332,
+        "rejected_turn_count": 2,
+        "relation_count": 2,
+        "role_families": [
+          "reasoning",
+          "evidence",
+          "format"
+        ],
+        "set_output_before_last_relation": true,
+        "structural_depth": 3,
+        "task_id": "hotpotqa:5ae3b4d05542992f92d82349",
+        "termination_reason": "finish",
+        "topology_family": "serial_3_plus",
+        "topology_motifs": [
+          "serial_3_plus"
+        ],
+        "turn_count": 9,
+        "turn_overhead": 2,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "add_agent",
+          "set_output",
+          "add_agent",
+          "set_relation",
+          "set_output",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 4,
+        "executor_call_count": 4,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 21877,
+        "prompt_character_mean": 16463.666666666668,
+        "rejected_turn_count": 1,
+        "relation_count": 1,
+        "role_families": [
+          "evidence",
+          "format"
+        ],
+        "set_output_before_last_relation": true,
+        "structural_depth": 2,
+        "task_id": "hotpotqa:5ac15df95542994d76dccded",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 6,
+        "turn_overhead": 1,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "add_agent",
+          "add_agent",
+          "set_relation",
+          "add_agent",
+          "set_relation",
+          "add_agent",
+          "set_relation",
+          "set_output",
+          "finish",
+          "set_relation",
+          "delete_agent",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 4,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 10,
+        "executor_call_count": 10,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "unverified",
+        "graph_revision": 10,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 7,
+        "parse_failure_count": 0,
+        "prompt_character_max": 30817,
+        "prompt_character_mean": 23777.333333333332,
+        "rejected_turn_count": 1,
+        "relation_count": 2,
+        "role_families": [
+          "synthesis",
+          "research",
+          "format"
+        ],
+        "set_output_before_last_relation": true,
+        "structural_depth": 3,
+        "task_id": "hotpotqa:5ae3918b5542994393b9e709",
+        "termination_reason": "finish",
+        "topology_family": "serial_3_plus",
+        "topology_motifs": [
+          "serial_3_plus"
+        ],
+        "turn_count": 12,
+        "turn_overhead": 5,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "add_agent",
+          "add_agent",
+          "set_output",
+          "add_agent",
+          "set_relation",
+          "set_output",
+          "set_relation",
+          "modify_agent",
+          "delete_agent",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 4,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 8,
+        "executor_call_count": 8,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 8,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 29547,
+        "prompt_character_mean": 22452.3,
+        "rejected_turn_count": 1,
+        "relation_count": 1,
+        "role_families": [
+          "evidence",
+          "format"
+        ],
+        "set_output_before_last_relation": true,
+        "structural_depth": 2,
+        "task_id": "hotpotqa:5a8b63755542997f31a41cfe",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 10,
+        "turn_overhead": 5,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "add_agent",
+          "add_agent",
+          "set_relation",
+          "add_agent",
+          "set_relation",
+          "add_agent",
+          "set_relation",
+          "set_output",
+          "finish"
+        ],
+        "agent_count": 4,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 8,
+        "executor_call_count": 8,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "unverified",
+        "graph_revision": 8,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 9,
+        "parse_failure_count": 0,
+        "prompt_character_max": 28287,
+        "prompt_character_mean": 20248.11111111111,
+        "rejected_turn_count": 0,
+        "relation_count": 3,
+        "role_families": [
+          "format",
+          "reasoning",
+          "evidence",
+          "synthesis"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 4,
+        "task_id": "hotpotqa:5a8efd3c55429918e830d179",
+        "termination_reason": "finish",
+        "topology_family": "serial_3_plus",
+        "topology_motifs": [
+          "serial_3_plus"
+        ],
+        "turn_count": 9,
+        "turn_overhead": 0,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "add_agent",
+          "set_output",
+          "add_agent",
+          "set_relation",
+          "set_output",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 4,
+        "executor_call_count": 4,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 18943,
+        "prompt_character_mean": 13400.166666666666,
+        "rejected_turn_count": 1,
+        "relation_count": 1,
+        "role_families": [
+          "comparison",
+          "format"
+        ],
+        "set_output_before_last_relation": true,
+        "structural_depth": 2,
+        "task_id": "hotpotqa:5a7a02235542996c55b2dcd3",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 6,
+        "turn_overhead": 1,
+        "visible_history_max": 4
+      }
+    ],
+    "turn_count_distribution": {
+      "10": 1,
+      "12": 1,
+      "15": 1,
+      "5": 8,
+      "6": 11,
+      "7": 4,
+      "8": 2,
+      "9": 4
+    }
+  },
+  "input_context": "full_10_passages",
+  "known_limitations": [
+    "Only answer EM/F1 is available; supporting-fact and joint metrics are not emitted.",
+    "A Director/API exception before terminal collection may not preserve partial turns.",
+    "Paper references use a different published evaluation setup and are not a paired baseline."
+  ],
+  "method_level_changes_performed": false,
+  "metric_scope": "official_compatible_answer_only",
+  "model_catalog_path": "config/model_catalog_triviaqa_v1.yaml",
+  "native_source_split": "train",
+  "operational_failure_count": 0,
+  "paper_references_percent": {
+    "comparability_note": "Reference numbers are contextual only; the paired Local Direct baseline on these fixed project-held-out samples is primary.",
+    "flowsteer": {
+      "exact_match": 89.84,
+      "token_f1": 91.2
+    },
+    "qwen3.5_9b_direct": {
+      "exact_match": 60.94,
+      "token_f1": 75.7
+    },
+    "skillflow": {
+      "exact_match": 92.19,
+      "token_f1": 93.95
+    }
+  },
+  "policy_adapter": "theta_hotpot_step_000000",
+  "policy_version": "qwen35-9b-hotpot-step-000000",
+  "project_split": "validation",
+  "sample_count": 32,
+  "schema_version": "flowsteer.hotpotqa.round_report.v1",
+  "supporting_fact_metrics_available": false,
+  "terminal_failure_count": 0,
+  "training_performed": false,
+  "typical_wrong_demo_task_ids": [
+    "hotpotqa:5a8d7341554299441c6b9fe5",
+    "hotpotqa:5adf44985542993a75d2646d",
+    "hotpotqa:5a89372855429951533612e6",
+    "hotpotqa:5abd90545542996e802b47d7",
+    "hotpotqa:5aba66c855429939ce03dcdb",
+    "hotpotqa:5ab381b155429969a97a816b",
+    "hotpotqa:5ac2a5d455429921a00ab01b",
+    "hotpotqa:5adf732a5542993a75d264e9",
+    "hotpotqa:5a7272eb5542997f827839d7"
+  ],
+  "wrong_demo_count": 9
+}

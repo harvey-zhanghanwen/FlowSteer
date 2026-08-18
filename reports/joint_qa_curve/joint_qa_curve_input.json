@@ -1,0 +1,38 @@
+{
+  "schema_version": "flowsteer.joint_qa_curve_input.v1",
+  "steps": [
+    {
+      "step": 0,
+      "label": "Step 0: zero LoRA matched control",
+      "expected_policy_version": "qwen35-9b-hotpot-step-000000",
+      "expected_policy_adapter": "theta_hotpot_step_000000",
+      "datasets": {
+        "hotpotqa": {
+          "metrics_path": "/ssd1/iclr/1/FlowSteer/artifacts/joint_qa_curve/step_000000/hotpotqa/paired_results.jsonl",
+          "trajectory_receipts_path": "/ssd1/iclr/1/FlowSteer/artifacts/joint_qa_curve/step_000000/hotpotqa/agentgraph_trajectories.jsonl"
+        },
+        "triviaqa": {
+          "metrics_path": "/ssd1/iclr/1/FlowSteer/artifacts/joint_qa_curve/step_000000/triviaqa/paired_results.jsonl",
+          "trajectory_receipts_path": "/ssd1/iclr/1/FlowSteer/artifacts/joint_qa_curve/step_000000/triviaqa/agentgraph_trajectories.jsonl"
+        }
+      }
+    },
+    {
+      "step": 1,
+      "label": "Step 1: one joint GRPO LoRA update",
+      "expected_policy_version": "qwen35-9b-jointqa-step-000001",
+      "expected_policy_adapter": "theta_jointqa_step_000001",
+      "datasets": {
+        "hotpotqa": {
+          "metrics_path": "/ssd1/iclr/1/FlowSteer/artifacts/joint_qa_curve/step_000001/hotpotqa/paired_results.jsonl",
+          "trajectory_receipts_path": "/ssd1/iclr/1/FlowSteer/artifacts/joint_qa_curve/step_000001/hotpotqa/agentgraph_trajectories.jsonl"
+        },
+        "triviaqa": {
+          "metrics_path": "/ssd1/iclr/1/FlowSteer/artifacts/joint_qa_curve/step_000001/triviaqa/paired_results.jsonl",
+          "trajectory_receipts_path": "/ssd1/iclr/1/FlowSteer/artifacts/joint_qa_curve/step_000001/triviaqa/agentgraph_trajectories.jsonl"
+        }
+      }
+    }
+  ]
+}
+
