@@ -421,3 +421,13 @@ for a draft/critique dependency, and serial dependencies otherwise.  This is a
 paired Skill candidate, not a base Director template, topology quota, reward,
 or direct Canvas mutation; it can become ACTIVE only through the unchanged
 independent evidence gate.
+
+The progressive Skill-on micro-training boundary reuses the existing
+`SkillLifecycleManager.audit` transition after a successful LoRA policy
+publication.  The runner changes only the policy coordinate, persists every
+affected `ACTIVE -> SUSPENDED` transition in the configured `SkillStore`, and
+records the lifecycle receipt before post-update canaries.  This is the
+necessary runner integration for the design document's policy-drift rule; it
+does not add a second lifecycle implementation.  The same boundary now derives
+the manifest's post-update canary bound from `policy_sync.post_update_canary_count`
+instead of reporting a stale constant.

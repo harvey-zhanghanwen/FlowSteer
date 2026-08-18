@@ -8,7 +8,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 from collections import Counter, defaultdict
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict, is_dataclass, replace
 from datetime import datetime, timezone
 import json
 import os
@@ -1806,11 +1806,89 @@ def _artifact_paths(config: Mapping[str, Any], root: Path) -> dict[str, Path]:
     for name, field_name in (
         ("retrieval", "retrieval_receipts_path"),
         ("behavior_preflight", "behavior_policy_preflight_path"),
+        ("skill_lifecycle", "skill_lifecycle_receipt_path"),
     ):
         value = storage.get(field_name)
         if isinstance(value, str) and value.strip():
             paths[name] = _resolve(root, value)
     return paths
+
+
+def _audit_active_skills_after_policy_update(
+    backend: Any,
+    *,
+    behavior_policy: str,
+    updated_policy: str,
+    adapter_name: str,
+    require_active_skills: bool,
+) -> dict[str, Any]:
+    """Persist the existing Skill lifecycle transition after policy drift.
+
+    ``SkillLifecycleManager.audit`` is the canonical project implementation of
+    version-drift suspension.  The smoke runner only supplies the newly
+    published policy coordinate and persists the resulting same-version
+    ``ACTIVE -> SUSPENDED`` transitions in the already configured SkillStore.
+    """
+
+    pipeline = getattr(backend, "skill_pipeline", None)
+    if pipeline is None:
+        if require_active_skills:
+            raise SmokeRunError(
+                "Skill-on training published a policy without a Skill lifecycle pipeline"
+            )
+        return {
+            "schema_version": "flowsteer.skill-policy-drift-receipt.v1",
+            "status": "not_applicable",
+            "behavior_policy_version": behavior_policy,
+            "updated_policy_version": updated_policy,
+            "adapter_name": adapter_name,
+            "active_skills_before": 0,
+            "suspended_skills": 0,
+            "transitions": [],
+        }
+
+    active_skills = tuple(
+        skill for skill in pipeline.skill_store.list() if skill.status is SkillStatus.ACTIVE
+    )
+    if require_active_skills and not active_skills:
+        raise SmokeRunError(
+            "Skill-on training published a policy but the frozen store has no ACTIVE Skill"
+        )
+    transitions: list[dict[str, Any]] = []
+    for skill in active_skills:
+        current_versions = replace(skill.versions, policy=updated_policy)
+        audited = pipeline.lifecycle.audit(skill, current_versions)
+        if audited.status is not SkillStatus.SUSPENDED:
+            raise SmokeRunError(
+                f"policy drift did not suspend ACTIVE Skill {skill.skill_id}"
+            )
+        pipeline.skill_store.upsert(audited)
+        persisted = pipeline.skill_store.get(skill.skill_id)
+        if persisted is None or persisted.status is not SkillStatus.SUSPENDED:
+            raise SmokeRunError(
+                f"suspended Skill was not persisted: {skill.skill_id}"
+            )
+        transitions.append(
+            {
+                "skill_id": skill.skill_id,
+                "version": skill.version,
+                "previous_status": skill.status.value,
+                "new_status": persisted.status.value,
+                "reason": persisted.suspended_reason,
+                "evidence_policy_version": skill.versions.policy,
+                "current_policy_version": updated_policy,
+            }
+        )
+    return {
+        "schema_version": "flowsteer.skill-policy-drift-receipt.v1",
+        "status": "completed",
+        "behavior_policy_version": behavior_policy,
+        "updated_policy_version": updated_policy,
+        "adapter_name": adapter_name,
+        "active_skills_before": len(active_skills),
+        "suspended_skills": len(transitions),
+        "transitions": transitions,
+    }
 
 
 def _select_run_scope(
@@ -2009,7 +2087,11 @@ async def run_smoke(
             "rollouts_per_task": len(rollout_ordinals),
             "expected_initial_rollouts": len(selected) * len(rollout_ordinals),
             "max_optimizer_updates": 1,
-            "post_update_canaries": 1,
+            "post_update_canaries": int(
+                _mapping(config["policy_sync"], "policy_sync")[
+                    "post_update_canary_count"
+                ]
+            ),
         },
         "selection_receipt": dict(scope_receipt),
         "selected_by_source": dict(sorted(source_counts.items())),
@@ -2252,6 +2334,38 @@ async def run_smoke(
     if new_policy != updated_policy:
         raise SmokeRunError("policy sync receipt has the wrong updated policy version")
     _write_json(paths["sync"], sync_value)
+
+    try:
+        skill_lifecycle_value = _audit_active_skills_after_policy_update(
+            live_backend,
+            behavior_policy=behavior_policy,
+            updated_policy=updated_policy,
+            adapter_name=adapter_name,
+            require_active_skills=bool(manifest["skills_enabled"]),
+        )
+    except Exception as exc:
+        skill_lifecycle_value = {
+            "schema_version": "flowsteer.skill-policy-drift-receipt.v1",
+            "status": "failed",
+            "behavior_policy_version": behavior_policy,
+            "updated_policy_version": updated_policy,
+            "adapter_name": adapter_name,
+            "error": _safe_error(exc),
+        }
+        if "skill_lifecycle" in paths:
+            _write_json(paths["skill_lifecycle"], skill_lifecycle_value)
+        manifest["status"] = "failed_skill_lifecycle"
+        manifest["policy_sync"] = sync_value
+        manifest["skill_policy_drift"] = skill_lifecycle_value
+        manifest["completed_at"] = _utc_now()
+        _write_json(paths["manifest"], manifest)
+        raise SmokeRunError(
+            "updated policy was published but ACTIVE Skills were not suspended"
+        ) from exc
+    if "skill_lifecycle" in paths:
+        _write_json(paths["skill_lifecycle"], skill_lifecycle_value)
+    manifest["skill_policy_drift"] = skill_lifecycle_value
+    _write_json(paths["manifest"], manifest)
 
     canary_count = int(
         _mapping(config["policy_sync"], "policy_sync")["post_update_canary_count"]

@@ -6,6 +6,7 @@ import os
 import copy
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -35,6 +36,14 @@ from src.interactive.scientific_sampling import (
     scientific_sampling_schedule_hash,
     stable_hash,
 )
+from src.interactive.skills import (
+    SkillEvidence,
+    SkillLifecycleManager,
+    SkillRecord,
+    SkillStatus,
+    SkillStore,
+)
+from src.interactive.versioning import VersionBundle
 
 
 _SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "train_agentgraph_smoke.py"
@@ -50,6 +59,9 @@ run_smoke = _MODULE.run_smoke
 select_smoke_tasks = _MODULE.select_smoke_tasks
 validate_smoke_bounds = _MODULE.validate_smoke_bounds
 validate_resumed_initial_rollouts = _MODULE._validate_resumed_initial_rollouts
+audit_active_skills_after_policy_update = (
+    _MODULE._audit_active_skills_after_policy_update
+)
 
 
 SOURCE_NAMES = {
@@ -523,6 +535,7 @@ class SelectionTests(unittest.TestCase):
                 run_smoke(config_path, prepare_only=True, project_root=root)
             )
             self.assertEqual("prepared", manifest["status"])
+            self.assertEqual(2, manifest["bounds"]["post_update_canaries"])
             self.assertEqual(
                 {"hotpotqa": 1, "triviaqa": 1},
                 manifest["selected_by_source"],
@@ -535,6 +548,70 @@ class SelectionTests(unittest.TestCase):
                 "Public retrieval observations (SkillFlow search/read)",
                 selected[1]["question"],
             )
+
+    def test_policy_update_persists_active_skill_suspension(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = SkillStore(Path(directory) / "skills.json")
+            evidence = SkillEvidence(
+                baseline="frozen-policy",
+                paired_effect_mean=0.1,
+                calibrated_lower=0.05,
+                calibrated_upper=0.15,
+                effective_pairs=2,
+                independent_problem_ids=("v1", "v2"),
+                discovery_problem_ids=("d1",),
+                validation_problem_ids=("v1", "v2"),
+                validation_splits=("validation",),
+                heldout_task_families=("hotpotqa",),
+                empirical_coverage=0.95,
+                harm_probability=0.0,
+                slice_effects={"hotpotqa": 0.1},
+                evidence_ids=("e1", "e2"),
+            )
+            active = SkillRecord(
+                skill_id="jointqa.hotpotqa.topology",
+                version=1,
+                status=SkillStatus.ACTIVE,
+                condition={"task_family": "hotpotqa", "graph_stage": "*"},
+                action={"instruction": "Use the validated dependency relation."},
+                evidence=evidence,
+                versions=VersionBundle(
+                    policy="policy-step-0",
+                    model_catalog="catalog-v1",
+                    evaluator="hotpotqa.official.answer.v1",
+                    prompt="prompt-v1",
+                    tool="tool-v1",
+                    posterior="posterior-v1",
+                    skill_library="library-v1",
+                ),
+                created_epoch=0,
+                eligible_epoch=1,
+                activated_epoch=1,
+                gate_config={"delta_min": 0.03},
+                gate_receipt="gate-receipt",
+            )
+            store.upsert(active)
+            pipeline = SimpleNamespace(
+                skill_store=store,
+                lifecycle=SkillLifecycleManager(),
+            )
+            receipt = audit_active_skills_after_policy_update(
+                SimpleNamespace(skill_pipeline=pipeline),
+                behavior_policy="policy-step-0",
+                updated_policy="policy-step-1",
+                adapter_name="theta-step-1",
+                require_active_skills=True,
+            )
+
+            persisted = store.get(active.skill_id)
+            self.assertIsNotNone(persisted)
+            assert persisted is not None
+            self.assertEqual(SkillStatus.SUSPENDED, persisted.status)
+            self.assertIn("policy", persisted.suspended_reason or "")
+            self.assertEqual("completed", receipt["status"])
+            self.assertEqual(1, receipt["suspended_skills"])
 
     def test_source_order_and_unique_base_task_are_enforced(self) -> None:
         tasks = [

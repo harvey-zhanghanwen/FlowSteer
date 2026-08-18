@@ -53,6 +53,7 @@ storage:
   manifest_path: "artifacts/joint_qa_progressive/training/step_000001/training_manifest.json"
   behavior_policy_preflight_path: "artifacts/joint_qa_progressive/training/step_000001/behavior_policy_preflight.json"
   sync_receipt_path: "artifacts/joint_qa_progressive/training/step_000001/sync_receipt.json"
+  skill_lifecycle_receipt_path: "artifacts/joint_qa_progressive/training/step_000001/skill_lifecycle_receipt.json"
   post_update_trajectories_path: "artifacts/joint_qa_progressive/training/step_000001/post_update_trajectories.jsonl"
 
 director:
