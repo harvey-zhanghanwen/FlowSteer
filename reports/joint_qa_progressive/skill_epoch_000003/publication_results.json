@@ -1,0 +1,540 @@
+{
+  "active_datasets": [],
+  "causal_estimand": "Skill prompt-prior visibility intent-to-treat effect on official answer token F1 from a shared empty Canvas",
+  "confirmation_block": {
+    "partition": "joint_qa_v2/development",
+    "start": 32,
+    "stop": 52,
+    "zero_based_stop_exclusive": true
+  },
+  "confirmation_pair_count": 40,
+  "discovery_pair_count": 6,
+  "experiment_version": "jointqa.mace-skill-evidence.epoch3.v1",
+  "forced_probe_trajectories_are_not_training_data": true,
+  "posterior": {
+    "calibration_quantile": 0.0,
+    "coverage_metrics": {},
+    "created_at": "2026-08-18T06:49:05.620639+00:00",
+    "encoder_version": "jointqa.skill-condition.fixed.v1",
+    "epoch": 6,
+    "feature_schema_version": "jointqa.skill-candidate-dataset-interaction.v1",
+    "mean_parameters": [
+      0.0,
+      0.16000000000000003,
+      0.0,
+      -0.14222222222222228,
+      0.0,
+      0.30222222222222217
+    ],
+    "observation_ids": [
+      "probe_45c0c1d3354789716828587c",
+      "probe_c8a0e7d2ef9bacd293ee161c",
+      "probe_97a19dd2055db2b7ee312de5",
+      "probe_32fe6786e0e5356a7a7e1f5d",
+      "probe_efbc086ca80819ad1da4e054",
+      "probe_a58e9e85529d81033b9daf35"
+    ],
+    "observation_noise": 0.25,
+    "policy_version": "qwen35-9b-hotpot-step-000000",
+    "posterior_id": "posterior_a52b374aea6433627dd4ceac",
+    "precision_parameters": [
+      [
+        9.0,
+        0.0,
+        4.0,
+        0.0,
+        4.0,
+        0.0
+      ],
+      [
+        0.0,
+        17.0,
+        0.0,
+        8.0,
+        0.0,
+        8.0
+      ],
+      [
+        4.0,
+        0.0,
+        5.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        8.0,
+        0.0,
+        9.0,
+        0.0,
+        0.0
+      ],
+      [
+        4.0,
+        0.0,
+        0.0,
+        0.0,
+        5.0,
+        0.0
+      ],
+      [
+        0.0,
+        8.0,
+        0.0,
+        0.0,
+        0.0,
+        9.0
+      ]
+    ],
+    "valid_task_slices": [
+      "hotpotqa",
+      "triviaqa"
+    ]
+  },
+  "posterior_version": "jointqa.bayesian-linear.progressive-subgraph.epoch4.v1",
+  "publications": {
+    "hotpotqa": {
+      "calibration": {
+        "aggregate_interval_method": "problem_cluster_percentile_bootstrap",
+        "alpha": 0.05,
+        "bootstrap_draws": 20000,
+        "bootstrap_seed": 20260821,
+        "calibration_sample_empirical_coverage": 0.9,
+        "conformal_interval": [
+          -0.9999999999970058,
+          1.0355555555525613
+        ],
+        "conformal_method": "split_conformal_standardized_residual",
+        "conformal_quantile": 2.9940396631008017,
+        "effect_mean": -0.062142857142857146,
+        "harm_probability_method": "problem_cluster_nonparametric_bootstrap",
+        "harm_threshold": 0.0,
+        "predicted_epistemic_std_before_confirmation": 0.339934634239519,
+        "predicted_mean_before_confirmation": 0.017777777777777753,
+        "problem_cluster_count": 20
+      },
+      "gate": {
+        "approved": false,
+        "no_practical_value": false,
+        "reasons": [
+          "calibrated lower bound does not exceed delta_min",
+          "negative-transfer probability exceeds harm limit",
+          "effect direction is inconsistent across task slices"
+        ],
+        "receipt": null
+      },
+      "predicted_before_confirmation": {
+        "candidate_id": "evidence_span_answer_contract",
+        "epistemic_std": 0.339934634239519,
+        "mean": 0.017777777777777753
+      },
+      "resumed": false,
+      "selected_candidate": "evidence_span_answer_contract",
+      "skill": {
+        "action": {
+          "instruction": "Before FINISH, bind one answer candidate to the question's subject, relation, qualifiers, and expected semantic type. Prefer the exact supported surface form, unit, and necessary proper-name modifiers; exclude an intermediate entity, a type noun already supplied by the question, translation, expanded alias, explanation, or multiple candidates. When retrieval is incomplete but a supported candidate can still be identified from the available evidence and model knowledge, verify that candidate instead of returning a generic refusal. Route it to a Format Agent that only emits one <answer> tag."
+        },
+        "activated_epoch": null,
+        "condition": {
+          "graph_stage": "*",
+          "tags": [],
+          "task_family": "hotpotqa"
+        },
+        "created_at": "2026-08-18T07:14:55.351715+00:00",
+        "created_epoch": 7,
+        "eligible_epoch": 8,
+        "evidence": {
+          "baseline": "frozen_progressive_step0_no_skill",
+          "calibrated_lower": -0.225,
+          "calibrated_upper": 0.07285714285714286,
+          "discovery_problem_ids": [
+            "hotpotqa:5a7315015542994cef4bc448",
+            "hotpotqa:5a75e7215542992db947370a",
+            "hotpotqa:5adffc93554299025d62a39f"
+          ],
+          "effective_pairs": 20,
+          "empirical_coverage": 0.9,
+          "evidence_ids": [
+            "probe_aa53416a7fab67ebeed523f8",
+            "probe_2ca89cd0da04c9e1d9a96ec7",
+            "probe_28df0cf3979f5f414e032a5a",
+            "probe_fcb7a08fa5472def31df42b7",
+            "probe_671faa89e1133311dfdb4993",
+            "probe_e000192b1a4cd17b09278f8c",
+            "probe_9ec7df229050250e219ba19f",
+            "probe_b3824d5e84236809eca444f7",
+            "probe_9f9a767e10bb4c3154446251",
+            "probe_dc2be7e52894d736c7b1ae2f",
+            "probe_6b36e11d8d1df1b74c32fe91",
+            "probe_fe36dc4bbda55d2e7a9dda4e",
+            "probe_8afb5c56f1f20de028320029",
+            "probe_48526e6a6f9a0c88a268a089",
+            "probe_f18ef8926780bd48fd8d1c03",
+            "probe_0f0da63e6414d8eaa922626f",
+            "probe_2584eb35104079faf17f0622",
+            "probe_dd425d49874d7e7ffdb73ba0",
+            "probe_ada47c3de3be0567d6a2a205",
+            "probe_69a0768e8a0fe505be20541a"
+          ],
+          "harm_probability": 0.7806,
+          "heldout_task_families": [
+            "hotpotqa"
+          ],
+          "independent_problem_ids": [
+            "hotpotqa:5ac061ab554299294b218fac",
+            "hotpotqa:5ab5a2f85542997d4ad1f197",
+            "hotpotqa:5abd7ca05542993062266cab",
+            "hotpotqa:5a8ce5c7554299441c6b9f64",
+            "hotpotqa:5a81ff1d554299676cceb1c3",
+            "hotpotqa:5ae732685542991e8301cbc3",
+            "hotpotqa:5a8a2ebc5542996c9b8d5e33",
+            "hotpotqa:5add28c85542992ae4cec4be",
+            "hotpotqa:5a7d90195542991319bc93cf",
+            "hotpotqa:5abe3f9455429976d4830aaa",
+            "hotpotqa:5abee5e25542994516f45473",
+            "hotpotqa:5ae78ec5554299540e5a5605",
+            "hotpotqa:5a760a5f554299109176e629",
+            "hotpotqa:5a7a52745542996c55b2dd4f",
+            "hotpotqa:5ac1f7f355429964131be2ae",
+            "hotpotqa:5a74248855429929fddd83e5",
+            "hotpotqa:5abd04f15542996e802b467e",
+            "hotpotqa:5ac3ad225542995ef918c1da",
+            "hotpotqa:5a736bfa5542991f29ee2e03",
+            "hotpotqa:5addfe6c5542997dc790710e"
+          ],
+          "paired_effect_mean": -0.062142857142857146,
+          "slice_effects": {
+            "hotpotqa": -0.062142857142857146
+          },
+          "validation_problem_ids": [
+            "hotpotqa:5ac061ab554299294b218fac",
+            "hotpotqa:5ab5a2f85542997d4ad1f197",
+            "hotpotqa:5abd7ca05542993062266cab",
+            "hotpotqa:5a8ce5c7554299441c6b9f64",
+            "hotpotqa:5a81ff1d554299676cceb1c3",
+            "hotpotqa:5ae732685542991e8301cbc3",
+            "hotpotqa:5a8a2ebc5542996c9b8d5e33",
+            "hotpotqa:5add28c85542992ae4cec4be",
+            "hotpotqa:5a7d90195542991319bc93cf",
+            "hotpotqa:5abe3f9455429976d4830aaa",
+            "hotpotqa:5abee5e25542994516f45473",
+            "hotpotqa:5ae78ec5554299540e5a5605",
+            "hotpotqa:5a760a5f554299109176e629",
+            "hotpotqa:5a7a52745542996c55b2dd4f",
+            "hotpotqa:5ac1f7f355429964131be2ae",
+            "hotpotqa:5a74248855429929fddd83e5",
+            "hotpotqa:5abd04f15542996e802b467e",
+            "hotpotqa:5ac3ad225542995ef918c1da",
+            "hotpotqa:5a736bfa5542991f29ee2e03",
+            "hotpotqa:5addfe6c5542997dc790710e"
+          ],
+          "validation_splits": [
+            "validation"
+          ]
+        },
+        "failure_scope": [],
+        "gate_config": {},
+        "gate_receipt": null,
+        "provenance": {
+          "baseline_action": {
+            "instruction": "No additional prompt prior; use the frozen Director policy."
+          },
+          "candidate_source": "natural_trajectory",
+          "discovery_probe_ids": [
+            "probe_97a19dd2055db2b7ee312de5",
+            "probe_efbc086ca80819ad1da4e054"
+          ],
+          "evidence_protocol": "flowsteer.skill-evidence.v1",
+          "evidence_stage": "independent_validation",
+          "executor_versions": {
+            "MiniMax-M2.5": "vectorengine:MiniMax-M2.5",
+            "MiniMax-M3": "vectorengine:MiniMax-M3",
+            "deepseek-v4-flash": "vectorengine:deepseek-v4-flash",
+            "deepseek-v4-pro": "vectorengine:deepseek-v4-pro",
+            "glm-4.5-flash": "vectorengine:glm-4.5-flash",
+            "gpt-4o-mini": "vectorengine:gpt-4o-mini",
+            "kimi-k2": "vectorengine:kimi-k2",
+            "qwen3.5-9b-local": "local-director:supervisor_theta",
+            "qwen3.5-flash": "vectorengine:qwen3.5-flash",
+            "qwen3.5-plus": "vectorengine:qwen3.5-plus"
+          },
+          "model_catalog_version": "c060a6f4209f5fbfe3ac44a7b21fb2b90593fe9b0ff394b63be23605f9ded147",
+          "runtime_version": "flowsteer.agentgraph.progressive-runtime.v1",
+          "source_problem_ids": [
+            "hotpotqa:5a75e7215542992db947370a"
+          ],
+          "source_trajectory_ids": [
+            "trajectory_bc524cd20a1ce09e2b3f5626"
+          ],
+          "validation_probe_ids": [
+            "probe_aa53416a7fab67ebeed523f8",
+            "probe_2ca89cd0da04c9e1d9a96ec7",
+            "probe_28df0cf3979f5f414e032a5a",
+            "probe_fcb7a08fa5472def31df42b7",
+            "probe_671faa89e1133311dfdb4993",
+            "probe_e000192b1a4cd17b09278f8c",
+            "probe_9ec7df229050250e219ba19f",
+            "probe_b3824d5e84236809eca444f7",
+            "probe_9f9a767e10bb4c3154446251",
+            "probe_dc2be7e52894d736c7b1ae2f",
+            "probe_6b36e11d8d1df1b74c32fe91",
+            "probe_fe36dc4bbda55d2e7a9dda4e",
+            "probe_8afb5c56f1f20de028320029",
+            "probe_48526e6a6f9a0c88a268a089",
+            "probe_f18ef8926780bd48fd8d1c03",
+            "probe_0f0da63e6414d8eaa922626f",
+            "probe_2584eb35104079faf17f0622",
+            "probe_dd425d49874d7e7ffdb73ba0",
+            "probe_ada47c3de3be0567d6a2a205",
+            "probe_69a0768e8a0fe505be20541a"
+          ]
+        },
+        "readable_text": "",
+        "skill_id": "jointqa.hotpotqa.evidence_span_answer_contract",
+        "status": "candidate",
+        "suspended_reason": null,
+        "updated_at": "2026-08-18T07:14:55.351729+00:00",
+        "version": 2,
+        "versions": {
+          "encoder": "jointqa.skill-condition.fixed.v1",
+          "evaluator": "hotpotqa.official.answer.v1",
+          "feature_schema": "jointqa.skill-candidate-dataset-interaction.v1",
+          "model_catalog": "c060a6f4209f5fbfe3ac44a7b21fb2b90593fe9b0ff394b63be23605f9ded147",
+          "policy": "qwen35-9b-hotpot-step-000000",
+          "posterior": "jointqa.bayesian-linear.progressive-subgraph.epoch4.v1",
+          "prompt": "agentgraph.director.progressive_subgraph.v1",
+          "skill_library": "jointqa.skill-library.progressive.epoch8.v1",
+          "tool": "agentgraph.add-subgraph+skillflow-public-retrieval.v1"
+        }
+      }
+    },
+    "triviaqa": {
+      "calibration": {
+        "aggregate_interval_method": "problem_cluster_percentile_bootstrap",
+        "alpha": 0.05,
+        "bootstrap_draws": 20000,
+        "bootstrap_seed": 20260822,
+        "calibration_sample_empirical_coverage": 0.95,
+        "conformal_interval": [
+          -0.33333333333099313,
+          1.2577777777754375
+        ],
+        "conformal_method": "split_conformal_standardized_residual",
+        "conformal_quantile": 2.340319212642112,
+        "effect_mean": -0.025,
+        "harm_probability_method": "problem_cluster_nonparametric_bootstrap",
+        "harm_threshold": 0.0,
+        "predicted_epistemic_std_before_confirmation": 0.339934634239519,
+        "predicted_mean_before_confirmation": 0.4622222222222222,
+        "problem_cluster_count": 20
+      },
+      "gate": {
+        "approved": false,
+        "no_practical_value": true,
+        "reasons": [
+          "calibrated lower bound does not exceed delta_min",
+          "negative-transfer probability exceeds harm limit",
+          "effect direction is inconsistent across task slices"
+        ],
+        "receipt": null
+      },
+      "predicted_before_confirmation": {
+        "candidate_id": "evidence_span_answer_contract",
+        "epistemic_std": 0.339934634239519,
+        "mean": 0.4622222222222222
+      },
+      "resumed": false,
+      "selected_candidate": "evidence_span_answer_contract",
+      "skill": {
+        "action": {
+          "instruction": "Before FINISH, bind one answer candidate to the question's subject, relation, qualifiers, and expected semantic type. Prefer the exact supported surface form, unit, and necessary proper-name modifiers; exclude an intermediate entity, a type noun already supplied by the question, translation, expanded alias, explanation, or multiple candidates. When retrieval is incomplete but a supported candidate can still be identified from the available evidence and model knowledge, verify that candidate instead of returning a generic refusal. Route it to a Format Agent that only emits one <answer> tag."
+        },
+        "activated_epoch": null,
+        "condition": {
+          "graph_stage": "*",
+          "tags": [],
+          "task_family": "triviaqa"
+        },
+        "created_at": "2026-08-18T07:14:55.423877+00:00",
+        "created_epoch": 7,
+        "eligible_epoch": 8,
+        "evidence": {
+          "baseline": "frozen_progressive_step0_no_skill",
+          "calibrated_lower": -0.06666666666666668,
+          "calibrated_upper": 0.0,
+          "discovery_problem_ids": [
+            "triviaqa:tc_247",
+            "triviaqa:tc_248",
+            "triviaqa:tc_249"
+          ],
+          "effective_pairs": 20,
+          "empirical_coverage": 0.95,
+          "evidence_ids": [
+            "probe_e355e2cde888631b8650d28c",
+            "probe_da3d15180da194be53bbe766",
+            "probe_7143377740e2d06c658690b8",
+            "probe_0f37058253b591933ce32e77",
+            "probe_60d7c29b0171683baec1b085",
+            "probe_34db2673e86e28e0b252e66d",
+            "probe_63ba5f2e1d092544573704ff",
+            "probe_f7db1a75e65c0a6d7e421083",
+            "probe_ae6c97de0f9ca571dfd00669",
+            "probe_c119863644f2b03c62e53142",
+            "probe_408800b070f1d4df75d086cc",
+            "probe_ffa037386193542b12779b7d",
+            "probe_56b1bf3d1f40c2e9bd1ef840",
+            "probe_e8577918ecc0d502c32bab0f",
+            "probe_03a8aa181c6ef487f757ec53",
+            "probe_0bc09a99dfad447e7c4a2dca",
+            "probe_1da1254c5fcb35cc776c1b24",
+            "probe_4ebd3a203a7d5a65f546afaa",
+            "probe_a6bd7fa05fc4108b6436c641",
+            "probe_eb04c9b603cb551fc27c5f88"
+          ],
+          "harm_probability": 0.8822,
+          "heldout_task_families": [
+            "triviaqa"
+          ],
+          "independent_problem_ids": [
+            "triviaqa:tc_48",
+            "triviaqa:tc_50",
+            "triviaqa:tc_52",
+            "triviaqa:tc_53",
+            "triviaqa:tc_54",
+            "triviaqa:tc_55",
+            "triviaqa:tc_57",
+            "triviaqa:tc_58",
+            "triviaqa:tc_60",
+            "triviaqa:tc_61",
+            "triviaqa:tc_63",
+            "triviaqa:tc_65",
+            "triviaqa:tc_66",
+            "triviaqa:tc_67",
+            "triviaqa:tc_68",
+            "triviaqa:tc_70",
+            "triviaqa:tc_72",
+            "triviaqa:tc_77",
+            "triviaqa:tc_78",
+            "triviaqa:tc_80"
+          ],
+          "paired_effect_mean": -0.025,
+          "slice_effects": {
+            "triviaqa": -0.025
+          },
+          "validation_problem_ids": [
+            "triviaqa:tc_48",
+            "triviaqa:tc_50",
+            "triviaqa:tc_52",
+            "triviaqa:tc_53",
+            "triviaqa:tc_54",
+            "triviaqa:tc_55",
+            "triviaqa:tc_57",
+            "triviaqa:tc_58",
+            "triviaqa:tc_60",
+            "triviaqa:tc_61",
+            "triviaqa:tc_63",
+            "triviaqa:tc_65",
+            "triviaqa:tc_66",
+            "triviaqa:tc_67",
+            "triviaqa:tc_68",
+            "triviaqa:tc_70",
+            "triviaqa:tc_72",
+            "triviaqa:tc_77",
+            "triviaqa:tc_78",
+            "triviaqa:tc_80"
+          ],
+          "validation_splits": [
+            "validation"
+          ]
+        },
+        "failure_scope": [],
+        "gate_config": {},
+        "gate_receipt": null,
+        "provenance": {
+          "baseline_action": {
+            "instruction": "No additional prompt prior; use the frozen Director policy."
+          },
+          "candidate_source": "natural_trajectory",
+          "discovery_probe_ids": [
+            "probe_32fe6786e0e5356a7a7e1f5d",
+            "probe_a58e9e85529d81033b9daf35"
+          ],
+          "evidence_protocol": "flowsteer.skill-evidence.v1",
+          "evidence_stage": "independent_validation",
+          "executor_versions": {
+            "MiniMax-M2.5": "vectorengine:MiniMax-M2.5",
+            "MiniMax-M3": "vectorengine:MiniMax-M3",
+            "deepseek-v4-flash": "vectorengine:deepseek-v4-flash",
+            "deepseek-v4-pro": "vectorengine:deepseek-v4-pro",
+            "glm-4.5-flash": "vectorengine:glm-4.5-flash",
+            "gpt-4o-mini": "vectorengine:gpt-4o-mini",
+            "kimi-k2": "vectorengine:kimi-k2",
+            "qwen3.5-9b-local": "local-director:supervisor_theta",
+            "qwen3.5-flash": "vectorengine:qwen3.5-flash",
+            "qwen3.5-plus": "vectorengine:qwen3.5-plus"
+          },
+          "model_catalog_version": "c060a6f4209f5fbfe3ac44a7b21fb2b90593fe9b0ff394b63be23605f9ded147",
+          "runtime_version": "flowsteer.agentgraph.progressive-runtime.v1",
+          "source_problem_ids": [
+            "triviaqa:tc_249"
+          ],
+          "source_trajectory_ids": [
+            "trajectory_e9ec4efcb2bb57378025d0df"
+          ],
+          "validation_probe_ids": [
+            "probe_e355e2cde888631b8650d28c",
+            "probe_da3d15180da194be53bbe766",
+            "probe_7143377740e2d06c658690b8",
+            "probe_0f37058253b591933ce32e77",
+            "probe_60d7c29b0171683baec1b085",
+            "probe_34db2673e86e28e0b252e66d",
+            "probe_63ba5f2e1d092544573704ff",
+            "probe_f7db1a75e65c0a6d7e421083",
+            "probe_ae6c97de0f9ca571dfd00669",
+            "probe_c119863644f2b03c62e53142",
+            "probe_408800b070f1d4df75d086cc",
+            "probe_ffa037386193542b12779b7d",
+            "probe_56b1bf3d1f40c2e9bd1ef840",
+            "probe_e8577918ecc0d502c32bab0f",
+            "probe_03a8aa181c6ef487f757ec53",
+            "probe_0bc09a99dfad447e7c4a2dca",
+            "probe_1da1254c5fcb35cc776c1b24",
+            "probe_4ebd3a203a7d5a65f546afaa",
+            "probe_a6bd7fa05fc4108b6436c641",
+            "probe_eb04c9b603cb551fc27c5f88"
+          ]
+        },
+        "readable_text": "",
+        "skill_id": "jointqa.triviaqa.evidence_span_answer_contract",
+        "status": "retired",
+        "suspended_reason": "no practical value",
+        "updated_at": "2026-08-18T07:14:55.493829+00:00",
+        "version": 2,
+        "versions": {
+          "encoder": "jointqa.skill-condition.fixed.v1",
+          "evaluator": "triviaqa.official.answer.v1",
+          "feature_schema": "jointqa.skill-candidate-dataset-interaction.v1",
+          "model_catalog": "c060a6f4209f5fbfe3ac44a7b21fb2b90593fe9b0ff394b63be23605f9ded147",
+          "policy": "qwen35-9b-hotpot-step-000000",
+          "posterior": "jointqa.bayesian-linear.progressive-subgraph.epoch4.v1",
+          "prompt": "agentgraph.director.progressive_subgraph.v1",
+          "skill_library": "jointqa.skill-library.progressive.epoch8.v1",
+          "tool": "agentgraph.add-subgraph+skillflow-public-retrieval.v1"
+        }
+      }
+    }
+  },
+  "round_id": 3,
+  "schema_version": "flowsteer.joint-qa.skill-publication-result.v1",
+  "seed": 20260821,
+  "selected_candidates": {
+    "hotpotqa": "evidence_span_answer_contract",
+    "triviaqa": "evidence_span_answer_contract"
+  },
+  "skill_library_version": "jointqa.skill-library.progressive.epoch8.v1",
+  "topology_adoption_acceptance": {
+    "requires_independent_evaluation": true,
+    "verified_by_this_protocol": false
+  }
+}

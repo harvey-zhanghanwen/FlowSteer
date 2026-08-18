@@ -3,6 +3,32 @@
   "baseline_action": {
     "instruction": "No additional prompt prior; use the frozen Director policy."
   },
+  "behavior_policy_preflight": {
+    "adapter_name": "theta_jointqa_progressive_step_000000",
+    "canary_succeeded": true,
+    "checkpoint_path": "/ssd1/iclr/1/FlowSteer/artifacts/hotpotqa_multiagent_skill/policy_step_000000/theta",
+    "completed_at": "2026-08-18T06:41:39.195787+00:00",
+    "duration_seconds": 0.06547164637595415,
+    "loaded_now": false,
+    "models_after": [
+      "supervisor_theta",
+      "theta_jointqa_progressive_step_000000"
+    ],
+    "models_before": [
+      "supervisor_theta",
+      "theta_jointqa_progressive_step_000000"
+    ],
+    "policy_published": false,
+    "request_attempts": {
+      "canary": 1,
+      "models_after": 1,
+      "models_before": 1
+    },
+    "started_at": "2026-08-18T06:41:39.130302+00:00",
+    "status": "ready",
+    "success": true,
+    "training_performed": false
+  },
   "candidate_actions": {
     "evidence_grounded_component_transaction": {
       "instruction": "First identify the requested answer type and the evidence dependency structure. When two evidence subquestions are conditionally independent, use one ADD_SUBGRAPH transaction for two evidence branches feeding their first semantic fan-in Agent, then execute that component without setting output_agent_id. Only after Canvas feedback exposes the combined semantic answer, use the next transaction to add the Format Agent, add the directed fan-in-to-Format relation, set Format as output_agent_id, and execute it. For serial or single-hop dependencies, execute the smallest directed semantic component before adding Format. Each evidence artifact states subject, relation, answer, qualifiers, and a verbatim evidence span. The fan-in Agent rejects entity/relation drift, intermediate values, answer-type mismatch, and unsupported refusal; it preserves the evidence surface form and unit. The Format Agent only emits that verified candidate in one <answer> tag."
@@ -96,6 +122,19 @@
   "feature_schema_version": "jointqa.skill-candidate-dataset-interaction.v1",
   "final_test_block": "joint_qa_v2/test task IDs are read only for overlap exclusion; answers and metrics are excluded from evidence, posterior fitting, and training",
   "forced_probe_excluded_from_grpo_and_benchmark": true,
+  "frozen_executor_versions": {
+    "MiniMax-M2.5": "vectorengine:MiniMax-M2.5",
+    "MiniMax-M3": "vectorengine:MiniMax-M3",
+    "deepseek-v4-flash": "vectorengine:deepseek-v4-flash",
+    "deepseek-v4-pro": "vectorengine:deepseek-v4-pro",
+    "glm-4.5-flash": "vectorengine:glm-4.5-flash",
+    "gpt-4o-mini": "vectorengine:gpt-4o-mini",
+    "kimi-k2": "vectorengine:kimi-k2",
+    "qwen3.5-9b-local": "local-director:supervisor_theta",
+    "qwen3.5-flash": "vectorengine:qwen3.5-flash",
+    "qwen3.5-plus": "vectorengine:qwen3.5-plus"
+  },
+  "frozen_model_catalog_version": "c060a6f4209f5fbfe3ac44a7b21fb2b90593fe9b0ff394b63be23605f9ded147",
   "intervention_scope": "full trajectory from a shared empty-Canvas snapshot",
   "natural_candidate_tasks": {
     "hotpotqa": "hotpotqa:5a75e7215542992db947370a",
