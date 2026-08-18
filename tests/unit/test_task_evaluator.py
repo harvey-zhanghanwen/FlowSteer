@@ -9,6 +9,7 @@ from src.interactive.task_evaluator import (
     GRADER_TEMPLATE,
     HOTPOTQA_ANSWER_EVALUATOR_VERSION,
     TRIVIAQA_ANSWER_EVALUATOR_VERSION,
+    _webshop_instruction_matches,
     evaluate_task,
 )
 
@@ -226,6 +227,17 @@ class SWEbenchEvaluatorTests(unittest.IsolatedAsyncioTestCase):
 
 
 class EnvironmentEvaluatorTests(unittest.IsolatedAsyncioTestCase):
+    def test_webshop_goal_match_accepts_only_upstream_price_suffix(self) -> None:
+        goal = "find a 10 ounce jar of fries seasoning"
+        self.assertTrue(_webshop_instruction_matches(goal, goal))
+        self.assertTrue(
+            _webshop_instruction_matches(
+                goal,
+                goal + ", and price lower than 12.50 dollars",
+            )
+        )
+        self.assertFalse(_webshop_instruction_matches(goal, goal + " please"))
+
     async def test_webshop_uses_ragen_and_a_stateful_action_prompt(self) -> None:
         prompts: list[str] = []
 

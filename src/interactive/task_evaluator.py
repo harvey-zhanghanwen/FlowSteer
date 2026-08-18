@@ -26,6 +26,7 @@ import json
 import math
 import os
 from pathlib import Path
+import random
 import re
 import string
 import sys
@@ -46,7 +47,7 @@ SKILLFLOW_REWARD_VERSION = "skillflow.training.reward.v1"
 HOTPOTQA_ANSWER_EVALUATOR_VERSION = "hotpotqa.official.answer.v1"
 TRIVIAQA_ANSWER_EVALUATOR_VERSION = "triviaqa.official.answer.v1"
 HEALTHBENCH_EVALUATOR_VERSION = "openai.simple-evals.healthbench.v1"
-RAGEN_EVALUATOR_VERSION = "skillflow.ragen_adapter.v1"
+RAGEN_EVALUATOR_VERSION = "skillflow.ragen_adapter.v2"
 SWEBENCH_EVALUATOR_VERSION = "swebench.harness.v1"
 UNAVAILABLE_EVALUATOR_VERSION = "agentgraph.evaluator.unavailable.v1"
 
@@ -741,6 +742,11 @@ def _load_ragen_module(path: Path) -> Any:
     if not source.is_file():
         raise FileNotFoundError(f"RAGEN adapter not found: {source}")
     module_name = "_flowsteer_deployed_ragen_adapter"
+    loaded = sys.modules.get(module_name)
+    loaded_source = getattr(loaded, "__file__", None) if loaded is not None else None
+    if loaded_source and Path(str(loaded_source)).expanduser().resolve() == source:
+        # Reuse SkillFlow's process-local WebShop server cache across calls.
+        return loaded
     spec = importlib.util.spec_from_file_location(module_name, source)
     if spec is None or spec.loader is None:
         raise ImportError(f"cannot load RAGEN adapter: {source}")
@@ -773,6 +779,21 @@ def _environment_config(
 
 def _path_identity(value: Any) -> str:
     return os.path.realpath(os.path.abspath(os.path.expanduser(str(value))))
+
+
+def _webshop_instruction_matches(aligned_goal: str, runtime_instruction: str) -> bool:
+    """Allow only WebShop's upstream-generated price suffix on a live goal."""
+
+    aligned = " ".join(str(aligned_goal).split())
+    runtime = " ".join(str(runtime_instruction).split())
+    if not aligned or not runtime:
+        return aligned == runtime
+    if runtime == aligned:
+        return True
+    suffix = runtime[len(aligned) :] if runtime.startswith(aligned) else ""
+    return bool(
+        re.fullmatch(r", and price lower than \d+(?:\.\d{2}) dollars", suffix)
+    )
 
 
 def _lock_alfworld_task(module: Any, config: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -987,6 +1008,14 @@ async def _evaluate_environment(
         lock_details: dict[str, Any] = {}
         if dataset == "alfworld":
             config, lock_details = _lock_alfworld_task(module, config)
+        elif dataset == "webshop":
+            # The deployed RAGENAdapter does not seed Python before upstream
+            # goal generation samples a price bound; pin it at reset so the
+            # live episode matches the aligned goal catalog.
+            check_webshop = getattr(module, "_check_webshop", None)
+            if callable(check_webshop) and not bool(check_webshop()):
+                raise RuntimeError("formal WebShop dependencies are unavailable")
+            random.seed(int(config.get("env_seed", 1000)))
         adapter = module.RAGENAdapter()
         observation = str(
             adapter.reset(
@@ -1049,6 +1078,7 @@ async def _evaluate_environment(
             "goal_split",
             "file_path",
             "attr_path",
+            "env_seed",
         ):
             if field_name not in config or not hasattr(webshop_env, field_name):
                 continue
@@ -1078,8 +1108,10 @@ async def _evaluate_environment(
         if (
             requested_instruction
             and actual_instruction
-            and " ".join(requested_instruction.split())
-            != " ".join(actual_instruction.split())
+            and not _webshop_instruction_matches(
+                requested_instruction,
+                actual_instruction,
+            )
         ):
             protocol_mismatches["goal_instruction"] = {
                 "requested": requested_instruction,
@@ -1095,6 +1127,7 @@ async def _evaluate_environment(
                 "goal_split",
                 "file_path",
                 "attr_path",
+                "env_seed",
             )
             if hasattr(webshop_env, field_name)
         }

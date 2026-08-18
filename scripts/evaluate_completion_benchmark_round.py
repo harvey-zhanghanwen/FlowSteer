@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run a fixed AIME 2026 or HealthBench Professional evaluation round.
+"""Run one fixed completion or interactive benchmark evaluation round.
 
 This runner is evaluation-only.  It keeps the frozen task, resume, Canvas,
 trajectory-receipt, and Stable Zero boundaries from
@@ -76,7 +76,7 @@ _trajectory_resume_matches = hotpot_round._trajectory_resume_matches
 
 
 class CompletionBenchmarkRoundError(RuntimeError):
-    """The fixed AIME/HealthBench evaluation protocol could not complete."""
+    """The fixed benchmark evaluation protocol could not complete."""
 
 
 _BENCHMARKS: Mapping[str, Mapping[str, Any]] = {
@@ -98,7 +98,15 @@ _BENCHMARKS: Mapping[str, Mapping[str, Any]] = {
         ),
         "primary_metric": "raw_score",
     },
+    "webshop": {
+        "label": "WebShop",
+        "section_names": ("webshop_evaluation",),
+        "phase_names": ("webshop_evaluation",),
+        "primary_metric": "success",
+    },
 }
+
+_INTERACTIVE_BENCHMARKS = frozenset({"webshop"})
 
 
 def _utc_now() -> str:
@@ -129,7 +137,7 @@ def _evaluation_section(
     present = [name for name in sorted(known_names) if name in config]
     if len(present) != 1:
         raise ConfigurationError(
-            "exactly one AIME/HealthBench dataset-specific evaluation section "
+            "exactly one supported dataset-specific evaluation section "
             "must be configured"
         )
     section_name = present[0]
@@ -201,6 +209,14 @@ def validate_completion_benchmark_config(config: Mapping[str, Any]) -> None:
         )
         checks["evaluation.healthbench_judge_catalog_path"] = bool(
             str(evaluation.get("healthbench_judge_catalog_path", "")).strip()
+        )
+    if dataset_key in _INTERACTIVE_BENCHMARKS:
+        evaluation = _mapping(config.get("evaluation"), "evaluation")
+        per_source = evaluation.get("max_environment_steps_by_source")
+        checks["evaluation.max_environment_steps_by_source"] = bool(
+            isinstance(per_source, Mapping)
+            and type(per_source.get(dataset_key)) is int
+            and int(per_source[dataset_key]) > 0
         )
     failed = [name for name, valid in checks.items() if not valid]
     if failed:
@@ -348,15 +364,34 @@ async def _evaluate_prediction(
     backend: LiveSmokeBackend,
     task: TaskRecord,
     prediction: str,
+    *,
+    run_graph: Optional[Any] = None,
 ) -> Any:
-    """Use the existing evaluator, including an already configured HB judge."""
+    """Use the existing evaluator and its configured benchmark dependency."""
 
-    if _dataset_key(task) == "healthbench_professional":
+    dataset_key = _dataset_key(task)
+    if dataset_key == "healthbench_professional":
         return await evaluate_task(
             task,
             prediction,
             judge=backend.judge,
             judge_model=backend.judge_model,
+        )
+    if dataset_key in _INTERACTIVE_BENCHMARKS:
+        evaluation = _mapping(backend.config["evaluation"], "evaluation")
+        configured_steps = evaluation.get("max_environment_steps_by_source", {})
+        if not isinstance(configured_steps, Mapping):
+            configured_steps = {}
+        return await evaluate_task(
+            task,
+            prediction,
+            run_graph=run_graph,
+            max_environment_steps=int(
+                configured_steps.get(
+                    dataset_key,
+                    evaluation["max_environment_steps"],
+                )
+            ),
         )
     return await evaluate_task(task, prediction)
 
@@ -375,6 +410,67 @@ async def _direct_one(
     model = backend.registry.require_model(model_id)
     provider = backend.registry.provider_for(model_id)
     run_id = f"{run_label}-direct-{index:04d}"
+    dataset_key = _dataset_key(task)
+    started_at = _utc_now()
+
+    if dataset_key in _INTERACTIVE_BENCHMARKS:
+        executions: list[dict[str, Any]] = []
+
+        async def direct_action(environment_prompt: str) -> str:
+            step_index = len(executions)
+            request = AgentRequest(
+                request_id=f"{run_id}:direct:environment:{step_index:04d}",
+                run_id=run_id,
+                graph_revision=0,
+                problem=environment_prompt,
+                agent=AgentNode("direct", model_id, contract),
+                model=model,
+                provider=provider,
+                phase=ExecutionPhase.SINGLE,
+                is_output_agent=True,
+            )
+            response = await backend.runtime.gateway.generate(request)
+            execution = execution_record_from_call(AgentCallRecord(request, response))
+            actual_seed = execution.metadata.get("response", {}).get(
+                "generation_seed"
+            )
+            if actual_seed != seed:
+                raise CompletionBenchmarkRoundError(
+                    "Direct environment generation seed receipt differs from config"
+                )
+            executions.append(execution.to_dict())
+            return response.text
+
+        evaluation = await _evaluate_prediction(
+            backend,
+            task,
+            "",
+            run_graph=direct_action,
+        )
+        if not executions:
+            raise CompletionBenchmarkRoundError(
+                "interactive evaluator completed without a Direct policy call"
+            )
+        final_execution = executions[-1]
+        return {
+            "schema_version": "flowsteer.completion_benchmark.direct_prediction.v1",
+            "dataset_key": dataset_key,
+            "task_id": task.task_id,
+            "task": task.to_dict(),
+            "condition": "direct_local_qwen35_9b",
+            "protocol": protocol,
+            "model_id": model_id,
+            "provider_id": provider.provider_id,
+            "provider_model": model.model_name,
+            "generation_seed": seed,
+            "final_answer": str(final_execution.get("output", "")),
+            "evaluation": asdict(evaluation),
+            "execution": final_execution,
+            "executions": executions,
+            "started_at": started_at,
+            "completed_at": _utc_now(),
+        }
+
     request = AgentRequest(
         request_id=f"{run_id}:direct:single",
         run_id=run_id,
@@ -386,7 +482,6 @@ async def _direct_one(
         phase=ExecutionPhase.SINGLE,
         is_output_agent=True,
     )
-    started_at = _utc_now()
     response = await backend.runtime.gateway.generate(request)
     execution = execution_record_from_call(AgentCallRecord(request, response))
     actual_seed = execution.metadata.get("response", {}).get("generation_seed")
@@ -395,7 +490,6 @@ async def _direct_one(
             "Direct generation seed receipt differs from config"
         )
     evaluation = await _evaluate_prediction(backend, task, response.text)
-    dataset_key = _dataset_key(task)
     return {
         "schema_version": "flowsteer.completion_benchmark.direct_prediction.v1",
         "dataset_key": dataset_key,
@@ -459,6 +553,7 @@ async def _collect_direct(
         evaluation = candidate.get("evaluation")
         if (
             task is not None
+            and _dataset_key(task) not in _INTERACTIVE_BENCHMARKS
             and candidate.get("model_id") == model_id
             and candidate.get("protocol") == protocol
             and candidate.get("generation_seed") == seed
@@ -583,28 +678,22 @@ def _metric(
 
 def _direct_telemetry(value: Optional[Mapping[str, Any]]) -> Mapping[str, Any]:
     execution = value.get("execution") if value else None
-    response = (
-        execution.get("metadata", {}).get("response", {})
-        if isinstance(execution, Mapping)
-        else {}
-    )
+    recorded = value.get("executions") if value else None
+    if isinstance(recorded, Sequence) and not isinstance(recorded, (str, bytes)):
+        executions = [item for item in recorded if isinstance(item, Mapping)]
+    elif isinstance(execution, Mapping):
+        executions = [execution]
+    else:
+        executions = []
     return {
-        "api_attempts": int(response.get("attempt_count") or 0),
-        "input_tokens": (
-            int(execution.get("input_tokens") or 0)
-            if isinstance(execution, Mapping)
-            else 0
+        "api_attempts": sum(
+            int(item.get("metadata", {}).get("response", {}).get("attempt_count") or 0)
+            for item in executions
         ),
-        "output_tokens": (
-            int(execution.get("output_tokens") or 0)
-            if isinstance(execution, Mapping)
-            else 0
-        ),
-        "latency_ms": (
-            float(execution.get("latency_ms") or 0.0)
-            if isinstance(execution, Mapping)
-            else 0.0
-        ),
+        "input_tokens": sum(int(item.get("input_tokens") or 0) for item in executions),
+        "output_tokens": sum(int(item.get("output_tokens") or 0) for item in executions),
+        "latency_ms": sum(float(item.get("latency_ms") or 0.0) for item in executions),
+        "environment_policy_calls": len(executions),
     }
 
 
@@ -630,11 +719,12 @@ def _failure_type(
         if graph_score == 0.0 and direct_score == 1.0:
             return "agentgraph_exact_match_regression"
         return "both_exact" if graph_score == 1.0 else "both_incorrect"
+    metric_name = str(_BENCHMARKS[dataset_key]["primary_metric"])
     if graph_score > direct_score:
-        return "agentgraph_higher_raw_score"
+        return f"agentgraph_higher_{metric_name}"
     if graph_score < direct_score:
-        return "direct_higher_raw_score"
-    return "equal_raw_score"
+        return f"direct_higher_{metric_name}"
+    return f"equal_{metric_name}"
 
 
 def _paired_rows(
@@ -782,6 +872,8 @@ def _report(
             "SkillFlow_exact_answer_extraction_and_exact_match"
             if dataset_key == "aime_2026"
             else "OpenAI_simple_evals_HealthBench_rubric_raw_score"
+            if dataset_key == "healthbench_professional"
+            else "SkillFlow_RAGEN_official_environment_terminal_success"
         ),
         "direct_local_baseline": direct,
         "agentgraph": graph,
@@ -926,6 +1018,7 @@ def _completion_stable_zero_check(
             and graph_evaluation.get("evaluator_version") == evaluator_version
         )
         judge_receipts_valid = True
+        official_harness_receipts_valid = True
         if dataset_key == "healthbench_professional":
             judge_receipts_valid = all(
                 isinstance(value.get("details"), Mapping)
@@ -939,12 +1032,14 @@ def _completion_stable_zero_check(
             "direct_evaluator_valid": direct_evaluator_valid,
             "agentgraph_evaluator_valid": graph_evaluator_valid,
             "judge_receipts_valid": judge_receipts_valid,
+            "official_harness_receipts_valid": official_harness_receipts_valid,
         }
         check["passed"] = bool(
             check.get("passed")
             and direct_evaluator_valid
             and graph_evaluator_valid
             and judge_receipts_valid
+            and official_harness_receipts_valid
         )
         checks.append(check)
     return {
@@ -1037,14 +1132,25 @@ async def run_completion_benchmark_round(
             ),
             adapter_name=str(director["behavior_adapter_name"]),
         )
-        known_prediction = (
-            f"<answer>{selected[0].ground_truth}</answer>"
-            if dataset_key == "aime_2026"
-            else selected[0].ground_truth
-        )
-        known_answer = await _evaluate_prediction(
-            backend, selected[0], known_prediction
-        )
+        if dataset_key in _INTERACTIVE_BENCHMARKS:
+            async def invalid_environment_action(_prompt: str) -> str:
+                return "<INVALID>"
+
+            known_answer = await _evaluate_prediction(
+                backend,
+                selected[0],
+                "",
+                run_graph=invalid_environment_action,
+            )
+        else:
+            known_prediction = (
+                f"<answer>{selected[0].ground_truth}</answer>"
+                if dataset_key == "aime_2026"
+                else selected[0].ground_truth
+            )
+            known_answer = await _evaluate_prediction(
+                backend, selected[0], known_prediction
+            )
         metric_name = str(_BENCHMARKS[dataset_key]["primary_metric"])
         known_value = known_answer.metrics.get(metric_name)
         known_valid = (
@@ -1177,7 +1283,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--config",
         required=True,
-        help="fixed AIME 2026 or HealthBench Professional evaluation YAML",
+        help="fixed benchmark evaluation YAML",
     )
     parser.add_argument(
         "--prepare-only",

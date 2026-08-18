@@ -1,0 +1,41 @@
+# Dedicated official-live WebShop alignment catalog.
+#
+# The preparer reads the deployed SkillFlow RAGENAdapter's server.goals list;
+# it does not infer goal identity from baseline_models/data/human_goals.json.
+# Its output is isolated from the existing seven-dataset agentgraph_v1 files.
+
+schema_version: "flowsteer.agentgraph.datasets.v1"
+
+aligned_dir: "data/webshop_v2"
+aligned_files:
+  train: "data/webshop_v2/train.jsonl"
+  validation: "data/webshop_v2/validation.jsonl"
+  test: "data/webshop_v2/test.jsonl"
+  manifest: "data/webshop_v2/manifest.json"
+
+alignment_recipe:
+  heldout_split: "validation"
+  heldout_count_per_dataset: 128
+  train_count_per_dataset: 512
+  selection: "sequential"
+  cycle_training_only: true
+
+sources:
+  webshop:
+    enabled: true
+    display_name: "WebShop"
+    task_type: "interactive_agent"
+    metric: "success_rate"
+    ragen_adapter_path: "${FLOWSTEER_RAGEN_ADAPTER_PATH:-/home/test/SKILLEV/skillflow-bayesian-improve-deploy/src/ragen_adapter.py}"
+    webshop_path: "${SKILLRL_WEBSHOP_PATH:-/home/test/datasets/WebShop}"
+    search_index_path: "${WEBSHOP_SEARCH_INDEX_PATH:-/ssd1/iclr/.private/skillflow-resources/webshop-search/indexes}"
+    env_config:
+      observation_mode: "text"
+      human_goals: true
+      use_small: false
+      num_products: null
+      goal_split: "all"
+      file_path: "${WEBSHOP_FILE_PATH:-/home/test/datasets/WebShop/data/items_shuffle.json}"
+      attr_path: "${WEBSHOP_ATTR_PATH:-/home/test/datasets/WebShop/data/items_ins_v2.json}"
+      human_attr_path: "${WEBSHOP_HUMAN_ATTR_PATH:-/home/test/datasets/WebShop/data/items_human_ins.json}"
+      env_seed: "${WEBSHOP_ENV_SEED:-1000}"

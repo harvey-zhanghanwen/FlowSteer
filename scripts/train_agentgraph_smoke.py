@@ -360,6 +360,35 @@ def _dataset_key(task: TaskRecord) -> str:
     return value.strip()
 
 
+def _workflow_problem(
+    task: TaskRecord,
+    config: Mapping[str, Any],
+) -> str:
+    """Expose the required interactive execution interface to Flow-Director.
+
+    SkillFlow keeps the immutable task query separate from the environment
+    context.  For WebShop the finalized AgentGraph is invoked on every
+    environment step, without prescribing a topology, role, model, or Skill.
+    """
+
+    if _dataset_key(task) != "webshop":
+        return task.question
+    section = config.get("webshop_evaluation")
+    if not isinstance(section, Mapping):
+        return task.question
+    contract = section.get("direct_contract")
+    if not isinstance(contract, str) or not contract.strip():
+        return task.question
+    return (
+        f"{task.question}\n\n"
+        "Execution interface: after the AgentGraph is finalized, the same "
+        "graph is invoked once per environment step. Each invocation receives "
+        "the current observation, recent interaction history, and admissible "
+        "actions. The Output Agent must satisfy this action contract: "
+        f"{contract.strip()} Do not return a prose answer or product summary."
+    )
+
+
 def _skill_context_tag(namespace: str, field_name: str, value: Any) -> str:
     """Encode one exact, decision-time Skill condition as a namespaced tag."""
 
@@ -1693,7 +1722,12 @@ class LiveSmokeBackend:
                 ),
             )
 
-        return await collector.collect(task, rollout_index, evaluator_callback)
+        return await collector.collect(
+            task,
+            rollout_index,
+            evaluator_callback,
+            workflow_problem=_workflow_problem(task, self.config),
+        )
 
     def train(
         self,
