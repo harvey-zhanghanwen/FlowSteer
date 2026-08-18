@@ -448,6 +448,21 @@ subproblem independence.  Their topology adoption receipts remain diagnostic
 only and never enter terminal F1, GRPO reward, posterior observations, or the
 Skill evidence gate.
 
+Round 2 then established positive, zero-harm mean effects for semantic
+grounding on both datasets, but its problem-cluster bootstrap lower bounds did
+not clear the unchanged publication threshold.  The final bounded evidence
+round therefore combines that observed answer contract with the FlowSteer
+component boundary in one rejectable prior: conditionally independent evidence
+branches and their semantic fan-in execute as one `ADD_SUBGRAPH` transaction,
+and the Format Agent is added only after Canvas feedback.  Serial and
+single-hop tasks retain the smallest directed semantic component.  The round
+uses train positions `[17:20]`, natural-candidate position `20`, and the
+previously unopened development positions `[32:52]`; the fixed development
+evaluation `[0:32]`, all prior evidence, formal GRPO positions, and final test
+remain excluded.  This is a refinement of immutable experiment coordinates
+and prompt-prior content over the same runner, posterior, paired intervention,
+and gate—not a new exploration or Skill architecture.
+
 `materialize_joint_qa_progressive_evaluations.py` and
 `materialize_joint_qa_progressive_skill_training.py` derive the common delayed
 visibility epoch from the two matched ACTIVE Skill records instead of assuming

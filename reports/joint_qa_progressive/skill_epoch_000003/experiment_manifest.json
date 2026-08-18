@@ -1,0 +1,146 @@
+{
+  "adapter_name": "theta_jointqa_progressive_step_000000",
+  "baseline_action": {
+    "instruction": "No additional prompt prior; use the frozen Director policy."
+  },
+  "candidate_actions": {
+    "evidence_grounded_component_transaction": {
+      "instruction": "First identify the requested answer type and the evidence dependency structure. When two evidence subquestions are conditionally independent, use one ADD_SUBGRAPH transaction for two evidence branches feeding their first semantic fan-in Agent, then execute that component without setting output_agent_id. Only after Canvas feedback exposes the combined semantic answer, add the Format Agent in the next transaction. For serial or single-hop dependencies, execute the smallest directed semantic component before adding Format. Each evidence artifact states subject, relation, answer, qualifiers, and a verbatim evidence span. The fan-in Agent rejects entity/relation drift, intermediate values, answer-type mismatch, and unsupported refusal; it preserves the evidence surface form and unit. The Format Agent only emits that verified candidate in one <answer> tag."
+    },
+    "evidence_span_answer_contract": {
+      "instruction": "Before FINISH, bind one answer candidate to the question's subject, relation, qualifiers, and expected semantic type. Prefer the exact supported surface form, unit, and necessary proper-name modifiers; exclude an intermediate entity, a type noun already supplied by the question, translation, expanded alias, explanation, or multiple candidates. When retrieval is incomplete but a supported candidate can still be identified from the available evidence and model knowledge, verify that candidate instead of returning a generic refusal. Route it to a Format Agent that only emits one <answer> tag."
+    }
+  },
+  "candidate_source_artifacts": [
+    "reports/hotpotqa_multiagent_skill",
+    "reports/joint_qa_curve",
+    "reports/joint_qa_mace_skill",
+    "artifacts/joint_qa_progressive/step_000000/*/agentgraph_trajectories.jsonl"
+  ],
+  "causal_estimand": "Skill prompt-prior visibility intent-to-treat effect",
+  "companion_outcome": "normalized_exact_match",
+  "confirmation_block": "joint_qa_v2/development:[32:52]_per_dataset (zero-based, stop-exclusive)",
+  "confirmation_tasks": {
+    "hotpotqa": [
+      "hotpotqa:5ac061ab554299294b218fac",
+      "hotpotqa:5ab5a2f85542997d4ad1f197",
+      "hotpotqa:5abd7ca05542993062266cab",
+      "hotpotqa:5a8ce5c7554299441c6b9f64",
+      "hotpotqa:5a81ff1d554299676cceb1c3",
+      "hotpotqa:5ae732685542991e8301cbc3",
+      "hotpotqa:5a8a2ebc5542996c9b8d5e33",
+      "hotpotqa:5add28c85542992ae4cec4be",
+      "hotpotqa:5a7d90195542991319bc93cf",
+      "hotpotqa:5abe3f9455429976d4830aaa",
+      "hotpotqa:5abee5e25542994516f45473",
+      "hotpotqa:5ae78ec5554299540e5a5605",
+      "hotpotqa:5a760a5f554299109176e629",
+      "hotpotqa:5a7a52745542996c55b2dd4f",
+      "hotpotqa:5ac1f7f355429964131be2ae",
+      "hotpotqa:5a74248855429929fddd83e5",
+      "hotpotqa:5abd04f15542996e802b467e",
+      "hotpotqa:5ac3ad225542995ef918c1da",
+      "hotpotqa:5a736bfa5542991f29ee2e03",
+      "hotpotqa:5addfe6c5542997dc790710e"
+    ],
+    "triviaqa": [
+      "triviaqa:tc_48",
+      "triviaqa:tc_50",
+      "triviaqa:tc_52",
+      "triviaqa:tc_53",
+      "triviaqa:tc_54",
+      "triviaqa:tc_55",
+      "triviaqa:tc_57",
+      "triviaqa:tc_58",
+      "triviaqa:tc_60",
+      "triviaqa:tc_61",
+      "triviaqa:tc_63",
+      "triviaqa:tc_65",
+      "triviaqa:tc_66",
+      "triviaqa:tc_67",
+      "triviaqa:tc_68",
+      "triviaqa:tc_70",
+      "triviaqa:tc_72",
+      "triviaqa:tc_77",
+      "triviaqa:tc_78",
+      "triviaqa:tc_80"
+    ]
+  },
+  "development_block": "joint_qa_v2/development",
+  "discovery_schedule": "balanced cold start, posterior-UCB prefilter, then particle EVSI",
+  "discovery_tasks": {
+    "hotpotqa": [
+      "hotpotqa:5ae3cf7e5542990afbd1e1e2",
+      "hotpotqa:5adffc93554299025d62a39f",
+      "hotpotqa:5a7315015542994cef4bc448"
+    ],
+    "triviaqa": [
+      "triviaqa:tc_246",
+      "triviaqa:tc_247",
+      "triviaqa:tc_248"
+    ]
+  },
+  "encoder_version": "jointqa.skill-condition.fixed.v1",
+  "epochs": {
+    "discovery": 6,
+    "eligible_activation": 8,
+    "validation": 7
+  },
+  "evsi_budget": {
+    "observation_samples": 2048,
+    "posterior_particles": 1024,
+    "ucb_prefilter_top_k": 2
+  },
+  "experiment_version": "jointqa.mace-skill-evidence.epoch3.v1",
+  "feature_schema_version": "jointqa.skill-candidate-dataset-interaction.v1",
+  "final_test_block": "joint_qa_v2/test (not opened by this protocol)",
+  "forced_probe_excluded_from_grpo_and_benchmark": true,
+  "intervention_scope": "full trajectory from a shared empty-Canvas snapshot",
+  "natural_candidate_tasks": {
+    "hotpotqa": "hotpotqa:5a75e7215542992db947370a",
+    "triviaqa": "triviaqa:tc_249"
+  },
+  "not_a_prefix_topology_intervention": true,
+  "partition_manifest": "data/joint_qa_v2/manifest.json",
+  "policy_version": "qwen35-9b-hotpot-step-000000",
+  "posterior_version": "jointqa.bayesian-linear.progressive-subgraph.epoch4.v1",
+  "primary_outcome": "official_answer_token_f1",
+  "prompt_version": "agentgraph.director.progressive_subgraph.v1",
+  "round_id": 3,
+  "runtime_version": "flowsteer.agentgraph.progressive-runtime.v1",
+  "schema_version": "flowsteer.joint-qa.mace-bayesian-skill.v2",
+  "seed": 20260821,
+  "selection_coordinates": {
+    "reserved_grpo_training_positions": {
+      "hotpotqa": 9,
+      "triviaqa": 12
+    },
+    "skill_confirmation": {
+      "partition": "development",
+      "start": 32,
+      "stop": 52,
+      "zero_based_stop_exclusive": true
+    },
+    "train_discovery": {
+      "start": 17,
+      "stop": 20,
+      "zero_based_stop_exclusive": true
+    },
+    "train_natural_candidate_position": 20
+  },
+  "skill_gate": {
+    "delta_min": 0.03,
+    "max_harm_probability": 0.05,
+    "minimum_effective_pairs": 20,
+    "minimum_empirical_coverage": 0.9,
+    "minimum_independent_problems": 20,
+    "minimum_positive_slice_fraction": 0.75
+  },
+  "skill_library_version": "jointqa.skill-library.progressive.epoch8.v1",
+  "tool_version": "agentgraph.add-subgraph+skillflow-public-retrieval.v1",
+  "topology_adoption_acceptance": {
+    "reason": "The paired intervention estimates full-trajectory Skill prompt-prior visibility intent-to-treat effect from an empty Canvas; terminal answer F1 does not verify Director adoption of parallel branches or semantic fan-in.",
+    "requires_independent_evaluation": true,
+    "verified_by_this_protocol": false
+  }
+}

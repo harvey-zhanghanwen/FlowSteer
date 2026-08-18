@@ -172,6 +172,7 @@ def test_epoch1_spec_candidates_manifest_and_publication_scope() -> None:
         },
         "train_natural_candidate_position": 7,
         "skill_confirmation": {
+            "partition": "skill_confirmation",
             "start": 20,
             "stop": 40,
             "zero_based_stop_exclusive": True,
@@ -324,6 +325,92 @@ def test_epoch2_uses_fresh_evidence_and_conditional_topology_priors() -> None:
     }
 
 
+def test_epoch3_uses_unopened_development_validation_and_component_prior() -> None:
+    spec = runner._spec_for_round(3)
+    discovery, confirmation, natural = runner._selected_tasks(spec)
+    train_path = runner.ROOT / "data/joint_qa_v2/train.jsonl"
+    development_path = runner.ROOT / "data/joint_qa_v2/development.jsonl"
+    test_ids = {
+        task.task_id
+        for task in iter_task_records(
+            runner.ROOT / "data/joint_qa_v2/test.jsonl", expected_split="test"
+        )
+    }
+    prior_ids: set[str] = set()
+    for prior_round in (0, 1, 2):
+        prior_discovery, prior_confirmation, prior_natural = runner._selected_tasks(
+            runner._spec_for_round(prior_round)
+        )
+        prior_ids.update(
+            task.task_id
+            for dataset in runner.DATASETS
+            for task in (
+                *prior_discovery[dataset],
+                prior_natural[dataset],
+                *prior_confirmation[dataset],
+            )
+        )
+
+    selected_ids: set[str] = set()
+    fixed_development_ids: set[str] = set()
+    reserved_positions = runner._reserved_training_positions()
+    for dataset in runner.DATASETS:
+        train = _dataset_records(train_path, "train", dataset)
+        development = _dataset_records(development_path, "validation", dataset)
+        assert [task.task_id for task in discovery[dataset]] == [
+            task.task_id for task in train[17:20]
+        ]
+        assert natural[dataset].task_id == train[20].task_id
+        assert [task.task_id for task in confirmation[dataset]] == [
+            task.task_id for task in development[32:52]
+        ]
+        selected_ids.update(task.task_id for task in discovery[dataset])
+        selected_ids.add(natural[dataset].task_id)
+        selected_ids.update(task.task_id for task in confirmation[dataset])
+        fixed_development_ids.update(task.task_id for task in development[:32])
+        assert train[reserved_positions[dataset]].task_id not in selected_ids
+
+    assert not selected_ids & prior_ids
+    assert not selected_ids & fixed_development_ids
+    assert not selected_ids & test_ids
+    assert tuple(spec.candidate_actions) == (
+        "evidence_grounded_component_transaction",
+        "evidence_span_answer_contract",
+    )
+    component = spec.candidate_actions[
+        "evidence_grounded_component_transaction"
+    ]["instruction"]
+    for phrase in (
+        "conditionally independent",
+        "one ADD_SUBGRAPH transaction",
+        "first semantic fan-in Agent",
+        "without setting output_agent_id",
+        "after Canvas feedback",
+        "next transaction",
+        "subject, relation, answer, qualifiers",
+        "verbatim evidence span",
+        "evidence surface form and unit",
+    ):
+        assert phrase in component
+
+    manifest = runner._manifest(discovery, confirmation, natural, spec)
+    assert manifest["confirmation_block"] == (
+        "joint_qa_v2/development:[32:52]_per_dataset "
+        "(zero-based, stop-exclusive)"
+    )
+    assert manifest["selection_coordinates"]["skill_confirmation"] == {
+        "partition": "development",
+        "start": 32,
+        "stop": 52,
+        "zero_based_stop_exclusive": True,
+    }
+    assert manifest["epochs"] == {
+        "discovery": 6,
+        "validation": 7,
+        "eligible_activation": 8,
+    }
+
+
 def test_unknown_round_is_rejected() -> None:
     with pytest.raises(ValueError, match="unsupported Skill evidence round"):
-        runner._spec_for_round(3)
+        runner._spec_for_round(4)

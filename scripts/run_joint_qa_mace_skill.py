@@ -175,6 +175,45 @@ ROUND2_CANDIDATE_ACTIONS: Mapping[str, Mapping[str, Any]] = {
 }
 
 
+# Round 3 keeps the evidence-grounding behavior that produced positive,
+# zero-harm effects in round 2 and makes the FlowSteer interaction boundary
+# explicit: a semantic component executes before the terminal Format Agent is
+# added.  The second candidate isolates the answer contract/refusal failure
+# class.  Both remain rejectable prompt priors under the unchanged gate.
+ROUND3_CANDIDATE_ACTIONS: Mapping[str, Mapping[str, Any]] = {
+    "evidence_grounded_component_transaction": {
+        "instruction": (
+            "First identify the requested answer type and the evidence dependency "
+            "structure. When two evidence subquestions are conditionally "
+            "independent, use one ADD_SUBGRAPH transaction for two evidence "
+            "branches feeding their first semantic fan-in Agent, then execute that "
+            "component without setting output_agent_id. Only after Canvas feedback exposes the combined semantic "
+            "answer, add the Format Agent in the next transaction. For serial or "
+            "single-hop dependencies, execute the smallest directed semantic "
+            "component before adding Format. Each evidence artifact states subject, "
+            "relation, answer, qualifiers, and a verbatim evidence span. The fan-in Agent "
+            "rejects entity/relation drift, intermediate values, answer-type "
+            "mismatch, and unsupported refusal; it preserves the evidence surface "
+            "form and unit. The Format Agent only emits that verified candidate in "
+            "one <answer> tag."
+        )
+    },
+    "evidence_span_answer_contract": {
+        "instruction": (
+            "Before FINISH, bind one answer candidate to the question's subject, "
+            "relation, qualifiers, and expected semantic type. Prefer the exact "
+            "supported surface form, unit, and necessary proper-name modifiers; "
+            "exclude an intermediate entity, a type noun already supplied by the "
+            "question, translation, expanded alias, explanation, or multiple "
+            "candidates. When retrieval is incomplete but a supported candidate can "
+            "still be identified from the available evidence and model knowledge, "
+            "verify that candidate instead of returning a generic refusal. Route it "
+            "to a Format Agent that only emits one <answer> tag."
+        )
+    },
+}
+
+
 @dataclass(frozen=True)
 class SkillEvidenceRoundSpec:
     """Immutable coordinates for one bounded Skill evidence epoch."""
@@ -193,6 +232,7 @@ class SkillEvidenceRoundSpec:
     discovery_epoch: int
     validation_epoch: int
     activation_epoch: int
+    confirmation_source: str = "skill_confirmation"
 
     @property
     def output_root(self) -> Path:
@@ -287,10 +327,29 @@ EPOCH2_SPEC = SkillEvidenceRoundSpec(
     activation_epoch=6,
 )
 
+EPOCH3_SPEC = SkillEvidenceRoundSpec(
+    round_id=3,
+    experiment_version="jointqa.mace-skill-evidence.epoch3.v1",
+    candidate_actions=ROUND3_CANDIDATE_ACTIONS,
+    discovery_start=17,
+    discovery_stop=20,
+    natural_index=20,
+    confirmation_start=32,
+    confirmation_stop=52,
+    seed=20260821,
+    posterior_version="jointqa.bayesian-linear.progressive-subgraph.epoch4.v1",
+    skill_library_version="jointqa.skill-library.progressive.epoch8.v1",
+    discovery_epoch=6,
+    validation_epoch=7,
+    activation_epoch=8,
+    confirmation_source="development",
+)
+
 ROUND_SPECS: Mapping[int, SkillEvidenceRoundSpec] = {
     0: EPOCH0_SPEC,
     1: EPOCH1_SPEC,
     2: EPOCH2_SPEC,
+    3: EPOCH3_SPEC,
 }
 
 
@@ -374,10 +433,20 @@ def _selected_tasks(
 ]:
     train_path = ROOT / "data/joint_qa_v2/train.jsonl"
     confirmation_path = ROOT / "data/joint_qa_v2/skill_confirmation.jsonl"
+    development_path = ROOT / "data/joint_qa_v2/development.jsonl"
     train = tuple(iter_task_records(train_path, expected_split="train"))
-    validation = tuple(
-        iter_task_records(confirmation_path, expected_split="validation")
-    )
+    validation_sources = {
+        "skill_confirmation": tuple(
+            iter_task_records(confirmation_path, expected_split="validation")
+        ),
+        "development": tuple(
+            iter_task_records(development_path, expected_split="validation")
+        ),
+    }
+    if spec.confirmation_source not in validation_sources:
+        raise RuntimeError(
+            f"unsupported confirmation source: {spec.confirmation_source}"
+        )
     discovery: dict[str, tuple[TaskRecord, ...]] = {}
     confirmation: dict[str, tuple[TaskRecord, ...]] = {}
     natural: dict[str, TaskRecord] = {}
@@ -385,7 +454,9 @@ def _selected_tasks(
     for dataset in DATASETS:
         dataset_train = tuple(task for task in train if _dataset_key(task) == dataset)
         dataset_validation = tuple(
-            task for task in validation if _dataset_key(task) == dataset
+            task
+            for task in validation_sources[spec.confirmation_source]
+            if _dataset_key(task) == dataset
         )
         required_train = max(
             spec.discovery_stop,
@@ -407,7 +478,7 @@ def _selected_tasks(
         for task in (*discovery[dataset], natural[dataset]):
             _require_partition(task, "train")
         for task in confirmation[dataset]:
-            _require_partition(task, "skill_confirmation")
+            _require_partition(task, spec.confirmation_source)
     all_ids = [
         task.task_id
         for dataset in DATASETS
@@ -431,12 +502,14 @@ def _selected_tasks(
             dataset_train = tuple(
                 task for task in train if _dataset_key(task) == dataset
             )
-            dataset_validation = tuple(
-                task for task in validation if _dataset_key(task) == dataset
-            )
             for prior_round_id, prior_spec in ROUND_SPECS.items():
                 if prior_round_id >= spec.round_id:
                     continue
+                prior_validation = tuple(
+                    task
+                    for task in validation_sources[prior_spec.confirmation_source]
+                    if _dataset_key(task) == dataset
+                )
                 prior_evidence_ids.update(
                     task.task_id
                     for task in (
@@ -444,7 +517,7 @@ def _selected_tasks(
                             prior_spec.discovery_start : prior_spec.discovery_stop
                         ],
                         dataset_train[prior_spec.natural_index],
-                        *dataset_validation[
+                        *prior_validation[
                             prior_spec.confirmation_start : prior_spec.confirmation_stop
                         ],
                     )
@@ -452,17 +525,32 @@ def _selected_tasks(
             reserved_training_ids.add(
                 dataset_train[reserved_positions[dataset]].task_id
             )
-        heldout_ids = {
+        # Step0/Skill-on/Step1 development evaluation is fixed to the first 32
+        # sequential tasks per dataset.  Later development tasks may serve as
+        # independent validation, but the fixed evaluation block and all test
+        # tasks remain protected.
+        development = tuple(
+            iter_task_records(development_path, expected_split="validation")
+        )
+        fixed_development_ids = {
             task.task_id
-            for path, split in (
-                (ROOT / "data/joint_qa_v2/development.jsonl", "validation"),
-                (ROOT / "data/joint_qa_v2/test.jsonl", "test"),
+            for dataset in DATASETS
+            for task in tuple(
+                item for item in development if _dataset_key(item) == dataset
+            )[:32]
+        }
+        final_test_ids = {
+            task.task_id
+            for task in iter_task_records(
+                ROOT / "data/joint_qa_v2/test.jsonl", expected_split="test"
             )
-            for task in iter_task_records(path, expected_split=split)
         }
         selected_ids = set(all_ids)
         forbidden = selected_ids & (
-            prior_evidence_ids | reserved_training_ids | heldout_ids
+            prior_evidence_ids
+            | reserved_training_ids
+            | fixed_development_ids
+            | final_test_ids
         )
         if forbidden:
             raise RuntimeError(
@@ -850,7 +938,7 @@ def _manifest(
             "joint_qa_v2/skill_confirmation:first20_per_dataset"
             if spec.round_id == 0
             else (
-                "joint_qa_v2/skill_confirmation:"
+                f"joint_qa_v2/{spec.confirmation_source}:"
                 f"[{spec.confirmation_start}:{spec.confirmation_stop}]_per_dataset "
                 "(zero-based, stop-exclusive)"
             )
@@ -913,6 +1001,7 @@ def _manifest(
                     },
                     "train_natural_candidate_position": spec.natural_index,
                     "skill_confirmation": {
+                        "partition": spec.confirmation_source,
                         "start": spec.confirmation_start,
                         "stop": spec.confirmation_stop,
                         "zero_based_stop_exclusive": True,
@@ -1319,7 +1408,7 @@ async def run(*, prepare_only: bool = False, round_id: int = 0) -> dict[str, Any
                 "posterior_version": spec.posterior_version,
                 "skill_library_version": spec.skill_library_version,
                 "confirmation_block": {
-                    "partition": "joint_qa_v2/skill_confirmation",
+                    "partition": f"joint_qa_v2/{spec.confirmation_source}",
                     "start": spec.confirmation_start,
                     "stop": spec.confirmation_stop,
                     "zero_based_stop_exclusive": True,
