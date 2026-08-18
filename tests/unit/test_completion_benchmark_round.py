@@ -4,8 +4,11 @@ import asyncio
 from copy import deepcopy
 import importlib.util
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
-from src.interactive.config_loader import load_yaml
+from src.interactive.config_loader import load_model_registry, load_yaml
+from src.interactive.task_evaluator import EvaluationOutcome
 
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -30,9 +33,15 @@ def _evaluation_config(dataset_key: str) -> dict:
             "official_2026_only": True,
             "benchmark_slice": "official_aime_2026",
         }
-    else:
+    elif dataset_key == "healthbench_professional":
         section_name = "healthbench_professional_evaluation"
         phase = "healthbench_professional_evaluation"
+        split = "validation"
+        sample_count = 2
+        extra = {}
+    else:
+        section_name = f"{dataset_key}_evaluation"
+        phase = f"{dataset_key}_evaluation"
         split = "validation"
         sample_count = 2
         extra = {}
@@ -53,6 +62,10 @@ def _evaluation_config(dataset_key: str) -> dict:
         config["evaluation"]["healthbench_judge_catalog_path"] = (
             "config/model_catalog_healthbench_reference_judge.yaml"
         )
+    if dataset_key in {"webshop", "alfworld"}:
+        config["evaluation"]["max_environment_steps_by_source"] = {
+            dataset_key: 10
+        }
     return config
 
 
@@ -65,8 +78,13 @@ def test_runner_reuses_hotpot_graph_and_stable_zero_boundaries():
     )
 
 
-def test_aime_and_health_configs_are_evaluation_only():
-    for dataset_key in ("aime_2026", "healthbench_professional"):
+def test_supported_configs_are_evaluation_only():
+    for dataset_key in (
+        "aime_2026",
+        "healthbench_professional",
+        "webshop",
+        "alfworld",
+    ):
         config = _evaluation_config(dataset_key)
         _MODULE.validate_completion_benchmark_config(config)
 
@@ -261,3 +279,99 @@ def test_reports_aime_exact_match_and_healthbench_raw_score():
     assert health["denominator"] == 2
     assert health["strict_raw_score"] == 0.25
     assert health["completed_only_raw_score"] == 0.25
+
+    environment = _MODULE._aggregate(
+        [
+            {
+                "direct": {"available": True, "valid": True, "success": 0.0},
+                "agentgraph": {
+                    "available": True,
+                    "valid": True,
+                    "success": 1.0,
+                    "explicit_finish": True,
+                },
+            }
+        ],
+        "agentgraph",
+        "webshop",
+    )
+    assert environment["strict_success"] == 1.0
+
+
+def test_interactive_direct_condition_records_every_environment_policy_call():
+    registry = load_model_registry(
+        _ROOT / "config" / "model_catalog_hotpotqa_deep_v6.yaml"
+    )
+
+    class Gateway:
+        def __init__(self):
+            self.calls = 0
+
+        async def generate(self, request):
+            self.calls += 1
+            return SimpleNamespace(text=f"click[action-{self.calls}]")
+
+    gateway = Gateway()
+    backend = SimpleNamespace(
+        registry=registry,
+        runtime=SimpleNamespace(gateway=gateway),
+        config={"evaluation": {"max_environment_steps": 10}},
+    )
+    task = _MODULE.TaskRecord(
+        task_id="webshop:00001",
+        question="buy an item",
+        ground_truth="environment_success",
+        split="validation",
+        metadata={"dataset_key": "webshop"},
+    )
+    execution_index = 0
+
+    class Execution:
+        def __init__(self, output):
+            nonlocal execution_index
+            execution_index += 1
+            self.output = output
+            self.metadata = {"response": {"generation_seed": 17}}
+
+        def to_dict(self):
+            return {
+                "output": self.output,
+                "metadata": self.metadata,
+                "input_tokens": 1,
+                "output_tokens": 1,
+                "latency_ms": 1.0,
+            }
+
+    async def fake_evaluate(_backend, _task, _prediction, *, run_graph=None):
+        assert run_graph is not None
+        await run_graph("environment step one")
+        await run_graph("environment step two")
+        return EvaluationOutcome(
+            valid=True,
+            reward=1.0,
+            metrics={"success": 1.0},
+            reason="evaluated",
+            evaluator_version="skillflow.ragen_adapter.v1",
+        )
+
+    with patch.object(
+        _MODULE,
+        "execution_record_from_call",
+        side_effect=lambda call: Execution(call.response.text),
+    ), patch.object(_MODULE, "_evaluate_prediction", new=fake_evaluate):
+        result = asyncio.run(
+            _MODULE._direct_one(
+                backend,
+                task,
+                0,
+                model_id="qwen3.5-9b-local",
+                protocol="skillflow_ragen_webshop_react_v1",
+                contract="Return one legal action.",
+                seed=17,
+                run_label="webshop-test",
+            )
+        )
+
+    assert len(result["executions"]) == 2
+    assert result["final_answer"] == "click[action-2]"
+    assert result["evaluation"]["metrics"]["success"] == 1.0

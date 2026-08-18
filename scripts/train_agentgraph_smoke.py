@@ -43,7 +43,7 @@ from src.interactive.joint_qa_training_schedule import (
     JointQATrainingProgress,
 )
 from src.interactive.openai_gateway import OpenAICompatibleGateway
-from src.interactive.persistence import EvidenceStore
+from src.interactive.persistence import EvidenceStore, GraphSnapshotEvent
 from src.interactive.qa_retrieval import (
     SkillFlowQARetriever,
     augment_task_with_retrieval,
@@ -84,6 +84,7 @@ from src.interactive.task_evaluator import (
     HEALTHBENCH_EVALUATOR_VERSION,
     HOTPOTQA_ANSWER_EVALUATOR_VERSION,
     RAGEN_EVALUATOR_VERSION,
+    SWEHarnessCallback,
     SWEBENCH_EVALUATOR_VERSION,
     TRIVIAQA_ANSWER_EVALUATOR_VERSION,
     evaluate_task,
@@ -143,7 +144,11 @@ def validate_smoke_bounds(config: Mapping[str, Any]) -> None:
     joint_qa_micro = _is_joint_qa_micro(config)
     frozen_micro = hotpot_micro or joint_qa_micro
     selection_key = (
-        "hotpot_micro" if hotpot_micro else "joint_qa_micro" if joint_qa_micro else "smoke"
+        "hotpot_micro"
+        if hotpot_micro
+        else "joint_qa_micro"
+        if joint_qa_micro
+        else "smoke"
     )
     selection_name = f"data.{selection_key}"
     selection = _mapping(
@@ -196,9 +201,7 @@ def validate_smoke_bounds(config: Mapping[str, Any]) -> None:
             if joint_qa_micro
             else "sequential_per_source"
         ),
-        f"{selection_name}.expected_total_tasks": selection.get(
-            "expected_total_tasks"
-        )
+        f"{selection_name}.expected_total_tasks": selection.get("expected_total_tasks")
         == (1 if hotpot_micro else 2 if joint_qa_micro else 14),
         "grpo.enabled": grpo.get("enabled") is True,
         "grpo.samples_per_problem": type(grpo.get("samples_per_problem")) is int
@@ -223,8 +226,7 @@ def validate_smoke_bounds(config: Mapping[str, Any]) -> None:
         "grpo.terminal_task_reward_only": grpo.get("terminal_task_reward_only") is True,
         "policy_sync.enabled": policy_sync.get("enabled") is True,
         "policy_sync.post_update_canary_count": (
-            policy_sync.get("post_update_canary_count")
-            == (2 if joint_qa_micro else 1)
+            policy_sync.get("post_update_canary_count") == (2 if joint_qa_micro else 1)
         ),
         "evaluation.healthbench_judge_model": frozen_micro
         or bool(str(evaluation.get("healthbench_judge_model", "")).strip()),
@@ -236,12 +238,9 @@ def validate_smoke_bounds(config: Mapping[str, Any]) -> None:
         "director.top_p": float(director.get("top_p", -1)) == 1.0,
         "director.top_k": director.get("top_k") == -1,
         "exploration.enabled": exploration.get("enabled") is False,
-        "grpo.structural_reward": float(grpo.get("structural_reward", -1.0))
-        == 0.0,
-        "grpo.exploration_reward": float(grpo.get("exploration_reward", -1.0))
-        == 0.0,
-        "grpo.skill_usage_reward": float(grpo.get("skill_usage_reward", -1.0))
-        == 0.0,
+        "grpo.structural_reward": float(grpo.get("structural_reward", -1.0)) == 0.0,
+        "grpo.exploration_reward": float(grpo.get("exploration_reward", -1.0)) == 0.0,
+        "grpo.skill_usage_reward": float(grpo.get("skill_usage_reward", -1.0)) == 0.0,
         "skills.enabled": (
             hotpot_micro
             or (joint_qa_micro and (not skills_enabled or joint_skill_on))
@@ -256,9 +255,7 @@ def validate_smoke_bounds(config: Mapping[str, Any]) -> None:
 
     if frozen_micro:
         expected_dataset_keys = (
-            ("hotpotqa",)
-            if hotpot_micro
-            else ("hotpotqa", "triviaqa")
+            ("hotpotqa",) if hotpot_micro else ("hotpotqa", "triviaqa")
         )
         configured_dataset_keys = (
             (selection.get("dataset_key"),)
@@ -274,13 +271,16 @@ def validate_smoke_bounds(config: Mapping[str, Any]) -> None:
                 raise ConfigurationError(
                     f"{selection_name}.{field_name} must be non-empty"
                 )
-        if len(
-            {
-                str(selection["schedule_path"]),
-                str(selection["cursor_path"]),
-                str(selection["next_cursor_path"]),
-            }
-        ) != 3:
+        if (
+            len(
+                {
+                    str(selection["schedule_path"]),
+                    str(selection["cursor_path"]),
+                    str(selection["next_cursor_path"]),
+                }
+            )
+            != 3
+        ):
             raise ConfigurationError(
                 "frozen schedule, cursor, and next cursor paths must differ"
             )
@@ -291,8 +291,7 @@ def validate_smoke_bounds(config: Mapping[str, Any]) -> None:
             )
             if (
                 retrieval.get("enabled") is not True
-                or retrieval.get("mode")
-                != "deterministic_question_query_prefetch"
+                or retrieval.get("mode") != "deterministic_question_query_prefetch"
                 or int(retrieval.get("search_limit", 0)) < 1
             ):
                 raise ConfigurationError(
@@ -313,22 +312,17 @@ def validate_smoke_bounds(config: Mapping[str, Any]) -> None:
                 )
             if joint_skill_on:
                 required_skill_ids = skills["required_skill_ids"]
-                if (
-                    not all(
-                        isinstance(value, str) and value.strip()
-                        for value in required_skill_ids
-                    )
-                    or len(required_skill_ids) != len(set(required_skill_ids))
-                ):
+                if not all(
+                    isinstance(value, str) and value.strip()
+                    for value in required_skill_ids
+                ) or len(required_skill_ids) != len(set(required_skill_ids)):
                     raise ConfigurationError(
                         "skills.required_skill_ids must contain unique non-empty IDs"
                     )
     else:
         if selection.get("tasks_per_dataset") != 2:
             raise ConfigurationError("data.smoke.tasks_per_dataset must be 2")
-        source_order = tuple(
-            str(value) for value in selection.get("source_order", ())
-        )
+        source_order = tuple(str(value) for value in selection.get("source_order", ()))
         if source_order != EXPECTED_SOURCE_ORDER:
             raise ConfigurationError(
                 "data.smoke.source_order must contain the fixed seven-source order"
@@ -342,10 +336,14 @@ def validate_smoke_bounds(config: Mapping[str, Any]) -> None:
         if not isinstance(value, str) or not value.strip():
             raise ConfigurationError(f"director.{field_name} must be non-empty")
     if director["behavior_policy_version"] == director["updated_policy_version"]:
-        raise ConfigurationError("Director behavior and updated policy versions must differ")
+        raise ConfigurationError(
+            "Director behavior and updated policy versions must differ"
+        )
     oom = _mapping(_mapping(config["gpu"], "gpu")["oom_policy"], "gpu.oom_policy")
     if tuple(oom.get("micro_batch_schedule", ())) != (4, 2, 1):
-        raise ConfigurationError("gpu.oom_policy.micro_batch_schedule must be [4, 2, 1]")
+        raise ConfigurationError(
+            "gpu.oom_policy.micro_batch_schedule must be [4, 2, 1]"
+        )
 
 
 def _resolve(root: Path, value: str | os.PathLike[str]) -> Path:
@@ -360,12 +358,44 @@ def _dataset_key(task: TaskRecord) -> str:
     return value.strip()
 
 
+def _workflow_problem(
+    task: TaskRecord,
+    config: Mapping[str, Any],
+) -> str:
+    """Expose the required interactive execution interface to Flow-Director.
+
+    SkillFlow public tasks keep the immutable query separate from the public
+    environment/tool context. Static QA needs only the query. For WebShop and
+    ALFWorld, the compiled AgentGraph is a step policy: after ``FINISH`` it is
+    invoked again with each observation and admissible-action list. Present
+    that runtime contract without prescribing a topology, role template,
+    model, or Skill.
+    """
+
+    source_key = _dataset_key(task)
+    if source_key not in {"webshop", "alfworld"}:
+        return task.question
+    section = config.get(f"{source_key}_evaluation")
+    if not isinstance(section, Mapping):
+        return task.question
+    contract = section.get("direct_contract")
+    if not isinstance(contract, str) or not contract.strip():
+        return task.question
+    return (
+        f"{task.question}\n\n"
+        "Execution interface: after the AgentGraph is finalized, the same "
+        "graph is invoked once per environment step. Each invocation receives "
+        "the current observation, recent interaction history, and admissible "
+        "actions. The Output Agent must satisfy this action contract: "
+        f"{contract.strip()} Do not return a prose answer or product summary."
+    )
+
+
 def _skill_context_tag(namespace: str, field_name: str, value: Any) -> str:
     """Encode one exact, decision-time Skill condition as a namespaced tag."""
 
-    return (
-        f"{namespace}.{field_name}="
-        + json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return f"{namespace}.{field_name}=" + json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     )
 
 
@@ -421,9 +451,7 @@ def _skill_query_tags(
         "graph_stage": graph_stage,
         "topology_family": statistics["topology_family"],
         "structural_depth": statistics["structural_depth"],
-        "output_state": (
-            "set" if graph.output_agent_id is not None else "unset"
-        ),
+        "output_state": ("set" if graph.output_agent_id is not None else "unset"),
     }
     for field_name, value in prefix_fields.items():
         tags.add(_skill_context_tag("graph_prefix", field_name, value))
@@ -661,7 +689,9 @@ def _validate_resumed_initial_rollouts(
         ):
             raise SmokeRunError(f"resumed rollout {index} has an invalid evaluator")
         if not record.sampling_receipt_verified:
-            raise SmokeRunError(f"resumed rollout {index} has an invalid sampling receipt")
+            raise SmokeRunError(
+                f"resumed rollout {index} has an invalid sampling receipt"
+            )
         if not record.turns:
             raise SmokeRunError(f"resumed rollout {index} contains no policy turns")
         for turn in record.turns:
@@ -692,8 +722,7 @@ def _validate_resumed_initial_rollouts(
             coordinate.task_id != task.task_id
             or coordinate.sequence_position != rollout_ordinal
             or coordinate.schedule_purpose != condition_id
-            or coordinate.optimizer_step_or_anchor_ordinal
-            != sampling_anchor_ordinal
+            or coordinate.optimizer_step_or_anchor_ordinal != sampling_anchor_ordinal
         ):
             raise SmokeRunError(
                 f"resumed rollout {index} has the wrong frozen sampling coordinate"
@@ -870,7 +899,10 @@ def _validate_resume_evidence_stream(
                 )
             payload = value.get("payload")
             event_id = value.get("event_id")
-            if not isinstance(payload, Mapping) or payload.get("trajectory_id") != event_id:
+            if (
+                not isinstance(payload, Mapping)
+                or payload.get("trajectory_id") != event_id
+            ):
                 raise SmokeRunError(
                     f"resume evidence line {line_number} has an invalid trajectory envelope"
                 )
@@ -893,14 +925,20 @@ def _json_value(value: Any) -> Any:
         return asdict(value)
     if isinstance(value, Mapping):
         return dict(value)
-    raise TypeError("artifact values must be mappings, dataclasses, or expose to_dict()")
+    raise TypeError(
+        "artifact values must be mappings, dataclasses, or expose to_dict()"
+    )
 
 
 def _write_json(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        json.dumps(_json_value(value) if not isinstance(value, Mapping) else dict(value),
-                   ensure_ascii=False, indent=2, sort_keys=True)
+        json.dumps(
+            _json_value(value) if not isinstance(value, Mapping) else dict(value),
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
         + "\n",
         encoding="utf-8",
     )
@@ -911,7 +949,8 @@ def _write_jsonl(path: Path, values: Sequence[Any]) -> None:
     with path.open("w", encoding="utf-8") as handle:
         for value in values:
             handle.write(
-                json.dumps(_json_value(value), ensure_ascii=False, sort_keys=True) + "\n"
+                json.dumps(_json_value(value), ensure_ascii=False, sort_keys=True)
+                + "\n"
             )
 
 
@@ -1044,7 +1083,9 @@ def _graph_from_mapping(value: Mapping[str, Any]) -> AgentGraph:
     raw_relations = value.get("relations", ())
     if not isinstance(raw_nodes, Sequence) or isinstance(raw_nodes, (str, bytes)):
         raise ValueError("final graph nodes are malformed")
-    if not isinstance(raw_relations, Sequence) or isinstance(raw_relations, (str, bytes)):
+    if not isinstance(raw_relations, Sequence) or isinstance(
+        raw_relations, (str, bytes)
+    ):
         raise ValueError("final graph relations are malformed")
     nodes = []
     for item in raw_nodes:
@@ -1091,21 +1132,19 @@ class SmokeBackend(Protocol):
         condition_id: Optional[str] = None,
         sampling_schedule_purpose: Optional[str] = None,
         prompt_priors: Sequence[Mapping[str, Any]] = (),
+        stage_conditioned_prompt_prior: Optional[Mapping[str, Any]] = None,
         forced_probe: bool = False,
         condition_satisfied: bool = True,
         sampling_anchor_ordinal: Optional[int] = None,
-    ) -> TrajectoryRecord:
-        ...
+    ) -> TrajectoryRecord: ...
 
     def train(
         self,
         trajectories: Sequence[TrajectoryRecord],
         output_dir: Path,
-    ) -> Any:
-        ...
+    ) -> Any: ...
 
-    async def publish(self, summary: Any) -> Any:
-        ...
+    async def publish(self, summary: Any) -> Any: ...
 
 
 JudgeCallback = Callable[[Sequence[Mapping[str, str]], str], Awaitable[Any]]
@@ -1127,6 +1166,7 @@ class LiveSmokeBackend:
         publisher: SGLangPolicyPublisher,
         judge: Optional[JudgeCallback],
         judge_model: str,
+        swe_harness: Optional[SWEHarnessCallback] = None,
         skill_pipeline: Optional[SkillEvidencePipeline] = None,
         skill_epoch: int = 0,
     ) -> None:
@@ -1140,6 +1180,7 @@ class LiveSmokeBackend:
         self.publisher = publisher
         self.judge = judge
         self.judge_model = judge_model
+        self.swe_harness = swe_harness
         self.skill_pipeline = skill_pipeline
         self.skill_epoch = skill_epoch
 
@@ -1195,7 +1236,9 @@ class LiveSmokeBackend:
         try:
             from transformers import AutoTokenizer
         except ImportError as exc:  # pragma: no cover - heavy runtime only
-            raise RuntimeError("transformers is required for Qwen3.5 smoke rollout") from exc
+            raise RuntimeError(
+                "transformers is required for Qwen3.5 smoke rollout"
+            ) from exc
         tokenizer = AutoTokenizer.from_pretrained(
             str(director["tokenizer_path"]),
             trust_remote_code=True,
@@ -1266,8 +1309,7 @@ class LiveSmokeBackend:
                 str(value) for value in skills_config.get("required_skill_ids", ())
             )
             missing_skill_ids = sorted(
-                set(required_skill_ids)
-                - {skill.skill_id for skill in active_snapshot}
+                set(required_skill_ids) - {skill.skill_id for skill in active_snapshot}
             )
             if missing_skill_ids:
                 raise ConfigurationError(
@@ -1326,7 +1368,9 @@ class LiveSmokeBackend:
                         director["expected_server_weight_version"]
                     ),
                     behavior_adapter_checkpoint=(
-                        str(_resolve(root, str(director["behavior_adapter_checkpoint"])))
+                        str(
+                            _resolve(root, str(director["behavior_adapter_checkpoint"]))
+                        )
                         if director.get("behavior_adapter_checkpoint")
                         else None
                     ),
@@ -1434,6 +1478,20 @@ class LiveSmokeBackend:
 
         if self.skill_pipeline is None:
             return ()
+        query = self._skill_query(task, environment)
+        priors = self.skill_pipeline.retrieve_prompt_priors(
+            query,
+            versions,
+        )
+        return tuple(prior.to_dict() for prior in priors)
+
+    def _skill_query(
+        self,
+        task: TaskRecord,
+        environment: AgentWorkflowEnv,
+    ) -> SkillQuery:
+        """Build the same graph-stage query for ACTIVE Skills and forced probes."""
+
         graph = environment.graph
         if not graph.nodes:
             graph_stage = "empty_graph"
@@ -1441,9 +1499,7 @@ class LiveSmokeBackend:
             graph_stage = "before_final_answer"
         else:
             graph_stage = "construction"
-        task_family = str(
-            task.metadata.get("task_family", _dataset_key(task))
-        ).strip()
+        task_family = str(task.metadata.get("task_family", _dataset_key(task))).strip()
         if not task_family:
             task_family = _dataset_key(task)
         complete_validation = graph.validate(
@@ -1458,17 +1514,53 @@ class LiveSmokeBackend:
             graph_stage=graph_stage,
             validation_issue_codes=issue_tags,
         )
-        priors = self.skill_pipeline.retrieve_prompt_priors(
-            SkillQuery(
-                task_family=task_family,
-                graph_stage=graph_stage,
-                tags=query_tags,
-                available_models=tuple(self.registry.model_ids),
-                current_epoch=self.skill_epoch,
-            ),
-            versions,
+        return SkillQuery(
+            task_family=task_family,
+            graph_stage=graph_stage,
+            tags=query_tags,
+            available_models=tuple(self.registry.model_ids),
+            current_epoch=self.skill_epoch,
         )
-        return tuple(prior.to_dict() for prior in priors)
+
+    @staticmethod
+    def _forced_probe_condition_matches(
+        prompt_prior: Mapping[str, Any],
+        query: SkillQuery,
+    ) -> bool:
+        """Apply SkillRetriever's exact task/stage/tag/model condition boundary."""
+
+        condition = prompt_prior.get("condition")
+        action = prompt_prior.get("action")
+        if not isinstance(condition, Mapping) or not isinstance(action, Mapping):
+            return False
+        if condition.get("task_family") not in ("*", query.task_family):
+            return False
+        if condition.get("graph_stage") not in ("*", query.graph_stage):
+            return False
+        required_tags = set(condition.get("tags", ()))
+        if required_tags and not required_tags.issubset(set(query.tags)):
+            return False
+        model_id = action.get("model_id")
+        return not model_id or model_id in set(query.available_models)
+
+    @staticmethod
+    def _prompt_prior_exposure_rounds(
+        trajectory: TrajectoryRecord,
+        condition_id: str,
+    ) -> tuple[int, ...]:
+        """Read assignment exposure only from exact verified Director prompts."""
+
+        condition_id_fragment = json.dumps(
+            {"condition_id": condition_id},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )[1:-1]
+        return tuple(
+            turn.round_index
+            for turn in trajectory.turns
+            if turn.receipt_verified and condition_id_fragment in turn.prompt
+        )
 
     async def collect(
         self,
@@ -1480,6 +1572,7 @@ class LiveSmokeBackend:
         condition_id: Optional[str] = None,
         sampling_schedule_purpose: Optional[str] = None,
         prompt_priors: Sequence[Mapping[str, Any]] = (),
+        stage_conditioned_prompt_prior: Optional[Mapping[str, Any]] = None,
         forced_probe: bool = False,
         condition_satisfied: bool = True,
         sampling_anchor_ordinal: Optional[int] = None,
@@ -1526,6 +1619,54 @@ class LiveSmokeBackend:
                 raise TypeError("prompt_priors must contain only mappings")
             normalized_conditions.append(dict(item))
         static_conditions = tuple(normalized_conditions)
+        dynamic_condition: Optional[dict[str, Any]] = None
+        if stage_conditioned_prompt_prior is not None:
+            if not isinstance(stage_conditioned_prompt_prior, Mapping):
+                raise TypeError(
+                    "stage_conditioned_prompt_prior must be a mapping or None"
+                )
+            dynamic_condition = dict(stage_conditioned_prompt_prior)
+            if static_conditions:
+                raise ConfigurationError(
+                    "static prompt conditions and a dynamic prompt provider are "
+                    "mutually exclusive"
+                )
+            if self.skill_pipeline is not None:
+                raise ConfigurationError(
+                    "forced-probe prompt conditions and dynamic ACTIVE Skill "
+                    "retrieval are mutually exclusive"
+                )
+            if not forced_probe:
+                raise ConfigurationError(
+                    "stage-conditioned prompt conditions require forced_probe=true"
+                )
+            if dynamic_condition.get("application_mode") != "forced_probe_condition":
+                raise ConfigurationError(
+                    "stage-conditioned prompt conditions must use "
+                    "application_mode=forced_probe_condition"
+                )
+            dynamic_scope = dynamic_condition.get("condition")
+            if not isinstance(dynamic_scope, Mapping):
+                raise ConfigurationError(
+                    "stage-conditioned prompt conditions require a condition mapping"
+                )
+            dynamic_stage = dynamic_scope.get("graph_stage")
+            if dynamic_stage not in {
+                "empty_graph",
+                "construction",
+                "before_final_answer",
+            }:
+                raise ConfigurationError(
+                    "stage-conditioned forced probes require one exact graph_stage"
+                )
+            dynamic_condition_id = dynamic_condition.get("condition_id")
+            if (
+                not isinstance(dynamic_condition_id, str)
+                or not dynamic_condition_id.strip()
+            ):
+                raise ConfigurationError(
+                    "stage-conditioned prompt conditions require condition_id"
+                )
         if static_conditions:
             if self.skill_pipeline is not None:
                 raise ConfigurationError(
@@ -1563,7 +1704,9 @@ class LiveSmokeBackend:
             )
         ).strip()
         if not catalog_order_namespace:
-            raise ConfigurationError("experiment.catalog_order_namespace must be non-empty")
+            raise ConfigurationError(
+                "experiment.catalog_order_namespace must be non-empty"
+            )
         base_seed = int(experiment["seed"])
         if sampling_anchor_ordinal is None:
             resolved_sampling_anchor_ordinal = int(
@@ -1572,10 +1715,7 @@ class LiveSmokeBackend:
                     experiment.get("update_step", 0),
                 )
             )
-        elif (
-            type(sampling_anchor_ordinal) is int
-            and sampling_anchor_ordinal >= 0
-        ):
+        elif type(sampling_anchor_ordinal) is int and sampling_anchor_ordinal >= 0:
             resolved_sampling_anchor_ordinal = sampling_anchor_ordinal
         else:
             raise ValueError("sampling_anchor_ordinal must be non-negative or None")
@@ -1597,8 +1737,7 @@ class LiveSmokeBackend:
             max_rounds=int(director["max_rounds"]),
             seed=base_seed,
             catalog_order_seed=(
-                f"{experiment['seed']}:{catalog_order_namespace}:"
-                f"{task.task_id}"
+                f"{experiment['seed']}:{catalog_order_namespace}:{task.task_id}"
             ),
             history_window=int(director["history_window"]),
             sampling_base_seed=base_seed,
@@ -1609,29 +1748,44 @@ class LiveSmokeBackend:
             runtime=self.runtime,
             execute_on_edit=bool(director["execute_on_edit"]),
             max_agents=int(graph_config["max_agents"]),
-            max_agents_per_subgraph=int(
-                graph_config.get("max_agents_per_subgraph", 3)
-            ),
-            require_exact_answer_tag=(
-                terminal_protocol == "exact_single_answer_tag"
-            ),
-            require_format_agent=(
-                terminal_protocol == "exact_single_answer_tag"
-            ),
+            max_agents_per_subgraph=int(graph_config.get("max_agents_per_subgraph", 3)),
+            require_exact_answer_tag=(terminal_protocol == "exact_single_answer_tag"),
+            require_format_agent=(terminal_protocol == "exact_single_answer_tag"),
         )
+
+        def stage_conditioned_provider(
+            provider_task: TaskRecord,
+            provider_environment: AgentWorkflowEnv,
+            provider_versions: VersionBundle,
+        ) -> Sequence[Mapping[str, Any]]:
+            del provider_versions
+            if dynamic_condition is None:
+                return ()
+            query = self._skill_query(provider_task, provider_environment)
+            if not self._forced_probe_condition_matches(dynamic_condition, query):
+                return ()
+            return (dynamic_condition,)
+
+        dynamic_forced_probe = dynamic_condition is not None
         collector = AgentGraphRolloutCollector(
             orchestrator,
             environment,
             versions,
-            self.evidence_store,
+            None if dynamic_forced_probe else self.evidence_store,
             condition_id=resolved_condition_id,
             skills=static_conditions,
             skill_provider=(
-                self._visible_skill_priors
-                if self.skill_pipeline is not None and not static_conditions
-                else None
+                stage_conditioned_provider
+                if dynamic_forced_probe
+                else (
+                    self._visible_skill_priors
+                    if self.skill_pipeline is not None and not static_conditions
+                    else None
+                )
             ),
-            condition_satisfied=condition_satisfied,
+            condition_satisfied=(
+                False if dynamic_forced_probe else condition_satisfied
+            ),
             forced_probe=forced_probe,
             expected_task_split=expected_task_split,
         )
@@ -1672,9 +1826,9 @@ class LiveSmokeBackend:
                 )
                 return result.final_answer
 
-            configured_steps = _mapping(
-                self.config["evaluation"], "evaluation"
-            ).get("max_environment_steps_by_source", {})
+            configured_steps = _mapping(self.config["evaluation"], "evaluation").get(
+                "max_environment_steps_by_source", {}
+            )
             if not isinstance(configured_steps, Mapping):
                 configured_steps = {}
             return await evaluate_task(
@@ -1683,6 +1837,7 @@ class LiveSmokeBackend:
                 judge=self.judge,
                 judge_model=self.judge_model,
                 run_graph=run_graph,
+                swe_harness=self.swe_harness,
                 max_environment_steps=int(
                     configured_steps.get(
                         source_key,
@@ -1693,7 +1848,37 @@ class LiveSmokeBackend:
                 ),
             )
 
-        return await collector.collect(task, rollout_index, evaluator_callback)
+        trajectory = await collector.collect(
+            task,
+            rollout_index,
+            evaluator_callback,
+            workflow_problem=_workflow_problem(task, self.config),
+        )
+        if not dynamic_forced_probe:
+            return trajectory
+
+        assert dynamic_condition is not None
+        dynamic_condition_id = str(dynamic_condition["condition_id"]).strip()
+        exposure_rounds = self._prompt_prior_exposure_rounds(
+            trajectory,
+            dynamic_condition_id,
+        )
+        trajectory = replace(
+            trajectory,
+            condition_satisfied=bool(exposure_rounds),
+        )
+        if self.evidence_store is not None:
+            for turn in trajectory.turns:
+                self.evidence_store.append_snapshot(
+                    GraphSnapshotEvent(
+                        revision=turn.graph_revision,
+                        graph=turn.graph_snapshot,
+                        snapshot_id=turn.graph_snapshot_id,
+                        previous_snapshot_id=turn.previous_graph_snapshot_id,
+                    )
+                )
+            self.evidence_store.append_trajectory(trajectory)
+        return trajectory
 
     def train(
         self,
@@ -1754,8 +1939,8 @@ def _summary_dict(summary: Any) -> dict[str, Any]:
 
 
 def _write_grpo_groups(path: Path, trajectories: Sequence[TrajectoryRecord]) -> None:
-    grouped: dict[tuple[str, str, str], list[tuple[TrajectoryRecord, Any]]] = defaultdict(
-        list
+    grouped: dict[tuple[str, str, str], list[tuple[TrajectoryRecord, Any]]] = (
+        defaultdict(list)
     )
     for record in trajectories:
         item = trajectory_to_grpo(record)
@@ -1848,7 +2033,9 @@ def _audit_active_skills_after_policy_update(
         }
 
     active_skills = tuple(
-        skill for skill in pipeline.skill_store.list() if skill.status is SkillStatus.ACTIVE
+        skill
+        for skill in pipeline.skill_store.list()
+        if skill.status is SkillStatus.ACTIVE
     )
     if require_active_skills and not active_skills:
         raise SmokeRunError(
@@ -1865,9 +2052,7 @@ def _audit_active_skills_after_policy_update(
         pipeline.skill_store.upsert(audited)
         persisted = pipeline.skill_store.get(skill.skill_id)
         if persisted is None or persisted.status is not SkillStatus.SUSPENDED:
-            raise SmokeRunError(
-                f"suspended Skill was not persisted: {skill.skill_id}"
-            )
+            raise SmokeRunError(f"suspended Skill was not persisted: {skill.skill_id}")
         transitions.append(
             {
                 "skill_id": skill.skill_id,
@@ -1916,9 +2101,15 @@ def _select_run_scope(
         rollout_ordinals = tuple(
             range(int(_mapping(config["grpo"], "grpo")["samples_per_problem"]))
         )
-        return selected, rollout_ordinals, None, None, {
-            "selection": "sequential_per_source",
-        }
+        return (
+            selected,
+            rollout_ordinals,
+            None,
+            None,
+            {
+                "selection": "sequential_per_source",
+            },
+        )
 
     if _is_joint_qa_micro(config):
         joint = _mapping(data["joint_qa_micro"], "data.joint_qa_micro")
@@ -1967,16 +2158,22 @@ def _select_run_scope(
             selection=joint,
             receipt_path=retrieval_path,
         )
-        return augmented, rollout_ordinals, progress, next_cursor_path, {
-            "selection": "frozen_joint_qa_schedule",
-            "schedule_path": str(schedule_path),
-            "schedule_id": schedule.content_hash,
-            "cursor_path": str(cursor_path),
-            "cursor_before": cursor.to_value(),
-            "step": step.to_value(),
-            "retrieval_receipts_path": str(retrieval_path),
-            "next_cursor_path": str(next_cursor_path),
-        }
+        return (
+            augmented,
+            rollout_ordinals,
+            progress,
+            next_cursor_path,
+            {
+                "selection": "frozen_joint_qa_schedule",
+                "schedule_path": str(schedule_path),
+                "schedule_id": schedule.content_hash,
+                "cursor_path": str(cursor_path),
+                "cursor_before": cursor.to_value(),
+                "step": step.to_value(),
+                "retrieval_receipts_path": str(retrieval_path),
+                "next_cursor_path": str(next_cursor_path),
+            },
+        )
 
     hotpot = _mapping(data["hotpot_micro"], "data.hotpot_micro")
     schedule_path = _resolve(root, str(hotpot["schedule_path"]))
@@ -2004,15 +2201,21 @@ def _select_run_scope(
         raise ConfigurationError(
             "frozen rollout ordinals differ from grpo.samples_per_problem"
         )
-    return (task,), rollout_ordinals, progress, next_cursor_path, {
-        "selection": "frozen_hotpot_schedule",
-        "schedule_path": str(schedule_path),
-        "schedule_id": schedule.content_hash,
-        "cursor_path": str(cursor_path),
-        "cursor_before": cursor.to_value(),
-        "step": step.to_value(),
-        "next_cursor_path": str(next_cursor_path),
-    }
+    return (
+        (task,),
+        rollout_ordinals,
+        progress,
+        next_cursor_path,
+        {
+            "selection": "frozen_hotpot_schedule",
+            "schedule_path": str(schedule_path),
+            "schedule_id": schedule.content_hash,
+            "cursor_path": str(cursor_path),
+            "cursor_before": cursor.to_value(),
+            "step": step.to_value(),
+            "next_cursor_path": str(next_cursor_path),
+        },
+    )
 
 
 async def run_smoke(
@@ -2095,7 +2298,9 @@ async def run_smoke(
         },
         "selection_receipt": dict(scope_receipt),
         "selected_by_source": dict(sorted(source_counts.items())),
-        "artifacts": {name: str(path) for name, path in paths.items() if name != "training_root"},
+        "artifacts": {
+            name: str(path) for name, path in paths.items() if name != "training_root"
+        },
         "exploration_enabled": False,
         "skills_enabled": bool(_mapping(config["skills"], "skills")["enabled"]),
         "resume_initial_rollouts_requested": bool(resume_initial_rollouts),
@@ -2257,7 +2462,9 @@ async def run_smoke(
     if len(initial) != int(grpo["expected_rollout_count"]):
         raise SmokeRunError("initial rollout count differs from the fixed smoke bound")
     if any(record.versions.policy != behavior_policy for record in initial):
-        raise SmokeRunError("initial trajectories contain a non-behavior policy version")
+        raise SmokeRunError(
+            "initial trajectories contain a non-behavior policy version"
+        )
     _write_jsonl(paths["trajectories"], initial)
     _write_grpo_groups(paths["groups"], initial)
 
@@ -2277,7 +2484,11 @@ async def run_smoke(
         "valid_evaluators": sum(record.evaluation.valid for record in initial),
         "grpo_eligible": sum(record.grpo_eligible for record in initial),
         "evaluator_versions": dict(
-            sorted(Counter(record.evaluation.evaluator_version for record in initial).items())
+            sorted(
+                Counter(
+                    record.evaluation.evaluator_version for record in initial
+                ).items()
+            )
         ),
     }
     manifest["training"] = summary_value
