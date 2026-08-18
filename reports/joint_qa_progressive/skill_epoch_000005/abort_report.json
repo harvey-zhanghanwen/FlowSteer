@@ -1,0 +1,35 @@
+{
+  "schema_version": "flowsteer.joint-qa.skill-evidence-abort.v1",
+  "round_id": 5,
+  "status": "aborted_invalid_experiment",
+  "reason": "treatment-arm-specific ADD_SUBGRAPH parser incompatibility",
+  "expected_trajectory_count": 174,
+  "observed_trajectory_count": 4,
+  "observed_pair_count": 2,
+  "publication_created": false,
+  "posterior_gate_eligible": false,
+  "grpo_eligible": false,
+  "interface_failure": {
+    "field": "output_agent_id",
+    "director_value": null,
+    "candidate_attempt_count": 10,
+    "candidate_parser_rejection_count": 9,
+    "incumbent_attempt_count": 0,
+    "parser_message": "output_agent_id must be a non-empty string"
+  },
+  "trajectory_quality": {
+    "explicit_finish_count": 3,
+    "max_rounds_count": 1,
+    "invalid_evaluator_count": 0,
+    "api_fallback_count": 0,
+    "manual_repair_count": 0
+  },
+  "disposition": {
+    "trajectories_retained_for_diagnostics": true,
+    "trajectories_excluded_from_posterior": true,
+    "trajectories_excluded_from_skill_gate": true,
+    "trajectories_excluded_from_training": true,
+    "confirmation_block_quarantined": true,
+    "next_epoch_reuses_tasks": false
+  }
+}

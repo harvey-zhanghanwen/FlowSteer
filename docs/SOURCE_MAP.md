@@ -523,3 +523,19 @@ Round 4 itself remains a valid rejection result: HotpotQA had paired mean
 harm gate. Neither candidate was activated or admitted to GRPO. Epoch 5 is
 therefore a new-policy revalidation after a source-mapped observation fix, not
 post-hoc activation of the rejected evidence.
+
+Epoch 5 was then aborted after 4/174 trajectories because its treatment arm
+exposed a narrower JSON compatibility fault. The Director represented an
+intentionally absent Output as `"output_agent_id": null`, while the strict
+parser accepted only an omitted field. Nine such rejections occurred in
+candidate arms and none in incumbent arms, so those trajectories are retained
+only as diagnostics and are excluded from the posterior, Skill gate and GRPO.
+
+| Current module | Classification | Reference source | Reused boundary | Minimal adaptation |
+| --- | --- | --- | --- | --- |
+| `agent_action_parser.py::AgentActionParser._build_action` (`ADD_SUBGRAPH`) | Necessary JSON-schema compatibility adaptation | Existing `AgentAction.output_agent_id: Optional[str]`, FlowSteer structure-level ADD before terminal Output selection, and the project action schema where `output_agent_id` is optional | Omitted Output and explicit JSON null both denote an output-free intermediate component; a non-null value must still be a non-empty Agent ID | Normalize only `ADD_SUBGRAPH.output_agent_id=null` to `None`. Empty strings and non-string, non-null values remain invalid; no other optional field is relaxed. |
+| `run_joint_qa_mace_skill.py` epoch 6 | Same frozen evidence caller chain with a new tool identity | Existing epoch-5 candidate hypotheses, paired-arm randomization, posterior scheduler and unchanged Skill gate | The four contaminated epoch-5 trajectories and its reserved tasks are never resumed or pooled | Use train discovery `[56:59]`, natural position `59`, fresh canonical confirmation `[944:984]`, and a new tool version reflecting nullable optional Output semantics. |
+
+This adaptation does not add an Agent, relation, topology prior, repair pass or
+reward. It only makes the parser agree with the already-declared optional
+field and with the Runtime's existing support for `output_agent_id=None`.

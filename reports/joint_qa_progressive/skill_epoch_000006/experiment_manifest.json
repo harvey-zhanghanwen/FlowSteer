@@ -1,0 +1,191 @@
+{
+  "adapter_name": "theta_jointqa_progressive_step_000000",
+  "additional_confirmation_manifest": "data/joint_qa_v2/skill_confirmation_round6_manifest.json",
+  "baseline_action": {
+    "instruction": "No additional prompt prior; use the frozen Director policy."
+  },
+  "candidate_actions": {
+    "conditional_fan_in_deferred_format": {
+      "instruction": "Only when two evidence subquestions are conditionally independent, first use one ADD_SUBGRAPH for the two evidence Agents and their semantic fan-in Agent, without output_agent_id. After that component executes, use the next ADD_SUBGRAPH to add one Format Agent, connect fan-in to Format, set Format as output_agent_id, and then FINISH."
+    },
+    "exact_answer_handoff": {
+      "instruction": "Pass exactly one supported answer candidate to the Format Agent. The candidate must match the question's semantic type and preserve required names, modifiers, units, and evidence language. The Format Agent only copies that candidate into one <answer> tag; it must not shorten, translate, expand, or add alternatives."
+    }
+  },
+  "candidate_source_artifacts": [
+    "reports/joint_qa_progressive/skill_epoch_000002/publication_results.json",
+    "reports/joint_qa_progressive/skill_epoch_000003/publication_results.json",
+    "reports/joint_qa_progressive/skill_epoch_000004/publication_results.json",
+    "reports/joint_qa_progressive/skill_epoch_000005/abort_report.json",
+    "reports/hotpotqa_multiagent_skill",
+    "reports/joint_qa_curve",
+    "reports/joint_qa_mace_skill",
+    "artifacts/joint_qa_progressive/step_000000/*/agentgraph_trajectories.jsonl"
+  ],
+  "causal_estimand": "Skill prompt-prior visibility intent-to-treat effect",
+  "companion_outcome": "normalized_exact_match",
+  "confirmation_block": "joint_qa_v2/skill_confirmation_round6:[0:40]_per_dataset (zero-based, stop-exclusive)",
+  "confirmation_tasks": {
+    "hotpotqa": [
+      "hotpotqa:5a8f590a554299458435d5cf",
+      "hotpotqa:5a8e29175542990e94052a81",
+      "hotpotqa:5a80e8ca55429938b6142249",
+      "hotpotqa:5ac485835542997ea680ca77",
+      "hotpotqa:5a77a6aa5542992a6e59df5b",
+      "hotpotqa:5a8ad7ee5542992d82986f99",
+      "hotpotqa:5a8aff4f55429971feec45e0",
+      "hotpotqa:5a8503055542997175ce1f62",
+      "hotpotqa:5ae080ba55429924de1b70e3",
+      "hotpotqa:5ae13eb75542997b2ef7d161",
+      "hotpotqa:5abf2be75542990832d3a138",
+      "hotpotqa:5abc374555429959677d6a52",
+      "hotpotqa:5a8bb6305542995e66a474d8",
+      "hotpotqa:5a746cf555429979e288294c",
+      "hotpotqa:5ade1bcf55429975fa854e58",
+      "hotpotqa:5a7a257a5542996a35c170ff",
+      "hotpotqa:5a76387d55429976ec32bd7d",
+      "hotpotqa:5abd9e7e55429924427fd06d",
+      "hotpotqa:5ab8d10b5542991b5579f00e",
+      "hotpotqa:5ae7861c5542994a481bbd50",
+      "hotpotqa:5a7f4f7e5542992097ad2f0b",
+      "hotpotqa:5a84812e5542997175ce1ecf",
+      "hotpotqa:5a7c34d35542996dd594b8d6",
+      "hotpotqa:5a8c54035542995e66a475c3",
+      "hotpotqa:5ade956b554299728e26c743",
+      "hotpotqa:5abe4dec5542991f66106136",
+      "hotpotqa:5ab764c05542995dae37e911",
+      "hotpotqa:5aba0b025542994dbf01989b",
+      "hotpotqa:5ac51af155429924173fb5ae",
+      "hotpotqa:5abedf2d5542990832d3a10a",
+      "hotpotqa:5a81f94d55429903bc27ba14",
+      "hotpotqa:5adf9dfd554299025d62a2e7",
+      "hotpotqa:5ae49b0c5542995ad6573dbb",
+      "hotpotqa:5a7281c45542997f827839ef",
+      "hotpotqa:5a8b56c855429950cd6afcbd",
+      "hotpotqa:5ab207e255429970612095b1",
+      "hotpotqa:5abdde8f5542991f66106082",
+      "hotpotqa:5ac265055542992f1f2b38a9",
+      "hotpotqa:5a81e13255429903bc27b9fb",
+      "hotpotqa:5a8074765542996402f6a52d"
+    ],
+    "triviaqa": [
+      "triviaqa:tc_1560",
+      "triviaqa:tc_1563",
+      "triviaqa:tc_1564",
+      "triviaqa:tc_1565",
+      "triviaqa:tc_1566",
+      "triviaqa:tc_1567",
+      "triviaqa:tc_1568",
+      "triviaqa:tc_1569",
+      "triviaqa:tc_1571",
+      "triviaqa:tc_1572",
+      "triviaqa:tc_1573",
+      "triviaqa:tc_1574",
+      "triviaqa:tc_1575",
+      "triviaqa:tc_1576",
+      "triviaqa:tc_1577",
+      "triviaqa:tc_1579",
+      "triviaqa:tc_1580",
+      "triviaqa:tc_1581",
+      "triviaqa:tc_1583",
+      "triviaqa:tc_1584",
+      "triviaqa:tc_1586",
+      "triviaqa:tc_1588",
+      "triviaqa:tc_1591",
+      "triviaqa:tc_1592",
+      "triviaqa:tc_1593",
+      "triviaqa:tc_1594",
+      "triviaqa:tc_1595",
+      "triviaqa:tc_1596",
+      "triviaqa:tc_1597",
+      "triviaqa:tc_1598",
+      "triviaqa:tc_1599",
+      "triviaqa:tc_1600",
+      "triviaqa:tc_1601",
+      "triviaqa:tc_1603",
+      "triviaqa:tc_1607",
+      "triviaqa:tc_1610",
+      "triviaqa:tc_1612",
+      "triviaqa:tc_1614",
+      "triviaqa:tc_1615",
+      "triviaqa:tc_1617"
+    ]
+  },
+  "development_block": "joint_qa_v2/development",
+  "discovery_schedule": "balanced cold start, posterior-UCB prefilter, then particle EVSI",
+  "discovery_tasks": {
+    "hotpotqa": [
+      "hotpotqa:5a7d15e35542995ed0d165dd",
+      "hotpotqa:5ac5247c55429924173fb602",
+      "hotpotqa:5a80b23a5542992bc0c4a7b2"
+    ],
+    "triviaqa": [
+      "triviaqa:tc_302",
+      "triviaqa:tc_303",
+      "triviaqa:tc_305"
+    ]
+  },
+  "encoder_version": "jointqa.skill-condition.fixed.v1",
+  "epochs": {
+    "discovery": 15,
+    "eligible_activation": 17,
+    "validation": 16
+  },
+  "evsi_budget": {
+    "observation_samples": 2048,
+    "posterior_particles": 1024,
+    "ucb_prefilter_top_k": 2
+  },
+  "experiment_version": "jointqa.mace-skill-evidence.epoch6.v1",
+  "feature_schema_version": "jointqa.skill-candidate-dataset-interaction.v1",
+  "final_test_block": "joint_qa_v2/test task IDs are read only for overlap exclusion; answers and metrics are excluded from evidence, posterior fitting, and training",
+  "forced_probe_excluded_from_grpo_and_benchmark": true,
+  "intervention_scope": "full trajectory from a shared empty-Canvas snapshot",
+  "natural_candidate_tasks": {
+    "hotpotqa": "hotpotqa:5a8d209555429941ae14df84",
+    "triviaqa": "triviaqa:tc_306"
+  },
+  "not_a_prefix_topology_intervention": true,
+  "partition_manifest": "data/joint_qa_v2/manifest.json",
+  "policy_version": "qwen35-9b-hotpot-step-000000",
+  "posterior_version": "jointqa.bayesian-linear.progressive-subgraph.epoch7.v1",
+  "primary_outcome": "official_answer_token_f1",
+  "prompt_version": "agentgraph.director.progressive_subgraph.intermediate-partial.v2",
+  "round_id": 6,
+  "runtime_version": "flowsteer.agentgraph.progressive-runtime.v1",
+  "schema_version": "flowsteer.joint-qa.mace-bayesian-skill.v2",
+  "seed": 20260824,
+  "selection_coordinates": {
+    "reserved_grpo_training_positions": {
+      "hotpotqa": 9,
+      "triviaqa": 12
+    },
+    "skill_confirmation": {
+      "partition": "skill_confirmation_round6",
+      "start": 0,
+      "stop": 40,
+      "zero_based_stop_exclusive": true
+    },
+    "train_discovery": {
+      "start": 56,
+      "stop": 59,
+      "zero_based_stop_exclusive": true
+    },
+    "train_natural_candidate_position": 59
+  },
+  "skill_gate": {
+    "delta_min": 0.03,
+    "max_harm_probability": 0.05,
+    "minimum_effective_pairs": 20,
+    "minimum_empirical_coverage": 0.9,
+    "minimum_independent_problems": 20,
+    "minimum_positive_slice_fraction": 0.75
+  },
+  "skill_library_version": "jointqa.skill-library.progressive.epoch15.v1",
+  "tool_version": "agentgraph.add-subgraph-nullable-output+skillflow-public-retrieval.v2",
+  "topology_adoption_acceptance": {
+    "reason": "The paired intervention estimates full-trajectory Skill prompt-prior visibility intent-to-treat effect from an empty Canvas; terminal answer F1 does not verify Director adoption of parallel branches or semantic fan-in.",
+    "requires_independent_evaluation": true,
+    "verified_by_this_protocol": false
+  }
+}

@@ -285,10 +285,16 @@ class AgentActionParser:
                 raise AgentActionParseError(
                     "add_subgraph may contain at most one relation per endpoint pair"
                 )
+            # Qwen may serialize an omitted subgraph Output as JSON null.  This
+            # normalization is local to ADD_SUBGRAPH; other optional strings
+            # retain the strict non-empty-string contract.
+            output_agent_id = None
+            if data.get("output_agent_id") is not None:
+                output_agent_id = _required_string(data, "output_agent_id")
             return AgentAction(
                 agents=agents,
                 relations=relations,
-                output_agent_id=_optional_string(data, "output_agent_id"),
+                output_agent_id=output_agent_id,
                 **common,
             )
 

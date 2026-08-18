@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import random
 import tempfile
@@ -427,6 +428,26 @@ class ParserTests(unittest.TestCase):
         self.assertIsNone(self.parser.parse(payloads[0]).output_agent_id)
         self.assertNotIn("output_agent_id", self.parser.parse(payloads[0]).to_dict())
 
+    def test_add_subgraph_normalizes_null_output_to_omitted_roundtrip(self) -> None:
+        raw = (
+            '{"action":"add_subgraph","agents":['
+            '{"agent_id":"a","model_id":"m","contract":"collect evidence"}'
+            '],"relations":[],"output_agent_id":null}'
+        )
+
+        parsed = self.parser.parse(raw)
+        self.assertIsNone(parsed.output_agent_id)
+        self.assertNotIn("output_agent_id", parsed.to_dict())
+        roundtrip = self.parser.parse(json.dumps(parsed.to_dict()))
+        self.assertEqual(parsed.to_dict(), roundtrip.to_dict())
+        self.assertIsNone(roundtrip.output_agent_id)
+
+        for invalid_output in ('""', '"   "', "1", "false", "[]", "{}"):
+            with self.subTest(invalid_output=invalid_output):
+                invalid = raw.replace("null", invalid_output)
+                with self.assertRaises(AgentActionParseError):
+                    self.parser.parse(invalid)
+
     def test_add_subgraph_rejects_agent_count_and_invalid_relations(self) -> None:
         invalid = [
             '{"action":"add_subgraph","agents":[],"relations":[]}',
@@ -591,6 +612,43 @@ class _CountingRuntime(AgentRuntime):
 
 
 class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
+    async def test_null_output_executes_an_output_free_component(self) -> None:
+        registry = make_registry()
+        gateway = _ImmediateGateway()
+        runtime = _CountingRuntime(registry, gateway)
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=runtime,
+            problem="question",
+            execute_on_edit=True,
+            require_exact_answer_tag=True,
+            require_format_agent=True,
+        )
+
+        component = await env.step(
+            '{"action":"add_subgraph","agents":['
+            '{"agent_id":"evidence","model_id":"cheap",'
+            '"contract":"collect evidence"},'
+            '{"agent_id":"synthesis","model_id":"fast",'
+            '"contract":"synthesize evidence"}'
+            '],"relations":['
+            '{"source_id":"evidence","target_id":"synthesis",'
+            '"source_to_target":true,"target_to_source":false}'
+            '],"output_agent_id":null}'
+        )
+
+        self.assertTrue(component.accepted)
+        self.assertIsNotNone(component.action)
+        assert component.action is not None
+        self.assertIsNone(component.action.output_agent_id)
+        self.assertIsNone(env.graph.output_agent_id)
+        self.assertIsNone(component.final_answer)
+        self.assertEqual(1, runtime.execute_count)
+        self.assertEqual(
+            {"evidence", "synthesis"},
+            set(component.execution.executed_agent_ids),
+        )
+
     async def test_add_subgraph_rolls_back_the_whole_transaction(self) -> None:
         registry = make_registry()
         gateway = _ImmediateGateway()

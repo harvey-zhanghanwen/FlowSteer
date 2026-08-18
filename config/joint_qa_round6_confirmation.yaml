@@ -1,0 +1,18 @@
+schema_version: "flowsteer.joint-qa.additional-confirmation.v1"
+dataset_catalog_path: "config/datasets_agentgraph.yaml"
+base_manifest_path: "data/joint_qa_v2/manifest.json"
+base_confirmation_path: "data/joint_qa_v2/skill_confirmation_all_round5.jsonl"
+output_path: "data/joint_qa_v2/skill_confirmation_round6.jsonl"
+combined_output_path: "data/joint_qa_v2/skill_confirmation_all_round6.jsonl"
+manifest_path: "data/joint_qa_v2/skill_confirmation_round6_manifest.json"
+datasets: [hotpotqa, triviaqa]
+partition: "skill_confirmation_round6"
+task_split: "validation"
+
+# Round 5 was aborted before confirmation sampling after an ADD_SUBGRAPH JSON
+# compatibility fault was observed.  Its entire reserved block nevertheless
+# remains quarantined.  Round 6 therefore advances to the next canonical,
+# validation-only block and never reuses the four contaminated trajectories.
+candidate_range:
+  start: 944
+  stop: 984

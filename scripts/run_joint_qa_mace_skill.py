@@ -283,6 +283,7 @@ class SkillEvidenceRoundSpec:
     activation_epoch: int
     confirmation_source: str = "skill_confirmation"
     prompt_version: str = PROMPT_VERSION
+    tool_version: str = TOOL_VERSION
 
     @property
     def output_root(self) -> Path:
@@ -432,6 +433,26 @@ EPOCH5_SPEC = SkillEvidenceRoundSpec(
     prompt_version="agentgraph.director.progressive_subgraph.intermediate-partial.v2",
 )
 
+EPOCH6_SPEC = SkillEvidenceRoundSpec(
+    round_id=6,
+    experiment_version="jointqa.mace-skill-evidence.epoch6.v1",
+    candidate_actions=ROUND5_CANDIDATE_ACTIONS,
+    discovery_start=56,
+    discovery_stop=59,
+    natural_index=59,
+    confirmation_start=0,
+    confirmation_stop=40,
+    seed=20260824,
+    posterior_version="jointqa.bayesian-linear.progressive-subgraph.epoch7.v1",
+    skill_library_version="jointqa.skill-library.progressive.epoch15.v1",
+    discovery_epoch=15,
+    validation_epoch=16,
+    activation_epoch=17,
+    confirmation_source="skill_confirmation_round6",
+    prompt_version="agentgraph.director.progressive_subgraph.intermediate-partial.v2",
+    tool_version="agentgraph.add-subgraph-nullable-output+skillflow-public-retrieval.v2",
+)
+
 ROUND_SPECS: Mapping[int, SkillEvidenceRoundSpec] = {
     0: EPOCH0_SPEC,
     1: EPOCH1_SPEC,
@@ -439,6 +460,7 @@ ROUND_SPECS: Mapping[int, SkillEvidenceRoundSpec] = {
     3: EPOCH3_SPEC,
     4: EPOCH4_SPEC,
     5: EPOCH5_SPEC,
+    6: EPOCH6_SPEC,
 }
 
 
@@ -528,6 +550,9 @@ def _selected_tasks(
     round5_confirmation_path = (
         ROOT / "data/joint_qa_v2/skill_confirmation_round5.jsonl"
     )
+    round6_confirmation_path = (
+        ROOT / "data/joint_qa_v2/skill_confirmation_round6.jsonl"
+    )
     development_path = ROOT / "data/joint_qa_v2/development.jsonl"
     train = tuple(iter_task_records(train_path, expected_split="train"))
     validation_sources = {
@@ -545,6 +570,11 @@ def _selected_tasks(
         "skill_confirmation_round5": tuple(
             iter_task_records(
                 round5_confirmation_path, expected_split="validation"
+            )
+        ),
+        "skill_confirmation_round6": tuple(
+            iter_task_records(
+                round6_confirmation_path, expected_split="validation"
             )
         ),
     }
@@ -718,7 +748,7 @@ def _versions(
         policy_version=POLICY_VERSION,
         model_catalog_version=backend.model_catalog_version,
         prompt_version=spec.prompt_version,
-        tool_version=TOOL_VERSION,
+        tool_version=spec.tool_version,
         encoder_version=ENCODER_VERSION,
         feature_schema_version=FEATURE_SCHEMA_VERSION,
         posterior_version=spec.posterior_version,
@@ -1033,7 +1063,7 @@ def _manifest(
         "posterior_version": spec.posterior_version,
         "skill_library_version": spec.skill_library_version,
         "prompt_version": spec.prompt_version,
-        "tool_version": TOOL_VERSION,
+        "tool_version": spec.tool_version,
         "runtime_version": RUNTIME_VERSION,
         "primary_outcome": "official_answer_token_f1",
         "companion_outcome": "normalized_exact_match",
@@ -1074,6 +1104,13 @@ def _manifest(
                     "reports/joint_qa_progressive/skill_epoch_000004/publication_results.json"
                 ]
                 if spec.round_id >= 5
+                else []
+            ),
+            *(
+                [
+                    "reports/joint_qa_progressive/skill_epoch_000005/abort_report.json"
+                ]
+                if spec.round_id >= 6
                 else []
             ),
             "reports/hotpotqa_multiagent_skill",
