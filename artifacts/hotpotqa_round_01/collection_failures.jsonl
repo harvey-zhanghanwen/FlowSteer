@@ -1,2 +1,0 @@
-{"condition": "agentgraph", "error": "DirectorError: SGLang Director request failed: HTTP 500", "recorded_at": "2026-08-15T15:05:09.165303+00:00", "stage": "director_canvas_runtime_or_evaluator", "task_id": "hotpotqa:5a7a06935542990198eaf050"}
-{"condition": "agentgraph", "error": "DirectorError: SGLang Director request failed: HTTP 500", "recorded_at": "2026-08-15T15:05:09.167227+00:00", "stage": "director_canvas_runtime_or_evaluator", "task_id": "hotpotqa:5a879ab05542996e4f30887e"}

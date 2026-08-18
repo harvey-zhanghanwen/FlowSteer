@@ -7,6 +7,23 @@ Direct/AgentGraph paired reporting, trajectory receipts, and Stable Zero
 checks. It does not contain training, optimizer updates, generated data, model
 weights, credentials, or per-task runtime artifacts.
 
+## Clean backup reference
+
+This recovery snapshot is published on branch
+`backup/aime2026-stable-zero-arch-clean-20260819`. Restore it in an isolated
+directory so an existing dirty worktree is not changed:
+
+```bash
+git clone --single-branch --depth 1 \
+  --branch backup/aime2026-stable-zero-arch-clean-20260819 \
+  https://github.com/harvey-zhanghanwen/FlowSteer.git \
+  FlowSteer-aime2026-restore
+```
+
+The tracked `artifacts/` tree is deliberately absent from this clean branch.
+Restore the external Step-0 adapter and the dependencies listed below before
+running model-backed evaluation.
+
 ## Population boundary
 
 - Training candidate population: AIME 2000--2024, cycled internally to 512.
