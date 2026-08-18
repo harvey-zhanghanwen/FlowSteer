@@ -81,6 +81,22 @@ The development topology distribution includes single-node, serial, fan-in,
 and mixed graphs. These observations are not randomized causal evidence and
 therefore do not change the Skill lifecycle state.
 
+## Recorded held-out result
+
+- Fixed held-out tasks: 128.
+- Stable Zero: 128/128 passed with valid Direct and AgentGraph evaluator
+  receipts, explicit `FINISH`, saved output inbox, and verified Director turns.
+- AgentGraph mean rubric `raw_score`: 0.2075.
+- Qwen3.5-9B Direct mean rubric `raw_score`: 0.1318.
+- Mean paired delta: +0.0757; pair outcomes: 35 higher, 74 equal, 19 lower.
+- Terminal, evaluator, and operational failures: 0.
+- Policy: `qwen35-9b-healthbench-round-01-step-000000`;
+  Skill condition: memory-off; training/optimizer updates: none.
+
+This value is the public simple-evals-compatible mean rubric `raw_score`; it is
+not an accuracy percentage and is not the unavailable private leaderboard
+metric.
+
 ## Data excluded from Git
 
 Credentials, conversations, rubrics, physician responses, judge responses,
