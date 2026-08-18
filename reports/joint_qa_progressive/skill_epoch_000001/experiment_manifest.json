@@ -3,6 +3,32 @@
   "baseline_action": {
     "instruction": "No additional prompt prior; use the frozen Director policy."
   },
+  "behavior_policy_preflight": {
+    "adapter_name": "theta_jointqa_progressive_step_000000",
+    "canary_succeeded": true,
+    "checkpoint_path": "/ssd1/iclr/1/FlowSteer/artifacts/hotpotqa_multiagent_skill/policy_step_000000/theta",
+    "completed_at": "2026-08-18T05:18:23.932054+00:00",
+    "duration_seconds": 0.06232027988880873,
+    "loaded_now": false,
+    "models_after": [
+      "supervisor_theta",
+      "theta_jointqa_progressive_step_000000"
+    ],
+    "models_before": [
+      "supervisor_theta",
+      "theta_jointqa_progressive_step_000000"
+    ],
+    "policy_published": false,
+    "request_attempts": {
+      "canary": 1,
+      "models_after": 1,
+      "models_before": 1
+    },
+    "started_at": "2026-08-18T05:18:23.869724+00:00",
+    "status": "ready",
+    "success": true,
+    "training_performed": false
+  },
   "candidate_actions": {
     "answer_type_and_span_consistency": {
       "instruction": "Preserve the question's expected answer type when handing an answer candidate to the Output Agent, and return a canonical, minimal complete extractive span supported by the evidence. Do not replace a named entity with a count, category, abbreviation, or expanded alias, and do not apply unconditional shortest-span compression."
@@ -95,6 +121,19 @@
   "feature_schema_version": "jointqa.skill-candidate-dataset-interaction.v1",
   "final_test_block": "joint_qa_v2/test (not opened by this protocol)",
   "forced_probe_excluded_from_grpo_and_benchmark": true,
+  "frozen_executor_versions": {
+    "MiniMax-M2.5": "vectorengine:MiniMax-M2.5",
+    "MiniMax-M3": "vectorengine:MiniMax-M3",
+    "deepseek-v4-flash": "vectorengine:deepseek-v4-flash",
+    "deepseek-v4-pro": "vectorengine:deepseek-v4-pro",
+    "glm-4.5-flash": "vectorengine:glm-4.5-flash",
+    "gpt-4o-mini": "vectorengine:gpt-4o-mini",
+    "kimi-k2": "vectorengine:kimi-k2",
+    "qwen3.5-9b-local": "local-director:supervisor_theta",
+    "qwen3.5-flash": "vectorengine:qwen3.5-flash",
+    "qwen3.5-plus": "vectorengine:qwen3.5-plus"
+  },
+  "frozen_model_catalog_version": "c060a6f4209f5fbfe3ac44a7b21fb2b90593fe9b0ff394b63be23605f9ded147",
   "intervention_scope": "full trajectory from a shared empty-Canvas snapshot",
   "natural_candidate_tasks": {
     "hotpotqa": "hotpotqa:5a79c7f95542994bb9457099",
