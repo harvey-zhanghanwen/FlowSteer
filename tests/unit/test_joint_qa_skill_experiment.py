@@ -149,6 +149,48 @@ class JointQAPosteriorSchedulerTests(unittest.TestCase):
             (scheduler.features.dimension, scheduler.features.dimension),
         )
 
+    def test_particle_evsi_probe_ranking_is_deterministic(self) -> None:
+        scheduler = JointQAPosteriorScheduler(
+            ("grounding", "verification"),
+            seed=11,
+            observation_variance=0.25,
+        )
+        scheduler.update(
+            "hotpotqa",
+            "grounding",
+            0.5,
+            observation_id="pair-grounding",
+        )
+        scheduler.update(
+            "hotpotqa",
+            "verification",
+            -0.1,
+            observation_id="pair-verification",
+        )
+
+        first = scheduler.rank_probes_by_evsi(
+            "hotpotqa",
+            seed=29,
+            posterior_particles=128,
+            observation_samples=256,
+        )
+        second = scheduler.rank_probes_by_evsi(
+            "hotpotqa",
+            seed=29,
+            posterior_particles=128,
+            observation_samples=256,
+        )
+
+        self.assertEqual(first, second)
+        self.assertEqual(set(first.candidate_ids), {"grounding", "verification"})
+        self.assertEqual(first.selected_id, first.candidate_ids[0])
+        self.assertEqual(len(first.values), 2)
+        self.assertTrue(all(np.isfinite(value) for value in first.values))
+        self.assertGreaterEqual(first.values[0], first.values[1])
+        self.assertEqual(first.posterior_particles, 128)
+        self.assertEqual(first.observation_samples, 256)
+        self.assertEqual(first.observation_std, 0.5)
+
 
 class SkillValidationCalibrationTests(unittest.TestCase):
     def test_calibration_is_deterministic_for_fixed_problem_clusters_and_seed(self) -> None:

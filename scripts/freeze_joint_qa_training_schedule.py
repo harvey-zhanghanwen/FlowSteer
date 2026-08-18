@@ -47,6 +47,7 @@ def freeze_schedule_artifacts(
     train_path: Path,
     validation_path: Path,
     test_path: Path,
+    skill_confirmation_path: Path | None = None,
     schedule_path: Path,
     cursor_path: Path,
     step_count: int,
@@ -75,6 +76,7 @@ def freeze_schedule_artifacts(
         train_path=train_path,
         validation_path=validation_path,
         test_path=test_path,
+        skill_confirmation_path=skill_confirmation_path,
         task_positions_by_dataset={
             "hotpotqa": hotpotqa_positions,
             "triviaqa": triviaqa_positions,
@@ -123,6 +125,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="existing aligned test JSONL",
     )
     parser.add_argument(
+        "--skill-confirmation",
+        help="optional independent validation JSONL excluded from training",
+    )
+    parser.add_argument(
         "--schedule-output",
         default="artifacts/joint_qa_training/formal_schedule.json",
     )
@@ -166,6 +172,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         train_path=_resolve(args.train),
         validation_path=_resolve(args.validation),
         test_path=_resolve(args.test),
+        skill_confirmation_path=(
+            _resolve(args.skill_confirmation) if args.skill_confirmation else None
+        ),
         schedule_path=_resolve(args.schedule_output),
         cursor_path=_resolve(args.cursor_output),
         step_count=args.step_count,

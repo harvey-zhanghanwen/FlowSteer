@@ -475,6 +475,44 @@ class SelectionTests(unittest.TestCase):
             with self.assertRaisesRegex(Exception, "expected_rollout_count"):
                 validate_smoke_bounds(config)
 
+    def test_joint_qa_bounds_allow_only_frozen_versioned_skill_on(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            _, config_path, _ = create_joint_qa_micro_project(Path(directory))
+            config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            config["skills"].update(
+                enabled=True,
+                frozen_store=True,
+                store_path="artifacts/skill_epoch/skills.json",
+                retrieval_top_k=2,
+                current_epoch=2,
+                library_version="jointqa.skill-library.progressive.epoch2.v1",
+                posterior_version="jointqa.posterior.progressive.epoch0.v1",
+                required_skill_ids=["jointqa.hotpotqa.format", "jointqa.triviaqa.format"],
+            )
+            config["deployment"].update(
+                active_skills_only=True,
+                allow_forced_probes=False,
+                exploration_beta=0.0,
+            )
+            validate_smoke_bounds(config)
+
+            not_frozen = copy.deepcopy(config)
+            not_frozen["skills"]["frozen_store"] = False
+            with self.assertRaisesRegex(Exception, "skills.enabled"):
+                validate_smoke_bounds(not_frozen)
+
+            missing_version = copy.deepcopy(config)
+            missing_version["skills"]["posterior_version"] = "none"
+            with self.assertRaisesRegex(Exception, "skills.enabled"):
+                validate_smoke_bounds(missing_version)
+
+            duplicate_ids = copy.deepcopy(config)
+            duplicate_ids["skills"]["required_skill_ids"] = ["same", "same"]
+            with self.assertRaisesRegex(Exception, "required_skill_ids"):
+                validate_smoke_bounds(duplicate_ids)
+
     def test_joint_qa_prepare_freezes_both_tasks_and_trivia_retrieval(self) -> None:
         import asyncio
         import tempfile

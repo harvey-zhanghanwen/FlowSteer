@@ -66,7 +66,12 @@ from src.interactive.scientific_sampling import (
     scientific_sampling_schedule_hash,
     stable_hash,
 )
-from src.interactive.skills import SkillEvidencePipeline, SkillQuery, SkillStore
+from src.interactive.skills import (
+    SkillEvidencePipeline,
+    SkillQuery,
+    SkillStatus,
+    SkillStore,
+)
 from src.interactive.smoke_trainer import (
     Qwen35OnePassSmokeTrainer,
     SmokeTrainerConfig,
@@ -151,6 +156,26 @@ def validate_smoke_bounds(config: Mapping[str, Any]) -> None:
     evaluation = _mapping(config.get("evaluation"), "evaluation")
     exploration = _mapping(config.get("exploration"), "exploration")
     skills = _mapping(config.get("skills"), "skills")
+    deployment = _mapping(config.get("deployment"), "deployment")
+    skills_enabled = skills.get("enabled") is True
+    joint_skill_on = (
+        joint_qa_micro
+        and skills_enabled
+        and skills.get("frozen_store") is True
+        and isinstance(skills.get("store_path"), str)
+        and bool(str(skills.get("store_path")).strip())
+        and type(skills.get("retrieval_top_k")) is int
+        and int(skills.get("retrieval_top_k")) > 0
+        and type(skills.get("current_epoch")) is int
+        and int(skills.get("current_epoch")) >= 1
+        and str(skills.get("library_version", "none")) != "none"
+        and str(skills.get("posterior_version", "none")) != "none"
+        and isinstance(skills.get("required_skill_ids"), list)
+        and bool(skills.get("required_skill_ids"))
+        and deployment.get("active_skills_only") is True
+        and deployment.get("allow_forced_probes") is False
+        and float(deployment.get("exploration_beta", -1.0)) == 0.0
+    )
 
     checks = {
         "experiment.phase": experiment.get("phase")
@@ -217,7 +242,11 @@ def validate_smoke_bounds(config: Mapping[str, Any]) -> None:
         == 0.0,
         "grpo.skill_usage_reward": float(grpo.get("skill_usage_reward", -1.0))
         == 0.0,
-        "skills.enabled": hotpot_micro or skills.get("enabled") is False,
+        "skills.enabled": (
+            hotpot_micro
+            or (joint_qa_micro and (not skills_enabled or joint_skill_on))
+            or (not frozen_micro and not skills_enabled)
+        ),
     }
     failed = [name for name, valid in checks.items() if not valid]
     if failed:
@@ -282,6 +311,18 @@ def validate_smoke_bounds(config: Mapping[str, Any]) -> None:
                 raise ConfigurationError(
                     "joint QA micro-training requires exact_single_answer_tag for both datasets"
                 )
+            if joint_skill_on:
+                required_skill_ids = skills["required_skill_ids"]
+                if (
+                    not all(
+                        isinstance(value, str) and value.strip()
+                        for value in required_skill_ids
+                    )
+                    or len(required_skill_ids) != len(set(required_skill_ids))
+                ):
+                    raise ConfigurationError(
+                        "skills.required_skill_ids must contain unique non-empty IDs"
+                    )
     else:
         if selection.get("tasks_per_dataset") != 2:
             raise ConfigurationError("data.smoke.tasks_per_dataset must be 2")
@@ -1208,10 +1249,67 @@ class LiveSmokeBackend:
                 )
             if skill_epoch < 0:
                 raise ConfigurationError("skills.current_epoch must be non-negative")
+            skill_store = SkillStore(store_path)
+            retrieval_snapshot = tuple(skill_store.list())
+            active_snapshot = tuple(
+                skill
+                for skill in retrieval_snapshot
+                if skill.status is SkillStatus.ACTIVE
+                and skill.activated_epoch is not None
+                and skill.activated_epoch <= skill_epoch
+            )
+            if not active_snapshot:
+                raise ConfigurationError(
+                    "enabled Skill retrieval requires an ACTIVE Skill visible in the current epoch"
+                )
+            required_skill_ids = tuple(
+                str(value) for value in skills_config.get("required_skill_ids", ())
+            )
+            missing_skill_ids = sorted(
+                set(required_skill_ids)
+                - {skill.skill_id for skill in active_snapshot}
+            )
+            if missing_skill_ids:
+                raise ConfigurationError(
+                    "frozen Skill store is missing required ACTIVE Skill IDs: "
+                    + ", ".join(missing_skill_ids)
+                )
+            expected_skill_versions = {
+                "policy": str(director["behavior_policy_version"]),
+                "model_catalog": registry.catalog_id,
+                "prompt": str(experiment.get("prompt_version", PROMPT_VERSION)),
+                "tool": str(experiment.get("tool_version", TOOL_VERSION)),
+                "posterior": str(skills_config.get("posterior_version", "none")),
+                "skill_library": str(skills_config.get("library_version", "none")),
+            }
+            for skill in active_snapshot:
+                mismatches = {
+                    field: (getattr(skill.versions, field), expected)
+                    for field, expected in expected_skill_versions.items()
+                    if getattr(skill.versions, field) != expected
+                }
+                if mismatches:
+                    raise ConfigurationError(
+                        f"ACTIVE Skill {skill.skill_id} is incompatible with the frozen regime: "
+                        + ", ".join(sorted(mismatches))
+                    )
+            if _is_joint_qa_micro(config):
+                covered_families = {
+                    str(skill.condition.get("task_family", ""))
+                    for skill in active_snapshot
+                }
+                if "*" not in covered_families and not {
+                    "hotpotqa",
+                    "triviaqa",
+                }.issubset(covered_families):
+                    raise ConfigurationError(
+                        "joint QA Skill-on training requires ACTIVE coverage for both datasets"
+                    )
             skill_pipeline = SkillEvidencePipeline(
                 evidence_store=evidence_store,
-                skill_store=SkillStore(store_path),
+                skill_store=skill_store,
                 retrieval_top_k=retrieval_top_k,
+                retrieval_snapshot=retrieval_snapshot,
             )
 
         trainer: Optional[Qwen35OnePassSmokeTrainer] = None
@@ -1760,6 +1858,12 @@ def _select_run_scope(
             train_path=train_path,
             validation_path=_resolve(root, str(data["validation_path"])),
             test_path=_resolve(root, str(data["test_path"])),
+            skill_confirmation_path=(
+                _resolve(root, str(data["skill_confirmation_path"]))
+                if isinstance(data.get("skill_confirmation_path"), str)
+                and str(data["skill_confirmation_path"]).strip()
+                else None
+            ),
         )
         step = progress.current_step
         tasks = resolved[cursor.cursor]
@@ -1965,6 +2069,24 @@ async def run_smoke(
         _write_json(paths["manifest"], manifest)
     expected_jobs: list[tuple[TaskRecord, int, VersionBundle]] = []
     experiment = _mapping(config["experiment"], "experiment")
+    skills_config = _mapping(config["skills"], "skills")
+    configured_skill_library_version = (
+        str(skills_config.get("library_version", "none"))
+        if skills_config.get("enabled") is True
+        else "none"
+    )
+    configured_posterior_version = (
+        str(skills_config.get("posterior_version", "none"))
+        if skills_config.get("enabled") is True
+        else "none"
+    )
+    manifest["regime_versions"] = {
+        "prompt": str(experiment.get("prompt_version", PROMPT_VERSION)),
+        "tool": str(experiment.get("tool_version", TOOL_VERSION)),
+        "posterior": configured_posterior_version,
+        "skill_library": configured_skill_library_version,
+        "model_catalog": live_backend.model_catalog_version,
+    }
     for task in selected:
         versions = version_bundle_for(
             task,
@@ -1972,6 +2094,8 @@ async def run_smoke(
             model_catalog_version=live_backend.model_catalog_version,
             prompt_version=str(experiment.get("prompt_version", PROMPT_VERSION)),
             tool_version=str(experiment.get("tool_version", TOOL_VERSION)),
+            posterior_version=configured_posterior_version,
+            skill_library_version=configured_skill_library_version,
         )
         for rollout_index in rollout_ordinals:
             expected_jobs.append((task, rollout_index, versions))
@@ -2025,6 +2149,29 @@ async def run_smoke(
             "reused": 0,
             "new_collections": len(initial),
         }
+    if skills_config.get("enabled") is True:
+        required_skill_ids = tuple(
+            str(value) for value in skills_config.get("required_skill_ids", ())
+        )
+        visibility_receipts: list[dict[str, Any]] = []
+        for record in initial:
+            first_prompt = record.turns[0].prompt if record.turns else ""
+            visible = tuple(
+                skill_id for skill_id in required_skill_ids if skill_id in first_prompt
+            )
+            if not visible:
+                raise SmokeRunError(
+                    f"no required ACTIVE Skill is visible in {record.trajectory_id}"
+                )
+            visibility_receipts.append(
+                {
+                    "trajectory_id": record.trajectory_id,
+                    "task_id": record.task.task_id,
+                    "visible_skill_ids": list(visible),
+                }
+            )
+        manifest["skill_visibility_receipts"] = visibility_receipts
+        _write_json(paths["manifest"], manifest)
     if len(initial) != int(grpo["expected_rollout_count"]):
         raise SmokeRunError("initial rollout count differs from the fixed smoke bound")
     if any(record.versions.policy != behavior_policy for record in initial):
@@ -2118,6 +2265,8 @@ async def run_smoke(
             model_catalog_version=live_backend.model_catalog_version,
             prompt_version=str(experiment.get("prompt_version", PROMPT_VERSION)),
             tool_version=str(experiment.get("tool_version", TOOL_VERSION)),
+            posterior_version=configured_posterior_version,
+            skill_library_version=configured_skill_library_version,
         )
         canary_jobs.append(live_backend.collect(task, 10_000 + index, versions))
     try:

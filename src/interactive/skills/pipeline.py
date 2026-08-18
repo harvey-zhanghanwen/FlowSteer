@@ -257,6 +257,7 @@ class SkillEvidencePipeline:
         skill_store: SkillStore,
         gate_config: SkillGateConfig | None = None,
         retrieval_top_k: int = 3,
+        retrieval_snapshot: Sequence[SkillRecord] | None = None,
     ) -> None:
         self.evidence_store = evidence_store
         self.skill_store = skill_store
@@ -266,6 +267,15 @@ class SkillEvidencePipeline:
         )
         self.lifecycle = SkillLifecycleManager(self.gate)
         self.retriever = SkillRetriever(top_k=retrieval_top_k)
+        if retrieval_snapshot is None:
+            self._retrieval_snapshot: tuple[SkillRecord, ...] | None = None
+        else:
+            snapshot = tuple(retrieval_snapshot)
+            if any(not isinstance(skill, SkillRecord) for skill in snapshot):
+                raise TypeError("retrieval_snapshot must contain SkillRecord values")
+            if len({skill.skill_id for skill in snapshot}) != len(snapshot):
+                raise ValueError("retrieval_snapshot must contain unique Skill IDs")
+            self._retrieval_snapshot = snapshot
 
     def discover(
         self,
@@ -456,7 +466,12 @@ class SkillEvidencePipeline:
     ) -> tuple[PromptSkillPrior, ...]:
         """Return rejectable prompt priors; never apply actions to a Canvas."""
 
-        skills = self.retriever.retrieve(self.skill_store.list(), query, versions)
+        library = (
+            self.skill_store.list()
+            if self._retrieval_snapshot is None
+            else list(self._retrieval_snapshot)
+        )
+        skills = self.retriever.retrieve(library, query, versions)
         return tuple(
             PromptSkillPrior(
                 skill_id=skill.skill_id,

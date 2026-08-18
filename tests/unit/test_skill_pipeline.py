@@ -279,6 +279,25 @@ class SkillPipelineTests(unittest.TestCase):
             [SkillStatus.CANDIDATE, SkillStatus.CANDIDATE, SkillStatus.ACTIVE],
         )
 
+        frozen_pipeline = SkillEvidencePipeline(
+            evidence_store=self.pipeline.evidence_store,
+            skill_store=self.pipeline.skill_store,
+            retrieval_snapshot=(result.skill,),
+        )
+        retired = self.pipeline.lifecycle.retire(result.skill, "next epoch update")
+        self.pipeline.skill_store.upsert(retired)
+        query = SkillQuery(
+            task_family="hotpotqa",
+            graph_stage="after_bridge",
+            available_models=("executor-a",),
+            current_epoch=2,
+        )
+        self.assertEqual(self.pipeline.retrieve_prompt_priors(query, versions()), ())
+        self.assertEqual(
+            len(frozen_pipeline.retrieve_prompt_priors(query, versions())),
+            1,
+        )
+
     def test_discovery_and_validation_problem_overlap_is_rejected(self) -> None:
         candidate = self.discover()
         with self.assertRaisesRegex(ValueError, "overlap"):

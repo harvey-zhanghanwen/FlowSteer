@@ -24,12 +24,13 @@ from ..skills import SkillValidationStatistics
 from .policies import UCBPolicy
 from .posterior import BayesianLinearPosterior
 from .records import PolicyDecision
+from .evsi import make_common_random_numbers, particle_evsi_many
 
 
 DATASETS = ("hotpotqa", "triviaqa")
 ENCODER_VERSION = "jointqa.skill-condition.fixed.v1"
 FEATURE_SCHEMA_VERSION = "jointqa.skill-candidate-dataset-interaction.v1"
-POSTERIOR_VERSION = "jointqa.bayesian-linear.step2.v1"
+POSTERIOR_VERSION = "jointqa.bayesian-linear.progressive-subgraph.v1"
 
 
 def _name(value: str, *, field: str) -> str:
@@ -96,6 +97,18 @@ class ScheduledCandidate:
     selection_mode: str
 
 
+@dataclass(frozen=True)
+class EVSIProbeDecision:
+    """Particle-EVSI ranking over candidate paired interventions."""
+
+    candidate_ids: tuple[str, ...]
+    values: tuple[float, ...]
+    selected_id: str
+    posterior_particles: int
+    observation_samples: int
+    observation_std: float
+
+
 class JointQAPosteriorScheduler:
     """Balanced cold start followed by MACE-style posterior UCB selection."""
 
@@ -156,12 +169,95 @@ class JointQAPosteriorScheduler:
         observation_id = _name(observation_id, field="observation_id")
         if observation_id in self.observation_ids:
             raise ValueError("posterior observation IDs must be unique")
-        difference = self.features.context(dataset, candidate_id) - self.features.baseline(
-            dataset
+        candidate = self.features.context(dataset, candidate_id)
+        baseline = self.features.baseline(dataset)
+        # ``observation_variance`` is the predeclared variance of the paired
+        # terminal effect, not a single-arm variance.  Use the posterior's
+        # paired-difference API explicitly so the causal contrast remains
+        # visible at the update boundary.
+        self.posterior.update_paired_difference(
+            candidate,
+            baseline,
+            float(paired_terminal_effect),
+            difference_variance=self.posterior.observation_variance,
         )
-        self.posterior.update(difference, float(paired_terminal_effect))
         self._counts[(dataset, candidate_id)] += 1
         self.observation_ids.append(observation_id)
+
+    def rank_probes_by_evsi(
+        self,
+        dataset: str,
+        *,
+        candidate_ids: Sequence[str] | None = None,
+        seed: int,
+        posterior_particles: int = 1024,
+        observation_samples: int = 2048,
+    ) -> EVSIProbeDecision:
+        """Rank paired interventions by particle EVSI with common random numbers."""
+
+        candidates = (
+            self.features.candidate_ids
+            if candidate_ids is None
+            else tuple(_name(value, field="candidate_id") for value in candidate_ids)
+        )
+        if not candidates or len(candidates) != len(set(candidates)):
+            raise ValueError("candidate_ids must be unique and non-empty")
+        unknown = [
+            value for value in candidates if value not in self.features.candidate_ids
+        ]
+        if unknown:
+            raise ValueError("unknown EVSI candidate_id: " + ", ".join(unknown))
+        if type(posterior_particles) is not int or posterior_particles < 2:
+            raise ValueError("posterior_particles must be an integer >= 2")
+        if type(observation_samples) is not int or observation_samples < 2:
+            raise ValueError("observation_samples must be an integer >= 2")
+
+        all_contexts = np.stack(
+            [
+                self.features.context(dataset, candidate_id)
+                - self.features.baseline(dataset)
+                for candidate_id in self.features.candidate_ids
+            ]
+        )
+        probe_contexts = np.stack(
+            [
+                self.features.context(dataset, candidate_id)
+                - self.features.baseline(dataset)
+                for candidate_id in candidates
+            ]
+        )
+        rng = np.random.default_rng(seed)
+        parameter_particles = self.posterior.sample_parameters(
+            rng,
+            size=posterior_particles,
+        )
+        utilities = parameter_particles @ all_contexts.T
+        probe_signals = probe_contexts @ parameter_particles.T
+        common_random_numbers = make_common_random_numbers(
+            observation_samples,
+            rng=rng,
+        )
+        observation_std = math.sqrt(self.posterior.observation_variance)
+        evsi_values = particle_evsi_many(
+            utilities,
+            probe_signals,
+            observation_std,
+            common_random_numbers=common_random_numbers,
+        )
+        order = sorted(
+            range(len(candidates)),
+            key=lambda index: (-float(evsi_values[index]), index),
+        )
+        ranked_ids = tuple(candidates[index] for index in order)
+        ranked_values = tuple(float(evsi_values[index]) for index in order)
+        return EVSIProbeDecision(
+            candidate_ids=ranked_ids,
+            values=ranked_values,
+            selected_id=ranked_ids[0],
+            posterior_particles=posterior_particles,
+            observation_samples=observation_samples,
+            observation_std=observation_std,
+        )
 
     def predict(self, dataset: str, candidate_id: str) -> tuple[float, float]:
         difference = self.features.context(dataset, candidate_id) - self.features.baseline(

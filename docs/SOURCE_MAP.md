@@ -387,3 +387,27 @@ forced paired interventions remain ineligible for GRPO.  MACE-style UCB/EVSI,
 the joint Bayesian posterior and evidence-gated Skill lifecycle remain the
 project-algorithm layer required by the design note and must be evaluated in a
 separate frozen exploration epoch before any Skill becomes ACTIVE.
+
+## Joint-QA frozen Skill epoch and one-update training boundary
+
+This layer connects existing exploration, Skill, and learner components; it
+does not add a second rollout engine, optimizer, Skill store, or policy
+publisher.  Skill effects are explicitly the intent-to-treat effect of making
+a rejectable prompt prior visible during a complete trajectory from an empty
+Canvas.  They are not labelled as local topology effects or verified Director
+adoption.
+
+| Current module | Classification | Reference source | Reused boundary | Minimal adaptation |
+| --- | --- | --- | --- | --- |
+| `exploration/skill_experiment.py::rank_probes_by_evsi` | Project-algorithm wiring required by the design note | Existing `exploration/evsi.py::{make_common_random_numbers,particle_evsi_many}` and joint `BayesianLinearPosterior` | MACE-style posterior UCB supplies a top-K candidate set; particle EVSI with common random numbers selects the next paid paired intervention | The existing numerical EVSI primitive previously had no joint-QA caller.  The adapter only maps the fixed candidate/dataset feature differences into that primitive and records the deterministic ranking. |
+| `run_joint_qa_mace_skill.py` | Thin experiment adapter | Existing paired-probe runner, `JointQAPosteriorScheduler`, `SkillEvidencePipeline`, and SkillFlow retrieval observation adapter | Balanced cold start, UCB prefilter, EVSI selection, randomized paired-arm order, independent confirmation, deterministic gate, and delayed next-epoch activation | Old Step-2 paths and a fixed fan-in prior were incompatible with the new `add_subgraph` action profile.  The runner uses the disjoint `joint_qa_v2` train/Skill-confirmation partitions and two bounded, rejectable failure-derived priors without mutating Canvas. |
+| `skills/pipeline.py::retrieval_snapshot` | SkillFlow lifecycle adaptation | SkillFlow frozen ACTIVE Skill library per rollout/training epoch | Every Director turn in one batch reads the same immutable Skill records | The local pipeline formerly reread its JSON store on every turn.  An optional typed snapshot freezes visibility while leaving the existing store and retriever unchanged. |
+| `train_agentgraph_smoke.py` Skill-on joint micro boundary | Necessary SkillFlow training adaptation | Existing SkillFlow-style exact group admission, one-pass LoRA learner, frozen schedule/cursor, adapter publication and updated-policy canary | Terminal F1-only GRPO, one real `optimizer.step`, exact policy/version receipt, pause/drain/load/canary route switch | Skill-on is admitted only for a frozen store containing version-compatible ACTIVE Skills covering both datasets.  The manifest records posterior/library versions and first-turn Skill visibility; forced probes remain disabled.  Joint schedule resolution additionally includes the independent Skill-confirmation path in its held-out union. |
+| `materialize_joint_qa_progressive_skill_training.py`, `freeze_joint_qa_training_schedule.py` | Necessary experiment materialization adaptation | Existing `freeze_joint_qa_training_schedule`, write-once cursor, `SkillStore`, YAML loader, and `validate_smoke_bounds` | Evidence gate is checked before a fixed train-only schedule and resolved Skill-on config can exist | The adapter selects one predeclared unused train position per dataset, binds exact ACTIVE Skill IDs/library/posterior/policy versions, and writes no rollout or model state.  The freeze CLI now forwards the optional Skill-confirmation path into the existing held-out-union check. |
+| Progressive Step-0 and Skill-on Step-1 YAML files | Necessary configuration adaptation | Existing HotpotQA/TriviaQA evaluators, ten-arm v6 Executor catalog, formal zero-update LoRA, and joint-QA smoke trainer | Fixed development sample, local Qwen3.5-9B Director, `add_subgraph` search space, two train tasks x eight rollouts, one update, and two canaries | The training YAML remains a fail-closed template until evidence-gated ACTIVE Skill IDs and their exact library/posterior versions are materialized.  No placeholder is reported as an executed run. |
+
+The SkillStore is frozen before natural GRPO collection.  A successful LoRA
+update creates a new policy version, after which the prior ACTIVE Skills are
+version-incompatible and must be suspended or independently revalidated before
+another training epoch.  Development and final test tasks are never used for
+posterior fitting, EVSI, Skill confirmation, or optimizer data.

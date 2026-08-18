@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the bounded joint-QA MACE -> Bayesian posterior -> Skill protocol.
+"""Run the bounded progressive joint-QA MACE -> posterior -> Skill protocol.
 
 This is an experiment adapter over existing project components, not another
 exploration or Skill implementation.  It reuses:
@@ -10,8 +10,9 @@ exploration or Skill implementation.  It reuses:
 * the existing ``SkillEvidencePipeline`` and deterministic evidence gate; and
 * SkillFlow's public TriviaQA retrieval observations.
 
-The fixed final benchmark is validation[0:32].  Skill confirmation uses the
-disjoint validation[32:52] block and never enters GRPO or benchmark EM/F1.
+Development, discovery, Skill confirmation, and final test come from the
+disjoint ``joint_qa_v2`` manifest.  Skill confirmation never enters GRPO or
+reported development/test EM/F1.
 The paired intervention starts from an empty Canvas, freezes policy/model/
 evaluator/tool versions and sampling coordinates, and regenerates downstream
 execution for each arm.  Its primary outcome is official answer token F1;
@@ -52,6 +53,7 @@ from src.interactive.qa_retrieval import augment_task_with_retrieval
 from src.interactive.records import ProbeRecord, SelectionReceipt, TaskRecord, TrajectoryRecord
 from src.interactive.skills import (
     SkillEvidencePipeline,
+    SkillGateConfig,
     SkillProbeEvidence,
     SkillStatus,
     SkillStore,
@@ -61,42 +63,51 @@ from src.interactive.task_dataset import iter_task_records
 
 
 ROOT = Path(__file__).resolve().parents[1]
-OUTPUT_ROOT = ROOT / "artifacts/joint_qa_mace_skill"
-REPORT_ROOT = ROOT / "reports/joint_qa_mace_skill"
+OUTPUT_ROOT = ROOT / "artifacts/joint_qa_progressive/skill_epoch_000000"
+REPORT_ROOT = ROOT / "reports/joint_qa_progressive/skill_epoch_000000"
 EVIDENCE_ROOT = OUTPUT_ROOT / "evidence"
 SKILL_STORE_PATH = OUTPUT_ROOT / "skills.json"
 PAIR_PATH = OUTPUT_ROOT / "paired_observations.jsonl"
 SELECTION_PATH = OUTPUT_ROOT / "selection_receipts.jsonl"
+EVSI_PATH = OUTPUT_ROOT / "evsi_receipts.jsonl"
 PUBLICATION_PATH = OUTPUT_ROOT / "publication_results.json"
 MANIFEST_PATH = OUTPUT_ROOT / "experiment_manifest.json"
 RUNTIME_VERSION = "flowsteer.agentgraph.progressive-runtime.v1"
-POLICY_VERSION = "qwen35-9b-jointqa-step-000002"
-SKILL_LIBRARY_VERSION = "jointqa.skill-library.epoch2.v1"
+POLICY_VERSION = "qwen35-9b-hotpot-step-000000"
+PROMPT_VERSION = "agentgraph.director.progressive_subgraph.v1"
+TOOL_VERSION = "agentgraph.add-subgraph+skillflow-public-retrieval.v1"
+SKILL_LIBRARY_VERSION = "jointqa.skill-library.progressive.epoch2.v1"
+EVALUATION_CONFIG = ROOT / "config/evaluation_joint_qa_progressive_step0_hotpotqa.yaml"
+BEHAVIOR_ADAPTER_NAME = "theta_jointqa_progressive_step_000000"
+BEHAVIOR_ADAPTER_CHECKPOINT = (
+    ROOT / "artifacts/hotpotqa_multiagent_skill/policy_step_000000/theta"
+)
 SEED = 20260818
 
 BASELINE_ACTION: Mapping[str, Any] = {
     "instruction": "No additional prompt prior; use the frozen Director policy."
 }
 
-# These two bounded actions are derived from the already persisted Step-2
-# wrong-demo categories.  They remain rejectable Director context and never
-# mutate the Canvas directly.
+# These bounded prompt priors encode the two failure classes supported by the
+# persisted joint-QA wrong demos: fragile multi-action component construction
+# and unsupported/overlong terminal answers.  They do not prescribe a fixed
+# topology or model and never mutate the Canvas directly.
 CANDIDATE_ACTIONS: Mapping[str, Mapping[str, Any]] = {
-    "independent_evidence_fan_in": {
+    "subgraph_transaction_boundary": {
         "instruction": (
-            "When the question requires evidence reconciliation, construct a directed "
-            "acyclic workflow with two independent Evidence Agents feeding one "
-            "Reasoning or Verification Agent, followed by one terminal Format Agent. "
-            "Route every required upstream artifact to the terminal path; use reciprocal "
-            "communication only when the evidence artifacts conflict."
+            "When one immediately executable functional component requires several "
+            "Agents and their dependencies, add its one-to-three Agents and relations "
+            "in one add_subgraph transaction. Inspect that component's execution "
+            "feedback before choosing the next edit; use only the dependency structure "
+            "and model choices warranted by the current question."
         )
     },
-    "answer_span_verification": {
+    "evidence_to_format_handoff": {
         "instruction": (
-            "Before finish, verify the selected entity and answer granularity against "
-            "the question and the cited evidence. Route the verified result to one "
-            "terminal Format Agent, which emits exactly one shortest supported answer "
-            "span inside a single <answer> tag without explanation."
+            "Before FINISH, ensure the terminal path carries the evidence and answer "
+            "candidate needed by the Output Agent. When exact answer formatting is a "
+            "separate responsibility, use a Format Agent only to extract one shortest "
+            "supported answer span inside a single <answer> tag."
         )
     },
 }
@@ -107,6 +118,14 @@ def _dataset_key(task: TaskRecord) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"task has no dataset key: {task.task_id}")
     return value
+
+
+def _require_partition(task: TaskRecord, expected: str) -> None:
+    observed = task.metadata.get("joint_qa_partition")
+    if observed != expected:
+        raise RuntimeError(
+            f"task {task.task_id} belongs to partition {observed!r}, expected {expected!r}"
+        )
 
 
 def _condition(dataset: str) -> dict[str, Any]:
@@ -136,11 +155,11 @@ def _selected_tasks() -> tuple[
     dict[str, tuple[TaskRecord, ...]],
     dict[str, TaskRecord],
 ]:
-    train_path = ROOT / "data/agentgraph_v1/train.jsonl"
-    validation_path = ROOT / "data/agentgraph_v1/validation.jsonl"
+    train_path = ROOT / "data/joint_qa_v2/train.jsonl"
+    confirmation_path = ROOT / "data/joint_qa_v2/skill_confirmation.jsonl"
     train = tuple(iter_task_records(train_path, expected_split="train"))
     validation = tuple(
-        iter_task_records(validation_path, expected_split="validation")
+        iter_task_records(confirmation_path, expected_split="validation")
     )
     discovery: dict[str, tuple[TaskRecord, ...]] = {}
     confirmation: dict[str, tuple[TaskRecord, ...]] = {}
@@ -150,11 +169,26 @@ def _selected_tasks() -> tuple[
         dataset_validation = tuple(
             task for task in validation if _dataset_key(task) == dataset
         )
-        if len(dataset_train) < 4 or len(dataset_validation) < 52:
+        if len(dataset_train) < 4 or len(dataset_validation) < 20:
             raise RuntimeError(f"insufficient aligned tasks for {dataset}")
         discovery[dataset] = dataset_train[:3]
         natural[dataset] = dataset_train[3]
-        confirmation[dataset] = dataset_validation[32:52]
+        confirmation[dataset] = dataset_validation[:20]
+        for task in (*discovery[dataset], natural[dataset]):
+            _require_partition(task, "train")
+        for task in confirmation[dataset]:
+            _require_partition(task, "skill_confirmation")
+    all_ids = [
+        task.task_id
+        for dataset in DATASETS
+        for task in (
+            *discovery[dataset],
+            natural[dataset],
+            *confirmation[dataset],
+        )
+    ]
+    if len(all_ids) != len(set(all_ids)):
+        raise RuntimeError("discovery, natural-candidate, and confirmation tasks overlap")
     return discovery, confirmation, natural
 
 
@@ -163,7 +197,7 @@ def _augment_trivia(
     confirmation: dict[str, tuple[TaskRecord, ...]],
     natural: dict[str, TaskRecord],
 ) -> None:
-    config = load_yaml(ROOT / "config/evaluation_joint_qa_step2_triviaqa.yaml")
+    config = load_yaml(ROOT / "config/evaluation_joint_qa_progressive_step0_triviaqa.yaml")
     ordered = (
         *discovery["triviaqa"],
         natural["triviaqa"],
@@ -183,14 +217,12 @@ def _augment_trivia(
 
 
 def _backend() -> LiveSmokeBackend:
-    config = deepcopy(
-        load_yaml(ROOT / "config/evaluation_joint_qa_step2_hotpotqa.yaml")
-    )
+    config = deepcopy(load_yaml(EVALUATION_CONFIG))
     config["storage"]["root"] = str(EVIDENCE_ROOT)
     config["skills"]["enabled"] = False
-    config["experiment"]["condition_id"] = "joint_qa_mace_skill"
+    config["experiment"]["condition_id"] = "joint_qa_progressive_skill_epoch0"
     config["experiment"]["sampling_schedule_purpose"] = (
-        "joint_qa_mace_skill_paired_v1"
+        "joint_qa_progressive_skill_paired_v1"
     )
     return LiveSmokeBackend.from_config(config, ROOT, evaluation_only=True)
 
@@ -200,8 +232,8 @@ def _versions(backend: LiveSmokeBackend, task: TaskRecord):
         task,
         policy_version=POLICY_VERSION,
         model_catalog_version=backend.model_catalog_version,
-        prompt_version="agentgraph.director.generic_dependency.v1",
-        tool_version="agentgraph.atomic-actions+skillflow-public-retrieval.v1",
+        prompt_version=PROMPT_VERSION,
+        tool_version=TOOL_VERSION,
         encoder_version=ENCODER_VERSION,
         feature_schema_version=FEATURE_SCHEMA_VERSION,
         posterior_version=POSTERIOR_VERSION,
@@ -334,7 +366,7 @@ async def _paired_probe(
     if stage not in {"discovery", "confirmation"}:
         raise ValueError("stage must be discovery or confirmation")
     order = randomize_probe_order("incumbent", "candidate", order_rng)
-    schedule = f"joint_qa_mace_skill_{stage}_paired_v1"
+    schedule = f"joint_qa_progressive_skill_{stage}_paired_v1"
     condition_ids = {
         "incumbent": f"jointqa_skill_{stage}:incumbent",
         "candidate": f"jointqa_skill_{stage}:candidate:{candidate_id}",
@@ -462,6 +494,16 @@ async def _paired_probe(
         "token_f1_effect": probe.paired_effect,
         "condition": _condition(dataset),
         "candidate_action": dict(CANDIDATE_ACTIONS[candidate_id]),
+        "estimand": "skill_prompt_prior_visibility_intent_to_treat_effect",
+        "treatment_assigned": True,
+        "prompt_prior_visible": True,
+        "director_adoption_verified": False,
+        "condition_ids": condition_ids,
+        "branch_order": [order.presented_first, order.presented_second],
+        "shared_director_sampling": dict(incumbent.director_sampling),
+        "versions": incumbent.versions.to_dict(),
+        "executor_versions": _executor_versions(backend),
+        "evaluator_version": incumbent.evaluation.evaluator_version,
         "forced_probe": True,
         "grpo_eligible": False,
     }
@@ -473,7 +515,7 @@ def _proposal(dataset: str, candidate_id: str) -> StructuredSkillCandidate:
         skill_id=f"jointqa.{dataset}.{candidate_id}",
         condition=_condition(dataset),
         action=dict(CANDIDATE_ACTIONS[candidate_id]),
-        baseline_id="frozen_step2_no_skill",
+        baseline_id="frozen_progressive_step0_no_skill",
         baseline_action=dict(BASELINE_ACTION),
         failure_scope=(),
     )
@@ -485,23 +527,47 @@ def _manifest(
     natural: Mapping[str, TaskRecord],
 ) -> dict[str, Any]:
     return {
-        "schema_version": "flowsteer.joint-qa.mace-bayesian-skill.v1",
+        "schema_version": "flowsteer.joint-qa.mace-bayesian-skill.v2",
         "seed": SEED,
         "policy_version": POLICY_VERSION,
-        "adapter_name": "theta_jointqa_step_000002",
+        "adapter_name": BEHAVIOR_ADAPTER_NAME,
         "encoder_version": ENCODER_VERSION,
         "feature_schema_version": FEATURE_SCHEMA_VERSION,
         "posterior_version": POSTERIOR_VERSION,
         "skill_library_version": SKILL_LIBRARY_VERSION,
+        "prompt_version": PROMPT_VERSION,
+        "tool_version": TOOL_VERSION,
         "runtime_version": RUNTIME_VERSION,
         "primary_outcome": "official_answer_token_f1",
         "companion_outcome": "normalized_exact_match",
-        "final_benchmark_block": "validation[0:32]",
-        "confirmation_block": "validation[32:52]",
+        "partition_manifest": "data/joint_qa_v2/manifest.json",
+        "development_block": "joint_qa_v2/development",
+        "confirmation_block": "joint_qa_v2/skill_confirmation:first20_per_dataset",
+        "final_test_block": "joint_qa_v2/test (not opened by this protocol)",
         "candidate_actions": {key: dict(value) for key, value in CANDIDATE_ACTIONS.items()},
+        "candidate_source_artifacts": [
+            "reports/hotpotqa_multiagent_skill",
+            "reports/joint_qa_curve",
+            "reports/joint_qa_mace_skill",
+        ],
         "baseline_action": dict(BASELINE_ACTION),
-        "discovery_schedule": "two-candidate balanced cold start then posterior UCB",
+        "skill_gate": SkillGateConfig().to_dict(),
+        "evsi_budget": {
+            "ucb_prefilter_top_k": 2,
+            "posterior_particles": 1024,
+            "observation_samples": 2048,
+        },
+        "epochs": {
+            "discovery": 0,
+            "validation": 1,
+            "eligible_activation": 2,
+        },
+        "discovery_schedule": (
+            "balanced cold start, posterior-UCB prefilter, then particle EVSI"
+        ),
         "intervention_scope": "full trajectory from a shared empty-Canvas snapshot",
+        "causal_estimand": "Skill prompt-prior visibility intent-to-treat effect",
+        "not_a_prefix_topology_intervention": True,
         "forced_probe_excluded_from_grpo_and_benchmark": True,
         "natural_candidate_tasks": {
             key: task.task_id for key, task in natural.items()
@@ -519,13 +585,22 @@ def _manifest(
 
 async def run(*, prepare_only: bool = False) -> dict[str, Any]:
     discovery_tasks, confirmation_tasks, natural_tasks = _selected_tasks()
-    _augment_trivia(discovery_tasks, confirmation_tasks, natural_tasks)
     manifest = _manifest(discovery_tasks, confirmation_tasks, natural_tasks)
     _write_json(MANIFEST_PATH, manifest)
     if prepare_only:
         return {"status": "prepared", "manifest": str(MANIFEST_PATH)}
+    _augment_trivia(discovery_tasks, confirmation_tasks, natural_tasks)
 
     backend = _backend()
+    behavior_preflight = await asyncio.to_thread(
+        backend.publisher.ensure_loaded_adapter,
+        checkpoint_path=str(BEHAVIOR_ADAPTER_CHECKPOINT),
+        adapter_name=BEHAVIOR_ADAPTER_NAME,
+    )
+    manifest["behavior_policy_preflight"] = dict(behavior_preflight)
+    manifest["frozen_model_catalog_version"] = backend.model_catalog_version
+    manifest["frozen_executor_versions"] = _executor_versions(backend)
+    _write_json(MANIFEST_PATH, manifest)
     cache = _resume_trajectories(backend.evidence_store)
     scheduler = JointQAPosteriorScheduler(
         tuple(CANDIDATE_ACTIONS),
@@ -537,6 +612,7 @@ async def run(*, prepare_only: bool = False) -> dict[str, Any]:
     order_rng = np.random.default_rng(SEED)
     pair_rows: list[dict[str, Any]] = []
     selection_rows: list[SelectionReceipt] = []
+    evsi_rows: list[dict[str, Any]] = []
     discovery_evidence: dict[str, list[SkillProbeEvidence]] = {
         dataset: [] for dataset in DATASETS
     }
@@ -552,10 +628,45 @@ async def run(*, prepare_only: bool = False) -> dict[str, Any]:
             _append_posterior_once(backend.evidence_store, before)
             scheduled = scheduler.select(dataset)
             sampling_probability = 1.0
+            selected_id = scheduled.candidate_id
+            selection_mode = scheduled.selection_mode
             if scheduled.decision is not None:
                 scores = np.asarray(scheduled.decision.scores, dtype=np.float64)
-                tied = np.flatnonzero(np.isclose(scores, scores.max()))
-                sampling_probability = 1.0 / float(len(tied))
+                prefilter_indices = tuple(
+                    sorted(
+                        range(len(scores)),
+                        key=lambda index: (-float(scores[index]), index),
+                    )[: min(2, len(scores))]
+                )
+                prefiltered = tuple(
+                    tuple(CANDIDATE_ACTIONS)[index] for index in prefilter_indices
+                )
+                evsi = scheduler.rank_probes_by_evsi(
+                    dataset,
+                    candidate_ids=prefiltered,
+                    seed=SEED + cycle * len(DATASETS) + dataset_index,
+                    posterior_particles=1024,
+                    observation_samples=2048,
+                )
+                selected_id = evsi.selected_id
+                selection_mode = "posterior_ucb_prefilter_particle_evsi"
+                evsi_rows.append(
+                    {
+                        "schema_version": "flowsteer.joint-qa.evsi-selection.v1",
+                        "problem_id": task.task_id,
+                        "dataset": dataset,
+                        "posterior_id": before.posterior_id,
+                        "ucb_candidate_ids": list(tuple(CANDIDATE_ACTIONS)),
+                        "ucb_scores": [float(value) for value in scores],
+                        "prefiltered_candidate_ids": list(prefiltered),
+                        "evsi_ranked_candidate_ids": list(evsi.candidate_ids),
+                        "evsi_values": list(evsi.values),
+                        "selected_id": selected_id,
+                        "posterior_particles": evsi.posterior_particles,
+                        "observation_samples": evsi.observation_samples,
+                        "observation_std": evsi.observation_std,
+                    }
+                )
             means = {
                 candidate_id: scheduler.predict(dataset, candidate_id)[0]
                 for candidate_id in CANDIDATE_ACTIONS
@@ -574,13 +685,13 @@ async def run(*, prepare_only: bool = False) -> dict[str, Any]:
                         {
                             "problem_id": task.task_id,
                             "posterior_id": before.posterior_id,
-                            "selected_id": scheduled.candidate_id,
+                            "selected_id": selected_id,
                         },
                     ),
                     snapshot_id=snapshot_id,
-                    strategy=scheduled.selection_mode,
+                    strategy=selection_mode,
                     candidate_ids=tuple(CANDIDATE_ACTIONS),
-                    selected_id=scheduled.candidate_id,
+                    selected_id=selected_id,
                     predicted_means=means,
                     predicted_stds=stds,
                     sampling_probability=sampling_probability,
@@ -593,7 +704,7 @@ async def run(*, prepare_only: bool = False) -> dict[str, Any]:
                 cache,
                 scheduler,
                 task,
-                scheduled.candidate_id,
+                selected_id,
                 stage="discovery",
                 anchor=3000 + cycle * len(DATASETS) + dataset_index,
                 order_rng=order_rng,
@@ -601,7 +712,7 @@ async def run(*, prepare_only: bool = False) -> dict[str, Any]:
             )
             scheduler.update(
                 dataset,
-                scheduled.candidate_id,
+                selected_id,
                 evidence.probe.paired_effect,
                 observation_id=evidence.probe.probe_id,
             )
@@ -609,6 +720,7 @@ async def run(*, prepare_only: bool = False) -> dict[str, Any]:
             pair_rows.append(row)
             _write_jsonl(PAIR_PATH, pair_rows)
             _write_jsonl(SELECTION_PATH, selection_rows)
+            _write_jsonl(EVSI_PATH, evsi_rows)
 
     posterior = scheduler.posterior_record(epoch=0, policy_version=POLICY_VERSION)
     _append_posterior_once(backend.evidence_store, posterior)
