@@ -1,0 +1,145 @@
+{
+  "adapter_name": "theta_jointqa_progressive_step_000000",
+  "baseline_action": {
+    "instruction": "No additional prompt prior; use the frozen Director policy."
+  },
+  "candidate_actions": {
+    "conditional_independence_evidence_fan_in": {
+      "instruction": "Decompose into parallel evidence branches only when at least two evidence subquestions are conditionally independent. In one ADD_SUBGRAPH transaction, add those branches and their first fan-in Agent. Each branch emits a supported subject-relation-answer-qualifier proposition and evidence span; the fan-in Agent checks identity, relation, qualifier, and answer-type consistency before emitting one candidate. If conditional independence is absent, use directed serial dependencies. Do not prescribe a total Agent count; the Format Agent only serializes the verified fan-in output."
+    },
+    "subject_relation_answer_type_grounding": {
+      "instruction": "Before FINISH, perform semantic verification only when evidence contains competing entities, a comparison, a qualifier, an alias, or an answer candidate whose semantic type may differ from the question. Represent the supported proposition as subject, relation, answer, and qualifiers; reject a different subject or relation, an intermediate value, or an answer-type mismatch. Preserve the evidence span's language and necessary proper-name modifiers. Route exactly one verified answer candidate and its supporting span to the Output Agent, which only serializes it in one <answer> tag."
+    }
+  },
+  "candidate_source_artifacts": [
+    "reports/hotpotqa_multiagent_skill",
+    "reports/joint_qa_curve",
+    "reports/joint_qa_mace_skill",
+    "artifacts/joint_qa_progressive/step_000000/*/agentgraph_trajectories.jsonl"
+  ],
+  "causal_estimand": "Skill prompt-prior visibility intent-to-treat effect",
+  "companion_outcome": "normalized_exact_match",
+  "confirmation_block": "joint_qa_v2/skill_confirmation:[40:60]_per_dataset (zero-based, stop-exclusive)",
+  "confirmation_tasks": {
+    "hotpotqa": [
+      "hotpotqa:5a7c4cb555429907fabeef56",
+      "hotpotqa:5adc05f35542996e685252ac",
+      "hotpotqa:5ab65a7a55429954757d3250",
+      "hotpotqa:5a7cffec554299452d57bac1",
+      "hotpotqa:5ab9f60e55429901930fa753",
+      "hotpotqa:5a73d26b5542992d56e7e3a6",
+      "hotpotqa:5a7bbc77554299294a54aaaa",
+      "hotpotqa:5adf53885542995ec70e8fc5",
+      "hotpotqa:5a74742655429979e2882958",
+      "hotpotqa:5ab56bbe554299494045efbe",
+      "hotpotqa:5ae6692255429908198fa5c4",
+      "hotpotqa:5a8507305542994c784ddada",
+      "hotpotqa:5a8204dc55429926c1cdadea",
+      "hotpotqa:5ae0ae2655429906c02daaf4",
+      "hotpotqa:5a809c385542996402f6a5a4",
+      "hotpotqa:5ac39af3554299391541380e",
+      "hotpotqa:5ab63bc75542995eadeeff8a",
+      "hotpotqa:5a76ce7f55429972597f13d5",
+      "hotpotqa:5ac1326b55429964131be179",
+      "hotpotqa:5a729c575542991f9a20c52f"
+    ],
+    "triviaqa": [
+      "triviaqa:tc_1205",
+      "triviaqa:tc_1206",
+      "triviaqa:tc_1207",
+      "triviaqa:tc_1209",
+      "triviaqa:tc_1212",
+      "triviaqa:tc_1213",
+      "triviaqa:tc_1214",
+      "triviaqa:tc_1215",
+      "triviaqa:tc_1217",
+      "triviaqa:tc_1219",
+      "triviaqa:tc_1221",
+      "triviaqa:tc_1222",
+      "triviaqa:tc_1223",
+      "triviaqa:tc_1224",
+      "triviaqa:tc_1225",
+      "triviaqa:tc_1226",
+      "triviaqa:tc_1227",
+      "triviaqa:tc_1228",
+      "triviaqa:tc_1230",
+      "triviaqa:tc_1231"
+    ]
+  },
+  "development_block": "joint_qa_v2/development",
+  "discovery_schedule": "balanced cold start, posterior-UCB prefilter, then particle EVSI",
+  "discovery_tasks": {
+    "hotpotqa": [
+      "hotpotqa:5ac4bfd05542997ea680caab",
+      "hotpotqa:5ab72adb5542993667793f5d",
+      "hotpotqa:5abb06bc554299232ef4a3bb"
+    ],
+    "triviaqa": [
+      "triviaqa:tc_240",
+      "triviaqa:tc_242",
+      "triviaqa:tc_243"
+    ]
+  },
+  "encoder_version": "jointqa.skill-condition.fixed.v1",
+  "epochs": {
+    "discovery": 4,
+    "eligible_activation": 6,
+    "validation": 5
+  },
+  "evsi_budget": {
+    "observation_samples": 2048,
+    "posterior_particles": 1024,
+    "ucb_prefilter_top_k": 2
+  },
+  "experiment_version": "jointqa.mace-skill-evidence.epoch2.v1",
+  "feature_schema_version": "jointqa.skill-candidate-dataset-interaction.v1",
+  "final_test_block": "joint_qa_v2/test (not opened by this protocol)",
+  "forced_probe_excluded_from_grpo_and_benchmark": true,
+  "intervention_scope": "full trajectory from a shared empty-Canvas snapshot",
+  "natural_candidate_tasks": {
+    "hotpotqa": "hotpotqa:5ab51d295542996a3a96a01f",
+    "triviaqa": "triviaqa:tc_244"
+  },
+  "not_a_prefix_topology_intervention": true,
+  "partition_manifest": "data/joint_qa_v2/manifest.json",
+  "policy_version": "qwen35-9b-hotpot-step-000000",
+  "posterior_version": "jointqa.bayesian-linear.progressive-subgraph.epoch3.v1",
+  "primary_outcome": "official_answer_token_f1",
+  "prompt_version": "agentgraph.director.progressive_subgraph.v1",
+  "round_id": 2,
+  "runtime_version": "flowsteer.agentgraph.progressive-runtime.v1",
+  "schema_version": "flowsteer.joint-qa.mace-bayesian-skill.v2",
+  "seed": 20260820,
+  "selection_coordinates": {
+    "reserved_grpo_training_positions": {
+      "hotpotqa": 9,
+      "triviaqa": 12
+    },
+    "skill_confirmation": {
+      "start": 40,
+      "stop": 60,
+      "zero_based_stop_exclusive": true
+    },
+    "train_discovery": {
+      "start": 13,
+      "stop": 16,
+      "zero_based_stop_exclusive": true
+    },
+    "train_natural_candidate_position": 16
+  },
+  "skill_gate": {
+    "delta_min": 0.03,
+    "max_harm_probability": 0.05,
+    "minimum_effective_pairs": 20,
+    "minimum_empirical_coverage": 0.9,
+    "minimum_independent_problems": 20,
+    "minimum_positive_slice_fraction": 0.75
+  },
+  "skill_library_version": "jointqa.skill-library.progressive.epoch6.v1",
+  "tool_version": "agentgraph.add-subgraph+skillflow-public-retrieval.v1",
+  "topology_adoption_acceptance": {
+    "reason": "The paired intervention estimates full-trajectory Skill prompt-prior visibility intent-to-treat effect from an empty Canvas; terminal answer F1 does not verify Director adoption of parallel branches or semantic fan-in.",
+    "requires_independent_evaluation": true,
+    "verified_by_this_protocol": false
+  }
+}

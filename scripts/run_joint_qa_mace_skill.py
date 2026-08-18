@@ -141,6 +141,40 @@ ROUND1_CANDIDATE_ACTIONS: Mapping[str, Mapping[str, Any]] = {
 }
 
 
+# Round 2 narrows the prompt priors to the two failure modes established by
+# round-1 confirmation receipts: subject/relation drift and missing conditional
+# fan-in adoption.  This is still the same paired-intervention caller chain;
+# no Canvas mutation, topology reward, or second Skill implementation is added.
+ROUND2_CANDIDATE_ACTIONS: Mapping[str, Mapping[str, Any]] = {
+    "subject_relation_answer_type_grounding": {
+        "instruction": (
+            "Before FINISH, perform semantic verification only when evidence "
+            "contains competing entities, a comparison, a qualifier, an alias, "
+            "or an answer candidate whose semantic type may differ from the "
+            "question. Represent the supported proposition as subject, relation, "
+            "answer, and qualifiers; reject a different subject or relation, an "
+            "intermediate value, or an answer-type mismatch. Preserve the evidence "
+            "span's language and necessary proper-name modifiers. Route exactly one "
+            "verified answer candidate and its supporting span to the Output Agent, "
+            "which only serializes it in one <answer> tag."
+        )
+    },
+    "conditional_independence_evidence_fan_in": {
+        "instruction": (
+            "Decompose into parallel evidence branches only when at least two "
+            "evidence subquestions are conditionally independent. In one "
+            "ADD_SUBGRAPH transaction, add those branches and their first fan-in "
+            "Agent. Each branch emits a supported subject-relation-answer-qualifier "
+            "proposition and evidence span; the fan-in Agent checks identity, "
+            "relation, qualifier, and answer-type consistency before emitting one "
+            "candidate. If conditional independence is absent, use directed serial "
+            "dependencies. Do not prescribe a total Agent count; the Format Agent "
+            "only serializes the verified fan-in output."
+        )
+    },
+}
+
+
 @dataclass(frozen=True)
 class SkillEvidenceRoundSpec:
     """Immutable coordinates for one bounded Skill evidence epoch."""
@@ -236,9 +270,27 @@ EPOCH1_SPEC = SkillEvidenceRoundSpec(
     activation_epoch=4,
 )
 
+EPOCH2_SPEC = SkillEvidenceRoundSpec(
+    round_id=2,
+    experiment_version="jointqa.mace-skill-evidence.epoch2.v1",
+    candidate_actions=ROUND2_CANDIDATE_ACTIONS,
+    discovery_start=13,
+    discovery_stop=16,
+    natural_index=16,
+    confirmation_start=40,
+    confirmation_stop=60,
+    seed=20260820,
+    posterior_version="jointqa.bayesian-linear.progressive-subgraph.epoch3.v1",
+    skill_library_version="jointqa.skill-library.progressive.epoch6.v1",
+    discovery_epoch=4,
+    validation_epoch=5,
+    activation_epoch=6,
+)
+
 ROUND_SPECS: Mapping[int, SkillEvidenceRoundSpec] = {
     0: EPOCH0_SPEC,
     1: EPOCH1_SPEC,
+    2: EPOCH2_SPEC,
 }
 
 
@@ -329,7 +381,7 @@ def _selected_tasks(
     discovery: dict[str, tuple[TaskRecord, ...]] = {}
     confirmation: dict[str, tuple[TaskRecord, ...]] = {}
     natural: dict[str, TaskRecord] = {}
-    reserved_positions = _reserved_training_positions() if spec.round_id == 1 else {}
+    reserved_positions = _reserved_training_positions() if spec.round_id > 0 else {}
     for dataset in DATASETS:
         dataset_train = tuple(task for task in train if _dataset_key(task) == dataset)
         dataset_validation = tuple(
@@ -368,12 +420,12 @@ def _selected_tasks(
     if len(all_ids) != len(set(all_ids)):
         raise RuntimeError("discovery, natural-candidate, and confirmation tasks overlap")
 
-    # The second evidence epoch is disjoint from epoch0, held-out development
-    # and test, and the dataset-specific task positions reserved by the formal
-    # GRPO training config.
+    # Every later evidence epoch is disjoint from all prior evidence, held-out
+    # development and test, and the dataset-specific task positions reserved by
+    # the formal GRPO training config.
     # Enforce this at selection time instead of relying only on the manifest.
-    if spec.round_id == 1:
-        epoch0_ids: set[str] = set()
+    if spec.round_id > 0:
+        prior_evidence_ids: set[str] = set()
         reserved_training_ids: set[str] = set()
         for dataset in DATASETS:
             dataset_train = tuple(
@@ -382,18 +434,21 @@ def _selected_tasks(
             dataset_validation = tuple(
                 task for task in validation if _dataset_key(task) == dataset
             )
-            epoch0_ids.update(
-                task.task_id
-                for task in (
-                    *dataset_train[
-                        EPOCH0_SPEC.discovery_start : EPOCH0_SPEC.discovery_stop
-                    ],
-                    dataset_train[EPOCH0_SPEC.natural_index],
-                    *dataset_validation[
-                        EPOCH0_SPEC.confirmation_start : EPOCH0_SPEC.confirmation_stop
-                    ],
+            for prior_round_id, prior_spec in ROUND_SPECS.items():
+                if prior_round_id >= spec.round_id:
+                    continue
+                prior_evidence_ids.update(
+                    task.task_id
+                    for task in (
+                        *dataset_train[
+                            prior_spec.discovery_start : prior_spec.discovery_stop
+                        ],
+                        dataset_train[prior_spec.natural_index],
+                        *dataset_validation[
+                            prior_spec.confirmation_start : prior_spec.confirmation_stop
+                        ],
+                    )
                 )
-            )
             reserved_training_ids.add(
                 dataset_train[reserved_positions[dataset]].task_id
             )
@@ -407,12 +462,13 @@ def _selected_tasks(
         }
         selected_ids = set(all_ids)
         forbidden = selected_ids & (
-            epoch0_ids | reserved_training_ids | heldout_ids
+            prior_evidence_ids | reserved_training_ids | heldout_ids
         )
         if forbidden:
             raise RuntimeError(
-                "round1 evidence tasks overlap epoch0, held-out, or reserved "
-                "training tasks: " + ", ".join(sorted(forbidden))
+                f"round{spec.round_id} evidence tasks overlap prior evidence, "
+                "held-out, or reserved training tasks: "
+                + ", ".join(sorted(forbidden))
             )
     return discovery, confirmation, natural
 
@@ -794,7 +850,8 @@ def _manifest(
             "joint_qa_v2/skill_confirmation:first20_per_dataset"
             if spec.round_id == 0
             else (
-                "joint_qa_v2/skill_confirmation:[20:40]_per_dataset "
+                "joint_qa_v2/skill_confirmation:"
+                f"[{spec.confirmation_start}:{spec.confirmation_stop}]_per_dataset "
                 "(zero-based, stop-exclusive)"
             )
         ),
@@ -841,9 +898,9 @@ def _manifest(
     }
 
     # Epoch0 remains serialization-compatible with the already persisted
-    # protocol.  Round 1 adds explicit coordinates and the scope boundary that
-    # answer-quality evidence cannot itself establish topology adoption.
-    if spec.round_id == 1:
+    # protocol.  Later rounds add explicit coordinates and the scope boundary
+    # that answer-quality evidence cannot itself establish topology adoption.
+    if spec.round_id > 0:
         manifest.update(
             {
                 "round_id": spec.round_id,
@@ -899,7 +956,7 @@ def _guard_output_identity(
         "confirmation_tasks",
     )
     roots = [(spec.output_root, spec.manifest_path)]
-    if spec.round_id == 1:
+    if spec.round_id > 0:
         roots.append((spec.report_root, spec.report_root / "experiment_manifest.json"))
     for root, manifest_path in roots:
         if not root.exists() or not any(root.iterdir()):
@@ -912,7 +969,7 @@ def _guard_output_identity(
         mismatched = [
             key for key in identity_keys if persisted.get(key) != manifest.get(key)
         ]
-        if spec.round_id == 1:
+        if spec.round_id > 0:
             for key in ("round_id", "experiment_version", "selection_coordinates"):
                 if persisted.get(key) != manifest.get(key):
                     mismatched.append(key)
@@ -928,7 +985,7 @@ def _write_manifest(
     manifest: Mapping[str, Any],
 ) -> None:
     _write_json(spec.manifest_path, manifest)
-    if spec.round_id == 1:
+    if spec.round_id > 0:
         _write_json(spec.report_root / "experiment_manifest.json", manifest)
 
 
@@ -1253,7 +1310,7 @@ async def run(*, prepare_only: bool = False, round_id: int = 0) -> dict[str, Any
         ),
         "forced_probe_trajectories_are_not_training_data": True,
     }
-    if spec.round_id == 1:
+    if spec.round_id > 0:
         result.update(
             {
                 "round_id": spec.round_id,
@@ -1278,7 +1335,7 @@ async def run(*, prepare_only: bool = False, round_id: int = 0) -> dict[str, Any
             }
         )
     _write_json(spec.publication_path, result)
-    if spec.round_id == 1:
+    if spec.round_id > 0:
         _write_json(spec.report_root / "publication_results.json", result)
     return result
 

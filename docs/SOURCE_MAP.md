@@ -434,6 +434,20 @@ mentions conditional evidence fan-in, but terminal F1 remains only an
 intent-to-treat Skill outcome; non-chain topology adoption requires a separate
 receipt-based acceptance check and receives no reward.
 
+The second frozen evidence epoch also rejected both selected candidates:
+HotpotQA showed negative paired transfer from unconditional answer-span
+handling, while TriviaQA's small positive mean did not clear the calibrated
+lower bound.  `run_joint_qa_mace_skill.py --round 2` therefore remains the same
+upstream caller chain and changes only immutable experiment coordinates and
+the failure-derived prompt priors.  It consumes train positions `[13:16]`,
+natural-candidate position `16`, and Skill-confirmation positions `[40:60]`,
+while excluding both prior evidence rounds and the formal GRPO task positions.
+The two priors condition semantic verification on subject/relation/qualifier or
+answer-type ambiguity, and condition parallel evidence fan-in on actual
+subproblem independence.  Their topology adoption receipts remain diagnostic
+only and never enter terminal F1, GRPO reward, posterior observations, or the
+Skill evidence gate.
+
 `materialize_joint_qa_progressive_evaluations.py` and
 `materialize_joint_qa_progressive_skill_training.py` derive the common delayed
 visibility epoch from the two matched ACTIVE Skill records instead of assuming

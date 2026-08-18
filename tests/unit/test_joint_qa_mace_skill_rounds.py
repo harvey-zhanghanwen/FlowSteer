@@ -246,6 +246,84 @@ def test_round1_output_guard_allows_matching_resume_and_rejects_foreign_root(
         runner._guard_output_identity(spec, manifest)
 
 
+def test_epoch2_uses_fresh_evidence_and_conditional_topology_priors() -> None:
+    spec = runner._spec_for_round(2)
+    discovery, confirmation, natural = runner._selected_tasks(spec)
+    train_path = runner.ROOT / "data/joint_qa_v2/train.jsonl"
+    confirmation_path = runner.ROOT / "data/joint_qa_v2/skill_confirmation.jsonl"
+    reserved_positions = runner._reserved_training_positions()
+    prior_ids: set[str] = set()
+    for prior_round in (0, 1):
+        prior_discovery, prior_confirmation, prior_natural = runner._selected_tasks(
+            runner._spec_for_round(prior_round)
+        )
+        prior_ids.update(
+            task.task_id
+            for dataset in runner.DATASETS
+            for task in (
+                *prior_discovery[dataset],
+                prior_natural[dataset],
+                *prior_confirmation[dataset],
+            )
+        )
+
+    selected_ids: set[str] = set()
+    for dataset in runner.DATASETS:
+        train = _dataset_records(train_path, "train", dataset)
+        heldout = _dataset_records(confirmation_path, "validation", dataset)
+        assert [task.task_id for task in discovery[dataset]] == [
+            task.task_id for task in train[13:16]
+        ]
+        assert natural[dataset].task_id == train[16].task_id
+        assert [task.task_id for task in confirmation[dataset]] == [
+            task.task_id for task in heldout[40:60]
+        ]
+        selected_ids.update(task.task_id for task in discovery[dataset])
+        selected_ids.add(natural[dataset].task_id)
+        selected_ids.update(task.task_id for task in confirmation[dataset])
+        assert train[reserved_positions[dataset]].task_id not in selected_ids
+
+    assert not selected_ids & prior_ids
+    assert tuple(spec.candidate_actions) == (
+        "subject_relation_answer_type_grounding",
+        "conditional_independence_evidence_fan_in",
+    )
+    semantic = spec.candidate_actions[
+        "subject_relation_answer_type_grounding"
+    ]["instruction"]
+    for phrase in (
+        "semantic verification only when",
+        "subject, relation, answer, and qualifiers",
+        "answer-type mismatch",
+        "supporting span",
+        "one <answer> tag",
+    ):
+        assert phrase in semantic
+    topology = spec.candidate_actions[
+        "conditional_independence_evidence_fan_in"
+    ]["instruction"]
+    for phrase in (
+        "conditionally independent",
+        "one ADD_SUBGRAPH transaction",
+        "first fan-in Agent",
+        "directed serial dependencies",
+        "Do not prescribe a total Agent count",
+    ):
+        assert phrase in topology
+
+    manifest = runner._manifest(discovery, confirmation, natural, spec)
+    assert manifest["round_id"] == 2
+    assert manifest["confirmation_block"] == (
+        "joint_qa_v2/skill_confirmation:[40:60]_per_dataset "
+        "(zero-based, stop-exclusive)"
+    )
+    assert manifest["epochs"] == {
+        "discovery": 4,
+        "validation": 5,
+        "eligible_activation": 6,
+    }
+
+
 def test_unknown_round_is_rejected() -> None:
     with pytest.raises(ValueError, match="unsupported Skill evidence round"):
-        runner._spec_for_round(2)
+        runner._spec_for_round(3)
