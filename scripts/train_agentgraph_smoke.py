@@ -549,6 +549,10 @@ def version_bundle_for(
     model_catalog_version: str,
     prompt_version: str = PROMPT_VERSION,
     tool_version: str = TOOL_VERSION,
+    encoder_version: str = "none",
+    feature_schema_version: str = "none",
+    posterior_version: str = "none",
+    skill_library_version: str = "none",
 ) -> VersionBundle:
     return VersionBundle(
         policy=policy_version,
@@ -556,6 +560,10 @@ def version_bundle_for(
         evaluator=evaluator_version_for(task),
         prompt=prompt_version,
         tool=tool_version,
+        encoder=encoder_version,
+        feature_schema=feature_schema_version,
+        posterior=posterior_version,
+        skill_library=skill_library_version,
     )
 
 
@@ -1039,6 +1047,12 @@ class SmokeBackend(Protocol):
         versions: VersionBundle,
         *,
         expected_task_split: str = "train",
+        condition_id: Optional[str] = None,
+        sampling_schedule_purpose: Optional[str] = None,
+        prompt_priors: Sequence[Mapping[str, Any]] = (),
+        forced_probe: bool = False,
+        condition_satisfied: bool = True,
+        sampling_anchor_ordinal: Optional[int] = None,
     ) -> TrajectoryRecord:
         ...
 
@@ -1365,10 +1379,73 @@ class LiveSmokeBackend:
         versions: VersionBundle,
         *,
         expected_task_split: str = "train",
+        condition_id: Optional[str] = None,
+        sampling_schedule_purpose: Optional[str] = None,
+        prompt_priors: Sequence[Mapping[str, Any]] = (),
+        forced_probe: bool = False,
+        condition_satisfied: bool = True,
+        sampling_anchor_ordinal: Optional[int] = None,
     ) -> TrajectoryRecord:
         director = _mapping(self.config["director"], "director")
         graph_config = _mapping(self.config["agent_graph"], "agent_graph")
         experiment = _mapping(self.config["experiment"], "experiment")
+        if condition_id is None:
+            resolved_condition_id = str(
+                experiment.get("condition_id", "natural_smoke")
+            ).strip()
+        elif isinstance(condition_id, str):
+            resolved_condition_id = condition_id.strip()
+        else:
+            raise TypeError("condition_id must be text or None")
+        if not resolved_condition_id:
+            raise ConfigurationError("condition_id must be non-empty")
+        if sampling_schedule_purpose is None:
+            resolved_schedule_purpose = str(
+                experiment.get(
+                    "sampling_schedule_purpose",
+                    resolved_condition_id,
+                )
+            ).strip()
+        elif isinstance(sampling_schedule_purpose, str):
+            resolved_schedule_purpose = sampling_schedule_purpose.strip()
+        else:
+            raise TypeError("sampling_schedule_purpose must be text or None")
+        if not resolved_schedule_purpose:
+            raise ConfigurationError("sampling_schedule_purpose must be non-empty")
+        for name, value in (
+            ("forced_probe", forced_probe),
+            ("condition_satisfied", condition_satisfied),
+        ):
+            if type(value) is not bool:
+                raise TypeError(f"{name} must be bool")
+        if isinstance(prompt_priors, (str, bytes)) or not isinstance(
+            prompt_priors, Sequence
+        ):
+            raise TypeError("prompt_priors must be a sequence of mappings")
+        normalized_conditions: list[dict[str, Any]] = []
+        for item in prompt_priors:
+            if not isinstance(item, Mapping):
+                raise TypeError("prompt_priors must contain only mappings")
+            normalized_conditions.append(dict(item))
+        static_conditions = tuple(normalized_conditions)
+        if static_conditions:
+            if self.skill_pipeline is not None:
+                raise ConfigurationError(
+                    "forced-probe prompt conditions and dynamic ACTIVE Skill "
+                    "retrieval are mutually exclusive"
+                )
+            if not forced_probe:
+                raise ConfigurationError(
+                    "static prompt conditions require forced_probe=true"
+                )
+            if any(
+                item.get("application_mode") != "forced_probe_condition"
+                for item in static_conditions
+            ):
+                raise ConfigurationError(
+                    "static prompt conditions must use "
+                    "application_mode=forced_probe_condition"
+                )
         terminal_protocols = graph_config.get("terminal_protocol_by_source", {})
         if not isinstance(terminal_protocols, Mapping):
             raise ConfigurationError(
@@ -1390,25 +1467,31 @@ class LiveSmokeBackend:
         if not catalog_order_namespace:
             raise ConfigurationError("experiment.catalog_order_namespace must be non-empty")
         base_seed = int(experiment["seed"])
-        sampling_anchor_ordinal = int(
-            experiment.get(
-                "sampling_anchor_ordinal",
-                experiment.get("update_step", 0),
+        if sampling_anchor_ordinal is None:
+            resolved_sampling_anchor_ordinal = int(
+                experiment.get(
+                    "sampling_anchor_ordinal",
+                    experiment.get("update_step", 0),
+                )
             )
-        )
+        elif (
+            type(sampling_anchor_ordinal) is int
+            and sampling_anchor_ordinal >= 0
+        ):
+            resolved_sampling_anchor_ordinal = sampling_anchor_ordinal
+        else:
+            raise ValueError("sampling_anchor_ordinal must be non-negative or None")
         sampling_coordinate = ScientificSamplingCoordinate(
             sampling_schedule_hash=scientific_sampling_schedule_hash(
                 base_seed=base_seed
             ),
-            schedule_purpose=str(
-                experiment.get("condition_id", "natural_smoke")
-            ),
+            schedule_purpose=resolved_schedule_purpose,
             ordered_sequence_hash=stable_hash([task.task_id]),
             # SkillFlow's position is a rollout coordinate.  It must be the
             # ordinal within this task, never the task's selected-list index.
             sequence_position=rollout_index,
             task_id=task.task_id,
-            optimizer_step_or_anchor_ordinal=sampling_anchor_ordinal,
+            optimizer_step_or_anchor_ordinal=resolved_sampling_anchor_ordinal,
         )
         orchestrator = AgentGraphOrchestrator(
             self.registry,
@@ -1440,14 +1523,15 @@ class LiveSmokeBackend:
             environment,
             versions,
             self.evidence_store,
-            condition_id=str(experiment.get("condition_id", "natural_smoke")),
-            skills=(),
+            condition_id=resolved_condition_id,
+            skills=static_conditions,
             skill_provider=(
                 self._visible_skill_priors
-                if self.skill_pipeline is not None
+                if self.skill_pipeline is not None and not static_conditions
                 else None
             ),
-            forced_probe=False,
+            condition_satisfied=condition_satisfied,
+            forced_probe=forced_probe,
             expected_task_split=expected_task_split,
         )
 

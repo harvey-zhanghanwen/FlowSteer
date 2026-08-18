@@ -110,7 +110,25 @@ def validate_hotpot_config(config: Mapping[str, Any]) -> None:
     grpo = _mapping(config.get("grpo"), "grpo")
     exploration = _mapping(config.get("exploration"), "exploration")
     skills = _mapping(config.get("skills"), "skills")
+    deployment = _mapping(config.get("deployment"), "deployment")
     gpu = _mapping(config.get("gpu"), "gpu")
+    skills_enabled = skills.get("enabled") is True
+    skill_evaluation_mode = (
+        skills.get("enabled") is False
+        or (
+            skills_enabled
+            and isinstance(skills.get("store_path"), str)
+            and bool(str(skills.get("store_path")).strip())
+            and type(skills.get("retrieval_top_k")) is int
+            and int(skills.get("retrieval_top_k")) > 0
+            and type(skills.get("current_epoch")) is int
+            and int(skills.get("current_epoch")) >= 1
+            and deployment.get("exploration_beta") == 0.0
+            and deployment.get("allow_forced_probes") is False
+            and deployment.get("active_skills_only") is True
+            and deployment.get("require_version_compatible_skills") is True
+        )
+    )
     checks = {
         "experiment.phase": experiment.get("phase") == "hotpotqa_evaluation",
         "experiment.training_enabled": experiment.get("training_enabled") is False,
@@ -124,7 +142,7 @@ def validate_hotpot_config(config: Mapping[str, Any]) -> None:
         "optimizer_passes": grpo.get("optimization_passes_per_rollout_batch") == 0,
         "optimizer_updates": grpo.get("max_optimizer_updates") == 0,
         "exploration.enabled": exploration.get("enabled") is False,
-        "skills.enabled": skills.get("enabled") is False,
+        "skills.evaluation_mode": skill_evaluation_mode,
         "gpu.training_enabled": gpu.get("training_enabled") is False,
     }
     failed = [name for name, valid in checks.items() if not valid]
@@ -543,6 +561,8 @@ async def _collect_graph(
     bounded = _mapping(config["hotpotqa_evaluation"], "hotpotqa_evaluation")
     experiment = _mapping(config["experiment"], "experiment")
     director = _mapping(config["director"], "director")
+    exploration = _mapping(config.get("exploration", {}), "exploration")
+    skills = _mapping(config.get("skills", {}), "skills")
     policy = str(director["behavior_policy_version"])
     condition_id = str(experiment["condition_id"])
     versions = {
@@ -552,6 +572,12 @@ async def _collect_graph(
             model_catalog_version=backend.model_catalog_version,
             prompt_version=str(experiment["prompt_version"]),
             tool_version=str(experiment["tool_version"]),
+            encoder_version=str(exploration.get("encoder_version", "none")),
+            feature_schema_version=str(
+                exploration.get("feature_schema_version", "none")
+            ),
+            posterior_version=str(exploration.get("posterior_version", "none")),
+            skill_library_version=str(skills.get("library_version", "none")),
         )
         for task in selected
     }
@@ -967,6 +993,13 @@ def _report(
         "model_catalog_path": config["agent_graph"]["model_catalog_path"],
         "training_performed": False,
         "method_level_changes_performed": False,
+        "skill_injection_performed": bool(config.get("skills", {}).get("enabled", False)),
+        "skill_evaluation_mode": (
+            "memory_on_active_only"
+            if bool(config.get("skills", {}).get("enabled", False))
+            else "memory_off"
+        ),
+        "skill_store_path": config.get("skills", {}).get("store_path"),
         "known_limitations": [
             "Only answer EM/F1 is available; supporting-fact and joint metrics are not emitted.",
             "A Director/API exception before terminal collection may not preserve partial turns.",
@@ -988,9 +1021,15 @@ def _report_markdown(report: Mapping[str, Any]) -> str:
         if split == "train"
         else "fixed project validation samples"
     )
+    skill_sentence = (
+        "Only evidence-gated ACTIVE Skills were retrieved as rejectable prompt priors; "
+        "no forced intervention or Skill update ran."
+        if report.get("skill_injection_performed")
+        else "No Skill was injected."
+    )
     return f"""# HotpotQA Architecture Validation — {report['evaluation_name']}
 
-Evaluation split: **{split}**; {sample_role}: **{report['sample_count']}**. The model input uses all ten supplied passages. No training, backward pass, optimizer step, policy update, MACE, Bayesian, or Skill loop ran.
+Evaluation split: **{split}**; {sample_role}: **{report['sample_count']}**. The model input uses all ten supplied passages. No training, backward pass, optimizer step, policy update, MACE, Bayesian update, or Skill publication ran. {skill_sentence}
 
 Metric scope: **official-compatible answer-only EM/F1**. Supporting-fact and joint metrics are unavailable because this run does not emit formal supporting-fact predictions.
 

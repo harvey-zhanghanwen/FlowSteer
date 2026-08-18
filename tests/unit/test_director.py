@@ -364,6 +364,41 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
             first.sampling_receipt["algorithm"],
         )
 
+    async def test_forced_probe_condition_is_separate_from_active_skill_prior(
+        self,
+    ) -> None:
+        model_registry = registry()
+        env = AgentWorkflowEnv(
+            model_registry, gateway=FakeGateway(), problem="same task"
+        )
+        orchestrator = AgentGraphOrchestrator(
+            model_registry,
+            ScriptedDirector([]),
+        )
+        active_prior = {
+            "skill_id": "skill-active",
+            "application_mode": "rejectable_prompt_prior",
+            "content": "Optional evidence-gated instruction.",
+        }
+        forced_condition = {
+            "condition_id": "candidate-a",
+            "application_mode": "forced_probe_condition",
+            "content": "Apply the predeclared intervention for this probe arm.",
+        }
+
+        messages = transcript_messages(
+            orchestrator.build_prompt(
+                env,
+                0,
+                (active_prior, forced_condition),
+            )
+        )
+        state = observation_payload(messages[-1])
+
+        self.assertEqual([active_prior], state["available_skills"])
+        self.assertEqual([forced_condition], state["exploration_conditions"])
+        self.assertNotIn("validated Skill facts", messages[-1]["content"])
+
     async def test_round_limit_is_explicit_failure(self) -> None:
         model_registry = registry()
         client = ScriptedDirector(

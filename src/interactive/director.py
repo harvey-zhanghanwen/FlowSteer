@@ -421,14 +421,29 @@ class AgentGraphOrchestrator:
             if env.max_agents is not None:
                 payload["max_agents"] = env.max_agents
         if skills:
-            payload["available_skills"] = list(skills)
+            # The MD's signal-isolation contract distinguishes a forced
+            # exploration condition from an evidence-gated Skill prior.  Both
+            # are prompt context only, but they must remain separate in the
+            # exact Director observation and trajectory receipt.
+            available_skills: list[dict[str, Any]] = []
+            exploration_conditions: list[dict[str, Any]] = []
+            for item in skills:
+                value = dict(item)
+                if value.get("application_mode") == "forced_probe_condition":
+                    exploration_conditions.append(value)
+                else:
+                    available_skills.append(value)
+            if available_skills:
+                payload["available_skills"] = available_skills
+            if exploration_conditions:
+                payload["exploration_conditions"] = exploration_conditions
         return payload
 
     @staticmethod
     def _observation_message(payload: Mapping[str, Any]) -> str:
         return (
-            "Canvas observation. Choose exactly one next action using only the "
-            "task, messages, Canvas, catalog, and any supplied validated Skill facts.\n\n"
+            "Canvas observation. Choose exactly one next action from the defined "
+            "action space using only the state below.\n\n"
             + json.dumps(
                 dict(payload),
                 ensure_ascii=False,

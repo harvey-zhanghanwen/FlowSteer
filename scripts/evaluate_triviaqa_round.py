@@ -104,7 +104,25 @@ def validate_trivia_config(config: Mapping[str, Any]) -> None:
     grpo = _mapping(config.get("grpo"), "grpo")
     exploration = _mapping(config.get("exploration"), "exploration")
     skills = _mapping(config.get("skills"), "skills")
+    deployment = _mapping(config.get("deployment"), "deployment")
     gpu = _mapping(config.get("gpu"), "gpu")
+    skills_enabled = skills.get("enabled") is True
+    skill_evaluation_mode = (
+        skills.get("enabled") is False
+        or (
+            skills_enabled
+            and isinstance(skills.get("store_path"), str)
+            and bool(str(skills.get("store_path")).strip())
+            and type(skills.get("retrieval_top_k")) is int
+            and int(skills.get("retrieval_top_k")) > 0
+            and type(skills.get("current_epoch")) is int
+            and int(skills.get("current_epoch")) >= 1
+            and deployment.get("exploration_beta") == 0.0
+            and deployment.get("allow_forced_probes") is False
+            and deployment.get("active_skills_only") is True
+            and deployment.get("require_version_compatible_skills") is True
+        )
+    )
     checks = {
         "experiment.phase": experiment.get("phase") == "triviaqa_evaluation",
         "experiment.training_enabled": experiment.get("training_enabled") is False,
@@ -122,7 +140,7 @@ def validate_trivia_config(config: Mapping[str, Any]) -> None:
         "optimizer_passes": grpo.get("optimization_passes_per_rollout_batch") == 0,
         "optimizer_updates": grpo.get("max_optimizer_updates") == 0,
         "exploration.enabled": exploration.get("enabled") is False,
-        "skills.enabled": skills.get("enabled") is False,
+        "skills.evaluation_mode": skill_evaluation_mode,
         "gpu.training_enabled": gpu.get("training_enabled") is False,
     }
     failed = [name for name, passed in checks.items() if not passed]
@@ -445,7 +463,13 @@ def _report(
         "policy_adapter": config["director"].get("behavior_adapter_name"),
         "model_catalog_path": str(config["agent_graph"]["model_catalog_path"]),
         "training_performed": False,
-        "skill_injection_performed": False,
+        "skill_injection_performed": bool(config.get("skills", {}).get("enabled", False)),
+        "skill_evaluation_mode": (
+            "memory_on_active_only"
+            if bool(config.get("skills", {}).get("enabled", False))
+            else "memory_off"
+        ),
+        "skill_store_path": config.get("skills", {}).get("store_path"),
         "completed_at": _utc_now(),
     }
 
@@ -457,9 +481,15 @@ def _report_markdown(report: Mapping[str, Any]) -> str:
     failure_lines = "\n".join(
         f"- `{name}`：{count}" for name, count in report["failure_types"].items()
     ) or "- 无"
+    skill_sentence = (
+        "本轮只检索通过证据门控的 ACTIVE Skill，并将其作为可拒绝的 prompt prior；"
+        "没有 forced intervention 或 Skill 更新。"
+        if report.get("skill_injection_performed")
+        else "本轮没有注入 Skill。"
+    )
     return f"""# TriviaQA 第一轮架构验证
 
-固定项目 validation：**{report['sample_count']}** 题。Direct 与 AgentGraph 使用同一批题、同一 Qwen3.5-9B、同一公开检索观察和同一终局 evaluator。本轮未执行训练、GRPO、反向传播、优化器更新、LoRA 发布或 Skill 注入。
+固定项目 validation：**{report['sample_count']}** 题。Direct 与 AgentGraph 使用同一批题、同一 Qwen3.5-9B、同一公开检索观察和同一终局 evaluator。本轮未执行训练、GRPO、反向传播、优化器更新、LoRA 发布、贝叶斯后验更新或 Skill 发布。{skill_sentence}
 
 评测采用 SkillFlow Formal Protocol 10 兼容的答案归一化：对 accepted answers 取最大 token F1，并报告 normalized exact match。检索复用 SkillFlow `RetrievalIndex.search/read`；当前适配采用确定性问题查询预取，不等同于 SkillFlow 的模型驱动多轮 `search/read/complete` 完整协议。
 
