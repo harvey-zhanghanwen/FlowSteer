@@ -230,6 +230,36 @@ def _resume_trajectories(store: EvidenceStore) -> dict[tuple[str, str], Trajecto
     return result
 
 
+def _append_posterior_once(store: EvidenceStore, record: Any) -> None:
+    """Resume an immutable posterior snapshot without changing its timestamp."""
+
+    persisted = store.posteriors.get(record.posterior_id)
+    if persisted is None:
+        store.append_posterior(record)
+        return
+    expected = record.to_dict()
+    persisted_semantics = {
+        key: value for key, value in persisted.items() if key != "created_at"
+    }
+    expected_semantics = {
+        key: value for key, value in expected.items() if key != "created_at"
+    }
+    if json.dumps(
+        persisted_semantics,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ) != json.dumps(
+        expected_semantics,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ):
+        raise RuntimeError(
+            f"persisted posterior semantics differ: {record.posterior_id}"
+        )
+
+
 async def _arm(
     backend: LiveSmokeBackend,
     cache: dict[tuple[str, str], TrajectoryRecord],
@@ -519,7 +549,7 @@ async def run(*, prepare_only: bool = False) -> dict[str, Any]:
                 epoch=0,
                 policy_version=POLICY_VERSION,
             )
-            backend.evidence_store.append_posterior(before)
+            _append_posterior_once(backend.evidence_store, before)
             scheduled = scheduler.select(dataset)
             sampling_probability = 1.0
             if scheduled.decision is not None:
@@ -581,7 +611,7 @@ async def run(*, prepare_only: bool = False) -> dict[str, Any]:
             _write_jsonl(SELECTION_PATH, selection_rows)
 
     posterior = scheduler.posterior_record(epoch=0, policy_version=POLICY_VERSION)
-    backend.evidence_store.append_posterior(posterior)
+    _append_posterior_once(backend.evidence_store, posterior)
     selected_candidates = {
         dataset: scheduler.exploit(dataset) for dataset in DATASETS
     }

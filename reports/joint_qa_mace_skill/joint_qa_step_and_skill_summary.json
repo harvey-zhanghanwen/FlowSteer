@@ -1,0 +1,87 @@
+{
+  "schema_version": "flowsteer.joint-qa.training-skill-summary.v1",
+  "benchmark": {
+    "split_block": "validation[0:32]",
+    "samples_per_dataset": 32,
+    "direct_local": {
+      "hotpotqa": {"exact_match_percent": 68.75, "token_f1_percent": 78.180147},
+      "triviaqa": {"exact_match_percent": 50.0, "token_f1_percent": 57.291667},
+      "macro_average": {"exact_match_percent": 59.375, "token_f1_percent": 67.735907}
+    },
+    "steps": [
+      {
+        "step": 0,
+        "label": "zero LoRA matched control",
+        "policy_version": "qwen35-9b-hotpot-step-000000",
+        "hotpotqa": {"n": 32, "exact_match_percent": 71.875, "token_f1_percent": 82.8125},
+        "triviaqa": {"n": 32, "exact_match_percent": 40.625, "token_f1_percent": 54.356061},
+        "macro_average": {"exact_match_percent": 56.25, "token_f1_percent": 68.58428}
+      },
+      {
+        "step": 1,
+        "label": "one joint GRPO LoRA update",
+        "policy_version": "qwen35-9b-jointqa-step-000001",
+        "hotpotqa": {"n": 32, "exact_match_percent": 68.75, "token_f1_percent": 79.6875},
+        "triviaqa": {"n": 32, "exact_match_percent": 43.75, "token_f1_percent": 53.125},
+        "macro_average": {"exact_match_percent": 56.25, "token_f1_percent": 66.40625}
+      },
+      {
+        "step": 2,
+        "label": "two cumulative joint GRPO LoRA updates",
+        "policy_version": "qwen35-9b-jointqa-step-000002",
+        "hotpotqa": {"n": 32, "exact_match_percent": 65.625, "token_f1_percent": 77.5},
+        "triviaqa": {"n": 32, "exact_match_percent": 43.75, "token_f1_percent": 53.125},
+        "macro_average": {"exact_match_percent": 54.6875, "token_f1_percent": 65.3125}
+      }
+    ]
+  },
+  "skill_confirmation": {
+    "split_block": "validation[32:52]",
+    "forced_probes_excluded_from_grpo_and_benchmark": true,
+    "selected_candidate": "independent_evidence_fan_in",
+    "hotpotqa": {
+      "pairs": 20,
+      "incumbent_exact_match_percent": 70.0,
+      "candidate_exact_match_percent": 65.0,
+      "exact_match_effect_percent": -5.0,
+      "incumbent_token_f1_percent": 83.166667,
+      "candidate_token_f1_percent": 82.452381,
+      "token_f1_effect_percent": -0.714286,
+      "token_f1_bootstrap_interval_percent": [-11.666667, 12.619048],
+      "harm_probability": 0.55775,
+      "status": "candidate",
+      "gate_approved": false
+    },
+    "triviaqa": {
+      "pairs": 20,
+      "incumbent_exact_match_percent": 65.0,
+      "candidate_exact_match_percent": 60.0,
+      "exact_match_effect_percent": -5.0,
+      "incumbent_token_f1_percent": 71.666667,
+      "candidate_token_f1_percent": 66.702786,
+      "token_f1_effect_percent": -4.96388,
+      "token_f1_bootstrap_interval_percent": [-14.242389, 1.052632],
+      "harm_probability": 0.87215,
+      "status": "retired",
+      "gate_approved": false
+    },
+    "macro_average": {
+      "incumbent_exact_match_percent": 67.5,
+      "candidate_exact_match_percent": 62.5,
+      "exact_match_effect_percent": -5.0,
+      "incumbent_token_f1_percent": 77.416667,
+      "candidate_token_f1_percent": 74.577584,
+      "token_f1_effect_percent": -2.839083
+    }
+  },
+  "deployment_after_training_and_skill_gate": {
+    "policy_version": "qwen35-9b-jointqa-step-000002",
+    "adapter_name": "theta_jointqa_step_000002",
+    "active_skill_count": 0,
+    "formal_skill_on_benchmark_run": false,
+    "reason": "No candidate passed independent Skill evidence gating; deployment therefore reuses the verified Step 2 no-Skill benchmark.",
+    "hotpotqa": {"n": 32, "exact_match_percent": 65.625, "token_f1_percent": 77.5},
+    "triviaqa": {"n": 32, "exact_match_percent": 43.75, "token_f1_percent": 53.125},
+    "macro_average": {"exact_match_percent": 54.6875, "token_f1_percent": 65.3125}
+  }
+}

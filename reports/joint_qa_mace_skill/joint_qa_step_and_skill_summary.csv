@@ -1,0 +1,13 @@
+phase,step,dataset,n,em_percent,f1_percent,em_effect_percent,f1_effect_percent,policy_version,skill_status,notes
+direct,baseline,hotpotqa,32,68.750000,78.180147,,,qwen35-9b-direct-local,none,fixed validation[0:32]
+direct,baseline,triviaqa,32,50.000000,57.291667,,,qwen35-9b-direct-local,none,fixed validation[0:32]
+benchmark,0,hotpotqa,32,71.875000,82.812500,0.000000,0.000000,qwen35-9b-hotpot-step-000000,disabled,zero LoRA matched control
+benchmark,0,triviaqa,32,40.625000,54.356061,0.000000,0.000000,qwen35-9b-hotpot-step-000000,disabled,zero LoRA matched control
+benchmark,1,hotpotqa,32,68.750000,79.687500,-3.125000,-3.125000,qwen35-9b-jointqa-step-000001,disabled,one joint GRPO LoRA update
+benchmark,1,triviaqa,32,43.750000,53.125000,3.125000,-1.231061,qwen35-9b-jointqa-step-000001,disabled,one joint GRPO LoRA update
+benchmark,2,hotpotqa,32,65.625000,77.500000,-6.250000,-5.312500,qwen35-9b-jointqa-step-000002,disabled,two cumulative joint GRPO LoRA updates
+benchmark,2,triviaqa,32,43.750000,53.125000,3.125000,-1.231061,qwen35-9b-jointqa-step-000002,disabled,two cumulative joint GRPO LoRA updates
+skill_confirmation,2,hotpotqa,20,65.000000,82.452381,-5.000000,-0.714286,qwen35-9b-jointqa-step-000002,candidate,independent_evidence_fan_in rejected
+skill_confirmation,2,triviaqa,20,60.000000,66.702786,-5.000000,-4.963880,qwen35-9b-jointqa-step-000002,retired,independent_evidence_fan_in rejected
+deployment_after_gate,2,hotpotqa,32,65.625000,77.500000,0.000000,0.000000,qwen35-9b-jointqa-step-000002,no_active_skill,reuses Step 2 benchmark because no Skill passed the gate
+deployment_after_gate,2,triviaqa,32,43.750000,53.125000,0.000000,0.000000,qwen35-9b-jointqa-step-000002,no_active_skill,reuses Step 2 benchmark because no Skill passed the gate
