@@ -1,3 +1,4 @@
 step,label,policy_version,policy_adapter,hotpotqa_task_count,hotpotqa_strict_em,hotpotqa_strict_f1,hotpotqa_strict_em_percent,hotpotqa_strict_f1_percent,triviaqa_task_count,triviaqa_strict_em,triviaqa_strict_f1,triviaqa_strict_em_percent,triviaqa_strict_f1_percent,macro_strict_em,macro_strict_f1,macro_strict_em_percent,macro_strict_f1_percent
 0,Step 0: zero LoRA matched control,qwen35-9b-hotpot-step-000000,theta_hotpot_step_000000,32,0.71875,0.828125,71.875,82.8125,32,0.40625,0.543560606060606,40.625,54.356060606060595,0.5625,0.685842803030303,56.25,68.5842803030303
 1,Step 1: one joint GRPO LoRA update,qwen35-9b-jointqa-step-000001,theta_jointqa_step_000001,32,0.6875,0.796875,68.75,79.6875,32,0.4375,0.53125,43.75,53.125,0.5625,0.6640625,56.25,66.40625
+2,Step 2: second joint GRPO LoRA update,qwen35-9b-jointqa-step-000002,theta_jointqa_step_000002,32,0.65625,0.775,65.625,77.5,32,0.4375,0.53125,43.75,53.125,0.546875,0.653125,54.6875,65.3125

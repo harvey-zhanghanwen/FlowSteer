@@ -1,0 +1,161 @@
+{
+  "artifacts": {
+    "behavior_preflight": "/ssd1/iclr/1/FlowSteer/artifacts/joint_qa_micro/step_000002_attempt_02/behavior_policy_preflight.json",
+    "groups": "/ssd1/iclr/1/FlowSteer/artifacts/joint_qa_micro/step_000002_attempt_02/grpo_groups.jsonl",
+    "manifest": "/ssd1/iclr/1/FlowSteer/artifacts/joint_qa_micro/step_000002_attempt_02/training_manifest.json",
+    "post_update": "/ssd1/iclr/1/FlowSteer/artifacts/joint_qa_micro/step_000002_attempt_02/post_update_trajectories.jsonl",
+    "retrieval": "/ssd1/iclr/1/FlowSteer/artifacts/joint_qa_micro/step_000002_attempt_02/retrieval_receipts.jsonl",
+    "selected": "/ssd1/iclr/1/FlowSteer/artifacts/joint_qa_micro/step_000002_attempt_02/selected_tasks.jsonl",
+    "sync": "/ssd1/iclr/1/FlowSteer/artifacts/joint_qa_micro/step_000002_attempt_02/sync_receipt.json",
+    "trajectories": "/ssd1/iclr/1/FlowSteer/artifacts/joint_qa_micro/step_000002_attempt_02/trajectories.jsonl"
+  },
+  "behavior_policy_preflight": {
+    "adapter_name": "theta_jointqa_step_000001",
+    "canary_succeeded": true,
+    "checkpoint_path": "/ssd1/iclr/1/FlowSteer/artifacts/joint_qa_micro/step_000001/checkpoint/checkpoint_final/supervisor_lora/step_000001_20260818T004520962544Z/theta",
+    "completed_at": "2026-08-18T01:10:46.664056+00:00",
+    "duration_seconds": 0.3537489753216505,
+    "loaded_now": true,
+    "models_after": [
+      "supervisor_theta",
+      "theta_jointqa_step_000001"
+    ],
+    "models_before": [
+      "supervisor_theta"
+    ],
+    "policy_published": false,
+    "request_attempts": {
+      "canary": 1,
+      "load_adapter": 1,
+      "models_after": 1,
+      "models_before": 1
+    },
+    "started_at": "2026-08-18T01:10:46.310295+00:00",
+    "status": "ready",
+    "success": true,
+    "training_performed": false
+  },
+  "bounds": {
+    "expected_initial_rollouts": 16,
+    "max_optimizer_updates": 1,
+    "post_update_canaries": 1,
+    "rollouts_per_task": 8,
+    "selected_tasks": 2,
+    "tasks_per_dataset": 1
+  },
+  "completed_at": "2026-08-18T01:12:08.202041+00:00",
+  "config_path": "/ssd1/iclr/1/FlowSteer/config/training_joint_qa_step2_attempt2.yaml",
+  "exploration_enabled": false,
+  "initial_rollout_source": {
+    "mode": "live_collection",
+    "new_collections": 16,
+    "reused": 0
+  },
+  "initial_rollouts": {
+    "collected": 16,
+    "evaluator_versions": {
+      "hotpotqa.official.answer.v1": 8,
+      "triviaqa.official.answer.v1": 8
+    },
+    "grpo_eligible": 12,
+    "valid_evaluators": 16
+  },
+  "policy_sync": {
+    "behavior_policy_version": "qwen35-9b-jointqa-step-000001",
+    "candidate_policy_version": "qwen35-9b-jointqa-step-000002",
+    "status": "not_attempted_no_optimizer_update",
+    "success": false
+  },
+  "resume_initial_rollouts_requested": false,
+  "schema_version": "flowsteer.agentgraph.smoke_manifest.v1",
+  "selected_by_source": {
+    "hotpotqa": 1,
+    "triviaqa": 1
+  },
+  "selection_receipt": {
+    "cursor_before": {
+      "curriculum_id": "sha256:033ed9a1143cfc4f60cd7adbf84ba009bc30b512f883fcc7c1beba1cca370720",
+      "cursor": 0,
+      "format": "flowsteer-joint-qa-training-cursor@1"
+    },
+    "cursor_path": "/ssd1/iclr/1/FlowSteer/artifacts/joint_qa_micro/step_000002_attempt_02/cursor_step_000000.json",
+    "next_cursor_path": "/ssd1/iclr/1/FlowSteer/artifacts/joint_qa_micro/step_000002_attempt_02/cursor_step_000001.json",
+    "retrieval_receipts_path": "/ssd1/iclr/1/FlowSteer/artifacts/joint_qa_micro/step_000002_attempt_02/retrieval_receipts.jsonl",
+    "schedule_id": "sha256:033ed9a1143cfc4f60cd7adbf84ba009bc30b512f883fcc7c1beba1cca370720",
+    "schedule_path": "/ssd1/iclr/1/FlowSteer/artifacts/joint_qa_micro/step_000002_attempt_02/frozen_schedule.json",
+    "selection": "frozen_joint_qa_schedule",
+    "step": {
+      "format": "flowsteer-joint-qa-training-step@1",
+      "rollout_ordinals": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ],
+      "step_ordinal": 1,
+      "tasks": [
+        {
+          "dataset_key": "hotpotqa",
+          "format": "flowsteer-joint-qa-training-task@1",
+          "task_id": "hotpotqa:5adffc93554299025d62a39f",
+          "task_position": 18
+        },
+        {
+          "dataset_key": "triviaqa",
+          "format": "flowsteer-joint-qa-training-task@1",
+          "task_id": "triviaqa:tc_247",
+          "task_position": 18
+        }
+      ]
+    }
+  },
+  "skills_enabled": false,
+  "started_at": "2026-08-18T01:10:45.761883+00:00",
+  "status": "failed_no_optimizer_update",
+  "train_path": "/ssd1/iclr/1/FlowSteer/data/agentgraph_v1/train.jsonl",
+  "training": {
+    "behavior_policy_version": "qwen35-9b-jointqa-step-000001",
+    "checkpoint_dir": "",
+    "committed_step": 1,
+    "continuation_adapter_checkpoint": "/ssd1/iclr/1/FlowSteer/artifacts/joint_qa_micro/step_000001/checkpoint/checkpoint_final/supervisor_lora/step_000001_20260818T004520962544Z/theta",
+    "continuation_loaded": false,
+    "exact_groups": 2,
+    "excluded_groups": 2,
+    "exclusions": {
+      "hotpotqa:5adffc93554299025d62a39f|joint_qa_balanced_micro|versions_afa7539023f282c94b2f": "zero_information_group",
+      "triviaqa:tc_247|joint_qa_balanced_micro|versions_4d2575c86af1ee58a86d": "zero_information_group"
+    },
+    "grad_norm": 0.0,
+    "gradient_partition_token_costs": [
+      0,
+      0
+    ],
+    "informative_groups": 0,
+    "input_trajectories": 16,
+    "loss": 0.0,
+    "max_behavior_logprob_delta": 0.0,
+    "micro_batch_size_used": 0,
+    "oom_backoff_count": 0,
+    "optimizer_resume_status": "not_started",
+    "optimizer_state_checkpoint": "",
+    "optimizer_state_saved": false,
+    "optimizer_updates": 0,
+    "provider_logprob_diagnostic_exceeded": false,
+    "provider_logprob_diagnostic_tolerance": 0.0,
+    "provider_logprob_exceeded_tokens": 0,
+    "provider_logprob_mean_abs_delta": 0.0,
+    "provider_logprob_p95_abs_delta": 0.0,
+    "provider_logprob_tokens_compared": 0,
+    "record_eligible_trajectories": 12,
+    "trainable_update_l2": 0.0,
+    "trained_groups": 0,
+    "trained_trajectories": 0,
+    "update_step": 2,
+    "updated_policy_version": "",
+    "zero_information_groups": 2
+  }
+}

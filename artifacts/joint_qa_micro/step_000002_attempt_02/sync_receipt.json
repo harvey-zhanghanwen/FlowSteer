@@ -1,0 +1,6 @@
+{
+  "behavior_policy_version": "qwen35-9b-jointqa-step-000001",
+  "candidate_policy_version": "qwen35-9b-jointqa-step-000002",
+  "status": "not_attempted_no_optimizer_update",
+  "success": false
+}

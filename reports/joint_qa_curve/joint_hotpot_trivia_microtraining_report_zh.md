@@ -49,13 +49,15 @@ Step 0 两个数据集共 64/64 条 trajectory 均完成且 evaluator receipt �
 | Step 0 AgentGraph，zero LoRA | 71.88 | 82.81 | 40.63 | 54.36 | 56.25 | 68.58 |
 | Step 1 AgentGraph，1 次联合 GRPO update | 68.75 | 79.69 | 43.75 | 53.13 | 56.25 | 66.41 |
 | Step 1 − Step 0 | -3.13 | -3.13 | +3.13 | -1.23 | 0.00 | -2.18 |
+| Step 2 AgentGraph，2 次累计联合 GRPO update | 65.63 | 77.50 | 43.75 | 53.13 | 54.69 | 65.31 |
+| Step 2 − Step 1 | -3.13 | -2.19 | 0.00 | 0.00 | -1.56 | -1.09 |
 
 主要结论：
 
 1. Step 0 AgentGraph 在 HotpotQA 上优于 Direct，但在 TriviaQA 上低于 Direct，存在明显的跨数据集不对称。
 2. Step 1 令 TriviaQA 净增加 1 个 EM，同时令 HotpotQA 净减少 1 个 EM；宏平均 EM 不变，宏平均 F1 下降。
-3. 每个数据集只有 32 题，一题等于 3.125 个 EM 百分点；本轮不足以支持稳定泛化结论。
-4. Step 1 之后两个数据集的联合成绩没有改善，因此不能把这次更新描述为成功优化。
+3. Step 2 在 TriviaQA 上与 Step 1 持平，但 HotpotQA 继续下降；宏平均 EM/F1 均低于 Step 0 和 Direct。
+4. 每个数据集只有 32 题，一题等于 3.125 个 EM 百分点；两次 update 都未产生综合 held-out 收益，不能描述为成功优化。
 
 权威曲线文件：
 
@@ -90,20 +92,35 @@ Step 0 两个数据集共 64/64 条 trajectory 均完成且 evaluator receipt �
 
 需要保留的诊断：provider log-probability comparison 中 3 个 token 超过 0.25 tolerance；mean absolute delta 为 0.00991，P95 为 0.06754。它不否定本次更新，但继续训练前应复核。
 
-### Step 2 尝试
+### Step 2
 
-Step 2 收集了新的 HotpotQA/TriviaQA 各 8 条 rollout，但没有执行 optimizer step：
+为了得到第二个真实 policy update，训练任务按预先冻结的顺序推进；没有依据 validation 成绩选择训练题：
 
-- HotpotQA：8 条 reward 全为 2/3
-- TriviaQA：8 条 reward 全为 0
-- informative groups：0
-- `optimizer_updates=0`
-- `trainable_update_l2=0`
-- 未生成 Step 2 checkpoint
-- 未发布 adapter，也未运行 post-update canary
-- manifest：`failed_no_optimizer_update`
+| Attempt | Train position | HotpotQA group | TriviaQA group | 结果 |
+|---|---:|---|---|---|
+| 1 | 17 | reward 全为 2/3 | reward 全为 0 | zero-information，未更新 |
+| 2 | 18 | reward 全为 1 | reward 全为 0 | zero-information，未更新 |
+| 3 | 19 | reward 全为 1 | reward 全为 1 | zero-information，未更新 |
+| 4 | 20 | reward 为 0.8/1.0 | reward 全为 1 | HotpotQA group 提供梯度，完成更新 |
 
-这是 GRPO 对 zero-information group 的 fail-closed 行为。Step 2 不能作为新的 policy point，也不能写入训练曲线。
+前三个 attempt 都按 GRPO 规则 fail-closed，没有 checkpoint、adapter sync 或伪造曲线点。Attempt 4：
+
+- behavior policy：`qwen35-9b-jointqa-step-000001`
+- 16 条 rollout，13 条 GRPO eligible
+- exact groups：2；informative groups：1
+- 实际训练：HotpotQA group 的 7 条 eligible trajectory
+- `optimizer_resume_status=restored_optimizer`
+- `optimizer_updates=1`
+- loss：`-0.008829`
+- gradient norm：`0.719158`
+- `trainable_update_l2=0.025979`
+- OOM backoff：0
+- updated policy：`qwen35-9b-jointqa-step-000002`
+- adapter：`theta_jointqa_step_000002`
+- SGLang route switch：成功
+- HotpotQA/TriviaQA post-update canary：2/2 成功
+
+Step 2 的第二次真实 update 已写入三点训练曲线。provider log-probability comparison 中 2 个 token 超过 0.25 tolerance；mean absolute delta 为 0.00765，P95 为 0.05377。
 
 ## 5. AgentGraph 与通信
 
@@ -124,6 +141,7 @@ Step 2 收集了新的 HotpotQA/TriviaQA 各 8 条 rollout，但没有执行 opt
 - 两个数据集均未产生 reciprocal relation 或 peer-draft communication。
 - effective dependency status 均为 `weak`，拓扑仍以浅层二节点串行图为主。
 - Step 1 后 HotpotQA 进一步变浅，TriviaQA 的三节点串行图增加；没有证据说明更深 topology 本身带来稳定收益。
+- Step 2：HotpotQA 为 24 个二节点串行图、8 个三节点串行图；TriviaQA 为 28 个二节点串行图、4 个三节点串行图。仍没有 reciprocal relation。
 - Format role 在每条验证 trajectory 中均存在，但 Format Agent 无法修复上游错误事实。
 
 推理成本明显高于 Direct：
@@ -134,6 +152,8 @@ Step 2 收集了新的 HotpotQA/TriviaQA 各 8 条 rollout，但没有执行 opt
 | Step 0 | TriviaQA | 1,177,128 | 38,055 | 30.93× | 13.73 s |
 | Step 1 | HotpotQA | 1,254,403 | 54,993 | 22.81× | 15.03 s |
 | Step 1 | TriviaQA | 1,077,251 | 38,055 | 28.31× | 12.65 s |
+| Step 2 | HotpotQA | 1,061,342 | 54,993 | 19.30× | 10.70 s |
+| Step 2 | TriviaQA | 952,910 | 38,055 | 25.04× | 9.76 s |
 
 这里的 latency 是各题内部调用累计值；并发运行的墙钟时间更短。
 
@@ -190,16 +210,23 @@ Task：`triviaqa:tc_43`
 - Step 1：`Bo Donaldson and The Heywoods`
 - 分类：evidence disambiguation 与 answer span extraction 改善；但问题未明确限定美国榜单，需警惕 benchmark-specific answer selection。
 
+### Step 2 的局部修复与新退化
+
+- HotpotQA `Todd Phillips` 样本从 Step 1 的 `max_rounds` 恢复为正确终局，`Carol Lawrence` 样本也由错误的 `Eartha Kitt` 恢复正确。
+- 同时新增 3 个 HotpotQA architecture regression candidate，包括 `United States → Germany`、`2006 → 1986`、`Hawaii → California`，净减少 1 个 EM。
+- TriviaQA `tc_41` 从 `dance` 修复为 `ballet`，但 `tc_24` 从 `helicopter` 退化为过长的 `single-engine helicopter`；EM/F1 净变化为 0。
+- 这些翻转再次说明单个 informative group 的 update 方差很高，不能从局部修复推断总体改进。
+
 ## 7. 是否属于 HotpotQA 过拟合
 
 当前证据不支持“TriviaQA 初始低分是 HotpotQA 训练过拟合”的因果结论：
 
 1. Step 0 使用 zero-initialized LoRA；adapter 名称包含 `hotpot`，但它没有经过 HotpotQA optimizer update。
 2. Step 0 的跨数据集差异更符合 retrieval coverage、问题语义和答案规范化边界不同。
-3. Step 1 的实际梯度完全来自一个 TriviaQA informative group；之后 HotpotQA 降低、TriviaQA EM 增加，与 negative transfer 相容，但样本与更新次数过少。
+3. Step 1 的梯度来自一个 TriviaQA informative group，Step 2 的梯度来自一个 HotpotQA informative group；两次更新都没有改善宏平均，表明问题不是简单增加某一数据集权重即可解决。
 4. 没有持续多步退化、重复 seed 或更大固定验证集证据，因此不能称为 catastrophic forgetting。
 
-更准确的结论是：平衡的 rollout 数量没有带来平衡的梯度信号；一次单任务 informative group 的 GRPO 更新产生了高方差的跨数据集泛化结果。
+更准确的结论是：平衡的 rollout 数量没有带来平衡的梯度信号；两个单任务 informative group 的 GRPO update 都产生了高方差的跨数据集泛化结果。
 
 ## 8. 下一步建议
 
@@ -217,8 +244,8 @@ Task：`triviaqa:tc_43`
 - Step 1 training summary：`artifacts/joint_qa_micro/step_000001/checkpoint/training_summary.json`
 - Step 1 sync receipt：`artifacts/joint_qa_micro/step_000001/sync_receipt.json`
 - Step 1 post-update canaries：`artifacts/joint_qa_micro/step_000001/post_update_trajectories.jsonl`
-- Step 2 zero-information groups：`artifacts/joint_qa_micro/step_000002/grpo_groups.jsonl`
-- Step 2 failure manifest：`artifacts/joint_qa_micro/step_000002/training_manifest.json`
-- Step 0/1 evaluation reports：`reports/joint_qa_curve/step_000000/`、`reports/joint_qa_curve/step_000001/`
+- Step 2 zero-information attempts：`artifacts/joint_qa_micro/step_000002/`、`step_000002_attempt_02/`、`step_000002_attempt_03/`
+- Step 2 successful update：`artifacts/joint_qa_micro/step_000002_attempt_04/training_manifest.json`
+- Step 2 sync receipt：`artifacts/joint_qa_micro/step_000002_attempt_04/sync_receipt.json`
+- Step 0/1/2 evaluation reports：`reports/joint_qa_curve/step_000000/`、`step_000001/`、`step_000002/`
 - 联合训练曲线：`reports/joint_qa_curve/final/`
-

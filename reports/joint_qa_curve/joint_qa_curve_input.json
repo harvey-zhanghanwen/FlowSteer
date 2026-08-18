@@ -32,7 +32,22 @@
           "trajectory_receipts_path": "/ssd1/iclr/1/FlowSteer/artifacts/joint_qa_curve/step_000001/triviaqa/agentgraph_trajectories.jsonl"
         }
       }
+    },
+    {
+      "step": 2,
+      "label": "Step 2: second joint GRPO LoRA update",
+      "expected_policy_version": "qwen35-9b-jointqa-step-000002",
+      "expected_policy_adapter": "theta_jointqa_step_000002",
+      "datasets": {
+        "hotpotqa": {
+          "metrics_path": "/ssd1/iclr/1/FlowSteer/artifacts/joint_qa_curve/step_000002/hotpotqa/paired_results.jsonl",
+          "trajectory_receipts_path": "/ssd1/iclr/1/FlowSteer/artifacts/joint_qa_curve/step_000002/hotpotqa/agentgraph_trajectories.jsonl"
+        },
+        "triviaqa": {
+          "metrics_path": "/ssd1/iclr/1/FlowSteer/artifacts/joint_qa_curve/step_000002/triviaqa/paired_results.jsonl",
+          "trajectory_receipts_path": "/ssd1/iclr/1/FlowSteer/artifacts/joint_qa_curve/step_000002/triviaqa/agentgraph_trajectories.jsonl"
+        }
+      }
     }
   ]
 }
-

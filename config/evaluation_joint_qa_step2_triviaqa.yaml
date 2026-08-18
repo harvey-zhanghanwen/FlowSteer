@@ -1,0 +1,171 @@
+# Fixed held-out TriviaQA side of the joint-QA matched-control Step 2.
+# It preserves the existing SkillFlow public retrieval boundary. Direct
+# predictions use a dataset-level shared path for reuse by later policy steps.
+
+schema_version: "flowsteer.agentgraph.config.v1"
+experiment:
+  name: "joint_qa_matched_control_step2_triviaqa"
+  phase: "triviaqa_evaluation"
+  baseline_id: "joint_qa_matched_control_step2"
+  step_id: "step_000002"
+  training_enabled: false
+  seed: 20260818
+  condition_id: "joint_qa_matched_control"
+  catalog_order_namespace: "joint_qa_shared_local_qwen35_v1"
+  prompt_version: "agentgraph.director.generic_dependency.v1"
+  tool_version: "agentgraph.atomic-actions+skillflow-public-retrieval.v1"
+  output_dir: "artifacts/joint_qa_curve/step_000002/triviaqa"
+
+data:
+  catalog_path: "config/datasets_agentgraph.yaml"
+  train_path: "data/agentgraph_v1/train.jsonl"
+  validation_path: "data/agentgraph_v1/validation.jsonl"
+  test_path: "data/agentgraph_v1/test.jsonl"
+  enforce_split_isolation: true
+  task_schema_version: "flowsteer.agentgraph.task.v1"
+
+triviaqa_evaluation:
+  dataset_key: "triviaqa"
+  split: "validation"
+  selection: "sequential"
+  sample_count: 32
+  rollouts_per_task: 1
+  concurrency: 4
+  direct_model_id: "qwen3.5-9b-local"
+  direct_protocol: "qwen35_single_call_same_public_retrieval_context_v1"
+  retrieval:
+    enabled: true
+    mode: "deterministic_question_query_prefetch"
+    query_policy: "stop_word_filtered_first_12_unique_terms"
+    skillflow_source: "/home/test/SKILLEV/skillflow-bayesian-improve-deploy/src"
+    index_path: "/ssd1/iclr/SKILLEV/skillev-new-b2-temp/data/datasets/dpr-wikipedia/atlas-retrieval.sqlite3"
+    search_limit: 5
+
+storage:
+  schema_version: "flowsteer.agentgraph.triviaqa_round.v1"
+  root: "artifacts/joint_qa_curve/step_000002/triviaqa/evidence"
+  selected_tasks_path: "artifacts/joint_qa_curve/step_000002/triviaqa/selected_tasks.jsonl"
+  retrieval_receipts_path: "artifacts/joint_qa_curve/step_000002/triviaqa/retrieval_receipts.jsonl"
+  direct_predictions_path: "artifacts/joint_qa_curve/shared/triviaqa_direct_predictions.jsonl"
+  trajectories_path: "artifacts/joint_qa_curve/step_000002/triviaqa/agentgraph_trajectories.jsonl"
+  failures_path: "artifacts/joint_qa_curve/step_000002/triviaqa/collection_failures.jsonl"
+  paired_results_path: "artifacts/joint_qa_curve/step_000002/triviaqa/paired_results.jsonl"
+  wrong_demos_path: "artifacts/joint_qa_curve/step_000002/triviaqa/wrong_demos.jsonl"
+  manifest_path: "artifacts/joint_qa_curve/step_000002/triviaqa/run_manifest.json"
+  preflight_receipt_path: "artifacts/joint_qa_curve/step_000002/triviaqa/preflight_receipt.json"
+  report_json_path: "reports/joint_qa_curve/step_000002/triviaqa_report.json"
+  report_markdown_path: "reports/joint_qa_curve/step_000002/triviaqa_report.md"
+
+director:
+  base_model: "${QWEN35_9B_MODEL_PATH:-/home/test/SKILLEV/skillev-new-b2-temp/model/Qwen3.5-9B-modelscope}"
+  tokenizer_path: "${QWEN35_9B_TOKENIZER_PATH:-/home/test/SKILLEV/skillev-new-b2-temp/tokenizer/Qwen3.5-9B}"
+  backend: "sglang"
+  api_base: "http://127.0.0.1:${FLOWSTEER_SUPERVISOR_PORT:-8015}/v1"
+  served_model_name: "supervisor_theta"
+  behavior_policy_version: "qwen35-9b-jointqa-step-000002"
+  behavior_adapter_name: "theta_jointqa_step_000002"
+  behavior_adapter_checkpoint: "/ssd1/iclr/1/FlowSteer/artifacts/joint_qa_micro/step_000002_attempt_04/checkpoint/checkpoint_final/supervisor_lora/step_000002_20260818T011725818958Z/theta"
+  updated_policy_version: "unused-evaluation-only"
+  expected_server_weight_version: "default"
+  prompt_profile: "minimal"
+  dtype: "bfloat16"
+  max_context_tokens: 8192
+  max_action_tokens: 512
+  temperature: 1.0
+  top_p: 1.0
+  top_k: -1
+  max_rounds: 20
+  execute_on_edit: true
+  history_window: 4
+  lora:
+    enabled: true
+    rank: 64
+    alpha: 128
+    dropout: 0.0
+    target_modules: [q_proj, k_proj, v_proj, o_proj]
+
+agent_graph:
+  max_agents: 8
+  contract_type: "free_text"
+  relation_encoding: "two_bit"
+  actions: [add_agent, modify_agent, delete_agent, set_relation, set_output, finish]
+  executor_selection: "director_catalog_choice"
+  max_bidirectional_block_size: 2
+  require_unique_output: true
+  require_all_agents_reach_output: true
+  terminal_protocol_by_source:
+    hotpotqa: "exact_single_answer_tag"
+    triviaqa: "exact_single_answer_tag"
+  model_catalog_path: "config/model_catalog_triviaqa_v1.yaml"
+
+evaluation:
+  healthbench_judge_model: ""
+  max_environment_steps: 20
+  swebench_harness_enabled: false
+  invalid_evaluator_action: "persist_and_exclude"
+
+grpo:
+  enabled: false
+  objective: "action_masked_one_pass"
+  group_key: [task_id, condition_id, policy_version]
+  samples_per_problem: 1
+  advantage_epsilon: 1.0e-8
+  equal_weight_per_problem: true
+  terminal_task_reward_only: true
+  structural_reward: 0.0
+  exploration_reward: 0.0
+  skill_usage_reward: 0.0
+  require_valid_evaluator: true
+  reject_forced_probes: true
+  reject_fallback_or_manual_repair: true
+  reject_reconstructed_context: true
+  require_exact_behavior_receipt: true
+  optimization_passes_per_rollout_batch: 0
+  max_optimizer_updates: 0
+  learning_rate: 0.0
+  gradient_checkpointing: false
+  max_grad_norm: 0.0
+
+policy_sync:
+  enabled: false
+  api_base: "http://127.0.0.1:${FLOWSTEER_SUPERVISOR_PORT:-8015}"
+  adapter_name_prefix: "theta_jointqa_step_"
+  request_timeout_seconds: 120
+  max_retries: 3
+  retry_backoff_seconds: 2
+
+exploration:
+  enabled: false
+  strategy: "none"
+  forced_probe_rollouts: 0
+
+skills:
+  enabled: false
+  initial_library: []
+  retrieval_top_k: 0
+
+gpu:
+  learner_physical: 3
+  rollout_physical: 4
+  gradient_replica_physical: 5
+  learner_device: "cuda:3"
+  rollout_engine: "sglang"
+  gradient_replica_device: "cuda:5"
+  supervisor_gpu_id: 4
+  supervisor_api_base: "http://127.0.0.1:8015/v1"
+  training_enabled: false
+  oom_policy:
+    status: "inactive_evaluation_only"
+    micro_batch_size: 1
+    minimum_micro_batch_size: 1
+    micro_batch_schedule: [1]
+    retry_on_cuda_oom: false
+    split_items_across_learner_and_replica: false
+    gradient_accumulation_steps: 1
+    gradient_checkpointing: false
+
+deployment:
+  exploration_beta: 0.0
+  allow_forced_probes: false
+  active_skills_only: false
+  require_version_compatible_skills: true

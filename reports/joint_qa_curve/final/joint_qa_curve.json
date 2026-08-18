@@ -81,7 +81,7 @@
     ]
   },
   "fixed_task_ids_verified": true,
-  "generated_at": "2026-08-18T00:55:54.938490+00:00",
+  "generated_at": "2026-08-18T01:22:37.131070+00:00",
   "macro_average": "unweighted_mean_over_HotpotQA_and_TriviaQA",
   "metric_scope": "strict_heldout_answer_exact_match_and_token_f1",
   "policy_adapter_receipts_verified": true,
@@ -193,6 +193,59 @@
       "policy_adapter_receipts_verified": true,
       "policy_version": "qwen35-9b-jointqa-step-000001",
       "step": 1
+    },
+    {
+      "datasets": {
+        "hotpotqa": {
+          "completed": 32,
+          "dataset": "HotpotQA",
+          "evaluator_receipts_verified": true,
+          "evaluator_valid": 32,
+          "evaluator_version": "hotpotqa.official.answer.v1",
+          "metrics_path": "/ssd1/iclr/1/FlowSteer/artifacts/joint_qa_curve/step_000002/hotpotqa/paired_results.jsonl",
+          "metrics_source_kind": "paired_results_jsonl",
+          "policy_adapter": "theta_jointqa_step_000002",
+          "policy_adapter_receipt_available": true,
+          "policy_receipt_verified": true,
+          "policy_version": "qwen35-9b-jointqa-step-000002",
+          "strict_exact_match": 0.65625,
+          "strict_exact_match_percent": 65.625,
+          "strict_token_f1": 0.775,
+          "strict_token_f1_percent": 77.5,
+          "task_count": 32,
+          "trajectory_receipts_path": "/ssd1/iclr/1/FlowSteer/artifacts/joint_qa_curve/step_000002/hotpotqa/agentgraph_trajectories.jsonl"
+        },
+        "triviaqa": {
+          "completed": 32,
+          "dataset": "TriviaQA",
+          "evaluator_receipts_verified": true,
+          "evaluator_valid": 32,
+          "evaluator_version": "triviaqa.official.answer.v1",
+          "metrics_path": "/ssd1/iclr/1/FlowSteer/artifacts/joint_qa_curve/step_000002/triviaqa/paired_results.jsonl",
+          "metrics_source_kind": "paired_results_jsonl",
+          "policy_adapter": "theta_jointqa_step_000002",
+          "policy_adapter_receipt_available": true,
+          "policy_receipt_verified": true,
+          "policy_version": "qwen35-9b-jointqa-step-000002",
+          "strict_exact_match": 0.4375,
+          "strict_exact_match_percent": 43.75,
+          "strict_token_f1": 0.53125,
+          "strict_token_f1_percent": 53.125,
+          "task_count": 32,
+          "trajectory_receipts_path": "/ssd1/iclr/1/FlowSteer/artifacts/joint_qa_curve/step_000002/triviaqa/agentgraph_trajectories.jsonl"
+        }
+      },
+      "label": "Step 2: second joint GRPO LoRA update",
+      "macro_average": {
+        "strict_exact_match": 0.546875,
+        "strict_exact_match_percent": 54.6875,
+        "strict_token_f1": 0.653125,
+        "strict_token_f1_percent": 65.3125
+      },
+      "policy_adapter": "theta_jointqa_step_000002",
+      "policy_adapter_receipts_verified": true,
+      "policy_version": "qwen35-9b-jointqa-step-000002",
+      "step": 2
     }
   ]
 }
