@@ -24,6 +24,51 @@ The tracked `artifacts/` tree is deliberately absent from this clean branch.
 Restore the external Step-0 adapter and the dependencies listed below before
 running model-backed evaluation.
 
+## Runtime recovery prerequisites
+
+The saved Round 01 configuration is evaluation-only, but it intentionally
+binds inference to the frozen Step-0 adapter
+`theta_jointqa_progressive_step_000000`.  The clean branch excludes that
+62 MiB adapter.  Restore the exact three-file adapter directory from the
+project backup branch before running Stable Zero or evaluation:
+
+```bash
+git fetch --depth 1 origin experiment/joint-qa-progressive-skill-rl-02
+git restore --source FETCH_HEAD -- \
+  artifacts/hotpotqa_multiagent_skill/policy_step_000000/theta
+```
+
+Set the local runtime paths without committing them.  The three source
+variables below correspond directly to `config/datasets_aime2026.yaml`:
+
+```bash
+export FLOWSTEER_AIME_HISTORY_PATH=/path/to/aime_2000_2025.jsonl
+export FLOWSTEER_AIME2025_PATH=/path/to/flowsteer/aime2025.jsonl
+export FLOWSTEER_DATASETS_ROOT=/path/to/datasets
+export QWEN35_9B_MODEL_PATH=/path/to/Qwen3.5-9B
+export QWEN35_9B_TOKENIZER_PATH=/path/to/Qwen3.5-9B-tokenizer
+export FLOWSTEER_PYTHON_BIN=/path/to/skillflow-runtime/bin/python
+export FLOWSTEER_ROLLOUT_GPU=4
+export FLOWSTEER_SUPERVISOR_PORT=8015
+```
+
+Keep port `8015` for this frozen configuration because the local Agent model
+entry in `config/model_catalog_hotpotqa_deep_v6.yaml` uses that endpoint.  If
+the Director selects a remote Agent, also provide `VECTOR_ENGINE_API_KEY`
+through the local environment.  Do not add any credential to Git.
+
+Start the SkillFlow SGLang Supervisor in a separate terminal:
+
+```bash
+bash scripts/start_qwen35_director_server.sh
+```
+
+The evaluation runner calls SGLang `/load_lora_adapter` and performs its
+adapter canary automatically; no manual adapter-load request is required.
+`requirements-qwen35-runtime.txt` describes the runtime dependencies, while
+the local model, CUDA/SGLang environment, adapter, and raw datasets remain
+external to this source backup.
+
 ## Population boundary
 
 - Training candidate population: AIME 2000--2024, cycled internally to 512.
