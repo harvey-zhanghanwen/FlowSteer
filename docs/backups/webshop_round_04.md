@@ -7,14 +7,23 @@
 `training_enabled: false`、`grpo.enabled: false`、`max_optimizer_updates: 0`、
 `policy_sync.enabled: false`。
 
-Round04 的开发集与固定 held-out 运行仍在进行或尚未完成。本说明不预填开发集
-或 held-out 的 success rate；本快照只保存当时的架构和可恢复入口，不把未完成
+Round04 开发集已完成 16 个固定训练侧样本的正式架构验证；固定 held-out 尚未
+完成。本快照保存开发集聚合报告、架构和可恢复入口，不把尚未完成的 held-out
 运行表述为结果。
 
 - 发布分支：`backup/webshop-round04-stable-zero-arch-clean-20260819`
 - 发布 commit：由本分支的 Git 历史确定；本说明不自引用 commit ID
-- 开发集正式指标：运行中/未完成，不在此预填
+- 开发 Stable Zero：16/16
+- 开发集 AgentGraph success rate：5/16（31.25%）
+- 开发集 Qwen3.5-9B Direct success rate：4/16（25.00%）
+- AgentGraph − Direct：+6.25 percentage points
+- 开发集 operational/evaluator failure：0；terminal failure：0
+- 开发报告：`reports/webshop_round_04/development_report.json` 与
+  `reports/webshop_round_04/development_report.md`
 - 固定 held-out 正式指标：未完成，不在此预填
+
+上述开发运行没有训练、LoRA/GRPO、backward、optimizer update、Bayesian update、
+Skill 注入或 Skill 发布。
 
 ## 固定数据划分与正式指标
 
