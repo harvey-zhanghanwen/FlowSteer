@@ -526,6 +526,82 @@ def test_epoch4_uses_fresh_canonical_confirmation_and_atomic_priors() -> None:
     }
 
 
+def test_epoch5_revalidates_atomic_priors_after_terminal_feedback_alignment() -> None:
+    spec = runner._spec_for_round(5)
+    discovery, confirmation, natural = runner._selected_tasks(spec)
+    train_path = runner.ROOT / "data/joint_qa_v2/train.jsonl"
+    confirmation_path = (
+        runner.ROOT / "data/joint_qa_v2/skill_confirmation_round5.jsonl"
+    )
+    prior_ids: set[str] = set()
+    for prior_round in range(5):
+        prior_discovery, prior_confirmation, prior_natural = runner._selected_tasks(
+            runner._spec_for_round(prior_round)
+        )
+        prior_ids.update(
+            task.task_id
+            for dataset in runner.DATASETS
+            for task in (
+                *prior_discovery[dataset],
+                prior_natural[dataset],
+                *prior_confirmation[dataset],
+            )
+        )
+
+    selected_ids: set[str] = set()
+    for dataset in runner.DATASETS:
+        train = _dataset_records(train_path, "train", dataset)
+        validation = _dataset_records(confirmation_path, "validation", dataset)
+        assert [task.task_id for task in discovery[dataset]] == [
+            task.task_id for task in train[52:55]
+        ]
+        assert natural[dataset].task_id == train[55].task_id
+        assert [task.task_id for task in confirmation[dataset]] == [
+            task.task_id for task in validation[:40]
+        ]
+        selected_ids.update(task.task_id for task in discovery[dataset])
+        selected_ids.add(natural[dataset].task_id)
+        selected_ids.update(task.task_id for task in confirmation[dataset])
+        assert all(
+            task.metadata["joint_qa_partition"] == "skill_confirmation_round5"
+            for task in confirmation[dataset]
+        )
+    assert not selected_ids & prior_ids
+
+    fan_in = spec.candidate_actions["conditional_fan_in_deferred_format"][
+        "instruction"
+    ]
+    assert "without output_agent_id" in fan_in
+    assert "After that component executes" in fan_in
+    assert "empty Canvas reports" not in fan_in
+    assert spec.candidate_actions["exact_answer_handoff"] == (
+        runner.ROUND4_CANDIDATE_ACTIONS["exact_answer_handoff"]
+    )
+
+    manifest = runner._manifest(discovery, confirmation, natural, spec)
+    assert manifest["confirmation_block"] == (
+        "joint_qa_v2/skill_confirmation_round5:[0:40]_per_dataset "
+        "(zero-based, stop-exclusive)"
+    )
+    assert manifest["additional_confirmation_manifest"] == (
+        "data/joint_qa_v2/skill_confirmation_round5_manifest.json"
+    )
+    assert manifest["prompt_version"] == (
+        "agentgraph.director.progressive_subgraph.intermediate-partial.v2"
+    )
+    assert manifest["selection_coordinates"]["skill_confirmation"] == {
+        "partition": "skill_confirmation_round5",
+        "start": 0,
+        "stop": 40,
+        "zero_based_stop_exclusive": True,
+    }
+    assert manifest["epochs"] == {
+        "discovery": 12,
+        "validation": 13,
+        "eligible_activation": 14,
+    }
+
+
 def test_unknown_round_is_rejected() -> None:
     with pytest.raises(ValueError, match="unsupported Skill evidence round"):
-        runner._spec_for_round(5)
+        runner._spec_for_round(6)

@@ -1,0 +1,17 @@
+schema_version: "flowsteer.joint-qa.additional-confirmation.v1"
+dataset_catalog_path: "config/datasets_agentgraph.yaml"
+base_manifest_path: "data/joint_qa_v2/manifest.json"
+base_confirmation_path: "data/joint_qa_v2/skill_confirmation_all.jsonl"
+output_path: "data/joint_qa_v2/skill_confirmation_round5.jsonl"
+combined_output_path: "data/joint_qa_v2/skill_confirmation_all_round5.jsonl"
+manifest_path: "data/joint_qa_v2/skill_confirmation_round5_manifest.json"
+datasets: [hotpotqa, triviaqa]
+partition: "skill_confirmation_round5"
+task_split: "validation"
+
+# Round 4 froze canonical positions [864, 904).  This adjacent block is
+# write-once, disjoint from train/development/test and every earlier Skill
+# evidence epoch, and remains excluded from GRPO and reported task metrics.
+candidate_range:
+  start: 904
+  stop: 944

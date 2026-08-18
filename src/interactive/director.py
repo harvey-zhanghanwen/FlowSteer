@@ -380,9 +380,11 @@ class AgentGraphOrchestrator:
         include_task_context: bool,
         skills: Sequence[Mapping[str, Any]],
     ) -> dict[str, Any]:
-        complete_validation = env.graph.validate(
+        # FlowSteer applies terminal completeness at FINISH.  Intermediate
+        # Canvas observations expose only mutation-safety validation.
+        partial_validation = env.graph.validate(
             self.registry,
-            require_complete=True,
+            require_complete=False,
         )
         snapshot = env.snapshot()
         directed_edges = [
@@ -400,17 +402,18 @@ class AgentGraphOrchestrator:
             # direct edge view avoids making the Director mentally invert a
             # relation after AgentGraph canonicalizes endpoint order.
             payload["directed_edges"] = directed_edges
-        if complete_validation.issues:
+        if partial_validation.issues:
             payload["structural_issues"] = [
                 {
                     "code": issue.code,
                     "message": issue.message,
                 }
-                for issue in complete_validation.issues
+                for issue in partial_validation.issues
             ]
-        format_issue = env.format_agent_issue()
-        if format_issue is not None:
-            payload["terminal_format_issue"] = format_issue
+        if env.graph.output_agent_id is not None:
+            format_issue = env.format_agent_issue()
+            if format_issue is not None:
+                payload["terminal_format_issue"] = format_issue
         if include_task_context:
             payload.update(
                 {

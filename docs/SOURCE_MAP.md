@@ -501,3 +501,25 @@ necessary runner integration for the design document's policy-drift rule; it
 does not add a second lifecycle implementation.  The same boundary now derives
 the manifest's post-update canary bound from `policy_sync.post_update_canary_count`
 instead of reporting a stale constant.
+
+## Intermediate Canvas terminal-feedback alignment and Skill epoch 5
+
+Round 4 supplied the causal evidence for one narrower architecture correction.
+The `conditional_fan_in_deferred_format` prompt prior was executable end to
+end, but most treatment trajectories either selected an Output prematurely or
+reached `max_rounds`.  The Director observation was applying complete-graph and
+Format checks to every intermediate Canvas, while both FlowSteer and the local
+Runtime reserve those checks for the `FINISH` boundary.
+
+| Current module | Classification | Reference source | Reused boundary | Minimal adaptation |
+| --- | --- | --- | --- | --- |
+| `director.py::AgentGraphOrchestrator._canvas_observation` | Necessary FlowSteer compatibility correction | FlowSteer `workflow_env.py::_step_internal`: `_check_finish_constraints` runs only in the `FINISH` branch; local `AgentWorkflowEnv.step` validates ordinary mutations and progressive execution with `require_complete=False` | Every accepted subgraph transaction still executes once and returns the same Canvas feedback; `FINISH` still enforces complete graph, Format Agent and exact-answer protocol | Intermediate observations use partial structural validation. `terminal_format_issue` is shown only after an Output has been selected. A premature `FINISH` remains rejected and its exact terminal issue is returned through `canvas_feedback`. |
+| `run_joint_qa_mace_skill.py` epoch 5 | Same MACE/Bayesian/Skill caller chain with new immutable coordinates | Existing `JointQAPosteriorScheduler`, randomized paired intervention, `SkillEvidencePipeline`, delayed activation and the two round-4 atomic hypotheses | No topology reward, direct Canvas edit, fixed Agent count, or relaxed gate | The obsolete round-4 workaround text is removed after the observation correction. Discovery uses train positions `[52:55]`, the natural candidate uses position `55`, and confirmation uses a fresh validation-only canonical block `[904:944]`. The changed observation protocol receives a new prompt version so its trajectories cannot group with earlier behavior. |
+| `joint_qa_round5_confirmation.yaml` | Existing additional-confirmation adapter reuse | `materialize_joint_qa_additional_confirmation.py`, which directly reuses the existing dataset converters and partition record adapter | Write-once sequential conversion and exclusion from GRPO, development metrics and final test | Publishes 40 new tasks per dataset as `skill_confirmation_round5`; the fixed test block and every earlier evidence task remain untouched. |
+
+Round 4 itself remains a valid rejection result: HotpotQA had paired mean
+`delta F1=-0.1923` with calibrated interval `[-0.3423,-0.0500]`; TriviaQA had
+`delta F1=+0.0375` but interval `[-0.0875,+0.1650]` and failed the unchanged
+harm gate. Neither candidate was activated or admitted to GRPO. Epoch 5 is
+therefore a new-policy revalidation after a source-mapped observation fix, not
+post-hoc activation of the rejected evidence.

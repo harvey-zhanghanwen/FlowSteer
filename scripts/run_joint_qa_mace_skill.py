@@ -244,6 +244,25 @@ ROUND4_CANDIDATE_ACTIONS: Mapping[str, Mapping[str, Any]] = {
 }
 
 
+# Round 5 reruns the same atomic hypotheses after aligning the Director's
+# intermediate Canvas observation with FlowSteer's actual interaction boundary:
+# terminal completeness and Format constraints are checked at FINISH, not on a
+# valid output-free semantic component.  The obsolete workaround text from
+# round 4 is removed; no topology reward or fixed role template is introduced.
+ROUND5_CANDIDATE_ACTIONS: Mapping[str, Mapping[str, Any]] = {
+    "conditional_fan_in_deferred_format": {
+        "instruction": (
+            "Only when two evidence subquestions are conditionally independent, "
+            "first use one ADD_SUBGRAPH for the two evidence Agents and their "
+            "semantic fan-in Agent, without output_agent_id. After that component "
+            "executes, use the next ADD_SUBGRAPH to add one Format Agent, connect "
+            "fan-in to Format, set Format as output_agent_id, and then FINISH."
+        )
+    },
+    "exact_answer_handoff": deepcopy(ROUND4_CANDIDATE_ACTIONS["exact_answer_handoff"]),
+}
+
+
 @dataclass(frozen=True)
 class SkillEvidenceRoundSpec:
     """Immutable coordinates for one bounded Skill evidence epoch."""
@@ -263,6 +282,7 @@ class SkillEvidenceRoundSpec:
     validation_epoch: int
     activation_epoch: int
     confirmation_source: str = "skill_confirmation"
+    prompt_version: str = PROMPT_VERSION
 
     @property
     def output_root(self) -> Path:
@@ -393,12 +413,32 @@ EPOCH4_SPEC = SkillEvidenceRoundSpec(
     confirmation_source="skill_confirmation_round4",
 )
 
+EPOCH5_SPEC = SkillEvidenceRoundSpec(
+    round_id=5,
+    experiment_version="jointqa.mace-skill-evidence.epoch5.v1",
+    candidate_actions=ROUND5_CANDIDATE_ACTIONS,
+    discovery_start=52,
+    discovery_stop=55,
+    natural_index=55,
+    confirmation_start=0,
+    confirmation_stop=40,
+    seed=20260823,
+    posterior_version="jointqa.bayesian-linear.progressive-subgraph.epoch6.v1",
+    skill_library_version="jointqa.skill-library.progressive.epoch13.v1",
+    discovery_epoch=12,
+    validation_epoch=13,
+    activation_epoch=14,
+    confirmation_source="skill_confirmation_round5",
+    prompt_version="agentgraph.director.progressive_subgraph.intermediate-partial.v2",
+)
+
 ROUND_SPECS: Mapping[int, SkillEvidenceRoundSpec] = {
     0: EPOCH0_SPEC,
     1: EPOCH1_SPEC,
     2: EPOCH2_SPEC,
     3: EPOCH3_SPEC,
     4: EPOCH4_SPEC,
+    5: EPOCH5_SPEC,
 }
 
 
@@ -485,6 +525,9 @@ def _selected_tasks(
     round4_confirmation_path = (
         ROOT / "data/joint_qa_v2/skill_confirmation_round4.jsonl"
     )
+    round5_confirmation_path = (
+        ROOT / "data/joint_qa_v2/skill_confirmation_round5.jsonl"
+    )
     development_path = ROOT / "data/joint_qa_v2/development.jsonl"
     train = tuple(iter_task_records(train_path, expected_split="train"))
     validation_sources = {
@@ -497,6 +540,11 @@ def _selected_tasks(
         "skill_confirmation_round4": tuple(
             iter_task_records(
                 round4_confirmation_path, expected_split="validation"
+            )
+        ),
+        "skill_confirmation_round5": tuple(
+            iter_task_records(
+                round5_confirmation_path, expected_split="validation"
             )
         ),
     }
@@ -669,7 +717,7 @@ def _versions(
         task,
         policy_version=POLICY_VERSION,
         model_catalog_version=backend.model_catalog_version,
-        prompt_version=PROMPT_VERSION,
+        prompt_version=spec.prompt_version,
         tool_version=TOOL_VERSION,
         encoder_version=ENCODER_VERSION,
         feature_schema_version=FEATURE_SCHEMA_VERSION,
@@ -984,15 +1032,15 @@ def _manifest(
         "feature_schema_version": FEATURE_SCHEMA_VERSION,
         "posterior_version": spec.posterior_version,
         "skill_library_version": spec.skill_library_version,
-        "prompt_version": PROMPT_VERSION,
+        "prompt_version": spec.prompt_version,
         "tool_version": TOOL_VERSION,
         "runtime_version": RUNTIME_VERSION,
         "primary_outcome": "official_answer_token_f1",
         "companion_outcome": "normalized_exact_match",
         "partition_manifest": "data/joint_qa_v2/manifest.json",
         "additional_confirmation_manifest": (
-            "data/joint_qa_v2/skill_confirmation_round4_manifest.json"
-            if spec.confirmation_source == "skill_confirmation_round4"
+            f"data/joint_qa_v2/{spec.confirmation_source}_manifest.json"
+            if spec.confirmation_source.startswith("skill_confirmation_round")
             else None
         ),
         "development_block": "joint_qa_v2/development",
@@ -1019,6 +1067,13 @@ def _manifest(
                     "reports/joint_qa_progressive/skill_epoch_000003/publication_results.json"
                 ]
                 if spec.round_id >= 4
+                else []
+            ),
+            *(
+                [
+                    "reports/joint_qa_progressive/skill_epoch_000004/publication_results.json"
+                ]
+                if spec.round_id >= 5
                 else []
             ),
             "reports/hotpotqa_multiagent_skill",

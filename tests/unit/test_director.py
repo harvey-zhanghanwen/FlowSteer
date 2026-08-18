@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import unittest
 
+from src.interactive.agent_graph import AgentGraph, AgentNode
 from src.interactive.agent_runtime import AgentResponse
 from src.interactive.agent_workflow_env import AgentWorkflowEnv
 from src.interactive.director import (
@@ -198,7 +199,8 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(initial_state["max_agents"], 10)
         self.assertEqual(initial_state["task"], "2+2?")
         self.assertNotIn("directed_edges", initial_state)
-        self.assertTrue(initial_state["structural_issues"])
+        self.assertNotIn("structural_issues", initial_state)
+        self.assertNotIn("terminal_format_issue", initial_state)
         qwen_catalog = next(
             item
             for item in initial_state["model_catalog"]
@@ -234,6 +236,109 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         # The latest progressive result occurs only in the current user
         # observation, rather than in a reconstructed history field.
         self.assertEqual(2, client.prompts[2].count("execution_result="))
+
+    async def test_intermediate_component_defers_terminal_constraints_until_finish(
+        self,
+    ) -> None:
+        model_registry = registry()
+        orchestrator = AgentGraphOrchestrator(
+            model_registry,
+            ScriptedDirector([]),
+        )
+        env = AgentWorkflowEnv(
+            model_registry,
+            gateway=FakeGateway(),
+            problem="two-hop question",
+            require_exact_answer_tag=True,
+            require_format_agent=True,
+        )
+        component_action = (
+            '{"action":"add_subgraph","agents":['
+            '{"agent_id":"left","model_id":"qwen","contract":"left evidence"},'
+            '{"agent_id":"right","model_id":"other","contract":"right evidence"},'
+            '{"agent_id":"merge","model_id":"qwen","contract":"merge evidence"}'
+            '],"relations":['
+            '{"source_id":"left","target_id":"merge",'
+            '"source_to_target":true,"target_to_source":false},'
+            '{"source_id":"right","target_id":"merge",'
+            '"source_to_target":true,"target_to_source":false}'
+            ']}'
+        )
+
+        initial_prompt = orchestrator.build_prompt(env, 0, ())
+        initial_state = observation_payload(transcript_messages(initial_prompt)[-1])
+        self.assertNotIn("structural_issues", initial_state)
+        self.assertNotIn("terminal_format_issue", initial_state)
+
+        component = await env.step(component_action)
+        self.assertTrue(component.accepted)
+        self.assertIsNone(env.graph.output_agent_id)
+        component_prompt = orchestrator.continue_prompt(
+            initial_prompt,
+            component_action,
+            env,
+            (),
+        )
+        component_state = observation_payload(
+            transcript_messages(component_prompt)[-1]
+        )
+        self.assertEqual(
+            "fan_in",
+            component_state["topology_statistics"]["topology_family"],
+        )
+        self.assertNotIn("structural_issues", component_state)
+        self.assertNotIn("terminal_format_issue", component_state)
+
+        finish_action = '{"action":"finish"}'
+        premature_finish = await env.step(finish_action)
+        self.assertFalse(premature_finish.accepted)
+        self.assertIn(
+            "output_agent_count",
+            {issue.code for issue in premature_finish.validation_issues},
+        )
+        finish_prompt = orchestrator.continue_prompt(
+            component_prompt,
+            finish_action,
+            env,
+            (),
+        )
+        finish_state = observation_payload(transcript_messages(finish_prompt)[-1])
+        self.assertIn("cannot finish", finish_state["canvas_feedback"])
+        self.assertIn("output_agent_count", finish_state["canvas_feedback"])
+        self.assertNotIn("structural_issues", finish_state)
+        self.assertNotIn("terminal_format_issue", finish_state)
+
+    async def test_selected_invalid_output_reports_terminal_format_issue(self) -> None:
+        model_registry = registry()
+        graph = AgentGraph(
+            nodes=(
+                AgentNode(
+                    "solver",
+                    "qwen",
+                    "compute the semantic answer",
+                    role_family="reasoning",
+                ),
+            ),
+            output_agent_id="solver",
+        )
+        env = AgentWorkflowEnv(
+            model_registry,
+            gateway=FakeGateway(),
+            problem="question",
+            graph=graph,
+            require_format_agent=True,
+        )
+        orchestrator = AgentGraphOrchestrator(
+            model_registry,
+            ScriptedDirector([]),
+        )
+
+        state = observation_payload(
+            transcript_messages(orchestrator.build_prompt(env, 0, ()))[-1]
+        )
+        self.assertNotIn("structural_issues", state)
+        self.assertIn("terminal_format_issue", state)
+        self.assertIn("distinct Format Agent", state["terminal_format_issue"])
 
     async def test_director_terminal_policy_is_issue_driven_without_role_template(
         self,
