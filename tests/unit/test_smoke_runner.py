@@ -639,7 +639,9 @@ class SelectionTests(unittest.TestCase):
         }
         self.assertEqual("hotpotqa.official.answer.v1", versions["hotpotqa"])
         self.assertEqual("triviaqa.official.answer.v1", versions["triviaqa"])
-        self.assertEqual("skillflow.training.reward.v1", versions["aime_2026"])
+        self.assertEqual(
+            "skillflow.protocol-v10.static.integer.v1", versions["aime_2026"]
+        )
         self.assertEqual(versions["webshop"], versions["alfworld"])
         self.assertEqual(6, len(set(versions.values())))
 

@@ -117,11 +117,19 @@ class StaticEvaluatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1.0, normalized.metrics["exact_match"])
         self.assertAlmostEqual(2.0 / 3.0, repeated.metrics["token_f1"])
 
-    async def test_aime_uses_skillflow_exact_answer_extraction(self) -> None:
-        outcome = await evaluate_task(task("AIME 2026", ground_truth="56"), "Thus \\boxed{56}.")
+    async def test_aime_uses_skillflow_protocol10_integer_submission(self) -> None:
+        outcome = await evaluate_task(
+            task("AIME 2026", ground_truth="56"), "<answer>056</answer>"
+        )
         self.assertTrue(outcome.valid)
         self.assertEqual(1.0, outcome.reward)
+        self.assertEqual(1.0, outcome.metrics["accuracy"])
         self.assertEqual(1.0, outcome.metrics["exact_match"])
+
+        free_form = await evaluate_task(
+            task("AIME 2026", ground_truth="56"), "Thus \\boxed{56}."
+        )
+        self.assertEqual(0.0, free_form.reward)
 
     async def test_explicit_answer_boundary_is_scored_and_raw_output_is_retained(self) -> None:
         raw = "A long explanation with distractor 999. <answer>red fox</answer>"

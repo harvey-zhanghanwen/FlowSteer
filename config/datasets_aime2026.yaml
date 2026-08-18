@@ -1,0 +1,29 @@
+# AIME-specific population boundary for architecture development and Stable
+# Zero evaluation.  This follows SkillFlow Protocol 10's year boundary: AIME
+# through 2024 for training, AIME 2025 for development, and all 30 official AIME 2026
+# tasks for final evaluation.  The available year-labelled training source
+# begins in 2000, so this catalog materializes a 512-task 2000--2024 subset.
+# No training is enabled by this catalog.
+
+schema_version: "flowsteer.agentgraph.aime2026.dataset.v1"
+task_schema_version: "flowsteer.agentgraph.task.v1"
+aligned_dir: "data/aime2026_v1"
+
+sources:
+  # The local year-labelled historical population is used so 2025 can be
+  # excluded by identity instead of relying on the older mixed 1983--2025 pool.
+  historical_path: "${FLOWSTEER_AIME_HISTORY_PATH:-/ssd1/iclr/2/datasets/aime_2000_2025/aime_2000_2025.jsonl}"
+  # FlowSteer's 30-problem AIME 2025 evaluation source.
+  development_path: "${FLOWSTEER_AIME2025_PATH:-/ssd1/iclr/owner/skillflow-iclr/resources/datasets/FlowSteer-Dataset/eval/aime2025.jsonl}"
+  # MathArena/EnvCommons official 30-problem AIME 2026 release.
+  final_path: "${FLOWSTEER_DATASETS_ROOT:-/home/test/datasets}/AIME_2026/data/train-*.parquet"
+
+split_policy:
+  training_maximum_year: 2024
+  train_count: 512
+  development_year: 2025
+  development_count: 30
+  final_year: 2026
+  final_count: 30
+  final_evaluation_only: true
+  training_enabled: false

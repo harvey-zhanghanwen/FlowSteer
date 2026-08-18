@@ -31,6 +31,10 @@ import string
 import sys
 from typing import Any, Awaitable, Callable, Mapping, Optional, Sequence
 
+from .aime2026_adapter import (
+    AIME2026_EVALUATOR_VERSION,
+    score_aime2026_integer,
+)
 from .records import TaskRecord
 
 
@@ -516,6 +520,41 @@ def _evaluate_static(
             ),
         },
         evaluator_version=evaluator_version,
+    )
+
+
+def _evaluate_aime2026(
+    record: TaskRecord | Mapping[str, Any], prediction: str
+) -> EvaluationOutcome:
+    """Apply SkillFlow Protocol 10's strict INTEGER submission scorer."""
+
+    answers = _accepted_answers(record)
+    if not answers:
+        return _invalid(
+            "missing_ground_truth",
+            evaluator_version=AIME2026_EVALUATOR_VERSION,
+        )
+    try:
+        result = score_aime2026_integer(prediction, answers)
+    except (TypeError, ValueError) as exc:
+        return _invalid(
+            "aime_trusted_answer_invalid",
+            evaluator_version=AIME2026_EVALUATOR_VERSION,
+            details={"error_type": type(exc).__name__, "error": str(exc)},
+        )
+    return EvaluationOutcome(
+        valid=True,
+        reward=result.accuracy,
+        metrics={"accuracy": result.accuracy, "exact_match": result.accuracy},
+        reason="evaluated",
+        details={
+            "accepted_answer_count": len(answers),
+            "raw_prediction": result.raw_prediction,
+            "scored_prediction": result.scored_prediction,
+            "structured_answer_extracted": result.structured_answer_extracted,
+            "metric_scope": "official_integer_submission",
+        },
+        evaluator_version=AIME2026_EVALUATOR_VERSION,
     )
 
 
@@ -1296,8 +1335,10 @@ async def evaluate_task(
     if max_environment_steps <= 0:
         raise ValueError("max_environment_steps must be positive")
     dataset = _dataset_key(record)
-    if dataset in {"hotpotqa", "triviaqa", "aime"}:
+    if dataset in {"hotpotqa", "triviaqa"}:
         return _evaluate_static(record, str(prediction), dataset)
+    if dataset == "aime":
+        return _evaluate_aime2026(record, str(prediction))
     if dataset == "healthbench":
         return await _evaluate_healthbench(
             record,
@@ -1322,6 +1363,7 @@ __all__ = [
     "DEFAULT_RAGEN_ADAPTER_PATH",
     "EvaluationOutcome",
     "GRADER_TEMPLATE",
+    "AIME2026_EVALUATOR_VERSION",
     "HOTPOTQA_ANSWER_EVALUATOR_VERSION",
     "TRIVIAQA_ANSWER_EVALUATOR_VERSION",
     "evaluate_task",

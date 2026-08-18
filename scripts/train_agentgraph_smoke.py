@@ -79,11 +79,11 @@ from src.interactive.smoke_trainer import (
 )
 from src.interactive.task_dataset import iter_task_records
 from src.interactive.task_evaluator import (
+    AIME2026_EVALUATOR_VERSION,
     EvaluationOutcome,
     HEALTHBENCH_EVALUATOR_VERSION,
     HOTPOTQA_ANSWER_EVALUATOR_VERSION,
     RAGEN_EVALUATOR_VERSION,
-    SKILLFLOW_REWARD_VERSION,
     SWEBENCH_EVALUATOR_VERSION,
     TRIVIAQA_ANSWER_EVALUATOR_VERSION,
     evaluate_task,
@@ -573,7 +573,7 @@ def evaluator_version_for(task: TaskRecord) -> str:
     if source == "triviaqa":
         return TRIVIAQA_ANSWER_EVALUATOR_VERSION
     if source == "aime_2026":
-        return SKILLFLOW_REWARD_VERSION
+        return AIME2026_EVALUATOR_VERSION
     if source == "healthbench_professional":
         return HEALTHBENCH_EVALUATOR_VERSION
     if source in {"webshop", "alfworld"}:
