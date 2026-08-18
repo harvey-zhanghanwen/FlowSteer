@@ -20,7 +20,7 @@ data:
   catalog_path: "config/datasets_agentgraph.yaml"
   train_path: "data/joint_qa_v2/train.jsonl"
   validation_path: "data/joint_qa_v2/development.jsonl"
-  skill_confirmation_path: "data/joint_qa_v2/skill_confirmation.jsonl"
+  skill_confirmation_path: "data/joint_qa_v2/skill_confirmation_all.jsonl"
   test_path: "data/joint_qa_v2/test.jsonl"
   enforce_split_isolation: true
   task_schema_version: "flowsteer.agentgraph.task.v1"

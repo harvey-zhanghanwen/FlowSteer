@@ -656,6 +656,69 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(finished.execution_reused)
         self.assertEqual(1, runtime.execute_count)
 
+    async def test_fan_in_component_then_format_uses_two_execution_boundaries(self) -> None:
+        registry = make_registry()
+
+        class FormatGateway(_ImmediateGateway):
+            async def generate(self, request: AgentRequest) -> str:
+                self.requests.append(request)
+                if request.is_format_agent:
+                    return "<answer>Paris</answer>"
+                return f"evidence:{request.agent.id}"
+
+        gateway = FormatGateway()
+        runtime = _CountingRuntime(registry, gateway)
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=runtime,
+            problem="question",
+            execute_on_edit=True,
+            require_exact_answer_tag=True,
+            require_format_agent=True,
+        )
+
+        component = await env.step(
+            '{"action":"add_subgraph","agents":['
+            '{"agent_id":"left","model_id":"cheap","contract":"left evidence"},'
+            '{"agent_id":"right","model_id":"fast","contract":"right evidence"},'
+            '{"agent_id":"merge","model_id":"balanced","contract":"join evidence"}'
+            '],"relations":['
+            '{"source_id":"left","target_id":"merge",'
+            '"source_to_target":true,"target_to_source":false},'
+            '{"source_id":"right","target_id":"merge",'
+            '"source_to_target":true,"target_to_source":false}'
+            ']}'
+        )
+        self.assertTrue(component.accepted)
+        self.assertEqual(1, runtime.execute_count)
+        self.assertIsNone(env.graph.output_agent_id)
+        self.assertIsNone(component.final_answer)
+        self.assertEqual(
+            {"left", "right", "merge"}, set(component.execution.executed_agent_ids)
+        )
+
+        formatted = await env.step(
+            '{"action":"add_subgraph","agents":['
+            '{"agent_id":"format","model_id":"fast",'
+            '"contract":"serialize one answer","role_family":"format"}'
+            '],"relations":['
+            '{"source_id":"merge","target_id":"format",'
+            '"source_to_target":true,"target_to_source":false}'
+            '],"output_agent_id":"format"}'
+        )
+        self.assertTrue(formatted.accepted)
+        self.assertEqual(2, runtime.execute_count)
+        self.assertEqual(("format",), formatted.execution.executed_agent_ids)
+        self.assertEqual(
+            {"left", "right", "merge"}, set(formatted.execution.reused_agent_ids)
+        )
+        self.assertEqual("<answer>Paris</answer>", formatted.final_answer)
+
+        finished = await env.step('{"action":"finish"}')
+        self.assertTrue(finished.accepted)
+        self.assertTrue(finished.execution_reused)
+        self.assertEqual(2, runtime.execute_count)
+
     async def test_two_agent_bidirectional_subgraph_executes_one_bounded_block(self) -> None:
         registry = make_registry()
         gateway = _ImmediateGateway()

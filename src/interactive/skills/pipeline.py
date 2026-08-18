@@ -216,12 +216,14 @@ class PromptSkillPrior:
     rejectable: bool = field(default=True, init=False)
 
     def to_dict(self) -> dict[str, Any]:
+        # Match SkillFlow's model-visible retrieval boundary: identity plus the
+        # authored content.  Full condition/action/evidence remain in the
+        # frozen SkillRecord and trajectory/version receipts, rather than being
+        # duplicated in every Director observation.
         return {
             "skill_id": self.skill_id,
             "version": self.version,
             "content": self.content,
-            "condition": dict(self.condition),
-            "action": dict(self.action),
             "application_mode": self.application_mode,
             "rejectable": self.rejectable,
         }
@@ -232,17 +234,16 @@ def render_validated_skill(skill: SkillRecord) -> str:
 
     if skill.status is not SkillStatus.ACTIVE or not skill.gate_receipt:
         raise ValueError("only an ACTIVE, gate-validated Skill can be rendered")
-    evidence = skill.evidence
-    failure_scope = canonical_json(list(skill.failure_scope))
+    condition = skill.to_dict()["condition"]
+    action = skill.to_dict()["action"]
+    instruction = action.get("instruction")
+    if not isinstance(instruction, str) or not instruction.strip():
+        instruction = canonical_json(action)
     return (
         f"Optional validated Skill {skill.skill_id}@{skill.version}. "
-        f"Condition={canonical_json(skill.to_dict()['condition'])}. "
-        f"Suggested action={canonical_json(skill.to_dict()['action'])}. "
-        f"Independent paired effect={evidence.paired_effect_mean:.12g}, "
-        f"calibrated interval=[{evidence.calibrated_lower:.12g},"
-        f"{evidence.calibrated_upper:.12g}], "
-        f"effective problems={len(evidence.independent_problem_ids)}, "
-        f"failure scope={failure_scope}. "
+        f"Applicability: task_family={condition.get('task_family', '*')}, "
+        f"graph_stage={condition.get('graph_stage', '*')}. "
+        f"Instruction: {instruction.strip()} "
         "This is a prompt prior only; the Director may accept, modify, or reject it."
     )
 

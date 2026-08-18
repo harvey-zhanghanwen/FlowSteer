@@ -1,0 +1,19 @@
+schema_version: "flowsteer.joint-qa.additional-confirmation.v1"
+dataset_catalog_path: "config/datasets_agentgraph.yaml"
+base_manifest_path: "data/joint_qa_v2/manifest.json"
+base_confirmation_path: "data/joint_qa_v2/skill_confirmation.jsonl"
+output_path: "data/joint_qa_v2/skill_confirmation_round4.jsonl"
+combined_output_path: "data/joint_qa_v2/skill_confirmation_all.jsonl"
+manifest_path: "data/joint_qa_v2/skill_confirmation_round4_manifest.json"
+datasets: [hotpotqa, triviaqa]
+partition: "skill_confirmation_round4"
+task_split: "validation"
+
+# The existing joint_qa_v2 stream ends at canonical position 864 after the
+# fixed test block.  These next records have not appeared in any project
+# partition or prior artifact.  They are frozen once as round-4 confirmation
+# and permanently excluded from GRPO and reported development/test metrics.
+candidate_range:
+  start: 864
+  stop: 904
+

@@ -266,12 +266,13 @@ class SkillPipelineTests(unittest.TestCase):
         self.assertTrue(prior.rejectable)
         self.assertEqual(prior.application_mode, "rejectable_prompt_prior")
         self.assertIn("may accept, modify, or reject", prior.content)
-        self.assertIn("effective problems=2", prior.content)
+        self.assertIn("Applicability: task_family=hotpotqa", prior.content)
+        self.assertIn("Instruction:", prior.content)
         serialized = prior.to_dict()
         self.assertNotIn("canvas_patch", serialized)
         self.assertNotIn("canvas_action", serialized)
-        self.assertEqual(serialized["condition"], CONDITION)
-        self.assertEqual(serialized["action"], ACTION)
+        self.assertNotIn("condition", serialized)
+        self.assertNotIn("action", serialized)
 
         history = self.pipeline.skill_store.history(candidate.skill_id)
         self.assertEqual(

@@ -400,10 +400,12 @@ adoption.
 | Current module | Classification | Reference source | Reused boundary | Minimal adaptation |
 | --- | --- | --- | --- | --- |
 | `exploration/skill_experiment.py::rank_probes_by_evsi` | Project-algorithm wiring required by the design note | Existing `exploration/evsi.py::{make_common_random_numbers,particle_evsi_many}` and joint `BayesianLinearPosterior` | MACE-style posterior UCB supplies a top-K candidate set; particle EVSI with common random numbers selects the next paid paired intervention | The existing numerical EVSI primitive previously had no joint-QA caller.  The adapter only maps the fixed candidate/dataset feature differences into that primitive and records the deterministic ranking. |
-| `run_joint_qa_mace_skill.py` | Thin experiment adapter | Existing paired-probe runner, `JointQAPosteriorScheduler`, `SkillEvidencePipeline`, and SkillFlow retrieval observation adapter | Balanced cold start, UCB prefilter, EVSI selection, randomized paired-arm order, independent confirmation, deterministic gate, and delayed next-epoch activation | Old Step-2 paths and a fixed fan-in prior were incompatible with the new `add_subgraph` action profile.  The runner uses disjoint `joint_qa_v2` train evidence plus a versioned confirmation partition (`skill_confirmation` in rounds 0–2; development `[32:52]` in round 3) and bounded, rejectable failure-derived priors without mutating Canvas. |
+| `run_joint_qa_mace_skill.py` | Thin experiment adapter | Existing paired-probe runner, `JointQAPosteriorScheduler`, `SkillEvidencePipeline`, and SkillFlow retrieval observation adapter | Balanced cold start, UCB prefilter, EVSI selection, randomized paired-arm order, independent confirmation, deterministic gate, and delayed next-epoch activation | Old Step-2 paths and a fixed fan-in prior were incompatible with the new `add_subgraph` action profile.  The runner uses disjoint train evidence plus a versioned confirmation partition (`skill_confirmation` in rounds 0–2; adaptive development `[32:52]` in round 3; fresh canonical source `[864:904]` in round 4) and bounded, rejectable failure-derived priors without mutating Canvas. |
 | `skills/pipeline.py::retrieval_snapshot` | SkillFlow lifecycle adaptation | SkillFlow frozen ACTIVE Skill library per rollout/training epoch | Every Director turn in one batch reads the same immutable Skill records | The local pipeline formerly reread its JSON store on every turn.  An optional typed snapshot freezes visibility while leaving the existing store and retriever unchanged. |
+| `skills/pipeline.py::{PromptSkillPrior.to_dict,render_validated_skill}` | SkillFlow model-visible context adaptation | SkillFlow `TaskConditionedSkillRetriever.retrieve` and `render_retrieved_skill_block` expose Skill identity plus authored content, while applicability/evidence remain in the frozen library and receipts | ACTIVE-only retrieval, full SkillStore record, exact version binding, and rejectable prompt-prior semantics | The previous Director observation repeated full condition/action/evidence metadata and the instruction.  The model-visible projection now contains Skill ID/version, one applicability line, and one instruction; complete condition/action/evidence remain persisted and unchanged. |
 | `train_agentgraph_smoke.py` Skill-on joint micro boundary | Necessary SkillFlow training adaptation | Existing SkillFlow-style exact group admission, one-pass LoRA learner, frozen schedule/cursor, adapter publication and updated-policy canary | Terminal F1-only GRPO, one real `optimizer.step`, exact policy/version receipt, pause/drain/load/canary route switch | Skill-on is admitted only for a frozen store containing version-compatible ACTIVE Skills covering both datasets.  The manifest records posterior/library versions and first-turn Skill visibility; forced probes remain disabled.  Joint schedule resolution additionally includes the independent Skill-confirmation path in its held-out union. |
 | `materialize_joint_qa_progressive_skill_training.py`, `freeze_joint_qa_training_schedule.py` | Necessary experiment materialization adaptation | Existing `freeze_joint_qa_training_schedule`, write-once cursor, `SkillStore`, YAML loader, and `validate_smoke_bounds` | Evidence gate is checked before a fixed train-only schedule and resolved Skill-on config can exist | The adapter selects one predeclared unused train position per dataset, binds exact ACTIVE Skill IDs/library/posterior/policy versions, and writes no rollout or model state.  The freeze CLI now forwards the optional Skill-confirmation path into the existing held-out-union check. |
+| `materialize_joint_qa_additional_confirmation.py` | Necessary data-partition adaptation | Existing `prepare_agentgraph_datasets.CONVERTERS` and `prepare_joint_qa_partitions::{_take_candidate_prefix,_partition_record}` | Canonical sequential conversion, TaskRecord retagging, write-once publication, and problem-ID isolation | The original 64-item confirmation block is exhausted and the development block was exposed by prior architecture evaluation.  The adapter freezes canonical positions `[864:904]` after the untouched test block as validation-only data and emits a combined held-out union; it does not add a converter or change train/development/test records. |
 | Progressive Step-0 and Skill-on Step-1 YAML files | Necessary configuration adaptation | Existing HotpotQA/TriviaQA evaluators, ten-arm v6 Executor catalog, formal zero-update LoRA, and joint-QA smoke trainer | Fixed development sample, local Qwen3.5-9B Director, `add_subgraph` search space, two train tasks x eight rollouts, one update, and two canaries | The training YAML remains a fail-closed template until evidence-gated ACTIVE Skill IDs and their exact library/posterior versions are materialized.  No placeholder is reported as an executed run. |
 
 The SkillStore is frozen before natural GRPO collection.  A successful LoRA
@@ -453,18 +455,34 @@ Skill evidence gate.
 
 Round 2 then established positive, zero-harm mean effects for semantic
 grounding on both datasets, but its problem-cluster bootstrap lower bounds did
-not clear the unchanged publication threshold.  The final bounded evidence
-round therefore combines that observed answer contract with the FlowSteer
+not clear the unchanged publication threshold.  Round 3 therefore combined
+that observed answer contract with the FlowSteer
 component boundary in one rejectable prior: conditionally independent evidence
 branches and their semantic fan-in execute as one `ADD_SUBGRAPH` transaction,
 and the Format Agent is added only after Canvas feedback.  Serial and
 single-hop tasks retain the smallest directed semantic component.  The round
 uses train positions `[17:20]`, natural-candidate position `20`, and the
-previously unopened development positions `[32:52]`; the fixed development
-evaluation `[0:32]`, all prior evidence, formal GRPO positions, and final test
-remain excluded.  This is a refinement of immutable experiment coordinates
-and prompt-prior content over the same runner, posterior, paired intervention,
-and gate—not a new exploration or Skill architecture.
+progressive-runner-unused development positions `[32:52]`; the fixed
+development evaluation `[0:32]`, all prior evidence, formal GRPO positions,
+and final test remain excluded.  Those positions had appeared in an earlier
+128-task architecture evaluation, so round 3 is adaptive revalidation rather
+than independent confirmation.  Its negative result is retained, but it cannot
+publish a Skill.  This is a refinement of immutable experiment coordinates and
+prompt-prior content over the same runner, posterior, paired intervention, and
+gate—not a new exploration or Skill architecture.
+
+Round 3 selected the answer-handoff candidate on both datasets, but its paired
+effects were negative and the unchanged gate rejected publication.  Its long
+prompt prior also reduced depth-three final graphs and did not produce a
+committed fan-in topology.  Round 4 therefore leaves the runtime and action
+space unchanged and separates the prior into (1) conditional fan-in with
+deferred Format and (2) exact-answer handoff.  This follows SkillFlow's rule
+that a Skill is a rejectable prompt prior rather than a direct Canvas edit.
+Discovery uses previously unused train positions `[48:51]` plus natural
+position `51`.  Confirmation is materialized by the existing converters from
+canonical source positions `[864:904]`, after the complete frozen test block;
+these 40 fresh problems per dataset are validation-only and are included in
+the optimizer schedule's held-out union.
 
 `materialize_joint_qa_progressive_evaluations.py` and
 `materialize_joint_qa_progressive_skill_training.py` derive the common delayed

@@ -216,6 +216,34 @@ ROUND3_CANDIDATE_ACTIONS: Mapping[str, Mapping[str, Any]] = {
 }
 
 
+# Round 4 separates the two atomic prompt priors that round 3 combined.  The
+# first addresses only FlowSteer's component-execution order; the second keeps
+# semantic selection outside the Format Agent.  Both are short, conditional,
+# and rejectable.  They use a new canonical source block beyond every existing
+# joint_qa_v2 partition rather than reusing exposed development examples.
+ROUND4_CANDIDATE_ACTIONS: Mapping[str, Mapping[str, Any]] = {
+    "conditional_fan_in_deferred_format": {
+        "instruction": (
+            "Only when two evidence subquestions are conditionally independent, "
+            "first use one ADD_SUBGRAPH for the two evidence Agents and their "
+            "semantic fan-in Agent. Omit output_agent_id at this stage, even if the "
+            "empty Canvas reports that no Format Output is selected. After "
+            "execution, use the next ADD_SUBGRAPH to add one Format Agent, connect "
+            "fan-in to Format, set Format as output_agent_id, and then FINISH."
+        )
+    },
+    "exact_answer_handoff": {
+        "instruction": (
+            "Pass exactly one supported answer candidate to the Format Agent. The "
+            "candidate must match the question's semantic type and preserve required "
+            "names, modifiers, units, and evidence language. The Format Agent only "
+            "copies that candidate into one <answer> tag; it must not shorten, "
+            "translate, expand, or add alternatives."
+        )
+    },
+}
+
+
 @dataclass(frozen=True)
 class SkillEvidenceRoundSpec:
     """Immutable coordinates for one bounded Skill evidence epoch."""
@@ -347,11 +375,30 @@ EPOCH3_SPEC = SkillEvidenceRoundSpec(
     confirmation_source="development",
 )
 
+EPOCH4_SPEC = SkillEvidenceRoundSpec(
+    round_id=4,
+    experiment_version="jointqa.mace-skill-evidence.epoch4.v1",
+    candidate_actions=ROUND4_CANDIDATE_ACTIONS,
+    discovery_start=48,
+    discovery_stop=51,
+    natural_index=51,
+    confirmation_start=0,
+    confirmation_stop=40,
+    seed=20260822,
+    posterior_version="jointqa.bayesian-linear.progressive-subgraph.epoch5.v1",
+    skill_library_version="jointqa.skill-library.progressive.epoch11.v1",
+    discovery_epoch=9,
+    validation_epoch=10,
+    activation_epoch=11,
+    confirmation_source="skill_confirmation_round4",
+)
+
 ROUND_SPECS: Mapping[int, SkillEvidenceRoundSpec] = {
     0: EPOCH0_SPEC,
     1: EPOCH1_SPEC,
     2: EPOCH2_SPEC,
     3: EPOCH3_SPEC,
+    4: EPOCH4_SPEC,
 }
 
 
@@ -435,6 +482,9 @@ def _selected_tasks(
 ]:
     train_path = ROOT / "data/joint_qa_v2/train.jsonl"
     confirmation_path = ROOT / "data/joint_qa_v2/skill_confirmation.jsonl"
+    round4_confirmation_path = (
+        ROOT / "data/joint_qa_v2/skill_confirmation_round4.jsonl"
+    )
     development_path = ROOT / "data/joint_qa_v2/development.jsonl"
     train = tuple(iter_task_records(train_path, expected_split="train"))
     validation_sources = {
@@ -443,6 +493,11 @@ def _selected_tasks(
         ),
         "development": tuple(
             iter_task_records(development_path, expected_split="validation")
+        ),
+        "skill_confirmation_round4": tuple(
+            iter_task_records(
+                round4_confirmation_path, expected_split="validation"
+            )
         ),
     }
     if spec.confirmation_source not in validation_sources:
@@ -935,6 +990,11 @@ def _manifest(
         "primary_outcome": "official_answer_token_f1",
         "companion_outcome": "normalized_exact_match",
         "partition_manifest": "data/joint_qa_v2/manifest.json",
+        "additional_confirmation_manifest": (
+            "data/joint_qa_v2/skill_confirmation_round4_manifest.json"
+            if spec.confirmation_source == "skill_confirmation_round4"
+            else None
+        ),
         "development_block": "joint_qa_v2/development",
         "confirmation_block": (
             "joint_qa_v2/skill_confirmation:first20_per_dataset"
@@ -954,6 +1014,13 @@ def _manifest(
         },
         "candidate_source_artifacts": [
             "reports/joint_qa_progressive/skill_epoch_000002/publication_results.json",
+            *(
+                [
+                    "reports/joint_qa_progressive/skill_epoch_000003/publication_results.json"
+                ]
+                if spec.round_id >= 4
+                else []
+            ),
             "reports/hotpotqa_multiagent_skill",
             "reports/joint_qa_curve",
             "reports/joint_qa_mace_skill",
