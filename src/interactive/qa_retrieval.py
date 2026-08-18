@@ -19,6 +19,8 @@ import re
 import sys
 from typing import Any, Mapping, Sequence
 
+from .records import TaskRecord
+
 
 DEFAULT_SKILLFLOW_SOURCE = Path(
     "/home/test/SKILLEV/skillflow-bayesian-improve-deploy/src"
@@ -283,6 +285,35 @@ class SkillFlowQARetriever:
         self.close()
 
 
+def augment_task_with_retrieval(
+    task: TaskRecord,
+    receipt: QARetrievalReceipt,
+) -> TaskRecord:
+    """Expose only SkillFlow's public search/read observations to the model.
+
+    The task identity, split, and evaluator payload remain unchanged.  Only the
+    model-visible question is augmented through ``receipt.render_problem``;
+    the metadata addition records the public retrieval boundary without
+    copying passages or accepted answers into evaluator state.
+    """
+
+    metadata = dict(task.metadata)
+    metadata["public_retrieval"] = {
+        "implementation": receipt.implementation,
+        "query": receipt.query,
+        "search_limit": receipt.search_limit,
+        "tool_calls": receipt.tool_calls,
+        "passage_ids": [passage.passage_id for passage in receipt.passages],
+    }
+    return TaskRecord(
+        task_id=task.task_id,
+        question=receipt.render_problem(task.question),
+        ground_truth=task.ground_truth,
+        split=task.split,
+        metadata=metadata,
+    )
+
+
 def receipt_from_mapping(value: Mapping[str, Any]) -> QARetrievalReceipt:
     """Restore a cached public receipt without reopening the index."""
 
@@ -320,6 +351,7 @@ __all__ = [
     "QARetrievalReceipt",
     "SkillFlowQARetriever",
     "SkillFlowRetrievalError",
+    "augment_task_with_retrieval",
     "build_keyword_query",
     "receipt_from_mapping",
 ]

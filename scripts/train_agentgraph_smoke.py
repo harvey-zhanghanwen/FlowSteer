@@ -37,8 +37,19 @@ from src.interactive.hotpot_training_schedule import (
     HotpotTrainingCursorState,
     HotpotTrainingProgress,
 )
+from src.interactive.joint_qa_training_schedule import (
+    FrozenJointQATrainingSchedule,
+    JointQATrainingCursorState,
+    JointQATrainingProgress,
+)
 from src.interactive.openai_gateway import OpenAICompatibleGateway
 from src.interactive.persistence import EvidenceStore
+from src.interactive.qa_retrieval import (
+    SkillFlowQARetriever,
+    augment_task_with_retrieval,
+    build_keyword_query,
+    receipt_from_mapping,
+)
 from src.interactive.policy_sync import (
     PolicySyncConfig,
     PolicySyncError,
@@ -108,6 +119,15 @@ def _is_hotpot_micro(config: Mapping[str, Any]) -> bool:
     return experiment.get("phase") == "hotpotqa_micro_training"
 
 
+def _is_joint_qa_micro(config: Mapping[str, Any]) -> bool:
+    experiment = _mapping(config.get("experiment"), "experiment")
+    return experiment.get("phase") == "joint_qa_micro_training"
+
+
+def _is_frozen_micro(config: Mapping[str, Any]) -> bool:
+    return _is_hotpot_micro(config) or _is_joint_qa_micro(config)
+
+
 def validate_smoke_bounds(config: Mapping[str, Any]) -> None:
     """Reject configs that expand either supported one-update transaction."""
 
@@ -115,9 +135,14 @@ def validate_smoke_bounds(config: Mapping[str, Any]) -> None:
     experiment = _mapping(config.get("experiment"), "experiment")
     data = _mapping(config.get("data"), "data")
     hotpot_micro = _is_hotpot_micro(config)
-    selection_name = "data.hotpot_micro" if hotpot_micro else "data.smoke"
+    joint_qa_micro = _is_joint_qa_micro(config)
+    frozen_micro = hotpot_micro or joint_qa_micro
+    selection_key = (
+        "hotpot_micro" if hotpot_micro else "joint_qa_micro" if joint_qa_micro else "smoke"
+    )
+    selection_name = f"data.{selection_key}"
     selection = _mapping(
-        data.get("hotpot_micro" if hotpot_micro else "smoke"),
+        data.get(selection_key),
         selection_name,
     )
     grpo = _mapping(config.get("grpo"), "grpo")
@@ -129,21 +154,43 @@ def validate_smoke_bounds(config: Mapping[str, Any]) -> None:
 
     checks = {
         "experiment.phase": experiment.get("phase")
-        == ("hotpotqa_micro_training" if hotpot_micro else "smoke_training"),
+        == (
+            "hotpotqa_micro_training"
+            if hotpot_micro
+            else "joint_qa_micro_training"
+            if joint_qa_micro
+            else "smoke_training"
+        ),
         "experiment.training_enabled": experiment.get("training_enabled") is True,
         f"{selection_name}.split": selection.get("split") == "train",
         f"{selection_name}.selection": selection.get("selection")
-        == ("frozen_hotpot_schedule" if hotpot_micro else "sequential_per_source"),
+        == (
+            "frozen_hotpot_schedule"
+            if hotpot_micro
+            else "frozen_joint_qa_schedule"
+            if joint_qa_micro
+            else "sequential_per_source"
+        ),
         f"{selection_name}.expected_total_tasks": selection.get(
             "expected_total_tasks"
         )
-        == (1 if hotpot_micro else 14),
+        == (1 if hotpot_micro else 2 if joint_qa_micro else 14),
         "grpo.enabled": grpo.get("enabled") is True,
         "grpo.samples_per_problem": type(grpo.get("samples_per_problem")) is int
         and int(grpo["samples_per_problem"]) >= 2
-        and (hotpot_micro or grpo.get("samples_per_problem") == 2),
+        and (
+            hotpot_micro
+            or (joint_qa_micro and grpo.get("samples_per_problem") == 8)
+            or (not frozen_micro and grpo.get("samples_per_problem") == 2)
+        ),
         "grpo.expected_rollout_count": grpo.get("expected_rollout_count")
-        == (grpo.get("samples_per_problem") if hotpot_micro else 28),
+        == (
+            grpo.get("samples_per_problem")
+            if hotpot_micro
+            else 16
+            if joint_qa_micro
+            else 28
+        ),
         "grpo.optimization_passes_per_rollout_batch": (
             grpo.get("optimization_passes_per_rollout_batch") == 1
         ),
@@ -151,9 +198,10 @@ def validate_smoke_bounds(config: Mapping[str, Any]) -> None:
         "grpo.terminal_task_reward_only": grpo.get("terminal_task_reward_only") is True,
         "policy_sync.enabled": policy_sync.get("enabled") is True,
         "policy_sync.post_update_canary_count": (
-            policy_sync.get("post_update_canary_count") == 1
+            policy_sync.get("post_update_canary_count")
+            == (2 if joint_qa_micro else 1)
         ),
-        "evaluation.healthbench_judge_model": hotpot_micro
+        "evaluation.healthbench_judge_model": frozen_micro
         or bool(str(evaluation.get("healthbench_judge_model", "")).strip()),
         "evaluation.max_environment_steps": (
             evaluation.get("max_environment_steps") == 12
@@ -177,13 +225,25 @@ def validate_smoke_bounds(config: Mapping[str, Any]) -> None:
             "smoke config violates fixed bounds: " + ", ".join(failed)
         )
 
-    if hotpot_micro:
-        if selection.get("dataset_key") != "hotpotqa":
-            raise ConfigurationError("data.hotpot_micro.dataset_key must be hotpotqa")
+    if frozen_micro:
+        expected_dataset_keys = (
+            ("hotpotqa",)
+            if hotpot_micro
+            else ("hotpotqa", "triviaqa")
+        )
+        configured_dataset_keys = (
+            (selection.get("dataset_key"),)
+            if hotpot_micro
+            else tuple(str(value) for value in selection.get("dataset_keys", ()))
+        )
+        if configured_dataset_keys != expected_dataset_keys:
+            raise ConfigurationError(
+                f"{selection_name} dataset keys must be {expected_dataset_keys!r}"
+            )
         for field_name in ("schedule_path", "cursor_path", "next_cursor_path"):
             if not str(selection.get(field_name, "")).strip():
                 raise ConfigurationError(
-                    f"data.hotpot_micro.{field_name} must be non-empty"
+                    f"{selection_name}.{field_name} must be non-empty"
                 )
         if len(
             {
@@ -193,8 +253,35 @@ def validate_smoke_bounds(config: Mapping[str, Any]) -> None:
             }
         ) != 3:
             raise ConfigurationError(
-                "HotpotQA schedule, cursor, and next cursor paths must differ"
+                "frozen schedule, cursor, and next cursor paths must differ"
             )
+        if joint_qa_micro:
+            retrieval = _mapping(
+                selection.get("retrieval"),
+                f"{selection_name}.retrieval",
+            )
+            if (
+                retrieval.get("enabled") is not True
+                or retrieval.get("mode")
+                != "deterministic_question_query_prefetch"
+                or int(retrieval.get("search_limit", 0)) < 1
+            ):
+                raise ConfigurationError(
+                    "joint QA micro-training requires the frozen SkillFlow public retrieval condition"
+                )
+            terminal = _mapping(
+                _mapping(config["agent_graph"], "agent_graph").get(
+                    "terminal_protocol_by_source"
+                ),
+                "agent_graph.terminal_protocol_by_source",
+            )
+            if any(
+                terminal.get(source) != "exact_single_answer_tag"
+                for source in expected_dataset_keys
+            ):
+                raise ConfigurationError(
+                    "joint QA micro-training requires exact_single_answer_tag for both datasets"
+                )
     else:
         if selection.get("tasks_per_dataset") != 2:
             raise ConfigurationError("data.smoke.tasks_per_dataset must be 2")
@@ -779,6 +866,92 @@ def _write_jsonl(path: Path, values: Sequence[Any]) -> None:
             )
 
 
+def _read_jsonl_mappings(path: Path) -> tuple[Mapping[str, Any], ...]:
+    if not path.is_file():
+        return ()
+    values: list[Mapping[str, Any]] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for line_number, raw_line in enumerate(handle, start=1):
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise SmokeRunError(
+                    f"JSONL line {line_number} is not valid JSON: {path}"
+                ) from exc
+            if not isinstance(value, Mapping):
+                raise SmokeRunError(
+                    f"JSONL line {line_number} is not a mapping: {path}"
+                )
+            values.append(value)
+    return tuple(values)
+
+
+def _augment_joint_trivia_tasks(
+    tasks: Sequence[TaskRecord],
+    *,
+    selection: Mapping[str, Any],
+    receipt_path: Path,
+) -> tuple[TaskRecord, ...]:
+    """Reuse the frozen SkillFlow public retrieval condition for joint rollout."""
+
+    trivia_tasks = tuple(task for task in tasks if _dataset_key(task) == "triviaqa")
+    if len(trivia_tasks) != 1:
+        raise SmokeRunError("each joint QA step must contain exactly one TriviaQA task")
+    cached_by_task = {
+        str(row.get("task_id")): row for row in _read_jsonl_mappings(receipt_path)
+    }
+    receipts: dict[str, Any] = {}
+    persisted: dict[str, Mapping[str, Any]] = {}
+    for task in trivia_tasks:
+        cached = cached_by_task.get(task.task_id)
+        if cached is None or cached.get("question") != task.question:
+            continue
+        receipt_value = cached.get("retrieval")
+        if not isinstance(receipt_value, Mapping):
+            continue
+        restored = receipt_from_mapping(receipt_value)
+        if restored.query != build_keyword_query(task.question):
+            continue
+        receipts[task.task_id] = restored
+        persisted[task.task_id] = cached
+
+    retrieval = _mapping(
+        selection.get("retrieval"),
+        "data.joint_qa_micro.retrieval",
+    )
+    missing = [task for task in trivia_tasks if task.task_id not in receipts]
+    if missing:
+        with SkillFlowQARetriever(
+            index_path=str(retrieval["index_path"]),
+            skillflow_source=str(retrieval["skillflow_source"]),
+            search_limit=int(retrieval["search_limit"]),
+        ) as retriever:
+            for task in missing:
+                receipt = retriever.retrieve(build_keyword_query(task.question))
+                receipts[task.task_id] = receipt
+                persisted[task.task_id] = {
+                    "schema_version": "flowsteer.triviaqa.public_retrieval.v1",
+                    "task_id": task.task_id,
+                    "question": task.question,
+                    "retrieval": receipt.to_dict(),
+                    "created_at": _utc_now(),
+                }
+        _write_jsonl(
+            receipt_path,
+            [persisted[task.task_id] for task in trivia_tasks],
+        )
+
+    return tuple(
+        augment_task_with_retrieval(task, receipts[task.task_id])
+        if _dataset_key(task) == "triviaqa"
+        else task
+        for task in tasks
+    )
+
+
 def _read_trajectory_records(path: Path) -> tuple[TrajectoryRecord, ...]:
     """Load persisted rollouts through the immutable record contract."""
 
@@ -927,15 +1100,6 @@ class LiveSmokeBackend:
         *,
         evaluation_only: bool = False,
     ) -> "LiveSmokeBackend":
-        secret = os.environ.get("VECTOR_ENGINE_API_KEY", "")
-        # Evaluation-only runs may intentionally freeze a local-only model
-        # catalog.  In that case neither the Agent gateway nor the disabled
-        # HealthBench judge needs the remote provider credential.
-        if not secret and not evaluation_only:
-            raise ConfigurationError(
-                "missing required environment variable: VECTOR_ENGINE_API_KEY"
-            )
-
         director = _mapping(config["director"], "director")
         experiment = _mapping(config["experiment"], "experiment")
         graph_config = _mapping(config["agent_graph"], "agent_graph")
@@ -953,6 +1117,25 @@ class LiveSmokeBackend:
                 f"model catalog does not exist: {catalog_path}; copy the example first"
             )
         registry = load_model_registry(catalog_path)
+        required_credentials = tuple(
+            sorted(
+                {
+                    provider.api_key_env
+                    for provider_id in registry.provider_ids
+                    for provider in (registry.require_provider(provider_id),)
+                    if provider.api_key_env is not None
+                }
+            )
+        )
+        missing_credentials = tuple(
+            name for name in required_credentials if not os.environ.get(name, "")
+        )
+        if missing_credentials:
+            raise ConfigurationError(
+                "missing required provider environment variable(s): "
+                + ", ".join(missing_credentials)
+            )
+        secret = os.environ.get("VECTOR_ENGINE_API_KEY", "")
 
         try:
             from transformers import AutoTokenizer
@@ -1073,7 +1256,7 @@ class LiveSmokeBackend:
         )
         judge: Optional[JudgeCallback] = None
         judge_model = ""
-        if not evaluation_only and not _is_hotpot_micro(config):
+        if not evaluation_only and not _is_frozen_micro(config):
             judge, judge_model = cls._build_healthbench_judge(
                 registry,
                 secret,
@@ -1424,7 +1607,7 @@ def _write_grpo_groups(path: Path, trajectories: Sequence[TrajectoryRecord]) -> 
 
 def _artifact_paths(config: Mapping[str, Any], root: Path) -> dict[str, Path]:
     storage = _mapping(config["storage"], "storage")
-    return {
+    paths = {
         "selected": _resolve(root, str(storage["selected_tasks_path"])),
         "trajectories": _resolve(root, str(storage["trajectories_path"])),
         "groups": _resolve(root, str(storage["grpo_groups_path"])),
@@ -1435,6 +1618,14 @@ def _artifact_paths(config: Mapping[str, Any], root: Path) -> dict[str, Path]:
             root, str(_mapping(config["experiment"], "experiment")["output_dir"])
         ),
     }
+    for name, field_name in (
+        ("retrieval", "retrieval_receipts_path"),
+        ("behavior_preflight", "behavior_policy_preflight_path"),
+    ):
+        value = storage.get(field_name)
+        if isinstance(value, str) and value.strip():
+            paths[name] = _resolve(root, value)
+    return paths
 
 
 def _select_run_scope(
@@ -1443,15 +1634,15 @@ def _select_run_scope(
 ) -> tuple[
     tuple[TaskRecord, ...],
     tuple[int, ...],
-    Optional[HotpotTrainingProgress],
+    Optional[HotpotTrainingProgress | JointQATrainingProgress],
     Optional[Path],
     Mapping[str, Any],
 ]:
-    """Resolve either the legacy 7x2 scope or one exact frozen HotpotQA step."""
+    """Resolve the legacy smoke scope or one exact frozen micro-training step."""
 
     data = _mapping(config["data"], "data")
     train_path = _resolve(root, str(data["train_path"]))
-    if not _is_hotpot_micro(config):
+    if not _is_frozen_micro(config):
         smoke = _mapping(data["smoke"], "data.smoke")
         selected = select_smoke_tasks(
             iter_task_records(train_path, expected_split="train"),
@@ -1464,6 +1655,58 @@ def _select_run_scope(
         )
         return selected, rollout_ordinals, None, None, {
             "selection": "sequential_per_source",
+        }
+
+    if _is_joint_qa_micro(config):
+        joint = _mapping(data["joint_qa_micro"], "data.joint_qa_micro")
+        schedule_path = _resolve(root, str(joint["schedule_path"]))
+        cursor_path = _resolve(root, str(joint["cursor_path"]))
+        next_cursor_path = _resolve(root, str(joint["next_cursor_path"]))
+        if next_cursor_path.exists():
+            raise FileExistsError(
+                f"write-once next joint-QA cursor already exists: {next_cursor_path}"
+            )
+        schedule = FrozenJointQATrainingSchedule.read(schedule_path)
+        cursor = JointQATrainingCursorState.read(cursor_path)
+        progress = JointQATrainingProgress.from_state(schedule, cursor)
+        resolved = schedule.resolve(
+            train_path=train_path,
+            validation_path=_resolve(root, str(data["validation_path"])),
+            test_path=_resolve(root, str(data["test_path"])),
+        )
+        step = progress.current_step
+        tasks = resolved[cursor.cursor]
+        if tuple(task.task_id for task in tasks) != tuple(
+            binding.task_id for binding in step.tasks
+        ):
+            raise SmokeRunError(
+                "current frozen joint-QA tasks do not match their cursor"
+            )
+        rollout_ordinals = step.rollout_ordinals
+        grpo = _mapping(config["grpo"], "grpo")
+        if len(rollout_ordinals) != int(grpo["samples_per_problem"]):
+            raise ConfigurationError(
+                "frozen rollout ordinals differ from grpo.samples_per_problem"
+            )
+        storage = _mapping(config["storage"], "storage")
+        retrieval_path = _resolve(
+            root,
+            str(storage["retrieval_receipts_path"]),
+        )
+        augmented = _augment_joint_trivia_tasks(
+            tasks,
+            selection=joint,
+            receipt_path=retrieval_path,
+        )
+        return augmented, rollout_ordinals, progress, next_cursor_path, {
+            "selection": "frozen_joint_qa_schedule",
+            "schedule_path": str(schedule_path),
+            "schedule_id": schedule.content_hash,
+            "cursor_path": str(cursor_path),
+            "cursor_before": cursor.to_value(),
+            "step": step.to_value(),
+            "retrieval_receipts_path": str(retrieval_path),
+            "next_cursor_path": str(next_cursor_path),
         }
 
     hotpot = _mapping(data["hotpot_micro"], "data.hotpot_micro")
@@ -1521,9 +1764,9 @@ async def run_smoke(
     )
     config = load_yaml(resolved_config)
     validate_smoke_bounds(config)
-    if resume_initial_rollouts and not _is_hotpot_micro(config):
+    if resume_initial_rollouts and not _is_frozen_micro(config):
         raise ConfigurationError(
-            "exact initial-rollout resume is limited to frozen HotpotQA micro steps"
+            "exact initial-rollout resume is limited to frozen micro-training steps"
         )
     paths = _artifact_paths(config, root)
 
@@ -1538,10 +1781,14 @@ async def run_smoke(
             paths=paths,
             next_cursor_path=next_cursor_path,
         )
-    selection = _mapping(
-        data["hotpot_micro" if _is_hotpot_micro(config) else "smoke"],
-        "data selection",
+    selection_key = (
+        "hotpot_micro"
+        if _is_hotpot_micro(config)
+        else "joint_qa_micro"
+        if _is_joint_qa_micro(config)
+        else "smoke"
     )
+    selection = _mapping(data[selection_key], "data selection")
     if len(selected) != int(selection["expected_total_tasks"]):
         raise SmokeRunError("selected task count differs from the fixed run bound")
     _write_jsonl(
@@ -1560,7 +1807,13 @@ async def run_smoke(
         "train_path": str(train_path),
         "started_at": _utc_now(),
         "bounds": {
-            "tasks_per_dataset": (None if _is_hotpot_micro(config) else 2),
+            "tasks_per_dataset": (
+                None
+                if _is_hotpot_micro(config)
+                else 1
+                if _is_joint_qa_micro(config)
+                else 2
+            ),
             "selected_tasks": len(selected),
             "rollouts_per_task": len(rollout_ordinals),
             "expected_initial_rollouts": len(selected) * len(rollout_ordinals),
@@ -1598,18 +1851,45 @@ async def run_smoke(
     grpo = _mapping(config["grpo"], "grpo")
     behavior_policy = str(director["behavior_policy_version"])
     updated_policy = str(director["updated_policy_version"])
+    behavior_adapter = director.get("behavior_adapter_name")
+    behavior_checkpoint = director.get("behavior_adapter_checkpoint")
+    if (
+        isinstance(live_backend, LiveSmokeBackend)
+        and isinstance(behavior_adapter, str)
+        and behavior_adapter.strip()
+        and isinstance(behavior_checkpoint, str)
+        and behavior_checkpoint.strip()
+    ):
+        try:
+            behavior_preflight = await asyncio.to_thread(
+                live_backend.publisher.ensure_loaded_adapter,
+                checkpoint_path=str(_resolve(root, behavior_checkpoint)),
+                adapter_name=behavior_adapter,
+            )
+        except Exception as exc:
+            manifest["status"] = "failed_behavior_policy_preflight"
+            manifest["error"] = _safe_error(exc)
+            manifest["completed_at"] = _utc_now()
+            _write_json(paths["manifest"], manifest)
+            raise SmokeRunError("behavior policy adapter preflight failed") from exc
+        manifest["behavior_policy_preflight"] = dict(behavior_preflight)
+        if "behavior_preflight" in paths:
+            _write_json(paths["behavior_preflight"], behavior_preflight)
+        _write_json(paths["manifest"], manifest)
     expected_jobs: list[tuple[TaskRecord, int, VersionBundle]] = []
+    experiment = _mapping(config["experiment"], "experiment")
     for task in selected:
         versions = version_bundle_for(
             task,
             policy_version=behavior_policy,
             model_catalog_version=live_backend.model_catalog_version,
+            prompt_version=str(experiment.get("prompt_version", PROMPT_VERSION)),
+            tool_version=str(experiment.get("tool_version", TOOL_VERSION)),
         )
         for rollout_index in rollout_ordinals:
             expected_jobs.append((task, rollout_index, versions))
     if resume_initial_rollouts:
         initial = _read_trajectory_records(paths["trajectories"])
-        experiment = _mapping(config["experiment"], "experiment")
         storage = _mapping(config["storage"], "storage")
         behavior_adapter = director.get("behavior_adapter_name")
         if behavior_adapter is not None:
@@ -1749,6 +2029,8 @@ async def run_smoke(
             task,
             policy_version=updated_policy,
             model_catalog_version=live_backend.model_catalog_version,
+            prompt_version=str(experiment.get("prompt_version", PROMPT_VERSION)),
+            tool_version=str(experiment.get("tool_version", TOOL_VERSION)),
         )
         canary_jobs.append(live_backend.collect(task, 10_000 + index, versions))
     try:

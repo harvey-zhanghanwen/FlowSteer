@@ -56,6 +56,7 @@ from src.interactive.graph_diagnostics import aggregate_trajectory_diagnostics
 from src.interactive.qa_retrieval import (
     QARetrievalReceipt,
     SkillFlowQARetriever,
+    augment_task_with_retrieval,
     build_keyword_query,
     receipt_from_mapping,
 )
@@ -110,7 +111,6 @@ def validate_trivia_config(config: Mapping[str, Any]) -> None:
         "dataset_key": bounded.get("dataset_key") == "triviaqa",
         "split": bounded.get("split") == "validation",
         "selection": bounded.get("selection") == "sequential",
-        "sample_count": bounded.get("sample_count") == 128,
         "rollouts_per_task": bounded.get("rollouts_per_task") == 1,
         "direct_model_id": bounded.get("direct_model_id") == "qwen3.5-9b-local",
         "retrieval.enabled": retrieval.get("enabled") is True,
@@ -129,6 +129,15 @@ def validate_trivia_config(config: Mapping[str, Any]) -> None:
     if failed:
         raise ConfigurationError(
             "TriviaQA round violates fixed evaluation bounds: " + ", ".join(failed)
+        )
+    sample_count = bounded.get("sample_count")
+    if (
+        isinstance(sample_count, bool)
+        or not isinstance(sample_count, int)
+        or not 1 <= sample_count <= 128
+    ):
+        raise ConfigurationError(
+            "triviaqa_evaluation.sample_count must be between 1 and 128"
         )
     concurrency = bounded.get("concurrency")
     if isinstance(concurrency, bool) or not isinstance(concurrency, int) or concurrency < 1:
@@ -165,16 +174,19 @@ def _select_tasks(
     config: Mapping[str, Any], root: Path, selected_path: Path
 ) -> tuple[TaskRecord, ...]:
     data = _mapping(config["data"], "data")
+    bounded = _mapping(config["triviaqa_evaluation"], "triviaqa_evaluation")
     source = _resolve(root, str(data["validation_path"]))
     candidates = tuple(
         record
         for record in iter_task_records(source, expected_split="validation")
         if _dataset_key(record) == "triviaqa"
     )
-    if len(candidates) != 128:
+    count = int(bounded["sample_count"])
+    if len(candidates) < count:
         raise TriviaRoundError(
-            f"aligned validation contains {len(candidates)} TriviaQA tasks, expected 128"
+            f"aligned validation contains {len(candidates)} TriviaQA tasks, expected {count}"
         )
+    candidates = candidates[:count]
     if selected_path.exists():
         frozen = tuple(
             iter_task_records(selected_path, expected_split="validation")
@@ -264,24 +276,6 @@ def _prepare_retrieval(
                     flush=True,
                 )
     return receipts
-
-
-def _augmented_task(task: TaskRecord, receipt: QARetrievalReceipt) -> TaskRecord:
-    metadata = dict(task.metadata)
-    metadata["public_retrieval"] = {
-        "implementation": receipt.implementation,
-        "query": receipt.query,
-        "search_limit": receipt.search_limit,
-        "tool_calls": receipt.tool_calls,
-        "passage_ids": [passage.passage_id for passage in receipt.passages],
-    }
-    return TaskRecord(
-        task_id=task.task_id,
-        question=receipt.render_problem(task.question),
-        ground_truth=task.ground_truth,
-        split=task.split,
-        metadata=metadata,
-    )
 
 
 async def _direct_one(
@@ -498,7 +492,8 @@ async def run_trivia_round(
     active_original = selected[:2] if canary_only else selected
     receipts = _prepare_retrieval(active_original, config, paths["retrieval"])
     active = tuple(
-        _augmented_task(task, receipts[task.task_id]) for task in active_original
+        augment_task_with_retrieval(task, receipts[task.task_id])
+        for task in active_original
     )
     failures = _read_jsonl(paths["failures"])
     manifest: dict[str, Any] = {

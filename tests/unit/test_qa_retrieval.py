@@ -5,9 +5,11 @@ import unittest
 from src.interactive.qa_retrieval import (
     PublicPassageObservation,
     QARetrievalReceipt,
+    augment_task_with_retrieval,
     build_keyword_query,
     receipt_from_mapping,
 )
+from src.interactive.records import TaskRecord
 
 
 class QARetrievalReceiptTests(unittest.TestCase):
@@ -57,6 +59,55 @@ class QARetrievalReceiptTests(unittest.TestCase):
         self.assertEqual(
             original.render_problem("Question"),
             restored.render_problem("Question"),
+        )
+
+    def test_task_augmentation_preserves_evaluator_boundary(self) -> None:
+        evaluator_payload = {
+            "accepted_answers": ["SECRET EVALUATOR ANSWER"],
+            "question_source": "triviaqa",
+        }
+        task = TaskRecord(
+            task_id="triviaqa:validation:0001",
+            question="Which public fact answers this question?",
+            ground_truth=evaluator_payload,
+            split="validation",
+            metadata={"evaluator_payload": "SECRET EVALUATOR METADATA"},
+        )
+        receipt = QARetrievalReceipt(
+            query="public fact question",
+            search_limit=1,
+            passages=(
+                PublicPassageObservation(
+                    rank=1,
+                    passage_id="p1",
+                    document_id="d1",
+                    title="Public title",
+                    text="Public observation text.",
+                ),
+            ),
+        )
+
+        augmented = augment_task_with_retrieval(task, receipt)
+
+        self.assertEqual(task.task_id, augmented.task_id)
+        self.assertEqual(task.split, augmented.split)
+        self.assertIs(task.ground_truth, augmented.ground_truth)
+        self.assertEqual(
+            receipt.render_problem(task.question),
+            augmented.question,
+        )
+        self.assertIn("Public observation text.", augmented.question)
+        self.assertNotIn("SECRET EVALUATOR ANSWER", augmented.question)
+        self.assertNotIn("SECRET EVALUATOR METADATA", augmented.question)
+        self.assertEqual(
+            {
+                "implementation": receipt.implementation,
+                "query": receipt.query,
+                "search_limit": receipt.search_limit,
+                "tool_calls": receipt.tool_calls,
+                "passage_ids": ["p1"],
+            },
+            augmented.metadata["public_retrieval"],
         )
 
 

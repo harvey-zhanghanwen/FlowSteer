@@ -16,6 +16,11 @@ from src.interactive.hotpot_training_schedule import (
     HotpotTrainingCursorState,
     freeze_hotpot_training_schedule,
 )
+from src.interactive.joint_qa_training_schedule import (
+    JointQATrainingCursorState,
+    freeze_joint_qa_training_schedule,
+)
+from src.interactive.qa_retrieval import QARetrievalReceipt, build_keyword_query
 from src.interactive.records import (
     EvaluationReceipt,
     TaskRecord,
@@ -317,6 +322,91 @@ def create_hotpot_micro_project(tmp_path: Path) -> tuple[Path, Path, Path]:
     return root, config_path, root / "artifacts" / "cursor1.json"
 
 
+def create_joint_qa_micro_project(tmp_path: Path) -> tuple[Path, Path, Path]:
+    root, _ = create_project(tmp_path)
+    validation_path = root / "data" / "validation.jsonl"
+    test_path = root / "data" / "test.jsonl"
+    for path, split, index in (
+        (validation_path, "validation", 100),
+        (test_path, "test", 101),
+    ):
+        rows = []
+        for source in ("hotpotqa", "triviaqa"):
+            task = TaskRecord(
+                task_id=f"{source}:{split}-{index}",
+                question="Held-out question?",
+                ground_truth="answer",
+                split=split,
+                metadata={"dataset_key": source, "source": SOURCE_NAMES[source]},
+            )
+            rows.append(json.dumps(aligned_row(task)) + "\n")
+        path.write_text("".join(rows), encoding="utf-8")
+
+    schedule = freeze_joint_qa_training_schedule(
+        train_path=root / "data" / "train.jsonl",
+        validation_path=validation_path,
+        test_path=test_path,
+        task_positions_by_dataset={"hotpotqa": (0,), "triviaqa": (0,)},
+        rollouts_per_task=8,
+    )
+    schedule_path = root / "artifacts" / "joint_schedule.json"
+    cursor_path = root / "artifacts" / "joint_cursor0.json"
+    schedule_path.parent.mkdir(parents=True, exist_ok=True)
+    schedule.write_once(schedule_path)
+    JointQATrainingCursorState.fresh(schedule).write_once(cursor_path)
+
+    config = yaml.safe_load(
+        Path("config/training_joint_qa_step1.yaml").read_text(encoding="utf-8")
+    )
+    config["data"].update(
+        train_path="data/train.jsonl",
+        validation_path="data/validation.jsonl",
+        test_path="data/test.jsonl",
+    )
+    config["data"]["joint_qa_micro"].update(
+        schedule_path="artifacts/joint_schedule.json",
+        cursor_path="artifacts/joint_cursor0.json",
+        next_cursor_path="artifacts/joint_cursor1.json",
+    )
+    config["experiment"]["output_dir"] = "artifacts/joint_step1/training"
+    for field in (
+        "root",
+        "selected_tasks_path",
+        "retrieval_receipts_path",
+        "trajectories_path",
+        "grpo_groups_path",
+        "manifest_path",
+        "behavior_policy_preflight_path",
+        "sync_receipt_path",
+        "post_update_trajectories_path",
+    ):
+        leaf = Path(str(config["storage"][field])).name
+        config["storage"][field] = f"artifacts/joint_step1/{leaf}"
+    trivia = make_task("triviaqa", 0)
+    receipt = QARetrievalReceipt(
+        query=build_keyword_query(trivia.question),
+        search_limit=5,
+        passages=(),
+    )
+    retrieval_path = root / config["storage"]["retrieval_receipts_path"]
+    retrieval_path.parent.mkdir(parents=True, exist_ok=True)
+    retrieval_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "flowsteer.triviaqa.public_retrieval.v1",
+                "task_id": trivia.task_id,
+                "question": trivia.question,
+                "retrieval": receipt.to_dict(),
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    config_path = root / "config" / "joint.yaml"
+    config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+    return root, config_path, root / "artifacts" / "joint_cursor1.json"
+
+
 def read_jsonl(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
@@ -373,6 +463,40 @@ class SelectionTests(unittest.TestCase):
             config["grpo"]["structural_reward"] = 0.1
             with self.assertRaisesRegex(Exception, "structural_reward"):
                 validate_smoke_bounds(config)
+
+    def test_joint_qa_bounds_require_two_groups_and_two_canaries(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            _, config_path, _ = create_joint_qa_micro_project(Path(directory))
+            config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            validate_smoke_bounds(config)
+            config["grpo"]["expected_rollout_count"] = 8
+            with self.assertRaisesRegex(Exception, "expected_rollout_count"):
+                validate_smoke_bounds(config)
+
+    def test_joint_qa_prepare_freezes_both_tasks_and_trivia_retrieval(self) -> None:
+        import asyncio
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            root, config_path, _ = create_joint_qa_micro_project(Path(directory))
+            manifest = asyncio.run(
+                run_smoke(config_path, prepare_only=True, project_root=root)
+            )
+            self.assertEqual("prepared", manifest["status"])
+            self.assertEqual(
+                {"hotpotqa": 1, "triviaqa": 1},
+                manifest["selected_by_source"],
+            )
+            selected = read_jsonl(
+                root / "artifacts/joint_step1/selected_tasks.jsonl"
+            )
+            self.assertEqual(2, len(selected))
+            self.assertIn(
+                "Public retrieval observations (SkillFlow search/read)",
+                selected[1]["question"],
+            )
 
     def test_source_order_and_unique_base_task_are_enforced(self) -> None:
         tasks = [
