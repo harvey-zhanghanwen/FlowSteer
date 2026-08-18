@@ -422,6 +422,26 @@ paired Skill candidate, not a base Director template, topology quota, reward,
 or direct Canvas mutation; it can become ACTIVE only through the unchanged
 independent evidence gate.
 
+That first frozen evidence epoch rejected both candidates under the registered
+gate, so `run_joint_qa_mace_skill.py --round 1` is only a versioned repeat of
+the same caller chain: `JointQAPosteriorScheduler` -> randomized paired
+intervention -> `SkillEvidencePipeline` -> deterministic gate.  It consumes
+new train positions `[4:7]`, natural-candidate position `7`, and independent
+Skill-confirmation positions `[20:40]`; the initial epoch and the formal GRPO
+tasks remain excluded.  Its two replacement prompt priors come directly from
+persisted answer-type/span and subject-relation failure cases.  One candidate
+mentions conditional evidence fan-in, but terminal F1 remains only an
+intent-to-treat Skill outcome; non-chain topology adoption requires a separate
+receipt-based acceptance check and receives no reward.
+
+`materialize_joint_qa_progressive_evaluations.py` and
+`materialize_joint_qa_progressive_skill_training.py` derive the common delayed
+visibility epoch from the two matched ACTIVE Skill records instead of assuming
+epoch 2.  The training task positions are read from the existing frozen-schedule
+configuration (HotpotQA position 9 and TriviaQA position 12), keeping the
+materializer a thin adapter over `freeze_joint_qa_training_schedule` rather
+than adding another sampler.
+
 The progressive Skill-on micro-training boundary reuses the existing
 `SkillLifecycleManager.audit` transition after a successful LoRA policy
 publication.  The runner changes only the policy coordinate, persists every

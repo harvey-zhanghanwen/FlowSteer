@@ -213,6 +213,12 @@ def materialize_skill_on_evaluations(
         raise RuntimeError("ACTIVE Skills do not share one frozen library/posterior regime")
     if len(policy_versions) != 1:
         raise RuntimeError("ACTIVE Skills do not share one frozen behavior policy")
+    activation_epochs = {record.activated_epoch for record in records.values()}
+    if len(activation_epochs) != 1:
+        raise RuntimeError("ACTIVE Skills do not share one visibility epoch")
+    current_epoch = next(iter(activation_epochs))
+    if current_epoch is None:  # guarded above; keeps the type boundary explicit
+        raise RuntimeError("ACTIVE Skills have no visibility epoch")
     library_version = next(iter(library_versions))
     posterior_version = next(iter(posterior_versions))
     policy_version = next(iter(policy_versions))
@@ -236,14 +242,12 @@ def materialize_skill_on_evaluations(
             raise RuntimeError(f"{dataset} template tool version differs from Skill")
 
         skills = dict(_mapping(config.get("skills"), "skills"))
-        current_epoch = int(skills.get("current_epoch", 0))
-        if record.activated_epoch is None or record.activated_epoch > current_epoch:
-            raise RuntimeError(f"{dataset} ACTIVE Skill is not visible in this epoch")
         skills.update(
             store_path=_config_path(skill_store_path),
             library_version=library_version,
             posterior_version=posterior_version,
             required_skill_ids=[record.skill_id],
+            current_epoch=current_epoch,
         )
         config["skills"] = skills
         exploration = dict(_mapping(config.get("exploration"), "exploration"))
@@ -271,6 +275,7 @@ def materialize_skill_on_evaluations(
         "policy_version": policy_version,
         "library_version": library_version,
         "posterior_version": posterior_version,
+        "current_epoch": current_epoch,
         "required_skill_ids": {
             dataset: records[dataset].skill_id for dataset in DATASETS
         },

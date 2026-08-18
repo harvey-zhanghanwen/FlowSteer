@@ -24,7 +24,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 from copy import deepcopy
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 import json
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -78,6 +78,7 @@ PROMPT_VERSION = "agentgraph.director.progressive_subgraph.v1"
 TOOL_VERSION = "agentgraph.add-subgraph+skillflow-public-retrieval.v1"
 SKILL_LIBRARY_VERSION = "jointqa.skill-library.progressive.epoch2.v1"
 EVALUATION_CONFIG = ROOT / "config/evaluation_joint_qa_progressive_step0_hotpotqa.yaml"
+TRAINING_CONFIG = ROOT / "config/training_joint_qa_progressive_skill_on_step1.yaml"
 BEHAVIOR_ADAPTER_NAME = "theta_jointqa_progressive_step_000000"
 BEHAVIOR_ADAPTER_CHECKPOINT = (
     ROOT / "artifacts/hotpotqa_multiagent_skill/policy_step_000000/theta"
@@ -113,6 +114,164 @@ CANDIDATE_ACTIONS: Mapping[str, Mapping[str, Any]] = {
 }
 
 
+# Round 1 is a second, disjoint evidence epoch over the same upstream
+# FlowSteer/SkillFlow execution and evidence pipeline.  The two prompt priors
+# are predeclared from the persisted joint-QA wrong demos; they do not mutate
+# the Canvas, prescribe a fixed Agent count, or add a second Skill framework.
+ROUND1_CANDIDATE_ACTIONS: Mapping[str, Mapping[str, Any]] = {
+    "answer_type_and_span_consistency": {
+        "instruction": (
+            "Preserve the question's expected answer type when handing an answer "
+            "candidate to the Output Agent, and return a canonical, minimal complete "
+            "extractive span supported by the evidence. Do not replace a named entity "
+            "with a count, category, abbreviation, or expanded alias, and do not apply "
+            "unconditional shortest-span compression."
+        )
+    },
+    "relation_grounded_evidence_fan_in": {
+        "instruction": (
+            "Check the subject, relation, and qualifiers against retrieved evidence. "
+            "Only when independent evidence subquestions exist, create parallel "
+            "evidence branches and their semantic combiner in one ADD_SUBGRAPH "
+            "transaction; use a Format Agent only to serialize the combined answer. "
+            "Otherwise keep directed serial dependencies. Do not prescribe a fixed "
+            "Agent count."
+        )
+    },
+}
+
+
+@dataclass(frozen=True)
+class SkillEvidenceRoundSpec:
+    """Immutable coordinates for one bounded Skill evidence epoch."""
+
+    round_id: int
+    experiment_version: str
+    candidate_actions: Mapping[str, Mapping[str, Any]]
+    discovery_start: int
+    discovery_stop: int
+    natural_index: int
+    confirmation_start: int
+    confirmation_stop: int
+    seed: int
+    posterior_version: str
+    skill_library_version: str
+    discovery_epoch: int
+    validation_epoch: int
+    activation_epoch: int
+
+    @property
+    def output_root(self) -> Path:
+        return ROOT / f"artifacts/joint_qa_progressive/skill_epoch_{self.round_id:06d}"
+
+    @property
+    def report_root(self) -> Path:
+        return ROOT / f"reports/joint_qa_progressive/skill_epoch_{self.round_id:06d}"
+
+    @property
+    def evidence_root(self) -> Path:
+        return self.output_root / "evidence"
+
+    @property
+    def skill_store_path(self) -> Path:
+        return self.output_root / "skills.json"
+
+    @property
+    def pair_path(self) -> Path:
+        return self.output_root / "paired_observations.jsonl"
+
+    @property
+    def selection_path(self) -> Path:
+        return self.output_root / "selection_receipts.jsonl"
+
+    @property
+    def evsi_path(self) -> Path:
+        return self.output_root / "evsi_receipts.jsonl"
+
+    @property
+    def publication_path(self) -> Path:
+        return self.output_root / "publication_results.json"
+
+    @property
+    def manifest_path(self) -> Path:
+        return self.output_root / "experiment_manifest.json"
+
+    @property
+    def anchor_offset(self) -> int:
+        # Keep every epoch0 sampling coordinate byte-for-byte compatible.
+        return self.round_id * 10_000
+
+
+EPOCH0_SPEC = SkillEvidenceRoundSpec(
+    round_id=0,
+    experiment_version="jointqa.mace-skill-evidence.epoch0.v1",
+    candidate_actions=CANDIDATE_ACTIONS,
+    discovery_start=0,
+    discovery_stop=3,
+    natural_index=3,
+    confirmation_start=0,
+    confirmation_stop=20,
+    seed=SEED,
+    posterior_version=POSTERIOR_VERSION,
+    skill_library_version=SKILL_LIBRARY_VERSION,
+    discovery_epoch=0,
+    validation_epoch=1,
+    activation_epoch=2,
+)
+
+EPOCH1_SPEC = SkillEvidenceRoundSpec(
+    round_id=1,
+    experiment_version="jointqa.mace-skill-evidence.epoch1.v1",
+    candidate_actions=ROUND1_CANDIDATE_ACTIONS,
+    discovery_start=4,
+    discovery_stop=7,
+    natural_index=7,
+    confirmation_start=20,
+    confirmation_stop=40,
+    seed=20260819,
+    posterior_version="jointqa.bayesian-linear.progressive-subgraph.epoch2.v1",
+    skill_library_version="jointqa.skill-library.progressive.epoch4.v1",
+    discovery_epoch=2,
+    validation_epoch=3,
+    activation_epoch=4,
+)
+
+ROUND_SPECS: Mapping[int, SkillEvidenceRoundSpec] = {
+    0: EPOCH0_SPEC,
+    1: EPOCH1_SPEC,
+}
+
+
+def _spec_for_round(round_id: int) -> SkillEvidenceRoundSpec:
+    try:
+        return ROUND_SPECS[round_id]
+    except KeyError as exc:
+        raise ValueError(f"unsupported Skill evidence round: {round_id}") from exc
+
+
+def _reserved_training_positions() -> dict[str, int]:
+    """Read the formal GRPO task positions from the existing training config."""
+
+    config = load_yaml(TRAINING_CONFIG)
+    joint = config.get("data", {}).get("joint_qa_micro", {})
+    configured = joint.get("task_positions", {})
+    positions: dict[str, int] = {}
+    for dataset in DATASETS:
+        values = configured.get(dataset)
+        if (
+            not isinstance(values, list)
+            or len(values) != 1
+            or isinstance(values[0], bool)
+            or not isinstance(values[0], int)
+            or values[0] < 0
+        ):
+            raise RuntimeError(
+                f"training config must declare one non-negative position for {dataset}"
+            )
+        positions[dataset] = values[0]
+    return positions
+
+
 def _dataset_key(task: TaskRecord) -> str:
     value = task.metadata.get("dataset_key")
     if not isinstance(value, str) or not value.strip():
@@ -134,8 +293,12 @@ def _condition(dataset: str) -> dict[str, Any]:
     return {"task_family": dataset, "graph_stage": "*", "tags": []}
 
 
-def _prompt_condition(dataset: str, candidate_id: str) -> dict[str, Any]:
-    action = dict(CANDIDATE_ACTIONS[candidate_id])
+def _prompt_condition(
+    dataset: str,
+    candidate_id: str,
+    spec: SkillEvidenceRoundSpec = EPOCH0_SPEC,
+) -> dict[str, Any]:
+    action = dict(spec.candidate_actions[candidate_id])
     return {
         "condition_id": candidate_id,
         "application_mode": "forced_probe_condition",
@@ -150,7 +313,9 @@ def _prompt_condition(dataset: str, candidate_id: str) -> dict[str, Any]:
     }
 
 
-def _selected_tasks() -> tuple[
+def _selected_tasks(
+    spec: SkillEvidenceRoundSpec = EPOCH0_SPEC,
+) -> tuple[
     dict[str, tuple[TaskRecord, ...]],
     dict[str, tuple[TaskRecord, ...]],
     dict[str, TaskRecord],
@@ -164,16 +329,29 @@ def _selected_tasks() -> tuple[
     discovery: dict[str, tuple[TaskRecord, ...]] = {}
     confirmation: dict[str, tuple[TaskRecord, ...]] = {}
     natural: dict[str, TaskRecord] = {}
+    reserved_positions = _reserved_training_positions() if spec.round_id == 1 else {}
     for dataset in DATASETS:
         dataset_train = tuple(task for task in train if _dataset_key(task) == dataset)
         dataset_validation = tuple(
             task for task in validation if _dataset_key(task) == dataset
         )
-        if len(dataset_train) < 4 or len(dataset_validation) < 20:
+        required_train = max(
+            spec.discovery_stop,
+            spec.natural_index + 1,
+            reserved_positions.get(dataset, -1) + 1,
+        )
+        if (
+            len(dataset_train) < required_train
+            or len(dataset_validation) < spec.confirmation_stop
+        ):
             raise RuntimeError(f"insufficient aligned tasks for {dataset}")
-        discovery[dataset] = dataset_train[:3]
-        natural[dataset] = dataset_train[3]
-        confirmation[dataset] = dataset_validation[:20]
+        discovery[dataset] = dataset_train[
+            spec.discovery_start : spec.discovery_stop
+        ]
+        natural[dataset] = dataset_train[spec.natural_index]
+        confirmation[dataset] = dataset_validation[
+            spec.confirmation_start : spec.confirmation_stop
+        ]
         for task in (*discovery[dataset], natural[dataset]):
             _require_partition(task, "train")
         for task in confirmation[dataset]:
@@ -189,6 +367,53 @@ def _selected_tasks() -> tuple[
     ]
     if len(all_ids) != len(set(all_ids)):
         raise RuntimeError("discovery, natural-candidate, and confirmation tasks overlap")
+
+    # The second evidence epoch is disjoint from epoch0, held-out development
+    # and test, and the dataset-specific task positions reserved by the formal
+    # GRPO training config.
+    # Enforce this at selection time instead of relying only on the manifest.
+    if spec.round_id == 1:
+        epoch0_ids: set[str] = set()
+        reserved_training_ids: set[str] = set()
+        for dataset in DATASETS:
+            dataset_train = tuple(
+                task for task in train if _dataset_key(task) == dataset
+            )
+            dataset_validation = tuple(
+                task for task in validation if _dataset_key(task) == dataset
+            )
+            epoch0_ids.update(
+                task.task_id
+                for task in (
+                    *dataset_train[
+                        EPOCH0_SPEC.discovery_start : EPOCH0_SPEC.discovery_stop
+                    ],
+                    dataset_train[EPOCH0_SPEC.natural_index],
+                    *dataset_validation[
+                        EPOCH0_SPEC.confirmation_start : EPOCH0_SPEC.confirmation_stop
+                    ],
+                )
+            )
+            reserved_training_ids.add(
+                dataset_train[reserved_positions[dataset]].task_id
+            )
+        heldout_ids = {
+            task.task_id
+            for path, split in (
+                (ROOT / "data/joint_qa_v2/development.jsonl", "validation"),
+                (ROOT / "data/joint_qa_v2/test.jsonl", "test"),
+            )
+            for task in iter_task_records(path, expected_split=split)
+        }
+        selected_ids = set(all_ids)
+        forbidden = selected_ids & (
+            epoch0_ids | reserved_training_ids | heldout_ids
+        )
+        if forbidden:
+            raise RuntimeError(
+                "round1 evidence tasks overlap epoch0, held-out, or reserved "
+                "training tasks: " + ", ".join(sorted(forbidden))
+            )
     return discovery, confirmation, natural
 
 
@@ -196,6 +421,7 @@ def _augment_trivia(
     discovery: dict[str, tuple[TaskRecord, ...]],
     confirmation: dict[str, tuple[TaskRecord, ...]],
     natural: dict[str, TaskRecord],
+    spec: SkillEvidenceRoundSpec = EPOCH0_SPEC,
 ) -> None:
     config = load_yaml(ROOT / "config/evaluation_joint_qa_progressive_step0_triviaqa.yaml")
     ordered = (
@@ -203,7 +429,7 @@ def _augment_trivia(
         natural["triviaqa"],
         *confirmation["triviaqa"],
     )
-    receipt_path = OUTPUT_ROOT / "triviaqa_retrieval_receipts.jsonl"
+    receipt_path = spec.output_root / "triviaqa_retrieval_receipts.jsonl"
     receipts = _prepare_retrieval(ordered, config, receipt_path)
     augmented = {
         task.task_id: augment_task_with_retrieval(task, receipts[task.task_id])
@@ -216,18 +442,28 @@ def _augment_trivia(
     natural["triviaqa"] = augmented[natural["triviaqa"].task_id]
 
 
-def _backend() -> LiveSmokeBackend:
+def _backend(spec: SkillEvidenceRoundSpec = EPOCH0_SPEC) -> LiveSmokeBackend:
     config = deepcopy(load_yaml(EVALUATION_CONFIG))
-    config["storage"]["root"] = str(EVIDENCE_ROOT)
+    config["storage"]["root"] = str(spec.evidence_root)
     config["skills"]["enabled"] = False
-    config["experiment"]["condition_id"] = "joint_qa_progressive_skill_epoch0"
+    config["experiment"]["condition_id"] = (
+        "joint_qa_progressive_skill_epoch0"
+        if spec.round_id == 0
+        else f"joint_qa_progressive_skill_epoch{spec.round_id}"
+    )
     config["experiment"]["sampling_schedule_purpose"] = (
         "joint_qa_progressive_skill_paired_v1"
+        if spec.round_id == 0
+        else f"joint_qa_progressive_skill_epoch{spec.round_id}_paired_v1"
     )
     return LiveSmokeBackend.from_config(config, ROOT, evaluation_only=True)
 
 
-def _versions(backend: LiveSmokeBackend, task: TaskRecord):
+def _versions(
+    backend: LiveSmokeBackend,
+    task: TaskRecord,
+    spec: SkillEvidenceRoundSpec = EPOCH0_SPEC,
+):
     return version_bundle_for(
         task,
         policy_version=POLICY_VERSION,
@@ -236,8 +472,8 @@ def _versions(backend: LiveSmokeBackend, task: TaskRecord):
         tool_version=TOOL_VERSION,
         encoder_version=ENCODER_VERSION,
         feature_schema_version=FEATURE_SCHEMA_VERSION,
-        posterior_version=POSTERIOR_VERSION,
-        skill_library_version=SKILL_LIBRARY_VERSION,
+        posterior_version=spec.posterior_version,
+        skill_library_version=spec.skill_library_version,
     )
 
 
@@ -302,10 +538,11 @@ async def _arm(
     prompt_priors: Sequence[Mapping[str, Any]],
     forced_probe: bool,
     anchor: int,
+    spec: SkillEvidenceRoundSpec = EPOCH0_SPEC,
 ) -> TrajectoryRecord:
     key = (task.task_id, condition_id)
     existing = cache.get(key)
-    versions = _versions(backend, task)
+    versions = _versions(backend, task, spec)
     if existing is not None:
         if existing.task.to_dict() != task.to_dict() or existing.versions != versions:
             raise RuntimeError(f"persisted rollout regime differs for {key}")
@@ -361,19 +598,24 @@ async def _paired_probe(
     anchor: int,
     order_rng: np.random.Generator,
     sampling_probability: float,
+    spec: SkillEvidenceRoundSpec = EPOCH0_SPEC,
 ) -> tuple[SkillProbeEvidence, dict[str, Any]]:
     dataset = _dataset_key(task)
     if stage not in {"discovery", "confirmation"}:
         raise ValueError("stage must be discovery or confirmation")
     order = randomize_probe_order("incumbent", "candidate", order_rng)
-    schedule = f"joint_qa_progressive_skill_{stage}_paired_v1"
+    schedule = (
+        f"joint_qa_progressive_skill_{stage}_paired_v1"
+        if spec.round_id == 0
+        else f"joint_qa_progressive_skill_epoch{spec.round_id}_{stage}_paired_v1"
+    )
     condition_ids = {
         "incumbent": f"jointqa_skill_{stage}:incumbent",
         "candidate": f"jointqa_skill_{stage}:candidate:{candidate_id}",
     }
     priors = {
         "incumbent": (),
-        "candidate": (_prompt_condition(dataset, candidate_id),),
+        "candidate": (_prompt_condition(dataset, candidate_id, spec),),
     }
     observed: dict[str, TrajectoryRecord] = {}
     for arm_name in (order.presented_first, order.presented_second):
@@ -386,6 +628,7 @@ async def _paired_probe(
             prompt_priors=priors[arm_name],
             forced_probe=True,
             anchor=anchor,
+            spec=spec,
         )
         _valid_outcome(observed[arm_name])
         if not observed[arm_name].forced_probe or observed[arm_name].grpo_eligible:
@@ -427,7 +670,7 @@ async def _paired_probe(
             policy_version=POLICY_VERSION,
             state_features=scheduler.features.to_state_features(dataset, candidate_id),
             incumbent_action=dict(BASELINE_ACTION),
-            candidate_action=dict(CANDIDATE_ACTIONS[candidate_id]),
+            candidate_action=dict(spec.candidate_actions[candidate_id]),
             sampling_probability=sampling_probability,
             incumbent_returns=(float(incumbent.evaluation.reward),),
             candidate_returns=(float(candidate.evaluation.reward),),
@@ -493,7 +736,7 @@ async def _paired_probe(
         "candidate_token_f1": float(candidate.evaluation.reward),
         "token_f1_effect": probe.paired_effect,
         "condition": _condition(dataset),
-        "candidate_action": dict(CANDIDATE_ACTIONS[candidate_id]),
+        "candidate_action": dict(spec.candidate_actions[candidate_id]),
         "estimand": "skill_prompt_prior_visibility_intent_to_treat_effect",
         "treatment_assigned": True,
         "prompt_prior_visible": True,
@@ -510,11 +753,15 @@ async def _paired_probe(
     return evidence, row
 
 
-def _proposal(dataset: str, candidate_id: str) -> StructuredSkillCandidate:
+def _proposal(
+    dataset: str,
+    candidate_id: str,
+    spec: SkillEvidenceRoundSpec = EPOCH0_SPEC,
+) -> StructuredSkillCandidate:
     return StructuredSkillCandidate(
         skill_id=f"jointqa.{dataset}.{candidate_id}",
         condition=_condition(dataset),
-        action=dict(CANDIDATE_ACTIONS[candidate_id]),
+        action=dict(spec.candidate_actions[candidate_id]),
         baseline_id="frozen_progressive_step0_no_skill",
         baseline_action=dict(BASELINE_ACTION),
         failure_scope=(),
@@ -525,16 +772,17 @@ def _manifest(
     discovery: Mapping[str, Sequence[TaskRecord]],
     confirmation: Mapping[str, Sequence[TaskRecord]],
     natural: Mapping[str, TaskRecord],
+    spec: SkillEvidenceRoundSpec = EPOCH0_SPEC,
 ) -> dict[str, Any]:
-    return {
+    manifest = {
         "schema_version": "flowsteer.joint-qa.mace-bayesian-skill.v2",
-        "seed": SEED,
+        "seed": spec.seed,
         "policy_version": POLICY_VERSION,
         "adapter_name": BEHAVIOR_ADAPTER_NAME,
         "encoder_version": ENCODER_VERSION,
         "feature_schema_version": FEATURE_SCHEMA_VERSION,
-        "posterior_version": POSTERIOR_VERSION,
-        "skill_library_version": SKILL_LIBRARY_VERSION,
+        "posterior_version": spec.posterior_version,
+        "skill_library_version": spec.skill_library_version,
         "prompt_version": PROMPT_VERSION,
         "tool_version": TOOL_VERSION,
         "runtime_version": RUNTIME_VERSION,
@@ -542,9 +790,18 @@ def _manifest(
         "companion_outcome": "normalized_exact_match",
         "partition_manifest": "data/joint_qa_v2/manifest.json",
         "development_block": "joint_qa_v2/development",
-        "confirmation_block": "joint_qa_v2/skill_confirmation:first20_per_dataset",
+        "confirmation_block": (
+            "joint_qa_v2/skill_confirmation:first20_per_dataset"
+            if spec.round_id == 0
+            else (
+                "joint_qa_v2/skill_confirmation:[20:40]_per_dataset "
+                "(zero-based, stop-exclusive)"
+            )
+        ),
         "final_test_block": "joint_qa_v2/test (not opened by this protocol)",
-        "candidate_actions": {key: dict(value) for key, value in CANDIDATE_ACTIONS.items()},
+        "candidate_actions": {
+            key: dict(value) for key, value in spec.candidate_actions.items()
+        },
         "candidate_source_artifacts": [
             "reports/hotpotqa_multiagent_skill",
             "reports/joint_qa_curve",
@@ -559,9 +816,9 @@ def _manifest(
             "observation_samples": 2048,
         },
         "epochs": {
-            "discovery": 0,
-            "validation": 1,
-            "eligible_activation": 2,
+            "discovery": spec.discovery_epoch,
+            "validation": spec.validation_epoch,
+            "eligible_activation": spec.activation_epoch,
         },
         "discovery_schedule": (
             "balanced cold start, posterior-UCB prefilter, then particle EVSI"
@@ -583,16 +840,114 @@ def _manifest(
         },
     }
 
+    # Epoch0 remains serialization-compatible with the already persisted
+    # protocol.  Round 1 adds explicit coordinates and the scope boundary that
+    # answer-quality evidence cannot itself establish topology adoption.
+    if spec.round_id == 1:
+        manifest.update(
+            {
+                "round_id": spec.round_id,
+                "experiment_version": spec.experiment_version,
+                "selection_coordinates": {
+                    "train_discovery": {
+                        "start": spec.discovery_start,
+                        "stop": spec.discovery_stop,
+                        "zero_based_stop_exclusive": True,
+                    },
+                    "train_natural_candidate_position": spec.natural_index,
+                    "skill_confirmation": {
+                        "start": spec.confirmation_start,
+                        "stop": spec.confirmation_stop,
+                        "zero_based_stop_exclusive": True,
+                    },
+                    "reserved_grpo_training_positions": (
+                        _reserved_training_positions()
+                    ),
+                },
+                "topology_adoption_acceptance": {
+                    "verified_by_this_protocol": False,
+                    "requires_independent_evaluation": True,
+                    "reason": (
+                        "The paired intervention estimates full-trajectory Skill "
+                        "prompt-prior visibility intent-to-treat effect from an "
+                        "empty Canvas; terminal answer F1 does not verify Director "
+                        "adoption of parallel branches or semantic fan-in."
+                    ),
+                },
+            }
+        )
+    return manifest
 
-async def run(*, prepare_only: bool = False) -> dict[str, Any]:
-    discovery_tasks, confirmation_tasks, natural_tasks = _selected_tasks()
-    manifest = _manifest(discovery_tasks, confirmation_tasks, natural_tasks)
-    _write_json(MANIFEST_PATH, manifest)
+
+def _guard_output_identity(
+    spec: SkillEvidenceRoundSpec,
+    manifest: Mapping[str, Any],
+) -> None:
+    """Permit an exact resume but refuse to claim a non-empty foreign root."""
+
+    identity_keys = (
+        "policy_version",
+        "adapter_name",
+        "posterior_version",
+        "skill_library_version",
+        "prompt_version",
+        "tool_version",
+        "seed",
+        "candidate_actions",
+        "discovery_tasks",
+        "natural_candidate_tasks",
+        "confirmation_tasks",
+    )
+    roots = [(spec.output_root, spec.manifest_path)]
+    if spec.round_id == 1:
+        roots.append((spec.report_root, spec.report_root / "experiment_manifest.json"))
+    for root, manifest_path in roots:
+        if not root.exists() or not any(root.iterdir()):
+            continue
+        if not manifest_path.is_file():
+            raise RuntimeError(
+                f"refusing to overwrite non-empty output without manifest: {root}"
+            )
+        persisted = json.loads(manifest_path.read_text(encoding="utf-8"))
+        mismatched = [
+            key for key in identity_keys if persisted.get(key) != manifest.get(key)
+        ]
+        if spec.round_id == 1:
+            for key in ("round_id", "experiment_version", "selection_coordinates"):
+                if persisted.get(key) != manifest.get(key):
+                    mismatched.append(key)
+        if mismatched:
+            raise RuntimeError(
+                "refusing to overwrite output from a different evidence regime: "
+                + ", ".join(sorted(set(mismatched)))
+            )
+
+
+def _write_manifest(
+    spec: SkillEvidenceRoundSpec,
+    manifest: Mapping[str, Any],
+) -> None:
+    _write_json(spec.manifest_path, manifest)
+    if spec.round_id == 1:
+        _write_json(spec.report_root / "experiment_manifest.json", manifest)
+
+
+async def run(*, prepare_only: bool = False, round_id: int = 0) -> dict[str, Any]:
+    spec = _spec_for_round(round_id)
+    discovery_tasks, confirmation_tasks, natural_tasks = _selected_tasks(spec)
+    manifest = _manifest(
+        discovery_tasks,
+        confirmation_tasks,
+        natural_tasks,
+        spec,
+    )
+    _guard_output_identity(spec, manifest)
+    _write_manifest(spec, manifest)
     if prepare_only:
-        return {"status": "prepared", "manifest": str(MANIFEST_PATH)}
-    _augment_trivia(discovery_tasks, confirmation_tasks, natural_tasks)
+        return {"status": "prepared", "manifest": str(spec.manifest_path)}
+    _augment_trivia(discovery_tasks, confirmation_tasks, natural_tasks, spec)
 
-    backend = _backend()
+    backend = _backend(spec)
     behavior_preflight = await asyncio.to_thread(
         backend.publisher.ensure_loaded_adapter,
         checkpoint_path=str(BEHAVIOR_ADAPTER_CHECKPOINT),
@@ -601,16 +956,16 @@ async def run(*, prepare_only: bool = False) -> dict[str, Any]:
     manifest["behavior_policy_preflight"] = dict(behavior_preflight)
     manifest["frozen_model_catalog_version"] = backend.model_catalog_version
     manifest["frozen_executor_versions"] = _executor_versions(backend)
-    _write_json(MANIFEST_PATH, manifest)
+    _write_manifest(spec, manifest)
     cache = _resume_trajectories(backend.evidence_store)
     scheduler = JointQAPosteriorScheduler(
-        tuple(CANDIDATE_ACTIONS),
-        seed=SEED,
+        tuple(spec.candidate_actions),
+        seed=spec.seed,
         exploration_alpha=1.0,
         prior_precision=1.0,
         observation_variance=0.25,
     )
-    order_rng = np.random.default_rng(SEED)
+    order_rng = np.random.default_rng(spec.seed)
     pair_rows: list[dict[str, Any]] = []
     selection_rows: list[SelectionReceipt] = []
     evsi_rows: list[dict[str, Any]] = []
@@ -623,7 +978,7 @@ async def run(*, prepare_only: bool = False) -> dict[str, Any]:
         for dataset_index, dataset in enumerate(DATASETS):
             task = discovery_tasks[dataset][cycle]
             before = scheduler.posterior_record(
-                epoch=0,
+                epoch=spec.discovery_epoch,
                 policy_version=POLICY_VERSION,
             )
             _append_posterior_once(backend.evidence_store, before)
@@ -640,12 +995,12 @@ async def run(*, prepare_only: bool = False) -> dict[str, Any]:
                     )[: min(2, len(scores))]
                 )
                 prefiltered = tuple(
-                    tuple(CANDIDATE_ACTIONS)[index] for index in prefilter_indices
+                    tuple(spec.candidate_actions)[index] for index in prefilter_indices
                 )
                 evsi = scheduler.rank_probes_by_evsi(
                     dataset,
                     candidate_ids=prefiltered,
-                    seed=SEED + cycle * len(DATASETS) + dataset_index,
+                    seed=spec.seed + cycle * len(DATASETS) + dataset_index,
                     posterior_particles=1024,
                     observation_samples=2048,
                 )
@@ -657,7 +1012,7 @@ async def run(*, prepare_only: bool = False) -> dict[str, Any]:
                         "problem_id": task.task_id,
                         "dataset": dataset,
                         "posterior_id": before.posterior_id,
-                        "ucb_candidate_ids": list(tuple(CANDIDATE_ACTIONS)),
+                        "ucb_candidate_ids": list(tuple(spec.candidate_actions)),
                         "ucb_scores": [float(value) for value in scores],
                         "prefiltered_candidate_ids": list(prefiltered),
                         "evsi_ranked_candidate_ids": list(evsi.candidate_ids),
@@ -670,14 +1025,16 @@ async def run(*, prepare_only: bool = False) -> dict[str, Any]:
                 )
             means = {
                 candidate_id: scheduler.predict(dataset, candidate_id)[0]
-                for candidate_id in CANDIDATE_ACTIONS
+                for candidate_id in spec.candidate_actions
             }
             stds = {
                 candidate_id: scheduler.predict(dataset, candidate_id)[1]
-                for candidate_id in CANDIDATE_ACTIONS
+                for candidate_id in spec.candidate_actions
             }
             snapshot_id = _empty_snapshot_id(
-                task, "discovery", 3000 + cycle * len(DATASETS) + dataset_index
+                task,
+                "discovery",
+                spec.anchor_offset + 3000 + cycle * len(DATASETS) + dataset_index,
             )
             selection_rows.append(
                 SelectionReceipt(
@@ -691,7 +1048,7 @@ async def run(*, prepare_only: bool = False) -> dict[str, Any]:
                     ),
                     snapshot_id=snapshot_id,
                     strategy=selection_mode,
-                    candidate_ids=tuple(CANDIDATE_ACTIONS),
+                    candidate_ids=tuple(spec.candidate_actions),
                     selected_id=selected_id,
                     predicted_means=means,
                     predicted_stds=stds,
@@ -707,9 +1064,15 @@ async def run(*, prepare_only: bool = False) -> dict[str, Any]:
                 task,
                 selected_id,
                 stage="discovery",
-                anchor=3000 + cycle * len(DATASETS) + dataset_index,
+                anchor=(
+                    spec.anchor_offset
+                    + 3000
+                    + cycle * len(DATASETS)
+                    + dataset_index
+                ),
                 order_rng=order_rng,
                 sampling_probability=sampling_probability,
+                spec=spec,
             )
             scheduler.update(
                 dataset,
@@ -719,11 +1082,14 @@ async def run(*, prepare_only: bool = False) -> dict[str, Any]:
             )
             discovery_evidence[dataset].append(evidence)
             pair_rows.append(row)
-            _write_jsonl(PAIR_PATH, pair_rows)
-            _write_jsonl(SELECTION_PATH, selection_rows)
-            _write_jsonl(EVSI_PATH, evsi_rows)
+            _write_jsonl(spec.pair_path, pair_rows)
+            _write_jsonl(spec.selection_path, selection_rows)
+            _write_jsonl(spec.evsi_path, evsi_rows)
 
-    posterior = scheduler.posterior_record(epoch=0, policy_version=POLICY_VERSION)
+    posterior = scheduler.posterior_record(
+        epoch=spec.discovery_epoch,
+        policy_version=POLICY_VERSION,
+    )
     _append_posterior_once(backend.evidence_store, posterior)
     selected_candidates = {
         dataset: scheduler.exploit(dataset) for dataset in DATASETS
@@ -739,13 +1105,13 @@ async def run(*, prepare_only: bool = False) -> dict[str, Any]:
 
     pipeline = SkillEvidencePipeline(
         evidence_store=backend.evidence_store,
-        skill_store=SkillStore(SKILL_STORE_PATH),
+        skill_store=SkillStore(spec.skill_store_path),
         retrieval_top_k=1,
     )
     candidates = {}
     for dataset_index, dataset in enumerate(DATASETS):
         candidate_id = selected_candidates[dataset]
-        proposal = _proposal(dataset, candidate_id)
+        proposal = _proposal(dataset, candidate_id, spec)
         existing = pipeline.skill_store.get(proposal.skill_id)
         if existing is None:
             natural = await _arm(
@@ -753,16 +1119,21 @@ async def run(*, prepare_only: bool = False) -> dict[str, Any]:
                 cache,
                 natural_tasks[dataset],
                 condition_id=f"jointqa_skill_candidate:{dataset}",
-                schedule_purpose="joint_qa_skill_natural_candidate_v1",
+                schedule_purpose=(
+                    "joint_qa_skill_natural_candidate_v1"
+                    if spec.round_id == 0
+                    else f"joint_qa_skill_epoch{spec.round_id}_natural_candidate_v1"
+                ),
                 prompt_priors=(),
                 forced_probe=False,
-                anchor=2000 + dataset_index,
+                anchor=spec.anchor_offset + 2000 + dataset_index,
+                spec=spec,
             )
             _valid_outcome(natural)
             candidates[dataset] = pipeline.discover(
                 natural,
                 proposal,
-                created_epoch=0,
+                created_epoch=spec.discovery_epoch,
                 runtime_version=RUNTIME_VERSION,
                 executor_versions=_executor_versions(backend),
             )
@@ -787,9 +1158,17 @@ async def run(*, prepare_only: bool = False) -> dict[str, Any]:
                 task,
                 selected_candidates[dataset],
                 stage="confirmation",
-                anchor=4000 + DATASETS.index(dataset) * 100 + index,
-                order_rng=np.random.default_rng(SEED + DATASETS.index(dataset) * 100 + index),
+                anchor=(
+                    spec.anchor_offset
+                    + 4000
+                    + DATASETS.index(dataset) * 100
+                    + index
+                ),
+                order_rng=np.random.default_rng(
+                    spec.seed + DATASETS.index(dataset) * 100 + index
+                ),
                 sampling_probability=1.0,
+                spec=spec,
             )
 
     confirmation_jobs = [
@@ -808,7 +1187,7 @@ async def run(*, prepare_only: bool = False) -> dict[str, Any]:
     ):
         confirmation_evidence[dataset].append(evidence)
         pair_rows.append(row)
-    _write_jsonl(PAIR_PATH, pair_rows)
+    _write_jsonl(spec.pair_path, pair_rows)
 
     publications: dict[str, Any] = {}
     for dataset_index, dataset in enumerate(DATASETS):
@@ -827,7 +1206,7 @@ async def run(*, prepare_only: bool = False) -> dict[str, Any]:
             evidence
             for evidence in discovery_evidence[dataset]
             if evidence.probe.candidate_action
-            == dict(CANDIDATE_ACTIONS[selected_candidates[dataset]])
+            == dict(spec.candidate_actions[selected_candidates[dataset]])
         ]
         effects = {
             evidence.probe.problem_id: evidence.probe.paired_effect
@@ -838,15 +1217,15 @@ async def run(*, prepare_only: bool = False) -> dict[str, Any]:
             predicted_mean=float(predicted[dataset]["mean"]),
             predicted_std=float(predicted[dataset]["epistemic_std"]),
             task_family=dataset,
-            seed=SEED + dataset_index,
+            seed=spec.seed + dataset_index,
         )
         result = pipeline.confirm_and_publish(
             candidate,
             discovery_probes=selected_discovery,
             validation_probes=confirmation_evidence[dataset],
             statistics=statistics,
-            validation_epoch=1,
-            activation_epoch=2,
+            validation_epoch=spec.validation_epoch,
+            activation_epoch=spec.activation_epoch,
         )
         publications[dataset] = {
             "selected_candidate": selected_candidates[dataset],
@@ -874,15 +1253,48 @@ async def run(*, prepare_only: bool = False) -> dict[str, Any]:
         ),
         "forced_probe_trajectories_are_not_training_data": True,
     }
-    _write_json(PUBLICATION_PATH, result)
+    if spec.round_id == 1:
+        result.update(
+            {
+                "round_id": spec.round_id,
+                "experiment_version": spec.experiment_version,
+                "seed": spec.seed,
+                "posterior_version": spec.posterior_version,
+                "skill_library_version": spec.skill_library_version,
+                "confirmation_block": {
+                    "partition": "joint_qa_v2/skill_confirmation",
+                    "start": spec.confirmation_start,
+                    "stop": spec.confirmation_stop,
+                    "zero_based_stop_exclusive": True,
+                },
+                "causal_estimand": (
+                    "Skill prompt-prior visibility intent-to-treat effect on "
+                    "official answer token F1 from a shared empty Canvas"
+                ),
+                "topology_adoption_acceptance": {
+                    "verified_by_this_protocol": False,
+                    "requires_independent_evaluation": True,
+                },
+            }
+        )
+    _write_json(spec.publication_path, result)
+    if spec.round_id == 1:
+        _write_json(spec.report_root / "publication_results.json", result)
     return result
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--prepare-only", action="store_true")
+    parser.add_argument(
+        "--round",
+        type=int,
+        choices=tuple(ROUND_SPECS),
+        default=0,
+        help="bounded Skill evidence round (default: 0 for backward compatibility)",
+    )
     args = parser.parse_args(argv)
-    result = asyncio.run(run(prepare_only=args.prepare_only))
+    result = asyncio.run(run(prepare_only=args.prepare_only, round_id=args.round))
     print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
     return 0
 

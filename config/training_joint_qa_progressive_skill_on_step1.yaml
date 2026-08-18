@@ -29,6 +29,12 @@ data:
     dataset_keys: [hotpotqa, triviaqa]
     selection: "frozen_joint_qa_schedule"
     expected_total_tasks: 2
+    # Train-only tasks selected before rollout because each admits independent
+    # evidence branches followed by semantic fan-in.  They are disjoint from
+    # both Skill evidence epochs and every held-out partition.
+    task_positions:
+      hotpotqa: [9]
+      triviaqa: [12]
     schedule_path: "artifacts/joint_qa_progressive/training/step_000001/frozen_schedule.json"
     cursor_path: "artifacts/joint_qa_progressive/training/step_000001/cursor_step_000000.json"
     next_cursor_path: "artifacts/joint_qa_progressive/training/step_000001/cursor_step_000001.json"

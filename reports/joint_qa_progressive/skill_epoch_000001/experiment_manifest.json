@@ -1,0 +1,145 @@
+{
+  "adapter_name": "theta_jointqa_progressive_step_000000",
+  "baseline_action": {
+    "instruction": "No additional prompt prior; use the frozen Director policy."
+  },
+  "candidate_actions": {
+    "answer_type_and_span_consistency": {
+      "instruction": "Preserve the question's expected answer type when handing an answer candidate to the Output Agent, and return a canonical, minimal complete extractive span supported by the evidence. Do not replace a named entity with a count, category, abbreviation, or expanded alias, and do not apply unconditional shortest-span compression."
+    },
+    "relation_grounded_evidence_fan_in": {
+      "instruction": "Check the subject, relation, and qualifiers against retrieved evidence. Only when independent evidence subquestions exist, create parallel evidence branches and their semantic combiner in one ADD_SUBGRAPH transaction; use a Format Agent only to serialize the combined answer. Otherwise keep directed serial dependencies. Do not prescribe a fixed Agent count."
+    }
+  },
+  "candidate_source_artifacts": [
+    "reports/hotpotqa_multiagent_skill",
+    "reports/joint_qa_curve",
+    "reports/joint_qa_mace_skill",
+    "artifacts/joint_qa_progressive/step_000000/*/agentgraph_trajectories.jsonl"
+  ],
+  "causal_estimand": "Skill prompt-prior visibility intent-to-treat effect",
+  "companion_outcome": "normalized_exact_match",
+  "confirmation_block": "joint_qa_v2/skill_confirmation:[20:40]_per_dataset (zero-based, stop-exclusive)",
+  "confirmation_tasks": {
+    "hotpotqa": [
+      "hotpotqa:5ac1b9c155429963665198fe",
+      "hotpotqa:5ab51c2a5542991779162d80",
+      "hotpotqa:5ae08e2455429945ae9593bb",
+      "hotpotqa:5a7b8adb554299294a54a9e7",
+      "hotpotqa:5a775de85542993569682d6f",
+      "hotpotqa:5ae4c33a55429960a22e01c4",
+      "hotpotqa:5a78e3d2554299029c4b5eca",
+      "hotpotqa:5a873c985542994846c1cd28",
+      "hotpotqa:5ae0fd14554299422ee995a3",
+      "hotpotqa:5a8efb0f55429918e830d171",
+      "hotpotqa:5ab9aee55542996be2020588",
+      "hotpotqa:5a8ceac4554299585d9e3766",
+      "hotpotqa:5add88645542992ae4cec5a3",
+      "hotpotqa:5a77544955429966f1a36d0e",
+      "hotpotqa:5a7790f75542995d831811d8",
+      "hotpotqa:5a87f11455429938390d3ec1",
+      "hotpotqa:5ac3beb75542995ef918c20b",
+      "hotpotqa:5ab71f8e5542993667793f42",
+      "hotpotqa:5a7feaee5542994857a7684b",
+      "hotpotqa:5ab9796c554299753720f818"
+    ],
+    "triviaqa": [
+      "triviaqa:tc_1175",
+      "triviaqa:tc_1177",
+      "triviaqa:tc_1178",
+      "triviaqa:tc_1180",
+      "triviaqa:tc_1182",
+      "triviaqa:tc_1184",
+      "triviaqa:tc_1185",
+      "triviaqa:tc_1186",
+      "triviaqa:tc_1187",
+      "triviaqa:tc_1190",
+      "triviaqa:tc_1191",
+      "triviaqa:tc_1192",
+      "triviaqa:tc_1196",
+      "triviaqa:tc_1197",
+      "triviaqa:tc_1198",
+      "triviaqa:tc_1199",
+      "triviaqa:tc_1201",
+      "triviaqa:tc_1202",
+      "triviaqa:tc_1203",
+      "triviaqa:tc_1204"
+    ]
+  },
+  "development_block": "joint_qa_v2/development",
+  "discovery_schedule": "balanced cold start, posterior-UCB prefilter, then particle EVSI",
+  "discovery_tasks": {
+    "hotpotqa": [
+      "hotpotqa:5ab3dad4554299753aec59cb",
+      "hotpotqa:5ac12fda5542994d76dccdb0",
+      "hotpotqa:5a8e171b554299068b959e5a"
+    ],
+    "triviaqa": [
+      "triviaqa:tc_229",
+      "triviaqa:tc_230",
+      "triviaqa:tc_231"
+    ]
+  },
+  "encoder_version": "jointqa.skill-condition.fixed.v1",
+  "epochs": {
+    "discovery": 2,
+    "eligible_activation": 4,
+    "validation": 3
+  },
+  "evsi_budget": {
+    "observation_samples": 2048,
+    "posterior_particles": 1024,
+    "ucb_prefilter_top_k": 2
+  },
+  "experiment_version": "jointqa.mace-skill-evidence.epoch1.v1",
+  "feature_schema_version": "jointqa.skill-candidate-dataset-interaction.v1",
+  "final_test_block": "joint_qa_v2/test (not opened by this protocol)",
+  "forced_probe_excluded_from_grpo_and_benchmark": true,
+  "intervention_scope": "full trajectory from a shared empty-Canvas snapshot",
+  "natural_candidate_tasks": {
+    "hotpotqa": "hotpotqa:5a79c7f95542994bb9457099",
+    "triviaqa": "triviaqa:tc_232"
+  },
+  "not_a_prefix_topology_intervention": true,
+  "partition_manifest": "data/joint_qa_v2/manifest.json",
+  "policy_version": "qwen35-9b-hotpot-step-000000",
+  "posterior_version": "jointqa.bayesian-linear.progressive-subgraph.epoch2.v1",
+  "primary_outcome": "official_answer_token_f1",
+  "prompt_version": "agentgraph.director.progressive_subgraph.v1",
+  "round_id": 1,
+  "runtime_version": "flowsteer.agentgraph.progressive-runtime.v1",
+  "schema_version": "flowsteer.joint-qa.mace-bayesian-skill.v2",
+  "seed": 20260819,
+  "selection_coordinates": {
+    "reserved_grpo_training_positions": {
+      "hotpotqa": 9,
+      "triviaqa": 12
+    },
+    "skill_confirmation": {
+      "start": 20,
+      "stop": 40,
+      "zero_based_stop_exclusive": true
+    },
+    "train_discovery": {
+      "start": 4,
+      "stop": 7,
+      "zero_based_stop_exclusive": true
+    },
+    "train_natural_candidate_position": 7
+  },
+  "skill_gate": {
+    "delta_min": 0.03,
+    "max_harm_probability": 0.05,
+    "minimum_effective_pairs": 20,
+    "minimum_empirical_coverage": 0.9,
+    "minimum_independent_problems": 20,
+    "minimum_positive_slice_fraction": 0.75
+  },
+  "skill_library_version": "jointqa.skill-library.progressive.epoch4.v1",
+  "tool_version": "agentgraph.add-subgraph+skillflow-public-retrieval.v1",
+  "topology_adoption_acceptance": {
+    "reason": "The paired intervention estimates full-trajectory Skill prompt-prior visibility intent-to-treat effect from an empty Canvas; terminal answer F1 does not verify Director adoption of parallel branches or semantic fan-in.",
+    "requires_independent_evaluation": true,
+    "verified_by_this_protocol": false
+  }
+}

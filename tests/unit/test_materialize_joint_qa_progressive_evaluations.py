@@ -14,6 +14,10 @@ from scripts.materialize_joint_qa_progressive_evaluations import (
     materialize_skill_on_evaluations,
     materialize_step1_skill_off_evaluations,
 )
+from scripts.materialize_joint_qa_progressive_skill_training import (
+    DEFAULT_TEMPLATE as DEFAULT_TRAINING_TEMPLATE,
+    materialize as materialize_skill_training,
+)
 from src.interactive.skills import SkillEvidence, SkillRecord, SkillStatus, SkillStore
 from src.interactive.versioning import VersionBundle
 
@@ -25,7 +29,7 @@ LIBRARY = "jointqa.skill-library.progressive.epoch2.v1"
 POSTERIOR = "jointqa.bayesian-linear.progressive-subgraph.v1"
 
 
-def _active_skill(dataset: str) -> SkillRecord:
+def _active_skill(dataset: str, *, activated_epoch: int = 2) -> SkillRecord:
     evidence_ids = tuple(f"{dataset}-evidence-{index}" for index in range(4))
     problem_ids = tuple(f"{dataset}-problem-{index}" for index in range(4))
     return SkillRecord(
@@ -63,7 +67,7 @@ def _active_skill(dataset: str) -> SkillRecord:
         ),
         created_epoch=0,
         eligible_epoch=1,
-        activated_epoch=2,
+        activated_epoch=activated_epoch,
         gate_config={"delta_min": 0.03},
         gate_receipt=f"gate-{dataset}",
     )
@@ -174,6 +178,97 @@ def test_skill_on_fails_closed_unless_both_store_records_are_active() -> None:
                 output_paths=outputs,
             )
         assert not any(path.exists() for path in outputs.values())
+
+
+def test_skill_on_uses_the_common_delayed_activation_epoch() -> None:
+    with TemporaryDirectory() as directory:
+        root = Path(directory)
+        store_path = root / "skills.json"
+        store = SkillStore(store_path)
+        records = {
+            dataset: _active_skill(dataset, activated_epoch=4)
+            for dataset in DATASETS
+        }
+        for record in records.values():
+            store.upsert(record)
+        publication_path = root / "publication_results.json"
+        publication_path.write_text(
+            json.dumps(
+                {
+                    "active_datasets": list(DATASETS),
+                    "publications": {
+                        dataset: {"skill": record.to_dict(), "gate": {"approved": True}}
+                        for dataset, record in records.items()
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        outputs = _output_paths(root, "skill-on-epoch4")
+
+        receipt = materialize_skill_on_evaluations(
+            publication_path=publication_path,
+            skill_store_path=store_path,
+            output_paths=outputs,
+        )
+        resolved = _load_outputs(outputs)
+
+        assert receipt["current_epoch"] == 4
+        assert all(config["skills"]["current_epoch"] == 4 for config in resolved.values())
+
+
+def test_skill_training_uses_the_common_delayed_activation_epoch() -> None:
+    with TemporaryDirectory(dir=Path(__file__).resolve().parents[2]) as directory:
+        root = Path(directory)
+        store_path = root / "skills.json"
+        store = SkillStore(store_path)
+        records = {
+            dataset: _active_skill(dataset, activated_epoch=4)
+            for dataset in DATASETS
+        }
+        for record in records.values():
+            store.upsert(record)
+        publication_path = root / "publication_results.json"
+        publication_path.write_text(
+            json.dumps(
+                {
+                    "active_datasets": list(DATASETS),
+                    "publications": {
+                        dataset: {"skill": record.to_dict(), "gate": {"approved": True}}
+                        for dataset, record in records.items()
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        template = yaml.safe_load(DEFAULT_TRAINING_TEMPLATE.read_text(encoding="utf-8"))
+        template["data"]["joint_qa_micro"]["schedule_path"] = str(root / "schedule.json")
+        template["data"]["joint_qa_micro"]["cursor_path"] = str(root / "cursor.json")
+        template_path = root / "training.yaml"
+        template_path.write_text(
+            yaml.safe_dump(template, sort_keys=False, allow_unicode=True),
+            encoding="utf-8",
+        )
+        output_path = root / "resolved.yaml"
+
+        receipt = materialize_skill_training(
+            template_path=template_path,
+            publication_path=publication_path,
+            skill_store_path=store_path,
+            output_path=output_path,
+        )
+        resolved = yaml.safe_load(output_path.read_text(encoding="utf-8"))
+
+        assert receipt["current_epoch"] == 4
+        assert resolved["skills"]["current_epoch"] == 4
+        schedule = json.loads(
+            Path(receipt["schedule"]["schedule"]).read_text(encoding="utf-8")
+        )
+        selected = {
+            task["dataset_key"]: task for task in schedule["steps"][0]["tasks"]
+        }
+        assert selected["hotpotqa"]["task_position"] == 9
+        assert selected["triviaqa"]["task_position"] == 12
 
 
 def _write_training_receipts(root: Path) -> tuple[Path, Path, Path]:

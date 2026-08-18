@@ -52,6 +52,18 @@ def _relative(path: Path) -> str:
     return str(path.resolve().relative_to(PROJECT_ROOT.resolve()))
 
 
+def _task_positions(joint: Mapping[str, Any], dataset: str) -> tuple[int, ...]:
+    configured = _mapping(
+        joint.get("task_positions"), "data.joint_qa_micro.task_positions"
+    ).get(dataset)
+    if not isinstance(configured, (list, tuple)) or len(configured) != 1:
+        raise RuntimeError(f"{dataset} must declare exactly one train task position")
+    position = configured[0]
+    if isinstance(position, bool) or not isinstance(position, int) or position < 0:
+        raise RuntimeError(f"{dataset} train task position must be a non-negative integer")
+    return (position,)
+
+
 def materialize(
     *,
     template_path: Path = DEFAULT_TEMPLATE,
@@ -83,8 +95,8 @@ def materialize(
             raise RuntimeError(f"{dataset} publication has no matching ACTIVE Skill")
         if record.condition.get("task_family") != dataset:
             raise RuntimeError(f"{dataset} ACTIVE Skill has an incompatible task condition")
-        if record.activated_epoch is None or record.activated_epoch > 2:
-            raise RuntimeError(f"{dataset} ACTIVE Skill is not visible in epoch 2")
+        if record.activated_epoch is None:
+            raise RuntimeError(f"{dataset} ACTIVE Skill has no activation epoch")
         required_ids.append(record.skill_id)
         records.append(record)
 
@@ -95,6 +107,12 @@ def materialize(
         raise RuntimeError("ACTIVE Skills do not share one frozen library/posterior regime")
     if len(policy_versions) != 1:
         raise RuntimeError("ACTIVE Skills do not share one frozen behavior policy")
+    activation_epochs = {record.activated_epoch for record in records}
+    if len(activation_epochs) != 1:
+        raise RuntimeError("ACTIVE Skills do not share one visibility epoch")
+    current_epoch = next(iter(activation_epochs))
+    if current_epoch is None:  # guarded above; keeps the type boundary explicit
+        raise RuntimeError("ACTIVE Skills have no visibility epoch")
 
     config = load_yaml(template_path)
     skills = dict(_mapping(config["skills"], "skills"))
@@ -103,7 +121,7 @@ def materialize(
         library_version=next(iter(library_versions)),
         posterior_version=next(iter(posterior_versions)),
         required_skill_ids=required_ids,
-        current_epoch=2,
+        current_epoch=current_epoch,
     )
     config["skills"] = skills
     director = _mapping(config["director"], "director")
@@ -126,8 +144,8 @@ def materialize(
         cursor_path=cursor_path,
         step_count=1,
         rollouts_per_task=8,
-        hotpotqa_task_positions=(8,),
-        triviaqa_task_positions=(8,),
+        hotpotqa_task_positions=_task_positions(joint, "hotpotqa"),
+        triviaqa_task_positions=_task_positions(joint, "triviaqa"),
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(
@@ -142,6 +160,7 @@ def materialize(
         "policy_version": next(iter(policy_versions)),
         "library_version": next(iter(library_versions)),
         "posterior_version": next(iter(posterior_versions)),
+        "current_epoch": current_epoch,
         "schedule": schedule,
         "training_started": False,
     }
