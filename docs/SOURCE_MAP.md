@@ -411,3 +411,13 @@ update creates a new policy version, after which the prior ACTIVE Skills are
 version-incompatible and must be suspended or independently revalidated before
 another training epoch.  Development and final test tasks are never used for
 posterior fitting, EVSI, Skill confirmation, or optimizer data.
+
+The first progressive Step-0 stream showed that component transactions removed
+the singleton collapse but still produced only serial depth-2/3 graphs.  The
+fresh Skill epoch therefore replaces the obsolete transaction-construction
+prior with a rejectable dependency-aligned topology prior: parallel branches
+are suggested only for independent evidence, finite reciprocal revision only
+for a draft/critique dependency, and serial dependencies otherwise.  This is a
+paired Skill candidate, not a base Director template, topology quota, reward,
+or direct Canvas mutation; it can become ACTIVE only through the unchanged
+independent evidence gate.

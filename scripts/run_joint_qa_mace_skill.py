@@ -93,13 +93,13 @@ BASELINE_ACTION: Mapping[str, Any] = {
 # and unsupported/overlong terminal answers.  They do not prescribe a fixed
 # topology or model and never mutate the Canvas directly.
 CANDIDATE_ACTIONS: Mapping[str, Mapping[str, Any]] = {
-    "subgraph_transaction_boundary": {
+    "dependency_aligned_topology": {
         "instruction": (
-            "When one immediately executable functional component requires several "
-            "Agents and their dependencies, add its one-to-three Agents and relations "
-            "in one add_subgraph transaction. Inspect that component's execution "
-            "feedback before choosing the next edit; use only the dependency structure "
-            "and model choices warranted by the current question."
+            "When the question contains independent evidence subproblems, represent "
+            "them as parallel branches in one add_subgraph transaction and route them "
+            "to the first Agent that must combine them. When a draft and critique need "
+            "bounded revision, use one finite reciprocal pair; otherwise keep directed "
+            "dependencies. Do not add branches when the dependencies are serial."
         )
     },
     "evidence_to_format_handoff": {
@@ -549,6 +549,7 @@ def _manifest(
             "reports/hotpotqa_multiagent_skill",
             "reports/joint_qa_curve",
             "reports/joint_qa_mace_skill",
+            "artifacts/joint_qa_progressive/step_000000/*/agentgraph_trajectories.jsonl",
         ],
         "baseline_action": dict(BASELINE_ACTION),
         "skill_gate": SkillGateConfig().to_dict(),
