@@ -10,8 +10,15 @@ from src.interactive.agent_runtime import (
     AgentRuntimeError,
     CommunicationCondition,
     ExecutionPhase,
+    ReasoningExecutionAdapter,
 )
 from src.interactive.model_registry import ModelRegistry, ModelSpec, ProviderSpec
+from src.interactive.tool_runtime import (
+    FakeTool,
+    ToolCapability,
+    ToolRegistration,
+    ToolRegistry,
+)
 
 
 def registry() -> ModelRegistry:
@@ -41,6 +48,28 @@ class RecordingGateway:
 
 
 class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _stateful_tool_registry() -> ToolRegistry:
+        tool_id = "webshop.environment"
+        capability = ToolCapability(
+            tool_id=tool_id,
+            dataset_scope=("webshop",),
+            input_schema={"type": "object"},
+            output_schema={"type": "object"},
+            side_effect="environment_state_transition",
+            timeout_seconds=None,
+            version="test-v1",
+        )
+        return ToolRegistry(
+            (
+                ToolRegistration(
+                    tool_id,
+                    FakeTool({"step": lambda arguments: dict(arguments)}),
+                    capability,
+                ),
+            )
+        )
+
     async def test_chain_routes_final_outputs_and_models(self) -> None:
         catalog = registry()
         gateway = RecordingGateway()
@@ -183,6 +212,101 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 "question",
                 format_output_agent=True,
             )
+
+    async def test_format_execution_rejects_react_mode(self) -> None:
+        catalog = registry()
+        gateway = RecordingGateway()
+        graph = AgentGraph(
+            [
+                AgentNode("solver", "m1", "solve"),
+                AgentNode(
+                    "fmt",
+                    "m2",
+                    "extract",
+                    role_family="format",
+                    execution_mode="react",
+                ),
+            ],
+            [AgentRelation("solver", "fmt", True, False)],
+            output_agent_id="fmt",
+        )
+        runtime = AgentRuntime(
+            catalog,
+            gateway,
+            execution_adapters={"react": ReasoningExecutionAdapter(gateway)},
+        )
+
+        with self.assertRaisesRegex(
+            AgentRuntimeError,
+            "Format Agent must use reasoning execution without tools",
+        ):
+            await runtime.execute(graph, "question", format_output_agent=True)
+
+    async def test_stateful_tool_requires_one_graph_agent_owner(self) -> None:
+        catalog = registry()
+        gateway = RecordingGateway()
+        tools = self._stateful_tool_registry()
+        graph = AgentGraph(
+            [
+                AgentNode(
+                    "actor_a",
+                    "m1",
+                    "act",
+                    allowed_tools=("webshop.environment",),
+                    execution_mode="react",
+                ),
+                AgentNode(
+                    "actor_b",
+                    "m2",
+                    "act",
+                    allowed_tools=("webshop.environment",),
+                    execution_mode="react",
+                ),
+            ],
+            [AgentRelation("actor_a", "actor_b", True, False)],
+            output_agent_id="actor_b",
+        )
+        runtime = AgentRuntime(
+            catalog,
+            gateway,
+            execution_adapters={"react": ReasoningExecutionAdapter(gateway)},
+            tool_registry=tools,
+            dataset_id="webshop",
+        )
+
+        with self.assertRaisesRegex(AgentRuntimeError, "one graph Agent owner"):
+            await runtime.execute(graph, "question")
+        self.assertEqual([], gateway.requests)
+
+    async def test_stateful_tool_owner_cannot_join_reciprocal_block(self) -> None:
+        catalog = registry()
+        gateway = RecordingGateway()
+        tools = self._stateful_tool_registry()
+        graph = AgentGraph(
+            [
+                AgentNode(
+                    "actor",
+                    "m1",
+                    "act",
+                    allowed_tools=("webshop.environment",),
+                    execution_mode="react",
+                ),
+                AgentNode("critic", "m2", "critique"),
+            ],
+            [AgentRelation("actor", "critic", True, True)],
+            output_agent_id="critic",
+        )
+        runtime = AgentRuntime(
+            catalog,
+            gateway,
+            execution_adapters={"react": ReasoningExecutionAdapter(gateway)},
+            tool_registry=tools,
+            dataset_id="webshop",
+        )
+
+        with self.assertRaisesRegex(AgentRuntimeError, "reciprocal Agent block"):
+            await runtime.execute(graph, "question")
+        self.assertEqual([], gateway.requests)
 
     async def test_event_driven_successor_starts_while_unrelated_branch_is_slow(self) -> None:
         catalog = registry()

@@ -1,60 +1,70 @@
 # Dataset Capability Matrix
 
-Recorded from the current repository configuration, dataset registries,
-runtime adapters, evaluator code, and saved reports on 2026-08-19.  The seven
-targets are defined jointly by `config/datasets_agentgraph.yaml` and the
-dataset keys consumed by `scripts/train_agentgraph_smoke.py`.  Legacy
-FlowSteer benchmark entries outside this list are not part of the current
-multidataset AgentGraph scope.
+Recorded from the source tree on 2026-08-20.  This matrix separates three
+different claims:
 
-| Dataset | Task type | Evaluator and primary metric | Comparable baseline | External tool | ReAct | Coding Agent | Skill type / current status |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| HotpotQA | Static multi-hop QA | `hotpotqa.official.answer.v1`; normalized EM and answer token F1 | Local Qwen3.5-9B over the same ten passages | No external tool in the closed-context protocol | No | No | Evidence routing, bridge decomposition, verification; runtime retrieval exists, but no HotpotQA Skill is `ACTIVE` |
-| TriviaQA | Static factual QA | `triviaqa.official.answer.v1`; maximum normalized EM/F1 over accepted aliases | Local Qwen3.5-9B with the same public retrieval observations | Existing SkillFlow retrieval is deterministic prefetch, not a model-driven Tool loop | Partial: retrieval observations only | No | Retrieval/query/evidence handoff; existing candidates are `CANDIDATE` or `RETIRED`, none `ACTIVE` |
-| AIME 2026 | Mathematical reasoning | `skillflow.protocol-v10.static.integer.v1`; strict integer exact match / accuracy | Local Qwen3.5-9B single-call integer submission | None currently; calculator/Python/symbolic execution not wired | No | No | Derivation, independent verification, computation-tool selection; dataset Skills disabled and no validated candidate |
-| HealthBench Professional | Open-ended healthcare QA | `openai.simple-evals.healthbench.v1`; public rubric mean raw score | Local Qwen3.5-9B single healthcare response | No Executor tool; GPT-4.1 is evaluator-only | No | No | Clinical evidence coverage and verification; dataset Skills disabled and no paired evidence |
-| WebShop | Interactive web environment | `skillflow.ragen_adapter.v2`; official environment return and success | Single Qwen3.5-9B ReAct policy using the same environment and action budget | WebShop benchmark actions only: `search[...]` and `click[...]` | Yes, through the live benchmark environment | No | Search/refinement, attribute comparison, navigation, stopping; runtime Skill interface exists but no `ACTIVE` WebShop Skill |
-| ALFWorld | Interactive embodied environment | `skillflow.ragen_adapter.v2`; simulator terminal `won` / success | Single Qwen3.5-9B ReAct policy with the same game and action budget | ALFWorld admissible environment commands | Adapter prepared; live Stable Zero not yet run | No | Subgoal decomposition, state-dependent action selection, failed-action recovery; no evidence-gated Skill |
-| SWE-bench Verified | Software engineering / coding | `swebench.harness.v1`; official Docker harness resolved rate | Single Coding Agent under the same repository, tools, and test budget | Repository read/search/edit, shell and test tools are required but not yet wired into AgentRuntime | Required, not yet implemented | Required, not yet implemented | Repository inspection, localization, patch/test/revision; no coding Skill evidence |
+- **implemented** means the Runtime/adapter and its unit boundary exist;
+- **configured** means a frozen evaluation condition exists; and
+- **live-validated** means that condition produced evaluator-valid trajectories.
 
-## Current evaluation state
+An older result is not evidence that the new Tool/ReAct/Coding condition is
+live-validated.  In particular, the saved HotpotQA, TriviaQA, AIME,
+HealthBench and WebShop scores below predate the unified task-scoped Runtime.
 
-| Dataset | Fixed evaluation state | Current saved result | Stable Zero interpretation |
+## Shared architecture boundary
+
+| Boundary | Current status | Source classification |
+| --- | --- | --- |
+| Progressive Canvas | `AgentWorkflowEnv.step` retains FlowSteer's one accepted atomic Canvas edit followed by execution of the current graph and execution feedback to the next Director turn. `ADD_SUBGRAPH` may add one component containing multiple Agents; `FINISH` remains explicit and is distinct from `max_rounds`. | **Direct reuse:** FlowSteer `InteractiveWorkflowEnv.step`, workflow state and trajectory loop. **Necessary adaptation:** free AgentGraph actions, quotient-DAG validation and finite two-Agent reciprocal blocks. |
+| Unified Agent execution | `AgentRuntime` dispatches `reasoning`, `react`, and `coding` nodes through one scheduler and one model registry. Task-scoped Tool runtimes are selected by the explicit evaluation condition; only one stateful environment or repository owner is admitted in a graph. | **Necessary adaptation:** SkillFlow bounded execution inside the retained FlowSteer scheduler. |
+| Agent communication | `CommunicationEnvelope` carries source/target Agent IDs, artifact type/body, graph revision, optional environment revision, dependency, and Tool receipts. Legacy text fields remain for trajectory compatibility. | **Project algorithm addition:** typed cross-Agent envelopes are not represented by upstream FlowSteer or SkillFlow. |
+| Tool boundary | `ToolRegistry` admits immutable resource IDs with dataset scope, schema, side-effect, timeout and version metadata. `ToolReactExecutionAdapter` executes one `StructuredAction` per model turn and returns only the public observation. | **Direct reuse:** SkillFlow Tool/StructuredAction contracts. **Necessary adaptation:** asynchronous timeout and task-scoped registry. **Project algorithm addition:** `ToolCapability` and measured `ToolReceipt`. |
+| Trajectory receipts | `rollout_collector.py` persists provider/model calls, token and latency metadata, ReAct traces, Tool receipts, environment reset/transition receipts, environment revision, evaluator replay trace, and Coding Agent receipts in the existing trajectory boundary. | **Direct reuse:** FlowSteer action masks/turn records and SkillFlow rollout artifacts. **Necessary adaptation:** JSON-safe heterogeneous execution metadata. |
+| Native evaluator boundary | `task_evaluator.py` keeps gold answers, accepted aliases, rubrics, environment reward/`won`, and SWE-bench resolution outside model-visible Runtime state. Invalid evaluator receipts are excluded rather than replaced by proxy scores. | **Necessary adaptation:** benchmark-native evaluators are normalized behind one `evaluate_task` interface. |
+| Model capability admission | `probe_model_capabilities.py` first requires an exact `/v1/models` ID and then probes Text, `StructuredAction`, and Coding-format compatibility without alias substitution or silent fallback. `model_catalog_multidataset_tool_v1.yaml` contains the remote models admitted by the saved canary; the current local Qwen3.5-9B service canary is still pending. | **Necessary adaptation:** provider discovery/capability receipt for the heterogeneous Executor catalog. The Flow-Director remains local Qwen3.5-9B. |
+| Skill and training boundary | Skill schemas, lifecycle, retrieval and the project evidence gate exist, but every new multidataset Stable Zero configuration has Skills, GRPO, backward, optimizer updates and policy publication disabled. | **Direct reuse:** SkillFlow evidence/library primitives. **Project algorithm addition:** paired AgentGraph effect/posterior gate. **Not implemented/executed for this phase:** evidence-gated `ACTIVE` Skills and micro-training. |
+
+## Seven-dataset Runtime matrix
+
+| Dataset | Direct/Simple baseline | AgentGraph execution and Tool | Native evaluator / primary metric | Implementation and validation state |
+| --- | --- | --- | --- | --- |
+| HotpotQA | Local Qwen3.5-9B, one closed-context call over the supplied ten passages | Model-driven `search`/`read` through SkillFlow `RetrievalIndex`, bounded by `ToolReactExecutionAdapter`; the Director chooses the AgentGraph and Tool assignment | `hotpotqa.official.answer.v1`; normalized Exact Match and token F1 | Runtime wiring, frozen two-task canary condition and generic runner support are **implemented/configured**. Tool-enabled Stable Zero is **not yet live-validated**. Closed-context Direct and retrieval-enabled AgentGraph are different protocols and must be reported separately. |
+| TriviaQA | Local Qwen3.5-9B, one question-only call | Model-driven `search`/`read` through the same frozen SkillFlow `RetrievalIndex`; the legacy deterministic question-query prefetch is not used by this condition | `triviaqa.official.answer.v1`; maximum normalized Exact Match/F1 over accepted aliases | Runtime wiring, frozen two-task canary condition and generic runner support are **implemented/configured**. Tool-enabled Stable Zero is **not yet live-validated**. Question-only Direct and retrieval-enabled AgentGraph are different protocols. |
+| AIME 2026 | Local Qwen3.5-9B, one integer submission | Model-driven calculator and bounded child-process Python execution through `ToolReactExecutionAdapter`; Tool observations carry no reward | `skillflow.protocol-v10.static.integer.v1`; strict integer Exact Match/accuracy | Computation tools, runner wiring and frozen two-task canary condition are **implemented/configured**. Computation-enabled Stable Zero is **not yet live-validated**. |
+| HealthBench Professional | Local Qwen3.5-9B, one healthcare response | Model-driven search over the frozen SkillFlow MedRAG textbooks BM25 corpus; corpus identity/revision/row count are checked at open time and rubrics are not Tool inputs | `openai.simple-evals.healthbench.v1`; rubric mean raw score with the configured reference judge | MedRAG Tool, runner wiring and frozen two-task canary condition are **implemented/configured**. MedRAG-enabled Stable Zero is **not yet live-validated**. |
+| WebShop | Single local Qwen3.5-9B ReAct policy under the same environment and step budget | Request-scoped SkillFlow RAGEN episode; only admissible `search[...]`/`click[...]` actions and public observations are model-visible; evaluator replays the recorded transition trace | `skillflow.ragen_adapter.v2`; official environment return/success | Environment adapter, replay boundary, runner wiring and frozen two-task canary condition are **implemented/configured**. The new condition is **not yet live-validated**. |
+| ALFWorld | Single local Qwen3.5-9B ReAct policy under the same game and step budget | Request-scoped SkillFlow RAGEN episode with admissible simulator actions, public observations and evaluator-locked task identity | `skillflow.ragen_adapter.v2`; terminal `won`/success | Environment adapter, replay boundary, runner wiring and frozen two-task canary condition are **implemented/configured**. No evaluator-valid live Stable Zero episode exists yet. |
+| SWE-bench Verified | One bounded Coding Agent under the same repository, tools and test budget | Detached task/base-commit worktree; repository-relative list/search/view/exact-edit/diff/test tools; iterative Coding Agent completion requires a real edit, test call and inspected changed workspace diff | `swebench.harness.v1`; official Docker harness `resolved` | Worktree lifecycle, repository Tool registry, Coding Agent, runner wiring and frozen two-task condition are **implemented/configured**. The condition is only `prepared`: no live Coding trajectory or official-harness `resolved` receipt exists. |
+
+## Historical results kept separate from the new Runtime
+
+| Dataset | Historical fixed evaluation | Saved result | Why it is not a new-condition result |
 | --- | --- | --- | --- |
-| HotpotQA | 128/128 evaluator-valid | Direct EM 72.66%, F1 82.08%; AgentGraph EM 75.00%, F1 84.44% | End-to-end inference/evaluator chain is complete for the frozen project split |
-| TriviaQA | 128/128 evaluator-valid | Direct EM 51.56%, F1 57.90%; AgentGraph EM 52.34%, F1 61.80% | Chain is complete, but 12 Director rollouts exhausted `max_rounds`; model-driven retrieval Tool use is not yet proven |
-| AIME 2026 | 30/30 evaluator-valid official 2026 tasks | Direct 1/30 (3.33%); AgentGraph 13/30 (43.33%) | Completion and strict integer evaluator chain are complete; computation tools are absent |
-| HealthBench Professional | 128/128 evaluator-valid | Direct mean raw score 0.1318; AgentGraph 0.2075 | Public simple-evals-compatible local score only, not the private leaderboard metric |
-| WebShop | 126/128 evaluator-valid | Direct success 24.22%; AgentGraph strict success 22.66% | Canary passed, but two operational failures and one terminal failure prevent a complete fixed-128 claim |
-| ALFWorld | Dataset/configuration prepared | No Direct or AgentGraph result | `STABLE_ZERO = FAIL`: no live episode, trajectory, or terminal evaluator receipt yet |
-| SWE-bench Verified | Dataset/configuration prepared | No official resolved result | `STABLE_ZERO = FAIL`: official Docker harness preflight is blocked and iterative Coding Agent execution is absent |
+| HotpotQA | 128/128 evaluator-valid | Direct EM 72.66%, F1 82.08%; AgentGraph EM 75.00%, F1 84.44% | Closed-context architecture run before model-driven QA Tool wiring |
+| TriviaQA | 128/128 evaluator-valid | Direct EM 51.56%, F1 57.90%; AgentGraph EM 52.34%, F1 61.80% | Used the legacy deterministic retrieval-prefetch boundary |
+| AIME 2026 | 30/30 evaluator-valid official 2026 tasks | Direct 1/30 (3.33%); AgentGraph 13/30 (43.33%) | Run before calculator/Python Tool wiring |
+| HealthBench Professional | 128/128 evaluator-valid | Direct mean raw score 0.1318; AgentGraph 0.2075 | Run before the frozen MedRAG Tool boundary |
+| WebShop | 126/128 evaluator-valid | Direct success 24.22%; AgentGraph strict success 22.66% | Legacy evaluator-owned interaction; two operational failures remain |
+| ALFWorld | No evaluator-valid saved run | Not available | No live episode |
+| SWE-bench Verified | No official resolved run | Not available | Official harness result unavailable |
 
-## Protocol boundaries
+## Protocol boundaries and remaining work
 
-- The 128-held-out/512-training views are deterministic project splits.  They
-  must not be described as full official leaderboard evaluations, except for
-  the separate official 30-task AIME 2026 test view.
-- QA results must remain separated into closed-context Direct,
-  closed-context AgentGraph, and Tool-enabled AgentGraph protocols.
-- WebShop and ALFWorld receive reward only from their benchmark environment.
-- SWE-bench receives `resolved` only from the official harness; a generated
-  patch, an LLM judgement, or a proxy test is not a resolved instance.
-- All seven formal configurations currently have production Skills disabled.
-  `ACTIVE Skill = 0`; candidates cannot be presented as deployed capability.
-
-## Immediate capability gaps
-
-1. Add a registry-backed, receipt-bearing Tool execution boundary to the
-   existing AgentRuntime without replacing progressive Canvas editing.
-2. Replace TriviaQA deterministic prefetch with an explicitly separated,
-   model-driven `search/read/complete` Tool protocol when Tool-enabled results
-   are reported.
-3. Run a fixed ALFWorld canary that proves game identity, admissible actions,
-   state transition, terminal `won`, and trajectory persistence.
-4. Repair the remaining WebShop operational failures before claiming a
-   complete fixed-condition Stable Zero.
-5. Implement repository workspace inspection, patching, targeted tests, error
-   feedback, and bounded iterative repair for SWE-bench inside AgentGraph.
-6. Keep every dataset Skill disabled until randomized paired evidence,
-   independent validation, version compatibility, and the evidence gate make
-   it `ACTIVE`.
+1. The deterministic 128-held-out/512-training views are project splits, not
+   automatically official leaderboard evaluations. AIME's separate 30-task
+   official-2026 view remains distinct.
+2. QA Direct and retrieval-enabled AgentGraph conditions are not
+   protocol-equivalent. Report each protocol independently; do not interpret
+   their score difference as a paired architecture effect.
+3. WebShop and ALFWorld receive success only from the RAGEN environment.
+   Runtime traces are replayed by the evaluator; model-visible observations do
+   not contain reward or `won`.
+4. SWE-bench receives `resolved` only from the official harness. A generated
+   diff, model judgement, or local proxy test is not a resolved instance.
+5. All seven fixed conditions have `prepare-only` manifests and each declares
+   a two-task canary. Run the actual canaries before claiming a unified Runtime
+   Stable Zero result; for SWE-bench, the official Docker harness must also
+   return a valid `resolved` receipt.
+6. `ACTIVE Skill = 0` for this multidataset phase. The evidence gate, Skill
+   activation, micro-training, optimizer update and policy synchronization
+   have not been executed and must not be reported as completed.

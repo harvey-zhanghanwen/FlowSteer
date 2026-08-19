@@ -767,6 +767,127 @@ def _sampling_value(
         return default
 
 
+_JSON_UNSAFE = object()
+
+_PROVIDER_RESPONSE_METADATA_FIELDS: Tuple[str, ...] = (
+    "provider_id",
+    "model_id",
+    "prompt_tokens",
+    "completion_tokens",
+    "total_tokens",
+    "latency_ms",
+    "temperature",
+    "top_p",
+    "max_tokens",
+)
+
+_UNIFIED_EXECUTION_METADATA_FIELDS: Tuple[str, ...] = (
+    "execution_mode",
+    "react_turns_used",
+    "tool_calls",
+    "tool_receipts",
+    "react_trace",
+    "model_calls",
+    "environment_id",
+    "task_family",
+    "environment_revision",
+    "environment_reset_receipt",
+    "environment_receipts",
+    "environment_terminal",
+    "environment_turns_used",
+    "environment_steps",
+    "evaluator_environment_trace",
+)
+
+
+def _json_safe_value(value: object) -> object:
+    """Convert receipt values to JSON types and reject opaque runtime objects."""
+
+    if value is None or isinstance(value, (bool, int, str)):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else _JSON_UNSAFE
+    if isinstance(value, Mapping):
+        converted: dict[str, object] = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                continue
+            safe_item = _json_safe_value(item)
+            if safe_item is not _JSON_UNSAFE:
+                converted[key] = safe_item
+        return converted
+    if isinstance(value, (list, tuple)):
+        converted_items: list[object] = []
+        for item in value:
+            safe_item = _json_safe_value(item)
+            if safe_item is not _JSON_UNSAFE:
+                converted_items.append(safe_item)
+        return converted_items
+    return _JSON_UNSAFE
+
+
+def _copy_json_safe_fields(
+    source: Mapping[str, object],
+    target: dict[str, object],
+    fields: Sequence[str],
+) -> None:
+    for field in fields:
+        if field not in source:
+            continue
+        safe_value = _json_safe_value(source[field])
+        if safe_value is not _JSON_UNSAFE:
+            target[field] = safe_value
+
+
+def _json_safe_or_default(value: object, default: object = None) -> object:
+    safe_value = _json_safe_value(value)
+    return default if safe_value is _JSON_UNSAFE else safe_value
+
+
+def _model_call_metadata(
+    response_metadata: Mapping[str, object],
+) -> Iterable[Mapping[str, object]]:
+    raw_calls = response_metadata.get("model_calls", ())
+    if not isinstance(raw_calls, (list, tuple)):
+        return ()
+    return tuple(
+        call_metadata
+        for call in raw_calls
+        if isinstance(call, Mapping)
+        and isinstance((call_metadata := call.get("metadata")), Mapping)
+    )
+
+
+def _aggregated_int_metadata(
+    response_metadata: Mapping[str, object],
+    field: str,
+) -> Optional[int]:
+    direct = _optional_int(response_metadata.get(field))
+    if direct is not None:
+        return direct
+    values = [
+        value
+        for metadata in _model_call_metadata(response_metadata)
+        if (value := _optional_int(metadata.get(field))) is not None
+    ]
+    return sum(values) if values else None
+
+
+def _aggregated_float_metadata(
+    response_metadata: Mapping[str, object],
+    field: str,
+) -> Optional[float]:
+    direct = _optional_float(response_metadata.get(field))
+    if direct is not None:
+        return direct
+    values = [
+        value
+        for metadata in _model_call_metadata(response_metadata)
+        if (value := _optional_float(metadata.get(field))) is not None
+    ]
+    return sum(values) if values else None
+
+
 def _request_record(call: AgentCallRecord) -> Mapping[str, Any]:
     request = call.request
     return {
@@ -828,14 +949,42 @@ def _execution_record(call: AgentCallRecord) -> ExecutionRecord:
     if max_tokens <= 0:
         max_tokens = 4096
 
+    input_tokens = _aggregated_int_metadata(metadata, "prompt_tokens")
+    output_tokens = _aggregated_int_metadata(metadata, "completion_tokens")
+    total_tokens = _aggregated_int_metadata(metadata, "total_tokens")
+    latency_ms = _aggregated_float_metadata(metadata, "latency_ms")
+    attempt_count = _aggregated_int_metadata(metadata, "attempt_count")
     provider_model = metadata.get("provider_model", request.model.model_name)
-    response_receipt = {
-        "provider_request_id": metadata.get("provider_request_id"),
-        "provider_model": provider_model,
-        "finish_reason": metadata.get("finish_reason"),
-        "attempt_count": _optional_int(metadata.get("attempt_count")),
+    response_receipt: dict[str, object] = {
+        "provider_request_id": _json_safe_or_default(
+            metadata.get("provider_request_id")
+        ),
+        "provider_model": _json_safe_or_default(
+            provider_model,
+            request.model.model_name,
+        ),
+        "finish_reason": _json_safe_or_default(metadata.get("finish_reason")),
+        "attempt_count": attempt_count,
         "generation_seed": _optional_int(metadata.get("generation_seed")),
     }
+    _copy_json_safe_fields(
+        metadata,
+        response_receipt,
+        _PROVIDER_RESPONSE_METADATA_FIELDS,
+    )
+    _copy_json_safe_fields(
+        metadata,
+        response_receipt,
+        _UNIFIED_EXECUTION_METADATA_FIELDS,
+    )
+    for field, value in (
+        ("prompt_tokens", input_tokens),
+        ("completion_tokens", output_tokens),
+        ("total_tokens", total_tokens),
+        ("latency_ms", latency_ms),
+    ):
+        if value is not None:
+            response_receipt[field] = value
     return ExecutionRecord(
         execution_id=execution_id,
         experiment_id=request.run_id,
@@ -849,9 +998,9 @@ def _execution_record(call: AgentCallRecord) -> ExecutionRecord:
         temperature=temperature,
         top_p=top_p,
         max_tokens=max_tokens,
-        input_tokens=_optional_int(metadata.get("prompt_tokens")),
-        output_tokens=_optional_int(metadata.get("completion_tokens")),
-        latency_ms=_optional_float(metadata.get("latency_ms")),
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        latency_ms=latency_ms,
         metadata={"request": request_record, "response": response_receipt},
     )
 
@@ -867,6 +1016,33 @@ def _runtime_summary(runtime: Optional[AgentRuntimeResult]) -> Mapping[str, Any]
 
     if runtime is None:
         return {}
+    output_metadata: dict[str, object] = {}
+    for agent_id, metadata in runtime.output_metadata.items():
+        if not isinstance(agent_id, str) or not isinstance(metadata, Mapping):
+            continue
+        receipt: dict[str, object] = {}
+        for field in ("provider_request_id", "provider_model", "finish_reason"):
+            if field in metadata:
+                safe_value = _json_safe_value(metadata[field])
+                if safe_value is not _JSON_UNSAFE:
+                    receipt[field] = safe_value
+        attempt_count = _aggregated_int_metadata(metadata, "attempt_count")
+        generation_seed = _optional_int(metadata.get("generation_seed"))
+        if attempt_count is not None:
+            receipt["attempt_count"] = attempt_count
+        if generation_seed is not None:
+            receipt["generation_seed"] = generation_seed
+        _copy_json_safe_fields(
+            metadata,
+            receipt,
+            _PROVIDER_RESPONSE_METADATA_FIELDS,
+        )
+        _copy_json_safe_fields(
+            metadata,
+            receipt,
+            _UNIFIED_EXECUTION_METADATA_FIELDS,
+        )
+        output_metadata[agent_id] = receipt
     return {
         "run_id": runtime.run_id,
         "graph_revision": runtime.graph_revision,
@@ -879,6 +1055,7 @@ def _runtime_summary(runtime: Optional[AgentRuntimeResult]) -> Mapping[str, Any]
         ],
         "executed_agent_ids": list(runtime.executed_agent_ids),
         "reused_agent_ids": list(runtime.reused_agent_ids),
+        "output_metadata": output_metadata,
     }
 
 

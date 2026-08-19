@@ -24,7 +24,13 @@ _SPEC.loader.exec_module(_MODULE)
 def _evaluation_config(dataset_key: str) -> dict:
     config = deepcopy(load_yaml(_ROOT / "config" / "evaluation_hotpotqa_round_01.yaml"))
     config.pop("hotpotqa_evaluation")
-    if dataset_key == "aime_2026":
+    if dataset_key in {"hotpotqa", "triviaqa"}:
+        section_name = f"{dataset_key}_evaluation"
+        phase = f"{dataset_key}_evaluation"
+        split = "validation"
+        sample_count = 2
+        extra = {"protocol_equivalent_to_direct": False}
+    elif dataset_key == "aime_2026":
         section_name = "aime2026_evaluation"
         phase = "aime2026_evaluation"
         split = "test"
@@ -80,6 +86,8 @@ def test_runner_reuses_hotpot_graph_and_stable_zero_boundaries():
 
 def test_supported_configs_are_evaluation_only():
     for dataset_key in (
+        "hotpotqa",
+        "triviaqa",
         "aime_2026",
         "healthbench_professional",
         "webshop",
@@ -314,6 +322,69 @@ def test_reports_aime_exact_match_and_healthbench_raw_score():
     assert environment["strict_success"] == 1.0
 
 
+def test_qa_reports_native_exact_match_and_token_f1_together():
+    rows = [
+        {
+            "direct": {
+                "available": True,
+                "valid": True,
+                "exact_match": 0.0,
+                "token_f1": 0.5,
+            },
+            "agentgraph": {
+                "available": True,
+                "valid": True,
+                "exact_match": 1.0,
+                "token_f1": 1.0,
+                "explicit_finish": True,
+            },
+        },
+        {
+            "direct": {
+                "available": True,
+                "valid": True,
+                "exact_match": 1.0,
+                "token_f1": 1.0,
+            },
+            "agentgraph": {
+                "available": False,
+                "valid": False,
+                "exact_match": 0.0,
+                "token_f1": 0.0,
+                "explicit_finish": False,
+            },
+        },
+    ]
+
+    result = _MODULE._aggregate(rows, "agentgraph", "hotpotqa")
+
+    assert result["strict_exact_match"] == 0.5
+    assert result["strict_token_f1"] == 0.5
+    assert result["completed_only_exact_match"] == 1.0
+    assert result["completed_only_token_f1"] == 1.0
+
+
+def test_qa_metric_receipt_requires_both_native_metrics():
+    valid, values = _MODULE._metrics(
+        {
+            "evaluation": {
+                "valid": True,
+                "metrics": {"exact_match": 1.0, "token_f1": 0.75},
+            }
+        },
+        "triviaqa",
+    )
+    missing_f1, missing_values = _MODULE._metrics(
+        {"evaluation": {"valid": True, "metrics": {"exact_match": 1.0}}},
+        "triviaqa",
+    )
+
+    assert valid is True
+    assert values == {"exact_match": 1.0, "token_f1": 0.75}
+    assert missing_f1 is False
+    assert missing_values == {"exact_match": 0.0, "token_f1": 0.0}
+
+
 def test_interactive_direct_condition_records_every_environment_policy_call():
     registry = load_model_registry(
         _ROOT / "config" / "model_catalog_hotpotqa_deep_v6.yaml"
@@ -391,3 +462,106 @@ def test_interactive_direct_condition_records_every_environment_policy_call():
     assert len(result["executions"]) == 2
     assert result["final_answer"] == "click[action-2]"
     assert result["evaluation"]["metrics"]["success"] == 1.0
+
+
+def test_swe_direct_condition_is_one_coding_agent_with_repository_tools():
+    registry = load_model_registry(
+        _ROOT / "config" / "model_catalog_hotpotqa_deep_v6.yaml"
+    )
+    observed = {}
+    closed = []
+
+    class Runtime:
+        async def execute(self, graph, problem, *, run_id):
+            node = graph.nodes[0]
+            observed.update(
+                problem=problem,
+                run_id=run_id,
+                node=node,
+                output_agent_id=graph.output_agent_id,
+            )
+            call = SimpleNamespace(
+                response=SimpleNamespace(
+                    metadata={
+                        "model_calls": [
+                            {"metadata": {"generation_seed": 23}}
+                        ]
+                    }
+                )
+            )
+            return SimpleNamespace(
+                final_answer="diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py",
+                calls=(call,),
+                run_id=run_id,
+                output_agent_id=node.id,
+                block_completion_order=((node.id,),),
+                executed_agent_ids=(node.id,),
+            )
+
+    backend = SimpleNamespace(
+        registry=registry,
+        config={
+            "experiment": {"condition_id": "swe-coding"},
+            "swebench_evaluation": {
+                "dataset_key": "swe_bench",
+                "direct_completion_condition": (
+                    "Inspect, edit, run tests, inspect a changed diff, then complete."
+                ),
+            },
+            "swe_coding_runtime": {"enabled": True},
+        },
+        _runtime_for_task=lambda task, condition_id: (
+            Runtime(),
+            SimpleNamespace(resource_ids=("swebench_repository",)),
+            lambda: closed.append(True),
+        ),
+    )
+    task = _MODULE.TaskRecord(
+        task_id="swe_bench:one",
+        question="Fix the public issue description.",
+        ground_truth="official_harness_only",
+        split="validation",
+        metadata={"dataset_key": "swe_bench"},
+    )
+
+    async def fake_evaluate(_backend, _task, prediction, *, run_graph=None):
+        assert prediction.startswith("diff --git")
+        assert run_graph is None
+        return EvaluationOutcome(
+            valid=True,
+            reward=1.0,
+            metrics={"resolved": 1.0},
+            reason="official harness",
+            evaluator_version="swebench.harness.v1",
+        )
+
+    with patch.object(
+        _MODULE,
+        "execution_record_from_call",
+        return_value=SimpleNamespace(
+            to_dict=lambda: {
+                "output": "diff --git a/a.py b/a.py",
+                "metadata": {"response": {"attempt_count": 1}},
+            }
+        ),
+    ), patch.object(_MODULE, "_evaluate_prediction", new=fake_evaluate):
+        result = asyncio.run(
+            _MODULE._direct_one(
+                backend,
+                task,
+                0,
+                model_id="qwen3.5-9b-local",
+                protocol="single_coding_agent_v1",
+                contract="Use repository tools to resolve the issue.",
+                seed=23,
+                run_label="test",
+            )
+        )
+
+    node = observed["node"]
+    assert node.execution_mode.value == "coding"
+    assert node.allowed_tools == ("swebench_repository",)
+    assert observed["output_agent_id"] == "direct_coding_agent"
+    assert result["simple_baseline_topology"] == "single_coding_agent"
+    assert result["final_answer"].startswith("diff --git")
+    assert closed == [True]

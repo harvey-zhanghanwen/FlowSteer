@@ -1,17 +1,35 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import importlib.util
 import os
 import copy
 from dataclasses import replace
 from pathlib import Path
+import subprocess
+import sys
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
 import yaml
 
+from src.interactive.agent_graph import AgentGraph, AgentNode
+from src.interactive.agent_runtime import AgentResponse, AgentRuntime
+from src.interactive.agent_workflow_env import AgentWorkflowEnv
+from src.interactive.computation_tools import (
+    AIME_CALCULATOR_TOOL_ID,
+    AIME_PYTHON_EXEC_TOOL_ID,
+)
+from src.interactive.coding_tools import SWEBENCH_REPOSITORY_TOOL_ID
+from src.interactive.config_loader import ConfigurationError, load_model_registry
+from src.interactive.director import AgentGraphOrchestrator, decode_director_transcript
+from src.interactive.healthbench_tool_adapter import (
+    FrozenMedRAGBM25Corpus,
+    HEALTHBENCH_MEDRAG_SEARCH_TOOL_ID,
+    build_healthbench_medrag_tool_registry,
+)
 from src.interactive.persistence import stable_id
 from src.interactive.hotpot_training_schedule import (
     HotpotTrainingCursorState,
@@ -22,11 +40,16 @@ from src.interactive.joint_qa_training_schedule import (
     freeze_joint_qa_training_schedule,
 )
 from src.interactive.qa_retrieval import QARetrievalReceipt, build_keyword_query
+from src.interactive.qa_tool_adapter import build_qa_tool_registry
 from src.interactive.records import (
     EvaluationReceipt,
     TaskRecord,
     TrajectoryRecord,
     TurnRecord,
+)
+from src.interactive.rollout_collector import (
+    _runtime_summary,
+    execution_record_from_call,
 )
 from src.interactive.scientific_sampling import (
     GenerationPhase,
@@ -63,6 +86,14 @@ audit_active_skills_after_policy_update = (
     _MODULE._audit_active_skills_after_policy_update
 )
 workflow_problem = _MODULE._workflow_problem
+qa_tool_runtime_settings = _MODULE._qa_tool_runtime_settings
+aime_tool_runtime_settings = _MODULE._aime_tool_runtime_settings
+healthbench_tool_runtime_settings = _MODULE._healthbench_tool_runtime_settings
+environment_runtime_settings = _MODULE._environment_runtime_settings
+swe_coding_runtime_settings = _MODULE._swe_coding_runtime_settings
+environment_replay_trace_from_runtime = (
+    _MODULE._environment_replay_trace_from_runtime
+)
 
 
 SOURCE_NAMES = {
@@ -114,6 +145,38 @@ def test_interactive_workflow_problem_exposes_only_the_execution_contract():
     assert "Return exactly one admissible WebShop action." in value
     assert "topology" not in value.lower()
     assert "skill" not in value.lower()
+
+
+def test_explicit_environment_runtime_exposes_its_episode_contract():
+    task = make_task("webshop", 0)
+    config = {
+        "experiment": {"condition_id": "webshop_ragen_react_stable_zero"},
+        "evaluation": {
+            "max_environment_steps_by_source": {"webshop": 3},
+        },
+        "environment_runtime": {
+            "enabled": True,
+            "condition_id": "webshop_ragen_react_stable_zero",
+            "mode": "model_driven_ragen_react",
+            "dataset_scope": ["webshop"],
+            "ragen_adapter_path": "vendor/SkillFlow/src/ragen_adapter.py",
+            "tool_timeout_seconds": 9.0,
+            "max_environment_steps_by_source": {"webshop": 3},
+        },
+    }
+    config["webshop_evaluation"] = {
+        "direct_contract": "Return exactly one executable WebShop action."
+    }
+
+    value = workflow_problem(task, config)
+
+    assert "execution_mode `react`" in value
+    assert "`webshop.environment`" in value
+    assert "request-scoped episode" in value
+    assert "terminal state or the fixed evaluator step budget" in value
+    assert "same graph is invoked once per environment step" not in value
+    assert "reward" not in value.lower()
+    assert "evaluator info" not in value.lower()
 
 
 def test_static_workflow_problem_remains_the_immutable_question():
@@ -262,6 +325,1592 @@ class FakeBackend:
         self.events.append("publish")
         self.publish_summary = summary
         return Receipt()
+
+
+class QAToolRuntimeWiringTests(unittest.TestCase):
+    class _Gateway:
+        async def generate(self, request):  # pragma: no cover - no model call
+            raise AssertionError(f"unexpected model call: {request.request_id}")
+
+    class _Index:
+        manifest = SimpleNamespace(
+            corpus_name="public-test-corpus",
+            corpus_version="v1",
+            index_id="public-test-index-v1",
+            format="sqlite",
+            retrieval_backend="skillflow-test",
+        )
+
+        def search(self, query, *, limit):  # pragma: no cover - prompt only
+            del query, limit
+            return ()
+
+        def read(self, passage_id):  # pragma: no cover - prompt only
+            raise KeyError(passage_id)
+
+        def close(self):
+            return None
+
+    @staticmethod
+    def _config(*, enabled: bool = True) -> dict:
+        config = {
+            "experiment": {"condition_id": "hotpotqa_tool_react_stable_zero"},
+        }
+        if enabled:
+            config["qa_tool_runtime"] = {
+                "enabled": True,
+                "condition_id": "hotpotqa_tool_react_stable_zero",
+                "mode": "model_driven_search_read",
+                "dataset_scope": ["hotpotqa"],
+                "skillflow_source": "vendor/SkillFlow/src",
+                "index_path": "data/public-retrieval.sqlite3",
+                "tool_timeout_seconds": 7.0,
+                "max_turns_per_agent_call": 5,
+                "max_tool_calls_per_agent_call": 3,
+            }
+        return config
+
+    def test_closed_context_condition_keeps_original_runtime(self) -> None:
+        task = make_task("hotpotqa", 0)
+        registry = load_model_registry(
+            Path(__file__).resolve().parents[2]
+            / "config/model_catalog_triviaqa_v1.yaml"
+        )
+        base_runtime = AgentRuntime(registry, self._Gateway())
+        backend = object.__new__(_MODULE.LiveSmokeBackend)
+        backend.config = self._config(enabled=False)
+        backend.registry = registry
+        backend.runtime = base_runtime
+        backend.project_root = Path(self._temp_dir.name)
+
+        with patch.object(
+            _MODULE,
+            "open_qa_tool_registry",
+            side_effect=AssertionError("closed context must not open retrieval"),
+        ):
+            runtime, tool_registry, close = backend._runtime_for_task(task)
+
+        self.assertIs(base_runtime, runtime)
+        self.assertIsNone(tool_registry)
+        close()
+
+    def test_tool_condition_shares_registry_and_exposes_only_capabilities(self) -> None:
+        root = Path(self._temp_dir.name)
+        task = TaskRecord(
+            task_id="HotpotQA:tool-test",
+            question="Which public fact answers this question?",
+            ground_truth="EVALUATOR_TRUTH_MUST_NOT_APPEAR",
+            split="validation",
+            metadata={"dataset_key": "hotpotqa", "source": "HotpotQA"},
+        )
+        registry = load_model_registry(
+            Path(__file__).resolve().parents[2]
+            / "config/model_catalog_triviaqa_v1.yaml"
+        )
+        tool_registry = build_qa_tool_registry(self._Index())
+        owner = SimpleNamespace(
+            registry=tool_registry,
+            closed=False,
+        )
+
+        def close() -> None:
+            owner.closed = True
+
+        owner.close = close
+        backend = object.__new__(_MODULE.LiveSmokeBackend)
+        backend.config = self._config()
+        backend.registry = registry
+        backend.runtime = AgentRuntime(registry, self._Gateway())
+        backend.project_root = root
+
+        with patch.object(
+            _MODULE, "open_qa_tool_registry", return_value=owner
+        ) as opened:
+            runtime, shared_registry, close_runtime = backend._runtime_for_task(task)
+
+        self.assertIs(tool_registry, shared_registry)
+        self.assertIs(tool_registry, runtime.tool_registry)
+        self.assertIs(
+            tool_registry,
+            runtime.execution_adapters["react"]._tool_registry,
+        )
+        self.assertEqual("hotpotqa", runtime.dataset_id)
+        opened.assert_called_once_with(
+            index_path=root / "data/public-retrieval.sqlite3",
+            skillflow_source=root / "vendor/SkillFlow/src",
+            dataset_scope=("hotpotqa",),
+            timeout_seconds=7.0,
+        )
+
+        environment = AgentWorkflowEnv(
+            registry,
+            runtime=runtime,
+            problem=task.question,
+        )
+        orchestrator = AgentGraphOrchestrator(
+            registry,
+            client=object(),  # type: ignore[arg-type]
+            tool_registry=shared_registry,
+        )
+        messages = decode_director_transcript(
+            orchestrator.build_prompt(environment, 0, ())
+        )
+        self.assertIsNotNone(messages)
+        assert messages is not None
+        rendered = messages[-1]["content"]
+        state = json.loads(rendered.split("\n\n", 1)[1])
+        self.assertEqual(
+            {"qa-retrieval.search", "qa-retrieval.read"},
+            {item["tool_id"] for item in state["tool_catalog"]},
+        )
+        self.assertNotIn(task.ground_truth, rendered)
+        close_runtime()
+        self.assertTrue(owner.closed)
+
+    def test_tool_condition_rejects_condition_or_dataset_aliasing(self) -> None:
+        task = make_task("hotpotqa", 0)
+        mismatched = self._config()
+        mismatched["experiment"]["condition_id"] = "closed_context"
+        with self.assertRaisesRegex(ConfigurationError, "exactly match"):
+            qa_tool_runtime_settings(mismatched, task)
+
+        with self.assertRaisesRegex(ConfigurationError, "active rollout"):
+            qa_tool_runtime_settings(
+                self._config(),
+                task,
+                condition_id="different_runtime_arm",
+            )
+
+        out_of_scope = self._config()
+        out_of_scope["qa_tool_runtime"]["dataset_scope"] = ["triviaqa"]
+        with self.assertRaisesRegex(ConfigurationError, "not configured"):
+            qa_tool_runtime_settings(out_of_scope, task)
+
+    def setUp(self) -> None:
+        import tempfile
+
+        self._temp_dir = tempfile.TemporaryDirectory()
+
+    def tearDown(self) -> None:
+        self._temp_dir.cleanup()
+
+
+class AIMEComputationRuntimeWiringTests(unittest.IsolatedAsyncioTestCase):
+    class _NoCallGateway:
+        async def generate(self, request):  # pragma: no cover - no model call
+            raise AssertionError(f"unexpected model call: {request.request_id}")
+
+    class _StructuredActionGateway:
+        def __init__(self) -> None:
+            self.requests = []
+            self.outputs = [
+                {
+                    "kind": "tool",
+                    "name": "calculator",
+                    "arguments": {"expression": "20 + 22"},
+                    "resource_id": AIME_CALCULATOR_TOOL_ID,
+                    "skill_id": None,
+                },
+                {
+                    "kind": "tool",
+                    "name": "python_exec",
+                    "arguments": {"code": "print(6 * 7)"},
+                    "resource_id": AIME_PYTHON_EXEC_TOOL_ID,
+                    "skill_id": None,
+                },
+                {
+                    "kind": "complete",
+                    "name": "complete",
+                    "arguments": {"value": "42"},
+                    "resource_id": None,
+                    "skill_id": None,
+                },
+            ]
+
+        async def generate(self, request):
+            self.requests.append(request)
+            value = self.outputs.pop(0)
+            return AgentResponse(
+                json.dumps(value),
+                {
+                    "provider_request_id": f"fake:{len(self.requests)}",
+                    "prompt_tokens": 3,
+                    "completion_tokens": 2,
+                    "total_tokens": 5,
+                    "latency_ms": 1.0,
+                },
+            )
+
+    @staticmethod
+    def _config(*, enabled: bool | None = True) -> dict:
+        condition_id = "aime_2026_computation_react_stable_zero"
+        config = {"experiment": {"condition_id": condition_id}}
+        if enabled is not None:
+            config["aime_tool_runtime"] = {
+                "enabled": enabled,
+                "condition_id": condition_id,
+                "mode": "model_driven_computation",
+                "dataset_scope": ["aime_2026"],
+                "max_turns_per_agent_call": 5,
+                "max_tool_calls_per_agent_call": 3,
+                "calculator_timeout_seconds": 2.0,
+                "python_timeout_seconds": 4.0,
+            }
+        return config
+
+    @staticmethod
+    def _task() -> TaskRecord:
+        return TaskRecord(
+            task_id="AIME2026:tool-test",
+            question="Find the required integer.",
+            ground_truth="EVALUATOR_TRUTH_MUST_NOT_APPEAR",
+            split="validation",
+            metadata={"dataset_key": "aime_2026", "source": "AIME 2026"},
+        )
+
+    def _backend(self, config: dict, gateway=None):
+        registry = load_model_registry(
+            Path(__file__).resolve().parents[2]
+            / "config/model_catalog_triviaqa_v1.yaml"
+        )
+        resolved_gateway = gateway or self._NoCallGateway()
+        backend = object.__new__(_MODULE.LiveSmokeBackend)
+        backend.config = config
+        backend.registry = registry
+        backend.runtime = AgentRuntime(registry, resolved_gateway)
+        backend.project_root = Path(self._temp_dir.name)
+        return backend
+
+    def test_missing_or_disabled_condition_keeps_original_runtime(self) -> None:
+        task = self._task()
+        for enabled in (None, False):
+            with self.subTest(enabled=enabled):
+                backend = self._backend(self._config(enabled=enabled))
+                with patch.object(
+                    _MODULE,
+                    "create_aime_computation_registry",
+                    side_effect=AssertionError(
+                        "closed computation condition must not create Tools"
+                    ),
+                ):
+                    runtime, tool_registry, close = backend._runtime_for_task(task)
+
+                self.assertIs(backend.runtime, runtime)
+                self.assertIsNone(tool_registry)
+                close()
+
+    def test_tool_condition_shares_exact_registry_and_public_catalog(self) -> None:
+        task = self._task()
+        backend = self._backend(self._config())
+        with patch.object(
+            _MODULE,
+            "create_aime_computation_registry",
+            wraps=_MODULE.create_aime_computation_registry,
+        ) as created:
+            runtime, shared_registry, close = backend._runtime_for_task(
+                task,
+                condition_id="aime_2026_computation_react_stable_zero",
+            )
+
+        created.assert_called_once_with(
+            python_timeout_seconds=4.0,
+            calculator_timeout_seconds=2.0,
+        )
+        self.assertIs(shared_registry, runtime.tool_registry)
+        self.assertIs(
+            shared_registry,
+            runtime.execution_adapters["react"]._tool_registry,
+        )
+        self.assertEqual("aime_2026", runtime.dataset_id)
+
+        orchestrator = AgentGraphOrchestrator(
+            backend.registry,
+            client=object(),  # type: ignore[arg-type]
+            tool_registry=shared_registry,
+        )
+        environment = AgentWorkflowEnv(
+            backend.registry,
+            runtime=runtime,
+            problem=task.question,
+        )
+        messages = decode_director_transcript(
+            orchestrator.build_prompt(environment, 0, ())
+        )
+        self.assertIsNotNone(messages)
+        assert messages is not None
+        rendered = messages[-1]["content"]
+        state = json.loads(rendered.split("\n\n", 1)[1])
+        self.assertEqual(
+            {AIME_CALCULATOR_TOOL_ID, AIME_PYTHON_EXEC_TOOL_ID},
+            {entry["tool_id"] for entry in state["tool_catalog"]},
+        )
+        self.assertNotIn(task.ground_truth, rendered)
+        self.assertNotIn("reward", json.dumps(state["tool_catalog"]).lower())
+        close()
+        close()
+
+    def test_condition_mode_scope_and_rollout_aliasing_are_rejected(self) -> None:
+        task = self._task()
+
+        experiment_mismatch = self._config()
+        experiment_mismatch["experiment"]["condition_id"] = "closed_computation"
+        with self.assertRaisesRegex(ConfigurationError, "exactly match"):
+            aime_tool_runtime_settings(experiment_mismatch, task)
+
+        with self.assertRaisesRegex(ConfigurationError, "active rollout"):
+            aime_tool_runtime_settings(
+                self._config(),
+                task,
+                condition_id="different_condition",
+            )
+
+        wrong_mode = self._config()
+        wrong_mode["aime_tool_runtime"]["mode"] = "deterministic_prefetch"
+        with self.assertRaisesRegex(ConfigurationError, "model_driven_computation"):
+            aime_tool_runtime_settings(wrong_mode, task)
+
+        wrong_scope = self._config()
+        wrong_scope["aime_tool_runtime"]["dataset_scope"] = ["aime_2026", "hotpotqa"]
+        with self.assertRaisesRegex(ConfigurationError, "exactly"):
+            aime_tool_runtime_settings(wrong_scope, task)
+
+        with self.assertRaisesRegex(ConfigurationError, "not configured"):
+            aime_tool_runtime_settings(self._config(), make_task("hotpotqa", 0))
+
+    async def test_calculator_and_python_receipts_use_collector_persistence(self) -> None:
+        gateway = self._StructuredActionGateway()
+        backend = self._backend(self._config(), gateway=gateway)
+        task = self._task()
+        runtime, shared_registry, close = backend._runtime_for_task(task)
+        graph = AgentGraph(
+            (
+                AgentNode(
+                    "solver",
+                    "qwen3.5-9b-local",
+                    "Solve the problem using admitted computation Tools when useful.",
+                    allowed_tools=(
+                        AIME_CALCULATOR_TOOL_ID,
+                        AIME_PYTHON_EXEC_TOOL_ID,
+                    ),
+                    execution_mode="react",
+                    artifact_type="answer",
+                    completion_condition="return the required integer",
+                ),
+            ),
+            output_agent_id="solver",
+        )
+
+        result = await runtime.execute(
+            graph,
+            task.question,
+            run_id="aime-computation-receipt-test",
+        )
+
+        self.assertEqual("42", result.final_answer)
+        self.assertIs(shared_registry, runtime.tool_registry)
+        self.assertEqual(1, len(result.calls))
+        execution = execution_record_from_call(result.calls[0])
+        response_receipt = execution.metadata["response"]
+        self.assertEqual(
+            [AIME_CALCULATOR_TOOL_ID, AIME_PYTHON_EXEC_TOOL_ID],
+            [entry["tool_id"] for entry in response_receipt["tool_receipts"]],
+        )
+        self.assertTrue(
+            all(
+                entry["error_type"] is None
+                and entry["result"]["value"]["ok"] is True
+                for entry in response_receipt["tool_receipts"]
+            )
+        )
+        runtime_summary = _runtime_summary(result)
+        self.assertEqual(
+            response_receipt["tool_receipts"],
+            runtime_summary["output_metadata"]["solver"]["tool_receipts"],
+        )
+        json.dumps(execution.to_dict())
+        json.dumps(runtime_summary)
+        self.assertNotIn(task.ground_truth, gateway.requests[0].problem)
+        close()
+
+    def setUp(self) -> None:
+        import tempfile
+
+        self._temp_dir = tempfile.TemporaryDirectory()
+
+    def tearDown(self) -> None:
+        self._temp_dir.cleanup()
+
+
+class HealthBenchMedRAGRuntimeWiringTests(unittest.IsolatedAsyncioTestCase):
+    SOURCE_REVISION = "medrag-fixture-revision"
+
+    class _NoCallGateway:
+        async def generate(self, request):  # pragma: no cover - no model call
+            raise AssertionError(f"unexpected model call: {request.request_id}")
+
+    class _StructuredActionGateway:
+        def __init__(self) -> None:
+            self.requests = []
+            self.outputs = [
+                {
+                    "kind": "tool",
+                    "name": "search",
+                    "arguments": {
+                        "query": "aspirin gastrointestinal bleeding"
+                    },
+                    "resource_id": HEALTHBENCH_MEDRAG_SEARCH_TOOL_ID,
+                    "skill_id": None,
+                },
+                {
+                    "kind": "complete",
+                    "name": "complete",
+                    "arguments": {
+                        "value": (
+                            "Aspirin can increase gastrointestinal bleeding risk; "
+                            "seek individualized advice from a clinician."
+                        )
+                    },
+                    "resource_id": None,
+                    "skill_id": None,
+                },
+            ]
+
+        async def generate(self, request):
+            self.requests.append(request)
+            value = self.outputs.pop(0)
+            return AgentResponse(
+                json.dumps(value),
+                {
+                    "provider_request_id": f"health-fixture:{len(self.requests)}",
+                    "prompt_tokens": 5,
+                    "completion_tokens": 3,
+                    "total_tokens": 8,
+                    "latency_ms": 2.0,
+                },
+            )
+
+    @staticmethod
+    def _config(*, enabled: bool | None = True) -> dict:
+        condition_id = "healthbench_medrag_react_stable_zero"
+        config = {"experiment": {"condition_id": condition_id}}
+        if enabled is not None:
+            config["healthbench_tool_runtime"] = {
+                "enabled": enabled,
+                "condition_id": condition_id,
+                "mode": "model_driven_medrag_search",
+                "dataset_scope": ["healthbench_professional"],
+                "resource_dir": "resources/medrag-textbooks-runtime",
+                "source_identity": "skillflow-medrag-textbooks",
+                "source_revision": (
+                    HealthBenchMedRAGRuntimeWiringTests.SOURCE_REVISION
+                ),
+                "expected_rows": 2,
+                "max_turns_per_agent_call": 4,
+                "max_tool_calls_per_agent_call": 2,
+                "tool_timeout_seconds": 6.0,
+            }
+        return config
+
+    @staticmethod
+    def _task() -> TaskRecord:
+        return TaskRecord(
+            task_id="healthbench-professional:tool-test",
+            question=(
+                "Conversation:\n\n[user] Is aspirin safe if I have a history "
+                "of stomach bleeding?\n\n[assistant]"
+            ),
+            ground_truth="PHYSICIAN_RESPONSE_EVALUATOR_ONLY",
+            split="validation",
+            metadata={
+                "dataset_key": "healthbench_professional",
+                "source": "HealthBench Professional",
+                "evaluator_payload": {
+                    "rubric_items": [
+                        {
+                            "criterion_text": "RUBRIC_EVALUATOR_ONLY",
+                            "points": 10,
+                        }
+                    ],
+                    "physician_response": "REFERENCE_EVALUATOR_ONLY",
+                },
+            },
+        )
+
+    @classmethod
+    def _registry_owner(cls):
+        documents = (
+            "Aspirin can cause gastrointestinal bleeding and peptic ulcer disease.",
+            "Insulin lowers blood glucose in diabetes mellitus.",
+        )
+        corpus = FrozenMedRAGBM25Corpus(
+            source_identity="skillflow-medrag-textbooks",
+            source_revision=cls.SOURCE_REVISION,
+            corpus_rows=len(documents),
+            _corpus=documents,
+            _index={
+                "avg_dl": 7.0,
+                "doc_lens": [8, 7],
+                "idf": {
+                    "aspirin": 2.0,
+                    "gastrointestinal": 2.0,
+                    "bleeding": 2.0,
+                },
+                "inverted_index": {
+                    "aspirin": [(0, 1)],
+                    "gastrointestinal": [(0, 1)],
+                    "bleeding": [(0, 1)],
+                },
+            },
+        )
+        owner = SimpleNamespace(
+            registry=build_healthbench_medrag_tool_registry(
+                corpus,
+                timeout_seconds=6.0,
+            ),
+            closed=False,
+        )
+
+        def close() -> None:
+            if owner.closed:
+                return
+            corpus.close()
+            owner.closed = True
+
+        owner.close = close
+        return owner
+
+    def _backend(self, config: dict, gateway=None):
+        registry = load_model_registry(
+            Path(__file__).resolve().parents[2]
+            / "config/model_catalog_triviaqa_v1.yaml"
+        )
+        backend = object.__new__(_MODULE.LiveSmokeBackend)
+        backend.config = config
+        backend.registry = registry
+        backend.runtime = AgentRuntime(
+            registry,
+            gateway or self._NoCallGateway(),
+        )
+        backend.project_root = Path(self._temp_dir.name)
+        return backend
+
+    def test_missing_or_disabled_condition_keeps_closed_context_runtime(self) -> None:
+        task = self._task()
+        for enabled in (None, False):
+            with self.subTest(enabled=enabled):
+                backend = self._backend(self._config(enabled=enabled))
+                with patch.object(
+                    _MODULE,
+                    "open_healthbench_medrag_tool_registry",
+                    side_effect=AssertionError(
+                        "closed HealthBench condition must not open MedRAG"
+                    ),
+                ):
+                    runtime, tool_registry, close = backend._runtime_for_task(task)
+
+                self.assertIs(backend.runtime, runtime)
+                self.assertIsNone(tool_registry)
+                close()
+
+    def test_enabled_condition_shares_registry_and_public_catalog(self) -> None:
+        task = self._task()
+        backend = self._backend(self._config())
+        owner = self._registry_owner()
+        root = backend.project_root
+
+        with patch.object(
+            _MODULE,
+            "open_healthbench_medrag_tool_registry",
+            return_value=owner,
+        ) as opened:
+            runtime, shared_registry, close = backend._runtime_for_task(
+                task,
+                condition_id="healthbench_medrag_react_stable_zero",
+            )
+
+        opened.assert_called_once_with(
+            corpus_root=root / "resources/medrag-textbooks-runtime",
+            source_identity="skillflow-medrag-textbooks",
+            expected_source_revision=self.SOURCE_REVISION,
+            expected_rows=2,
+            timeout_seconds=6.0,
+        )
+        self.assertIs(shared_registry, runtime.tool_registry)
+        self.assertIs(
+            shared_registry,
+            runtime.execution_adapters["react"]._tool_registry,
+        )
+        self.assertEqual("healthbench_professional", runtime.dataset_id)
+
+        orchestrator = AgentGraphOrchestrator(
+            backend.registry,
+            client=object(),  # type: ignore[arg-type]
+            tool_registry=shared_registry,
+        )
+        environment = AgentWorkflowEnv(
+            backend.registry,
+            runtime=runtime,
+            problem=task.question,
+        )
+        messages = decode_director_transcript(
+            orchestrator.build_prompt(environment, 0, ())
+        )
+        self.assertIsNotNone(messages)
+        assert messages is not None
+        rendered = messages[-1]["content"]
+        state = json.loads(rendered.split("\n\n", 1)[1])
+        self.assertEqual(
+            [HEALTHBENCH_MEDRAG_SEARCH_TOOL_ID],
+            [entry["tool_id"] for entry in state["tool_catalog"]],
+        )
+        for evaluator_only in (
+            task.ground_truth,
+            "RUBRIC_EVALUATOR_ONLY",
+            "REFERENCE_EVALUATOR_ONLY",
+            "physician_response",
+            "evaluator_payload",
+        ):
+            self.assertNotIn(evaluator_only, rendered)
+
+        close()
+        close()
+        self.assertTrue(owner.closed)
+
+    def test_mode_scope_condition_and_resource_settings_are_strict(self) -> None:
+        task = self._task()
+
+        experiment_mismatch = self._config()
+        experiment_mismatch["experiment"]["condition_id"] = "closed_healthbench"
+        with self.assertRaisesRegex(ConfigurationError, "exactly match"):
+            healthbench_tool_runtime_settings(experiment_mismatch, task)
+
+        with self.assertRaisesRegex(ConfigurationError, "active rollout"):
+            healthbench_tool_runtime_settings(
+                self._config(),
+                task,
+                condition_id="different_condition",
+            )
+
+        wrong_mode = self._config()
+        wrong_mode["healthbench_tool_runtime"]["mode"] = "generic_retrieval"
+        with self.assertRaisesRegex(ConfigurationError, "model_driven_medrag_search"):
+            healthbench_tool_runtime_settings(wrong_mode, task)
+
+        wrong_scope = self._config()
+        wrong_scope["healthbench_tool_runtime"]["dataset_scope"] = [
+            "healthbench_professional",
+            "hotpotqa",
+        ]
+        with self.assertRaisesRegex(ConfigurationError, "exactly"):
+            healthbench_tool_runtime_settings(wrong_scope, task)
+
+        bad_rows = self._config()
+        bad_rows["healthbench_tool_runtime"]["expected_rows"] = 0
+        with self.assertRaisesRegex(ConfigurationError, "expected_rows"):
+            healthbench_tool_runtime_settings(bad_rows, task)
+
+        missing_revision = self._config()
+        missing_revision["healthbench_tool_runtime"]["source_revision"] = ""
+        with self.assertRaisesRegex(ConfigurationError, "source_revision"):
+            healthbench_tool_runtime_settings(missing_revision, task)
+
+        with self.assertRaisesRegex(ConfigurationError, "not configured"):
+            healthbench_tool_runtime_settings(
+                self._config(),
+                make_task("hotpotqa", 0),
+            )
+
+    async def test_medrag_tool_receipt_is_persisted_without_evaluator_payload(
+        self,
+    ) -> None:
+        gateway = self._StructuredActionGateway()
+        backend = self._backend(self._config(), gateway=gateway)
+        task = self._task()
+        owner = self._registry_owner()
+        with patch.object(
+            _MODULE,
+            "open_healthbench_medrag_tool_registry",
+            return_value=owner,
+        ):
+            runtime, shared_registry, close = backend._runtime_for_task(task)
+
+        graph = AgentGraph(
+            (
+                AgentNode(
+                    "clinical_reasoner",
+                    "qwen3.5-9b-local",
+                    "Answer the public conversation using admitted evidence when useful.",
+                    allowed_tools=(HEALTHBENCH_MEDRAG_SEARCH_TOOL_ID,),
+                    execution_mode="react",
+                    artifact_type="clinical_response",
+                    completion_condition="return a clinically useful response",
+                ),
+            ),
+            output_agent_id="clinical_reasoner",
+        )
+        result = await runtime.execute(
+            graph,
+            task.question,
+            run_id="healthbench-medrag-receipt-test",
+        )
+
+        self.assertIs(shared_registry, runtime.tool_registry)
+        self.assertEqual(1, len(result.calls))
+        execution = execution_record_from_call(result.calls[0])
+        response_receipt = execution.metadata["response"]
+        self.assertEqual(
+            [HEALTHBENCH_MEDRAG_SEARCH_TOOL_ID],
+            [entry["tool_id"] for entry in response_receipt["tool_receipts"]],
+        )
+        self.assertIsNone(response_receipt["tool_receipts"][0]["error_type"])
+        runtime_summary = _runtime_summary(result)
+        self.assertEqual(
+            response_receipt["tool_receipts"],
+            runtime_summary["output_metadata"]["clinical_reasoner"][
+                "tool_receipts"
+            ],
+        )
+        serialized = json.dumps(
+            {
+                "execution": execution.to_dict(),
+                "runtime": runtime_summary,
+            },
+            sort_keys=True,
+        )
+        for evaluator_only in (
+            task.ground_truth,
+            "RUBRIC_EVALUATOR_ONLY",
+            "REFERENCE_EVALUATOR_ONLY",
+            "physician_response",
+            "evaluator_payload",
+        ):
+            self.assertNotIn(evaluator_only, serialized)
+            self.assertTrue(
+                all(evaluator_only not in request.problem for request in gateway.requests)
+            )
+        close()
+        self.assertTrue(owner.closed)
+
+    def setUp(self) -> None:
+        import tempfile
+
+        self._temp_dir = tempfile.TemporaryDirectory()
+
+    def tearDown(self) -> None:
+        self._temp_dir.cleanup()
+
+
+class EnvironmentReplayRuntimeWiringTests(unittest.TestCase):
+    def test_extracts_the_only_environment_actor_trace(self) -> None:
+        trace = (
+            {
+                "step": 0,
+                "observation": "room",
+                "legal_actions": ["look"],
+                "action": "look",
+                "next_observation": "table",
+                "reward": 0.0,
+                "done": False,
+                "info": {},
+                "state_advanced": True,
+            },
+        )
+        runtime = SimpleNamespace(
+            output_metadata={
+                "planner": {"execution_mode": "reasoning"},
+                "actor": {"evaluator_environment_trace": trace},
+            }
+        )
+
+        extracted = environment_replay_trace_from_runtime(runtime)
+
+        self.assertEqual(trace, extracted)
+        self.assertIsNot(trace[0], extracted[0])
+
+    def test_rejects_multiple_independent_environment_episodes(self) -> None:
+        runtime = SimpleNamespace(
+            output_metadata={
+                "actor_a": {"evaluator_environment_trace": []},
+                "actor_b": {"evaluator_environment_trace": []},
+            }
+        )
+
+        with self.assertRaisesRegex(ConfigurationError, "multiple environment"):
+            environment_replay_trace_from_runtime(runtime)
+
+    def test_closed_condition_without_runtime_metadata_remains_empty(self) -> None:
+        self.assertEqual((), environment_replay_trace_from_runtime(None))
+        self.assertEqual(
+            (),
+            environment_replay_trace_from_runtime(
+                SimpleNamespace(output_metadata={"solver": {}})
+            ),
+        )
+
+
+class EnvironmentRuntimeWiringTests(unittest.TestCase):
+    class _Gateway:
+        async def generate(self, request):  # pragma: no cover - no model call
+            raise AssertionError(f"unexpected model call: {request.request_id}")
+
+    @staticmethod
+    def _config(
+        *,
+        source: str = "webshop",
+        enabled: bool | None = True,
+        runtime_budget: int = 3,
+        evaluator_budget: int = 3,
+    ) -> dict:
+        condition_id = f"{source}_ragen_react_stable_zero"
+        config = {
+            "experiment": {"condition_id": condition_id},
+            "evaluation": {
+                "max_environment_steps": 12,
+                "max_environment_steps_by_source": {
+                    source: evaluator_budget,
+                },
+            },
+        }
+        if enabled is not None:
+            config["environment_runtime"] = {
+                "enabled": enabled,
+                "condition_id": condition_id,
+                "mode": "model_driven_ragen_react",
+                "dataset_scope": [source],
+                "ragen_adapter_path": "vendor/SkillFlow/src/ragen_adapter.py",
+                "tool_timeout_seconds": 9.0,
+                "max_environment_steps_by_source": {
+                    source: runtime_budget,
+                },
+            }
+        return config
+
+    @staticmethod
+    def _task(source: str = "webshop") -> TaskRecord:
+        env_config = (
+            {"goal_index": 7, "env_seed": 1234}
+            if source == "webshop"
+            else {"game_file": "/games/locked-task-7.tw-pddl", "max_steps": 50}
+        )
+        return TaskRecord(
+            task_id=f"{source}:locked-task-7",
+            question="Complete the aligned environment task.",
+            ground_truth="",
+            split="validation",
+            metadata={
+                "dataset_key": source,
+                "source": SOURCE_NAMES[source],
+                "environment": {
+                    "env_type": source,
+                    "env_config": env_config,
+                },
+            },
+        )
+
+    def _backend(self, config: dict):
+        registry = load_model_registry(
+            Path(__file__).resolve().parents[2]
+            / "config/model_catalog_triviaqa_v1.yaml"
+        )
+        backend = object.__new__(_MODULE.LiveSmokeBackend)
+        backend.config = config
+        backend.registry = registry
+        backend.runtime = AgentRuntime(registry, self._Gateway())
+        backend.project_root = Path(self._temp_dir.name)
+        return backend
+
+    def test_missing_or_disabled_condition_keeps_original_runtime(self) -> None:
+        task = self._task()
+        for enabled in (None, False):
+            with self.subTest(enabled=enabled):
+                backend = self._backend(self._config(enabled=enabled))
+                with (
+                    patch.object(
+                        _MODULE,
+                        "evaluator_locked_ragen_session_factory",
+                        side_effect=AssertionError(
+                            "closed condition must not load a RAGEN task"
+                        ),
+                    ),
+                    patch.object(
+                        _MODULE,
+                        "build_environment_execution_resources",
+                        side_effect=AssertionError(
+                            "closed condition must not build environment tools"
+                        ),
+                    ),
+                ):
+                    runtime, tool_registry, close = backend._runtime_for_task(task)
+
+                self.assertIs(backend.runtime, runtime)
+                self.assertIsNone(tool_registry)
+                close()
+
+    def test_live_condition_shares_registry_and_binds_the_exact_record(self) -> None:
+        task = self._task()
+        backend = self._backend(self._config())
+        root = backend.project_root
+
+        # The concrete builder only stores this callable until execution; no
+        # simulator is started by this CPU wiring test.
+        def session_factory(request):  # type: ignore[no-untyped-def]
+            del request
+            return None
+
+        with (
+            patch.object(
+                _MODULE,
+                "evaluator_locked_ragen_session_factory",
+                return_value=session_factory,
+            ) as locked,
+            patch.object(
+                _MODULE,
+                "build_environment_execution_resources",
+                wraps=_MODULE.build_environment_execution_resources,
+            ) as built,
+        ):
+            runtime, shared_registry, close = backend._runtime_for_task(
+                task,
+                condition_id="webshop_ragen_react_stable_zero",
+            )
+
+        locked.assert_called_once_with(
+            record=task,
+            dataset="webshop",
+            ragen_adapter_path=root / "vendor/SkillFlow/src/ragen_adapter.py",
+            max_environment_steps=3,
+        )
+        built.assert_called_once_with(
+            gateway=backend.runtime.gateway,
+            session_factory=session_factory,
+            task_family="webshop",
+            max_turns=3,
+            timeout_seconds=9.0,
+        )
+        self.assertIs(shared_registry, runtime.tool_registry)
+        self.assertIs(
+            shared_registry,
+            runtime.execution_adapters["react"]._tool_registry,
+        )
+        self.assertEqual("webshop", runtime.dataset_id)
+
+        orchestrator = AgentGraphOrchestrator(
+            backend.registry,
+            client=object(),  # type: ignore[arg-type]
+            tool_registry=shared_registry,
+        )
+        environment = AgentWorkflowEnv(
+            backend.registry,
+            runtime=runtime,
+            problem=task.question,
+        )
+        messages = decode_director_transcript(
+            orchestrator.build_prompt(environment, 0, ())
+        )
+        self.assertIsNotNone(messages)
+        assert messages is not None
+        state = json.loads(messages[-1]["content"].split("\n\n", 1)[1])
+        self.assertEqual(
+            ["webshop.environment"],
+            [entry["tool_id"] for entry in state["tool_catalog"]],
+        )
+        rendered_catalog = json.dumps(state["tool_catalog"], sort_keys=True)
+        self.assertNotIn("reward", rendered_catalog)
+        self.assertNotIn("info", rendered_catalog)
+
+        close()
+        close()
+
+    def test_alfworld_uses_its_exact_record_and_source_budget(self) -> None:
+        task = self._task("alfworld")
+        backend = self._backend(
+            self._config(
+                source="alfworld",
+                runtime_budget=50,
+                evaluator_budget=50,
+            )
+        )
+
+        def session_factory(request):  # type: ignore[no-untyped-def]
+            del request
+            return None
+
+        with (
+            patch.object(
+                _MODULE,
+                "evaluator_locked_ragen_session_factory",
+                return_value=session_factory,
+            ) as locked,
+            patch.object(
+                _MODULE,
+                "build_environment_execution_resources",
+                wraps=_MODULE.build_environment_execution_resources,
+            ) as built,
+        ):
+            runtime, shared_registry, close = backend._runtime_for_task(task)
+
+        locked.assert_called_once_with(
+            record=task,
+            dataset="alfworld",
+            ragen_adapter_path=(
+                backend.project_root / "vendor/SkillFlow/src/ragen_adapter.py"
+            ),
+            max_environment_steps=50,
+        )
+        self.assertEqual("alfworld", built.call_args.kwargs["task_family"])
+        self.assertEqual(50, built.call_args.kwargs["max_turns"])
+        self.assertEqual("alfworld", runtime.dataset_id)
+        self.assertIs(shared_registry, runtime.tool_registry)
+        close()
+
+    def test_condition_scope_and_budget_mismatches_are_rejected(self) -> None:
+        task = self._task()
+
+        experiment_mismatch = self._config()
+        experiment_mismatch["experiment"]["condition_id"] = "closed_condition"
+        with self.assertRaisesRegex(ConfigurationError, "exactly match"):
+            environment_runtime_settings(experiment_mismatch, task)
+
+        with self.assertRaisesRegex(ConfigurationError, "active rollout"):
+            environment_runtime_settings(
+                self._config(),
+                task,
+                condition_id="different_condition",
+            )
+
+        out_of_scope = self._config()
+        out_of_scope["environment_runtime"]["dataset_scope"] = ["alfworld"]
+        with self.assertRaisesRegex(ConfigurationError, "not configured"):
+            environment_runtime_settings(out_of_scope, task)
+
+        budget_mismatch = self._config(runtime_budget=2, evaluator_budget=3)
+        with self.assertRaisesRegex(ConfigurationError, "exactly match"):
+            environment_runtime_settings(budget_mismatch, task)
+
+    def test_terminal_or_budget_trace_is_passed_without_legacy_resampling(self) -> None:
+        task = self._task()
+        backend = self._backend(self._config())
+        backend.judge = None
+        backend.judge_model = ""
+        backend.swe_harness = None
+        outcome = _MODULE.EvaluationOutcome(
+            valid=True,
+            reward=0.0,
+            metrics={"success": 0.0},
+            reason="evaluated",
+            evaluator_version=_MODULE.RAGEN_EVALUATOR_VERSION,
+        )
+        trace = tuple(
+            {
+                "step": index,
+                "observation": f"observation-{index}",
+                "legal_actions": ["look"],
+                "action": "look",
+                "next_observation": f"observation-{index + 1}",
+                "reward": 0.0,
+                "done": False,
+                "info": {"private_evaluator_field": index},
+                "state_advanced": True,
+            }
+            for index in range(3)
+        )
+        captured: dict = {}
+
+        async def fake_evaluate_task(*args, **kwargs):  # type: ignore[no-untyped-def]
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+            return outcome
+
+        with patch.object(_MODULE, "evaluate_task", side_effect=fake_evaluate_task):
+            result = asyncio.run(
+                backend.evaluate_final_graph(
+                    task,
+                    "observation-3",
+                    {"nodes": [], "relations": [], "revision": 0},
+                    rollout_index=4,
+                    environment_replay_trace=trace,
+                )
+            )
+
+        self.assertIs(outcome, result)
+        self.assertEqual(trace, captured["kwargs"]["environment_replay_trace"])
+        self.assertEqual(3, captured["kwargs"]["max_environment_steps"])
+        self.assertIsNone(captured["kwargs"]["run_graph"])
+        self.assertEqual(
+            backend.project_root / "vendor/SkillFlow/src/ragen_adapter.py",
+            captured["kwargs"]["ragen_adapter_path"],
+        )
+        self.assertNotIn(
+            "private_evaluator_field",
+            workflow_problem(task, self._config()),
+        )
+
+    def test_partial_nonterminal_trace_cannot_fall_back_to_old_runtime(self) -> None:
+        task = self._task()
+        backend = self._backend(self._config())
+        backend.judge = None
+        backend.judge_model = ""
+        backend.swe_harness = None
+        partial = (
+            {
+                "step": 0,
+                "observation": "start",
+                "legal_actions": ["look"],
+                "action": "look",
+                "next_observation": "next",
+                "reward": 0.0,
+                "done": False,
+                "info": {},
+                "state_advanced": True,
+            },
+        )
+
+        with (
+            patch.object(
+                _MODULE,
+                "evaluate_task",
+                side_effect=AssertionError("partial trace must not reach evaluator"),
+            ),
+            self.assertRaisesRegex(ConfigurationError, "terminal state or exhaust"),
+        ):
+            asyncio.run(
+                backend.evaluate_final_graph(
+                    task,
+                    "next",
+                    {"nodes": [], "relations": [], "revision": 0},
+                    rollout_index=0,
+                    environment_replay_trace=partial,
+                )
+            )
+
+    def setUp(self) -> None:
+        import tempfile
+
+        self._temp_dir = tempfile.TemporaryDirectory()
+
+    def tearDown(self) -> None:
+        self._temp_dir.cleanup()
+
+
+class SWEbenchCodingRuntimeWiringTests(unittest.IsolatedAsyncioTestCase):
+    _GOLD_PATCH = "GOLD_PATCH_EVALUATOR_ONLY"
+    _TEST_PATCH = "TEST_PATCH_EVALUATOR_ONLY"
+    _GROUND_TRUTH = "GROUND_TRUTH_EVALUATOR_ONLY"
+
+    class _NoCallGateway:
+        async def generate(self, request):  # pragma: no cover - no model call
+            raise AssertionError(f"unexpected model call: {request.request_id}")
+
+    class _CodingGateway:
+        def __init__(self) -> None:
+            self.requests = []
+            self.outputs = [
+                {
+                    "kind": "tool",
+                    "name": "view_file",
+                    "arguments": {"path": "bug.py"},
+                    "resource_id": SWEBENCH_REPOSITORY_TOOL_ID,
+                    "skill_id": None,
+                },
+                {
+                    "kind": "tool",
+                    "name": "exact_edit",
+                    "arguments": {
+                        "path": "bug.py",
+                        "old_str": "return a - b",
+                        "new_str": "return a + b",
+                    },
+                    "resource_id": SWEBENCH_REPOSITORY_TOOL_ID,
+                    "skill_id": None,
+                },
+                {
+                    "kind": "tool",
+                    "name": "run_tests",
+                    "arguments": {
+                        "command": [
+                            sys.executable,
+                            "-c",
+                            "from bug import add; assert add(2, 3) == 5",
+                        ],
+                        "timeout_seconds": 5,
+                    },
+                    "resource_id": SWEBENCH_REPOSITORY_TOOL_ID,
+                    "skill_id": None,
+                },
+                {
+                    "kind": "tool",
+                    "name": "diff",
+                    "arguments": {},
+                    "resource_id": SWEBENCH_REPOSITORY_TOOL_ID,
+                    "skill_id": None,
+                },
+                {
+                    "kind": "complete",
+                    "name": "complete",
+                    "arguments": {
+                        "value": "model prose must not replace the workspace diff"
+                    },
+                    "resource_id": None,
+                    "skill_id": None,
+                },
+            ]
+
+        async def generate(self, request):
+            self.requests.append(request)
+            return AgentResponse(
+                json.dumps(self.outputs.pop(0)),
+                {
+                    "provider_request_id": f"coding:{len(self.requests)}",
+                    "prompt_tokens": 7,
+                    "completion_tokens": 3,
+                    "total_tokens": 10,
+                    "latency_ms": 1.0,
+                },
+            )
+
+    @staticmethod
+    def _git(root: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", *arguments],
+            cwd=root,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    @staticmethod
+    def _config(*, enabled: bool | None = True) -> dict:
+        condition_id = "swebench_verified_coding_stable_zero"
+        config = {
+            "experiment": {"condition_id": condition_id},
+            "evaluation": {"max_environment_steps": 12},
+        }
+        if enabled is not None:
+            config["swe_coding_runtime"] = {
+                "enabled": enabled,
+                "condition_id": condition_id,
+                "mode": "iterative_repository_coding",
+                "dataset_scope": ["swe_bench"],
+                "repository_store": "repositories",
+                "worktree_root": "worktrees",
+                "max_turns_per_agent_call": 6,
+                "max_tool_calls_per_agent_call": 5,
+                "max_test_timeout_seconds": 8.0,
+                "setup_timeout_seconds": 10.0,
+                "cleanup_timeout_seconds": 10.0,
+            }
+        return config
+
+    def _task(self, *, instance_id: str = "owner__repo-1") -> TaskRecord:
+        return TaskRecord(
+            task_id=f"swe-bench:{instance_id}",
+            question="Fix add so it returns the sum instead of the difference.",
+            ground_truth=self._GROUND_TRUTH,
+            split="validation",
+            metadata={
+                "dataset_key": "swe_bench",
+                "source": "SWE-bench",
+                "skillflow": {
+                    "extra": {
+                        "instance_id": instance_id,
+                        "repo": "owner/repo",
+                        "base_commit": self.base_commit,
+                    }
+                },
+                "evaluator_payload": {
+                    "instance_id": instance_id,
+                    "patch": self._GOLD_PATCH,
+                    "test_patch": self._TEST_PATCH,
+                },
+            },
+        )
+
+    def _backend(self, config: dict, *, gateway=None):
+        registry = load_model_registry(
+            Path(__file__).resolve().parents[2]
+            / "config/model_catalog_triviaqa_v1.yaml"
+        )
+        backend = object.__new__(_MODULE.LiveSmokeBackend)
+        backend.config = config
+        backend.registry = registry
+        backend.runtime = AgentRuntime(
+            registry,
+            gateway or self._NoCallGateway(),
+        )
+        backend.project_root = self.root
+        backend.judge = None
+        backend.judge_model = ""
+        backend.swe_harness = None
+        return backend
+
+    @staticmethod
+    def _prepared_path(registry) -> Path:
+        repository_backend = registry._backend(SWEBENCH_REPOSITORY_TOOL_ID)
+        return repository_backend.repo_root
+
+    async def test_coding_condition_uses_shared_registry_and_persists_receipts(
+        self,
+    ) -> None:
+        gateway = self._CodingGateway()
+        backend = self._backend(self._config(), gateway=gateway)
+        task = self._task()
+
+        runtime, shared_registry, close = backend._runtime_for_task(
+            task,
+            condition_id="swebench_verified_coding_stable_zero",
+        )
+        prepared_path = self._prepared_path(shared_registry)
+        self.assertIs(shared_registry, runtime.tool_registry)
+        self.assertIs(
+            shared_registry,
+            runtime.execution_adapters["coding"]._tool_registry,
+        )
+        self.assertEqual("swe_bench", runtime.dataset_id)
+        self.assertEqual(
+            (SWEBENCH_REPOSITORY_TOOL_ID,),
+            shared_registry.resource_ids,
+        )
+
+        orchestrator = AgentGraphOrchestrator(
+            backend.registry,
+            client=object(),  # type: ignore[arg-type]
+            tool_registry=shared_registry,
+        )
+        environment = AgentWorkflowEnv(
+            backend.registry,
+            runtime=runtime,
+            problem=task.question,
+        )
+        messages = decode_director_transcript(
+            orchestrator.build_prompt(environment, 0, ())
+        )
+        self.assertIsNotNone(messages)
+        assert messages is not None
+        rendered = messages[-1]["content"]
+        state = json.loads(rendered.split("\n\n", 1)[1])
+        self.assertEqual(
+            [SWEBENCH_REPOSITORY_TOOL_ID],
+            [entry["tool_id"] for entry in state["tool_catalog"]],
+        )
+        for evaluator_only in (
+            self._GROUND_TRUTH,
+            self._GOLD_PATCH,
+            self._TEST_PATCH,
+            "evaluator_payload",
+        ):
+            self.assertNotIn(evaluator_only, rendered)
+
+        graph = AgentGraph(
+            (
+                AgentNode(
+                    "coder",
+                    "qwen3.5-9b-local",
+                    "Inspect the repository, implement the issue, run a targeted test, and submit the workspace diff.",
+                    allowed_tools=(SWEBENCH_REPOSITORY_TOOL_ID,),
+                    execution_mode="coding",
+                    artifact_type="patch_candidate",
+                    completion_condition="submit the tested unified workspace diff",
+                ),
+            ),
+            output_agent_id="coder",
+        )
+        result = await runtime.execute(
+            graph,
+            task.question,
+            run_id="swebench-coding-runtime-test",
+        )
+
+        self.assertIn("diff --git a/bug.py b/bug.py", result.final_answer)
+        self.assertIn("return a + b", result.final_answer)
+        self.assertNotIn("model prose", result.final_answer)
+        execution = execution_record_from_call(result.calls[0])
+        response_receipt = execution.metadata["response"]
+        self.assertEqual("coding", response_receipt["execution_mode"])
+        self.assertEqual(4, response_receipt["tool_calls"])
+        self.assertEqual(
+            ["view_file", "exact_edit", "run_tests", "diff"],
+            [
+                receipt["request"]["action"]
+                for receipt in response_receipt["tool_receipts"]
+            ],
+        )
+        summary = _runtime_summary(result)
+        self.assertEqual(
+            response_receipt["tool_receipts"],
+            summary["output_metadata"]["coder"]["tool_receipts"],
+        )
+        serialized_runtime = json.dumps(
+            {
+                "execution": execution.to_dict(),
+                "summary": summary,
+            },
+            sort_keys=True,
+        )
+        for evaluator_only in (
+            self._GROUND_TRUTH,
+            self._GOLD_PATCH,
+            self._TEST_PATCH,
+            "evaluator_payload",
+        ):
+            self.assertNotIn(evaluator_only, serialized_runtime)
+            self.assertTrue(
+                all(
+                    evaluator_only not in request.problem
+                    and evaluator_only not in request.agent.contract
+                    for request in gateway.requests
+                )
+            )
+
+        close()
+        close()
+        self.assertFalse(prepared_path.exists())
+
+    def test_each_runtime_owns_an_isolated_task_worktree(self) -> None:
+        backend = self._backend(self._config())
+        first_runtime, first_registry, first_close = backend._runtime_for_task(
+            self._task(instance_id="owner__repo-1")
+        )
+        second_runtime, second_registry, second_close = backend._runtime_for_task(
+            self._task(instance_id="owner__repo-2")
+        )
+        del first_runtime, second_runtime
+        first_path = self._prepared_path(first_registry)
+        second_path = self._prepared_path(second_registry)
+        try:
+            self.assertNotEqual(first_path, second_path)
+            (first_path / "bug.py").write_text(
+                "def add(a, b):\n    return 99\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                "def add(a, b):\n    return a - b\n",
+                (second_path / "bug.py").read_text(encoding="utf-8"),
+            )
+        finally:
+            first_close()
+            second_close()
+        self.assertFalse(first_path.exists())
+        self.assertFalse(second_path.exists())
+
+    def test_missing_or_disabled_condition_keeps_historical_runtime(self) -> None:
+        task = self._task()
+        for enabled in (None, False):
+            with self.subTest(enabled=enabled):
+                backend = self._backend(self._config(enabled=enabled))
+                with patch.object(
+                    _MODULE,
+                    "prepare_swebench_worktree_for_task",
+                    side_effect=AssertionError(
+                        "historical no-coding condition must not prepare a repository"
+                    ),
+                ):
+                    runtime, registry, close = backend._runtime_for_task(task)
+                self.assertIs(backend.runtime, runtime)
+                self.assertIsNone(registry)
+                close()
+
+    def test_condition_scope_mode_budgets_and_single_runtime_are_strict(self) -> None:
+        task = self._task()
+
+        experiment_mismatch = self._config()
+        experiment_mismatch["experiment"]["condition_id"] = "old_one_shot"
+        with self.assertRaisesRegex(ConfigurationError, "exactly match"):
+            swe_coding_runtime_settings(experiment_mismatch, task)
+
+        with self.assertRaisesRegex(ConfigurationError, "active rollout"):
+            swe_coding_runtime_settings(
+                self._config(),
+                task,
+                condition_id="different_condition",
+            )
+
+        wrong_scope = self._config()
+        wrong_scope["swe_coding_runtime"]["dataset_scope"] = [
+            "swe_bench",
+            "hotpotqa",
+        ]
+        with self.assertRaisesRegex(ConfigurationError, "exactly"):
+            swe_coding_runtime_settings(wrong_scope, task)
+
+        wrong_mode = self._config()
+        wrong_mode["swe_coding_runtime"]["mode"] = "one_shot_patch"
+        with self.assertRaisesRegex(ConfigurationError, "iterative_repository_coding"):
+            swe_coding_runtime_settings(wrong_mode, task)
+
+        bad_timeout = self._config()
+        bad_timeout["swe_coding_runtime"]["max_test_timeout_seconds"] = 0
+        with self.assertRaisesRegex(ConfigurationError, "max_test_timeout_seconds"):
+            swe_coding_runtime_settings(bad_timeout, task)
+
+        with self.assertRaisesRegex(ConfigurationError, "not configured"):
+            swe_coding_runtime_settings(self._config(), make_task("hotpotqa", 0))
+
+        multiple = self._config()
+        multiple["qa_tool_runtime"] = {
+            "enabled": True,
+            "condition_id": multiple["experiment"]["condition_id"],
+        }
+        backend = self._backend(multiple)
+        with self.assertRaisesRegex(ConfigurationError, "multiple task-scoped"):
+            backend._runtime_for_task(task)
+
+    async def test_official_resolved_boundary_receives_only_workspace_diff(self) -> None:
+        task = self._task()
+        backend = self._backend(self._config(enabled=False))
+        calls = []
+
+        async def official_harness(record, prediction):
+            calls.append((record.task_id, prediction))
+            return {
+                "resolved": True,
+                "official_score": 1.0,
+                "proxy_metric_used": False,
+            }
+
+        backend.swe_harness = official_harness
+        patch_text = (
+            "diff --git a/bug.py b/bug.py\n"
+            "--- a/bug.py\n+++ b/bug.py\n"
+            "@@ -1,2 +1,2 @@\n def add(a, b):\n"
+            "-    return a - b\n+    return a + b\n"
+        )
+        outcome = await backend.evaluate_final_graph(
+            task,
+            patch_text,
+            {"nodes": [], "relations": [], "revision": 0},
+            rollout_index=0,
+        )
+
+        self.assertTrue(outcome.valid)
+        self.assertEqual(1.0, outcome.metrics["resolved"])
+        self.assertEqual([(task.task_id, patch_text)], calls)
+        self.assertFalse(outcome.details["proxy_metric_used"])
+
+    def setUp(self) -> None:
+        import tempfile
+
+        self._temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self._temp_dir.name)
+        repository_store = self.root / "repositories"
+        worktree_root = self.root / "worktrees"
+        source = repository_store / "owner__repo"
+        source.mkdir(parents=True)
+        worktree_root.mkdir()
+        self._git(source, "init", "-q")
+        self._git(source, "config", "user.email", "fixture@example.invalid")
+        self._git(source, "config", "user.name", "Fixture")
+        (source / "bug.py").write_text(
+            "def add(a, b):\n    return a - b\n",
+            encoding="utf-8",
+        )
+        self._git(source, "add", "bug.py")
+        self._git(source, "commit", "-q", "-m", "base")
+        self.base_commit = self._git(
+            source, "rev-parse", "HEAD"
+        ).stdout.strip()
+
+    def tearDown(self) -> None:
+        self._temp_dir.cleanup()
 
 
 def create_project(tmp_path: Path) -> tuple[Path, Path]:

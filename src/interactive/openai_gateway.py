@@ -109,7 +109,27 @@ def _format_upstream(
 def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
     """Build finite-phase prompts without exposing provider credentials."""
 
-    if request.is_format_agent:
+    execution_mode = getattr(
+        request.agent.execution_mode,
+        "value",
+        request.agent.execution_mode,
+    )
+    if execution_mode in {"react", "coding"}:
+        # SkillFlow's BoundedAgent asks the policy for one StructuredAction per
+        # model turn.  The execution adapter, not this provider boundary,
+        # decides when a ``complete`` action becomes the node artifact.  The
+        # generic Output-Agent answer wrapper would otherwise override the
+        # JSON action contract and make an Output ReAct/Coding node
+        # unexecutable.
+        protocol = (
+            "This is one bounded execution-policy turn. Return exactly one "
+            "StructuredAction JSON object using the schema and admitted "
+            "resources in the assigned contract, with no Markdown or text "
+            "outside that object. A tool action requests one public "
+            "observation; a complete action supplies the declared node "
+            "artifact. Do not emit <answer> tags in this internal action."
+        )
+    elif request.is_format_agent:
         protocol = (
             "You are the terminal Format Agent. The semantic answer must already have "
             "been computed in exactly one routed upstream artifact. Your only task is to "

@@ -26,6 +26,7 @@ def request(
     keyed: bool = False,
     is_output_agent: bool = True,
     is_format_agent: bool = False,
+    execution_mode: str = "reasoning",
     communication_condition: CommunicationCondition = CommunicationCondition.NORMAL,
 ) -> AgentRequest:
     provider = ProviderSpec(
@@ -45,7 +46,12 @@ def request(
         run_id="run",
         graph_revision=1,
         problem="Solve the task",
-        agent=AgentNode("agent", "model", "verify carefully"),
+        agent=AgentNode(
+            "agent",
+            "model",
+            "verify carefully",
+            execution_mode=execution_mode,
+        ),
         model=model,
         provider=provider,
         phase=phase,
@@ -99,6 +105,15 @@ class MessageTests(unittest.TestCase):
         system = messages[0]["content"]
         self.assertIn("intermediate AgentGraph node", system)
         self.assertIn("do not use <answer> tags", system)
+        self.assertNotIn("unique Output Agent", system)
+
+    def test_react_output_turn_uses_structured_action_not_answer_wrapper(self) -> None:
+        messages = build_agent_messages(request(execution_mode="react"))
+        system = messages[0]["content"]
+
+        self.assertIn("StructuredAction JSON object", system)
+        self.assertIn("complete action", system)
+        self.assertIn("Do not emit <answer> tags", system)
         self.assertNotIn("unique Output Agent", system)
 
     def test_format_agent_extracts_one_upstream_solution_without_resolving(self) -> None:

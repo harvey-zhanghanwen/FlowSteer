@@ -400,12 +400,22 @@ class AgentRuntime:
         plan = self._build_plan(execution_graph, validation.components)
         nodes = {node.id: node for node in execution_graph.nodes}
         self._validate_execution_contracts(tuple(nodes.values()))
+        self._validate_stateful_resource_ownership(nodes, plan)
         if format_output_agent and execution_graph.output_agent_id is not None:
             format_node = nodes[execution_graph.output_agent_id]
             if (format_node.role_family or "").casefold() != "format":
                 raise AgentRuntimeError(
                     "format_output_agent requires the Output Agent to carry "
                     "role_family='format'"
+                )
+            format_mode = getattr(
+                format_node.execution_mode,
+                "value",
+                format_node.execution_mode,
+            )
+            if format_mode != "reasoning" or format_node.allowed_tools:
+                raise AgentRuntimeError(
+                    "Format Agent must use reasoning execution without tools"
                 )
         outputs: Dict[str, str] = {}
         output_metadata: Dict[str, Mapping[str, object]] = {}
@@ -584,6 +594,48 @@ class AgentRuntime:
                         f"agent {node.id!r} tool {tool_id!r} is outside dataset scope "
                         f"{self.dataset_id!r}"
                     )
+
+    def _validate_stateful_resource_ownership(
+        self,
+        nodes: Mapping[str, AgentNode],
+        plan: _ExecutionPlan,
+    ) -> None:
+        """Preserve single-episode/single-worktree semantics in a graph run.
+
+        SkillFlow binds one environment episode to one bounded Agent and one
+        SWE repository worktree to one coding episode.  FlowSteer's
+        reciprocal block executes both members concurrently and then executes
+        both again for revision, so a stateful resource cannot legally be
+        owned by that block or by multiple graph nodes.  Stateless retrieval
+        and process-isolated computation remain unrestricted.
+        """
+
+        if self.tool_registry is None:
+            return
+        exclusive_side_effects = {
+            "environment_state_transition",
+            "repository_read_write_and_test_process",
+        }
+        owners: Dict[str, List[str]] = {}
+        for node in nodes.values():
+            for tool_id in node.allowed_tools:
+                capability = self.tool_registry.require_capability(tool_id)
+                if capability.side_effect in exclusive_side_effects:
+                    owners.setdefault(tool_id, []).append(node.id)
+
+        for tool_id, agent_ids in sorted(owners.items()):
+            if len(agent_ids) != 1:
+                raise AgentRuntimeError(
+                    f"stateful tool {tool_id!r} requires one graph Agent owner; "
+                    f"found {len(agent_ids)}"
+                )
+            owner_id = agent_ids[0]
+            component = plan.component_for[owner_id]
+            if len(component) != 1:
+                raise AgentRuntimeError(
+                    f"stateful tool {tool_id!r} cannot execute inside a "
+                    "reciprocal Agent block"
+                )
 
     def _build_plan(
         self,

@@ -40,7 +40,7 @@ from train_agentgraph_smoke import (
     _write_json,
     evaluator_version_for,
 )
-from src.interactive.agent_graph import AgentNode
+from src.interactive.agent_graph import AgentGraph, AgentNode
 from src.interactive.agent_runtime import (
     AgentCallRecord,
     AgentRequest,
@@ -81,11 +81,26 @@ class CompletionBenchmarkRoundError(RuntimeError):
 
 
 _BENCHMARKS: Mapping[str, Mapping[str, Any]] = {
+    "hotpotqa": {
+        "label": "HotpotQA",
+        "section_names": ("hotpotqa_evaluation",),
+        "phase_names": ("hotpotqa_evaluation",),
+        "primary_metric": "exact_match",
+        "metric_names": ("exact_match", "token_f1"),
+    },
+    "triviaqa": {
+        "label": "TriviaQA",
+        "section_names": ("triviaqa_evaluation",),
+        "phase_names": ("triviaqa_evaluation",),
+        "primary_metric": "exact_match",
+        "metric_names": ("exact_match", "token_f1"),
+    },
     "aime_2026": {
         "label": "AIME 2026",
         "section_names": ("aime2026_evaluation", "aime_2026_evaluation"),
         "phase_names": ("aime2026_evaluation", "aime_2026_evaluation"),
         "primary_metric": "exact_match",
+        "metric_names": ("exact_match",),
     },
     "healthbench_professional": {
         "label": "HealthBench Professional",
@@ -98,24 +113,28 @@ _BENCHMARKS: Mapping[str, Mapping[str, Any]] = {
             "healthbench_professional_evaluation",
         ),
         "primary_metric": "raw_score",
+        "metric_names": ("raw_score",),
     },
     "webshop": {
         "label": "WebShop",
         "section_names": ("webshop_evaluation",),
         "phase_names": ("webshop_evaluation",),
         "primary_metric": "success",
+        "metric_names": ("success",),
     },
     "alfworld": {
         "label": "ALFWorld",
         "section_names": ("alfworld_evaluation",),
         "phase_names": ("alfworld_evaluation",),
         "primary_metric": "success",
+        "metric_names": ("success",),
     },
     "swe_bench": {
         "label": "SWE-bench Verified",
         "section_names": ("swebench_evaluation",),
         "phase_names": ("swebench_evaluation",),
         "primary_metric": "resolved",
+        "metric_names": ("resolved",),
     },
 }
 
@@ -250,6 +269,14 @@ def validate_completion_benchmark_config(config: Mapping[str, Any]) -> None:
         checks["evaluation.swebench_timeout_seconds"] = bool(
             type(timeout) is int and timeout > 0
         )
+        swe_runtime = config.get("swe_coding_runtime")
+        if isinstance(swe_runtime, Mapping) and swe_runtime.get("enabled") is True:
+            checks["swe_bench.direct_execution_mode"] = (
+                bounded.get("direct_execution_mode") == "coding"
+            )
+            checks["swe_bench.direct_completion_condition"] = bool(
+                str(bounded.get("direct_completion_condition", "")).strip()
+            )
     failed = [name for name, valid in checks.items() if not valid]
     if failed:
         raise ConfigurationError(
@@ -425,7 +452,12 @@ async def _evaluate_prediction(
                 )
             ),
         )
-    if dataset_key == "swe_bench":
+    swe_runtime = backend.config.get("swe_coding_runtime")
+    if (
+        dataset_key == "swe_bench"
+        and isinstance(swe_runtime, Mapping)
+        and swe_runtime.get("enabled") is True
+    ):
         return await evaluate_task(
             task,
             prediction,
@@ -450,6 +482,102 @@ async def _direct_one(
     run_id = f"{run_label}-direct-{index:04d}"
     dataset_key = _dataset_key(task)
     started_at = _utc_now()
+
+    if dataset_key == "swe_bench":
+        bounded = _evaluation_section(backend.config)[1]
+        condition_id = str(backend.config["experiment"]["condition_id"])
+        task_runtime, tool_registry, close_runtime = backend._runtime_for_task(
+            task,
+            condition_id=condition_id,
+        )
+        try:
+            if tool_registry is None:
+                raise CompletionBenchmarkRoundError(
+                    "SWE-bench Direct Coding Agent has no repository ToolRegistry"
+                )
+            node = AgentNode(
+                "direct_coding_agent",
+                model_id,
+                contract,
+                role_family="coding",
+                allowed_tools=tool_registry.resource_ids,
+                execution_mode="coding",
+                artifact_type="unified_diff",
+                completion_condition=str(
+                    bounded["direct_completion_condition"]
+                ),
+            )
+            graph = AgentGraph(
+                nodes=(node,),
+                output_agent_id=node.id,
+            )
+            runtime_result = await task_runtime.execute(
+                graph,
+                task.question,
+                run_id=run_id,
+            )
+            if not runtime_result.final_answer:
+                raise CompletionBenchmarkRoundError(
+                    "SWE-bench Direct Coding Agent produced no workspace diff"
+                )
+            calls = tuple(runtime_result.calls)
+            if len(calls) != 1:
+                raise CompletionBenchmarkRoundError(
+                    "SWE-bench single Coding Agent produced an invalid outer call count"
+                )
+            raw_model_calls = calls[0].response.metadata.get("model_calls", ())
+            model_call_seeds = [
+                item.get("metadata", {}).get("generation_seed")
+                for item in raw_model_calls
+                if isinstance(item, Mapping)
+                and isinstance(item.get("metadata"), Mapping)
+            ]
+            if not model_call_seeds or any(
+                actual_seed != seed for actual_seed in model_call_seeds
+            ):
+                raise CompletionBenchmarkRoundError(
+                    "Direct Coding Agent generation seed receipts differ from config"
+                )
+            executions = [
+                execution_record_from_call(call).to_dict() for call in calls
+            ]
+            evaluation = await _evaluate_prediction(
+                backend,
+                task,
+                runtime_result.final_answer,
+            )
+            return {
+                "schema_version": "flowsteer.completion_benchmark.direct_prediction.v1",
+                "dataset_key": dataset_key,
+                "task_id": task.task_id,
+                "task": task.to_dict(),
+                "condition": "direct_local_qwen35_9b",
+                "protocol": protocol,
+                "simple_baseline_topology": "single_coding_agent",
+                "model_id": model_id,
+                "provider_id": provider.provider_id,
+                "provider_model": model.model_name,
+                "generation_seed": seed,
+                "final_answer": runtime_result.final_answer,
+                "evaluation": asdict(evaluation),
+                "execution": executions[-1],
+                "executions": executions,
+                "runtime": {
+                    "run_id": runtime_result.run_id,
+                    "output_agent_id": runtime_result.output_agent_id,
+                    "block_completion_order": [
+                        list(block)
+                        for block in runtime_result.block_completion_order
+                    ],
+                    "executed_agent_ids": list(
+                        runtime_result.executed_agent_ids
+                    ),
+                },
+                "started_at": started_at,
+                "completed_at": _utc_now(),
+            }
+        finally:
+            close_runtime()
 
     if dataset_key in _INTERACTIVE_BENCHMARKS:
         executions: list[dict[str, Any]] = []
@@ -698,20 +826,36 @@ async def _collect_direct(
 def _metric(
     value: Optional[Mapping[str, Any]], dataset_key: str
 ) -> tuple[bool, float]:
+    valid, metrics = _metrics(value, dataset_key)
+    primary = str(_BENCHMARKS[dataset_key]["primary_metric"])
+    return valid, metrics.get(primary, 0.0)
+
+
+def _metrics(
+    value: Optional[Mapping[str, Any]], dataset_key: str
+) -> tuple[bool, dict[str, float]]:
+    """Return every native report metric, failing closed as one receipt."""
+
+    metric_names = tuple(_BENCHMARKS[dataset_key]["metric_names"])
+    empty = {str(name): 0.0 for name in metric_names}
     if value is None:
-        return False, 0.0
+        return False, empty
     evaluation = value.get("evaluation")
     if not isinstance(evaluation, Mapping) or evaluation.get("valid") is not True:
-        return False, 0.0
+        return False, empty
     metrics = evaluation.get("metrics")
     if not isinstance(metrics, Mapping):
-        return False, 0.0
-    metric_name = str(_BENCHMARKS[dataset_key]["primary_metric"])
-    raw = metrics.get(metric_name)
-    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
-        return False, 0.0
-    value_float = float(raw)
-    return (math.isfinite(value_float), value_float if math.isfinite(value_float) else 0.0)
+        return False, empty
+    values: dict[str, float] = {}
+    for metric_name in metric_names:
+        raw = metrics.get(metric_name)
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            return False, empty
+        metric_value = float(raw)
+        if not math.isfinite(metric_value):
+            return False, empty
+        values[str(metric_name)] = metric_value
+    return True, values
 
 
 def _direct_telemetry(value: Optional[Mapping[str, Any]]) -> Mapping[str, Any]:
@@ -758,6 +902,7 @@ def _failure_type(
             return "agentgraph_exact_match_regression"
         return "both_exact" if graph_score == 1.0 else "both_incorrect"
     metric_name = str(_BENCHMARKS[dataset_key]["primary_metric"])
+    metric_names = tuple(_BENCHMARKS[dataset_key]["metric_names"])
     if graph_score > direct_score:
         return f"agentgraph_higher_{metric_name}"
     if graph_score < direct_score:
@@ -776,8 +921,10 @@ def _paired_rows(
     for task in selected:
         direct_value = direct.get(task.task_id)
         graph_value = trajectories.get(task.task_id)
-        direct_valid, direct_score = _metric(direct_value, dataset_key)
-        graph_valid, graph_score = _metric(graph_value, dataset_key)
+        direct_valid, direct_metrics = _metrics(direct_value, dataset_key)
+        graph_valid, graph_metrics = _metrics(graph_value, dataset_key)
+        direct_score = direct_metrics[metric_name]
+        graph_score = graph_metrics[metric_name]
         direct_execution = direct_value.get("execution") if direct_value else None
         rows.append(
             {
@@ -793,7 +940,7 @@ def _paired_rows(
                     "final_answer": (
                         direct_value.get("final_answer") if direct_value else None
                     ),
-                    metric_name: direct_score,
+                    **{name: direct_metrics[name] for name in metric_names},
                     "evaluation": (
                         direct_value.get("evaluation") if direct_value else None
                     ),
@@ -806,7 +953,7 @@ def _paired_rows(
                     "final_answer": (
                         graph_value.get("final_answer") if graph_value else None
                     ),
-                    metric_name: graph_score,
+                    **{name: graph_metrics[name] for name in metric_names},
                     "evaluation": (
                         graph_value.get("evaluation") if graph_value else None
                     ),
@@ -834,7 +981,10 @@ def _paired_rows(
                         else None
                     ),
                 },
-                f"delta_{metric_name}": graph_score - direct_score,
+                **{
+                    f"delta_{name}": graph_metrics[name] - direct_metrics[name]
+                    for name in metric_names
+                },
                 "failure_type": _failure_type(
                     direct_value,
                     graph_value,
@@ -852,31 +1002,34 @@ def _paired_rows(
 def _aggregate(
     rows: Sequence[Mapping[str, Any]], condition: str, dataset_key: str
 ) -> Mapping[str, Any]:
-    metric_name = str(_BENCHMARKS[dataset_key]["primary_metric"])
+    metric_names = tuple(_BENCHMARKS[dataset_key]["metric_names"])
     total = len(rows)
     values = [row[condition] for row in rows]
     valid = [value for value in values if value.get("valid") is True]
-    strict = (
-        sum(float(value.get(metric_name, 0.0)) for value in values) / total
-        if total
-        else 0.0
-    )
-    completed_only = (
-        sum(float(value.get(metric_name, 0.0)) for value in valid) / len(valid)
-        if valid
-        else None
-    )
     result = {
         "denominator": total,
         "completed": sum(value.get("available") is True for value in values),
         "evaluator_valid": len(valid),
-        f"strict_{metric_name}": strict,
-        f"completed_only_{metric_name}": completed_only,
     }
+    for metric_name in metric_names:
+        strict = (
+            sum(float(value.get(metric_name, 0.0)) for value in values) / total
+            if total
+            else 0.0
+        )
+        completed_only = (
+            sum(float(value.get(metric_name, 0.0)) for value in valid) / len(valid)
+            if valid
+            else None
+        )
+        result[f"strict_{metric_name}"] = strict
+        result[f"completed_only_{metric_name}"] = completed_only
     # Official AIME accuracy is the dataset average of per-problem exact match.
     if dataset_key == "aime_2026":
-        result["strict_accuracy"] = strict
-        result["completed_only_accuracy"] = completed_only
+        result["strict_accuracy"] = result["strict_exact_match"]
+        result["completed_only_accuracy"] = result[
+            "completed_only_exact_match"
+        ]
     return result
 
 
@@ -889,6 +1042,7 @@ def _report(
     dataset_key = str(bounded["dataset_key"])
     specification = _BENCHMARKS[dataset_key]
     metric_name = str(specification["primary_metric"])
+    metric_names = tuple(specification["metric_names"])
     direct = _aggregate(rows, "direct", dataset_key)
     graph = _aggregate(rows, "agentgraph", dataset_key)
     strict_key = f"strict_{metric_name}"
@@ -906,8 +1060,20 @@ def _report(
         "benchmark_slice": bounded.get("benchmark_slice"),
         "sample_count": len(rows),
         "primary_metric": metric_name,
+        "protocol_equivalent_to_direct": bool(
+            bounded.get("protocol_equivalent_to_direct", False)
+        ),
+        "comparison_interpretation": (
+            "paired_architecture_comparison"
+            if bounded.get("protocol_equivalent_to_direct") is True
+            else "separate_protocol_descriptive_comparison"
+        ),
         "metric_scope": (
-            "SkillFlow_exact_answer_extraction_and_exact_match"
+            "HotpotQA_official_normalization_exact_match_and_token_F1"
+            if dataset_key == "hotpotqa"
+            else "TriviaQA_official_normalization_exact_match_and_token_F1"
+            if dataset_key == "triviaqa"
+            else "SkillFlow_exact_answer_extraction_and_exact_match"
             if dataset_key == "aime_2026"
             else "OpenAI_simple_evals_HealthBench_rubric_raw_score"
             if dataset_key == "healthbench_professional"
@@ -918,7 +1084,9 @@ def _report(
         "direct_local_baseline": direct,
         "agentgraph": graph,
         "agentgraph_minus_direct": {
-            metric_name: float(graph[strict_key]) - float(direct[strict_key])
+            name: float(graph[f"strict_{name}"])
+            - float(direct[f"strict_{name}"])
+            for name in metric_names
         },
         "graph_search_diagnostics": aggregate_trajectory_diagnostics(trajectories),
         "failure_types": dict(sorted(failure_counts.items())),
@@ -970,6 +1138,31 @@ def _report_markdown(report: Mapping[str, Any]) -> str:
         if report.get("skill_injection_performed")
         else "No Skill was injected."
     )
+    protocol_sentence = (
+        "Direct and AgentGraph use protocol-equivalent task/evaluator conditions."
+        if report.get("protocol_equivalent_to_direct") is True
+        else "Direct and AgentGraph are separate protocols; their delta is descriptive, not a paired causal estimate."
+    )
+    if tuple(report["agentgraph_minus_direct"]) == ("exact_match", "token_f1"):
+        return f"""# {report['dataset']} Architecture Validation
+
+Fixed {report['project_split']} samples: **{report['sample_count']}**. No training, GRPO, backward pass, optimizer update, LoRA publication, Bayesian update, or Skill publication ran. {skill_sentence}
+
+Native metrics: **exact_match** and **token_f1** (`{report['metric_scope']}`). AgentGraph explicit FINISH: **{report['explicit_finished_count']}/{report['sample_count']}**; terminal failures: **{report['terminal_failure_count']}**; operational/evaluator failures: **{report['operational_failure_count']}**.
+
+| Condition | Completed | Evaluator valid | Strict EM | Strict F1 |
+|---|---:|---:|---:|---:|
+| Qwen3.5-9B Direct Local Baseline | {direct['completed']} | {direct['evaluator_valid']} | {100 * float(direct['strict_exact_match']):.2f}% | {100 * float(direct['strict_token_f1']):.2f}% |
+| AgentGraph | {graph['completed']} | {graph['evaluator_valid']} | {100 * float(graph['strict_exact_match']):.2f}% | {100 * float(graph['strict_token_f1']):.2f}% |
+
+AgentGraph - Direct: **{100 * float(report['agentgraph_minus_direct']['exact_match']):+.2f} EM**, **{100 * float(report['agentgraph_minus_direct']['token_f1']):+.2f} F1**.
+
+{protocol_sentence}
+
+## Failure types
+
+{failures}
+"""
     return f"""# {report['dataset']} Architecture Validation
 
 Fixed {report['project_split']} samples: **{report['sample_count']}**. No training, GRPO, backward pass, optimizer update, LoRA publication, Bayesian update, or Skill publication ran. {skill_sentence}
@@ -982,6 +1175,8 @@ Primary metric: **{metric_name}** (`{report['metric_scope']}`). AgentGraph expli
 | AgentGraph | {graph['completed']} | {graph['evaluator_valid']} | {100 * float(graph[strict_key]):.2f}% |
 
 AgentGraph - Direct: **{100 * float(delta):+.2f} percentage points**.
+
+{protocol_sentence}
 
 ## Failure types
 
@@ -1247,15 +1442,23 @@ async def run_completion_benchmark_round(
                 backend, selected[0], known_prediction
             )
         metric_name = str(_BENCHMARKS[dataset_key]["primary_metric"])
-        known_value = known_answer.metrics.get(metric_name)
-        known_valid = (
-            known_answer.valid
-            and isinstance(known_value, (int, float))
-            and not isinstance(known_value, bool)
-            and math.isfinite(float(known_value))
+        known_metrics = tuple(_BENCHMARKS[dataset_key]["metric_names"])
+        known_values = {
+            name: known_answer.metrics.get(name) for name in known_metrics
+        }
+        known_value = known_values[metric_name]
+        known_valid = known_answer.valid and all(
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(float(value))
+            for value in known_values.values()
         )
         if dataset_key == "aime_2026":
             known_valid = known_valid and float(known_value) == 1.0
+        elif dataset_key in {"hotpotqa", "triviaqa"}:
+            known_valid = known_valid and all(
+                float(value) == 1.0 for value in known_values.values()
+            )
         if not known_valid:
             raise CompletionBenchmarkRoundError(
                 f"known-answer {dataset_key} evaluator preflight failed"

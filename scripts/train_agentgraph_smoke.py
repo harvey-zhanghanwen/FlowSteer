@@ -30,8 +30,18 @@ from src.interactive.config_loader import (
     load_yaml,
     validate_agent_graph_config,
 )
+from src.interactive.computation_tools import create_aime_computation_registry
+from src.interactive.coding_execution import CodingExecutionAdapter
+from src.interactive.coding_tools import create_swebench_repository_registry
 from src.interactive.director import AgentGraphOrchestrator
+from src.interactive.environment_execution import (
+    build_environment_execution_resources,
+    evaluator_locked_ragen_session_factory,
+)
 from src.interactive.grpo_objective import same_condition_advantages
+from src.interactive.healthbench_tool_adapter import (
+    open_healthbench_medrag_tool_registry,
+)
 from src.interactive.hotpot_training_schedule import (
     FrozenHotpotTrainingSchedule,
     HotpotTrainingCursorState,
@@ -44,12 +54,14 @@ from src.interactive.joint_qa_training_schedule import (
 )
 from src.interactive.openai_gateway import OpenAICompatibleGateway
 from src.interactive.persistence import EvidenceStore, GraphSnapshotEvent
+from src.interactive.qa_tool_adapter import open_qa_tool_registry
 from src.interactive.qa_retrieval import (
     SkillFlowQARetriever,
     augment_task_with_retrieval,
     build_keyword_query,
     receipt_from_mapping,
 )
+from src.interactive.react_execution import ToolReactExecutionAdapter
 from src.interactive.policy_sync import (
     PolicySyncConfig,
     PolicySyncError,
@@ -77,6 +89,7 @@ from src.interactive.smoke_trainer import (
     SmokeTrainerConfig,
     trajectory_to_grpo,
 )
+from src.interactive.swe_worktree import prepare_swebench_worktree_for_task
 from src.interactive.task_dataset import iter_task_records
 from src.interactive.task_evaluator import (
     AIME2026_EVALUATOR_VERSION,
@@ -94,6 +107,12 @@ from src.interactive.versioning import VersionBundle
 
 PROMPT_VERSION = "agentgraph.director.minimal.v1"
 TOOL_VERSION = "agentgraph.atomic-actions.v1"
+
+QA_TOOL_RUNTIME_MODE = "model_driven_search_read"
+ENVIRONMENT_RUNTIME_MODE = "model_driven_ragen_react"
+AIME_TOOL_RUNTIME_MODE = "model_driven_computation"
+HEALTHBENCH_TOOL_RUNTIME_MODE = "model_driven_medrag_search"
+SWE_CODING_RUNTIME_MODE = "iterative_repository_coding"
 
 EXPECTED_SOURCE_ORDER = (
     "hotpotqa",
@@ -365,20 +384,35 @@ def _workflow_problem(
     """Expose the required interactive execution interface to Flow-Director.
 
     SkillFlow public tasks keep the immutable query separate from the public
-    environment/tool context. Static QA needs only the query. For WebShop and
-    ALFWorld, the compiled AgentGraph is a step policy: after ``FINISH`` it is
-    invoked again with each observation and admissible-action list. Present
-    that runtime contract without prescribing a topology, role template,
-    model, or Skill.
+    environment/tool context. Static QA needs only the query. WebShop and
+    ALFWorld retain the evaluator-driven graph-as-step-policy contract unless
+    the frozen condition explicitly enables the task-scoped RAGEN ReAct
+    runtime. Present the selected runtime contract without prescribing a
+    topology, role template, model, or Skill.
     """
 
     source_key = _dataset_key(task)
     if source_key not in {"webshop", "alfworld"}:
         return task.question
     section = config.get(f"{source_key}_evaluation")
-    if not isinstance(section, Mapping):
-        return task.question
-    contract = section.get("direct_contract")
+    contract = section.get("direct_contract") if isinstance(section, Mapping) else ""
+    environment_settings = _environment_runtime_settings(config, task)
+    if environment_settings is not None:
+        action_contract = (
+            contract.strip()
+            if isinstance(contract, str) and contract.strip()
+            else "Return exactly one currently admissible environment action."
+        )
+        return (
+            f"{task.question}\n\n"
+            "Execution interface: a node using execution_mode `react` may select "
+            f"the `{source_key}.environment` tool. Its single execution owns one "
+            "bounded request-scoped episode; each environment turn receives the "
+            "current observation and admissible actions before selecting one "
+            f"action. {action_contract} The episode ends at the environment "
+            "terminal state or the fixed evaluator step budget. Do not return a "
+            "prose answer or product summary."
+        )
     if not isinstance(contract, str) or not contract.strip():
         return task.question
     return (
@@ -389,6 +423,587 @@ def _workflow_problem(
         "actions. The Output Agent must satisfy this action contract: "
         f"{contract.strip()} Do not return a prose answer or product summary."
     )
+
+
+def _environment_replay_trace_from_runtime(
+    final_runtime: Any,
+) -> tuple[Mapping[str, Any], ...]:
+    """Extract one request-scoped RAGEN trace from the final runtime result.
+
+    SkillFlow's environment boundary owns one simulator episode at a time and
+    ``task_evaluator`` replays one ordered action sequence.  A final graph may
+    contain reasoning collaborators, but it must therefore expose at most one
+    environment-actor trace for a terminal evaluation.  Missing metadata
+    preserves the existing evaluator-driven closed condition; malformed or
+    ambiguous metadata is rejected instead of silently selecting an episode.
+    """
+
+    if final_runtime is None:
+        return ()
+    output_metadata = getattr(final_runtime, "output_metadata", None)
+    if output_metadata is None:
+        return ()
+    if not isinstance(output_metadata, Mapping):
+        raise ConfigurationError("final runtime output_metadata must be a mapping")
+
+    traces: list[tuple[Mapping[str, Any], ...]] = []
+    for agent_id, metadata in output_metadata.items():
+        if not isinstance(agent_id, str) or not isinstance(metadata, Mapping):
+            raise ConfigurationError(
+                "final runtime output_metadata entries must be keyed mappings"
+            )
+        if "evaluator_environment_trace" not in metadata:
+            continue
+        raw_trace = metadata["evaluator_environment_trace"]
+        if isinstance(raw_trace, (str, bytes)) or not isinstance(
+            raw_trace, Sequence
+        ):
+            raise ConfigurationError(
+                "evaluator_environment_trace must be an ordered sequence"
+            )
+        trace: list[Mapping[str, Any]] = []
+        for entry in raw_trace:
+            if not isinstance(entry, Mapping):
+                raise ConfigurationError(
+                    "evaluator_environment_trace entries must be mappings"
+                )
+            trace.append(dict(entry))
+        traces.append(tuple(trace))
+
+    if len(traces) > 1:
+        raise ConfigurationError(
+            "one terminal evaluation cannot replay multiple environment episodes"
+        )
+    return traces[0] if traces else ()
+
+
+def _qa_tool_runtime_settings(
+    config: Mapping[str, Any],
+    task: TaskRecord,
+    *,
+    condition_id: Optional[str] = None,
+) -> Optional[dict[str, Any]]:
+    """Return one explicit task-scoped QA Tool/ReAct condition.
+
+    Absence (or ``enabled: false``) retains the existing closed-context
+    runtime exactly.  Enabling this condition requires a distinct experiment
+    condition ID so cached closed-context trajectories cannot be reused under
+    a tool-enabled search space.
+    """
+
+    raw = config.get("qa_tool_runtime")
+    if raw is None:
+        return None
+    section = _mapping(raw, "qa_tool_runtime")
+    enabled = section.get("enabled")
+    if enabled is False:
+        return None
+    if enabled is not True:
+        raise ConfigurationError("qa_tool_runtime.enabled must be bool")
+
+    source_key = _dataset_key(task)
+    dataset_scope = section.get("dataset_scope")
+    if (
+        not isinstance(dataset_scope, list)
+        or not dataset_scope
+        or not all(isinstance(value, str) and value.strip() for value in dataset_scope)
+        or len(set(dataset_scope)) != len(dataset_scope)
+    ):
+        raise ConfigurationError(
+            "qa_tool_runtime.dataset_scope must contain unique non-empty dataset IDs"
+        )
+    normalized_scope = tuple(value.strip() for value in dataset_scope)
+    if any(value not in {"hotpotqa", "triviaqa"} for value in normalized_scope):
+        raise ConfigurationError(
+            "qa_tool_runtime.dataset_scope supports only hotpotqa and triviaqa"
+        )
+    if source_key not in normalized_scope:
+        raise ConfigurationError(
+            f"qa_tool_runtime is not configured for dataset {source_key!r}"
+        )
+    if section.get("mode") != QA_TOOL_RUNTIME_MODE:
+        raise ConfigurationError(
+            "qa_tool_runtime.mode must be model_driven_search_read"
+        )
+
+    experiment = _mapping(config.get("experiment"), "experiment")
+    configured_condition_id = section.get("condition_id")
+    active_condition_id = (
+        str(experiment.get("condition_id", "")).strip()
+        if condition_id is None
+        else condition_id.strip()
+        if isinstance(condition_id, str)
+        else ""
+    )
+    if (
+        not isinstance(configured_condition_id, str)
+        or not configured_condition_id.strip()
+        or configured_condition_id.strip()
+        != str(experiment.get("condition_id", "")).strip()
+        or configured_condition_id.strip() != active_condition_id
+    ):
+        raise ConfigurationError(
+            "qa_tool_runtime.condition_id must exactly match both the experiment "
+            "and active rollout condition_id"
+        )
+    for field_name in ("skillflow_source", "index_path"):
+        value = section.get(field_name)
+        if not isinstance(value, str) or not value.strip():
+            raise ConfigurationError(
+                f"qa_tool_runtime.{field_name} must be non-empty text"
+            )
+
+    integer_fields = {
+        "max_turns_per_agent_call": 1,
+        "max_tool_calls_per_agent_call": 1,
+    }
+    for field_name, minimum in integer_fields.items():
+        value = section.get(field_name)
+        if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+            raise ConfigurationError(
+                f"qa_tool_runtime.{field_name} must be an integer >= {minimum}"
+            )
+    timeout_seconds = section.get("tool_timeout_seconds")
+    if (
+        isinstance(timeout_seconds, bool)
+        or not isinstance(timeout_seconds, (int, float))
+        or float(timeout_seconds) <= 0
+    ):
+        raise ConfigurationError(
+            "qa_tool_runtime.tool_timeout_seconds must be positive"
+        )
+    return {
+        "source_key": source_key,
+        "skillflow_source": section["skillflow_source"].strip(),
+        "index_path": section["index_path"].strip(),
+        "max_turns": int(section["max_turns_per_agent_call"]),
+        "max_tool_calls": int(section["max_tool_calls_per_agent_call"]),
+        "tool_timeout_seconds": float(timeout_seconds),
+    }
+
+
+def _aime_tool_runtime_settings(
+    config: Mapping[str, Any],
+    task: TaskRecord,
+    *,
+    condition_id: Optional[str] = None,
+) -> Optional[dict[str, Any]]:
+    """Return one explicit AIME computation Tool/ReAct condition.
+
+    A missing or disabled section preserves the existing no-Tool runtime.
+    The enabled arm is intentionally bound to the exact experiment and
+    rollout condition and to the sole ``aime_2026`` dataset scope, so its
+    trajectories cannot be mixed with a closed-computation protocol.
+    """
+
+    raw = config.get("aime_tool_runtime")
+    if raw is None:
+        return None
+    section = _mapping(raw, "aime_tool_runtime")
+    enabled = section.get("enabled")
+    if enabled is False:
+        return None
+    if enabled is not True:
+        raise ConfigurationError("aime_tool_runtime.enabled must be bool")
+
+    source_key = _dataset_key(task)
+    dataset_scope = section.get("dataset_scope")
+    if dataset_scope != ["aime_2026"]:
+        raise ConfigurationError(
+            "aime_tool_runtime.dataset_scope must be exactly ['aime_2026']"
+        )
+    if source_key != "aime_2026":
+        raise ConfigurationError(
+            f"aime_tool_runtime is not configured for dataset {source_key!r}"
+        )
+    if section.get("mode") != AIME_TOOL_RUNTIME_MODE:
+        raise ConfigurationError(
+            "aime_tool_runtime.mode must be model_driven_computation"
+        )
+
+    experiment = _mapping(config.get("experiment"), "experiment")
+    configured_condition_id = section.get("condition_id")
+    active_condition_id = (
+        str(experiment.get("condition_id", "")).strip()
+        if condition_id is None
+        else condition_id.strip()
+        if isinstance(condition_id, str)
+        else ""
+    )
+    if (
+        not isinstance(configured_condition_id, str)
+        or not configured_condition_id.strip()
+        or configured_condition_id.strip()
+        != str(experiment.get("condition_id", "")).strip()
+        or configured_condition_id.strip() != active_condition_id
+    ):
+        raise ConfigurationError(
+            "aime_tool_runtime.condition_id must exactly match both the "
+            "experiment and active rollout condition_id"
+        )
+
+    for field_name in (
+        "max_turns_per_agent_call",
+        "max_tool_calls_per_agent_call",
+    ):
+        value = section.get(field_name)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ConfigurationError(
+                f"aime_tool_runtime.{field_name} must be an integer >= 1"
+            )
+    for field_name in (
+        "calculator_timeout_seconds",
+        "python_timeout_seconds",
+    ):
+        value = section.get(field_name)
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or float(value) <= 0
+        ):
+            raise ConfigurationError(
+                f"aime_tool_runtime.{field_name} must be positive"
+            )
+    return {
+        "source_key": source_key,
+        "max_turns": int(section["max_turns_per_agent_call"]),
+        "max_tool_calls": int(section["max_tool_calls_per_agent_call"]),
+        "calculator_timeout_seconds": float(
+            section["calculator_timeout_seconds"]
+        ),
+        "python_timeout_seconds": float(section["python_timeout_seconds"]),
+    }
+
+
+def _healthbench_tool_runtime_settings(
+    config: Mapping[str, Any],
+    task: TaskRecord,
+    *,
+    condition_id: Optional[str] = None,
+) -> Optional[dict[str, Any]]:
+    """Return one explicit HealthBench Professional MedRAG/ReAct condition.
+
+    A missing or disabled section preserves the existing closed-context
+    HealthBench condition.  The enabled arm is bound to one exact rollout
+    condition and the sole HealthBench Professional dataset scope, and opens
+    only the configured frozen textbook resource.  Evaluator rubrics,
+    physician responses, task gold, and grading state are not part of this
+    runtime contract.
+    """
+
+    raw = config.get("healthbench_tool_runtime")
+    if raw is None:
+        return None
+    section = _mapping(raw, "healthbench_tool_runtime")
+    enabled = section.get("enabled")
+    if enabled is False:
+        return None
+    if enabled is not True:
+        raise ConfigurationError("healthbench_tool_runtime.enabled must be bool")
+
+    source_key = _dataset_key(task)
+    if section.get("dataset_scope") != ["healthbench_professional"]:
+        raise ConfigurationError(
+            "healthbench_tool_runtime.dataset_scope must be exactly "
+            "['healthbench_professional']"
+        )
+    if source_key != "healthbench_professional":
+        raise ConfigurationError(
+            "healthbench_tool_runtime is not configured for dataset "
+            f"{source_key!r}"
+        )
+    if section.get("mode") != HEALTHBENCH_TOOL_RUNTIME_MODE:
+        raise ConfigurationError(
+            "healthbench_tool_runtime.mode must be model_driven_medrag_search"
+        )
+
+    experiment = _mapping(config.get("experiment"), "experiment")
+    configured_condition_id = section.get("condition_id")
+    active_condition_id = (
+        str(experiment.get("condition_id", "")).strip()
+        if condition_id is None
+        else condition_id.strip()
+        if isinstance(condition_id, str)
+        else ""
+    )
+    if (
+        not isinstance(configured_condition_id, str)
+        or not configured_condition_id.strip()
+        or configured_condition_id.strip()
+        != str(experiment.get("condition_id", "")).strip()
+        or configured_condition_id.strip() != active_condition_id
+    ):
+        raise ConfigurationError(
+            "healthbench_tool_runtime.condition_id must exactly match both "
+            "the experiment and active rollout condition_id"
+        )
+
+    for field_name in (
+        "resource_dir",
+        "source_identity",
+        "source_revision",
+    ):
+        value = section.get(field_name)
+        if not isinstance(value, str) or not value.strip():
+            raise ConfigurationError(
+                f"healthbench_tool_runtime.{field_name} must be non-empty text"
+            )
+    for field_name in (
+        "expected_rows",
+        "max_turns_per_agent_call",
+        "max_tool_calls_per_agent_call",
+    ):
+        value = section.get(field_name)
+        if type(value) is not int or value < 1:
+            raise ConfigurationError(
+                f"healthbench_tool_runtime.{field_name} must be an integer >= 1"
+            )
+    timeout_seconds = section.get("tool_timeout_seconds")
+    if (
+        isinstance(timeout_seconds, bool)
+        or not isinstance(timeout_seconds, (int, float))
+        or float(timeout_seconds) <= 0
+    ):
+        raise ConfigurationError(
+            "healthbench_tool_runtime.tool_timeout_seconds must be positive"
+        )
+    return {
+        "source_key": source_key,
+        "resource_dir": section["resource_dir"].strip(),
+        "source_identity": section["source_identity"].strip(),
+        "source_revision": section["source_revision"].strip(),
+        "expected_rows": int(section["expected_rows"]),
+        "max_turns": int(section["max_turns_per_agent_call"]),
+        "max_tool_calls": int(section["max_tool_calls_per_agent_call"]),
+        "tool_timeout_seconds": float(timeout_seconds),
+    }
+
+
+def _environment_runtime_settings(
+    config: Mapping[str, Any],
+    task: TaskRecord,
+    *,
+    condition_id: Optional[str] = None,
+) -> Optional[dict[str, Any]]:
+    """Resolve one explicit task-scoped RAGEN ReAct condition.
+
+    Missing configuration (or ``enabled: false``) preserves the existing
+    evaluator-driven environment condition.  The enabled condition is bound
+    to one exact rollout condition, aligned task record, dataset ID, deployed
+    RAGEN bridge, and evaluator step budget; none of these fields may be
+    silently aliased across protocol arms.
+    """
+
+    raw = config.get("environment_runtime")
+    if raw is None:
+        return None
+    section = _mapping(raw, "environment_runtime")
+    enabled = section.get("enabled")
+    if enabled is False:
+        return None
+    if enabled is not True:
+        raise ConfigurationError("environment_runtime.enabled must be bool")
+
+    source_key = _dataset_key(task)
+    dataset_scope = section.get("dataset_scope")
+    if (
+        not isinstance(dataset_scope, list)
+        or not dataset_scope
+        or not all(isinstance(value, str) and value.strip() for value in dataset_scope)
+        or len(set(dataset_scope)) != len(dataset_scope)
+    ):
+        raise ConfigurationError(
+            "environment_runtime.dataset_scope must contain unique non-empty dataset IDs"
+        )
+    normalized_scope = tuple(value.strip() for value in dataset_scope)
+    if any(value not in {"webshop", "alfworld"} for value in normalized_scope):
+        raise ConfigurationError(
+            "environment_runtime.dataset_scope supports only webshop and alfworld"
+        )
+    if source_key not in normalized_scope:
+        raise ConfigurationError(
+            f"environment_runtime is not configured for dataset {source_key!r}"
+        )
+    if section.get("mode") != ENVIRONMENT_RUNTIME_MODE:
+        raise ConfigurationError(
+            "environment_runtime.mode must be model_driven_ragen_react"
+        )
+
+    experiment = _mapping(config.get("experiment"), "experiment")
+    configured_condition_id = section.get("condition_id")
+    active_condition_id = (
+        str(experiment.get("condition_id", "")).strip()
+        if condition_id is None
+        else condition_id.strip()
+        if isinstance(condition_id, str)
+        else ""
+    )
+    if (
+        not isinstance(configured_condition_id, str)
+        or not configured_condition_id.strip()
+        or configured_condition_id.strip()
+        != str(experiment.get("condition_id", "")).strip()
+        or configured_condition_id.strip() != active_condition_id
+    ):
+        raise ConfigurationError(
+            "environment_runtime.condition_id must exactly match both the "
+            "experiment and active rollout condition_id"
+        )
+
+    ragen_adapter_path = section.get("ragen_adapter_path")
+    if not isinstance(ragen_adapter_path, str) or not ragen_adapter_path.strip():
+        raise ConfigurationError(
+            "environment_runtime.ragen_adapter_path must be non-empty text"
+        )
+
+    evaluation = _mapping(config.get("evaluation"), "evaluation")
+    evaluator_budgets = evaluation.get("max_environment_steps_by_source")
+    if not isinstance(evaluator_budgets, Mapping) or source_key not in evaluator_budgets:
+        raise ConfigurationError(
+            "evaluation.max_environment_steps_by_source must explicitly bind "
+            f"dataset {source_key!r}"
+        )
+    runtime_budgets = section.get("max_environment_steps_by_source")
+    if not isinstance(runtime_budgets, Mapping) or source_key not in runtime_budgets:
+        raise ConfigurationError(
+            "environment_runtime.max_environment_steps_by_source must explicitly bind "
+            f"dataset {source_key!r}"
+        )
+    evaluator_budget = evaluator_budgets[source_key]
+    runtime_budget = runtime_budgets[source_key]
+    for field_name, value in (
+        ("evaluation.max_environment_steps_by_source", evaluator_budget),
+        ("environment_runtime.max_environment_steps_by_source", runtime_budget),
+    ):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ConfigurationError(
+                f"{field_name}[{source_key!r}] must be a positive integer"
+            )
+    if runtime_budget != evaluator_budget:
+        raise ConfigurationError(
+            "environment runtime max_turns must exactly match the authoritative "
+            f"evaluator budget for {source_key!r}"
+        )
+
+    timeout_seconds = section.get("tool_timeout_seconds")
+    if (
+        isinstance(timeout_seconds, bool)
+        or not isinstance(timeout_seconds, (int, float))
+        or float(timeout_seconds) <= 0
+    ):
+        raise ConfigurationError(
+            "environment_runtime.tool_timeout_seconds must be positive"
+        )
+    return {
+        "source_key": source_key,
+        "ragen_adapter_path": ragen_adapter_path.strip(),
+        "max_turns": int(runtime_budget),
+        "tool_timeout_seconds": float(timeout_seconds),
+    }
+
+
+def _swe_coding_runtime_settings(
+    config: Mapping[str, Any],
+    task: TaskRecord,
+    *,
+    condition_id: Optional[str] = None,
+) -> Optional[dict[str, Any]]:
+    """Resolve one explicit SWE-bench Verified Coding Agent condition.
+
+    A missing or disabled section preserves the historical one-shot/no-coding
+    protocol.  The enabled arm is bound to one exact experiment and rollout
+    condition, the sole ``swe_bench`` dataset scope, a prepared repository
+    store, and bounded inspect/edit/test turns.  Repository identity is read
+    later only through ``SWEbenchRepositoryIdentity.from_task_record``'s
+    public ``instance_id``/``repo``/``base_commit`` contract.
+    """
+
+    raw = config.get("swe_coding_runtime")
+    if raw is None:
+        return None
+    section = _mapping(raw, "swe_coding_runtime")
+    enabled = section.get("enabled")
+    if enabled is False:
+        return None
+    if enabled is not True:
+        raise ConfigurationError("swe_coding_runtime.enabled must be bool")
+
+    source_key = _dataset_key(task)
+    if section.get("dataset_scope") != ["swe_bench"]:
+        raise ConfigurationError(
+            "swe_coding_runtime.dataset_scope must be exactly ['swe_bench']"
+        )
+    if source_key != "swe_bench":
+        raise ConfigurationError(
+            f"swe_coding_runtime is not configured for dataset {source_key!r}"
+        )
+    if section.get("mode") != SWE_CODING_RUNTIME_MODE:
+        raise ConfigurationError(
+            "swe_coding_runtime.mode must be iterative_repository_coding"
+        )
+
+    experiment = _mapping(config.get("experiment"), "experiment")
+    configured_condition_id = section.get("condition_id")
+    active_condition_id = (
+        str(experiment.get("condition_id", "")).strip()
+        if condition_id is None
+        else condition_id.strip()
+        if isinstance(condition_id, str)
+        else ""
+    )
+    if (
+        not isinstance(configured_condition_id, str)
+        or not configured_condition_id.strip()
+        or configured_condition_id.strip()
+        != str(experiment.get("condition_id", "")).strip()
+        or configured_condition_id.strip() != active_condition_id
+    ):
+        raise ConfigurationError(
+            "swe_coding_runtime.condition_id must exactly match both the "
+            "experiment and active rollout condition_id"
+        )
+
+    for field_name in ("repository_store", "worktree_root"):
+        value = section.get(field_name)
+        if not isinstance(value, str) or not value.strip():
+            raise ConfigurationError(
+                f"swe_coding_runtime.{field_name} must be non-empty text"
+            )
+    for field_name in (
+        "max_turns_per_agent_call",
+        "max_tool_calls_per_agent_call",
+    ):
+        value = section.get(field_name)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ConfigurationError(
+                f"swe_coding_runtime.{field_name} must be an integer >= 1"
+            )
+    for field_name in (
+        "max_test_timeout_seconds",
+        "setup_timeout_seconds",
+        "cleanup_timeout_seconds",
+    ):
+        value = section.get(field_name)
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or float(value) <= 0
+        ):
+            raise ConfigurationError(
+                f"swe_coding_runtime.{field_name} must be positive"
+            )
+    return {
+        "source_key": source_key,
+        "repository_store": section["repository_store"].strip(),
+        "worktree_root": section["worktree_root"].strip(),
+        "max_turns": int(section["max_turns_per_agent_call"]),
+        "max_tool_calls": int(section["max_tool_calls_per_agent_call"]),
+        "max_test_timeout_seconds": float(
+            section["max_test_timeout_seconds"]
+        ),
+        "setup_timeout_seconds": float(section["setup_timeout_seconds"]),
+        "cleanup_timeout_seconds": float(section["cleanup_timeout_seconds"]),
+    }
 
 
 def _skill_context_tag(namespace: str, field_name: str, value: Any) -> str:
@@ -1169,6 +1784,7 @@ class LiveSmokeBackend:
         swe_harness: Optional[SWEHarnessCallback] = None,
         skill_pipeline: Optional[SkillEvidencePipeline] = None,
         skill_epoch: int = 0,
+        project_root: Optional[Path] = None,
     ) -> None:
         self.config = config
         self.registry = registry
@@ -1183,10 +1799,271 @@ class LiveSmokeBackend:
         self.swe_harness = swe_harness
         self.skill_pipeline = skill_pipeline
         self.skill_epoch = skill_epoch
+        self.project_root = (project_root or PROJECT_ROOT).expanduser().resolve()
 
     @property
     def model_catalog_version(self) -> str:
         return self.registry.catalog_id
+
+    def _runtime_for_task(
+        self,
+        task: TaskRecord,
+        *,
+        condition_id: Optional[str] = None,
+    ) -> tuple[AgentRuntime, Any, Callable[[], None]]:
+        """Build the task-scoped runtime selected by the frozen condition.
+
+        The default branch returns the original runtime unchanged.  The
+        explicit QA Tool/ReAct branch owns one real SkillFlow RetrievalIndex
+        connection for the duration of one rollout.  The explicit AIME arm
+        exposes SkillFlow's bounded calculator and Python executors.  The
+        explicit HealthBench arm owns one frozen MedRAG textbook corpus.  The
+        explicit environment branch owns one request-scoped RAGEN episode for
+        aligned record.  The explicit SWE-bench arm owns one detached
+        task-pinned repository worktree and bounded Coding Agent.  Every
+        enabled branch gives the Director and AgentRuntime the exact same
+        ToolRegistry instance.
+        """
+
+        runtime_section_names = (
+            "qa_tool_runtime",
+            "aime_tool_runtime",
+            "healthbench_tool_runtime",
+            "environment_runtime",
+            "swe_coding_runtime",
+        )
+        explicitly_enabled = tuple(
+            section_name
+            for section_name in runtime_section_names
+            if isinstance(self.config.get(section_name), Mapping)
+            and self.config[section_name].get("enabled") is True
+        )
+        if len(explicitly_enabled) > 1:
+            raise ConfigurationError(
+                "one rollout cannot enable multiple task-scoped Tool runtimes: "
+                + ", ".join(explicitly_enabled)
+            )
+
+        qa_settings = _qa_tool_runtime_settings(
+            self.config,
+            task,
+            condition_id=condition_id,
+        )
+        aime_settings = _aime_tool_runtime_settings(
+            self.config,
+            task,
+            condition_id=condition_id,
+        )
+        healthbench_settings = _healthbench_tool_runtime_settings(
+            self.config,
+            task,
+            condition_id=condition_id,
+        )
+        environment_settings = _environment_runtime_settings(
+            self.config,
+            task,
+            condition_id=condition_id,
+        )
+        swe_coding_settings = _swe_coding_runtime_settings(
+            self.config,
+            task,
+            condition_id=condition_id,
+        )
+        enabled_runtimes = sum(
+            settings is not None
+            for settings in (
+                qa_settings,
+                aime_settings,
+                healthbench_settings,
+                environment_settings,
+                swe_coding_settings,
+            )
+        )
+        if enabled_runtimes > 1:
+            raise ConfigurationError(
+                "one rollout cannot enable multiple task-scoped Tool runtimes"
+            )
+        if enabled_runtimes == 0:
+            return self.runtime, None, lambda: None
+
+        if swe_coding_settings is not None:
+            source_key = str(swe_coding_settings["source_key"])
+            prepared = prepare_swebench_worktree_for_task(
+                task,
+                repository_store=_resolve(
+                    self.project_root,
+                    str(swe_coding_settings["repository_store"]),
+                ),
+                worktree_root=_resolve(
+                    self.project_root,
+                    str(swe_coding_settings["worktree_root"]),
+                ),
+                setup_timeout_seconds=float(
+                    swe_coding_settings["setup_timeout_seconds"]
+                ),
+                cleanup_timeout_seconds=float(
+                    swe_coding_settings["cleanup_timeout_seconds"]
+                ),
+            )
+            try:
+                tool_registry = create_swebench_repository_registry(
+                    prepared.repo_root,
+                    dataset_scope=(source_key,),
+                    timeout_seconds=float(
+                        swe_coding_settings["max_test_timeout_seconds"]
+                    ),
+                )
+                adapter = CodingExecutionAdapter(
+                    gateway=self.runtime.gateway,
+                    tool_registry=tool_registry,
+                    max_turns=int(swe_coding_settings["max_turns"]),
+                    max_tool_calls=int(swe_coding_settings["max_tool_calls"]),
+                )
+                runtime = AgentRuntime(
+                    self.registry,
+                    self.runtime.gateway,
+                    execution_adapters={"coding": adapter},
+                    tool_registry=tool_registry,
+                    dataset_id=source_key,
+                )
+            except BaseException:
+                prepared.cleanup()
+                raise
+            return runtime, tool_registry, prepared.cleanup
+
+        if aime_settings is not None:
+            source_key = str(aime_settings["source_key"])
+            tool_registry = create_aime_computation_registry(
+                python_timeout_seconds=float(
+                    aime_settings["python_timeout_seconds"]
+                ),
+                calculator_timeout_seconds=float(
+                    aime_settings["calculator_timeout_seconds"]
+                ),
+            )
+            adapter = ToolReactExecutionAdapter(
+                gateway=self.runtime.gateway,
+                tool_registry=tool_registry,
+                max_turns=int(aime_settings["max_turns"]),
+                max_tool_calls=int(aime_settings["max_tool_calls"]),
+            )
+            runtime = AgentRuntime(
+                self.registry,
+                self.runtime.gateway,
+                execution_adapters={"react": adapter},
+                tool_registry=tool_registry,
+                dataset_id=source_key,
+            )
+            return runtime, tool_registry, lambda: None
+
+        if healthbench_settings is not None:
+            source_key = str(healthbench_settings["source_key"])
+            opened = open_healthbench_medrag_tool_registry(
+                corpus_root=_resolve(
+                    self.project_root,
+                    str(healthbench_settings["resource_dir"]),
+                ),
+                source_identity=str(healthbench_settings["source_identity"]),
+                expected_source_revision=str(
+                    healthbench_settings["source_revision"]
+                ),
+                expected_rows=int(healthbench_settings["expected_rows"]),
+                timeout_seconds=float(
+                    healthbench_settings["tool_timeout_seconds"]
+                ),
+            )
+            try:
+                adapter = ToolReactExecutionAdapter(
+                    gateway=self.runtime.gateway,
+                    tool_registry=opened.registry,
+                    max_turns=int(healthbench_settings["max_turns"]),
+                    max_tool_calls=int(healthbench_settings["max_tool_calls"]),
+                )
+                runtime = AgentRuntime(
+                    self.registry,
+                    self.runtime.gateway,
+                    execution_adapters={"react": adapter},
+                    tool_registry=opened.registry,
+                    dataset_id=source_key,
+                )
+            except BaseException:
+                opened.close()
+                raise
+            return runtime, opened.registry, opened.close
+
+        if environment_settings is not None:
+            source_key = str(environment_settings["source_key"])
+            ragen_adapter_path = _resolve(
+                self.project_root,
+                str(environment_settings["ragen_adapter_path"]),
+            )
+            session_factory = evaluator_locked_ragen_session_factory(
+                record=task,
+                dataset=source_key,
+                ragen_adapter_path=ragen_adapter_path,
+                max_environment_steps=int(environment_settings["max_turns"]),
+            )
+            resources = build_environment_execution_resources(
+                gateway=self.runtime.gateway,
+                session_factory=session_factory,
+                task_family=source_key,
+                max_turns=int(environment_settings["max_turns"]),
+                timeout_seconds=float(
+                    environment_settings["tool_timeout_seconds"]
+                ),
+            )
+            runtime = AgentRuntime(
+                self.registry,
+                self.runtime.gateway,
+                execution_adapters={"react": resources.execution_adapter},
+                tool_registry=resources.tool_registry,
+                dataset_id=source_key,
+            )
+
+            # EnvironmentExecutionAdapter closes the request-scoped simulator
+            # in its own ``finally`` block.  This explicit task lifecycle hook
+            # prevents callers from treating the resource set as process-wide.
+            closed = False
+
+            def close_environment_runtime() -> None:
+                nonlocal closed
+                if closed:
+                    return
+                closed = True
+
+            return (
+                runtime,
+                resources.tool_registry,
+                close_environment_runtime,
+            )
+
+        assert qa_settings is not None
+        opened = open_qa_tool_registry(
+            index_path=_resolve(self.project_root, str(qa_settings["index_path"])),
+            skillflow_source=_resolve(
+                self.project_root, str(qa_settings["skillflow_source"])
+            ),
+            dataset_scope=(str(qa_settings["source_key"]),),
+            timeout_seconds=float(qa_settings["tool_timeout_seconds"]),
+        )
+        try:
+            adapter = ToolReactExecutionAdapter(
+                gateway=self.runtime.gateway,
+                tool_registry=opened.registry,
+                max_turns=int(qa_settings["max_turns"]),
+                max_tool_calls=int(qa_settings["max_tool_calls"]),
+            )
+            runtime = AgentRuntime(
+                self.registry,
+                self.runtime.gateway,
+                execution_adapters={"react": adapter},
+                tool_registry=opened.registry,
+                dataset_id=str(qa_settings["source_key"]),
+            )
+        except BaseException:
+            opened.close()
+            raise
+        return runtime, opened.registry, opened.close
 
     @classmethod
     def from_config(
@@ -1431,6 +2308,7 @@ class LiveSmokeBackend:
             judge_model=judge_model,
             skill_pipeline=skill_pipeline,
             skill_epoch=skill_epoch,
+            project_root=root,
         )
 
     @staticmethod
@@ -1595,6 +2473,28 @@ class LiveSmokeBackend:
                 evaluator_version=RAGEN_EVALUATOR_VERSION,
             )
 
+        environment_settings = _environment_runtime_settings(self.config, task)
+        if environment_settings is not None:
+            budget = int(environment_settings["max_turns"])
+            if not environment_replay_trace:
+                raise ConfigurationError(
+                    "the explicit environment runtime produced no replay trace"
+                )
+            if len(environment_replay_trace) > budget:
+                raise ConfigurationError(
+                    "environment replay trace exceeds the authoritative evaluator budget"
+                )
+            final_entry = environment_replay_trace[-1]
+            terminal = (
+                isinstance(final_entry, Mapping)
+                and final_entry.get("done") is True
+            )
+            if not terminal and len(environment_replay_trace) != budget:
+                raise ConfigurationError(
+                    "environment replay must reach terminal state or exhaust the "
+                    "authoritative evaluator budget"
+                )
+
         environment_graph = _graph_from_mapping(final_graph)
         environment_step = len(environment_replay_trace)
 
@@ -1616,12 +2516,21 @@ class LiveSmokeBackend:
         )
         if not isinstance(configured_steps, Mapping):
             configured_steps = {}
+        evaluator_kwargs: dict[str, Any] = {}
+        if environment_settings is not None:
+            evaluator_kwargs["ragen_adapter_path"] = _resolve(
+                self.project_root,
+                str(environment_settings["ragen_adapter_path"]),
+            )
         return await evaluate_task(
             task,
             final_answer or "",
             judge=self.judge,
             judge_model=self.judge_model,
-            run_graph=run_graph,
+            # The explicit environment runtime already owns a terminal or
+            # budget-exhausted episode.  Its evaluator may replay that episode
+            # but must never resume through the legacy stateless callback.
+            run_graph=None if environment_settings is not None else run_graph,
             swe_harness=self.swe_harness,
             max_environment_steps=int(
                 configured_steps.get(
@@ -1632,6 +2541,7 @@ class LiveSmokeBackend:
                 )
             ),
             environment_replay_trace=environment_replay_trace,
+            **evaluator_kwargs,
         )
 
     async def collect(
@@ -1803,27 +2713,42 @@ class LiveSmokeBackend:
             task_id=task.task_id,
             optimizer_step_or_anchor_ordinal=resolved_sampling_anchor_ordinal,
         )
-        orchestrator = AgentGraphOrchestrator(
-            self.registry,
-            self.director_client,
-            max_rounds=int(director["max_rounds"]),
-            seed=base_seed,
-            catalog_order_seed=(
-                f"{experiment['seed']}:{catalog_order_namespace}:{task.task_id}"
-            ),
-            history_window=int(director["history_window"]),
-            sampling_base_seed=base_seed,
-            sampling_coordinate=sampling_coordinate,
+        task_runtime, task_tool_registry, close_task_runtime = self._runtime_for_task(
+            task,
+            condition_id=resolved_condition_id,
         )
-        environment = AgentWorkflowEnv(
-            self.registry,
-            runtime=self.runtime,
-            execute_on_edit=bool(director["execute_on_edit"]),
-            max_agents=int(graph_config["max_agents"]),
-            max_agents_per_subgraph=int(graph_config.get("max_agents_per_subgraph", 3)),
-            require_exact_answer_tag=(terminal_protocol == "exact_single_answer_tag"),
-            require_format_agent=(terminal_protocol == "exact_single_answer_tag"),
-        )
+        try:
+            orchestrator = AgentGraphOrchestrator(
+                self.registry,
+                self.director_client,
+                max_rounds=int(director["max_rounds"]),
+                seed=base_seed,
+                catalog_order_seed=(
+                    f"{experiment['seed']}:{catalog_order_namespace}:{task.task_id}"
+                ),
+                history_window=int(director["history_window"]),
+                sampling_base_seed=base_seed,
+                sampling_coordinate=sampling_coordinate,
+                tool_registry=task_tool_registry,
+            )
+            environment = AgentWorkflowEnv(
+                self.registry,
+                runtime=task_runtime,
+                execute_on_edit=bool(director["execute_on_edit"]),
+                max_agents=int(graph_config["max_agents"]),
+                max_agents_per_subgraph=int(
+                    graph_config.get("max_agents_per_subgraph", 3)
+                ),
+                require_exact_answer_tag=(
+                    terminal_protocol == "exact_single_answer_tag"
+                ),
+                require_format_agent=(
+                    terminal_protocol == "exact_single_answer_tag"
+                ),
+            )
+        except BaseException:
+            close_task_runtime()
+            raise
 
         def stage_conditioned_provider(
             provider_task: TaskRecord,
@@ -1839,28 +2764,32 @@ class LiveSmokeBackend:
             return (dynamic_condition,)
 
         dynamic_forced_probe = dynamic_condition is not None
-        collector = AgentGraphRolloutCollector(
-            orchestrator,
-            environment,
-            versions,
-            None if dynamic_forced_probe else self.evidence_store,
-            condition_id=resolved_condition_id,
-            skills=static_conditions,
-            skill_provider=(
-                stage_conditioned_provider
-                if dynamic_forced_probe
-                else (
-                    self._visible_skill_priors
-                    if self.skill_pipeline is not None and not static_conditions
-                    else None
-                )
-            ),
-            condition_satisfied=(
-                False if dynamic_forced_probe else condition_satisfied
-            ),
-            forced_probe=forced_probe,
-            expected_task_split=expected_task_split,
-        )
+        try:
+            collector = AgentGraphRolloutCollector(
+                orchestrator,
+                environment,
+                versions,
+                None if dynamic_forced_probe else self.evidence_store,
+                condition_id=resolved_condition_id,
+                skills=static_conditions,
+                skill_provider=(
+                    stage_conditioned_provider
+                    if dynamic_forced_probe
+                    else (
+                        self._visible_skill_priors
+                        if self.skill_pipeline is not None and not static_conditions
+                        else None
+                    )
+                ),
+                condition_satisfied=(
+                    False if dynamic_forced_probe else condition_satisfied
+                ),
+                forced_probe=forced_probe,
+                expected_task_split=expected_task_split,
+            )
+        except BaseException:
+            close_task_runtime()
+            raise
 
         async def evaluator_callback(
             evaluated_task: TaskRecord,
@@ -1868,20 +2797,25 @@ class LiveSmokeBackend:
             final_graph: Mapping[str, Any],
             final_runtime: Any,
         ) -> Any:
-            del final_runtime
             return await self.evaluate_final_graph(
                 evaluated_task,
                 final_answer,
                 final_graph,
                 rollout_index=rollout_index,
+                environment_replay_trace=(
+                    _environment_replay_trace_from_runtime(final_runtime)
+                ),
             )
 
-        trajectory = await collector.collect(
-            task,
-            rollout_index,
-            evaluator_callback,
-            workflow_problem=_workflow_problem(task, self.config),
-        )
+        try:
+            trajectory = await collector.collect(
+                task,
+                rollout_index,
+                evaluator_callback,
+                workflow_problem=_workflow_problem(task, self.config),
+            )
+        finally:
+            close_task_runtime()
         if not dynamic_forced_probe:
             return trajectory
 

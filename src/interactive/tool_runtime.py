@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
+from enum import Enum
 import inspect
 import json
 import time
@@ -27,6 +28,81 @@ JsonValue = Union[
     list["JsonValue"],
     dict[str, "JsonValue"],
 ]
+
+
+class ActionKind(str, Enum):
+    """Direct port of SkillFlow's executable structured-action kinds."""
+
+    TOOL = "tool"
+    SKILL = "skill"
+    COMPLETE = "complete"
+
+
+@dataclass(frozen=True, slots=True)
+class StructuredAction:
+    """Direct port of SkillFlow's serializable atomic action contract."""
+
+    kind: ActionKind
+    name: str
+    arguments: JsonValue
+    resource_id: Optional[str] = None
+    skill_id: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.kind, ActionKind):
+            raise TypeError("Structured action kind is incompatible")
+        if not isinstance(self.name, str) or not self.name.strip():
+            raise ValueError("Structured action name cannot be empty")
+        normalized = _normalize_json(self.arguments)
+        if normalized != self.arguments:
+            raise ValueError("Structured action arguments must be normalized JSON")
+        if self.kind in {ActionKind.TOOL, ActionKind.SKILL} and not self.resource_id:
+            raise ValueError("Executable actions require a resource ID")
+        if self.kind is ActionKind.SKILL and not self.skill_id:
+            raise ValueError("Skill actions require a skill ID")
+        if self.kind is not ActionKind.SKILL and self.skill_id is not None:
+            raise ValueError("Only Skill actions may carry a skill ID")
+        if self.kind is ActionKind.COMPLETE and self.resource_id is not None:
+            raise ValueError("Completion is not dispatched to a resource")
+        object.__setattr__(self, "name", self.name.strip())
+
+    def to_value(self) -> dict[str, JsonValue]:
+        return {
+            "arguments": self.arguments,
+            "kind": self.kind.value,
+            "name": self.name,
+            "resource_id": self.resource_id,
+            "skill_id": self.skill_id,
+        }
+
+    @classmethod
+    def from_value(cls, value: object) -> "StructuredAction":
+        normalized = _normalize_json(value)
+        if not isinstance(normalized, dict) or set(normalized) != {
+            "arguments",
+            "kind",
+            "name",
+            "resource_id",
+            "skill_id",
+        }:
+            raise ValueError("Structured action has an incompatible field set")
+        raw_kind = normalized["kind"]
+        raw_name = normalized["name"]
+        resource_id = normalized["resource_id"]
+        skill_id = normalized["skill_id"]
+        if not isinstance(raw_kind, str) or not isinstance(raw_name, str):
+            raise TypeError("Structured action kind/name must be text")
+        if resource_id is not None and not isinstance(resource_id, str):
+            raise TypeError("Structured action resource_id must be text or null")
+        if skill_id is not None and not isinstance(skill_id, str):
+            raise TypeError("Structured action skill_id must be text or null")
+        return cls(
+            kind=ActionKind(raw_kind),
+            name=raw_name,
+            arguments=normalized["arguments"],
+            resource_id=resource_id,
+            skill_id=skill_id,
+        )
 
 
 def _normalize_json(value: object) -> JsonValue:
@@ -64,6 +140,20 @@ class ToolRequest:
             "action": self.action,
             "arguments": cast(JsonValue, dict(self.arguments)),
         }
+
+    def to_structured_action(
+        self,
+        *,
+        resource_id: str,
+        skill_id: Optional[str] = None,
+    ) -> StructuredAction:
+        return StructuredAction(
+            kind=ActionKind.SKILL if skill_id is not None else ActionKind.TOOL,
+            name=self.action,
+            arguments=cast(JsonValue, dict(self.arguments)),
+            resource_id=resource_id,
+            skill_id=skill_id,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -322,8 +412,10 @@ class FakeTool:
 
 
 __all__ = [
+    "ActionKind",
     "FakeTool",
     "JsonValue",
+    "StructuredAction",
     "ToolBackend",
     "ToolCapability",
     "ToolReceipt",

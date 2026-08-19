@@ -1,0 +1,109 @@
+providers:
+  - provider_id: "local-director"
+    kind: "openai-compatible"
+    endpoint: "http://127.0.0.1:8015/v1"
+    max_concurrency: 32
+
+  - provider_id: "vectorengine"
+    kind: "openai-compatible"
+    endpoint: "${VECTOR_ENGINE_BASE_URL:-https://api.vectorengine.ai/v1}"
+    max_concurrency: 32
+    api_key_env: "VECTOR_ENGINE_API_KEY"
+
+# Every remote model name below is an exact, case-sensitive ID returned by
+# the account /v1/models endpoint on 2026-08-19 and passed all three minimal
+# Text, StructuredAction, and Coding-format canaries in
+# artifacts/model_capability_canary/cheap_fast_20260819.json.  Numeric priors
+# remain equal: capability evidence defines admission, not a role template.
+models:
+  - model_id: "qwen3.5-9b-local"
+    provider_id: "local-director"
+    model_name: "supervisor_theta"
+    selection_weight: 1.0
+    cheap_weight: 1.0
+    fast_weight: 1.0
+    context_window: 8192
+    metadata:
+      family: "qwen"
+      profile: "provider=local-director;locality=local;instruction=chat;context=8192;availability=existing-execution-evidence"
+      capability_canary: "pending_current_service_canary"
+      chat_template_enable_thinking: "false"
+      max_tokens: "4096"
+
+  - model_id: "qwen3.5-flash"
+    provider_id: "vectorengine"
+    model_name: "qwen3.5-flash"
+    selection_weight: 1.0
+    cheap_weight: 1.0
+    fast_weight: 1.0
+    metadata:
+      family: "qwen"
+      profile: "provider=vectorengine;locality=remote;instruction=chat;capabilities=text,structured-action,coding-format"
+      capability_canary: "passed_2026-08-19"
+      canary_source: "artifacts/model_capability_canary/cheap_fast_20260819.json"
+      max_tokens: "4096"
+
+  - model_id: "deepseek-v4-flash"
+    provider_id: "vectorengine"
+    model_name: "deepseek-v4-flash"
+    selection_weight: 1.0
+    cheap_weight: 1.0
+    fast_weight: 1.0
+    metadata:
+      family: "deepseek"
+      profile: "provider=vectorengine;locality=remote;instruction=chat;capabilities=text,structured-action,coding-format"
+      capability_canary: "passed_2026-08-19"
+      canary_source: "artifacts/model_capability_canary/cheap_fast_20260819.json"
+      max_tokens: "4096"
+
+  - model_id: "gpt-4o-mini"
+    provider_id: "vectorengine"
+    model_name: "gpt-4o-mini"
+    selection_weight: 1.0
+    cheap_weight: 1.0
+    fast_weight: 1.0
+    metadata:
+      family: "gpt"
+      profile: "provider=vectorengine;locality=remote;instruction=chat;capabilities=text,structured-action,coding-format"
+      capability_canary: "passed_2026-08-19"
+      canary_source: "artifacts/model_capability_canary/cheap_fast_20260819.json"
+      max_tokens: "4096"
+
+  - model_id: "MiniMax-M2.5"
+    provider_id: "vectorengine"
+    model_name: "MiniMax-M2.5"
+    selection_weight: 1.0
+    cheap_weight: 1.0
+    fast_weight: 1.0
+    metadata:
+      family: "minimax"
+      profile: "provider=vectorengine;locality=remote;instruction=chat;capabilities=text,structured-action,coding-format"
+      capability_canary: "passed_2026-08-19"
+      canary_source: "artifacts/model_capability_canary/cheap_fast_20260819.json"
+      max_tokens: "4096"
+
+  - model_id: "MiniMax-M3"
+    provider_id: "vectorengine"
+    model_name: "MiniMax-M3"
+    selection_weight: 1.0
+    cheap_weight: 1.0
+    fast_weight: 1.0
+    metadata:
+      family: "minimax"
+      profile: "provider=vectorengine;locality=remote;instruction=chat;capabilities=text,structured-action,coding-format"
+      capability_canary: "passed_2026-08-19"
+      canary_source: "artifacts/model_capability_canary/cheap_fast_20260819.json"
+      max_tokens: "4096"
+
+  - model_id: "glm-4.5-flash"
+    provider_id: "vectorengine"
+    model_name: "glm-4.5-flash"
+    selection_weight: 1.0
+    cheap_weight: 1.0
+    fast_weight: 1.0
+    metadata:
+      family: "glm"
+      profile: "provider=vectorengine;locality=remote;instruction=chat;capabilities=text,structured-action,coding-format"
+      capability_canary: "passed_2026-08-19"
+      canary_source: "artifacts/model_capability_canary/cheap_fast_20260819.json"
+      max_tokens: "4096"
