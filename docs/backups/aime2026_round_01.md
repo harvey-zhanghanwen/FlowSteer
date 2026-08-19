@@ -80,13 +80,13 @@ external to this source backup.
 Materialize the ignored local data:
 
 ```bash
-/ssd1/iclr/gpf/venvs/skillflow/bin/python scripts/prepare_aime2026_dataset.py
+"$FLOWSTEER_PYTHON_BIN" scripts/prepare_aime2026_dataset.py
 ```
 
 Validate the configuration without starting a model:
 
 ```bash
-/ssd1/iclr/gpf/venvs/skillflow/bin/python \
+"$FLOWSTEER_PYTHON_BIN" \
   scripts/evaluate_completion_benchmark_round.py \
   --config config/development_aime2026_round_01.yaml \
   --prepare-only
@@ -100,12 +100,12 @@ set -a
 source .env
 set +a
 
-/ssd1/iclr/gpf/venvs/skillflow/bin/python \
+"$FLOWSTEER_PYTHON_BIN" \
   scripts/evaluate_completion_benchmark_round.py \
   --config config/evaluation_aime2026_round_01.yaml \
   --canary-only
 
-/ssd1/iclr/gpf/venvs/skillflow/bin/python \
+"$FLOWSTEER_PYTHON_BIN" \
   scripts/evaluate_completion_benchmark_round.py \
   --config config/evaluation_aime2026_round_01.yaml
 ```
