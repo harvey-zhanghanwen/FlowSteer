@@ -5,6 +5,7 @@
 - 能力边界：request-scoped SkillFlow/RAGEN environment ReAct
 - Protocol：Direct 与 AgentGraph 使用相同原生游戏、task lock、50-step budget 和 evaluator。
 - 固定 validation task：**2**
+- Raw receipts：manifest=`artifacts/alfworld_ragen_required_actor_v2_stable_zero/evaluation/run_manifest.json`; paired=`artifacts/alfworld_ragen_required_actor_v2_stable_zero/evaluation/paired_results.jsonl`; trajectory=`artifacts/alfworld_ragen_required_actor_v2_stable_zero/evaluation/agentgraph_trajectories.jsonl`
 - 显式 FINISH：**2/2**
 - 有效原生 evaluator receipt：**2/2**
 - `STABLE_ZERO = PASS`
@@ -43,8 +44,31 @@
 
 ## Workflow 分布
 
-- `serial_2`: 1
+互斥 `topology_family` 计数（未观察到的合法结构显式记 0）：
+
 - `single`: 1
+- `serial_2`: 1
+- `serial_3_plus`: 0
+- `parallel`: 0
+- `fan_in`: 0
+- `fan_out`: 0
+- `reciprocal`: 0
+- `verification`: 0
+- `mixed`: 0
+- `other`: 0
+- `unknown`: 0
+
+可重叠的执行/协作 motif（来自最终图与实际 execution receipt）：
+
+- `parallel execution`: 0/2 tasks
+- `fan-in`: 0/2 tasks
+- `fan-out`: 0/2 tasks
+- `reciprocal`: 0/2 tasks
+- `verification`: 0/2 tasks
+- `ReAct`: 2/2 tasks
+- `Tool-using`: 2/2 tasks
+- `Coding`: 0/2 tasks
+- `mixed execution modes`: 1/2 tasks
 
 - 平均 structural depth：**1.50**
 - 平均 effective dependency depth：**1.50**
@@ -54,11 +78,32 @@
 
 ## Model 使用情况
 
+Final AgentGraph 中声明的 Executor node：
+
 - `gpt-4o-mini`: 1 Agent nodes
 - `qwen3.5-flash`: 2 Agent nodes
 
-- Model family：GPT=1, Qwen=2
+- Model family：Qwen=2, DeepSeek=0, Gemini=0, GPT=1, MiniMax=0, Grok=0, GLM=0, Other=0
 - Multi-model workflow 比例：**0/2**
+
+实际 Direct Executor model-call receipt：
+
+| Model ID | Accepted model calls | API attempts | Tokens | Latency (s) |
+|---|---:|---:|---:|---:|
+| qwen3.5-9b-local | 2 | 2 | 1597 | 0.95 |
+
+实际 AgentGraph Executor model-call receipt：
+
+| Model ID | Accepted model calls | API attempts | Tokens | Latency (s) |
+|---|---:|---:|---:|---:|
+| gpt-4o-mini | 4 | 4 | 2769 | 7.02 |
+| qwen3.5-flash | 7 | 7 | 22307 | 138.68 |
+
+- Flow-Director：**local Qwen3.5-9B（未替换为远端 Executor）**
+- Director policy receipt：`qwen35-9b-alfworld-ragen-environment-stable-zero-step-000000`；prompt=`agentgraph.director.progressive_subgraph.v1`
+- Director calls/attempts：**4/4**；tokens=**7761**；latency=**9.26s**
+
+
 
 ## Tool / ReAct 使用情况
 
@@ -82,10 +127,15 @@
 
 ### Correct Demo: `alfworld:train:00000`
 
+- Raw receipts：paired=`artifacts/alfworld_ragen_required_actor_v2_stable_zero/evaluation/paired_results.jsonl`; trajectory=`artifacts/alfworld_ragen_required_actor_v2_stable_zero/evaluation/agentgraph_trajectories.jsonl`
+
 - Task：put a handtowel in garbagecan.
 - Ground Truth：environment_success
 - Final Answer：You move the handtowel 1 to the garbagecan 1.
-- Evaluator: `{"environment_return": 10.0, "steps": 4.0, "success": 1.0, "terminal": 1.0}`
+- Evaluator：`skillflow.ragen_adapter.v2`; metrics=`{"environment_return": 10.0, "steps": 4.0, "success": 1.0, "terminal": 1.0}`
+- Trajectory ID：`trajectory_e12ed08ce175fb615e29ea4e`
+- Policy version：`qwen35-9b-alfworld-ragen-environment-stable-zero-step-000000`; prompt=`agentgraph.director.progressive_subgraph.v1`; tool=`skillflow.ragen-environment-react.required-actor.v2`
+- Output Agent：`lf_router`
 - AgentGraph: `lf_router`
 
 Agent 配置：
@@ -94,21 +144,35 @@ Agent 配置：
 
 Director atomic edit 序列：`add_subgraph → finish`
 
-原生 ReAct trace（4 个 action）：`go to handtowelholder 1 → take handtowel 1 from handtowelholder 1 → go to garbagecan 1 → move handtowel 1 to garbagecan 1`
+Progressive Canvas turn receipts：
+
+- round=`0`; action=`add_subgraph`; graph_revision=`2`; receipt_verified=`True`; communication_condition=`normal`; blocks=`[['lf_router']]`; executed=`['lf_router']`; reused=`[]`; feedback=accepted add_subgraph at revision 2; execution_result={"output_agent_id":"lf_router","output":"You move the handtowel 1 to the garbagecan 1.","executed_agent_ids":["lf_router"],"reused_agent_ids":[],"topology":{"agent_count":1,"relation_count":0,"directed_edge_count":0,"quotient_directed_edge_count":0,"reciprocal_pair_count":0,"component_count":1,"max_depth":1,"structural_depth":1,"max_width":1,"topology_family":"single","topology_motifs":[],"root_agent_ids":["lf_router"],"sink_agent_ids":["lf_router"],"root_component_count":1,"sink_component_count":1,"fan_in_agent_ids":[],"fan_out_agent_ids":[],"output_agent_id":"lf_router"},"output_inbox":[],"agent_artifacts":[{"agent_id":"lf_router","mod…
+- round=`1`; action=`finish`; graph_revision=`2`; receipt_verified=`True`; communication_condition=`normal`; blocks=`[['lf_router']]`; executed=`['lf_router']`; reused=`[]`; feedback=workflow finished
+
+原生 environment ReAct trace（4 个 action）：`go to handtowelholder 1 → take handtowel 1 from handtowelholder 1 → go to garbagecan 1 → move handtowel 1 to garbagecan 1`
+- step=1; action=`go to handtowelholder 1`; reward=`0.0`; terminal=`未记录`; parse_error=`False`; observation=-= Welcome to TextWorld, ALFRED! =- You are in the middle of a room. Looking quickly around you, you see a countertop 1, a drawer 2, a drawer 1, a garbagecan 1, a handtowelholder 2, a handtowelholder 1, a sinkbasin 2, a sinkbasin 1, a toilet 1, a toiletpaperhanger 1, and a towelholder 1. Your task is to: put a handtowel in garbagecan.
+- step=2; action=`take handtowel 1 from handtowelholder 1`; reward=`0.0`; terminal=`未记录`; parse_error=`False`; observation=You arrive at handtowelholder 1. On the handtowelholder 1, you see a handtowel 1.
+- step=3; action=`go to garbagecan 1`; reward=`0.0`; terminal=`未记录`; parse_error=`False`; observation=You pick up the handtowel 1 from the handtowelholder 1.
+- step=4; action=`move handtowel 1 to garbagecan 1`; reward=`10.0`; terminal=`未记录`; parse_error=`False`; observation=You arrive at garbagecan 1. On the garbagecan 1, you see nothing.
 
 Tool receipts：
 
-- tool=`alfworld.environment`, status=`completed`; request={"action": "go to handtowelholder 1", "arguments": {}}
-- tool=`alfworld.environment`, status=`completed`; request={"action": "take handtowel 1 from handtowelholder 1", "arguments": {}}
-- tool=`alfworld.environment`, status=`completed`; request={"action": "go to garbagecan 1", "arguments": {}}
-- tool=`alfworld.environment`, status=`completed`; request={"action": "move handtowel 1 to garbagecan 1", "arguments": {}}
+- receipt=1; tool=`alfworld.environment`; version=`skillflow.ragen_adapter.v2`; status=`completed`; latency_ms=`32.31111727654934`; request={"action": "go to handtowelholder 1", "arguments": {}}; result={"completed": true, "value": {"environment_revision": 1, "observation": "You arrive at handtowelholder 1. On the handtowelholder 1, you see a handtowel 1.", "terminal": false}}
+- receipt=2; tool=`alfworld.environment`; version=`skillflow.ragen_adapter.v2`; status=`completed`; latency_ms=`31.923177652060986`; request={"action": "take handtowel 1 from handtowelholder 1", "arguments": {}}; result={"completed": true, "value": {"environment_revision": 2, "observation": "You pick up the handtowel 1 from the handtowelholder 1.", "terminal": false}}
+- receipt=3; tool=`alfworld.environment`; version=`skillflow.ragen_adapter.v2`; status=`completed`; latency_ms=`33.98862108588219`; request={"action": "go to garbagecan 1", "arguments": {}}; result={"completed": true, "value": {"environment_revision": 3, "observation": "You arrive at garbagecan 1. On the garbagecan 1, you see nothing.", "terminal": false}}
+- receipt=4; tool=`alfworld.environment`; version=`skillflow.ragen_adapter.v2`; status=`completed`; latency_ms=`31.112930737435818`; request={"action": "move handtowel 1 to garbagecan 1", "arguments": {}}; result={"completed": true, "value": {"environment_revision": 4, "observation": "You move the handtowel 1 to the garbagecan 1.", "terminal": true}}
 
 ### Correct Demo: `alfworld:train:00006`
+
+- Raw receipts：paired=`artifacts/alfworld_ragen_required_actor_v2_stable_zero/evaluation/paired_results.jsonl`; trajectory=`artifacts/alfworld_ragen_required_actor_v2_stable_zero/evaluation/agentgraph_trajectories.jsonl`
 
 - Task：examine the pillow with the desklamp.
 - Ground Truth：environment_success
 - Final Answer：<answer>You turn on the desklamp 1.</answer>
-- Evaluator: `{"environment_return": 10.0, "steps": 6.0, "success": 1.0, "terminal": 1.0}`
+- Evaluator：`skillflow.ragen_adapter.v2`; metrics=`{"environment_return": 10.0, "steps": 6.0, "success": 1.0, "terminal": 1.0}`
+- Trajectory ID：`trajectory_63d47d45d1faf296cb9ad967`
+- Policy version：`qwen35-9b-alfworld-ragen-environment-stable-zero-step-000000`; prompt=`agentgraph.director.progressive_subgraph.v1`; tool=`skillflow.ragen-environment-react.required-actor.v2`
+- Output Agent：`report_final`
 - AgentGraph: `env_diagnostic → report_final`
 
 Agent 配置：
@@ -118,20 +182,31 @@ Agent 配置：
 
 Director atomic edit 序列：`add_subgraph → finish`
 
-Output Agent 实际 inbox：
+Progressive Canvas turn receipts：
 
-- `env_diagnostic` → `report_final`; artifact_type=`observation_text`; body=You turn on the desklamp 1.
+- round=`0`; action=`add_subgraph`; graph_revision=`4`; receipt_verified=`True`; communication_condition=`normal`; blocks=`[['env_diagnostic'], ['report_final']]`; executed=`['env_diagnostic', 'report_final']`; reused=`[]`; feedback=accepted add_subgraph at revision 4; execution_result={"output_agent_id":"report_final","output":"<answer>You turn on the desklamp 1.</answer>","executed_agent_ids":["env_diagnostic","report_final"],"reused_agent_ids":[],"topology":{"agent_count":2,"relation_count":1,"directed_edge_count":1,"quotient_directed_edge_count":1,"reciprocal_pair_count":0,"component_count":2,"max_depth":2,"structural_depth":2,"max_width":1,"topology_family":"serial_2","topology_motifs":["serial_2"],"root_agent_ids":["env_diagnostic"],"sink_agent_ids":["report_final"],"root_component_count":1,"sink_component_count":1,"fan_in_agent_ids":[],"fan_out_agent_ids":[],"output_agent_id":"report_final"},"output_inbox":[{"so…
+- round=`1`; action=`finish`; graph_revision=`4`; receipt_verified=`True`; communication_condition=`normal`; blocks=`[['env_diagnostic'], ['report_final']]`; executed=`['env_diagnostic', 'report_final']`; reused=`[]`; feedback=workflow finished
 
-原生 ReAct trace（6 个 action）：`go to bed 1 → take pillow 1 from bed 1 → examine pillow 1 → go to shelf 1 → go to dresser 1 → use desklamp 1`
+实际 CommunicationEnvelope：
+
+- `env_diagnostic` → `report_final`; artifact_type=`observation_text`; dependency=Read the diagnostic observation and output the final answer.; graph_revision=`4`; environment_revision=`6`; tool_receipts=`6`; body=You turn on the desklamp 1.
+
+原生 environment ReAct trace（6 个 action）：`go to bed 1 → take pillow 1 from bed 1 → examine pillow 1 → go to shelf 1 → go to dresser 1 → use desklamp 1`
+- step=1; action=`go to bed 1`; reward=`0.0`; terminal=`未记录`; parse_error=`False`; observation=-= Welcome to TextWorld, ALFRED! =- You are in the middle of a room. Looking quickly around you, you see a bed 1, a drawer 10, a drawer 9, a drawer 8, a drawer 7, a drawer 6, a drawer 5, a drawer 4, a drawer 3, a drawer 2, a drawer 1, a dresser 1, a garbagecan 1, a shelf 7, a shelf 6, a shelf 5, a shelf 4, a shelf 3, a shelf 2, and a shelf 1. Your task is to: examine the pillow with the desklamp.
+- step=2; action=`take pillow 1 from bed 1`; reward=`0.0`; terminal=`未记录`; parse_error=`False`; observation=You arrive at bed 1. On the bed 1, you see a book 3, a book 2, a book 1, a laptop 1, a pillow 2, and a pillow 1.
+- step=3; action=`examine pillow 1`; reward=`0.0`; terminal=`未记录`; parse_error=`False`; observation=You pick up the pillow 1 from the bed 1.
+- step=4; action=`go to shelf 1`; reward=`0.0`; terminal=`未记录`; parse_error=`False`; observation=There's nothing special about pillow 1.
+- step=5; action=`go to dresser 1`; reward=`0.0`; terminal=`未记录`; parse_error=`False`; observation=You arrive at shelf 1. On the shelf 1, you see nothing.
+- step=6; action=`use desklamp 1`; reward=`10.0`; terminal=`未记录`; parse_error=`False`; observation=You arrive at dresser 1. On the dresser 1, you see a cd 1, a cellphone 2, a creditcard 1, a desklamp 1, a mug 1, a pen 2, a pen 1, and a pencil 1.
 
 Tool receipts：
 
-- tool=`alfworld.environment`, status=`completed`; request={"action": "go to bed 1", "arguments": {}}
-- tool=`alfworld.environment`, status=`completed`; request={"action": "take pillow 1 from bed 1", "arguments": {}}
-- tool=`alfworld.environment`, status=`completed`; request={"action": "examine pillow 1", "arguments": {}}
-- tool=`alfworld.environment`, status=`completed`; request={"action": "go to shelf 1", "arguments": {}}
-- tool=`alfworld.environment`, status=`completed`; request={"action": "go to dresser 1", "arguments": {}}
-- tool=`alfworld.environment`, status=`completed`; request={"action": "use desklamp 1", "arguments": {}}
+- receipt=1; tool=`alfworld.environment`; version=`skillflow.ragen_adapter.v2`; status=`completed`; latency_ms=`66.0429298877716`; request={"action": "go to bed 1", "arguments": {}}; result={"completed": true, "value": {"environment_revision": 1, "observation": "You arrive at bed 1. On the bed 1, you see a book 3, a book 2, a book 1, a laptop 1, a pillow 2, and a pillow 1.", "terminal": false}}
+- receipt=2; tool=`alfworld.environment`; version=`skillflow.ragen_adapter.v2`; status=`completed`; latency_ms=`51.8827848136425`; request={"action": "take pillow 1 from bed 1", "arguments": {}}; result={"completed": true, "value": {"environment_revision": 2, "observation": "You pick up the pillow 1 from the bed 1.", "terminal": false}}
+- receipt=3; tool=`alfworld.environment`; version=`skillflow.ragen_adapter.v2`; status=`completed`; latency_ms=`59.65535342693329`; request={"action": "examine pillow 1", "arguments": {}}; result={"completed": true, "value": {"environment_revision": 3, "observation": "There's nothing special about pillow 1.", "terminal": false}}
+- receipt=4; tool=`alfworld.environment`; version=`skillflow.ragen_adapter.v2`; status=`completed`; latency_ms=`64.61669784039259`; request={"action": "go to shelf 1", "arguments": {}}; result={"completed": true, "value": {"environment_revision": 4, "observation": "You arrive at shelf 1. On the shelf 1, you see nothing.", "terminal": false}}
+- receipt=5; tool=`alfworld.environment`; version=`skillflow.ragen_adapter.v2`; status=`completed`; latency_ms=`56.509800255298615`; request={"action": "go to dresser 1", "arguments": {}}; result={"completed": true, "value": {"environment_revision": 5, "observation": "You arrive at dresser 1. On the dresser 1, you see a cd 1, a cellphone 2, a creditcard 1, a desklamp 1, a mug 1, a pen 2, a pen 1, and a pencil 1.", "terminal": false}}
+- receipt=6; tool=`alfworld.environment`; version=`skillflow.ragen_adapter.v2`; status=`completed`; latency_ms=`51.857282407581806`; request={"action": "use desklamp 1", "arguments": {}}; result={"completed": true, "value": {"environment_revision": 6, "observation": "You turn on the desklamp 1.", "terminal": true}}
 ## Wrong / Failure Demo
 
 当前 AgentGraph 2 题均成功；以下保留同一 fixed task 的真实 Direct failure contrast，不把它计为 AgentGraph wrong case。
@@ -144,9 +219,59 @@ Tool receipts：
 - Evaluator：`{"environment_return": 0.0, "steps": 50.0, "success": 0.0, "terminal": 0.0}`
 - Failure classification：`ReAct action selection / state tracking / stopping`
 
-Direct ReAct trace（50 个 action）：`go to bed 1 → take pillow 1 from bed 1 → examine pillow 1 → <INVALID> → examine pillow 1 → examine pillow 1 → examine pillow 1 → examine pillow 1 → examine pillow 1 → examine pillow 1 → examine pillow 1 → examine pillow 1 → examine pillow 1 → examine pillow 1` …
+Direct ReAct trace（50 个 action）：`go to bed 1 → take pillow 1 from bed 1 → examine pillow 1 → <INVALID> → examine pillow 1 → examine pillow 1 → examine pillow 1 → examine pillow 1 → examine pillow 1 → examine pillow 1 → examine pillow 1 → examine pillow 1 → examine pillow 1 → examine pillow 1 → examine pillow 1 → examine pillow 1 → examine pillow 1 → examine pillow 1 → examine pillow 1 → examine pillow 1 → examine pillow 1 → examine pillow 1 → examine pillow 1 → examine pillow 1 → examine pillow 1 → examine pillow 1 → examine pillow 1 → examine pillow 1 → examine pillow 1 → examine pillow 1 → examine pillow 1 → examine pillow 1 → examine pillow 1 → examine pillow 1 → examine pillow 1 → examine pillow 1 → examine pillow 1 → examine pillow 1 → examine pillow 1 → examine pillow 1 → examine pillow 1 → examine pillow 1 → examine pillow 1 → examine pillow 1 → examine pillow 1 → examine pillow 1 → examine pillow 1 → examine pillow 1 → examine pillow 1 → examine pillow 1`
+- step=1; action=`go to bed 1`; reward=`0.0`; terminal=`未记录`; parse_error=`False`; observation=-= Welcome to TextWorld, ALFRED! =- You are in the middle of a room. Looking quickly around you, you see a bed 1, a drawer 10, a drawer 9, a drawer 8, a drawer 7, a drawer 6, a drawer 5, a drawer 4, a drawer 3, a drawer 2, a drawer 1, a dresser 1, a garbagecan 1, a shelf 7, a shelf 6, a shelf 5, a shelf 4, a shelf 3, a shelf 2, and a shelf 1. Your task is to: examine the pillow with the desklamp.
+- step=2; action=`take pillow 1 from bed 1`; reward=`0.0`; terminal=`未记录`; parse_error=`False`; observation=You arrive at bed 1. On the bed 1, you see a book 3, a book 2, a book 1, a laptop 1, a pillow 2, and a pillow 1.
+- step=3; action=`examine pillow 1`; reward=`0.0`; terminal=`未记录`; parse_error=`False`; observation=You pick up the pillow 1 from the bed 1.
+- step=4; action=`<INVALID>`; reward=`0.0`; terminal=`未记录`; parse_error=`True`; observation=There's nothing special about pillow 1.
+- step=5; action=`examine pillow 1`; reward=`0.0`; terminal=`未记录`; parse_error=`False`; observation=There's nothing special about pillow 1.
+- step=6; action=`examine pillow 1`; reward=`0.0`; terminal=`未记录`; parse_error=`False`; observation=There's nothing special about pillow 1.
+- step=7; action=`examine pillow 1`; reward=`0.0`; terminal=`未记录`; parse_error=`False`; observation=There's nothing special about pillow 1.
+- step=8; action=`examine pillow 1`; reward=`0.0`; terminal=`未记录`; parse_error=`False`; observation=There's nothing special about pillow 1.
+- step=9; action=`examine pillow 1`; reward=`0.0`; terminal=`未记录`; parse_error=`False`; observation=There's nothing special about pillow 1.
+- step=10; action=`examine pillow 1`; reward=`0.0`; terminal=`未记录`; parse_error=`False`; observation=There's nothing special about pillow 1.
+- step=11; action=`examine pillow 1`; reward=`0.0`; terminal=`未记录`; parse_error=`False`; observation=There's nothing special about pillow 1.
+- step=12; action=`examine pillow 1`; reward=`0.0`; terminal=`未记录`; parse_error=`False`; observation=There's nothing special about pillow 1.
+- step=13; action=`examine pillow 1`; reward=`0.0`; terminal=`未记录`; parse_error=`False`; observation=There's nothing special about pillow 1.
+- step=14; action=`examine pillow 1`; reward=`0.0`; terminal=`未记录`; parse_error=`False`; observation=There's nothing special about pillow 1.
+- step=15; action=`examine pillow 1`; reward=`0.0`; terminal=`未记录`; parse_error=`False`; observation=There's nothing special about pillow 1.
+- step=16; action=`examine pillow 1`; reward=`0.0`; terminal=`未记录`; parse_error=`False`; observation=There's nothing special about pillow 1.
+- step=17; action=`examine pillow 1`; reward=`0.0`; terminal=`未记录`; parse_error=`False`; observation=There's nothing special about pillow 1.
+- step=18; action=`examine pillow 1`; reward=`0.0`; terminal=`未记录`; parse_error=`False`; observation=There's nothing special about pillow 1.
+- step=19; action=`examine pillow 1`; reward=`0.0`; terminal=`未记录`; parse_error=`False`; observation=There's nothing special about pillow 1.
+- step=20; action=`examine pillow 1`; reward=`0.0`; terminal=`未记录`; parse_error=`False`; observation=There's nothing special about pillow 1.
+- step=21; action=`examine pillow 1`; reward=`0.0`; terminal=`未记录`; parse_error=`False`; observation=There's nothing special about pillow 1.
+- step=22; action=`examine pillow 1`; reward=`0.0`; terminal=`未记录`; parse_error=`False`; observation=There's nothing special about pillow 1.
+- step=23; action=`examine pillow 1`; reward=`0.0`; terminal=`未记录`; parse_error=`False`; observation=There's nothing special about pillow 1.
+- step=24; action=`examine pillow 1`; reward=`0.0`; terminal=`未记录`; parse_error=`False`; observation=There's nothing special about pillow 1.
+- step=25; action=`examine pillow 1`; reward=`0.0`; terminal=`未记录`; parse_error=`False`; observation=There's nothing special about pillow 1.
+- step=26; action=`examine pillow 1`; reward=`0.0`; terminal=`未记录`; parse_error=`False`; observation=There's nothing special about pillow 1.
+- step=27; action=`examine pillow 1`; reward=`0.0`; terminal=`未记录`; parse_error=`False`; observation=There's nothing special about pillow 1.
+- step=28; action=`examine pillow 1`; reward=`0.0`; terminal=`未记录`; parse_error=`False`; observation=There's nothing special about pillow 1.
+- step=29; action=`examine pillow 1`; reward=`0.0`; terminal=`未记录`; parse_error=`False`; observation=There's nothing special about pillow 1.
+- step=30; action=`examine pillow 1`; reward=`0.0`; terminal=`未记录`; parse_error=`False`; observation=There's nothing special about pillow 1.
+- step=31; action=`examine pillow 1`; reward=`0.0`; terminal=`未记录`; parse_error=`False`; observation=There's nothing special about pillow 1.
+- step=32; action=`examine pillow 1`; reward=`0.0`; terminal=`未记录`; parse_error=`False`; observation=There's nothing special about pillow 1.
+- step=33; action=`examine pillow 1`; reward=`0.0`; terminal=`未记录`; parse_error=`False`; observation=There's nothing special about pillow 1.
+- step=34; action=`examine pillow 1`; reward=`0.0`; terminal=`未记录`; parse_error=`False`; observation=There's nothing special about pillow 1.
+- step=35; action=`examine pillow 1`; reward=`0.0`; terminal=`未记录`; parse_error=`False`; observation=There's nothing special about pillow 1.
+- step=36; action=`examine pillow 1`; reward=`0.0`; terminal=`未记录`; parse_error=`False`; observation=There's nothing special about pillow 1.
+- step=37; action=`examine pillow 1`; reward=`0.0`; terminal=`未记录`; parse_error=`False`; observation=There's nothing special about pillow 1.
+- step=38; action=`examine pillow 1`; reward=`0.0`; terminal=`未记录`; parse_error=`False`; observation=There's nothing special about pillow 1.
+- step=39; action=`examine pillow 1`; reward=`0.0`; terminal=`未记录`; parse_error=`False`; observation=There's nothing special about pillow 1.
+- step=40; action=`examine pillow 1`; reward=`0.0`; terminal=`未记录`; parse_error=`False`; observation=There's nothing special about pillow 1.
+- step=41; action=`examine pillow 1`; reward=`0.0`; terminal=`未记录`; parse_error=`False`; observation=There's nothing special about pillow 1.
+- step=42; action=`examine pillow 1`; reward=`0.0`; terminal=`未记录`; parse_error=`False`; observation=There's nothing special about pillow 1.
+- step=43; action=`examine pillow 1`; reward=`0.0`; terminal=`未记录`; parse_error=`False`; observation=There's nothing special about pillow 1.
+- step=44; action=`examine pillow 1`; reward=`0.0`; terminal=`未记录`; parse_error=`False`; observation=There's nothing special about pillow 1.
+- step=45; action=`examine pillow 1`; reward=`0.0`; terminal=`未记录`; parse_error=`False`; observation=There's nothing special about pillow 1.
+- step=46; action=`examine pillow 1`; reward=`0.0`; terminal=`未记录`; parse_error=`False`; observation=There's nothing special about pillow 1.
+- step=47; action=`examine pillow 1`; reward=`0.0`; terminal=`未记录`; parse_error=`False`; observation=There's nothing special about pillow 1.
+- step=48; action=`examine pillow 1`; reward=`0.0`; terminal=`未记录`; parse_error=`False`; observation=There's nothing special about pillow 1.
+- step=49; action=`examine pillow 1`; reward=`0.0`; terminal=`未记录`; parse_error=`False`; observation=There's nothing special about pillow 1.
+- step=50; action=`examine pillow 1`; reward=`0.0`; terminal=`未记录`; parse_error=`False`; observation=There's nothing special about pillow 1.
 
-FIRST ERROR：Direct arm 在第 3 个 environment step 首次产生 <INVALID>，随后重复 examine pillow 1，最终触发 50-step environment_step_limit；同题 v2 AgentGraph 用 6 个原生 action 成功。
+FIRST ERROR：Direct arm 在 zero-based step=3（第 4 个 environment action）首次产生 <INVALID>，随后重复 examine pillow 1，最终触发 50-step environment_step_limit；同题 v2 AgentGraph 用 6 个原生 action 成功。
 
 
 ## 最小架构适配

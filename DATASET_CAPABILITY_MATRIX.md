@@ -30,7 +30,7 @@ canaries and historical small-sample results are not formal benchmark estimates.
 | Trajectory receipts | `rollout_collector.py` persists provider/model calls, token and latency metadata, ReAct traces, Tool receipts, environment reset/transition receipts, environment revision, evaluator replay trace, and Coding Agent receipts in the existing trajectory boundary. | **Direct reuse:** FlowSteer action masks/turn records and SkillFlow rollout artifacts. **Necessary adaptation:** JSON-safe heterogeneous execution metadata. |
 | Native evaluator boundary | `task_evaluator.py` keeps gold answers, accepted aliases, rubrics, environment reward/`won`, and SWE-bench resolution outside model-visible Runtime state. Invalid evaluator receipts are excluded rather than replaced by proxy scores. | **Necessary adaptation:** benchmark-native evaluators are normalized behind one `evaluate_task` interface. |
 | Model capability admission | `probe_model_capabilities.py` first requires an exact `/v1/models` ID and then probes Text, `StructuredAction`, and Coding-format compatibility without alias substitution or silent fallback. `model_catalog_multidataset_tool_v1.yaml` contains admitted model IDs. The WebShop v4 receipt records heterogeneous Executor use by `deepseek-v4-flash` and local Qwen3.5-9B; this is execution evidence for those two catalog entries only, not for the entire model pool. | **Necessary adaptation:** provider discovery/capability receipt for the heterogeneous Executor catalog. The Flow-Director remains local Qwen3.5-9B. |
-| Skill and training boundary | Skill schemas, lifecycle, retrieval and the project evidence gate exist. The latest independent paired evidence produced two `CANDIDATE` Skills and zero `ACTIVE` Skills, so every multidataset Stable Zero configuration keeps Skill injection, GRPO, backward, optimizer updates and policy publication disabled. | **Direct reuse:** SkillFlow evidence/library primitives. **Project algorithm addition:** paired AgentGraph effect/posterior gate. **Not executed for this phase:** Skill injection and micro-training because the evidence gate did not approve an `ACTIVE` Skill. |
+| Skill and training boundary | Skill schemas, lifecycle, retrieval and the project evidence gate exist. The latest independent paired evidence produced two `CANDIDATE` Skills and zero `ACTIVE` Skills, so every multidataset Stable Zero configuration keeps Skill injection, GRPO, backward, optimizer updates and policy publication disabled. Two earlier joint-QA bounded GRPO runs each performed one real LoRA optimizer update, saved optimizer state, published the new policy, switched the SGLang route and passed post-update canaries; their fixed held-out macro metrics did not improve over Step 0. | **Direct reuse:** SkillFlow evidence/library and policy-publication primitives. **Project algorithm addition:** paired AgentGraph effect/posterior gate. **Current phase:** no Skill injection or optimizer update. **Prior core evidence:** the Director LoRA update/sync path is executable, but it does not validate learning for the new Tool/Environment/Coding action domains. |
 
 ## Seven-dataset Runtime matrix
 
@@ -99,6 +99,11 @@ canaries and historical small-sample results are not formal benchmark estimates.
 7. `ACTIVE Skill = 0` for this multidataset phase. The evidence gate did run:
    HotpotQA and TriviaQA candidates were rejected by the calibrated
    lower-bound/harm criteria. Consequently Skill injection, micro-training,
-   optimizer update and policy synchronization were not executed and must not
-   be reported as completed. Across the current seven-dataset phase,
-   `ACTIVE Skill = 0` and `optimizer_updates = 0`.
+   optimizer update and policy synchronization were not executed in the new
+   unified Runtime conditions and must not be reported as current-condition
+   training. Separately, the earlier joint-QA core has two receipt-valid
+   one-update LoRA runs with successful policy synchronization and post-update
+   canaries. Their Step 0→2 fixed held-out macro EM/F1 changed from
+   56.25%/68.58% to 54.69%/65.31%, so they establish an executable learning
+   path but not a positive performance trend. Across the current seven-dataset
+   Stable Zero phase, `ACTIVE Skill = 0` and `optimizer_updates = 0`.

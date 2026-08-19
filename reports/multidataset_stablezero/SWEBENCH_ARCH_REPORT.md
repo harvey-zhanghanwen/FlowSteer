@@ -6,12 +6,13 @@
 - 配置固定任务数：**128**
 - Runtime status：`failed_runtime_preflight`
 - 结果：**不可测**；SWEbenchHarnessUnavailable: official SWE-bench Docker harness is unavailable
+- Raw receipts：manifest=`artifacts/swebench_regular_dev_coding_agent_stable_zero/development/run_manifest.json`; paired=`artifacts/swebench_regular_dev_coding_agent_stable_zero/development/paired_results.jsonl`; trajectory=`artifacts/swebench_regular_dev_coding_agent_stable_zero/development/agentgraph_trajectories.jsonl`
 - 显式 FINISH receipt：**0/0**
 - Tool receipt：**0**
 - Environment transition receipt：**0**
 - Coding action receipt：**0**
 - optimizer update：**0**
-- `STABLE_ZERO = NOT_RUN`
+- `STABLE_ZERO = FAIL`
 
 | 原生指标 | Direct/Simple Baseline | AgentGraph |
 |---|---:|---:|
@@ -44,4 +45,4 @@
 - 原生 evaluator receipt：无
 - 记录的错误：`SWEbenchHarnessUnavailable: official SWE-bench Docker harness is unavailable`
 
-FIRST ERROR：当前运行尚未形成可评分的 terminal receipt；不能归因为 Director、AgentGraph、Tool、environment action、Coding Agent 或模型能力。
+FIRST INFRASTRUCTURE BLOCKER：`SWEbenchHarnessUnavailable: official SWE-bench Docker harness is unavailable`；官方 Docker harness preflight 未通过，因此没有启动 Direct/Coding Agent、没有 workspace edit/test、也没有 evaluator-valid resolved receipt。

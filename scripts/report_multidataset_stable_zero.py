@@ -26,6 +26,12 @@ TOOL_DIAGNOSTIC_RECEIPTS = {
     "healthbench_professional": "artifacts/tool_exact_schema_canary/healthbench_professional_exact_wire_v2_20260820.json",
 }
 
+MICRO_TRAINING_MANIFESTS = (
+    "artifacts/joint_qa_micro/step_000001/training_manifest.json",
+    "artifacts/joint_qa_micro/step_000002_attempt_04/training_manifest.json",
+)
+MICRO_TRAINING_CURVE = "reports/joint_qa_curve/final/joint_qa_curve.json"
+
 
 @dataclass(frozen=True)
 class DatasetSpec:
@@ -199,6 +205,27 @@ PRESERVED_FAILURES = {
             "因此以 max_rounds 终止。v3 只澄清字段层级和 exact tool_id 边界。"
         ),
     ),
+    "triviaqa": PreservedFailureSpec(
+        condition="qa_tool_react_stable_zero (pre-v3 output-span clarification)",
+        paired_path=(
+            "artifacts/qa_tool_react_stable_zero/"
+            "triviaqa/wrong_demos.jsonl"
+        ),
+        trajectory_path=(
+            "artifacts/qa_tool_react_stable_zero/"
+            "triviaqa/tool_agentgraph_trajectories.jsonl"
+        ),
+        task_id="triviaqa:tc_3",
+        classification="Output Agent contract / answer-span serialization",
+        first_error=(
+            "Output Agent returned `York, North Yorkshire, England` even though the task "
+            "asks for the English town and the Direct arm returned `York`. The official "
+            "TriviaQA answer evaluator therefore recorded EM=0 and token F1=0.8571428571. "
+            "The receipt does not support attributing this recovered semantic answer to "
+            "retrieval or model reasoning; the first evaluator-visible error is the "
+            "over-specified terminal answer span."
+        ),
+    ),
     "webshop": PreservedFailureSpec(
         condition="ragen_environment_v1 (pre-native-action adaptation)",
         paired_path=(
@@ -232,7 +259,7 @@ DIRECT_CONTRAST_FAILURES = {
         "task_id": "alfworld:train:00006",
         "classification": "ReAct action selection / state tracking / stopping",
         "first_error": (
-            "Direct arm 在第 3 个 environment step 首次产生 <INVALID>，随后重复 "
+            "Direct arm 在 zero-based step=3（第 4 个 environment action）首次产生 <INVALID>，随后重复 "
             "examine pillow 1，最终触发 50-step environment_step_limit；"
             "同题 v2 AgentGraph 用 6 个原生 action 成功。"
         ),
@@ -463,6 +490,164 @@ def _execution_responses(
     return responses
 
 
+def _execution_records(trajectory: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Return saved Executor records in trajectory order."""
+
+    records: list[dict[str, Any]] = []
+    turns = trajectory.get("turns", ())
+    if not isinstance(turns, Sequence) or isinstance(turns, (str, bytes)):
+        return records
+    for turn in turns:
+        executions = turn.get("executions", ()) if isinstance(turn, Mapping) else ()
+        if not isinstance(executions, Sequence) or isinstance(executions, (str, bytes)):
+            continue
+        records.extend(dict(item) for item in executions if isinstance(item, Mapping))
+    return records
+
+
+def _react_trace_entries(trajectory: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Return public ReAct actions/observations; hidden reasoning is never reconstructed."""
+
+    entries: list[dict[str, Any]] = []
+    for request, response in _execution_responses(trajectory):
+        raw = response.get("react_trace", ())
+        if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
+            continue
+        agent = request.get("agent", {})
+        agent_id = agent.get("id", "unknown") if isinstance(agent, Mapping) else "unknown"
+        for item in raw:
+            if not isinstance(item, Mapping):
+                continue
+            entry = dict(item)
+            entry["agent_id"] = agent_id
+            entries.append(entry)
+    return entries
+
+
+def _model_call_records(execution: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Normalize one saved execution into its actual accepted model-call receipts."""
+
+    metadata = execution.get("metadata", {})
+    response = metadata.get("response", {}) if isinstance(metadata, Mapping) else {}
+    model_calls = response.get("model_calls", ()) if isinstance(response, Mapping) else ()
+    if isinstance(model_calls, Sequence) and not isinstance(model_calls, (str, bytes)):
+        records: list[dict[str, Any]] = []
+        for call in model_calls:
+            if not isinstance(call, Mapping):
+                continue
+            call_metadata = call.get("metadata", {})
+            if isinstance(call_metadata, Mapping):
+                records.append(dict(call_metadata))
+        if records:
+            return records
+    response_metadata = response if isinstance(response, Mapping) else {}
+    return [
+        {
+            "model_id": execution.get("model_id", response_metadata.get("model_id", "unknown")),
+            "prompt_tokens": execution.get(
+                "input_tokens", response_metadata.get("prompt_tokens", 0)
+            ),
+            "completion_tokens": execution.get(
+                "output_tokens", response_metadata.get("completion_tokens", 0)
+            ),
+            "latency_ms": execution.get(
+                "latency_ms", response_metadata.get("latency_ms", 0.0)
+            ),
+            "attempt_count": response_metadata.get("attempt_count", 1),
+        }
+    ]
+
+
+def _aggregate_model_usage(
+    executions: Iterable[Mapping[str, Any]],
+) -> dict[str, dict[str, float]]:
+    usage: dict[str, dict[str, float]] = {}
+    for execution in executions:
+        for call in _model_call_records(execution):
+            model_id = str(call.get("model_id", "unknown"))
+            row = usage.setdefault(
+                model_id,
+                {"calls": 0.0, "attempts": 0.0, "tokens": 0.0, "latency_ms": 0.0},
+            )
+            row["calls"] += 1
+            row["attempts"] += float(call.get("attempt_count", 1) or 1)
+            row["tokens"] += float(call.get("prompt_tokens", 0) or 0)
+            row["tokens"] += float(call.get("completion_tokens", 0) or 0)
+            row["latency_ms"] += float(call.get("latency_ms", 0.0) or 0.0)
+    return usage
+
+
+def _director_usage(
+    trajectories: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    policies: set[str] = set()
+    prompts: set[str] = set()
+    calls = 0
+    attempts = 0
+    tokens = 0
+    latency_ms = 0.0
+    for trajectory in trajectories:
+        versions = trajectory.get("versions", {})
+        if isinstance(versions, Mapping):
+            if versions.get("policy"):
+                policies.add(str(versions["policy"]))
+            if versions.get("prompt"):
+                prompts.add(str(versions["prompt"]))
+        turns = trajectory.get("turns", ())
+        if not isinstance(turns, Sequence) or isinstance(turns, (str, bytes)):
+            continue
+        for turn in turns:
+            if not isinstance(turn, Mapping):
+                continue
+            calls += 1
+            attempts += int(turn.get("director_attempt_count", 1) or 1)
+            prompt_ids = turn.get("prompt_token_ids", ())
+            output_ids = turn.get("output_token_ids", ())
+            if isinstance(prompt_ids, Sequence) and not isinstance(prompt_ids, (str, bytes)):
+                tokens += len(prompt_ids)
+            if isinstance(output_ids, Sequence) and not isinstance(output_ids, (str, bytes)):
+                tokens += len(output_ids)
+            latency_ms += float(turn.get("director_latency_ms", 0.0) or 0.0)
+            if turn.get("policy_version"):
+                policies.add(str(turn["policy_version"]))
+    return {
+        "calls": calls,
+        "attempts": attempts,
+        "tokens": tokens,
+        "latency_ms": latency_ms,
+        "policies": sorted(policies),
+        "prompts": sorted(prompts),
+    }
+
+
+def _communication_envelopes(
+    trajectory: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Return recorded inter-Agent envelopes without reconstructing messages."""
+
+    envelopes: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for request, _ in _execution_responses(trajectory):
+        raw = request.get("upstream", ())
+        if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
+            continue
+        for item in raw:
+            if not isinstance(item, Mapping):
+                continue
+            envelope = dict(item)
+            identity = json.dumps(
+                envelope,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            if identity in seen:
+                continue
+            seen.add(identity)
+            envelopes.append(envelope)
+    return envelopes
+
+
 def _environment_receipts(trajectory: Mapping[str, Any]) -> list[dict[str, Any]]:
     receipts: list[dict[str, Any]] = []
     for _, response in _execution_responses(trajectory):
@@ -559,75 +744,183 @@ def _demo(
     trajectory: Mapping[str, Any] | None,
     *,
     label: str,
+    paired_receipt: str | None = None,
+    trajectory_receipt: str | None = None,
 ) -> str:
     graph = row.get("agentgraph", {})
+    evaluation = graph.get("evaluation", {})
+    evaluation = evaluation if isinstance(evaluation, Mapping) else {}
+    final_graph = graph.get("final_graph", {})
+    final_graph = final_graph if isinstance(final_graph, Mapping) else {}
+    versions = trajectory.get("versions", {}) if isinstance(trajectory, Mapping) else {}
+    versions = versions if isinstance(versions, Mapping) else {}
     lines = [
         f"### {label}: `{row.get('task_id')}`",
         "",
         f"- Task：{_short(row.get('question'), 700)}",
         f"- Ground Truth：{_short(row.get('ground_truth'), 350)}",
         f"- Final Answer：{_short(graph.get('final_answer'), 700)}",
-        f"- Evaluator: `{json.dumps(graph.get('evaluation', {}).get('metrics', {}), ensure_ascii=False, sort_keys=True)}`",
+        f"- Evaluator：`{evaluation.get('evaluator_version', 'legacy receipt 未记录')}`; "
+        f"metrics=`{json.dumps(evaluation.get('metrics', {}), ensure_ascii=False, sort_keys=True)}`",
+        f"- Trajectory ID：`{graph.get('trajectory_id') or (trajectory or {}).get('trajectory_id') or 'legacy receipt 未记录'}`",
+        f"- Policy version：`{versions.get('policy', 'legacy receipt 未记录')}`; "
+        f"prompt=`{versions.get('prompt', 'legacy receipt 未记录')}`; "
+        f"tool=`{versions.get('tool', 'legacy receipt 未记录')}`",
+        f"- Output Agent：`{final_graph.get('output_agent_id', 'legacy receipt 未记录')}`",
         f"- AgentGraph: `{_graph_line(row)}`",
         "",
         "Agent 配置：",
         "",
     ]
+    if paired_receipt or trajectory_receipt:
+        receipt_parts = []
+        if paired_receipt:
+            receipt_parts.append(f"paired=`{paired_receipt}`")
+        if trajectory_receipt:
+            receipt_parts.append(f"trajectory=`{trajectory_receipt}`")
+        lines[1:1] = ["", "- Raw receipts：" + "; ".join(receipt_parts)]
     for node in _graph_nodes(row):
+        mode = node.get("execution_mode", "legacy receipt 未记录")
+        tools = (
+            node.get("allowed_tools")
+            if "allowed_tools" in node
+            else "legacy receipt 未记录"
+        )
+        artifact = node.get("artifact_type", "legacy receipt 未记录")
         lines.append(
             "- `{id}` — model=`{model}`, execution_mode=`{mode}`, role_family=`{role}`, "
             "allowed_tools=`{tools}`, artifact_type=`{artifact}`; contract: {contract}".format(
                 id=node.get("id"),
                 model=node.get("model_id"),
-                mode=node.get("execution_mode"),
+                mode=mode,
                 role=node.get("role_family"),
-                tools=node.get("allowed_tools", []),
-                artifact=node.get("artifact_type"),
+                tools=tools,
+                artifact=artifact,
                 contract=_short(node.get("contract"), 320),
             )
         )
     if trajectory:
-        actions = []
+        actions: list[str] = []
         for turn in trajectory.get("turns", ()):
             if not isinstance(turn, Mapping):
                 continue
             action = turn.get("action", {})
             if isinstance(action, Mapping):
-                actions.append(str(action.get("action", action.get("action_type", "?"))))
-        lines.extend(["", f"Director atomic edit 序列：`{' → '.join(actions)}`"])
-    inbox = graph.get("output_agent_inbox", ())
-    if isinstance(inbox, Mapping):
-        inbox = inbox.get("upstream", ())
-    if isinstance(inbox, Sequence) and not isinstance(inbox, (str, bytes)) and inbox:
-        lines.extend(["", "Output Agent 实际 inbox：", ""])
-        for message in inbox[:4]:
-            if isinstance(message, Mapping):
-                lines.append(
-                    f"- `{message.get('source_agent_id', message.get('source_agent'))}` → "
-                    f"`{message.get('target_agent_id', message.get('target_agent'))}`; "
-                    f"artifact_type=`{message.get('artifact_type')}`; "
-                    f"body={_short(message.get('artifact_body', message.get('content')), 500)}"
+                actions.append(
+                    str(action.get("action", action.get("action_type", "invalid")))
                 )
+        lines.extend(["", f"Director atomic edit 序列：`{' → '.join(actions)}`"])
+        lines.extend(["", "Progressive Canvas turn receipts：", ""])
+        for turn in trajectory.get("turns", ()):
+            if not isinstance(turn, Mapping):
+                continue
+            action = turn.get("action", {})
+            action_name = (
+                action.get("action", action.get("action_type", "invalid"))
+                if isinstance(action, Mapping)
+                else "invalid"
+            )
+            runtime = turn.get("runtime_summary", {})
+            runtime = runtime if isinstance(runtime, Mapping) else {}
+            lines.append(
+                "- round=`{round}`; action=`{action}`; graph_revision=`{revision}`; "
+                "receipt_verified=`{verified}`; communication_condition=`{condition}`; "
+                "blocks=`{blocks}`; executed=`{executed}`; reused=`{reused}`; "
+                "feedback={feedback}".format(
+                    round=turn.get("round_index", "legacy receipt 未记录"),
+                    action=action_name,
+                    revision=turn.get("graph_revision", "legacy receipt 未记录"),
+                    verified=turn.get("receipt_verified", "legacy receipt 未记录"),
+                    condition=runtime.get("communication_condition", "not_executed"),
+                    blocks=runtime.get("block_completion_order", []),
+                    executed=runtime.get("executed_agent_ids", []),
+                    reused=runtime.get("reused_agent_ids", []),
+                    feedback=_short(turn.get("canvas_feedback"), 700),
+                )
+            )
+    envelopes = _communication_envelopes(trajectory or {})
+    if envelopes:
+        lines.extend(["", "实际 CommunicationEnvelope：", ""])
+        for message in envelopes:
+            receipts = message.get("tool_receipts", ())
+            receipt_count = (
+                len(receipts)
+                if isinstance(receipts, Sequence)
+                and not isinstance(receipts, (str, bytes))
+                else 0
+            )
+            lines.append(
+                f"- `{message.get('source_agent_id', message.get('source_agent'))}` → "
+                f"`{message.get('target_agent_id', message.get('target_agent'))}`; "
+                f"artifact_type=`{message.get('artifact_type')}`; "
+                f"dependency={_short(message.get('dependency'), 220)}; "
+                f"graph_revision=`{message.get('graph_revision')}`; "
+                f"environment_revision=`{message.get('environment_revision')}`; "
+                f"tool_receipts=`{receipt_count}`; "
+                f"body={_short(message.get('artifact_body', message.get('content')), 500)}"
+            )
+    else:
+        inbox = graph.get("output_agent_inbox", ())
+        if isinstance(inbox, Mapping):
+            inbox = inbox.get("upstream", ())
+        if (
+            isinstance(inbox, Sequence)
+            and not isinstance(inbox, (str, bytes))
+            and inbox
+        ):
+            lines.extend(["", "Output Agent 实际 inbox：", ""])
+            for message in inbox:
+                if isinstance(message, Mapping):
+                    lines.append(
+                        f"- `{message.get('source_agent_id', message.get('source_agent'))}` → "
+                        f"`{message.get('target_agent_id', message.get('target_agent'))}`; "
+                        f"artifact_type=`{message.get('artifact_type')}`; "
+                        f"body={_short(message.get('artifact_body', message.get('content')), 500)}"
+                    )
     trace = _environment_trace(row, "agentgraph")
     if trace:
         actions = [str(item.get("action")) for item in trace]
         lines.extend(
             [
                 "",
-                f"原生 ReAct trace（{len(actions)} 个 action）：`{' → '.join(actions[:12])}`"
-                + (" …" if len(actions) > 12 else ""),
+                f"原生 environment ReAct trace（{len(actions)} 个 action）：`{' → '.join(actions)}`",
             ]
         )
+        for index, item in enumerate(trace, start=1):
+            lines.append(
+                f"- step={index}; action=`{item.get('action')}`; "
+                f"reward=`{item.get('reward', '未记录')}`; terminal=`{item.get('terminal', '未记录')}`; "
+                f"parse_error=`{item.get('parse_error', False)}`; "
+                f"observation={_short(item.get('observation'), 700)}"
+            )
     if trajectory:
+        react_entries = _react_trace_entries(trajectory)
+        if react_entries:
+            lines.extend(["", "Executor ReAct trace（公开 StructuredAction/observation）：", ""])
+            for entry in react_entries:
+                action = entry.get("structured_action", {})
+                observation = entry.get("observation")
+                observation_status = entry.get("observation_status")
+                if observation_status is None and isinstance(observation, Mapping):
+                    observation_status = observation.get("observation_status")
+                lines.append(
+                    f"- agent=`{entry.get('agent_id')}`; turn=`{entry.get('turn')}`; "
+                    f"action={_short(json.dumps(action, ensure_ascii=False, sort_keys=True), 700)}; "
+                    f"observation_status=`{observation_status}`; "
+                    f"observation={_short(json.dumps(observation, ensure_ascii=False, sort_keys=True), 700)}"
+                )
         receipts = _tool_receipts(trajectory)
         if receipts:
             lines.extend(["", "Tool receipts：", ""])
-            for receipt in receipts[:6]:
+            for index, receipt in enumerate(receipts, start=1):
                 request = receipt.get("request", {})
                 lines.append(
-                    f"- tool=`{receipt.get('tool_id')}`, status=`"
+                    f"- receipt={index}; tool=`{receipt.get('tool_id')}`; "
+                    f"version=`{receipt.get('tool_version')}`; status=`"
                     f"{'error:' + str(receipt.get('error_type')) if receipt.get('error_type') else 'completed'}`; "
-                    f"request={_short(json.dumps(request, ensure_ascii=False, sort_keys=True), 360)}"
+                    f"latency_ms=`{receipt.get('latency_ms', '未记录')}`; "
+                    f"request={_short(json.dumps(request, ensure_ascii=False, sort_keys=True), 700)}; "
+                    f"result={_short(json.dumps(receipt.get('result'), ensure_ascii=False, sort_keys=True), 700)}"
                 )
     return "\n".join(lines)
 
@@ -661,10 +954,16 @@ def _direct_failure_demo(
             [
                 "",
                 f"Direct ReAct trace（{len(actions)} 个 action）："
-                f"`{' → '.join(actions[:14])}`"
-                + (" …" if len(actions) > 14 else ""),
+                f"`{' → '.join(actions)}`",
             ]
         )
+        for index, item in enumerate(trace, start=1):
+            lines.append(
+                f"- step={index}; action=`{item.get('action')}`; "
+                f"reward=`{item.get('reward', '未记录')}`; terminal=`{item.get('terminal', '未记录')}`; "
+                f"parse_error=`{item.get('parse_error', False)}`; "
+                f"observation={_short(item.get('observation'), 700)}"
+            )
     lines.extend(["", f"FIRST ERROR：{first_error}"])
     return "\n".join(lines)
 
@@ -692,7 +991,25 @@ def _first_error(row: Mapping[str, Any], spec: DatasetSpec) -> str:
         if em == 0.0 and f1 > 0.0:
             return "FIRST ERROR：terminal answer serialization 与 accepted answer span 不一致，但 token overlap 非零；错误位于 Format boundary。"
     if spec.key == "healthbench_professional":
-        return "FIRST ERROR：原生 reference judge 的 raw_score 未达到满分；需要结合 trajectory 中的 Tool receipt 判断是否存在更早的运行时失败。"
+        evaluation = graph.get("evaluation", {})
+        details = evaluation.get("details", {}) if isinstance(evaluation, Mapping) else {}
+        grades = details.get("rubric_grades", ()) if isinstance(details, Mapping) else ()
+        if isinstance(grades, Sequence) and not isinstance(grades, (str, bytes)):
+            unmet = next(
+                (
+                    grade
+                    for grade in grades
+                    if isinstance(grade, Mapping) and grade.get("criteria_met") is False
+                ),
+                None,
+            )
+            if unmet is not None:
+                return (
+                    "FIRST EVALUATOR-VISIBLE ERROR：首个未满足 rubric criterion 为 `"
+                    f"{_short(unmet.get('criterion'), 420)}`；judge explanation="
+                    f"{_short(unmet.get('explanation'), 700)}"
+                )
+        return "FIRST EVALUATOR-VISIBLE ERROR：原生 reference judge 的 raw_score 未达到满分；receipt 没有更细的 rubric grade。"
     if spec.key in {"webshop", "alfworld"}:
         trace = _environment_trace(row, "agentgraph")
         invalid = next(
@@ -714,6 +1031,8 @@ def _first_error_with_receipts(
     spec: DatasetSpec,
     trajectory: Mapping[str, Any] | None,
 ) -> str:
+    if spec.key == "healthbench_professional":
+        return _first_error(row, spec)
     if trajectory:
         failed = next(
             (receipt for receipt in _tool_receipts(trajectory) if receipt.get("error_type")),
@@ -725,6 +1044,38 @@ def _first_error_with_receipts(
                 f"`{failed.get('tool_id')}` 返回 `{failed.get('error_type')}`；"
                 "后续 Agent 仍完成了推理，但该 Tool 调用不能计为成功检索。"
             )
+        if spec.key in {"aime_2026", "webshop"}:
+            turns = trajectory.get("turns", ())
+            if isinstance(turns, Sequence) and not isinstance(turns, (str, bytes)):
+                for turn in turns:
+                    if not isinstance(turn, Mapping):
+                        continue
+                    feedback = str(turn.get("canvas_feedback") or "")
+                    if not any(
+                        marker in feedback
+                        for marker in (
+                            "edit rejected",
+                            "execution_error=",
+                            "invalid action:",
+                            "cannot finish:",
+                        )
+                    ):
+                        continue
+                    prefix = (
+                        "FIRST RECORDED CANVAS/RUNTIME FAULT"
+                        if spec.key == "aime_2026"
+                        else "FIRST RECORDED ENVIRONMENT-OWNERSHIP FAULT"
+                    )
+                    causal_note = (
+                        "This fault was later recovered; the receipt does not prove it caused the wrong terminal answer."
+                        if spec.key == "aime_2026"
+                        else "The Director recovered by deleting one owner; the terminal reward was 0.6, so the receipt does not establish a unique semantic cause for the non-success."
+                    )
+                    return (
+                        f"{prefix}：round={turn.get('round_index', '未记录')}, "
+                        f"graph_revision={turn.get('graph_revision', '未记录')}, "
+                        f"feedback={_short(feedback, 900)} {causal_note}"
+                    )
     return _first_error(row, spec)
 
 
@@ -737,7 +1088,11 @@ def _unmeasured_report(
     error = str(manifest.get("error") or manifest.get("blocked_reason") or "")
     optimizer = manifest.get("optimizer_updates")
     optimizer_text = str(optimizer) if isinstance(optimizer, int) else "不可测"
-    stable_state = "FAIL" if status in {"failed", "runtime_preflight_failed"} else "NOT_RUN"
+    stable_state = (
+        "FAIL"
+        if status in {"failed", "runtime_preflight_failed", "failed_runtime_preflight"}
+        else "NOT_RUN"
+    )
     tool_receipts = [
         receipt for trajectory in trajectories for receipt in _tool_receipts(trajectory)
     ]
@@ -764,6 +1119,7 @@ def _unmeasured_report(
 - 配置固定任务数：**{int(manifest.get('sample_count', 0) or 0)}**
 - Runtime status：`{status}`
 - 结果：**不可测**；{reason}
+- Raw receipts：manifest=`{spec.manifest_path}`; paired=`{spec.paired_path}`; trajectory=`{spec.trajectory_path}`
 - 显式 FINISH receipt：**{explicit_finish}/{len(trajectories)}**
 - Tool receipt：**{len(tool_receipts)}**
 - Environment transition receipt：**{len(environment_receipts)}**
@@ -791,7 +1147,7 @@ def _unmeasured_report(
 - 原生 evaluator receipt：无
 - 记录的错误：`{error or '无；当前状态表示尚未执行至 evaluator，而不是任务失败。'}`
 
-FIRST ERROR：当前运行尚未形成可评分的 terminal receipt；不能归因为 Director、AgentGraph、Tool、environment action、Coding Agent 或模型能力。
+{('FIRST INFRASTRUCTURE BLOCKER：`' + reason + '`；官方 Docker harness preflight 未通过，因此没有启动 Direct/Coding Agent、没有 workspace edit/test、也没有 evaluator-valid resolved receipt。' if spec.key == 'swe_bench' else 'FIRST ERROR：当前运行尚未形成可评分的 terminal receipt；不能归因为 Director、AgentGraph、Tool、environment action、Coding Agent 或模型能力。')}
 """
     summary = {
         "key": spec.key,
@@ -854,6 +1210,24 @@ def _report_for(spec: DatasetSpec) -> tuple[str, dict[str, Any]]:
         family_counts.update(_model_family(item) for item in ids)
         if len(set(ids)) > 1:
             multi_model += 1
+    graph_executions = [
+        execution
+        for trajectory in trajectories
+        for execution in _execution_records(trajectory)
+    ]
+    direct_executions = [
+        execution
+        for row in rows
+        for execution in (
+            [row.get("direct", {}).get("execution")]
+            if isinstance(row.get("direct"), Mapping)
+            and isinstance(row.get("direct", {}).get("execution"), Mapping)
+            else []
+        )
+    ]
+    graph_model_usage = _aggregate_model_usage(graph_executions)
+    direct_model_usage = _aggregate_model_usage(direct_executions)
+    director_usage = _director_usage(trajectories)
     tool_receipts = [
         receipt
         for trajectory in trajectories
@@ -945,13 +1319,105 @@ def _report_for(spec: DatasetSpec) -> tuple[str, dict[str, Any]]:
         f"{metric}={_metric_display(metric, _metric_mean(rows, 'agentgraph', metric))}"
         for metric in spec.metrics
     )
+    topology_order = (
+        "single",
+        "serial_2",
+        "serial_3_plus",
+        "parallel",
+        "fan_in",
+        "fan_out",
+        "reciprocal",
+        "verification",
+        "mixed",
+        "other",
+        "unknown",
+    )
+    topology_names = list(topology_order) + sorted(
+        name for name in topologies if name not in topology_order
+    )
     topology_lines = "\n".join(
-        f"- `{name}`: {count}" for name, count in sorted(topologies.items())
-    ) or "- none"
+        f"- `{name}`: {topologies.get(name, 0)}" for name in topology_names
+    )
+    motif_counts: Counter[str] = Counter()
+    for row in rows:
+        task_id = str(row.get("task_id"))
+        trajectory = trajectory_by_task.get(task_id, {})
+        nodes = _graph_nodes(row)
+        relations = _graph_relations(row)
+        modes = {str(node.get("execution_mode")) for node in nodes}
+        roles = {str(node.get("role_family", "")).casefold() for node in nodes}
+        indegree: Counter[str] = Counter()
+        outdegree: Counter[str] = Counter()
+        reciprocal = False
+        for relation in relations:
+            source = str(relation.get("source_id", ""))
+            target = str(relation.get("target_id", ""))
+            if relation.get("source_to_target") is True:
+                outdegree[source] += 1
+                indegree[target] += 1
+            if relation.get("target_to_source") is True:
+                outdegree[target] += 1
+                indegree[source] += 1
+            reciprocal = reciprocal or bool(
+                relation.get("source_to_target") is True
+                and relation.get("target_to_source") is True
+            )
+        motif_counts["parallel execution"] += _max_parallel_width(trajectory) > 1
+        motif_counts["fan-in"] += any(value > 1 for value in indegree.values())
+        motif_counts["fan-out"] += any(value > 1 for value in outdegree.values())
+        motif_counts["reciprocal"] += reciprocal
+        motif_counts["verification"] += any(
+            any(marker in role for marker in ("verif", "critic", "review", "check"))
+            for role in roles
+        )
+        motif_counts["ReAct"] += bool(
+            "react" in modes or _environment_trace(row, "agentgraph")
+        )
+        motif_counts["Tool-using"] += bool(_tool_receipts(trajectory))
+        motif_counts["Coding"] += bool(_coding_receipts(trajectory))
+        motif_counts["mixed execution modes"] += len(modes) > 1
+    motif_lines = "\n".join(
+        f"- `{name}`: {motif_counts.get(name, 0)}/{len(rows)} tasks"
+        for name in (
+            "parallel execution",
+            "fan-in",
+            "fan-out",
+            "reciprocal",
+            "verification",
+            "ReAct",
+            "Tool-using",
+            "Coding",
+            "mixed execution modes",
+        )
+    )
     model_lines = "\n".join(
         f"- `{name}`: {count} Agent nodes" for name, count in sorted(model_counts.items())
     ) or "- none"
-    family_lines = ", ".join(f"{name}={count}" for name, count in sorted(family_counts.items())) or "none"
+    family_order = ("Qwen", "DeepSeek", "Gemini", "GPT", "MiniMax", "Grok", "GLM", "Other")
+    family_lines = ", ".join(
+        f"{name}={family_counts.get(name, 0)}" for name in family_order
+    )
+
+    def usage_lines(usage: Mapping[str, Mapping[str, float]]) -> str:
+        return "\n".join(
+            "| {model} | {calls} | {attempts} | {tokens} | {latency:.2f} |".format(
+                model=model,
+                calls=int(values.get("calls", 0)),
+                attempts=int(values.get("attempts", 0)),
+                tokens=int(values.get("tokens", 0)),
+                latency=float(values.get("latency_ms", 0.0)) / 1000,
+            )
+            for model, values in sorted(usage.items())
+        ) or "| none | 0 | 0 | 0 | 0.00 |"
+
+    direct_usage_lines = usage_lines(direct_model_usage)
+    graph_usage_lines = usage_lines(graph_model_usage)
+    judge_cost_note = (
+        "HealthBench judge 的独立 token/latency receipt 未保存，不能并入上述 "
+        "Executor 成本；报告只引用 evaluator receipt 中实际记录的 judge model。"
+        if spec.key == "healthbench_professional"
+        else ""
+    )
     avg_width = _mean(
         float(_max_parallel_width(trajectory_by_task.get(str(row.get("task_id")), {})))
         for row in rows
@@ -981,6 +1447,7 @@ def _report_for(spec: DatasetSpec) -> tuple[str, dict[str, Any]]:
 - 能力边界：{spec.capability}
 - Protocol：{spec.protocol}
 - 固定 validation task：**{len(rows)}**
+- Raw receipts：manifest=`{spec.manifest_path}`; paired=`{spec.paired_path}`; trajectory=`{spec.trajectory_path}`
 - 显式 FINISH：**{sum(row.get('agentgraph', {}).get('explicit_finish') is True for row in rows)}/{len(rows)}**
 - 有效原生 evaluator receipt：**{sum(row.get('agentgraph', {}).get('valid') is True for row in rows)}/{len(rows)}**
 - `STABLE_ZERO = {'PASS' if stable_pass else 'FAIL'}`
@@ -1009,7 +1476,13 @@ def _report_for(spec: DatasetSpec) -> tuple[str, dict[str, Any]]:
 
 ## Workflow 分布
 
+互斥 `topology_family` 计数（未观察到的合法结构显式记 0）：
+
 {topology_lines}
+
+可重叠的执行/协作 motif（来自最终图与实际 execution receipt）：
+
+{motif_lines}
 
 - 平均 structural depth：**{_mean(float(item.get('structural_depth', 0.0) or 0.0) for item in diagnostics):.2f}**
 - 平均 effective dependency depth：**{_mean(float(item.get('effective_dependency_depth', 0.0) or 0.0) for item in diagnostics):.2f}**
@@ -1019,10 +1492,30 @@ def _report_for(spec: DatasetSpec) -> tuple[str, dict[str, Any]]:
 
 ## Model 使用情况
 
+Final AgentGraph 中声明的 Executor node：
+
 {model_lines}
 
 - Model family：{family_lines}
 - Multi-model workflow 比例：**{multi_model}/{len(rows)}**
+
+实际 Direct Executor model-call receipt：
+
+| Model ID | Accepted model calls | API attempts | Tokens | Latency (s) |
+|---|---:|---:|---:|---:|
+{direct_usage_lines}
+
+实际 AgentGraph Executor model-call receipt：
+
+| Model ID | Accepted model calls | API attempts | Tokens | Latency (s) |
+|---|---:|---:|---:|---:|
+{graph_usage_lines}
+
+- Flow-Director：**local Qwen3.5-9B（未替换为远端 Executor）**
+- Director policy receipt：`{', '.join(director_usage['policies']) or 'missing'}`；prompt=`{', '.join(director_usage['prompts']) or 'missing'}`
+- Director calls/attempts：**{director_usage['calls']}/{director_usage['attempts']}**；tokens=**{director_usage['tokens']}**；latency=**{director_usage['latency_ms'] / 1000:.2f}s**
+
+{judge_cost_note}
 
 ## Tool / ReAct 使用情况
 
@@ -1050,6 +1543,8 @@ def _report_for(spec: DatasetSpec) -> tuple[str, dict[str, Any]]:
                 row,
                 trajectory_by_task.get(str(row.get("task_id"))),
                 label="Correct Demo",
+                paired_receipt=spec.paired_path,
+                trajectory_receipt=spec.trajectory_path,
             )
             for row in selected
         )
@@ -1074,6 +1569,8 @@ def _report_for(spec: DatasetSpec) -> tuple[str, dict[str, Any]]:
                         correct_row,
                         correct_trajectory,
                         label="Preserved Correct Demo",
+                        paired_receipt=preserved_correct.paired_path,
+                        trajectory_receipt=preserved_correct.trajectory_path,
                     )
                     + "\n"
                 )
@@ -1090,6 +1587,8 @@ def _report_for(spec: DatasetSpec) -> tuple[str, dict[str, Any]]:
                     row,
                     trajectory_by_task.get(str(row.get("task_id"))),
                     label="Wrong Demo",
+                    paired_receipt=spec.paired_path,
+                    trajectory_receipt=spec.trajectory_path,
                 )
                 + "\n\n"
                 + _first_error_with_receipts(
@@ -1143,6 +1642,8 @@ def _report_for(spec: DatasetSpec) -> tuple[str, dict[str, Any]]:
                         failure_row,
                         failure_trajectory,
                         label="Preserved Wrong Demo",
+                        paired_receipt=preserved_failure.paired_path,
+                        trajectory_receipt=preserved_failure.trajectory_path,
                     )
                     + "\n\n"
                     + f"FIRST ERROR：{preserved_failure.first_error}\n"
@@ -1238,6 +1739,185 @@ def _skill_section() -> tuple[str, dict[str, Any]]:
     return text, {"active": active, "publication_count": len(lines)}
 
 
+def _model_canary_section() -> tuple[str, dict[str, Any]]:
+    """Render saved Text/ReAct/Coding capability receipts without probing again."""
+
+    remote_path = "artifacts/model_capability_canary/cheap_fast_20260819.json"
+    local_path = (
+        "artifacts/model_capability_canary/"
+        "local_qwen35_9b_nonthinking_20260820.json"
+    )
+    catalog_path = ROOT / "config/model_catalog_multidataset_tool_v1.yaml"
+    catalog_ids: set[str] = set()
+    if catalog_path.is_file():
+        for line in catalog_path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if stripped.startswith("- model_id:"):
+                catalog_ids.add(stripped.split(":", 1)[1].strip().strip('"\''))
+
+    probes: dict[str, dict[str, str]] = {}
+    for relative, provider in ((remote_path, "vectorengine"), (local_path, "local-director")):
+        payload = _load_json(ROOT / relative)
+        raw = payload.get("probes", ())
+        if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
+            continue
+        for probe in raw:
+            if not isinstance(probe, Mapping):
+                continue
+            model_id = str(probe.get("model_id", "unknown"))
+            catalog_id = "qwen3.5-9b-local" if model_id == "supervisor_theta" else model_id
+            row = probes.setdefault(catalog_id, {"provider": provider, "source": relative})
+            capability = str(probe.get("capability", "unknown"))
+            row[capability] = (
+                "PASS"
+                if probe.get("status") == "passed" and probe.get("compatible") is True
+                else str(probe.get("status", "FAIL"))
+            )
+
+    order = sorted(probes, key=lambda item: (item not in catalog_ids, item.casefold()))
+    rows = []
+    fully_validated = 0
+    admitted_validated = 0
+    for model_id in order:
+        item = probes[model_id]
+        complete = all(item.get(capability) == "PASS" for capability in ("text", "react", "coding"))
+        admitted = model_id in catalog_ids
+        fully_validated += int(complete)
+        admitted_validated += int(complete and admitted)
+        rows.append(
+            f"| {model_id} | {item.get('provider')} | {item.get('text', 'missing')} | "
+            f"{item.get('react', 'missing')} | {item.get('coding', 'missing')} | "
+            f"{'YES' if admitted else 'NO'} | `{item.get('source')}` |"
+        )
+    text = f"""## Model capability Canary
+
+| Exact catalog/model ID | Provider | Text | StructuredAction/ReAct | Coding format | Admitted Executor | Receipt |
+|---|---|---:|---:|---:|---:|---|
+{chr(10).join(rows) or '| missing | missing | missing | missing | missing | NO | missing |'}
+
+- Catalog entries with all three saved canaries：**{admitted_validated}/{len(catalog_ids)}**
+- `grok-4-1-fast-non-reasoning` 的三个 probe 均收到 HTTP 429，因此没有纳入 catalog；这不是把失败别名替换成另一个模型。
+- `/v1/models` 与 canary 均未提供通过验证的 Gemini exact model ID，所以 Gemini 显式保持 0，不凭空加入。
+- Flow-Director 仍固定为 local Qwen3.5-9B；表内远端模型只进入 Executor search space。
+"""
+    return text, {
+        "catalog_size": len(catalog_ids),
+        "admitted_validated": admitted_validated,
+        "fully_validated": fully_validated,
+    }
+
+
+def _micro_training_section() -> tuple[str, dict[str, Any]]:
+    """Render existing bounded optimizer/policy-sync receipts without rerunning them."""
+
+    rows: list[str] = []
+    validated_updates = 0
+    for relative in MICRO_TRAINING_MANIFESTS:
+        manifest = _load_json(ROOT / relative)
+        training = manifest.get("training", {})
+        sync = manifest.get("policy_sync", {})
+        canaries = manifest.get("post_update_canaries", {})
+        if not isinstance(training, Mapping):
+            training = {}
+        if not isinstance(sync, Mapping):
+            sync = {}
+        if not isinstance(canaries, Mapping):
+            canaries = {}
+        valid = bool(
+            manifest.get("status") == "completed"
+            and training.get("optimizer_updates") == 1
+            and isinstance(training.get("trainable_update_l2"), (int, float))
+            and not isinstance(training.get("trainable_update_l2"), bool)
+            and float(training["trainable_update_l2"]) > 0.0
+            and sync.get("success") is True
+            and sync.get("training_performed") is True
+            and sync.get("policy_published") is True
+            and sync.get("route_switch_succeeded") is True
+            and sync.get("canary_succeeded") is True
+            and int(canaries.get("collected", 0) or 0) > 0
+        )
+        validated_updates += int(valid)
+        rows.append(
+            "| {path} | {behavior} | {updated} | {optimizer} | {l2} | {sync} | {canary} |".format(
+                path=relative,
+                behavior=training.get("behavior_policy_version", "missing"),
+                updated=training.get("updated_policy_version", "missing"),
+                optimizer=training.get("optimizer_updates", "missing"),
+                l2=(
+                    f"{float(training['trainable_update_l2']):.6f}"
+                    if isinstance(training.get("trainable_update_l2"), (int, float))
+                    and not isinstance(training.get("trainable_update_l2"), bool)
+                    else "missing"
+                ),
+                sync="PASS" if sync.get("success") is True else "FAIL",
+                canary=canaries.get("collected", 0),
+            )
+        )
+
+    curve = _load_json(ROOT / MICRO_TRAINING_CURVE)
+    curve_verified = bool(
+        curve.get("fixed_task_ids_verified") is True
+        and curve.get("evaluator_receipts_verified") is True
+        and curve.get("policy_receipts_verified") is True
+        and curve.get("policy_adapter_receipts_verified") is True
+    )
+    steps = curve.get("steps", ())
+    if not isinstance(steps, Sequence) or isinstance(steps, (str, bytes)):
+        steps = ()
+    curve_rows: list[str] = []
+    macro_values: list[tuple[int, float, float]] = []
+    for step in steps:
+        if not isinstance(step, Mapping):
+            continue
+        macro = step.get("macro_average", {})
+        if not isinstance(macro, Mapping):
+            continue
+        em = macro.get("strict_exact_match")
+        f1 = macro.get("strict_token_f1")
+        if not isinstance(em, (int, float)) or isinstance(em, bool):
+            continue
+        if not isinstance(f1, (int, float)) or isinstance(f1, bool):
+            continue
+        ordinal = int(step.get("step", len(macro_values)))
+        macro_values.append((ordinal, float(em), float(f1)))
+        curve_rows.append(
+            f"| Step {ordinal} | {step.get('policy_version', 'missing')} | "
+            f"{100 * float(em):.2f}% | {100 * float(f1):.2f}% |"
+        )
+    positive_trend = bool(
+        curve_verified
+        and len(macro_values) >= 2
+        and (
+            macro_values[-1][1] > macro_values[0][1]
+            or macro_values[-1][2] > macro_values[0][2]
+        )
+    )
+    executed = validated_updates == len(MICRO_TRAINING_MANIFESTS)
+    text = f"""## 既有 bounded micro-training 证据
+
+这组证据来自当前项目此前完成的 HotpotQA/TriviaQA joint-QA Flow-Director 训练闭环；它与本轮统一 Tool/Environment/Coding Stable Zero 的版本边界分开报告，不能证明新 Tool action-selection policy 已被训练。
+
+| Manifest | Behavior policy | Updated policy | Optimizer updates | Trainable update L2 | Policy sync | Post-update canary |
+|---|---|---|---:|---:|---:|---:|
+{chr(10).join(rows) or '| missing | missing | missing | 0 | missing | FAIL | 0 |'}
+
+- Receipt-valid optimizer updates：**{validated_updates}/{len(MICRO_TRAINING_MANIFESTS)}**
+- Matched held-out curve receipt：`{MICRO_TRAINING_CURVE}`；fixed task/evaluator/policy receipts verified=`{str(curve_verified).lower()}`
+
+| Step | Policy version | HotpotQA/TriviaQA macro EM | Macro F1 |
+|---|---|---:|---:|
+{chr(10).join(curve_rows) or '| 不可测 | missing | 不可测 | 不可测 |'}
+
+该证据证明 LoRA 参数更新、optimizer state、policy publication、route switch 和 post-update canary 的闭环可执行。固定 held-out 的最终宏平均没有超过 Step 0，因此不能声称观察到正向 learning trend；按方案应优先继续检查 architecture/search-space 与 evidence quality，而不是扩大训练规模。
+"""
+    return text, {
+        "executed": executed,
+        "validated_updates": validated_updates,
+        "curve_verified": curve_verified,
+        "positive_trend": positive_trend,
+    }
+
+
 def _total_report(summaries: Sequence[Mapping[str, Any]]) -> str:
     table_lines = []
     for item in summaries:
@@ -1251,6 +1931,8 @@ def _total_report(summaries: Sequence[Mapping[str, Any]]) -> str:
             f"{item['correct']} | {item['wrong']} | {metric_text} | {item['capability']} |"
         )
     skill_text, skill_state = _skill_section()
+    model_canary_text, _model_canary_state = _model_canary_section()
+    micro_training_text, micro_training_state = _micro_training_section()
     optimizer_values = [
         item.get("optimizer_updates")
         for item in summaries
@@ -1276,6 +1958,41 @@ def _total_report(summaries: Sequence[Mapping[str, Any]]) -> str:
     )
     explicit_finish = sum(
         int(item.get("explicit_finish", 0) or 0) for item in summaries
+    )
+    aggregate_topologies: Counter[str] = Counter()
+    aggregate_families: Counter[str] = Counter()
+    total_measured = 0
+    multi_model_workflows = 0
+    for item in summaries:
+        raw_topologies = item.get("topologies", {})
+        if isinstance(raw_topologies, Mapping):
+            aggregate_topologies.update(
+                {str(key): int(value) for key, value in raw_topologies.items()}
+            )
+        raw_families = item.get("model_families", {})
+        if isinstance(raw_families, Mapping):
+            aggregate_families.update(
+                {str(key): int(value) for key, value in raw_families.items()}
+            )
+        total_measured += int(item.get("n", 0) or 0)
+        multi_model_workflows += int(item.get("multi_model", 0) or 0)
+    aggregate_topology_text = ", ".join(
+        f"{name}={aggregate_topologies.get(name, 0)}"
+        for name in (
+            "single",
+            "serial_2",
+            "serial_3_plus",
+            "parallel",
+            "fan_in",
+            "fan_out",
+            "reciprocal",
+            "verification",
+            "mixed",
+        )
+    )
+    aggregate_family_text = ", ".join(
+        f"{name}={aggregate_families.get(name, 0)}"
+        for name in ("Qwen", "DeepSeek", "Gemini", "GPT", "MiniMax", "Grok", "GLM", "Other")
     )
     by_key = {str(item.get("key")): item for item in summaries}
     diagnostic_rows: list[str] = []
@@ -1325,7 +2042,11 @@ def _total_report(summaries: Sequence[Mapping[str, Any]]) -> str:
         and int(swebench.get("coding_receipts", 0) or 0) > 0
     )
     all_stable = all(item.get("stable_zero") == "PASS" for item in summaries)
-    demos_complete = all(int(item.get("n", 0) or 0) > 0 for item in summaries)
+    demos_complete = all(
+        int(item.get("correct", 0) or 0) > 0
+        and int(item.get("wrong", 0) or 0) > 0
+        for item in summaries
+    )
     webshop_result_note = (
         "WebShop v4 只报告当前 native-validation paired receipts。"
         if webshop_measured
@@ -1384,6 +2105,16 @@ def _total_report(summaries: Sequence[Mapping[str, Any]]) -> str:
 - Environment transition receipt：**{environment_receipts}**
 - Coding action receipt：**{coding_receipts}**
 
+## Natural Stable Zero workflow/model adoption
+
+- Exclusive topology family：{aggregate_topology_text}
+- Declared Executor node family：{aggregate_family_text}
+- Multi-model workflow：**{multi_model_workflows}/{total_measured}**
+
+当前 {total_measured} 条自然 AgentGraph trajectory 只观察到 single/serial topology；parallel、fan-in、fan-out 与 reciprocal 在独立 non-chain runtime diagnostic 中可执行，但尚未被当前 fixed-task Director policy 自然采用。因此 `DEEP_WORKFLOW_READY` 只表示 search space/runtime capability，不能解释为 policy adoption 或性能收益。
+
+{model_canary_text}
+
 ## Exact-schema Tool forced probe（不计入 benchmark）
 
 | Dataset | Overall | Schema | Backend | Model/termination | Successful ToolReceipt |
@@ -1407,13 +2138,23 @@ def _total_report(summaries: Sequence[Mapping[str, Any]]) -> str:
 
 最新 evidence-gated `ACTIVE` Skill 数量：**{skill_state['active']}**。{skill_gate_note}`CANDIDATE` instruction 仍是候选，不作为已验证 Skill。
 
+{micro_training_text}
+
+## Current add_subgraph micro-training preflight
+
+- Decision：`NO_GO`
+- Receipt report：`reports/multidataset_stablezero/MICROTRAINING_PREFLIGHT.md`
+- 当前没有新的冻结 schedule/cursor，也没有满足 evidence gate 的 `ACTIVE` Skill；现成 `add_subgraph` 模板是 Skill-on。GPU 3 被本任务之外的进程占用，GPU 4 rollout service 已关闭，provider credential 未配置。因而本轮没有启动服务或训练，也没有把旧 cursor 重放称为新更新。
+
 ## 剩余问题分类
 
-- {swebench_issue}
+- `ENVIRONMENT_LIMITATION`：{swebench_issue}
 - `SKILL_EVIDENCE_INSUFFICIENT`：最新独立 paired evidence 未满足 calibrated lower-bound/harm gate；`ACTIVE` Skill 数为 0。
-- HotpotQA 与 TriviaQA v3 的当前 Stable Zero trajectories 各自然产生 1 条成功 retrieval `ToolReceipt`；AIME-2025 development 与 HealthBench v2 未自然选择其可选 Tool。两题 canary 只能验证自然工具调用链已经出现，不能估计 tool-use policy 的总体采用率、收益或 Skill effect。
-- HealthBench 的 2 题 reference-judge diagnostic raw_score 较低；该 canary 不足以证明模型能力或架构的单一原因。
-- {webshop_issue}
+- `TRAINING_INSTABILITY`：既有 joint-QA bounded micro-training 完成了 {micro_training_state['validated_updates']} 次真实 optimizer update 与 policy sync，但固定 held-out 宏平均没有形成正向趋势；该证据不覆盖本轮新增 Tool/Environment/Coding action-selection policy。
+- `TOOL_LIMITATION`：HotpotQA 与 TriviaQA v3 的当前 Stable Zero trajectories 各自然产生 1 条成功 retrieval `ToolReceipt`；AIME-2025 development 与 HealthBench v2 未自然选择其可选 Tool。两题 canary 只能验证自然工具调用链已经出现，不能估计 tool-use policy 的总体采用率、useful rate、wasted rate 或 Skill effect。
+- `MODEL_CAPABILITY_LIMIT`：HealthBench 的 2 题 reference-judge diagnostic raw_score 较低；该 canary 不足以把差距唯一归因于模型、架构或缺少检索。
+- `ARCHITECTURE_DEFECT`：当前没有新的 confirmed open defect。WebShop 的 action serialization / token-budget 缺陷已按 preserved failure receipt 修复；{webshop_issue}
+- `POLICY_LEARNING_PROBLEM`：尚未成立。当前自然 policy 没有采用非链式 topology，但 SWE Coding、ACTIVE Skill 和 Tool usefulness 闭环仍未齐全，不能先把缺口归因于 policy learning。
 
 ## 最终判定
 
@@ -1432,7 +2173,8 @@ QA_TOOL_USE_VALIDATED = {'YES' if qa_tool_use_validated else 'NO'}
 ALFWORLD_REACT_READY = {'YES' if alfworld_react_ready else 'NO'}
 WEBSHOP_REACT_READY = {'YES' if webshop_react_ready else 'NO'}
 
-CODING_AGENT_READY = YES
+CODING_AGENT_IMPLEMENTED = YES
+CODING_AGENT_READY = {'YES' if swebench_coding_ready else 'NO'}
 SWEBENCH_CODING_WORKFLOW_READY = {'YES' if swebench_coding_ready else 'NO'}
 
 SKILL_END_TO_END_READY = {'YES' if skill_state['active'] > 0 else 'NO'}
@@ -1441,15 +2183,16 @@ SKILL_SUMMARY_VALIDATED = NO
 ALL_DATASETS_STABLE_ZERO_COMPLETE = {'YES' if all_stable else 'NO'}
 CORRECT_WRONG_DEMOS_COMPLETE = {'YES' if demos_complete else 'NO'}
 
-MICRO_TRAINING_EXECUTED = NO
-LEARNING_TREND_OBSERVED = NO
+MICRO_TRAINING_EXECUTED = {'YES' if micro_training_state['executed'] else 'NO'}
+LEARNING_TREND_OBSERVED = {'YES' if micro_training_state['positive_trend'] else 'NO'}
 
-GITHUB_ARCHITECTURE_BACKUP = NOT_EVALUATED_BY_REPORT_GENERATOR
+LOCAL_RECOVERY_BACKUP = YES
+GITHUB_ARCHITECTURE_BACKUP = NO
 
 READY_FOR_FORMAL_MULTIDATASET_TRAINING = NO
 ```
 
-判定说明：`DEEP_WORKFLOW_READY` 表示 search space 与 scheduler 支持 deep/parallel/fan-in/finite-reciprocal motif，不表示当前 canary 已普遍采用深图。`CORRECT_WRONG_DEMOS_COMPLETE` 只表示七个数据集是否都已有 evaluator-valid paired result；不要求为获得错例而人为制造失败。报告生成器不执行或验证 Git push，因此不对远端备份状态作结论。
+判定说明：`DEEP_WORKFLOW_READY` 表示 search space 与 scheduler 支持 deep/parallel/fan-in/finite-reciprocal motif，不表示当前 canary 已普遍采用深图。`CORRECT_WRONG_DEMOS_COMPLETE` 要求每个数据集同时具有当前 evaluator-valid correct 与 wrong receipt；不会为凑数量制造失败。当前 branch/tag/patch/bundle 已形成可恢复本地备份，但当前环境对配置的 GitHub remote 没有可用 HTTPS/SSH 写认证，所以 `GITHUB_ARCHITECTURE_BACKUP=NO`，不伪称已推送。
 
 ## 报告索引
 
