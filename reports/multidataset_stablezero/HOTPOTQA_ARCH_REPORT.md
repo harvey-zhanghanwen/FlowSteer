@@ -21,10 +21,11 @@
 
 ## Evidence scope 与协议限制
 
-- Evidence scope：fixed validation canary
+- Evidence scope：exposed development canary；不是 unseen held-out 或 benchmark estimate
 - Protocol：Direct 使用给定上下文；AgentGraph 允许使用检索 Tool。两者属于 protocol-separated 条件，差值只作描述性统计。
 
-- 无额外限制记录。
+- 当前 2 题曾进入多轮架构诊断；2/2 只记录任务行为与 Stable Zero 链完整性，不能报告为 100% benchmark accuracy。
+- HotpotQA distractor protocol 的给定 passages 正常包含回答所需事实；这与 Ground Truth 字段进入模型 prompt 不同。
 
 ### 明确排除的历史结果
 

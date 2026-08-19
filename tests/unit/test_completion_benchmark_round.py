@@ -164,6 +164,61 @@ def test_aime_selection_filters_the_official_2026_slice(tmp_path):
     ]
 
 
+def test_selection_fails_closed_on_declared_partition_mismatch(tmp_path):
+    config = _evaluation_config("hotpotqa")
+    section = config["hotpotqa_evaluation"]
+    section.update(
+        {
+            "stage": "development",
+            "required_partition": "development",
+            "sample_count": 2,
+            "stable_zero_sample_count": 2,
+        }
+    )
+    source = tmp_path / "validation.jsonl"
+    selected = tmp_path / "selected.jsonl"
+    config["data"]["validation_path"] = str(source)
+    records = [
+        _MODULE.TaskRecord(
+            task_id=f"hotpotqa:{index}",
+            question=f"question {index}",
+            ground_truth=str(index),
+            split="validation",
+            metadata={
+                "dataset_key": "hotpotqa",
+                "joint_qa_partition": partition,
+            },
+        )
+        for index, partition in enumerate(("development", "test"))
+    ]
+    _MODULE._atomic_jsonl(
+        source,
+        [
+            {"schema_version": "flowsteer.agentgraph.task.v1", **item.to_dict()}
+            for item in records
+        ],
+    )
+
+    try:
+        _MODULE._select_tasks(config, tmp_path, selected)
+    except Exception as exc:
+        assert "belongs to partition 'test', expected 'development'" in str(exc)
+    else:  # pragma: no cover - fail-closed guard
+        raise AssertionError("cross-partition task selection was accepted")
+
+
+def test_final_evaluation_stage_requires_test_split():
+    config = _evaluation_config("hotpotqa")
+    config["hotpotqa_evaluation"]["stage"] = "final_evaluation"
+
+    try:
+        _MODULE.validate_completion_benchmark_config(config)
+    except Exception as exc:
+        assert "evaluation.final_split" in str(exc)
+    else:  # pragma: no cover - fail-closed guard
+        raise AssertionError("final evaluation accepted a validation split")
+
+
 def test_healthbench_evaluation_receives_the_backend_judge():
     calls = []
 

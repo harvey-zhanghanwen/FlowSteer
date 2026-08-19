@@ -234,6 +234,20 @@ def validate_completion_benchmark_config(config: Mapping[str, Any]) -> None:
         "skills.evaluation_mode": _skill_evaluation_mode(config),
         "gpu.training_enabled": gpu.get("training_enabled") is False,
     }
+    stage = bounded.get("stage")
+    if stage is not None:
+        checks["evaluation.stage"] = stage in {
+            "development",
+            "evaluation",
+            "final_evaluation",
+        }
+        if stage == "final_evaluation":
+            checks["evaluation.final_split"] = bounded.get("split") == "test"
+    required_partition = bounded.get("required_partition")
+    if required_partition is not None:
+        checks["evaluation.required_partition"] = bool(
+            isinstance(required_partition, str) and required_partition.strip()
+        )
     if dataset_key == "healthbench_professional":
         evaluation = _mapping(config.get("evaluation"), "evaluation")
         checks["evaluation.healthbench_judge_model"] = bool(
@@ -308,6 +322,17 @@ def validate_completion_benchmark_config(config: Mapping[str, Any]) -> None:
     ):
         raise ConfigurationError(
             f"{section_name}.sample_count must be between 1 and {maximum}"
+        )
+    stable_zero_sample_count = bounded.get(
+        "stable_zero_sample_count", min(2, sample_count)
+    )
+    if (
+        isinstance(stable_zero_sample_count, bool)
+        or not isinstance(stable_zero_sample_count, int)
+        or not 1 <= stable_zero_sample_count <= sample_count
+    ):
+        raise ConfigurationError(
+            f"{section_name}.stable_zero_sample_count must be between 1 and sample_count"
         )
     concurrency = bounded.get("concurrency")
     if isinstance(concurrency, bool) or not isinstance(concurrency, int) or concurrency < 1:
@@ -404,6 +429,21 @@ def _select_tasks(
     else:
         expected = candidates[:count]
 
+    required_partition = bounded.get("required_partition")
+
+    def require_partition(task: TaskRecord) -> None:
+        if required_partition is None:
+            return
+        observed = task.metadata.get("joint_qa_partition")
+        if observed != required_partition:
+            raise CompletionBenchmarkRoundError(
+                f"task {task.task_id!r} belongs to partition {observed!r}, "
+                f"expected {required_partition!r}"
+            )
+
+    for task in expected:
+        require_partition(task)
+
     if selected_path.exists():
         frozen = tuple(iter_task_records(selected_path, expected_split=split))
         if len(frozen) != count:
@@ -411,6 +451,7 @@ def _select_tasks(
                 f"frozen {dataset_key} selection has the wrong size"
             )
         for expected_task, frozen_task in zip(expected, frozen, strict=True):
+            require_partition(frozen_task)
             if (
                 expected_task.task_id != frozen_task.task_id
                 or expected_task.question != frozen_task.question
@@ -1410,6 +1451,26 @@ async def run_completion_benchmark_round(
         "selected_task_ids": [task.task_id for task in selected],
         "sample_count": len(selected),
         "fixed_split": str(bounded["split"]),
+        "evaluation_stage": str(bounded.get("stage", "legacy_unspecified")),
+        "required_partition": bounded.get("required_partition"),
+        "metric_interpretation": (
+            "stable_zero_chain_only_not_a_benchmark_estimate"
+            if canary_only
+            else (
+                "development_result_not_a_final_benchmark_estimate"
+                if bounded.get("stage") == "development"
+                else (
+                    "formal_evaluation_result"
+                    if bounded.get("stage") == "final_evaluation"
+                    else "legacy_evaluation_scope_not_formal_heldout"
+                )
+            )
+        ),
+        "model_visible_task_boundary": {
+            "prompt_source": "TaskRecord.question",
+            "ground_truth_role": "evaluator_only",
+            "evaluator_payload_role": "evaluator_only",
+        },
         "training_enabled": False,
         "optimizer_updates": 0,
         "runtime_resource": {
@@ -1550,7 +1611,10 @@ async def run_completion_benchmark_round(
             f"{dataset_key} runtime preflight failed"
         ) from exc
 
-    active = selected[:2] if canary_only else selected
+    stable_zero_sample_count = int(
+        bounded.get("stable_zero_sample_count", min(2, len(selected)))
+    )
+    active = selected[:stable_zero_sample_count] if canary_only else selected
     manifest["status"] = "direct_baseline"
     _write_json(paths["manifest"], manifest)
     direct = await _collect_direct(
@@ -1656,7 +1720,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--canary-only",
         action="store_true",
-        help="run the first two frozen tasks through the Stable Zero chain",
+        help=(
+            "run stable_zero_sample_count frozen tasks through the Stable Zero chain"
+        ),
     )
     return parser
 

@@ -181,6 +181,7 @@ def test_swebench_prepare_only_needs_neither_backend_nor_docker(
 ) -> None:
     config = deepcopy(_config("evaluation_swebench_verified_round_01.yaml"))
     config["swebench_evaluation"]["sample_count"] = 1
+    config["swebench_evaluation"]["stable_zero_sample_count"] = 1
 
     data_dir = tmp_path / "data"
     data_dir.mkdir()

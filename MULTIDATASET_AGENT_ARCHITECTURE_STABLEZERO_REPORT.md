@@ -17,17 +17,17 @@
 
 ## Stable Zero 结果
 
-| Dataset | Stable Zero | n | 满分/成功 | 错误 | 原生指标 | 能力边界 |
-|---|---:|---:|---:|---:|---|---|
-| HotpotQA | PASS | 2 | 2 | 0 | exact_match: Direct=100.00%, AgentGraph=100.00%; token_f1: Direct=100.00%, AgentGraph=100.00% | 闭卷上下文推理 + 冻结 Wikipedia RetrievalIndex/ReAct 能力 |
-| TriviaQA | PASS | 2 | 2 | 0 | exact_match: Direct=50.00%, AgentGraph=100.00%; token_f1: Direct=50.00%, AgentGraph=100.00% | 仅问题推理 + 冻结 Wikipedia RetrievalIndex/ReAct 能力 |
-| AIME-2025 Development（AIME 2026 目标适配） | PASS | 2 | 1 | 1 | exact_match: Direct=0.00%, AgentGraph=50.00% | 推理 + 有界 calculator/Python execution 能力 |
-| HealthBench Professional（reference-judge diagnostic） | PASS | 2 | 0 | 2 | raw_score: Direct=0.2000, AgentGraph=0.2000 | 临床推理 + 冻结教材语料 MedRAG search 能力 |
-| WebShop | PASS | 2 | 1 | 1 | success: Direct=50.00%, AgentGraph=50.00% | request-scoped SkillFlow/RAGEN environment ReAct |
-| ALFWorld | PASS | 2 | 2 | 0 | success: Direct=50.00%, AgentGraph=100.00% | request-scoped SkillFlow/RAGEN environment ReAct |
-| SWE-bench Regular Dev | FAIL | 0 | 0 | 0 | resolved: Direct=不可测, AgentGraph=不可测 | detached task-pinned worktree + iterative CodingExecutionAdapter + official Docker harness |
+| Dataset | Stable Zero | n | 满分/成功 | 错误 | 原生指标 | Evidence scope | 能力边界 |
+|---|---:|---:|---:|---:|---|---|---|
+| HotpotQA | PASS | 2 | 2 | 0 | exact_match: Direct=100.00%, AgentGraph=100.00%; token_f1: Direct=100.00%, AgentGraph=100.00% | exposed development canary；不是 unseen held-out 或 benchmark estimate | 闭卷上下文推理 + 冻结 Wikipedia RetrievalIndex/ReAct 能力 |
+| TriviaQA | PASS | 2 | 2 | 0 | exact_match: Direct=50.00%, AgentGraph=100.00%; token_f1: Direct=50.00%, AgentGraph=100.00% | exposed development canary；不是 unseen held-out 或 benchmark estimate | 仅问题推理 + 冻结 Wikipedia RetrievalIndex/ReAct 能力 |
+| AIME-2025 Development（AIME 2026 目标适配） | PASS | 2 | 1 | 1 | exact_match: Direct=0.00%, AgentGraph=50.00% | AIME 2025 development canary；不是 AIME 2026 benchmark 成绩 | 推理 + 有界 calculator/Python execution 能力 |
+| HealthBench Professional（reference-judge diagnostic） | PASS | 2 | 0 | 2 | raw_score: Direct=0.2000, AgentGraph=0.2000 | fixed internal validation diagnostic | 临床推理 + 冻结教材语料 MedRAG search 能力 |
+| WebShop | PASS | 2 | 1 | 1 | success: Direct=50.00%, AgentGraph=50.00% | native validation indices 500..627；2-task canary when executed | request-scoped SkillFlow/RAGEN environment ReAct |
+| ALFWorld | PASS | 2 | 2 | 0 | success: Direct=50.00%, AgentGraph=100.00% | fixed validation canary | request-scoped SkillFlow/RAGEN environment ReAct |
+| SWE-bench Regular Dev | FAIL | 0 | 0 | 0 | resolved: Direct=不可测, AgentGraph=不可测 | SWE-bench regular-dev architecture development；Verified 完整保留给最终评测 | detached task-pinned worktree + iterative CodingExecutionAdapter + official Docker harness |
 
-只有存在当前 evidence scope 下的 paired result 与原生 evaluator receipt 时才显示数值；缺失项显示“不可测”，不填 0。AIME 数值来自 AIME-2025 development canary，**不是 AIME 2026 benchmark 成绩**；WebShop v4 只报告当前 native-validation paired receipts。SWE-bench regular-dev 尚无 paired result，不以代理零分替代。
+只有存在当前 evidence scope 下的 paired result 与原生 evaluator receipt 时才显示数值；缺失项显示“不可测”，不填 0。HotpotQA 与 TriviaQA 的数值来自各 2 题、且已反复用于架构开发的 exposed development canary：`2/2` 是该小样本上的描述性结果，**不是 100% held-out accuracy，也不是 benchmark estimate**。AIME 数值来自 AIME-2025 development canary，**不是 AIME 2026 benchmark 成绩**；WebShop v4 只报告当前 native-validation paired receipts。SWE-bench regular-dev 尚无 paired result，不以代理零分替代。
 
 ## Runtime receipts
 
@@ -47,18 +47,20 @@
 
 ## Model capability Canary
 
-| Exact catalog/model ID | Provider | Text | StructuredAction/ReAct | Coding format | Admitted Executor | Receipt |
-|---|---|---:|---:|---:|---:|---|
-| deepseek-v4-flash | vectorengine | PASS | PASS | PASS | YES | `artifacts/model_capability_canary/cheap_fast_20260819.json` |
-| glm-4.5-flash | vectorengine | PASS | PASS | PASS | YES | `artifacts/model_capability_canary/cheap_fast_20260819.json` |
-| gpt-4o-mini | vectorengine | PASS | PASS | PASS | YES | `artifacts/model_capability_canary/cheap_fast_20260819.json` |
-| MiniMax-M2.5 | vectorengine | PASS | PASS | PASS | YES | `artifacts/model_capability_canary/cheap_fast_20260819.json` |
-| MiniMax-M3 | vectorengine | PASS | PASS | PASS | YES | `artifacts/model_capability_canary/cheap_fast_20260819.json` |
-| qwen3.5-9b-local | local-director | PASS | PASS | PASS | YES | `artifacts/model_capability_canary/local_qwen35_9b_nonthinking_20260820.json` |
-| qwen3.5-flash | vectorengine | PASS | PASS | PASS | YES | `artifacts/model_capability_canary/cheap_fast_20260819.json` |
-| grok-4-1-fast-non-reasoning | vectorengine | http_error | http_error | http_error | NO | `artifacts/model_capability_canary/cheap_fast_20260819.json` |
+| Exact catalog/model ID | Provider | Text | StructuredAction/ReAct | Coding format | v1 admitted / metadata | v2 admitted / metadata | Receipt |
+|---|---|---:|---:|---:|---:|---:|---|
+| deepseek-v4-flash | vectorengine | PASS | PASS | PASS | YES / PASS | YES / PASS | `artifacts/model_capability_canary/cheap_fast_20260819.json` |
+| glm-4.5-flash | vectorengine | PASS | PASS | PASS | YES / PASS | YES / PASS | `artifacts/model_capability_canary/cheap_fast_20260819.json` |
+| gpt-4o-mini | vectorengine | PASS | PASS | PASS | YES / PASS | YES / PASS | `artifacts/model_capability_canary/cheap_fast_20260819.json` |
+| MiniMax-M2.5 | vectorengine | PASS | PASS | PASS | YES / PASS | YES / PASS | `artifacts/model_capability_canary/cheap_fast_20260819.json` |
+| MiniMax-M3 | vectorengine | PASS | PASS | PASS | YES / PASS | YES / PASS | `artifacts/model_capability_canary/cheap_fast_20260819.json` |
+| qwen3.5-9b-local | local-director | PASS | PASS | PASS | YES / PENDING | YES / PASS | `artifacts/model_capability_canary/local_qwen35_9b_nonthinking_20260820.json` |
+| qwen3.5-flash | vectorengine | PASS | PASS | PASS | YES / PASS | YES / PASS | `artifacts/model_capability_canary/cheap_fast_20260819.json` |
+| grok-4-1-fast-non-reasoning | vectorengine | http_error | http_error | http_error | NO / PENDING | NO / MISSING | `artifacts/model_capability_canary/cheap_fast_20260819.json` |
 
-- Catalog entries with all three saved canaries：**7/7**
+- 现有 Stable Zero trajectory receipt 绑定的 catalog version：`f8c137ab29a56b2cf54f0472a00736e6e891544a0e7de041d11e31791c180e99`；对应 immutable `model_catalog_multidataset_tool_v1.yaml`。
+- v1 中 canary metadata 与三项 receipt 同时为 PASS：**6/7**。local Qwen 的 v1 metadata 仍是 `pending`，不能用后来的 receipt 追溯改写旧 catalog。
+- future-run v2 中 canary metadata 与三项 receipt 同时为 PASS：**7/7**。v2 只供新 condition/output directory，禁止用于 resume 旧 artifacts。
 - `grok-4-1-fast-non-reasoning` 的三个 probe 均收到 HTTP 429，因此没有纳入 catalog；这不是把失败别名替换成另一个模型。
 - `/v1/models` 与 canary 均未提供通过验证的 Gemini exact model ID，所以 Gemini 显式保持 0，不凭空加入。
 - Flow-Director 仍固定为 local Qwen3.5-9B；表内远端模型只进入 Executor search space。
@@ -77,6 +79,8 @@
 
 ## Protocol audit
 
+- HotpotQA 与 TriviaQA：当前 v3 的两题均为 exposed development canary；这些 task ID 在先前架构诊断与 progressive evaluation artifacts 中重复出现，构成 evaluation contamination，因此不能作为 unseen held-out evidence。模型可见边界仍由 `TaskRecord.question`、AgentGraph execution request 与 recorded upstream artifacts 构成；现有 prompt/trajectory receipt 未显示 `ground_truth` 或 `evaluator_payload` 被注入模型输入。两者必须同时陈述，不能用“没有 prompt leakage”推导出“样本未被开发过程暴露”。详见 `reports/multidataset_stablezero/HOTPOTQA_EVALUATION_LEAKAGE_AUDIT.md`。
+- HotpotQA distractor protocol：题目提供的 passages 本来就包含支持事实，使用这些 passages 作答不属于 Ground Truth 字段泄漏。v3 中观察到的 Atlas DPR Wikipedia 检索来自只读公开语料 `atlas-dpr-wikipedia-psgs-w100`；known-answer preflight 只验证 evaluator，并不进入模型请求。
 - HotpotQA、TriviaQA 与 AIME-2025 development：Direct 与 Tool-capable AgentGraph 分别报告；未把 protocol-separated delta 解释为 architecture causal effect 或 SOTA improvement。
 - HealthBench Professional v2：只报告 openai/simple-evals-compatible **reference-judge diagnostic**；不是私有官方评测服务或 leaderboard 成绩。
 - WebShop v4：只接受 native validation indices 500..627 的原生环境结果；旧 v2 native-test 结果作为 test-contaminated adaptation evidence 排除，v3 仅保留为上下文预算失败诊断。
@@ -140,7 +144,8 @@ COLLABORATION_DIVERSITY_READY = YES
 
 QA_TOOL_REGISTRY_READY = YES
 QA_DATABASE_SELECTION_READY = YES
-QA_TOOL_USE_VALIDATED = YES
+QA_TOOL_EXECUTION_READY = YES
+QA_TOOL_USE_VALIDATED = NO
 
 ALFWORLD_REACT_READY = YES
 WEBSHOP_REACT_READY = YES

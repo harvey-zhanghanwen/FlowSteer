@@ -21,10 +21,10 @@
 
 ## Evidence scope 与协议限制
 
-- Evidence scope：fixed validation canary
+- Evidence scope：exposed development canary；不是 unseen held-out 或 benchmark estimate
 - Protocol：Direct 仅接收问题；AgentGraph 允许使用检索 Tool。两者属于 protocol-separated 条件，差值只作描述性统计。
 
-- 无额外限制记录。
+- 当前 2 题来自已用于架构开发的 development block；结果不能外推为 TriviaQA benchmark accuracy。
 
 ### 明确排除的历史结果
 

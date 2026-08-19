@@ -14,6 +14,8 @@ import json
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
+import yaml
+
 
 ROOT = Path(__file__).resolve().parents[1]
 REPORT_ROOT = ROOT / "reports" / "multidataset_stablezero"
@@ -60,6 +62,11 @@ SPECS = (
         ("exact_match", "token_f1"),
         "闭卷上下文推理 + 冻结 Wikipedia RetrievalIndex/ReAct 能力",
         "Direct 使用给定上下文；AgentGraph 允许使用检索 Tool。两者属于 protocol-separated 条件，差值只作描述性统计。",
+        "exposed development canary；不是 unseen held-out 或 benchmark estimate",
+        (
+            "当前 2 题曾进入多轮架构诊断；2/2 只记录任务行为与 Stable Zero 链完整性，不能报告为 100% benchmark accuracy。",
+            "HotpotQA distractor protocol 的给定 passages 正常包含回答所需事实；这与 Ground Truth 字段进入模型 prompt 不同。",
+        ),
         excluded_evidence=(
             "v1 exact-schema 前的自然策略 canary 仅保留为历史结果；v2 因 Director schema/tool_id 边界含混导致 1/2 max_rounds，仅作为 v3 修复前失败诊断。",
         ),
@@ -74,6 +81,10 @@ SPECS = (
         ("exact_match", "token_f1"),
         "仅问题推理 + 冻结 Wikipedia RetrievalIndex/ReAct 能力",
         "Direct 仅接收问题；AgentGraph 允许使用检索 Tool。两者属于 protocol-separated 条件，差值只作描述性统计。",
+        "exposed development canary；不是 unseen held-out 或 benchmark estimate",
+        (
+            "当前 2 题来自已用于架构开发的 development block；结果不能外推为 TriviaQA benchmark accuracy。",
+        ),
         excluded_evidence=(
             "v1 exact-schema 前的自然策略 canary 只保留为历史结果，不进入当前 v3 指标。",
         ),
@@ -1747,13 +1758,37 @@ def _model_canary_section() -> tuple[str, dict[str, Any]]:
         "artifacts/model_capability_canary/"
         "local_qwen35_9b_nonthinking_20260820.json"
     )
-    catalog_path = ROOT / "config/model_catalog_multidataset_tool_v1.yaml"
-    catalog_ids: set[str] = set()
-    if catalog_path.is_file():
-        for line in catalog_path.read_text(encoding="utf-8").splitlines():
-            stripped = line.strip()
-            if stripped.startswith("- model_id:"):
-                catalog_ids.add(stripped.split(":", 1)[1].strip().strip('"\''))
+    catalog_paths = {
+        "receipt-bound v1": ROOT / "config/model_catalog_multidataset_tool_v1.yaml",
+        "future-run v2": ROOT / "config/model_catalog_multidataset_tool_v2.yaml",
+    }
+
+    def catalog_entries(path: Path) -> dict[str, Mapping[str, Any]]:
+        if not path.is_file():
+            return {}
+        payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+        raw = payload.get("models", ()) if isinstance(payload, Mapping) else ()
+        if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
+            return {}
+        return {
+            str(item.get("model_id")): item
+            for item in raw
+            if isinstance(item, Mapping) and str(item.get("model_id", "")).strip()
+        }
+
+    catalogs = {name: catalog_entries(path) for name, path in catalog_paths.items()}
+    v1_ids = set(catalogs["receipt-bound v1"])
+    v2_ids = set(catalogs["future-run v2"])
+    receipt_catalog_versions = sorted(
+        {
+            str(trajectory["versions"]["model_catalog"])
+            for spec in SPECS
+            if spec.trajectory_path
+            for trajectory in _load_jsonl(ROOT / spec.trajectory_path)
+            if isinstance(trajectory.get("versions"), Mapping)
+            and trajectory["versions"].get("model_catalog")
+        }
+    )
 
     probes: dict[str, dict[str, str]] = {}
     for relative, provider in ((remote_path, "vectorengine"), (local_path, "local-director")):
@@ -1774,36 +1809,61 @@ def _model_canary_section() -> tuple[str, dict[str, Any]]:
                 else str(probe.get("status", "FAIL"))
             )
 
-    order = sorted(probes, key=lambda item: (item not in catalog_ids, item.casefold()))
+    order = sorted(
+        probes,
+        key=lambda item: (item not in (v1_ids | v2_ids), item.casefold()),
+    )
     rows = []
     fully_validated = 0
-    admitted_validated = 0
+    v1_metadata_validated = 0
+    v2_metadata_validated = 0
     for model_id in order:
         item = probes[model_id]
         complete = all(item.get(capability) == "PASS" for capability in ("text", "react", "coding"))
-        admitted = model_id in catalog_ids
+        v1_entry = catalogs["receipt-bound v1"].get(model_id, {})
+        v2_entry = catalogs["future-run v2"].get(model_id, {})
+        v1_metadata = v1_entry.get("metadata", {}) if isinstance(v1_entry, Mapping) else {}
+        v2_metadata = v2_entry.get("metadata", {}) if isinstance(v2_entry, Mapping) else {}
+        v1_passed = bool(
+            isinstance(v1_metadata, Mapping)
+            and str(v1_metadata.get("capability_canary", "")).startswith("passed_")
+        )
+        v2_passed = bool(
+            isinstance(v2_metadata, Mapping)
+            and str(v2_metadata.get("capability_canary", "")).startswith("passed_")
+        )
         fully_validated += int(complete)
-        admitted_validated += int(complete and admitted)
+        v1_metadata_validated += int(complete and model_id in v1_ids and v1_passed)
+        v2_metadata_validated += int(complete and model_id in v2_ids and v2_passed)
         rows.append(
             f"| {model_id} | {item.get('provider')} | {item.get('text', 'missing')} | "
             f"{item.get('react', 'missing')} | {item.get('coding', 'missing')} | "
-            f"{'YES' if admitted else 'NO'} | `{item.get('source')}` |"
+            f"{'YES' if model_id in v1_ids else 'NO'} / "
+            f"{'PASS' if v1_passed else 'PENDING'} | "
+            f"{'YES' if model_id in v2_ids else 'NO'} / "
+            f"{'PASS' if v2_passed else 'MISSING'} | `{item.get('source')}` |"
         )
+    receipt_catalog_text = ", ".join(receipt_catalog_versions) or "missing"
     text = f"""## Model capability Canary
 
-| Exact catalog/model ID | Provider | Text | StructuredAction/ReAct | Coding format | Admitted Executor | Receipt |
-|---|---|---:|---:|---:|---:|---|
-{chr(10).join(rows) or '| missing | missing | missing | missing | missing | NO | missing |'}
+| Exact catalog/model ID | Provider | Text | StructuredAction/ReAct | Coding format | v1 admitted / metadata | v2 admitted / metadata | Receipt |
+|---|---|---:|---:|---:|---:|---:|---|
+{chr(10).join(rows) or '| missing | missing | missing | missing | missing | NO / MISSING | NO / MISSING | missing |'}
 
-- Catalog entries with all three saved canaries：**{admitted_validated}/{len(catalog_ids)}**
+- 现有 Stable Zero trajectory receipt 绑定的 catalog version：`{receipt_catalog_text}`；对应 immutable `model_catalog_multidataset_tool_v1.yaml`。
+- v1 中 canary metadata 与三项 receipt 同时为 PASS：**{v1_metadata_validated}/{len(v1_ids)}**。local Qwen 的 v1 metadata 仍是 `pending`，不能用后来的 receipt 追溯改写旧 catalog。
+- future-run v2 中 canary metadata 与三项 receipt 同时为 PASS：**{v2_metadata_validated}/{len(v2_ids)}**。v2 只供新 condition/output directory，禁止用于 resume 旧 artifacts。
 - `grok-4-1-fast-non-reasoning` 的三个 probe 均收到 HTTP 429，因此没有纳入 catalog；这不是把失败别名替换成另一个模型。
 - `/v1/models` 与 canary 均未提供通过验证的 Gemini exact model ID，所以 Gemini 显式保持 0，不凭空加入。
 - Flow-Director 仍固定为 local Qwen3.5-9B；表内远端模型只进入 Executor search space。
 """
     return text, {
-        "catalog_size": len(catalog_ids),
-        "admitted_validated": admitted_validated,
+        "catalog_size": len(v1_ids),
+        "admitted_validated": v1_metadata_validated,
+        "future_catalog_size": len(v2_ids),
+        "future_admitted_validated": v2_metadata_validated,
         "fully_validated": fully_validated,
+        "receipt_catalog_versions": receipt_catalog_versions,
     }
 
 
@@ -1928,7 +1988,8 @@ def _total_report(summaries: Sequence[Mapping[str, Any]]) -> str:
         ) or "不可测"
         table_lines.append(
             f"| {item['dataset']} | {item['stable_zero']} | {item['n']} | "
-            f"{item['correct']} | {item['wrong']} | {metric_text} | {item['capability']} |"
+            f"{item['correct']} | {item['wrong']} | {metric_text} | "
+            f"{item.get('evidence_scope', '未声明')} | {item['capability']} |"
         )
     skill_text, skill_state = _skill_section()
     model_canary_text, _model_canary_state = _model_canary_section()
@@ -2020,7 +2081,7 @@ def _total_report(summaries: Sequence[Mapping[str, Any]]) -> str:
     alfworld = by_key.get("alfworld", {})
     webshop_measured = int(webshop.get("n", 0) or 0) > 0
     swebench_measured = int(swebench.get("n", 0) or 0) > 0
-    qa_tool_use_validated = any(
+    qa_tool_execution_ready = any(
         int(by_key.get(key, {}).get("tool_success", 0) or 0) > 0
         for key in (
             "hotpotqa",
@@ -2029,6 +2090,10 @@ def _total_report(summaries: Sequence[Mapping[str, Any]]) -> str:
             "healthbench_professional",
         )
     )
+    # Natural successful calls prove the Tool execution path, not counterfactual
+    # usefulness.  The current evidence stores have no same-prefix Tool ON/OFF
+    # paired intervention, so the broader use-validation claim remains false.
+    qa_tool_use_validated = False
     webshop_react_ready = (
         webshop.get("stable_zero") == "PASS"
         and int(webshop.get("environment_receipts", 0) or 0) > 0
@@ -2091,11 +2156,11 @@ def _total_report(summaries: Sequence[Mapping[str, Any]]) -> str:
 
 ## Stable Zero 结果
 
-| Dataset | Stable Zero | n | 满分/成功 | 错误 | 原生指标 | 能力边界 |
-|---|---:|---:|---:|---:|---|---|
+| Dataset | Stable Zero | n | 满分/成功 | 错误 | 原生指标 | Evidence scope | 能力边界 |
+|---|---:|---:|---:|---:|---|---|---|
 {chr(10).join(table_lines)}
 
-只有存在当前 evidence scope 下的 paired result 与原生 evaluator receipt 时才显示数值；缺失项显示“不可测”，不填 0。AIME 数值来自 AIME-2025 development canary，**不是 AIME 2026 benchmark 成绩**；{webshop_result_note}{swebench_result_note}
+只有存在当前 evidence scope 下的 paired result 与原生 evaluator receipt 时才显示数值；缺失项显示“不可测”，不填 0。HotpotQA 与 TriviaQA 的数值来自各 2 题、且已反复用于架构开发的 exposed development canary：`2/2` 是该小样本上的描述性结果，**不是 100% held-out accuracy，也不是 benchmark estimate**。AIME 数值来自 AIME-2025 development canary，**不是 AIME 2026 benchmark 成绩**；{webshop_result_note}{swebench_result_note}
 
 ## Runtime receipts
 
@@ -2125,6 +2190,8 @@ def _total_report(summaries: Sequence[Mapping[str, Any]]) -> str:
 
 ## Protocol audit
 
+- HotpotQA 与 TriviaQA：当前 v3 的两题均为 exposed development canary；这些 task ID 在先前架构诊断与 progressive evaluation artifacts 中重复出现，构成 evaluation contamination，因此不能作为 unseen held-out evidence。模型可见边界仍由 `TaskRecord.question`、AgentGraph execution request 与 recorded upstream artifacts 构成；现有 prompt/trajectory receipt 未显示 `ground_truth` 或 `evaluator_payload` 被注入模型输入。两者必须同时陈述，不能用“没有 prompt leakage”推导出“样本未被开发过程暴露”。详见 `reports/multidataset_stablezero/HOTPOTQA_EVALUATION_LEAKAGE_AUDIT.md`。
+- HotpotQA distractor protocol：题目提供的 passages 本来就包含支持事实，使用这些 passages 作答不属于 Ground Truth 字段泄漏。v3 中观察到的 Atlas DPR Wikipedia 检索来自只读公开语料 `atlas-dpr-wikipedia-psgs-w100`；known-answer preflight 只验证 evaluator，并不进入模型请求。
 - HotpotQA、TriviaQA 与 AIME-2025 development：Direct 与 Tool-capable AgentGraph 分别报告；未把 protocol-separated delta 解释为 architecture causal effect 或 SOTA improvement。
 - HealthBench Professional v2：只报告 openai/simple-evals-compatible **reference-judge diagnostic**；不是私有官方评测服务或 leaderboard 成绩。
 - WebShop v4：只接受 native validation indices 500..627 的原生环境结果；旧 v2 native-test 结果作为 test-contaminated adaptation evidence 排除，v3 仅保留为上下文预算失败诊断。
@@ -2168,6 +2235,7 @@ COLLABORATION_DIVERSITY_READY = YES
 
 QA_TOOL_REGISTRY_READY = YES
 QA_DATABASE_SELECTION_READY = YES
+QA_TOOL_EXECUTION_READY = {'YES' if qa_tool_execution_ready else 'NO'}
 QA_TOOL_USE_VALIDATED = {'YES' if qa_tool_use_validated else 'NO'}
 
 ALFWORLD_REACT_READY = {'YES' if alfworld_react_ready else 'NO'}
