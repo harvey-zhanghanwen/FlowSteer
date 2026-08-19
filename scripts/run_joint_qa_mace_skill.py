@@ -24,7 +24,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 from copy import deepcopy
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 import json
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -50,7 +50,12 @@ from src.interactive.exploration.skill_experiment import (
 )
 from src.interactive.persistence import EvidenceStore, stable_id
 from src.interactive.qa_retrieval import augment_task_with_retrieval
-from src.interactive.records import ProbeRecord, SelectionReceipt, TaskRecord, TrajectoryRecord
+from src.interactive.records import (
+    ProbeRecord,
+    SelectionReceipt,
+    TaskRecord,
+    TrajectoryRecord,
+)
 from src.interactive.skills import (
     SkillEvidencePipeline,
     SkillGateConfig,
@@ -263,6 +268,18 @@ ROUND5_CANDIDATE_ACTIONS: Mapping[str, Mapping[str, Any]] = {
 }
 
 
+# Round 7 reuses two previously predeclared semantic hypotheses verbatim and
+# changes only their decision-time visibility boundary.  Grounding is queried
+# while the Canvas is under construction; terminal answer handoff is queried
+# only after a complete graph exists and immediately before FINISH.
+ROUND7_CANDIDATE_ACTIONS: Mapping[str, Mapping[str, Any]] = {
+    "subject_relation_answer_type_grounding": deepcopy(
+        ROUND2_CANDIDATE_ACTIONS["subject_relation_answer_type_grounding"]
+    ),
+    "exact_answer_handoff": deepcopy(ROUND4_CANDIDATE_ACTIONS["exact_answer_handoff"]),
+}
+
+
 @dataclass(frozen=True)
 class SkillEvidenceRoundSpec:
     """Immutable coordinates for one bounded Skill evidence epoch."""
@@ -284,6 +301,7 @@ class SkillEvidenceRoundSpec:
     confirmation_source: str = "skill_confirmation"
     prompt_version: str = PROMPT_VERSION
     tool_version: str = TOOL_VERSION
+    candidate_graph_stages: Mapping[str, str] = field(default_factory=dict)
 
     @property
     def output_root(self) -> Path:
@@ -453,6 +471,35 @@ EPOCH6_SPEC = SkillEvidenceRoundSpec(
     tool_version="agentgraph.add-subgraph-nullable-output+skillflow-public-retrieval.v2",
 )
 
+EPOCH7_SPEC = SkillEvidenceRoundSpec(
+    round_id=7,
+    experiment_version="jointqa.mace-skill-evidence.epoch7.v1",
+    candidate_actions=ROUND7_CANDIDATE_ACTIONS,
+    discovery_start=60,
+    discovery_stop=63,
+    natural_index=63,
+    confirmation_start=0,
+    confirmation_stop=40,
+    seed=20260825,
+    posterior_version="jointqa.bayesian-linear.progressive-subgraph.epoch8.v1",
+    skill_library_version="jointqa.skill-library.progressive.epoch18.v1",
+    discovery_epoch=18,
+    validation_epoch=19,
+    activation_epoch=20,
+    confirmation_source="skill_confirmation_round7",
+    prompt_version=(
+        "agentgraph.director.progressive-subgraph.stage-conditioned-skill.v3"
+    ),
+    tool_version=(
+        "agentgraph.add-subgraph-nullable-output+"
+        "skillflow-stage-conditioned-forced-probe.v3"
+    ),
+    candidate_graph_stages={
+        "subject_relation_answer_type_grounding": "construction",
+        "exact_answer_handoff": "before_final_answer",
+    },
+)
+
 ROUND_SPECS: Mapping[int, SkillEvidenceRoundSpec] = {
     0: EPOCH0_SPEC,
     1: EPOCH1_SPEC,
@@ -461,6 +508,7 @@ ROUND_SPECS: Mapping[int, SkillEvidenceRoundSpec] = {
     4: EPOCH4_SPEC,
     5: EPOCH5_SPEC,
     6: EPOCH6_SPEC,
+    7: EPOCH7_SPEC,
 }
 
 
@@ -509,10 +557,28 @@ def _require_partition(task: TaskRecord, expected: str) -> None:
         )
 
 
-def _condition(dataset: str) -> dict[str, Any]:
+def _condition(dataset: str, graph_stage: str = "*") -> dict[str, Any]:
     if dataset not in DATASETS:
         raise ValueError(f"unsupported dataset: {dataset}")
-    return {"task_family": dataset, "graph_stage": "*", "tags": []}
+    if graph_stage not in {
+        "*",
+        "empty_graph",
+        "construction",
+        "before_final_answer",
+    }:
+        raise ValueError(f"unsupported graph stage: {graph_stage}")
+    return {"task_family": dataset, "graph_stage": graph_stage, "tags": []}
+
+
+def _candidate_condition(
+    dataset: str,
+    candidate_id: str,
+    spec: SkillEvidenceRoundSpec = EPOCH0_SPEC,
+) -> dict[str, Any]:
+    if candidate_id not in spec.candidate_actions:
+        raise ValueError(f"unknown candidate action: {candidate_id}")
+    graph_stage = spec.candidate_graph_stages.get(candidate_id, "*")
+    return _condition(dataset, graph_stage)
 
 
 def _prompt_condition(
@@ -524,7 +590,7 @@ def _prompt_condition(
     return {
         "condition_id": candidate_id,
         "application_mode": "forced_probe_condition",
-        "condition": _condition(dataset),
+        "condition": _candidate_condition(dataset, candidate_id, spec),
         "action": action,
         "content": (
             "Predeclared paired-intervention condition. This is an optional, "
@@ -544,15 +610,10 @@ def _selected_tasks(
 ]:
     train_path = ROOT / "data/joint_qa_v2/train.jsonl"
     confirmation_path = ROOT / "data/joint_qa_v2/skill_confirmation.jsonl"
-    round4_confirmation_path = (
-        ROOT / "data/joint_qa_v2/skill_confirmation_round4.jsonl"
-    )
-    round5_confirmation_path = (
-        ROOT / "data/joint_qa_v2/skill_confirmation_round5.jsonl"
-    )
-    round6_confirmation_path = (
-        ROOT / "data/joint_qa_v2/skill_confirmation_round6.jsonl"
-    )
+    round4_confirmation_path = ROOT / "data/joint_qa_v2/skill_confirmation_round4.jsonl"
+    round5_confirmation_path = ROOT / "data/joint_qa_v2/skill_confirmation_round5.jsonl"
+    round6_confirmation_path = ROOT / "data/joint_qa_v2/skill_confirmation_round6.jsonl"
+    round7_confirmation_path = ROOT / "data/joint_qa_v2/skill_confirmation_round7.jsonl"
     development_path = ROOT / "data/joint_qa_v2/development.jsonl"
     train = tuple(iter_task_records(train_path, expected_split="train"))
     validation_sources = {
@@ -563,19 +624,16 @@ def _selected_tasks(
             iter_task_records(development_path, expected_split="validation")
         ),
         "skill_confirmation_round4": tuple(
-            iter_task_records(
-                round4_confirmation_path, expected_split="validation"
-            )
+            iter_task_records(round4_confirmation_path, expected_split="validation")
         ),
         "skill_confirmation_round5": tuple(
-            iter_task_records(
-                round5_confirmation_path, expected_split="validation"
-            )
+            iter_task_records(round5_confirmation_path, expected_split="validation")
         ),
         "skill_confirmation_round6": tuple(
-            iter_task_records(
-                round6_confirmation_path, expected_split="validation"
-            )
+            iter_task_records(round6_confirmation_path, expected_split="validation")
+        ),
+        "skill_confirmation_round7": tuple(
+            iter_task_records(round7_confirmation_path, expected_split="validation")
         ),
     }
     if spec.confirmation_source not in validation_sources:
@@ -603,9 +661,7 @@ def _selected_tasks(
             or len(dataset_validation) < spec.confirmation_stop
         ):
             raise RuntimeError(f"insufficient aligned tasks for {dataset}")
-        discovery[dataset] = dataset_train[
-            spec.discovery_start : spec.discovery_stop
-        ]
+        discovery[dataset] = dataset_train[spec.discovery_start : spec.discovery_stop]
         natural[dataset] = dataset_train[spec.natural_index]
         confirmation[dataset] = dataset_validation[
             spec.confirmation_start : spec.confirmation_stop
@@ -624,7 +680,9 @@ def _selected_tasks(
         )
     ]
     if len(all_ids) != len(set(all_ids)):
-        raise RuntimeError("discovery, natural-candidate, and confirmation tasks overlap")
+        raise RuntimeError(
+            "discovery, natural-candidate, and confirmation tasks overlap"
+        )
 
     # Every later evidence epoch is disjoint from all prior evidence, held-out
     # development and test, and the dataset-specific task positions reserved by
@@ -690,8 +748,7 @@ def _selected_tasks(
         if forbidden:
             raise RuntimeError(
                 f"round{spec.round_id} evidence tasks overlap prior evidence, "
-                "held-out, or reserved training tasks: "
-                + ", ".join(sorted(forbidden))
+                "held-out, or reserved training tasks: " + ", ".join(sorted(forbidden))
             )
     return discovery, confirmation, natural
 
@@ -702,7 +759,9 @@ def _augment_trivia(
     natural: dict[str, TaskRecord],
     spec: SkillEvidenceRoundSpec = EPOCH0_SPEC,
 ) -> None:
-    config = load_yaml(ROOT / "config/evaluation_joint_qa_progressive_step0_triviaqa.yaml")
+    config = load_yaml(
+        ROOT / "config/evaluation_joint_qa_progressive_step0_triviaqa.yaml"
+    )
     ordered = (
         *discovery["triviaqa"],
         natural["triviaqa"],
@@ -714,7 +773,9 @@ def _augment_trivia(
         task.task_id: augment_task_with_retrieval(task, receipts[task.task_id])
         for task in ordered
     }
-    discovery["triviaqa"] = tuple(augmented[task.task_id] for task in discovery["triviaqa"])
+    discovery["triviaqa"] = tuple(
+        augmented[task.task_id] for task in discovery["triviaqa"]
+    )
     confirmation["triviaqa"] = tuple(
         augmented[task.task_id] for task in confirmation["triviaqa"]
     )
@@ -725,6 +786,8 @@ def _backend(spec: SkillEvidenceRoundSpec = EPOCH0_SPEC) -> LiveSmokeBackend:
     config = deepcopy(load_yaml(EVALUATION_CONFIG))
     config["storage"]["root"] = str(spec.evidence_root)
     config["skills"]["enabled"] = False
+    config["experiment"]["prompt_version"] = spec.prompt_version
+    config["experiment"]["tool_version"] = spec.tool_version
     config["experiment"]["condition_id"] = (
         "joint_qa_progressive_skill_epoch0"
         if spec.round_id == 0
@@ -766,7 +829,9 @@ def _executor_versions(backend: LiveSmokeBackend) -> dict[str, str]:
     }
 
 
-def _resume_trajectories(store: EvidenceStore) -> dict[tuple[str, str], TrajectoryRecord]:
+def _resume_trajectories(
+    store: EvidenceStore,
+) -> dict[tuple[str, str], TrajectoryRecord]:
     result: dict[tuple[str, str], TrajectoryRecord] = {}
     for payload in store.trajectories.payloads():
         record = TrajectoryRecord.from_dict(payload)
@@ -815,6 +880,7 @@ async def _arm(
     condition_id: str,
     schedule_purpose: str,
     prompt_priors: Sequence[Mapping[str, Any]],
+    stage_conditioned_prompt_prior: Mapping[str, Any] | None = None,
     forced_probe: bool,
     anchor: int,
     spec: SkillEvidenceRoundSpec = EPOCH0_SPEC,
@@ -834,6 +900,7 @@ async def _arm(
         condition_id=condition_id,
         sampling_schedule_purpose=schedule_purpose,
         prompt_priors=prompt_priors,
+        stage_conditioned_prompt_prior=stage_conditioned_prompt_prior,
         forced_probe=forced_probe,
         condition_satisfied=True,
         sampling_anchor_ordinal=anchor,
@@ -850,7 +917,9 @@ def _valid_outcome(record: TrajectoryRecord) -> None:
     if record.evaluation.evaluator_version != record.versions.evaluator:
         raise RuntimeError(f"evaluator/version mismatch: {record.trajectory_id}")
     if record.api_fallback_used or record.manual_repair_used:
-        raise RuntimeError(f"fallback/manual repair in paired evidence: {record.trajectory_id}")
+        raise RuntimeError(
+            f"fallback/manual repair in paired evidence: {record.trajectory_id}"
+        )
 
 
 def _empty_snapshot_id(task: TaskRecord, stage: str, anchor: int) -> str:
@@ -892,9 +961,16 @@ async def _paired_probe(
         "incumbent": f"jointqa_skill_{stage}:incumbent",
         "candidate": f"jointqa_skill_{stage}:candidate:{candidate_id}",
     }
+    candidate_prior = _prompt_condition(dataset, candidate_id, spec)
+    candidate_stage = candidate_prior["condition"]["graph_stage"]
+    stage_conditioned_candidate = candidate_stage != "*"
     priors = {
         "incumbent": (),
-        "candidate": (_prompt_condition(dataset, candidate_id, spec),),
+        "candidate": () if stage_conditioned_candidate else (candidate_prior,),
+    }
+    stage_conditioned_priors = {
+        "incumbent": None,
+        "candidate": candidate_prior if stage_conditioned_candidate else None,
     }
     observed: dict[str, TrajectoryRecord] = {}
     for arm_name in (order.presented_first, order.presented_second):
@@ -905,6 +981,7 @@ async def _paired_probe(
             condition_id=condition_ids[arm_name],
             schedule_purpose=schedule,
             prompt_priors=priors[arm_name],
+            stage_conditioned_prompt_prior=stage_conditioned_priors[arm_name],
             forced_probe=True,
             anchor=anchor,
             spec=spec,
@@ -960,7 +1037,7 @@ async def _paired_probe(
         )
         evidence = SkillProbeEvidence(
             probe=probe,
-            condition=_condition(dataset),
+            condition=_candidate_condition(dataset, candidate_id, spec),
             runtime_version=RUNTIME_VERSION,
             model_catalog_version=backend.model_catalog_version,
         )
@@ -1014,11 +1091,19 @@ async def _paired_probe(
         "incumbent_token_f1": float(incumbent.evaluation.reward),
         "candidate_token_f1": float(candidate.evaluation.reward),
         "token_f1_effect": probe.paired_effect,
-        "condition": _condition(dataset),
+        "condition": _candidate_condition(dataset, candidate_id, spec),
         "candidate_action": dict(spec.candidate_actions[candidate_id]),
-        "estimand": "skill_prompt_prior_visibility_intent_to_treat_effect",
+        "estimand": (
+            "stage_conditioned_skill_prompt_prior_assignment_"
+            "intent_to_treat_effect_on_official_token_f1"
+            if spec.candidate_graph_stages
+            else "skill_prompt_prior_visibility_intent_to_treat_effect"
+        ),
         "treatment_assigned": True,
-        "prompt_prior_visible": True,
+        "prompt_prior_visible": bool(candidate.condition_satisfied),
+        "prompt_prior_exposure_rounds": list(
+            backend._prompt_prior_exposure_rounds(candidate, candidate_id)
+        ),
         "director_adoption_verified": False,
         "condition_ids": condition_ids,
         "branch_order": [order.presented_first, order.presented_second],
@@ -1039,7 +1124,7 @@ def _proposal(
 ) -> StructuredSkillCandidate:
     return StructuredSkillCandidate(
         skill_id=f"jointqa.{dataset}.{candidate_id}",
-        condition=_condition(dataset),
+        condition=_candidate_condition(dataset, candidate_id, spec),
         action=dict(spec.candidate_actions[candidate_id]),
         baseline_id="frozen_progressive_step0_no_skill",
         baseline_action=dict(BASELINE_ACTION),
@@ -1107,10 +1192,16 @@ def _manifest(
                 else []
             ),
             *(
-                [
-                    "reports/joint_qa_progressive/skill_epoch_000005/abort_report.json"
-                ]
+                ["reports/joint_qa_progressive/skill_epoch_000005/abort_report.json"]
                 if spec.round_id >= 6
+                else []
+            ),
+            *(
+                [
+                    "reports/joint_qa_progressive/skill_epoch_000006/"
+                    "publication_results.json"
+                ]
+                if spec.round_id >= 7
                 else []
             ),
             "reports/hotpotqa_multiagent_skill",
@@ -1137,18 +1228,40 @@ def _manifest(
         "causal_estimand": "Skill prompt-prior visibility intent-to-treat effect",
         "not_a_prefix_topology_intervention": True,
         "forced_probe_excluded_from_grpo_and_benchmark": True,
-        "natural_candidate_tasks": {
-            key: task.task_id for key, task in natural.items()
-        },
+        "natural_candidate_tasks": {key: task.task_id for key, task in natural.items()},
         "discovery_tasks": {
-            key: [task.task_id for task in values]
-            for key, values in discovery.items()
+            key: [task.task_id for task in values] for key, values in discovery.items()
         },
         "confirmation_tasks": {
             key: [task.task_id for task in values]
             for key, values in confirmation.items()
         },
     }
+
+    if spec.candidate_graph_stages:
+        manifest.update(
+            {
+                "candidate_conditions": {
+                    dataset: {
+                        candidate_id: _candidate_condition(
+                            dataset,
+                            candidate_id,
+                            spec,
+                        )
+                        for candidate_id in spec.candidate_actions
+                    }
+                    for dataset in DATASETS
+                },
+                "intervention_scope": (
+                    "candidate-specific graph-stage prompt-prior assignment "
+                    "from a shared empty-Canvas snapshot"
+                ),
+                "causal_estimand": (
+                    "Stage-conditioned Skill prompt-prior assignment "
+                    "intent-to-treat effect"
+                ),
+            }
+        )
 
     # Epoch0 remains serialization-compatible with the already persisted
     # protocol.  Later rounds add explicit coordinates and the scope boundary
@@ -1179,10 +1292,19 @@ def _manifest(
                     "verified_by_this_protocol": False,
                     "requires_independent_evaluation": True,
                     "reason": (
-                        "The paired intervention estimates full-trajectory Skill "
-                        "prompt-prior visibility intent-to-treat effect from an "
-                        "empty Canvas; terminal answer F1 does not verify Director "
-                        "adoption of parallel branches or semantic fan-in."
+                        (
+                            "The paired intervention estimates graph-stage-conditioned "
+                            "Skill prompt-prior assignment intent-to-treat effect from "
+                            "an empty Canvas; terminal answer F1 does not verify "
+                            "Director adoption of parallel branches or semantic fan-in."
+                        )
+                        if spec.candidate_graph_stages
+                        else (
+                            "The paired intervention estimates full-trajectory Skill "
+                            "prompt-prior visibility intent-to-treat effect from an "
+                            "empty Canvas; terminal answer F1 does not verify Director "
+                            "adoption of parallel branches or semantic fan-in."
+                        )
                     ),
                 },
             }
@@ -1209,6 +1331,8 @@ def _guard_output_identity(
         "natural_candidate_tasks",
         "confirmation_tasks",
     )
+    if spec.candidate_graph_stages:
+        identity_keys += ("candidate_conditions",)
     roots = [(spec.output_root, spec.manifest_path)]
     if spec.round_id > 0:
         roots.append((spec.report_root, spec.report_root / "experiment_manifest.json"))
@@ -1376,10 +1500,7 @@ async def run(*, prepare_only: bool = False, round_id: int = 0) -> dict[str, Any
                 selected_id,
                 stage="discovery",
                 anchor=(
-                    spec.anchor_offset
-                    + 3000
-                    + cycle * len(DATASETS)
-                    + dataset_index
+                    spec.anchor_offset + 3000 + cycle * len(DATASETS) + dataset_index
                 ),
                 order_rng=order_rng,
                 sampling_probability=sampling_probability,
@@ -1402,14 +1523,14 @@ async def run(*, prepare_only: bool = False, round_id: int = 0) -> dict[str, Any
         policy_version=POLICY_VERSION,
     )
     _append_posterior_once(backend.evidence_store, posterior)
-    selected_candidates = {
-        dataset: scheduler.exploit(dataset) for dataset in DATASETS
-    }
+    selected_candidates = {dataset: scheduler.exploit(dataset) for dataset in DATASETS}
     predicted = {
         dataset: {
             "candidate_id": selected_candidates[dataset],
             "mean": scheduler.predict(dataset, selected_candidates[dataset])[0],
-            "epistemic_std": scheduler.predict(dataset, selected_candidates[dataset])[1],
+            "epistemic_std": scheduler.predict(dataset, selected_candidates[dataset])[
+                1
+            ],
         }
         for dataset in DATASETS
     }
@@ -1470,10 +1591,7 @@ async def run(*, prepare_only: bool = False, round_id: int = 0) -> dict[str, Any
                 selected_candidates[dataset],
                 stage="confirmation",
                 anchor=(
-                    spec.anchor_offset
-                    + 4000
-                    + DATASETS.index(dataset) * 100
-                    + index
+                    spec.anchor_offset + 4000 + DATASETS.index(dataset) * 100 + index
                 ),
                 order_rng=np.random.default_rng(
                     spec.seed + DATASETS.index(dataset) * 100 + index
@@ -1488,7 +1606,10 @@ async def run(*, prepare_only: bool = False, round_id: int = 0) -> dict[str, Any
         for index, task in enumerate(confirmation_tasks[dataset])
     ]
     confirmation_results = await asyncio.gather(
-        *(confirm_one(dataset, index, task) for dataset, index, task in confirmation_jobs)
+        *(
+            confirm_one(dataset, index, task)
+            for dataset, index, task in confirmation_jobs
+        )
     )
     confirmation_evidence: dict[str, list[SkillProbeEvidence]] = {
         dataset: [] for dataset in DATASETS
@@ -1556,9 +1677,7 @@ async def run(*, prepare_only: bool = False, round_id: int = 0) -> dict[str, Any
             for dataset, value in publications.items()
             if value["skill"]["status"] == SkillStatus.ACTIVE.value
         ],
-        "discovery_pair_count": sum(
-            row["stage"] == "discovery" for row in pair_rows
-        ),
+        "discovery_pair_count": sum(row["stage"] == "discovery" for row in pair_rows),
         "confirmation_pair_count": sum(
             row["stage"] == "confirmation" for row in pair_rows
         ),
@@ -1579,8 +1698,16 @@ async def run(*, prepare_only: bool = False, round_id: int = 0) -> dict[str, Any
                     "zero_based_stop_exclusive": True,
                 },
                 "causal_estimand": (
-                    "Skill prompt-prior visibility intent-to-treat effect on "
-                    "official answer token F1 from a shared empty Canvas"
+                    (
+                        "Stage-conditioned Skill prompt-prior assignment "
+                        "intent-to-treat effect on official answer token F1 "
+                        "from a shared empty Canvas"
+                    )
+                    if spec.candidate_graph_stages
+                    else (
+                        "Skill prompt-prior visibility intent-to-treat effect on "
+                        "official answer token F1 from a shared empty Canvas"
+                    )
                 ),
                 "topology_adoption_acceptance": {
                     "verified_by_this_protocol": False,

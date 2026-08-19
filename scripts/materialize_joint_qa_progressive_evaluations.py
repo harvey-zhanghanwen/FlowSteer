@@ -41,10 +41,10 @@ from src.interactive.skills import SkillStatus, SkillStore
 DATASETS = ("hotpotqa", "triviaqa")
 DEFAULT_PUBLICATION = (
     PROJECT_ROOT
-    / "artifacts/joint_qa_progressive/skill_epoch_000000/publication_results.json"
+    / "artifacts/joint_qa_progressive/skill_epoch_000007/publication_results.json"
 )
 DEFAULT_SKILL_STORE = (
-    PROJECT_ROOT / "artifacts/joint_qa_progressive/skill_epoch_000000/skills.json"
+    PROJECT_ROOT / "artifacts/joint_qa_progressive/skill_epoch_000007/skills.json"
 )
 DEFAULT_TRAINING_MANIFEST = (
     PROJECT_ROOT
@@ -59,6 +59,10 @@ DEFAULT_SKILL_ON_TEMPLATES = {
     / f"config/evaluation_joint_qa_progressive_step0_skill_on_{dataset}.yaml"
     for dataset in DATASETS
 }
+DEFAULT_NO_SKILL_TEMPLATES = {
+    dataset: PROJECT_ROOT / f"config/evaluation_joint_qa_progressive_step0_{dataset}.yaml"
+    for dataset in DATASETS
+}
 DEFAULT_STEP1_TEMPLATES = {
     dataset: PROJECT_ROOT
     / f"config/evaluation_joint_qa_progressive_step1_skill_off_{dataset}.yaml"
@@ -67,6 +71,14 @@ DEFAULT_STEP1_TEMPLATES = {
 DEFAULT_SKILL_ON_OUTPUTS = {
     dataset: PROJECT_ROOT
     / f"artifacts/joint_qa_progressive/evaluation_configs/step_000000_skill_on/{dataset}.yaml"
+    for dataset in DATASETS
+}
+DEFAULT_NO_SKILL_OUTPUTS = {
+    dataset: PROJECT_ROOT
+    / (
+        "artifacts/joint_qa_progressive/evaluation_configs/"
+        f"step_000000_no_skill_matched/{dataset}.yaml"
+    )
     for dataset in DATASETS
 }
 DEFAULT_STEP1_OUTPUTS = {
@@ -214,6 +226,34 @@ def _fixed_test_storage(mode: str, dataset: str) -> dict[str, str]:
     return storage
 
 
+def _matched_development_storage(dataset: str) -> dict[str, str]:
+    """Isolate the v2 no-Skill comparator from earlier Step 0 artifacts."""
+
+    root = (
+        "artifacts/joint_qa_progressive/matched_development/"
+        f"step_000000_no_skill/{dataset}"
+    )
+    report_root = "reports/joint_qa_progressive/matched_development/step_000000_no_skill"
+    storage = {
+        "root": f"{root}/evidence",
+        "selected_tasks_path": f"{root}/selected_tasks.jsonl",
+        "direct_predictions_path": (
+            f"artifacts/joint_qa_progressive/shared/{dataset}_direct_predictions.jsonl"
+        ),
+        "trajectories_path": f"{root}/agentgraph_trajectories.jsonl",
+        "failures_path": f"{root}/collection_failures.jsonl",
+        "paired_results_path": f"{root}/paired_results.jsonl",
+        "wrong_demos_path": f"{root}/wrong_demos.jsonl",
+        "manifest_path": f"{root}/run_manifest.json",
+        "preflight_receipt_path": f"{root}/preflight_receipt.json",
+        "report_json_path": f"{report_root}/{dataset}_report.json",
+        "report_markdown_path": f"{report_root}/{dataset}_report.md",
+    }
+    if dataset == "triviaqa":
+        storage["retrieval_receipts_path"] = f"{root}/retrieval_receipts.jsonl"
+    return storage
+
+
 def _require_fixed_test_evaluation_only(
     config: Mapping[str, Any], dataset: str, sample_count: int
 ) -> None:
@@ -308,27 +348,11 @@ def _apply_evaluation_scope(
     return resolved
 
 
-def materialize_skill_on_evaluations(
-    *,
-    publication_path: Path = DEFAULT_PUBLICATION,
-    skill_store_path: Path = DEFAULT_SKILL_STORE,
-    template_paths: Mapping[str, Path] | None = None,
-    output_paths: Mapping[str, Path] | None = None,
-    evaluation_split: str = "validation",
-    sample_count: int | None = None,
-) -> dict[str, Any]:
-    """Bind the two evidence-gated ACTIVE Skills into matched Step 0 configs."""
-
-    publication_path = Path(publication_path).resolve()
-    skill_store_path = Path(skill_store_path).resolve()
-    templates = _paths(template_paths, DEFAULT_SKILL_ON_TEMPLATES, "template_paths")
-    default_outputs = (
-        DEFAULT_FIXED_TEST_SKILL_ON_OUTPUTS
-        if evaluation_split == "test"
-        else DEFAULT_SKILL_ON_OUTPUTS
-    )
-    outputs = _paths(output_paths, default_outputs, "output_paths")
-    _ensure_outputs_absent(outputs)
+def _active_skill_regime(
+    publication_path: Path,
+    skill_store_path: Path,
+) -> tuple[dict[str, Any], str, str, str, int]:
+    """Load the one frozen, dual-dataset ACTIVE Skill regime or fail closed."""
 
     publication = _json_mapping(publication_path, "publication")
     publications = _mapping(publication.get("publications"), "publications")
@@ -371,9 +395,43 @@ def materialize_skill_on_evaluations(
     current_epoch = next(iter(activation_epochs))
     if current_epoch is None:  # guarded above; keeps the type boundary explicit
         raise RuntimeError("ACTIVE Skills have no visibility epoch")
-    library_version = next(iter(library_versions))
-    posterior_version = next(iter(posterior_versions))
-    policy_version = next(iter(policy_versions))
+    prompt_versions = {record.versions.prompt for record in records.values()}
+    tool_versions = {record.versions.tool for record in records.values()}
+    if len(prompt_versions) != 1 or len(tool_versions) != 1:
+        raise RuntimeError("ACTIVE Skills do not share one frozen prompt/tool regime")
+    return (
+        records,
+        next(iter(library_versions)),
+        next(iter(posterior_versions)),
+        next(iter(policy_versions)),
+        current_epoch,
+    )
+
+
+def materialize_skill_on_evaluations(
+    *,
+    publication_path: Path = DEFAULT_PUBLICATION,
+    skill_store_path: Path = DEFAULT_SKILL_STORE,
+    template_paths: Mapping[str, Path] | None = None,
+    output_paths: Mapping[str, Path] | None = None,
+    evaluation_split: str = "validation",
+    sample_count: int | None = None,
+) -> dict[str, Any]:
+    """Bind the two evidence-gated ACTIVE Skills into matched Step 0 configs."""
+
+    publication_path = Path(publication_path).resolve()
+    skill_store_path = Path(skill_store_path).resolve()
+    templates = _paths(template_paths, DEFAULT_SKILL_ON_TEMPLATES, "template_paths")
+    default_outputs = (
+        DEFAULT_FIXED_TEST_SKILL_ON_OUTPUTS
+        if evaluation_split == "test"
+        else DEFAULT_SKILL_ON_OUTPUTS
+    )
+    outputs = _paths(output_paths, default_outputs, "output_paths")
+    _ensure_outputs_absent(outputs)
+    records, library_version, posterior_version, policy_version, current_epoch = (
+        _active_skill_regime(publication_path, skill_store_path)
+    )
 
     configs: dict[str, dict[str, Any]] = {}
     identities: dict[str, tuple[object, ...]] = {}
@@ -445,6 +503,144 @@ def materialize_skill_on_evaluations(
         "required_skill_ids": {
             dataset: records[dataset].skill_id for dataset in DATASETS
         },
+        "outputs": {dataset: str(outputs[dataset]) for dataset in DATASETS},
+        "evaluation_started": False,
+    }
+
+
+def materialize_step0_no_skill_evaluations(
+    *,
+    publication_path: Path = DEFAULT_PUBLICATION,
+    skill_store_path: Path = DEFAULT_SKILL_STORE,
+    template_paths: Mapping[str, Path] | None = None,
+    skill_on_template_paths: Mapping[str, Path] | None = None,
+    output_paths: Mapping[str, Path] | None = None,
+) -> dict[str, Any]:
+    """Materialize a development comparator matched to the ACTIVE Skill regime.
+
+    The existing Step 0 no-Skill templates retain the established evaluator and
+    artifact contract.  Prompt/tool coordinates are rebound to the corresponding
+    Skill-on templates only after the same dual-dataset ACTIVE gate succeeds.
+    """
+
+    publication_path = Path(publication_path).resolve()
+    skill_store_path = Path(skill_store_path).resolve()
+    templates = _paths(template_paths, DEFAULT_NO_SKILL_TEMPLATES, "template_paths")
+    skill_on_templates = _paths(
+        skill_on_template_paths,
+        DEFAULT_SKILL_ON_TEMPLATES,
+        "skill_on_template_paths",
+    )
+    outputs = _paths(output_paths, DEFAULT_NO_SKILL_OUTPUTS, "output_paths")
+    _ensure_outputs_absent(outputs)
+    records, library_version, posterior_version, policy_version, current_epoch = (
+        _active_skill_regime(publication_path, skill_store_path)
+    )
+
+    configs: dict[str, dict[str, Any]] = {}
+    identities: dict[str, tuple[object, ...]] = {}
+    for dataset in DATASETS:
+        reference = load_yaml(skill_on_templates[dataset])
+        reference_experiment = _mapping(reference.get("experiment"), "experiment")
+        record = records[dataset]
+        if reference_experiment.get("prompt_version") != record.versions.prompt:
+            raise RuntimeError(f"{dataset} Skill-on template prompt version differs from Skill")
+        if reference_experiment.get("tool_version") != record.versions.tool:
+            raise RuntimeError(f"{dataset} Skill-on template tool version differs from Skill")
+        if (
+            _mapping(reference.get("director"), "director").get(
+                "behavior_policy_version"
+            )
+            != policy_version
+        ):
+            raise RuntimeError(
+                f"{dataset} Skill-on template policy differs from ACTIVE Skill evidence"
+            )
+
+        config = deepcopy(load_yaml(templates[dataset]))
+        source_data = _mapping(config.get("data"), "data")
+        reference_data = _mapping(reference.get("data"), "data")
+        if {
+            key: value
+            for key, value in source_data.items()
+            if key != "skill_confirmation_path"
+        } != {
+            key: value
+            for key, value in reference_data.items()
+            if key != "skill_confirmation_path"
+        }:
+            raise RuntimeError(
+                f"{dataset} no-Skill template data differs beyond Skill confirmation"
+            )
+        config["data"] = deepcopy(dict(reference_data))
+        experiment = dict(_mapping(config.get("experiment"), "experiment"))
+        experiment.update(
+            prompt_version=record.versions.prompt,
+            tool_version=record.versions.tool,
+            output_dir=(
+                "artifacts/joint_qa_progressive/matched_development/"
+                f"step_000000_no_skill/{dataset}"
+            ),
+        )
+        config["experiment"] = experiment
+
+        for field in (
+            "schema_version",
+            "data",
+            f"{dataset}_evaluation",
+            "director",
+            "agent_graph",
+            "evaluation",
+            "grpo",
+            "policy_sync",
+            "gpu",
+        ):
+            if config.get(field) != reference.get(field):
+                raise RuntimeError(
+                    f"{dataset} no-Skill template differs from Skill-on architecture at {field}"
+                )
+        if _evaluation_identity(config) != _evaluation_identity(reference):
+            raise RuntimeError(
+                f"{dataset} no-Skill comparator changed policy/adapter/catalog/seed"
+            )
+        skills = _mapping(config.get("skills"), "skills")
+        if skills.get("enabled") is not False or skills.get("retrieval_top_k") != 0:
+            raise RuntimeError(f"{dataset} no-Skill comparator enables Skill retrieval")
+        exploration = _mapping(config.get("exploration"), "exploration")
+        if (
+            exploration.get("enabled") is not False
+            or exploration.get("forced_probe_rollouts") != 0
+        ):
+            raise RuntimeError(f"{dataset} no-Skill comparator enables exploration")
+        deployment = _mapping(config.get("deployment"), "deployment")
+        if deployment.get("active_skills_only") is not False:
+            raise RuntimeError(f"{dataset} no-Skill comparator requires ACTIVE Skills")
+        storage = dict(_mapping(config.get("storage"), "storage"))
+        storage.update(_matched_development_storage(dataset))
+        config["storage"] = storage
+        _require_no_placeholders(config, dataset)
+        configs[dataset] = config
+        identities[dataset] = _evaluation_identity(config)
+
+    if identities["hotpotqa"] != identities["triviaqa"]:
+        raise RuntimeError(
+            "Step 0 no-Skill dataset configs do not share one policy/adapter/catalog/seed"
+        )
+    _write_once(configs, outputs)
+    return {
+        "status": "materialized",
+        "mode": "step0_no_skill_matched",
+        "evaluation_split": "validation",
+        "sample_count": configs["hotpotqa"]["hotpotqa_evaluation"]["sample_count"],
+        "publication": str(publication_path),
+        "skill_store": str(skill_store_path),
+        "policy_version": policy_version,
+        "prompt_version": records["hotpotqa"].versions.prompt,
+        "tool_version": records["hotpotqa"].versions.tool,
+        "library_version": library_version,
+        "posterior_version": posterior_version,
+        "current_epoch": current_epoch,
+        "skills_visible": False,
         "outputs": {dataset: str(outputs[dataset]) for dataset in DATASETS},
         "evaluation_started": False,
     }
@@ -524,6 +720,14 @@ def materialize_step1_skill_off_evaluations(
     sync = _json_mapping(sync_receipt_path, "sync_receipt")
     if manifest.get("status") != "completed":
         raise RuntimeError("training manifest is not completed")
+    regime_versions = _mapping(
+        manifest.get("regime_versions"),
+        "training_manifest.regime_versions",
+    )
+    prompt_version = str(regime_versions.get("prompt", "")).strip()
+    tool_version = str(regime_versions.get("tool", "")).strip()
+    if not prompt_version or not tool_version:
+        raise RuntimeError("training manifest has no prompt/tool regime versions")
     training = _mapping(manifest.get("training"), "training_manifest.training")
     if training.get("optimizer_updates") != 1:
         raise RuntimeError("Step 1 evaluation requires exactly one optimizer update")
@@ -583,6 +787,15 @@ def materialize_step1_skill_off_evaluations(
     configs: dict[str, dict[str, Any]] = {}
     for dataset in DATASETS:
         config = deepcopy(load_yaml(templates[dataset]))
+        experiment = _mapping(config.get("experiment"), "experiment")
+        if experiment.get("prompt_version") != prompt_version:
+            raise RuntimeError(
+                f"{dataset} Step 1 template prompt version differs from training"
+            )
+        if experiment.get("tool_version") != tool_version:
+            raise RuntimeError(
+                f"{dataset} Step 1 template tool version differs from training"
+            )
         director = dict(_mapping(config.get("director"), "director"))
         director.update(
             behavior_policy_version=policy_version,
@@ -626,6 +839,8 @@ def materialize_step1_skill_off_evaluations(
         "adapter_name": adapter_name,
         "checkpoint_version": checkpoint_version,
         "checkpoint": str(checkpoint),
+        "prompt_version": prompt_version,
+        "tool_version": tool_version,
         "server_weight_version": server_weight_version,
         "server_weight_source": server_weight_source,
         "optimizer_updates": 1,
@@ -668,6 +883,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="required for explicit test scope; use 128 for the formal full test",
     )
 
+    no_skill = subparsers.add_parser(
+        "step0-no-skill",
+        help="materialize the v2 development comparator with Skill retrieval disabled",
+    )
+    no_skill.add_argument("--publication", default=str(DEFAULT_PUBLICATION))
+    no_skill.add_argument("--skill-store", default=str(DEFAULT_SKILL_STORE))
+    no_skill.add_argument(
+        "--hotpot-template", default=str(DEFAULT_NO_SKILL_TEMPLATES["hotpotqa"])
+    )
+    no_skill.add_argument(
+        "--trivia-template", default=str(DEFAULT_NO_SKILL_TEMPLATES["triviaqa"])
+    )
+    no_skill.add_argument("--hotpot-output")
+    no_skill.add_argument("--trivia-output")
+    no_skill.set_defaults(split="validation", sample_count=None)
+
     step1 = subparsers.add_parser(
         "step1-skill-off", help="materialize matched Step 1 Skill-off configs"
     )
@@ -700,6 +931,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.mode == "step1-skill-off" and args.split == "test"
         else DEFAULT_SKILL_ON_OUTPUTS
         if args.mode == "skill-on"
+        else DEFAULT_NO_SKILL_OUTPUTS
+        if args.mode == "step0-no-skill"
         else DEFAULT_STEP1_OUTPUTS
     )
     outputs = _dataset_paths(
@@ -714,6 +947,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             output_paths=outputs,
             evaluation_split=args.split,
             sample_count=args.sample_count,
+        )
+    elif args.mode == "step0-no-skill":
+        result = materialize_step0_no_skill_evaluations(
+            publication_path=Path(args.publication),
+            skill_store_path=Path(args.skill_store),
+            template_paths=templates,
+            output_paths=outputs,
         )
     else:
         result = materialize_step1_skill_off_evaluations(

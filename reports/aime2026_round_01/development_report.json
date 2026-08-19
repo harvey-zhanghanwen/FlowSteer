@@ -1,0 +1,1383 @@
+{
+  "agentgraph": {
+    "completed": 30,
+    "completed_only_accuracy": 0.6666666666666666,
+    "completed_only_exact_match": 0.6666666666666666,
+    "denominator": 30,
+    "evaluator_valid": 30,
+    "strict_accuracy": 0.6666666666666666,
+    "strict_exact_match": 0.6666666666666666
+  },
+  "agentgraph_minus_direct": {
+    "exact_match": 0.6666666666666666
+  },
+  "below_full_score_demo_count": 10,
+  "benchmark_slice": "development_aime_2025",
+  "completed_at": "2026-08-18T15:23:33.497823+00:00",
+  "dataset": "AIME 2026",
+  "dataset_key": "aime_2026",
+  "direct_local_baseline": {
+    "completed": 30,
+    "completed_only_accuracy": 0.0,
+    "completed_only_exact_match": 0.0,
+    "denominator": 30,
+    "evaluator_valid": 30,
+    "strict_accuracy": 0.0,
+    "strict_exact_match": 0.0
+  },
+  "explicit_finished_count": 30,
+  "failure_types": {
+    "agentgraph_exact_match_gain": 20,
+    "both_incorrect": 10
+  },
+  "graph_search_diagnostics": {
+    "action_counts": {
+      "add_subgraph": 57,
+      "delete_agent": 7,
+      "finish": 52,
+      "modify_agent": 16,
+      "parse_failed": 14,
+      "set_output": 1,
+      "set_relation": 6
+    },
+    "action_sequence_counts": {
+      "add_subgraph -> add_subgraph -> add_subgraph -> finish -> modify_agent -> finish -> finish -> finish -> modify_agent -> finish -> modify_agent -> finish": 1,
+      "add_subgraph -> add_subgraph -> add_subgraph -> finish -> modify_agent -> finish -> modify_agent -> finish": 1,
+      "add_subgraph -> add_subgraph -> delete_agent -> delete_agent -> add_subgraph -> delete_agent -> delete_agent -> add_subgraph -> finish": 1,
+      "add_subgraph -> add_subgraph -> finish": 3,
+      "add_subgraph -> add_subgraph -> set_relation -> modify_agent -> set_relation -> modify_agent -> set_relation -> delete_agent -> add_subgraph -> add_subgraph -> set_relation -> finish -> modify_agent -> finish -> set_relation -> modify_agent -> finish": 1,
+      "add_subgraph -> finish": 12,
+      "add_subgraph -> modify_agent -> add_subgraph -> finish": 1,
+      "add_subgraph -> modify_agent -> finish -> finish -> finish -> finish -> finish -> finish -> modify_agent -> finish -> parse_failed -> finish -> finish -> finish -> finish -> parse_failed -> modify_agent -> finish": 1,
+      "add_subgraph -> parse_failed -> add_subgraph -> delete_agent -> set_relation -> set_output -> add_subgraph -> delete_agent -> add_subgraph -> finish": 1,
+      "add_subgraph -> parse_failed -> add_subgraph -> finish": 1,
+      "parse_failed -> add_subgraph -> add_subgraph -> add_subgraph -> finish": 2,
+      "parse_failed -> add_subgraph -> add_subgraph -> add_subgraph -> modify_agent -> finish -> modify_agent -> finish": 1,
+      "parse_failed -> add_subgraph -> add_subgraph -> finish": 2,
+      "parse_failed -> parse_failed -> add_subgraph -> add_subgraph -> finish": 1,
+      "parse_failed -> parse_failed -> parse_failed -> add_subgraph -> finish -> modify_agent -> finish": 1
+    },
+    "agent_count_distribution": {
+      "2": 25,
+      "3": 5
+    },
+    "atomic_cost_by_agent_count": {
+      "2": {
+        "mean_edit_overhead": 1.56,
+        "mean_minimum_final_construction_actions": 5.0,
+        "mean_observed_turns": 5.6,
+        "mean_turn_overhead": 0.6,
+        "tasks": 25
+      },
+      "3": {
+        "mean_edit_overhead": 0.0,
+        "mean_minimum_final_construction_actions": 7.0,
+        "mean_observed_turns": 2.6,
+        "mean_turn_overhead": -4.4,
+        "tasks": 5
+      }
+    },
+    "depth_three_plus_count": 5,
+    "effective_dependency_depth_distribution": {
+      "2": 25,
+      "3": 5
+    },
+    "effective_dependency_status_distribution": {
+      "weak": 30
+    },
+    "execution_turn_count": 40,
+    "executor_call_count": 74,
+    "explicit_finish_count": 30,
+    "full_structural_depth_evidence_status_distribution": {
+      "weak": 30
+    },
+    "max_rounds_termination_count": 0,
+    "max_rounds_values_seen": {},
+    "maximum_prompt_characters": 20631,
+    "maximum_turn_count": 18,
+    "maximum_visible_history": 4,
+    "mean_prompt_characters": 11884.543369125427,
+    "mean_turn_count": 5.1,
+    "parse_failure_count": 14,
+    "rejected_turn_count": 66,
+    "rejected_turn_rate": 0.43137254901960786,
+    "role_family_distribution": {
+      "Geometry-Solver-Analyzer": 1,
+      "Geometry-Solver-Verfier": 1,
+      "Logic": 1,
+      "analyzer": 1,
+      "critic": 1,
+      "format": 30,
+      "manager": 1,
+      "math_analyst": 1,
+      "math_expert": 1,
+      "math_solver": 2,
+      "mathematician": 2,
+      "reasoner": 2,
+      "reasoning": 1,
+      "solver": 19,
+      "solving": 1
+    },
+    "set_output_before_last_relation_count": 0,
+    "structural_depth_distribution": {
+      "2": 25,
+      "3": 5
+    },
+    "task_count": 30,
+    "tasks_with_execution": 30,
+    "three_plus_agent_count": 5,
+    "topology_family_distribution": {
+      "serial_2": 25,
+      "serial_3_plus": 5
+    },
+    "trajectories": [
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 11736,
+        "prompt_character_mean": 9702.0,
+        "rejected_turn_count": 0,
+        "relation_count": 1,
+        "role_families": [
+          "format",
+          "mathematician"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "aime-2025:i:01",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -3,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 12258,
+        "prompt_character_mean": 10116.0,
+        "rejected_turn_count": 0,
+        "relation_count": 1,
+        "role_families": [
+          "format",
+          "solver"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "aime-2025:i:02",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -3,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 12001,
+        "prompt_character_mean": 9901.5,
+        "rejected_turn_count": 0,
+        "relation_count": 1,
+        "role_families": [
+          "solving",
+          "format"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "aime-2025:i:05",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -3,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "modify_agent",
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 15448,
+        "prompt_character_mean": 10977.75,
+        "rejected_turn_count": 2,
+        "relation_count": 1,
+        "role_families": [
+          "mathematician",
+          "format"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "aime-2025:i:03",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 4,
+        "turn_overhead": -1,
+        "visible_history_max": 3
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 13447,
+        "prompt_character_mean": 10073.666666666666,
+        "rejected_turn_count": 1,
+        "relation_count": 1,
+        "role_families": [
+          "format",
+          "math_solver"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "aime-2025:i:04",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 3,
+        "turn_overhead": -2,
+        "visible_history_max": 2
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 11907,
+        "prompt_character_mean": 9873.0,
+        "rejected_turn_count": 0,
+        "relation_count": 1,
+        "role_families": [
+          "format",
+          "solver"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "aime-2025:i:06",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -3,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 12598,
+        "prompt_character_mean": 10428.5,
+        "rejected_turn_count": 0,
+        "relation_count": 1,
+        "role_families": [
+          "format",
+          "solver"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "aime-2025:i:10",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -3,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 14601,
+        "prompt_character_mean": 10908.0,
+        "rejected_turn_count": 1,
+        "relation_count": 1,
+        "role_families": [
+          "format",
+          "math_analyst"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "aime-2025:i:07",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 3,
+        "turn_overhead": -2,
+        "visible_history_max": 2
+      },
+      {
+        "action_sequence": [
+          "parse_failed",
+          "parse_failed",
+          "add_subgraph",
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 2,
+        "prompt_character_max": 16962,
+        "prompt_character_mean": 11642.4,
+        "rejected_turn_count": 3,
+        "relation_count": 1,
+        "role_families": [
+          "solver",
+          "format"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "aime-2025:i:09",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 5,
+        "turn_overhead": 0,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "parse_failed",
+          "add_subgraph",
+          "delete_agent",
+          "set_relation",
+          "set_output",
+          "add_subgraph",
+          "delete_agent",
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 8,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 2,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 12,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 1,
+        "prompt_character_max": 17477,
+        "prompt_character_mean": 14503.6,
+        "rejected_turn_count": 4,
+        "relation_count": 1,
+        "role_families": [
+          "format",
+          "reasoner"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "aime-2025:i:08",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 10,
+        "turn_overhead": 5,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "add_subgraph",
+          "add_subgraph",
+          "finish",
+          "modify_agent",
+          "finish",
+          "finish",
+          "finish",
+          "modify_agent",
+          "finish",
+          "modify_agent",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 3,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 4,
+        "executor_call_count": 5,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 7,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 19569,
+        "prompt_character_mean": 15625.5,
+        "rejected_turn_count": 7,
+        "relation_count": 1,
+        "role_families": [
+          "format",
+          "solver"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "aime-2025:i:12",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 12,
+        "turn_overhead": 7,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "parse_failed",
+          "parse_failed",
+          "parse_failed",
+          "add_subgraph",
+          "finish",
+          "modify_agent",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 1,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 2,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 5,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 3,
+        "prompt_character_max": 19519,
+        "prompt_character_mean": 13589.285714285714,
+        "rejected_turn_count": 4,
+        "relation_count": 1,
+        "role_families": [
+          "format",
+          "solver"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "aime-2025:i:14",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 7,
+        "turn_overhead": 2,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 3,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 6,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 7,
+        "parse_failure_count": 0,
+        "prompt_character_max": 14532,
+        "prompt_character_mean": 10531.666666666666,
+        "rejected_turn_count": 1,
+        "relation_count": 2,
+        "role_families": [
+          "format",
+          "reasoner",
+          "critic"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 3,
+        "task_id": "aime-2025:i:15",
+        "termination_reason": "finish",
+        "topology_family": "serial_3_plus",
+        "topology_motifs": [
+          "serial_3_plus"
+        ],
+        "turn_count": 3,
+        "turn_overhead": -4,
+        "visible_history_max": 2
+      },
+      {
+        "action_sequence": [
+          "parse_failed",
+          "add_subgraph",
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 3,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 6,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 7,
+        "parse_failure_count": 1,
+        "prompt_character_max": 17923,
+        "prompt_character_mean": 12093.0,
+        "rejected_turn_count": 2,
+        "relation_count": 2,
+        "role_families": [
+          "solver",
+          "manager",
+          "format"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 3,
+        "task_id": "aime-2025:i:13",
+        "termination_reason": "finish",
+        "topology_family": "serial_3_plus",
+        "topology_motifs": [
+          "serial_3_plus"
+        ],
+        "turn_count": 4,
+        "turn_overhead": -3,
+        "visible_history_max": 3
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 3,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 6,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 7,
+        "parse_failure_count": 0,
+        "prompt_character_max": 14697,
+        "prompt_character_mean": 11273.5,
+        "rejected_turn_count": 0,
+        "relation_count": 2,
+        "role_families": [
+          "Geometry-Solver-Analyzer",
+          "Geometry-Solver-Verfier",
+          "format"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 3,
+        "task_id": "aime-2025:ii:01",
+        "termination_reason": "finish",
+        "topology_family": "serial_3_plus",
+        "topology_motifs": [
+          "serial_3_plus"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -5,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "parse_failed",
+          "add_subgraph",
+          "add_subgraph",
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 1,
+        "prompt_character_max": 16067,
+        "prompt_character_mean": 11126.4,
+        "rejected_turn_count": 3,
+        "relation_count": 1,
+        "role_families": [
+          "format",
+          "solver"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "aime-2025:ii:02",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 5,
+        "turn_overhead": 0,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "parse_failed",
+          "add_subgraph",
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 1,
+        "prompt_character_max": 19797,
+        "prompt_character_mean": 13331.25,
+        "rejected_turn_count": 2,
+        "relation_count": 1,
+        "role_families": [
+          "format",
+          "Logic"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "aime-2025:ii:04",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 4,
+        "turn_overhead": -1,
+        "visible_history_max": 3
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 12647,
+        "prompt_character_mean": 10476.5,
+        "rejected_turn_count": 0,
+        "relation_count": 1,
+        "role_families": [
+          "format",
+          "solver"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "aime-2025:ii:06",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -3,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 3,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 6,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 7,
+        "parse_failure_count": 0,
+        "prompt_character_max": 14345,
+        "prompt_character_mean": 11088.5,
+        "rejected_turn_count": 0,
+        "relation_count": 2,
+        "role_families": [
+          "solver",
+          "analyzer",
+          "format"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 3,
+        "task_id": "aime-2025:ii:03",
+        "termination_reason": "finish",
+        "topology_family": "serial_3_plus",
+        "topology_motifs": [
+          "serial_3_plus"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -5,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 11886,
+        "prompt_character_mean": 9898.5,
+        "rejected_turn_count": 0,
+        "relation_count": 1,
+        "role_families": [
+          "solver",
+          "format"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "aime-2025:ii:07",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -3,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 12151,
+        "prompt_character_mean": 9988.0,
+        "rejected_turn_count": 0,
+        "relation_count": 1,
+        "role_families": [
+          "format",
+          "solver"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "aime-2025:ii:09",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -3,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 3,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 6,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 7,
+        "parse_failure_count": 0,
+        "prompt_character_max": 13184,
+        "prompt_character_mean": 10512.5,
+        "rejected_turn_count": 0,
+        "relation_count": 2,
+        "role_families": [
+          "solver",
+          "format",
+          "solver"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 3,
+        "task_id": "aime-2025:ii:10",
+        "termination_reason": "finish",
+        "topology_family": "serial_3_plus",
+        "topology_motifs": [
+          "serial_3_plus"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -5,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "parse_failed",
+          "add_subgraph",
+          "add_subgraph",
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 1,
+        "prompt_character_max": 19722,
+        "prompt_character_mean": 13576.8,
+        "rejected_turn_count": 3,
+        "relation_count": 1,
+        "role_families": [
+          "solver",
+          "format"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "aime-2025:ii:11",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 5,
+        "turn_overhead": 0,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "add_subgraph",
+          "set_relation",
+          "modify_agent",
+          "set_relation",
+          "modify_agent",
+          "set_relation",
+          "delete_agent",
+          "add_subgraph",
+          "add_subgraph",
+          "set_relation",
+          "finish",
+          "modify_agent",
+          "finish",
+          "set_relation",
+          "modify_agent",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 8,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 2,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 12,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 18620,
+        "prompt_character_mean": 15405.176470588236,
+        "rejected_turn_count": 9,
+        "relation_count": 1,
+        "role_families": [
+          "format",
+          "solver"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "aime-2025:ii:05",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 17,
+        "turn_overhead": 12,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "parse_failed",
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 1,
+        "prompt_character_max": 17143,
+        "prompt_character_mean": 11763.0,
+        "rejected_turn_count": 2,
+        "relation_count": 1,
+        "role_families": [
+          "format",
+          "math_solver"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "aime-2025:ii:12",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 4,
+        "turn_overhead": -1,
+        "visible_history_max": 3
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 12931,
+        "prompt_character_mean": 10755.0,
+        "rejected_turn_count": 0,
+        "relation_count": 1,
+        "role_families": [
+          "reasoning",
+          "format"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "aime-2025:ii:08",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -3,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "add_subgraph",
+          "add_subgraph",
+          "finish",
+          "modify_agent",
+          "finish",
+          "modify_agent",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 2,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 3,
+        "executor_call_count": 4,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 6,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 20631,
+        "prompt_character_mean": 15695.25,
+        "rejected_turn_count": 4,
+        "relation_count": 1,
+        "role_families": [
+          "format",
+          "math_expert"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "aime-2025:ii:15",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 8,
+        "turn_overhead": 3,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "parse_failed",
+          "add_subgraph",
+          "add_subgraph",
+          "add_subgraph",
+          "modify_agent",
+          "finish",
+          "modify_agent",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 2,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 2,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 6,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 1,
+        "prompt_character_max": 20225,
+        "prompt_character_mean": 13859.0,
+        "rejected_turn_count": 4,
+        "relation_count": 1,
+        "role_families": [
+          "format",
+          "solver"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "aime-2025:ii:13",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 8,
+        "turn_overhead": 3,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "modify_agent",
+          "finish",
+          "finish",
+          "finish",
+          "finish",
+          "finish",
+          "finish",
+          "modify_agent",
+          "finish",
+          "parse_failed",
+          "finish",
+          "finish",
+          "finish",
+          "finish",
+          "parse_failed",
+          "modify_agent",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 3,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 7,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 2,
+        "prompt_character_max": 18072,
+        "prompt_character_mean": 14826.055555555555,
+        "rejected_turn_count": 13,
+        "relation_count": 1,
+        "role_families": [
+          "solver",
+          "format"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "aime-2025:i:11",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 18,
+        "turn_overhead": 13,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "add_subgraph",
+          "delete_agent",
+          "delete_agent",
+          "add_subgraph",
+          "delete_agent",
+          "delete_agent",
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 12,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 2,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 16,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 17711,
+        "prompt_character_mean": 12995.0,
+        "rejected_turn_count": 1,
+        "relation_count": 1,
+        "role_families": [
+          "format",
+          "solver"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "aime-2025:ii:14",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 9,
+        "turn_overhead": 4,
+        "visible_history_max": 4
+      }
+    ],
+    "turn_count_distribution": {
+      "10": 1,
+      "12": 1,
+      "17": 1,
+      "18": 1,
+      "2": 12,
+      "3": 3,
+      "4": 4,
+      "5": 3,
+      "7": 1,
+      "8": 2,
+      "9": 1
+    }
+  },
+  "metric_scope": "SkillFlow_exact_answer_extraction_and_exact_match",
+  "model_catalog_path": "config/model_catalog_hotpotqa_deep_v6.yaml",
+  "operational_failure_count": 0,
+  "policy_adapter": "theta_jointqa_progressive_step_000000",
+  "policy_version": "qwen35-9b-aime2026-round-01-step-000000",
+  "primary_metric": "exact_match",
+  "project_split": "validation",
+  "sample_count": 30,
+  "schema_version": "flowsteer.completion_benchmark.round_report.v1",
+  "skill_evaluation_mode": "memory_off",
+  "skill_injection_performed": false,
+  "skill_store_path": null,
+  "terminal_failure_count": 0,
+  "training_performed": false,
+  "typical_below_full_score_task_ids": [
+    "aime-2025:i:10",
+    "aime-2025:i:14",
+    "aime-2025:i:15",
+    "aime-2025:ii:04",
+    "aime-2025:ii:05",
+    "aime-2025:ii:09",
+    "aime-2025:ii:10",
+    "aime-2025:ii:13",
+    "aime-2025:ii:14",
+    "aime-2025:ii:15"
+  ]
+}

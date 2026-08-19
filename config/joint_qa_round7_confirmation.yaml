@@ -1,0 +1,17 @@
+schema_version: "flowsteer.joint-qa.additional-confirmation.v1"
+dataset_catalog_path: "config/datasets_agentgraph.yaml"
+base_manifest_path: "data/joint_qa_v2/manifest.json"
+base_confirmation_path: "data/joint_qa_v2/skill_confirmation_all_round6.jsonl"
+output_path: "data/joint_qa_v2/skill_confirmation_round7.jsonl"
+combined_output_path: "data/joint_qa_v2/skill_confirmation_all_round7.jsonl"
+manifest_path: "data/joint_qa_v2/skill_confirmation_round7_manifest.json"
+datasets: [hotpotqa, triviaqa]
+partition: "skill_confirmation_round7"
+task_split: "validation"
+
+# Round 7 uses the next untouched canonical validation-only block after the
+# Round 6 reservation [944, 984). It is excluded from GRPO and reported task
+# metrics and is used only for the independently gated paired intervention.
+candidate_range:
+  start: 984
+  stop: 1024

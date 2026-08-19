@@ -13,7 +13,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 from collections import Counter
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, timezone
 import json
 import os
@@ -51,7 +51,8 @@ from src.interactive.graph_diagnostics import (
     aggregate_trajectory_diagnostics,
     diagnose_trajectory,
 )
-from src.interactive.records import TaskRecord, TrajectoryRecord
+from src.interactive.persistence import stable_id
+from src.interactive.records import EvaluationReceipt, TaskRecord, TrajectoryRecord
 from src.interactive.rollout_collector import execution_record_from_call
 from src.interactive.task_dataset import iter_task_records
 from src.interactive.task_evaluator import evaluate_task
@@ -382,9 +383,33 @@ def _trajectory_resume_matches(
     condition_id: str,
     versions: Mapping[str, str],
 ) -> bool:
+    evaluation = value.get("evaluation")
+    return bool(
+        _trajectory_identity_matches(
+            value,
+            task=task,
+            condition_id=condition_id,
+            versions=versions,
+        )
+        and isinstance(evaluation, Mapping)
+        and evaluation.get("valid") is True
+        and evaluation.get("evaluator_version") == versions.get("evaluator")
+    )
+
+
+def _trajectory_identity_matches(
+    value: Mapping[str, Any],
+    *,
+    task: TaskRecord,
+    condition_id: str,
+    versions: Mapping[str, str],
+) -> bool:
+    """Match the frozen rollout independently of evaluator admission."""
+
     embedded = value.get("task")
     return bool(
-        isinstance(embedded, Mapping)
+        isinstance(value.get("trajectory_id"), str)
+        and isinstance(embedded, Mapping)
         and embedded.get("task_id") == task.task_id
         and value.get("condition_id") == condition_id
         and value.get("versions") == versions
@@ -392,6 +417,169 @@ def _trajectory_resume_matches(
         and isinstance(value.get("evaluation"), Mapping)
         and isinstance(value.get("explicit_finish"), bool)
     )
+
+
+def _environment_replay_trace(
+    value: Mapping[str, Any],
+) -> Optional[tuple[dict[str, Any], ...]]:
+    """Return only a structurally ordered evaluator trace prefix."""
+
+    evaluation = value.get("evaluation")
+    details = evaluation.get("details") if isinstance(evaluation, Mapping) else None
+    raw_trace = details.get("trace") if isinstance(details, Mapping) else None
+    if raw_trace is None:
+        return ()
+    if not isinstance(raw_trace, list):
+        return None
+    trace: list[dict[str, Any]] = []
+    for step_index, entry in enumerate(raw_trace):
+        if not isinstance(entry, Mapping) or entry.get("step") != step_index:
+            return None
+        trace.append(dict(entry))
+    return tuple(trace)
+
+
+def _environment_replay_trace_length(value: Mapping[str, Any]) -> int:
+    trace = _environment_replay_trace(value)
+    return -1 if trace is None else len(trace)
+
+
+def _evaluation_retry_attempt(value: Mapping[str, Any]) -> int:
+    receipt = value.get("evaluation_retry_receipt")
+    attempt = receipt.get("attempt") if isinstance(receipt, Mapping) else 0
+    return attempt if type(attempt) is int and attempt >= 1 else 0
+
+
+def _final_graph(value: Mapping[str, Any]) -> Optional[Mapping[str, Any]]:
+    turns = value.get("turns")
+    if not isinstance(turns, list) or not turns:
+        return None
+    final_turn = turns[-1]
+    graph = final_turn.get("graph_snapshot") if isinstance(final_turn, Mapping) else None
+    return dict(graph) if isinstance(graph, Mapping) else None
+
+
+async def _retry_terminal_evaluator(
+    backend: LiveSmokeBackend,
+    task: TaskRecord,
+    source: Mapping[str, Any],
+    *,
+    versions: Mapping[str, str],
+    attempt: int,
+) -> Mapping[str, Any]:
+    """Append one evaluator-only attempt for a frozen AgentGraph rollout."""
+
+    source_record = TrajectoryRecord.from_dict(source)
+    source_trajectory_id = source_record.trajectory_id
+    expected_evaluator = str(versions["evaluator"])
+    source_evaluation = source.get("evaluation")
+    source_details = (
+        source_evaluation.get("details")
+        if isinstance(source_evaluation, Mapping)
+        else None
+    )
+    replay_trace_missing = not isinstance(source_details, Mapping) or (
+        "trace" not in source_details or source_details.get("trace") is None
+    )
+    replay_trace = _environment_replay_trace(source)
+    final_graph = _final_graph(source)
+    started_at = _utc_now()
+    if _dataset_key(task) in {"webshop", "alfworld"} and replay_trace_missing:
+        evaluation = EvaluationReceipt(
+            evaluator_version=expected_evaluator,
+            valid=False,
+            reward=None,
+            reason="environment_replay_trace_unavailable",
+            details={
+                "error": "interactive evaluator attempt has no persisted trace",
+                "trace": None,
+            },
+        )
+    elif replay_trace is None:
+        evaluation = EvaluationReceipt(
+            evaluator_version=expected_evaluator,
+            valid=False,
+            reward=None,
+            reason="environment_replay_trace_invalid",
+            details={
+                "error": "persisted evaluator trace is structurally invalid",
+                "trace": (
+                    source_details.get("trace")
+                    if isinstance(source_details, Mapping)
+                    else None
+                ),
+            },
+        )
+    elif final_graph is None and source_record.final_answer is not None:
+        evaluation = EvaluationReceipt(
+            evaluator_version=expected_evaluator,
+            valid=False,
+            reward=None,
+            reason="terminal_evaluator_retry_unavailable",
+            details={"error": "frozen final graph snapshot is unavailable"},
+        )
+    else:
+        try:
+            outcome = await backend.evaluate_final_graph(
+                task,
+                source_record.final_answer,
+                final_graph or {},
+                rollout_index=0,
+                environment_replay_trace=replay_trace,
+            )
+            evaluation = EvaluationReceipt.from_dict(asdict(outcome))
+        except Exception as exc:
+            evaluation = EvaluationReceipt(
+                evaluator_version=expected_evaluator,
+                valid=False,
+                reward=None,
+                reason="terminal_evaluator_retry_failed",
+                details={
+                    "error": _safe_error(exc),
+                    "trace": list(replay_trace),
+                },
+            )
+    completed_at = _utc_now()
+    retry_trajectory_id = stable_id(
+        "trajectory",
+        {
+            "source_trajectory_id": source_trajectory_id,
+            "attempt": attempt,
+            "evaluator_version": expected_evaluator,
+            "mode": "terminal_evaluator_only",
+        },
+    )
+    retry_record = replace(
+        source_record,
+        trajectory_id=retry_trajectory_id,
+        evaluation=evaluation,
+        created_at=completed_at,
+    )
+    payload = retry_record.to_dict()
+    final_turn = source.get("turns", ())[-1] if source.get("turns") else None
+    payload["evaluation_retry_receipt"] = {
+        "schema_version": "flowsteer.agentgraph.evaluation_retry.v1",
+        "source_trajectory_id": source_trajectory_id,
+        "attempt": attempt,
+        "mode": "terminal_evaluator_only",
+        "evaluator_version": expected_evaluator,
+        "reused_director_canvas": True,
+        "reused_turn_count": len(source_record.turns),
+        "final_graph_snapshot_id": (
+            final_turn.get("graph_snapshot_id")
+            if isinstance(final_turn, Mapping)
+            else None
+        ),
+        "environment_replay_steps": (
+            None
+            if replay_trace is None or replay_trace_missing
+            else len(replay_trace)
+        ),
+        "started_at": started_at,
+        "completed_at": completed_at,
+    }
+    backend.evidence_store.append_trajectory(payload)
+    return payload
 
 
 async def _collect_direct(
@@ -589,41 +777,62 @@ async def _collect_graph(
         )
         for task in selected
     }
-    by_task = {
-        task_id: value
-        for task_id, value in _by_task(_read_jsonl(path)).items()
-        for task in selected
-        if task.task_id == task_id
-        and _trajectory_resume_matches(
-            value,
-            task=task,
-            condition_id=condition_id,
-            versions=versions[task_id].to_dict(),
-        )
-    }
-    # The collector commits to EvidenceStore before returning to this runner.
-    # Recover that authoritative payload first if the process stopped between
-    # the append and its ordered mirror checkpoint; never repay a successful
-    # provider call merely because the mirror write was interrupted.
     selected_by_id = {task.task_id: task for task in selected}
-    for value in backend.evidence_store.trajectories.payloads():
+    # The collector commits to EvidenceStore before returning to this runner.
+    # Read both the ordered checkpoint and the authoritative append-only stream
+    # before scheduling any work.  An exact invalid evaluator attempt reserves
+    # its frozen rollout just like a valid one: only its terminal evaluator may
+    # be retried, never the Director/Canvas/Agent construction.
+    candidates = [*_read_jsonl(path), *backend.evidence_store.trajectories.payloads()]
+    valid_candidates: dict[str, tuple[int, dict[str, Any]]] = {}
+    invalid_candidates: dict[str, list[tuple[int, dict[str, Any]]]] = {}
+    for order, value in enumerate(candidates):
         embedded = value.get("task")
         task_id = embedded.get("task_id") if isinstance(embedded, Mapping) else None
         selected_task = selected_by_id.get(task_id)
-        if (
-            selected_task is not None
-            and task_id not in by_task
-            and _trajectory_resume_matches(
-                value,
-                task=selected_task,
-                condition_id=condition_id,
-                versions=versions[task_id].to_dict(),
-            )
+        if selected_task is None or not _trajectory_identity_matches(
+            value,
+            task=selected_task,
+            condition_id=condition_id,
+            versions=versions[task_id].to_dict(),
         ):
-            by_task[task_id] = dict(value)
+            continue
+        if _trajectory_resume_matches(
+            value,
+            task=selected_task,
+            condition_id=condition_id,
+            versions=versions[task_id].to_dict(),
+        ):
+            valid_candidates[task_id] = (order, dict(value))
+        else:
+            invalid_candidates.setdefault(task_id, []).append((order, dict(value)))
+
+    by_task = {
+        task_id: value for task_id, (_, value) in valid_candidates.items()
+    }
+    retry_sources: dict[str, tuple[dict[str, Any], int]] = {}
+    for task_id, values in invalid_candidates.items():
+        if task_id in by_task:
+            continue
+        # Reuse the longest structurally valid environment prefix; if several
+        # attempts reached the same step, the latest append-only event wins.
+        _, source = max(
+            values,
+            key=lambda item: (_environment_replay_trace_length(item[1]), item[0]),
+        )
+        next_attempt = 1 + max(
+            _evaluation_retry_attempt(value) for _, value in values
+        )
+        retry_sources[task_id] = (source, next_attempt)
+    pending_retry_task_ids = set(retry_sources)
+
+    # Remove stale invalid rows from the ordered mirror.  They remain in the
+    # append-only EvidenceStore, while this checkpoint contains at most one
+    # admitted trajectory per task in the frozen selection order.
     _persist_ordered(path, selected, by_task)
     manifest["agentgraph_progress"] = {
         "completed": len(by_task),
+        "pending_evaluator_retries": len(pending_retry_task_ids),
         "failed_attempts": sum(
             item.get("condition") == "agentgraph" for item in failures
         ),
@@ -631,18 +840,29 @@ async def _collect_graph(
     _write_json(manifest_path, manifest)
     semaphore = asyncio.Semaphore(int(bounded["concurrency"]))
 
-    async def run(task: TaskRecord) -> tuple[TaskRecord, Any]:
+    async def run(task: TaskRecord) -> tuple[TaskRecord, str, Any]:
         async with semaphore:
+            mode = "terminal_evaluator_retry" if task.task_id in retry_sources else "collect"
             try:
-                trajectory = await backend.collect(
-                    task,
-                    0,
-                    versions[task.task_id],
-                    expected_task_split=str(bounded.get("split", "validation")),
-                )
-                return task, trajectory
+                if mode == "terminal_evaluator_retry":
+                    source, attempt = retry_sources[task.task_id]
+                    result = await _retry_terminal_evaluator(
+                        backend,
+                        task,
+                        source,
+                        versions=versions[task.task_id].to_dict(),
+                        attempt=attempt,
+                    )
+                else:
+                    result = await backend.collect(
+                        task,
+                        0,
+                        versions[task.task_id],
+                        expected_task_split=str(bounded.get("split", "validation")),
+                    )
+                return task, mode, result
             except BaseException as exc:
-                return task, exc
+                return task, mode, exc
 
     jobs = [
         asyncio.create_task(run(task))
@@ -650,24 +870,62 @@ async def _collect_graph(
         if task.task_id not in by_task
     ]
     for completed in asyncio.as_completed(jobs):
-        task, result = await completed
+        task, mode, result = await completed
         if isinstance(result, BaseException):
             failures.append(
                 {
                     "task_id": task.task_id,
                     "condition": "agentgraph",
-                    "stage": "director_canvas_runtime_or_evaluator",
+                    "stage": mode,
                     "error": _safe_error(result),
                     "recorded_at": _utc_now(),
                 }
             )
         else:
-            if not isinstance(result, TrajectoryRecord):
+            if isinstance(result, TrajectoryRecord):
+                payload = result.to_dict()
+            elif isinstance(result, Mapping):
+                payload = dict(result)
+            else:
                 raise HotpotRoundError("backend returned a non-trajectory result")
-            by_task[task.task_id] = result.to_dict()
-            _persist_ordered(path, selected, by_task)
+            if _trajectory_resume_matches(
+                payload,
+                task=task,
+                condition_id=condition_id,
+                versions=versions[task.task_id].to_dict(),
+            ):
+                by_task[task.task_id] = payload
+                pending_retry_task_ids.discard(task.task_id)
+                _persist_ordered(path, selected, by_task)
+            else:
+                pending_retry_task_ids.add(task.task_id)
+                evaluation = payload.get("evaluation")
+                reason = (
+                    evaluation.get("reason", "invalid_evaluator_receipt")
+                    if isinstance(evaluation, Mapping)
+                    else "missing_evaluator_receipt"
+                )
+                failures.append(
+                    {
+                        "task_id": task.task_id,
+                        "condition": "agentgraph",
+                        "stage": (
+                            "terminal_evaluator_retry"
+                            if mode == "terminal_evaluator_retry"
+                            else "terminal_evaluator"
+                        ),
+                        "error": str(reason),
+                        "trajectory_id": payload.get("trajectory_id"),
+                        "recorded_at": _utc_now(),
+                    }
+                )
         manifest["agentgraph_progress"] = {
             "completed": len(by_task),
+            "pending_evaluator_retries": sum(
+                task.task_id not in by_task
+                and task.task_id in pending_retry_task_ids
+                for task in selected
+            ),
             "failed_attempts": sum(
                 item.get("condition") == "agentgraph" for item in failures
             ),

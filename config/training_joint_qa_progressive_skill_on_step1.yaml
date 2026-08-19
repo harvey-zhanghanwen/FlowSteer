@@ -12,15 +12,15 @@ experiment:
   sampling_anchor_ordinal: 1
   condition_id: "joint_qa_progressive_skill_on_micro"
   catalog_order_namespace: "joint_qa_progressive_shared_v1"
-  prompt_version: "agentgraph.director.progressive_subgraph.v1"
-  tool_version: "agentgraph.add-subgraph+skillflow-public-retrieval.v1"
+  prompt_version: "agentgraph.director.progressive-subgraph.stage-conditioned-skill.v3"
+  tool_version: "agentgraph.add-subgraph-nullable-output+skillflow-stage-conditioned-forced-probe.v3"
   output_dir: "artifacts/joint_qa_progressive/training/step_000001/checkpoint"
 
 data:
   catalog_path: "config/datasets_agentgraph.yaml"
   train_path: "data/joint_qa_v2/train.jsonl"
   validation_path: "data/joint_qa_v2/development.jsonl"
-  skill_confirmation_path: "data/joint_qa_v2/skill_confirmation_all.jsonl"
+  skill_confirmation_path: "data/joint_qa_v2/skill_confirmation_all_round7.jsonl"
   test_path: "data/joint_qa_v2/test.jsonl"
   enforce_split_isolation: true
   task_schema_version: "flowsteer.agentgraph.task.v1"

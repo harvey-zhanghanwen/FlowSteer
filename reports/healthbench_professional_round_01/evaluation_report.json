@@ -1,0 +1,5323 @@
+{
+  "agentgraph": {
+    "completed": 128,
+    "completed_only_raw_score": 0.20753956115969618,
+    "denominator": 128,
+    "evaluator_valid": 128,
+    "strict_raw_score": 0.20753956115969618
+  },
+  "agentgraph_minus_direct": {
+    "raw_score": 0.07573412979842076
+  },
+  "below_full_score_demo_count": 102,
+  "benchmark_slice": null,
+  "completed_at": "2026-08-18T19:05:39.626551+00:00",
+  "dataset": "HealthBench Professional",
+  "dataset_key": "healthbench_professional",
+  "direct_local_baseline": {
+    "completed": 128,
+    "completed_only_raw_score": 0.13180543136127543,
+    "denominator": 128,
+    "evaluator_valid": 128,
+    "strict_raw_score": 0.13180543136127543
+  },
+  "explicit_finished_count": 128,
+  "failure_types": {
+    "agentgraph_higher_raw_score": 35,
+    "direct_higher_raw_score": 19,
+    "equal_raw_score": 74
+  },
+  "graph_search_diagnostics": {
+    "action_counts": {
+      "add_subgraph": 160,
+      "delete_agent": 9,
+      "finish": 148,
+      "modify_agent": 10,
+      "parse_failed": 50,
+      "set_output": 12,
+      "set_relation": 18
+    },
+    "action_sequence_counts": {
+      "add_subgraph -> add_subgraph -> add_subgraph -> finish": 2,
+      "add_subgraph -> add_subgraph -> add_subgraph -> set_relation -> finish -> delete_agent -> set_output -> finish": 1,
+      "add_subgraph -> add_subgraph -> delete_agent -> delete_agent -> add_subgraph -> finish": 1,
+      "add_subgraph -> add_subgraph -> finish": 4,
+      "add_subgraph -> add_subgraph -> finish -> parse_failed -> parse_failed -> parse_failed -> set_relation -> set_relation -> finish": 1,
+      "add_subgraph -> add_subgraph -> modify_agent -> finish": 1,
+      "add_subgraph -> add_subgraph -> set_output -> modify_agent -> modify_agent -> finish": 1,
+      "add_subgraph -> delete_agent -> add_subgraph -> finish": 1,
+      "add_subgraph -> delete_agent -> add_subgraph -> finish -> set_relation -> finish": 1,
+      "add_subgraph -> delete_agent -> finish": 1,
+      "add_subgraph -> delete_agent -> set_output -> finish": 1,
+      "add_subgraph -> finish": 66,
+      "add_subgraph -> finish -> set_output -> finish": 1,
+      "add_subgraph -> finish -> set_relation -> finish": 3,
+      "add_subgraph -> finish -> set_relation -> set_relation -> finish": 1,
+      "add_subgraph -> finish -> set_relation -> set_relation -> finish -> set_relation -> modify_agent -> finish -> set_relation -> finish -> set_relation -> finish -> delete_agent -> set_relation -> finish -> parse_failed -> set_relation -> finish": 1,
+      "add_subgraph -> modify_agent -> add_subgraph -> finish": 1,
+      "add_subgraph -> modify_agent -> finish": 2,
+      "add_subgraph -> parse_failed -> add_subgraph -> add_subgraph -> set_output -> finish": 1,
+      "add_subgraph -> parse_failed -> finish": 1,
+      "add_subgraph -> set_output -> finish": 3,
+      "add_subgraph -> set_output -> set_output -> modify_agent -> finish": 1,
+      "add_subgraph -> set_relation -> modify_agent -> set_output -> delete_agent -> finish -> set_output -> finish": 1,
+      "finish -> add_subgraph -> finish": 1,
+      "parse_failed -> add_subgraph -> add_subgraph -> add_subgraph -> add_subgraph -> finish": 1,
+      "parse_failed -> add_subgraph -> add_subgraph -> finish": 3,
+      "parse_failed -> add_subgraph -> finish": 16,
+      "parse_failed -> add_subgraph -> modify_agent -> finish": 1,
+      "parse_failed -> add_subgraph -> parse_failed -> add_subgraph -> finish": 1,
+      "parse_failed -> add_subgraph -> parse_failed -> finish": 1,
+      "parse_failed -> add_subgraph -> parse_failed -> parse_failed -> add_subgraph -> finish": 1,
+      "parse_failed -> parse_failed -> add_subgraph -> add_subgraph -> finish": 1,
+      "parse_failed -> parse_failed -> add_subgraph -> finish": 2,
+      "parse_failed -> parse_failed -> add_subgraph -> parse_failed -> add_subgraph -> finish -> set_relation -> finish -> add_subgraph -> finish": 1,
+      "parse_failed -> parse_failed -> parse_failed -> finish -> add_subgraph -> add_subgraph -> finish": 1,
+      "parse_failed -> parse_failed -> parse_failed -> parse_failed -> finish -> add_subgraph -> finish": 1
+    },
+    "agent_count_distribution": {
+      "1": 4,
+      "2": 66,
+      "3": 57,
+      "5": 1
+    },
+    "atomic_cost_by_agent_count": {
+      "1": {
+        "mean_edit_overhead": 2.5,
+        "mean_minimum_final_construction_actions": 3.0,
+        "mean_observed_turns": 4.75,
+        "mean_turn_overhead": 1.75,
+        "tasks": 4
+      },
+      "2": {
+        "mean_edit_overhead": 0.45454545454545453,
+        "mean_minimum_final_construction_actions": 5.0,
+        "mean_observed_turns": 3.015151515151515,
+        "mean_turn_overhead": -1.9848484848484849,
+        "tasks": 66
+      },
+      "3": {
+        "mean_edit_overhead": 0.17543859649122806,
+        "mean_minimum_final_construction_actions": 7.315789473684211,
+        "mean_observed_turns": 3.1403508771929824,
+        "mean_turn_overhead": -4.175438596491228,
+        "tasks": 57
+      },
+      "5": {
+        "mean_edit_overhead": 1.0,
+        "mean_minimum_final_construction_actions": 11.0,
+        "mean_observed_turns": 10.0,
+        "mean_turn_overhead": -1.0,
+        "tasks": 1
+      }
+    },
+    "depth_three_plus_count": 50,
+    "effective_dependency_depth_distribution": {
+      "1": 6,
+      "2": 73,
+      "3": 48,
+      "4": 1
+    },
+    "effective_dependency_status_distribution": {
+      "not_applicable": 6,
+      "weak": 122
+    },
+    "execution_turn_count": 159,
+    "executor_call_count": 366,
+    "explicit_finish_count": 128,
+    "full_structural_depth_evidence_status_distribution": {
+      "not_applicable": 6,
+      "unverified": 1,
+      "weak": 121
+    },
+    "max_rounds_termination_count": 0,
+    "max_rounds_values_seen": {},
+    "maximum_prompt_characters": 34386,
+    "maximum_turn_count": 18,
+    "maximum_visible_history": 4,
+    "mean_prompt_characters": 13718.894909474206,
+    "mean_turn_count": 3.1796875,
+    "parse_failure_count": 50,
+    "rejected_turn_count": 111,
+    "rejected_turn_rate": 0.2727272727272727,
+    "role_family_distribution": {
+      "Clinical Analyst": 1,
+      "ClinicalReasoner": 1,
+      "Consultant": 1,
+      "Expert-Medical-Adviser": 1,
+      "Format": 1,
+      "Generator": 1,
+      "Medical Researcher": 1,
+      "Research_Design": 1,
+      "Researcher": 1,
+      "RxNorm-Supported-RAG-Analyzer": 1,
+      "Statistical_Plan": 1,
+      "Writer": 1,
+      "analysis": 4,
+      "analyst": 6,
+      "anesthesia_expert": 1,
+      "answer": 1,
+      "calculation": 1,
+      "challenger": 1,
+      "clarify": 1,
+      "clinical": 2,
+      "clinical-editor": 1,
+      "clinical_analysis": 1,
+      "clinical_analyst": 5,
+      "clinical_documentation": 1,
+      "clinical_expert": 4,
+      "clinical_guidance": 1,
+      "clinical_planner": 1,
+      "clinical_prescriber": 1,
+      "clinical_reasongr": 1,
+      "clinical_reasoning": 4,
+      "clinical_tier_1": 1,
+      "clinical_tier_2": 1,
+      "clinical_triage": 1,
+      "clinical_workflow": 2,
+      "clinical_writer": 1,
+      "clinician": 6,
+      "clinician_assistant": 1,
+      "communication": 1,
+      "composer": 1,
+      "consultant": 1,
+      "content_delivery": 1,
+      "content_generator": 1,
+      "counselor": 1,
+      "critical-read": 1,
+      "critical_thinker": 1,
+      "data": 2,
+      "data_extraction": 1,
+      "data_extractor": 1,
+      "data_retrieval": 1,
+      "decision": 2,
+      "diagnosis": 2,
+      "diagnosis_engine": 3,
+      "diagnosis_formulation": 1,
+      "doctor": 1,
+      "domain-expert": 1,
+      "domain_expert_lifescience": 1,
+      "draft": 1,
+      "editor": 2,
+      "educator": 3,
+      "evaluator": 2,
+      "executive_synthesis": 1,
+      "expert": 6,
+      "extractor": 1,
+      "fact_checking": 1,
+      "format": 51,
+      "formater": 1,
+      "formatter": 1,
+      "guidance": 1,
+      "hemodynamic_analyst": 1,
+      "induction_planner": 1,
+      "information_extraction": 1,
+      "information_verifier": 1,
+      "inquire": 1,
+      "intake": 1,
+      "integrator": 1,
+      "investigator": 1,
+      "knowledge": 1,
+      "knowledge_retriever": 2,
+      "language_converter": 1,
+      "lumo": 1,
+      "manage": 1,
+      "math": 1,
+      "math_engine": 1,
+      "medical-analyst": 1,
+      "medical_analysis": 1,
+      "medical_analyst": 2,
+      "medical_calculator": 1,
+      "medical_expert": 2,
+      "medical_reviewer": 1,
+      "medical_scribe": 1,
+      "medical_verifier": 1,
+      "medicines": 1,
+      "note_summarizer": 1,
+      "operator": 5,
+      "orchestrator": 2,
+      "output": 2,
+      "output_agent": 2,
+      "output_formatter": 1,
+      "pain": 1,
+      "planner": 4,
+      "preprocess": 1,
+      "presenter": 1,
+      "process": 1,
+      "producer": 1,
+      "protocol_designer": 1,
+      "protocol_generation": 1,
+      "pruner": 1,
+      "public_health_coord": 1,
+      "quality_control": 1,
+      "reason": 2,
+      "reason_agent": 2,
+      "reasoner": 1,
+      "reasoning": 5,
+      "reporter": 3,
+      "research": 5,
+      "research_wave": 1,
+      "researcher": 10,
+      "retrieval": 1,
+      "retrieval_synthesis": 1,
+      "retriever": 3,
+      "risk_assessment": 1,
+      "ritual": 1,
+      "router": 1,
+      "safety": 1,
+      "safety_audit": 1,
+      "safety_checker": 1,
+      "scouter": 1,
+      "scribe": 2,
+      "searcher": 1,
+      "sight": 1,
+      "simplifier": 1,
+      "specialist": 5,
+      "summarizer": 2,
+      "summary_formatter": 1,
+      "summary_generator": 1,
+      "synthesis": 3,
+      "synthesis_reviewer": 1,
+      "synthesize": 1,
+      "synthesizer": 8,
+      "temporal_planning": 1,
+      "text-output": 1,
+      "thinker": 1,
+      "translate": 1,
+      "translation": 1,
+      "translator": 5,
+      "treatment_planner": 1,
+      "treatment_planning": 1,
+      "triage": 2,
+      "unspecified": 1,
+      "validate": 1,
+      "validation": 2,
+      "validator": 4,
+      "verifier": 1,
+      "verify": 2,
+      "workflow_engine": 1,
+      "write": 1,
+      "writer": 6
+    },
+    "set_output_before_last_relation_count": 0,
+    "structural_depth_distribution": {
+      "1": 6,
+      "2": 72,
+      "3": 49,
+      "4": 1
+    },
+    "task_count": 128,
+    "tasks_with_execution": 128,
+    "three_plus_agent_count": 58,
+    "topology_family_distribution": {
+      "fan_in": 8,
+      "mixed": 18,
+      "reciprocal": 2,
+      "serial_2": 65,
+      "serial_3_plus": 31,
+      "single": 4
+    },
+    "trajectories": [
+      {
+        "action_sequence": [
+          "parse_failed",
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 1,
+        "prompt_character_max": 15424,
+        "prompt_character_mean": 11565.0,
+        "rejected_turn_count": 1,
+        "relation_count": 1,
+        "role_families": [
+          "clinician",
+          "clinician_assistant"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:9566084de89c416408691006a6f06f9c",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 3,
+        "turn_overhead": -2,
+        "visible_history_max": 2
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "add_subgraph",
+          "set_output",
+          "modify_agent",
+          "modify_agent",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 2,
+        "effective_dependency_depth": 3,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 9,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 8,
+        "parse_failure_count": 0,
+        "prompt_character_max": 23723,
+        "prompt_character_mean": 15153.5,
+        "rejected_turn_count": 2,
+        "relation_count": 3,
+        "role_families": [
+          "medical_analysis",
+          "format",
+          "treatment_planning"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 3,
+        "task_id": "healthbench-professional:c19c2113ba68bb3c4a3e63836e31b558",
+        "termination_reason": "finish",
+        "topology_family": "mixed",
+        "topology_motifs": [
+          "fan_in",
+          "fan_out"
+        ],
+        "turn_count": 6,
+        "turn_overhead": -2,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 12659,
+        "prompt_character_mean": 10241.5,
+        "rejected_turn_count": 0,
+        "relation_count": 1,
+        "role_families": [
+          "ClinicalReasoner",
+          "Generator"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:a5778c7ecdb4eeccf9d252631e18a274",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -3,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish",
+          "set_relation",
+          "set_relation",
+          "finish",
+          "set_relation",
+          "modify_agent",
+          "finish",
+          "set_relation",
+          "finish",
+          "set_relation",
+          "finish",
+          "delete_agent",
+          "set_relation",
+          "finish",
+          "parse_failed",
+          "set_relation",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 10,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 8,
+        "executor_call_count": 16,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 14,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 1,
+        "prompt_character_max": 29310,
+        "prompt_character_mean": 24810.166666666668,
+        "rejected_turn_count": 9,
+        "relation_count": 1,
+        "role_families": [
+          "pruner",
+          "router"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:e339f34a3a35f3f067422b5768287f7c",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 18,
+        "turn_overhead": 13,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 13029,
+        "prompt_character_mean": 10686.0,
+        "rejected_turn_count": 0,
+        "relation_count": 1,
+        "role_families": [
+          "preprocess",
+          "translation"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:3533d9bfd2d32f8c465e7af62aec9781",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -3,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "parse_failed",
+          "parse_failed",
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 2,
+        "prompt_character_max": 19556,
+        "prompt_character_mean": 14714.25,
+        "rejected_turn_count": 2,
+        "relation_count": 1,
+        "role_families": [
+          "researcher",
+          "synthesizer"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:c42bd4fc760487ac7b5e70fbb41a8edc",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 4,
+        "turn_overhead": -1,
+        "visible_history_max": 3
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 13421,
+        "prompt_character_mean": 10626.5,
+        "rejected_turn_count": 0,
+        "relation_count": 1,
+        "role_families": [
+          "synthesis_reviewer",
+          "clinical_planner"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:37101607e2947481e85e8fe3597a1acf",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -3,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "parse_failed",
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 3,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 6,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 7,
+        "parse_failure_count": 1,
+        "prompt_character_max": 16954,
+        "prompt_character_mean": 11881.0,
+        "rejected_turn_count": 1,
+        "relation_count": 2,
+        "role_families": [
+          "analysis",
+          "format",
+          "validation"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 3,
+        "task_id": "healthbench-professional:9a160f86c59743692e46fab89aae42f2",
+        "termination_reason": "finish",
+        "topology_family": "serial_3_plus",
+        "topology_motifs": [
+          "serial_3_plus"
+        ],
+        "turn_count": 3,
+        "turn_overhead": -4,
+        "visible_history_max": 2
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 3,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 6,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 7,
+        "parse_failure_count": 0,
+        "prompt_character_max": 14137,
+        "prompt_character_mean": 10921.5,
+        "rejected_turn_count": 0,
+        "relation_count": 2,
+        "role_families": [
+          "format",
+          "expert",
+          "writer"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 3,
+        "task_id": "healthbench-professional:4f08ae480b16ef825cf098eca6530e68",
+        "termination_reason": "finish",
+        "topology_family": "serial_3_plus",
+        "topology_motifs": [
+          "serial_3_plus"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -5,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "add_subgraph",
+          "finish",
+          "parse_failed",
+          "parse_failed",
+          "parse_failed",
+          "set_relation",
+          "set_relation",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 3,
+        "executor_call_count": 5,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "unverified",
+        "graph_revision": 6,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 7,
+        "parse_failure_count": 3,
+        "prompt_character_max": 21791,
+        "prompt_character_mean": 15864.888888888889,
+        "rejected_turn_count": 5,
+        "relation_count": 2,
+        "role_families": [
+          "content_delivery",
+          "reasoning",
+          "data_extraction"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 3,
+        "task_id": "healthbench-professional:f056cdb489e3636b0b51afb8fd6b3a8a",
+        "termination_reason": "finish",
+        "topology_family": "serial_3_plus",
+        "topology_motifs": [
+          "serial_3_plus"
+        ],
+        "turn_count": 9,
+        "turn_overhead": 2,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "parse_failed",
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 1,
+        "prompt_character_max": 13770,
+        "prompt_character_mean": 10241.0,
+        "rejected_turn_count": 1,
+        "relation_count": 1,
+        "role_families": [
+          "researcher",
+          "format"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:dadbebd3dce1b5928cac5a44dde095d3",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 3,
+        "turn_overhead": -2,
+        "visible_history_max": 2
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "set_relation",
+          "modify_agent",
+          "set_output",
+          "delete_agent",
+          "finish",
+          "set_output",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 6,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 4,
+        "executor_call_count": 8,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 10,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 24746,
+        "prompt_character_mean": 18495.375,
+        "rejected_turn_count": 3,
+        "relation_count": 1,
+        "role_families": [
+          "validation",
+          "retrieval_synthesis"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:fa30f3f57c7219130345f5c2e6d03d65",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 8,
+        "turn_overhead": 3,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "parse_failed",
+          "add_subgraph",
+          "parse_failed",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 2,
+        "prompt_character_max": 16248,
+        "prompt_character_mean": 11710.75,
+        "rejected_turn_count": 2,
+        "relation_count": 1,
+        "role_families": [
+          "clinician",
+          "searcher"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:cd132a0c7cde74c0242aa8ef3850c9b9",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 4,
+        "turn_overhead": -1,
+        "visible_history_max": 3
+      },
+      {
+        "action_sequence": [
+          "parse_failed",
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 1,
+        "prompt_character_max": 14237,
+        "prompt_character_mean": 10510.0,
+        "rejected_turn_count": 1,
+        "relation_count": 1,
+        "role_families": [
+          "retriever",
+          "synthesizer"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:ed8b3ca0a4dabfd0827c17a08513a181",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 3,
+        "turn_overhead": -2,
+        "visible_history_max": 2
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 3,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 7,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 8,
+        "parse_failure_count": 0,
+        "prompt_character_max": 14906,
+        "prompt_character_mean": 11327.0,
+        "rejected_turn_count": 0,
+        "relation_count": 3,
+        "role_families": [
+          "researcher",
+          "analyst",
+          "writer"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 3,
+        "task_id": "healthbench-professional:e156871820fef362c392aedfc8429c48",
+        "termination_reason": "finish",
+        "topology_family": "mixed",
+        "topology_motifs": [
+          "fan_in",
+          "fan_out"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -6,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "parse_failed",
+          "parse_failed",
+          "add_subgraph",
+          "parse_failed",
+          "add_subgraph",
+          "finish",
+          "set_relation",
+          "finish",
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 5,
+        "edit_overhead": 1,
+        "effective_dependency_depth": 4,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 3,
+        "executor_call_count": 7,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 11,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 11,
+        "parse_failure_count": 3,
+        "prompt_character_max": 22936,
+        "prompt_character_mean": 16273.7,
+        "rejected_turn_count": 6,
+        "relation_count": 4,
+        "role_families": [
+          "evaluator",
+          "expert",
+          "format",
+          "expert",
+          "unspecified"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 4,
+        "task_id": "healthbench-professional:2014ab7a9d8865f0da483817843ccbc5",
+        "termination_reason": "finish",
+        "topology_family": "fan_in",
+        "topology_motifs": [
+          "parallel",
+          "fan_in"
+        ],
+        "turn_count": 10,
+        "turn_overhead": -1,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "parse_failed",
+          "add_subgraph",
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 1,
+        "prompt_character_max": 23100,
+        "prompt_character_mean": 17393.25,
+        "rejected_turn_count": 2,
+        "relation_count": 1,
+        "role_families": [
+          "clinical_reasoning",
+          "clinical_documentation"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:b24258427538a4738c0fb8695b8e88c2",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 4,
+        "turn_overhead": -1,
+        "visible_history_max": 3
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 3,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 6,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 7,
+        "parse_failure_count": 0,
+        "prompt_character_max": 33646,
+        "prompt_character_mean": 30707.5,
+        "rejected_turn_count": 0,
+        "relation_count": 2,
+        "role_families": [
+          "data",
+          "math",
+          "clinical"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 3,
+        "task_id": "healthbench-professional:f00a97ad9c1f6f9d51f7595d2f1fb192",
+        "termination_reason": "finish",
+        "topology_family": "serial_3_plus",
+        "topology_motifs": [
+          "serial_3_plus"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -5,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "modify_agent",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 1,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 5,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 14489,
+        "prompt_character_mean": 10904.666666666666,
+        "rejected_turn_count": 0,
+        "relation_count": 1,
+        "role_families": [
+          "format",
+          "extractor"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:ba61acc5f41d03f6c4350fbec738c8f6",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 3,
+        "turn_overhead": -2,
+        "visible_history_max": 2
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 3,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 6,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 7,
+        "parse_failure_count": 0,
+        "prompt_character_max": 17649,
+        "prompt_character_mean": 12581.0,
+        "rejected_turn_count": 1,
+        "relation_count": 2,
+        "role_families": [
+          "diagnosis",
+          "decision",
+          "triage"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 3,
+        "task_id": "healthbench-professional:70b6d338c5f3d475537ff276228e979b",
+        "termination_reason": "finish",
+        "topology_family": "serial_3_plus",
+        "topology_motifs": [
+          "serial_3_plus"
+        ],
+        "turn_count": 3,
+        "turn_overhead": -4,
+        "visible_history_max": 2
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 33132,
+        "prompt_character_mean": 30646.0,
+        "rejected_turn_count": 0,
+        "relation_count": 1,
+        "role_families": [
+          "planner",
+          "format"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:8dc777ec90ff6c48fb0c9575a6ef3efd",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -3,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 3,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 7,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 8,
+        "parse_failure_count": 0,
+        "prompt_character_max": 34386,
+        "prompt_character_mean": 30541.5,
+        "rejected_turn_count": 0,
+        "relation_count": 3,
+        "role_families": [
+          "clinician",
+          "format",
+          "medicines"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 3,
+        "task_id": "healthbench-professional:b3d32c955eca9915b39e7844142e0a7c",
+        "termination_reason": "finish",
+        "topology_family": "mixed",
+        "topology_motifs": [
+          "fan_in",
+          "fan_out"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -6,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 12359,
+        "prompt_character_mean": 10109.0,
+        "rejected_turn_count": 0,
+        "relation_count": 1,
+        "role_families": [
+          "translator",
+          "orchestrator"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:069140a41499956bda412db8a616992e",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -3,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 20319,
+        "prompt_character_mean": 17921.5,
+        "rejected_turn_count": 0,
+        "relation_count": 1,
+        "role_families": [
+          "clinical-editor",
+          "text-output"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:2fadeaf6f5af1e6a10ffde01c134b2ed",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -3,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 13115,
+        "prompt_character_mean": 10463.5,
+        "rejected_turn_count": 0,
+        "relation_count": 1,
+        "role_families": [
+          "medical_scribe",
+          "quality_control"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:bf9e5af57ef45233ad32ab7b57e0e2e6",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -3,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "parse_failed",
+          "parse_failed",
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 3,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 6,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 7,
+        "parse_failure_count": 2,
+        "prompt_character_max": 18299,
+        "prompt_character_mean": 12122.0,
+        "rejected_turn_count": 2,
+        "relation_count": 2,
+        "role_families": [
+          "output_agent",
+          "clinical_expert",
+          "safety_audit"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 3,
+        "task_id": "healthbench-professional:9a0a92b2f7944d9dd91772b48e59cf28",
+        "termination_reason": "finish",
+        "topology_family": "serial_3_plus",
+        "topology_motifs": [
+          "serial_3_plus"
+        ],
+        "turn_count": 4,
+        "turn_overhead": -3,
+        "visible_history_max": 3
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "delete_agent",
+          "add_subgraph",
+          "finish",
+          "set_relation",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 4,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 4,
+        "executor_call_count": 6,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 10,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 7,
+        "parse_failure_count": 0,
+        "prompt_character_max": 24766,
+        "prompt_character_mean": 17489.833333333332,
+        "rejected_turn_count": 1,
+        "relation_count": 2,
+        "role_families": [
+          "translator",
+          "validator",
+          "validator"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:4ec442d1a4ab6ae633d47438531697c5",
+        "termination_reason": "finish",
+        "topology_family": "fan_in",
+        "topology_motifs": [
+          "parallel",
+          "fan_in"
+        ],
+        "turn_count": 6,
+        "turn_overhead": -1,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish",
+          "set_output",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 1,
+        "effective_dependency_depth": 3,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 2,
+        "executor_call_count": 6,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 8,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 8,
+        "parse_failure_count": 0,
+        "prompt_character_max": 22204,
+        "prompt_character_mean": 15068.75,
+        "rejected_turn_count": 1,
+        "relation_count": 3,
+        "role_families": [
+          "writer",
+          "researcher",
+          "critical_thinker"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 3,
+        "task_id": "healthbench-professional:6daac09cf85897e495539f3255bcf14c",
+        "termination_reason": "finish",
+        "topology_family": "mixed",
+        "topology_motifs": [
+          "fan_in",
+          "fan_out"
+        ],
+        "turn_count": 4,
+        "turn_overhead": -4,
+        "visible_history_max": 3
+      },
+      {
+        "action_sequence": [
+          "parse_failed",
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 3,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 7,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 8,
+        "parse_failure_count": 1,
+        "prompt_character_max": 17980,
+        "prompt_character_mean": 12485.666666666666,
+        "rejected_turn_count": 1,
+        "relation_count": 3,
+        "role_families": [
+          "Format",
+          "Research_Design",
+          "Statistical_Plan"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 3,
+        "task_id": "healthbench-professional:74ba10a0332a386e5a36fe3c765c5789",
+        "termination_reason": "finish",
+        "topology_family": "mixed",
+        "topology_motifs": [
+          "fan_in",
+          "fan_out"
+        ],
+        "turn_count": 3,
+        "turn_overhead": -5,
+        "visible_history_max": 2
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 3,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 6,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 7,
+        "parse_failure_count": 0,
+        "prompt_character_max": 13466,
+        "prompt_character_mean": 10552.0,
+        "rejected_turn_count": 0,
+        "relation_count": 2,
+        "role_families": [
+          "clarify",
+          "output",
+          "manage"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 3,
+        "task_id": "healthbench-professional:34de42d85191eec893b650337159ae32",
+        "termination_reason": "finish",
+        "topology_family": "serial_3_plus",
+        "topology_motifs": [
+          "serial_3_plus"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -5,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 3,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 7,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 8,
+        "parse_failure_count": 0,
+        "prompt_character_max": 18104,
+        "prompt_character_mean": 13101.5,
+        "rejected_turn_count": 0,
+        "relation_count": 3,
+        "role_families": [
+          "clinical_analyst",
+          "reporter",
+          "public_health_coord"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 3,
+        "task_id": "healthbench-professional:2f0063180b7fe7da3c326912112d6cb7",
+        "termination_reason": "finish",
+        "topology_family": "mixed",
+        "topology_motifs": [
+          "fan_in",
+          "fan_out"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -6,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish",
+          "set_relation",
+          "set_relation",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 1,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 2,
+        "executor_call_count": 4,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 5,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 32326,
+        "prompt_character_mean": 25727.4,
+        "rejected_turn_count": 2,
+        "relation_count": 1,
+        "role_families": [
+          "analysis",
+          "guidance"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:af76c840abe8e2890236150d7812aaa9",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 5,
+        "turn_overhead": 0,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "parse_failed",
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 3,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 6,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 7,
+        "parse_failure_count": 1,
+        "prompt_character_max": 16997,
+        "prompt_character_mean": 11661.0,
+        "rejected_turn_count": 1,
+        "relation_count": 2,
+        "role_families": [
+          "answer",
+          "inquire",
+          "validate"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 3,
+        "task_id": "healthbench-professional:148caba6ee69c05895b4d9b0012d7a66",
+        "termination_reason": "finish",
+        "topology_family": "serial_3_plus",
+        "topology_motifs": [
+          "serial_3_plus"
+        ],
+        "turn_count": 3,
+        "turn_overhead": -4,
+        "visible_history_max": 2
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 13166,
+        "prompt_character_mean": 10510.5,
+        "rejected_turn_count": 0,
+        "relation_count": 1,
+        "role_families": [
+          "expert",
+          "format"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:c70db1fcf0a0e2e2b86e19141c7ab39e",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -3,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 3,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 6,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 7,
+        "parse_failure_count": 0,
+        "prompt_character_max": 19577,
+        "prompt_character_mean": 14250.5,
+        "rejected_turn_count": 0,
+        "relation_count": 2,
+        "role_families": [
+          "diagnosis_engine",
+          "diagnosis_engine",
+          "diagnosis_engine"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 3,
+        "task_id": "healthbench-professional:5b639eecb6a0a71ce39b9f5349cf50db",
+        "termination_reason": "finish",
+        "topology_family": "serial_3_plus",
+        "topology_motifs": [
+          "serial_3_plus"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -5,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 3,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 6,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 7,
+        "parse_failure_count": 0,
+        "prompt_character_max": 17893,
+        "prompt_character_mean": 12789.666666666666,
+        "rejected_turn_count": 1,
+        "relation_count": 2,
+        "role_families": [
+          "analyst",
+          "format",
+          "writer"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 3,
+        "task_id": "healthbench-professional:725e0669a5554ccfc7609d1c831c8abb",
+        "termination_reason": "finish",
+        "topology_family": "serial_3_plus",
+        "topology_motifs": [
+          "serial_3_plus"
+        ],
+        "turn_count": 3,
+        "turn_overhead": -4,
+        "visible_history_max": 2
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 20514,
+        "prompt_character_mean": 17740.0,
+        "rejected_turn_count": 0,
+        "relation_count": 1,
+        "role_families": [
+          "operator",
+          "critical-read"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:f1fa1b4d3ae3502f2f17801bf23b2bef",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -3,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 13466,
+        "prompt_character_mean": 10881.0,
+        "rejected_turn_count": 0,
+        "relation_count": 1,
+        "role_families": [
+          "format",
+          "consultant"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:3a6f1b8fa83a0dfb47cc0b2543969b49",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -3,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 3,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 7,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 8,
+        "parse_failure_count": 0,
+        "prompt_character_max": 14927,
+        "prompt_character_mean": 11355.0,
+        "rejected_turn_count": 0,
+        "relation_count": 3,
+        "role_families": [
+          "challenger",
+          "intake",
+          "synthesizer"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 3,
+        "task_id": "healthbench-professional:50ea172e8c130fae0a8fdbbf13e71c01",
+        "termination_reason": "finish",
+        "topology_family": "mixed",
+        "topology_motifs": [
+          "fan_in",
+          "fan_out"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -6,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "parse_failed",
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 3,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 7,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 8,
+        "parse_failure_count": 1,
+        "prompt_character_max": 18618,
+        "prompt_character_mean": 12441.0,
+        "rejected_turn_count": 1,
+        "relation_count": 3,
+        "role_families": [
+          "clinical_analyst",
+          "knowledge_retriever",
+          "format"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 3,
+        "task_id": "healthbench-professional:0dfb42f288816984dfda2951b1da9339",
+        "termination_reason": "finish",
+        "topology_family": "mixed",
+        "topology_motifs": [
+          "fan_in",
+          "fan_out"
+        ],
+        "turn_count": 3,
+        "turn_overhead": -5,
+        "visible_history_max": 2
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 18275,
+        "prompt_character_mean": 15831.0,
+        "rejected_turn_count": 0,
+        "relation_count": 1,
+        "role_families": [
+          "data",
+          "format"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:874fd1c805541e26d3f9aed1d31ae99b",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -3,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "parse_failed",
+          "add_subgraph",
+          "parse_failed",
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 1,
+        "effective_dependency_status": "not_applicable",
+        "execution_turn_count": 1,
+        "executor_call_count": 4,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "not_applicable",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 2,
+        "prompt_character_max": 21058,
+        "prompt_character_mean": 15378.8,
+        "rejected_turn_count": 3,
+        "relation_count": 1,
+        "role_families": [
+          "note_summarizer",
+          "summary_generator"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 1,
+        "task_id": "healthbench-professional:c820187649a64fca4be8aa237bd93fd6",
+        "termination_reason": "finish",
+        "topology_family": "reciprocal",
+        "topology_motifs": [
+          "reciprocal"
+        ],
+        "turn_count": 5,
+        "turn_overhead": 0,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "add_subgraph",
+          "add_subgraph",
+          "set_relation",
+          "finish",
+          "delete_agent",
+          "set_output",
+          "finish"
+        ],
+        "agent_count": 1,
+        "edit_overhead": 4,
+        "effective_dependency_depth": 1,
+        "effective_dependency_status": "not_applicable",
+        "execution_turn_count": 4,
+        "executor_call_count": 5,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "not_applicable",
+        "graph_revision": 6,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 3,
+        "parse_failure_count": 0,
+        "prompt_character_max": 19720,
+        "prompt_character_mean": 15235.875,
+        "rejected_turn_count": 3,
+        "relation_count": 0,
+        "role_families": [
+          "translator"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 1,
+        "task_id": "healthbench-professional:95e372d4acf027eadf6534a7dae70e96",
+        "termination_reason": "finish",
+        "topology_family": "single",
+        "topology_motifs": [],
+        "turn_count": 8,
+        "turn_overhead": 5,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 20847,
+        "prompt_character_mean": 18149.5,
+        "rejected_turn_count": 0,
+        "relation_count": 1,
+        "role_families": [
+          "medical_reviewer",
+          "clinical_prescriber"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:e630f382e8c32cfc1d220f24235ba00f",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -3,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 12619,
+        "prompt_character_mean": 10325.5,
+        "rejected_turn_count": 0,
+        "relation_count": 1,
+        "role_families": [
+          "translator",
+          "verifier"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:a75babf5812e259a882aa7a1151f6dc0",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -3,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "parse_failed",
+          "add_subgraph",
+          "modify_agent",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 1,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 2,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 5,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 1,
+        "prompt_character_max": 18723,
+        "prompt_character_mean": 12407.0,
+        "rejected_turn_count": 1,
+        "relation_count": 1,
+        "role_families": [
+          "translator",
+          "output"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:5433d7fd883062036203893c8b32e771",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 4,
+        "turn_overhead": -1,
+        "visible_history_max": 3
+      },
+      {
+        "action_sequence": [
+          "parse_failed",
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 3,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 6,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 7,
+        "parse_failure_count": 1,
+        "prompt_character_max": 14885,
+        "prompt_character_mean": 10722.333333333334,
+        "rejected_turn_count": 1,
+        "relation_count": 2,
+        "role_families": [
+          "reason",
+          "format",
+          "verify"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 3,
+        "task_id": "healthbench-professional:5b139efb2c8c5881d782135358d5ec25",
+        "termination_reason": "finish",
+        "topology_family": "serial_3_plus",
+        "topology_motifs": [
+          "serial_3_plus"
+        ],
+        "turn_count": 3,
+        "turn_overhead": -4,
+        "visible_history_max": 2
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 20288,
+        "prompt_character_mean": 17702.0,
+        "rejected_turn_count": 0,
+        "relation_count": 1,
+        "role_families": [
+          "format",
+          "planner"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:304e1196cbe5caa7907f30d170174adc",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -3,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 3,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 7,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 8,
+        "parse_failure_count": 0,
+        "prompt_character_max": 28189,
+        "prompt_character_mean": 24609.0,
+        "rejected_turn_count": 0,
+        "relation_count": 3,
+        "role_families": [
+          "format",
+          "knowledge",
+          "triage"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 3,
+        "task_id": "healthbench-professional:e3eb6d1155ac99d74fe22f86bc529837",
+        "termination_reason": "finish",
+        "topology_family": "mixed",
+        "topology_motifs": [
+          "fan_in",
+          "fan_out"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -6,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "parse_failed",
+          "parse_failed",
+          "parse_failed",
+          "finish",
+          "add_subgraph",
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 3,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 7,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 8,
+        "parse_failure_count": 3,
+        "prompt_character_max": 21421,
+        "prompt_character_mean": 14567.857142857143,
+        "rejected_turn_count": 5,
+        "relation_count": 3,
+        "role_families": [
+          "clinical_expert",
+          "synthesis",
+          "risk_assessment"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 3,
+        "task_id": "healthbench-professional:e529c3dbebd813c64db0381d151944f7",
+        "termination_reason": "finish",
+        "topology_family": "mixed",
+        "topology_motifs": [
+          "fan_in",
+          "fan_out"
+        ],
+        "turn_count": 7,
+        "turn_overhead": -1,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "parse_failed",
+          "add_subgraph",
+          "add_subgraph",
+          "add_subgraph",
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 1,
+        "effective_dependency_depth": 3,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 2,
+        "executor_call_count": 5,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 7,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 7,
+        "parse_failure_count": 1,
+        "prompt_character_max": 20060,
+        "prompt_character_mean": 13805.5,
+        "rejected_turn_count": 3,
+        "relation_count": 2,
+        "role_families": [
+          "planner",
+          "scouter",
+          "formatter"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 3,
+        "task_id": "healthbench-professional:977f694d9e913f02c3cc043c3e880cf3",
+        "termination_reason": "finish",
+        "topology_family": "serial_3_plus",
+        "topology_motifs": [
+          "serial_3_plus"
+        ],
+        "turn_count": 6,
+        "turn_overhead": -1,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 3,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 6,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 7,
+        "parse_failure_count": 0,
+        "prompt_character_max": 14134,
+        "prompt_character_mean": 10994.0,
+        "rejected_turn_count": 0,
+        "relation_count": 2,
+        "role_families": [
+          "hemodynamic_analyst",
+          "induction_planner",
+          "format"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 3,
+        "task_id": "healthbench-professional:d701c74f2d7a7a70dee79fb1bbb1f7e6",
+        "termination_reason": "finish",
+        "topology_family": "serial_3_plus",
+        "topology_motifs": [
+          "serial_3_plus"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -5,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "set_output",
+          "set_output",
+          "modify_agent",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 1,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 2,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 5,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 21062,
+        "prompt_character_mean": 14794.2,
+        "rejected_turn_count": 2,
+        "relation_count": 1,
+        "role_families": [
+          "operator",
+          "format"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:2f654b3e7680051dda0345c1493d0fdd",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 5,
+        "turn_overhead": 0,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 6,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 7,
+        "parse_failure_count": 0,
+        "prompt_character_max": 17288,
+        "prompt_character_mean": 12003.333333333334,
+        "rejected_turn_count": 1,
+        "relation_count": 2,
+        "role_families": [
+          "scribe",
+          "format",
+          "educator"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:584f84f2ba215592e2356cbcd98240e4",
+        "termination_reason": "finish",
+        "topology_family": "fan_in",
+        "topology_motifs": [
+          "parallel",
+          "fan_in"
+        ],
+        "turn_count": 3,
+        "turn_overhead": -4,
+        "visible_history_max": 2
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "add_subgraph",
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 3,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 7,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 8,
+        "parse_failure_count": 0,
+        "prompt_character_max": 20991,
+        "prompt_character_mean": 13058.25,
+        "rejected_turn_count": 2,
+        "relation_count": 3,
+        "role_families": [
+          "presenter",
+          "researcher",
+          "analyst"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 3,
+        "task_id": "healthbench-professional:dd0457d8e0ffc31711c9f85570827d78",
+        "termination_reason": "finish",
+        "topology_family": "mixed",
+        "topology_motifs": [
+          "fan_in",
+          "fan_out"
+        ],
+        "turn_count": 4,
+        "turn_overhead": -4,
+        "visible_history_max": 3
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish",
+          "set_relation",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 1,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 2,
+        "executor_call_count": 7,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 7,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 7,
+        "parse_failure_count": 0,
+        "prompt_character_max": 21607,
+        "prompt_character_mean": 15008.0,
+        "rejected_turn_count": 1,
+        "relation_count": 2,
+        "role_families": [
+          "pain",
+          "ritual",
+          "lumo"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:75826cd07bfeffd48b53789dd4205f03",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2",
+          "reciprocal"
+        ],
+        "turn_count": 4,
+        "turn_overhead": -3,
+        "visible_history_max": 3
+      },
+      {
+        "action_sequence": [
+          "parse_failed",
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 3,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 6,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 7,
+        "parse_failure_count": 1,
+        "prompt_character_max": 16342,
+        "prompt_character_mean": 11425.0,
+        "rejected_turn_count": 1,
+        "relation_count": 2,
+        "role_families": [
+          "analyst",
+          "composer",
+          "researcher"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 3,
+        "task_id": "healthbench-professional:83a295db73b1bc551ed5941434655de1",
+        "termination_reason": "finish",
+        "topology_family": "serial_3_plus",
+        "topology_motifs": [
+          "serial_3_plus"
+        ],
+        "turn_count": 3,
+        "turn_overhead": -4,
+        "visible_history_max": 2
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 3,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 6,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 7,
+        "parse_failure_count": 0,
+        "prompt_character_max": 22788,
+        "prompt_character_mean": 19611.0,
+        "rejected_turn_count": 0,
+        "relation_count": 2,
+        "role_families": [
+          "format",
+          "reason",
+          "sight"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 3,
+        "task_id": "healthbench-professional:c9c5f9605db3a65dc138d75eb5ac6ab1",
+        "termination_reason": "finish",
+        "topology_family": "serial_3_plus",
+        "topology_motifs": [
+          "serial_3_plus"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -5,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 3,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 7,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 8,
+        "parse_failure_count": 0,
+        "prompt_character_max": 15498,
+        "prompt_character_mean": 11692.5,
+        "rejected_turn_count": 0,
+        "relation_count": 3,
+        "role_families": [
+          "clinical_writer",
+          "format",
+          "clinical_analyst"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 3,
+        "task_id": "healthbench-professional:cd5940a3d17aee98aa6e4018b35daa98",
+        "termination_reason": "finish",
+        "topology_family": "mixed",
+        "topology_motifs": [
+          "fan_in",
+          "fan_out"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -6,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "add_subgraph",
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 3,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 7,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 8,
+        "parse_failure_count": 0,
+        "prompt_character_max": 24301,
+        "prompt_character_mean": 17457.5,
+        "rejected_turn_count": 2,
+        "relation_count": 3,
+        "role_families": [
+          "analyst",
+          "clinician",
+          "format"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 3,
+        "task_id": "healthbench-professional:6b8d7147e81bea94d88ffd1c7a99fb25",
+        "termination_reason": "finish",
+        "topology_family": "mixed",
+        "topology_motifs": [
+          "fan_in",
+          "fan_out"
+        ],
+        "turn_count": 4,
+        "turn_overhead": -4,
+        "visible_history_max": 3
+      },
+      {
+        "action_sequence": [
+          "parse_failed",
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 1,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 1,
+        "effective_dependency_status": "not_applicable",
+        "execution_turn_count": 1,
+        "executor_call_count": 1,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "not_applicable",
+        "graph_revision": 2,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 3,
+        "parse_failure_count": 1,
+        "prompt_character_max": 13581,
+        "prompt_character_mean": 10553.666666666666,
+        "rejected_turn_count": 1,
+        "relation_count": 0,
+        "role_families": [
+          "simplifier"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 1,
+        "task_id": "healthbench-professional:54927c2849dc77d31f5cdec37707a1c9",
+        "termination_reason": "finish",
+        "topology_family": "single",
+        "topology_motifs": [],
+        "turn_count": 3,
+        "turn_overhead": 0,
+        "visible_history_max": 2
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 1,
+        "effective_dependency_status": "not_applicable",
+        "execution_turn_count": 1,
+        "executor_call_count": 4,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "not_applicable",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 12911,
+        "prompt_character_mean": 10302.0,
+        "rejected_turn_count": 0,
+        "relation_count": 1,
+        "role_families": [
+          "Expert-Medical-Adviser",
+          "format"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 1,
+        "task_id": "healthbench-professional:6f2fb5f8acd1abf5d2fe47300cffc923",
+        "termination_reason": "finish",
+        "topology_family": "reciprocal",
+        "topology_motifs": [
+          "reciprocal"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -3,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 3,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 6,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 7,
+        "parse_failure_count": 0,
+        "prompt_character_max": 13985,
+        "prompt_character_mean": 10932.0,
+        "rejected_turn_count": 0,
+        "relation_count": 2,
+        "role_families": [
+          "summary_formatter",
+          "clinical_analyst",
+          "protocol_designer"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 3,
+        "task_id": "healthbench-professional:35b9ab1e8dc0ef2244dde26f4872d185",
+        "termination_reason": "finish",
+        "topology_family": "serial_3_plus",
+        "topology_motifs": [
+          "serial_3_plus"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -5,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 12443,
+        "prompt_character_mean": 10118.0,
+        "rejected_turn_count": 0,
+        "relation_count": 1,
+        "role_families": [
+          "format",
+          "retriever"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:b436aa3e35424fb868cbd87172dd7dfb",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -3,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "modify_agent",
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 6,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 7,
+        "parse_failure_count": 0,
+        "prompt_character_max": 19048,
+        "prompt_character_mean": 12224.5,
+        "rejected_turn_count": 2,
+        "relation_count": 2,
+        "role_families": [
+          "format",
+          "fact_checking",
+          "clinical_reasoning"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:c8ff5c99cc87bca185aa0432259deeff",
+        "termination_reason": "finish",
+        "topology_family": "fan_in",
+        "topology_motifs": [
+          "parallel",
+          "fan_in"
+        ],
+        "turn_count": 4,
+        "turn_overhead": -3,
+        "visible_history_max": 3
+      },
+      {
+        "action_sequence": [
+          "parse_failed",
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 1,
+        "prompt_character_max": 15837,
+        "prompt_character_mean": 11766.0,
+        "rejected_turn_count": 1,
+        "relation_count": 1,
+        "role_families": [
+          "clinical_expert",
+          "format"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:c3fc32bce9986b51c688e46c988116fe",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 3,
+        "turn_overhead": -2,
+        "visible_history_max": 2
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 3,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 6,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 7,
+        "parse_failure_count": 0,
+        "prompt_character_max": 20770,
+        "prompt_character_mean": 17079.5,
+        "rejected_turn_count": 0,
+        "relation_count": 2,
+        "role_families": [
+          "reporter",
+          "anesthesia_expert",
+          "safety_checker"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 3,
+        "task_id": "healthbench-professional:503b75b4cba8e5abd656cd2512a449bb",
+        "termination_reason": "finish",
+        "topology_family": "serial_3_plus",
+        "topology_motifs": [
+          "serial_3_plus"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -5,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 3,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 6,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 7,
+        "parse_failure_count": 0,
+        "prompt_character_max": 20891,
+        "prompt_character_mean": 17873.5,
+        "rejected_turn_count": 0,
+        "relation_count": 2,
+        "role_families": [
+          "data_extractor",
+          "format",
+          "format"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 3,
+        "task_id": "healthbench-professional:dedf5543d9d7e5d4db33212e68ab6937",
+        "termination_reason": "finish",
+        "topology_family": "serial_3_plus",
+        "topology_motifs": [
+          "serial_3_plus"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -5,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 3,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 6,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 7,
+        "parse_failure_count": 0,
+        "prompt_character_max": 15739,
+        "prompt_character_mean": 12564.0,
+        "rejected_turn_count": 0,
+        "relation_count": 2,
+        "role_families": [
+          "process",
+          "verify",
+          "translate"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 3,
+        "task_id": "healthbench-professional:a79240f2ad2bc52983bd65c417842661",
+        "termination_reason": "finish",
+        "topology_family": "serial_3_plus",
+        "topology_motifs": [
+          "serial_3_plus"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -5,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 3,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 7,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 8,
+        "parse_failure_count": 0,
+        "prompt_character_max": 15623,
+        "prompt_character_mean": 11715.0,
+        "rejected_turn_count": 0,
+        "relation_count": 3,
+        "role_families": [
+          "operator",
+          "operator",
+          "operator"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 3,
+        "task_id": "healthbench-professional:12beaf3375f3ce85e04b651cf88de389",
+        "termination_reason": "finish",
+        "topology_family": "mixed",
+        "topology_motifs": [
+          "fan_in",
+          "fan_out"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -6,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "set_output",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 3,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 7,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 8,
+        "parse_failure_count": 0,
+        "prompt_character_max": 18063,
+        "prompt_character_mean": 13950.0,
+        "rejected_turn_count": 1,
+        "relation_count": 3,
+        "role_families": [
+          "clinical_workflow",
+          "clinical_workflow",
+          "format"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 3,
+        "task_id": "healthbench-professional:8c50707e96f619c4387209337a1d585d",
+        "termination_reason": "finish",
+        "topology_family": "mixed",
+        "topology_motifs": [
+          "fan_in",
+          "fan_out"
+        ],
+        "turn_count": 3,
+        "turn_overhead": -5,
+        "visible_history_max": 2
+      },
+      {
+        "action_sequence": [
+          "parse_failed",
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 3,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 7,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 8,
+        "parse_failure_count": 1,
+        "prompt_character_max": 17839,
+        "prompt_character_mean": 11968.666666666666,
+        "rejected_turn_count": 1,
+        "relation_count": 3,
+        "role_families": [
+          "medical_analyst",
+          "knowledge_retriever",
+          "treatment_planner"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 3,
+        "task_id": "healthbench-professional:d07578daa48030c376c70d3e9bd81d48",
+        "termination_reason": "finish",
+        "topology_family": "mixed",
+        "topology_motifs": [
+          "fan_in",
+          "fan_out"
+        ],
+        "turn_count": 3,
+        "turn_overhead": -5,
+        "visible_history_max": 2
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 12219,
+        "prompt_character_mean": 9968.5,
+        "rejected_turn_count": 0,
+        "relation_count": 1,
+        "role_families": [
+          "doctor",
+          "format"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:cfe155549d2470c9f6ffaa06097f7add",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -3,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 6,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 7,
+        "parse_failure_count": 0,
+        "prompt_character_max": 14437,
+        "prompt_character_mean": 11132.5,
+        "rejected_turn_count": 0,
+        "relation_count": 2,
+        "role_families": [
+          "specialist",
+          "orchestrator",
+          "specialist"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:4f118b7f2841f4816f4b8d4b989e4500",
+        "termination_reason": "finish",
+        "topology_family": "fan_in",
+        "topology_motifs": [
+          "parallel",
+          "fan_in"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -5,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 3,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 6,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 7,
+        "parse_failure_count": 0,
+        "prompt_character_max": 14240,
+        "prompt_character_mean": 11024.0,
+        "rejected_turn_count": 0,
+        "relation_count": 2,
+        "role_families": [
+          "output_agent",
+          "researcher",
+          "synthesizer"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 3,
+        "task_id": "healthbench-professional:846f8c4d59d4ccbe9a14d2b20c7f175e",
+        "termination_reason": "finish",
+        "topology_family": "serial_3_plus",
+        "topology_motifs": [
+          "serial_3_plus"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -5,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "parse_failed",
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 6,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 7,
+        "parse_failure_count": 1,
+        "prompt_character_max": 16007,
+        "prompt_character_mean": 11099.333333333334,
+        "rejected_turn_count": 1,
+        "relation_count": 2,
+        "role_families": [
+          "expert",
+          "evaluator",
+          "synthesizer"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:43195fe0fc4d3af8a379242fb06582dd",
+        "termination_reason": "finish",
+        "topology_family": "fan_in",
+        "topology_motifs": [
+          "parallel",
+          "fan_in"
+        ],
+        "turn_count": 3,
+        "turn_overhead": -4,
+        "visible_history_max": 2
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "delete_agent",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 3,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 7,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 16275,
+        "prompt_character_mean": 12471.666666666666,
+        "rejected_turn_count": 0,
+        "relation_count": 1,
+        "role_families": [
+          "medical_verifier",
+          "language_converter"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:34e392723b3c5e4a18ffef591999b2ca",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 3,
+        "turn_overhead": -2,
+        "visible_history_max": 2
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 11953,
+        "prompt_character_mean": 9828.5,
+        "rejected_turn_count": 0,
+        "relation_count": 1,
+        "role_families": [
+          "content_generator",
+          "format"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:282e788a7f8be989ae55aa236fcd9f88",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -3,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 11866,
+        "prompt_character_mean": 9754.0,
+        "rejected_turn_count": 0,
+        "relation_count": 1,
+        "role_families": [
+          "analyst",
+          "draft"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:27780da4d1b342caf1b83f5bdf726ba1",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -3,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 12680,
+        "prompt_character_mean": 10207.5,
+        "rejected_turn_count": 0,
+        "relation_count": 1,
+        "role_families": [
+          "formater",
+          "thinker"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:458add9eb24073846f7864852018af56",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -3,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 12804,
+        "prompt_character_mean": 10310.0,
+        "rejected_turn_count": 0,
+        "relation_count": 1,
+        "role_families": [
+          "clinical_expert",
+          "validator"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:815c97141ca6bf23359012d8879c1c4f",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -3,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "parse_failed",
+          "add_subgraph",
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 6,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 7,
+        "parse_failure_count": 1,
+        "prompt_character_max": 18615,
+        "prompt_character_mean": 12214.25,
+        "rejected_turn_count": 2,
+        "relation_count": 2,
+        "role_families": [
+          "specialist",
+          "integrator",
+          "specialist"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:c1633d335487b8a56df1f7a993ce3be0",
+        "termination_reason": "finish",
+        "topology_family": "fan_in",
+        "topology_motifs": [
+          "parallel",
+          "fan_in"
+        ],
+        "turn_count": 4,
+        "turn_overhead": -3,
+        "visible_history_max": 3
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 3,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 6,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 7,
+        "parse_failure_count": 0,
+        "prompt_character_max": 14391,
+        "prompt_character_mean": 11152.5,
+        "rejected_turn_count": 0,
+        "relation_count": 2,
+        "role_families": [
+          "format",
+          "research_wave",
+          "workflow_engine"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 3,
+        "task_id": "healthbench-professional:4b863d4f920b1e54cdebe37d6cd050b9",
+        "termination_reason": "finish",
+        "topology_family": "serial_3_plus",
+        "topology_motifs": [
+          "serial_3_plus"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -5,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 26981,
+        "prompt_character_mean": 24608.5,
+        "rejected_turn_count": 0,
+        "relation_count": 1,
+        "role_families": [
+          "research",
+          "format"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:e2d17058591b30e7187df009d1e25495",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -3,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 12599,
+        "prompt_character_mean": 10146.5,
+        "rejected_turn_count": 0,
+        "relation_count": 1,
+        "role_families": [
+          "domain-expert",
+          "synthesizer"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:819a2ff6b5fe93b0d30eb7fb5a15cb26",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -3,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 12567,
+        "prompt_character_mean": 10153.5,
+        "rejected_turn_count": 0,
+        "relation_count": 1,
+        "role_families": [
+          "investigator",
+          "scribe"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:a0177e18b2a459793b382283433cf7e2",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -3,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 12729,
+        "prompt_character_mean": 10201.5,
+        "rejected_turn_count": 0,
+        "relation_count": 1,
+        "role_families": [
+          "educator",
+          "validator"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:077cc5ea55c6378fd65b529e2928dff5",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -3,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 12239,
+        "prompt_character_mean": 9938.5,
+        "rejected_turn_count": 0,
+        "relation_count": 1,
+        "role_families": [
+          "summarizer",
+          "domain_expert_lifescience"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:69ce3f03e8cd876e3d6e65fb80062c47",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -3,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 12074,
+        "prompt_character_mean": 9875.5,
+        "rejected_turn_count": 0,
+        "relation_count": 1,
+        "role_families": [
+          "reasoning",
+          "format"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:8fc810b9b1cfae60006305c59ae6c036",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -3,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 13173,
+        "prompt_character_mean": 10552.5,
+        "rejected_turn_count": 0,
+        "relation_count": 1,
+        "role_families": [
+          "Researcher",
+          "Writer"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:d1734ecd148132f2e1c33fd8479d4950",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -3,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 3,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 6,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 7,
+        "parse_failure_count": 0,
+        "prompt_character_max": 13677,
+        "prompt_character_mean": 10677.5,
+        "rejected_turn_count": 0,
+        "relation_count": 2,
+        "role_families": [
+          "reporter",
+          "retriever",
+          "synthesizer"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 3,
+        "task_id": "healthbench-professional:a2ab1f20471d9a27fc3d36400c5d143c",
+        "termination_reason": "finish",
+        "topology_family": "serial_3_plus",
+        "topology_motifs": [
+          "serial_3_plus"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -5,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 14055,
+        "prompt_character_mean": 10951.0,
+        "rejected_turn_count": 0,
+        "relation_count": 1,
+        "role_families": [
+          "research",
+          "writer"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:b2ca9a7335466400874603783b181252",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -3,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "parse_failed",
+          "add_subgraph",
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 2,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 1,
+        "prompt_character_max": 16060,
+        "prompt_character_mean": 10921.25,
+        "rejected_turn_count": 1,
+        "relation_count": 1,
+        "role_families": [
+          "research",
+          "editor"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:065a88b40640f4e6b26f6ebaa4d14f0c",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 4,
+        "turn_overhead": -1,
+        "visible_history_max": 3
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 3,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 6,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 7,
+        "parse_failure_count": 0,
+        "prompt_character_max": 14300,
+        "prompt_character_mean": 11016.0,
+        "rejected_turn_count": 0,
+        "relation_count": 2,
+        "role_families": [
+          "Consultant",
+          "Medical Researcher",
+          "Clinical Analyst"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 3,
+        "task_id": "healthbench-professional:ae1a922b7cb36444211f034c7840ab75",
+        "termination_reason": "finish",
+        "topology_family": "serial_3_plus",
+        "topology_motifs": [
+          "serial_3_plus"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -5,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "set_output",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 13935,
+        "prompt_character_mean": 11311.0,
+        "rejected_turn_count": 1,
+        "relation_count": 1,
+        "role_families": [
+          "researcher",
+          "summarizer"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:8d0d3d8e6bfb9f5d818689734d8a3857",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 3,
+        "turn_overhead": -2,
+        "visible_history_max": 2
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 6,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 7,
+        "parse_failure_count": 0,
+        "prompt_character_max": 20224,
+        "prompt_character_mean": 17208.5,
+        "rejected_turn_count": 0,
+        "relation_count": 2,
+        "role_families": [
+          "reason_agent",
+          "reason_agent",
+          "format"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:dcb10a237a47639ad33ac8c24da73740",
+        "termination_reason": "finish",
+        "topology_family": "fan_in",
+        "topology_motifs": [
+          "parallel",
+          "fan_in"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -5,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 3,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 7,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 8,
+        "parse_failure_count": 0,
+        "prompt_character_max": 15602,
+        "prompt_character_mean": 11747.5,
+        "rejected_turn_count": 0,
+        "relation_count": 3,
+        "role_families": [
+          "researcher",
+          "planner",
+          "producer"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 3,
+        "task_id": "healthbench-professional:a8f50fd2cf3c7cf8fc2cebb60e3f3202",
+        "termination_reason": "finish",
+        "topology_family": "mixed",
+        "topology_motifs": [
+          "fan_in",
+          "fan_out"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -6,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "parse_failed",
+          "add_subgraph",
+          "parse_failed",
+          "parse_failed",
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 3,
+        "prompt_character_max": 17647,
+        "prompt_character_mean": 13088.833333333334,
+        "rejected_turn_count": 4,
+        "relation_count": 1,
+        "role_families": [
+          "medical_calculator",
+          "format"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:6df6c53605808c8939d2187243747ec9",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 6,
+        "turn_overhead": 1,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 3,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 6,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 7,
+        "parse_failure_count": 0,
+        "prompt_character_max": 31494,
+        "prompt_character_mean": 26697.666666666668,
+        "rejected_turn_count": 1,
+        "relation_count": 2,
+        "role_families": [
+          "clinical_reasoning",
+          "format",
+          "protocol_generation"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 3,
+        "task_id": "healthbench-professional:57ceb8d0506f3263702e59eef9ce8ad3",
+        "termination_reason": "finish",
+        "topology_family": "serial_3_plus",
+        "topology_motifs": [
+          "serial_3_plus"
+        ],
+        "turn_count": 3,
+        "turn_overhead": -4,
+        "visible_history_max": 2
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "add_subgraph",
+          "modify_agent",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 1,
+        "effective_dependency_depth": 3,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 8,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 8,
+        "parse_failure_count": 0,
+        "prompt_character_max": 32383,
+        "prompt_character_mean": 24425.75,
+        "rejected_turn_count": 1,
+        "relation_count": 3,
+        "role_families": [
+          "clinical_reasoning",
+          "data_retrieval",
+          "clinical_guidance"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 3,
+        "task_id": "healthbench-professional:a585099acf153d0f72f74c786b115a87",
+        "termination_reason": "finish",
+        "topology_family": "mixed",
+        "topology_motifs": [
+          "fan_in",
+          "fan_out"
+        ],
+        "turn_count": 4,
+        "turn_overhead": -4,
+        "visible_history_max": 3
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "delete_agent",
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 3,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 6,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 7,
+        "parse_failure_count": 0,
+        "prompt_character_max": 16427,
+        "prompt_character_mean": 11487.0,
+        "rejected_turn_count": 2,
+        "relation_count": 2,
+        "role_families": [
+          "clinical_tier_1",
+          "format",
+          "clinical_tier_2"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 3,
+        "task_id": "healthbench-professional:3decb44b98204650079838963bae22cc",
+        "termination_reason": "finish",
+        "topology_family": "serial_3_plus",
+        "topology_motifs": [
+          "serial_3_plus"
+        ],
+        "turn_count": 4,
+        "turn_overhead": -3,
+        "visible_history_max": 3
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 12397,
+        "prompt_character_mean": 10051.5,
+        "rejected_turn_count": 0,
+        "relation_count": 1,
+        "role_families": [
+          "medical_expert",
+          "synthesizer"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:90945d27377c40a39ed5a393b8457c30",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -3,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 15843,
+        "prompt_character_mean": 13416.0,
+        "rejected_turn_count": 0,
+        "relation_count": 1,
+        "role_families": [
+          "reasoning",
+          "format"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:b96c46ec3c96437b8e448e2cb1abe7a7",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -3,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "finish",
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 21613,
+        "prompt_character_mean": 18603.333333333332,
+        "rejected_turn_count": 1,
+        "relation_count": 1,
+        "role_families": [
+          "reasoner",
+          "format"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:38a13bdef2c57f656969c2a2869f987e",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 3,
+        "turn_overhead": -2,
+        "visible_history_max": 2
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 3,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 6,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 7,
+        "parse_failure_count": 0,
+        "prompt_character_max": 14561,
+        "prompt_character_mean": 11375.0,
+        "rejected_turn_count": 0,
+        "relation_count": 2,
+        "role_families": [
+          "diagnosis",
+          "calculation",
+          "format"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 3,
+        "task_id": "healthbench-professional:20cae7fd167b5eebe3ae19c6e25ccdac",
+        "termination_reason": "finish",
+        "topology_family": "serial_3_plus",
+        "topology_motifs": [
+          "serial_3_plus"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -5,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 13143,
+        "prompt_character_mean": 10443.5,
+        "rejected_turn_count": 0,
+        "relation_count": 1,
+        "role_families": [
+          "analysis",
+          "format"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:ffbce4c57dabfd48a4e99047813723e7",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -3,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 12716,
+        "prompt_character_mean": 10332.5,
+        "rejected_turn_count": 0,
+        "relation_count": 1,
+        "role_families": [
+          "medical_analyst",
+          "format"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:cca54d5849d80c7c9af86e02163bb927",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -3,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "add_subgraph",
+          "delete_agent",
+          "delete_agent",
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 1,
+        "edit_overhead": 6,
+        "effective_dependency_depth": 1,
+        "effective_dependency_status": "not_applicable",
+        "execution_turn_count": 2,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "not_applicable",
+        "graph_revision": 8,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 3,
+        "parse_failure_count": 0,
+        "prompt_character_max": 16997,
+        "prompt_character_mean": 13295.833333333334,
+        "rejected_turn_count": 1,
+        "relation_count": 0,
+        "role_families": [
+          "clinical_analysis"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 1,
+        "task_id": "healthbench-professional:dc4f101b1b9ead76d90067debe5c7d36",
+        "termination_reason": "finish",
+        "topology_family": "single",
+        "topology_motifs": [],
+        "turn_count": 6,
+        "turn_overhead": 3,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish",
+          "set_relation",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 1,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 2,
+        "executor_call_count": 4,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 5,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 27999,
+        "prompt_character_mean": 22634.25,
+        "rejected_turn_count": 1,
+        "relation_count": 1,
+        "role_families": [
+          "educator",
+          "counselor"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:7e0185d4e32080585cd03ca9ad076057",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 4,
+        "turn_overhead": -1,
+        "visible_history_max": 3
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 1,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 1,
+        "effective_dependency_status": "not_applicable",
+        "execution_turn_count": 1,
+        "executor_call_count": 1,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "not_applicable",
+        "graph_revision": 2,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 3,
+        "parse_failure_count": 0,
+        "prompt_character_max": 10956,
+        "prompt_character_mean": 9410.5,
+        "rejected_turn_count": 0,
+        "relation_count": 0,
+        "role_families": [
+          "clinician"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 1,
+        "task_id": "healthbench-professional:068abd7e3805cfacf547bedf2be204d5",
+        "termination_reason": "finish",
+        "topology_family": "single",
+        "topology_motifs": [],
+        "turn_count": 2,
+        "turn_overhead": -1,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 3,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 6,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 7,
+        "parse_failure_count": 0,
+        "prompt_character_max": 14124,
+        "prompt_character_mean": 10940.5,
+        "rejected_turn_count": 0,
+        "relation_count": 2,
+        "role_families": [
+          "communication",
+          "reasoning",
+          "format"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 3,
+        "task_id": "healthbench-professional:8ff15e203f0537239318271d60c97896",
+        "termination_reason": "finish",
+        "topology_family": "serial_3_plus",
+        "topology_motifs": [
+          "serial_3_plus"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -5,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "set_output",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 3,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 6,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 7,
+        "parse_failure_count": 0,
+        "prompt_character_max": 16491,
+        "prompt_character_mean": 12997.333333333334,
+        "rejected_turn_count": 1,
+        "relation_count": 2,
+        "role_families": [
+          "analysis",
+          "decision",
+          "format"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 3,
+        "task_id": "healthbench-professional:b8dea8a27a3fd62dbffc67eab09d1b8f",
+        "termination_reason": "finish",
+        "topology_family": "serial_3_plus",
+        "topology_motifs": [
+          "serial_3_plus"
+        ],
+        "turn_count": 3,
+        "turn_overhead": -4,
+        "visible_history_max": 2
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 18196,
+        "prompt_character_mean": 15570.0,
+        "rejected_turn_count": 0,
+        "relation_count": 1,
+        "role_families": [
+          "clinician",
+          "format"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:99750e7472125ff9f35a896e532bb77a",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -3,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 24758,
+        "prompt_character_mean": 22063.0,
+        "rejected_turn_count": 0,
+        "relation_count": 1,
+        "role_families": [
+          "clinical_analyst",
+          "information_verifier"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:7ddaff0971d31fb1b8495587cd5b075c",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -3,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "parse_failed",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 1,
+        "prompt_character_max": 15434,
+        "prompt_character_mean": 12205.0,
+        "rejected_turn_count": 1,
+        "relation_count": 1,
+        "role_families": [
+          "write",
+          "reasoning"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:2142fe540982b1ca76ab54dd6280d831",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 3,
+        "turn_overhead": -2,
+        "visible_history_max": 2
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 12374,
+        "prompt_character_mean": 10017.0,
+        "rejected_turn_count": 0,
+        "relation_count": 1,
+        "role_families": [
+          "specialist",
+          "editor"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:8a4a8c84e3068dcb71ecdbd921d48075",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -3,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 12964,
+        "prompt_character_mean": 10317.0,
+        "rejected_turn_count": 0,
+        "relation_count": 1,
+        "role_families": [
+          "safety",
+          "expert"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:54f98e63dbdd317b1a6bf3d8f84f7bf0",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -3,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 12739,
+        "prompt_character_mean": 10283.0,
+        "rejected_turn_count": 0,
+        "relation_count": 1,
+        "role_families": [
+          "medical-analyst",
+          "format"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:cf4dcb33df1de7f98b4e463fba383e7a",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -3,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "parse_failed",
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 1,
+        "prompt_character_max": 13912,
+        "prompt_character_mean": 10377.0,
+        "rejected_turn_count": 1,
+        "relation_count": 1,
+        "role_families": [
+          "format",
+          "researcher"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:5ce259604fbfef1118840478e256e126",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 3,
+        "turn_overhead": -2,
+        "visible_history_max": 2
+      },
+      {
+        "action_sequence": [
+          "parse_failed",
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 1,
+        "prompt_character_max": 15620,
+        "prompt_character_mean": 11242.0,
+        "rejected_turn_count": 1,
+        "relation_count": 1,
+        "role_families": [
+          "format",
+          "RxNorm-Supported-RAG-Analyzer"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:704fc35c00a01020f25a210f10bd1e8e",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 3,
+        "turn_overhead": -2,
+        "visible_history_max": 2
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish",
+          "set_relation",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 1,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 2,
+        "executor_call_count": 4,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 5,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 18426,
+        "prompt_character_mean": 13091.75,
+        "rejected_turn_count": 1,
+        "relation_count": 1,
+        "role_families": [
+          "synthesis",
+          "retrieval"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:c857f17ea00406ca5ee18a8703dc80b5",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 4,
+        "turn_overhead": -1,
+        "visible_history_max": 3
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "delete_agent",
+          "set_output",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 4,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 2,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 8,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 25464,
+        "prompt_character_mean": 19776.5,
+        "rejected_turn_count": 0,
+        "relation_count": 1,
+        "role_families": [
+          "research",
+          "synthesis"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:41ba225b4e2a8210c1d03112a34c0ab1",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 4,
+        "turn_overhead": -1,
+        "visible_history_max": 3
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 3,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 6,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 7,
+        "parse_failure_count": 0,
+        "prompt_character_max": 14400,
+        "prompt_character_mean": 11145.0,
+        "rejected_turn_count": 0,
+        "relation_count": 2,
+        "role_families": [
+          "synthesize",
+          "format",
+          "research"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 3,
+        "task_id": "healthbench-professional:6a1461a4f831cbf80ed23fdf8e253ceb",
+        "termination_reason": "finish",
+        "topology_family": "serial_3_plus",
+        "topology_motifs": [
+          "serial_3_plus"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -5,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "parse_failed",
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 1,
+        "prompt_character_max": 14975,
+        "prompt_character_mean": 11419.0,
+        "rejected_turn_count": 1,
+        "relation_count": 1,
+        "role_families": [
+          "information_extraction",
+          "writer"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:87b33fc3634f75b494607948dcb227ce",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 3,
+        "turn_overhead": -2,
+        "visible_history_max": 2
+      },
+      {
+        "action_sequence": [
+          "parse_failed",
+          "parse_failed",
+          "parse_failed",
+          "parse_failed",
+          "finish",
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 3,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 6,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 7,
+        "parse_failure_count": 4,
+        "prompt_character_max": 17988,
+        "prompt_character_mean": 13874.285714285714,
+        "rejected_turn_count": 5,
+        "relation_count": 2,
+        "role_families": [
+          "executive_synthesis",
+          "clinical_triage",
+          "temporal_planning"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 3,
+        "task_id": "healthbench-professional:27bbb5684615ff90c2934062536a9abd",
+        "termination_reason": "finish",
+        "topology_family": "serial_3_plus",
+        "topology_motifs": [
+          "serial_3_plus"
+        ],
+        "turn_count": 7,
+        "turn_overhead": 0,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "parse_failed",
+          "add_subgraph",
+          "add_subgraph",
+          "set_output",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 3,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 6,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 7,
+        "parse_failure_count": 1,
+        "prompt_character_max": 19019,
+        "prompt_character_mean": 13271.666666666666,
+        "rejected_turn_count": 4,
+        "relation_count": 2,
+        "role_families": [
+          "math_engine",
+          "medical_expert",
+          "output_formatter"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 3,
+        "task_id": "healthbench-professional:5c3ac439452be4dd558976e3edfd3198",
+        "termination_reason": "finish",
+        "topology_family": "serial_3_plus",
+        "topology_motifs": [
+          "serial_3_plus"
+        ],
+        "turn_count": 6,
+        "turn_overhead": -1,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "parse_failed",
+          "parse_failed",
+          "add_subgraph",
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 2,
+        "prompt_character_max": 17512,
+        "prompt_character_mean": 12165.0,
+        "rejected_turn_count": 3,
+        "relation_count": 1,
+        "role_families": [
+          "clinical",
+          "format"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:a8b554a1eb39fac4d7e4bbf3c89891b4",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 5,
+        "turn_overhead": 0,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "modify_agent",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 1,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 5,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 15150,
+        "prompt_character_mean": 11239.0,
+        "rejected_turn_count": 0,
+        "relation_count": 1,
+        "role_families": [
+          "diagnosis_formulation",
+          "clinical_reasongr"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "healthbench-professional:11cb964a58ffb9fb7abda7c811ca305f",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 3,
+        "turn_overhead": -2,
+        "visible_history_max": 2
+      }
+    ],
+    "turn_count_distribution": {
+      "10": 1,
+      "18": 1,
+      "2": 66,
+      "3": 28,
+      "4": 17,
+      "5": 4,
+      "6": 6,
+      "7": 2,
+      "8": 2,
+      "9": 1
+    }
+  },
+  "metric_scope": "OpenAI_simple_evals_HealthBench_rubric_raw_score",
+  "model_catalog_path": "config/model_catalog_hotpotqa_deep_v6.yaml",
+  "operational_failure_count": 0,
+  "policy_adapter": "theta_jointqa_progressive_step_000000",
+  "policy_version": "qwen35-9b-healthbench-round-01-step-000000",
+  "primary_metric": "raw_score",
+  "project_split": "validation",
+  "sample_count": 128,
+  "schema_version": "flowsteer.completion_benchmark.round_report.v1",
+  "skill_evaluation_mode": "memory_off",
+  "skill_injection_performed": false,
+  "skill_store_path": null,
+  "terminal_failure_count": 0,
+  "training_performed": false,
+  "typical_below_full_score_task_ids": [
+    "healthbench-professional:9566084de89c416408691006a6f06f9c",
+    "healthbench-professional:c19c2113ba68bb3c4a3e63836e31b558",
+    "healthbench-professional:a5778c7ecdb4eeccf9d252631e18a274",
+    "healthbench-professional:3533d9bfd2d32f8c465e7af62aec9781",
+    "healthbench-professional:37101607e2947481e85e8fe3597a1acf",
+    "healthbench-professional:9a160f86c59743692e46fab89aae42f2",
+    "healthbench-professional:4f08ae480b16ef825cf098eca6530e68",
+    "healthbench-professional:f056cdb489e3636b0b51afb8fd6b3a8a",
+    "healthbench-professional:fa30f3f57c7219130345f5c2e6d03d65",
+    "healthbench-professional:dadbebd3dce1b5928cac5a44dde095d3"
+  ]
+}

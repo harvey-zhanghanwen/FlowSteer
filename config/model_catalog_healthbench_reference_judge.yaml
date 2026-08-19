@@ -1,0 +1,19 @@
+providers:
+  - provider_id: "vectorengine-healthbench-judge"
+    kind: "openai-compatible"
+    endpoint: "${VECTOR_ENGINE_BASE_URL:-https://api.vectorengine.ai/v1}"
+    max_concurrency: 32
+    api_key_env: "VECTOR_ENGINE_API_KEY"
+
+# Evaluator-only registry. This model is deliberately absent from the
+# AgentGraph model catalog and therefore cannot be selected by Flow-Director.
+models:
+  - model_id: "healthbench-reference-judge"
+    provider_id: "vectorengine-healthbench-judge"
+    model_name: "gpt-4.1-2025-04-14"
+    selection_weight: 1.0
+    cheap_weight: 1.0
+    fast_weight: 1.0
+    metadata:
+      family: "gpt"
+      profile: "evaluator_only;healthbench_simple_evals_compatible_reference"

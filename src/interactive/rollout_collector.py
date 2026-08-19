@@ -942,6 +942,8 @@ class AgentGraphRolloutCollector:
         task: TaskRecord,
         rollout_index: int,
         evaluator_callback: EvaluatorCallback,
+        *,
+        workflow_problem: Optional[str] = None,
     ) -> TrajectoryRecord:
         """Collect, evaluate, and optionally persist one rollout.
 
@@ -964,18 +966,33 @@ class AgentGraphRolloutCollector:
             raise ValueError("rollout_index must be a non-negative integer")
         if not callable(evaluator_callback):
             raise TypeError("evaluator_callback must be callable")
+        if workflow_problem is not None and (
+            not isinstance(workflow_problem, str) or not workflow_problem.strip()
+        ):
+            raise ValueError("workflow_problem must be non-empty text when supplied")
 
         async with self._lock:
-            return await self._collect_locked(task, rollout_index, evaluator_callback)
+            return await self._collect_locked(
+                task,
+                rollout_index,
+                evaluator_callback,
+                workflow_problem=workflow_problem,
+            )
 
     async def _collect_locked(
         self,
         task: TaskRecord,
         rollout_index: int,
         evaluator_callback: EvaluatorCallback,
+        *,
+        workflow_problem: Optional[str],
     ) -> TrajectoryRecord:
         env = self.environment
-        env.reset(task.question)
+        # SkillFlow separates the immutable public task from the execution
+        # context presented to an orchestrator.  Keep the original TaskRecord
+        # in the trajectory/evaluator receipt while allowing a thin benchmark
+        # adapter to expose a required runtime interface to Flow-Director.
+        env.reset(workflow_problem or task.question)
         turns: list[TurnRecord] = []
         snapshots: list[GraphSnapshotEvent] = []
         previous_snapshot_id: Optional[str] = None

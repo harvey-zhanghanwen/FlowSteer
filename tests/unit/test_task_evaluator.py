@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from pathlib import Path
+import sys
+import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -9,6 +12,8 @@ from src.interactive.task_evaluator import (
     GRADER_TEMPLATE,
     HOTPOTQA_ANSWER_EVALUATOR_VERSION,
     TRIVIAQA_ANSWER_EVALUATOR_VERSION,
+    _webshop_instruction_matches,
+    _load_ragen_module,
     evaluate_task,
 )
 
@@ -117,11 +122,19 @@ class StaticEvaluatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1.0, normalized.metrics["exact_match"])
         self.assertAlmostEqual(2.0 / 3.0, repeated.metrics["token_f1"])
 
-    async def test_aime_uses_skillflow_exact_answer_extraction(self) -> None:
-        outcome = await evaluate_task(task("AIME 2026", ground_truth="56"), "Thus \\boxed{56}.")
+    async def test_aime_uses_skillflow_protocol10_integer_submission(self) -> None:
+        outcome = await evaluate_task(
+            task("AIME 2026", ground_truth="56"), "<answer>056</answer>"
+        )
         self.assertTrue(outcome.valid)
         self.assertEqual(1.0, outcome.reward)
+        self.assertEqual(1.0, outcome.metrics["accuracy"])
         self.assertEqual(1.0, outcome.metrics["exact_match"])
+
+        free_form = await evaluate_task(
+            task("AIME 2026", ground_truth="56"), "Thus \\boxed{56}."
+        )
+        self.assertEqual(0.0, free_form.reward)
 
     async def test_explicit_answer_boundary_is_scored_and_raw_output_is_retained(self) -> None:
         raw = "A long explanation with distractor 999. <answer>red fox</answer>"
@@ -218,6 +231,82 @@ class SWEbenchEvaluatorTests(unittest.IsolatedAsyncioTestCase):
 
 
 class EnvironmentEvaluatorTests(unittest.IsolatedAsyncioTestCase):
+    def test_deployed_ragen_module_is_reused_within_the_process(self) -> None:
+        module_name = "_flowsteer_deployed_ragen_adapter"
+        previous = sys.modules.pop(module_name, None)
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                source = Path(directory) / "ragen_adapter.py"
+                source.write_text("VALUE = object()\n", encoding="utf-8")
+                first = _load_ragen_module(source)
+                second = _load_ragen_module(source)
+                self.assertIs(first, second)
+        finally:
+            sys.modules.pop(module_name, None)
+            if previous is not None:
+                sys.modules[module_name] = previous
+
+    def test_webshop_goal_match_accepts_only_upstream_price_suffix(self) -> None:
+        goal = "i need a natural looking hair extension"
+        self.assertTrue(_webshop_instruction_matches(goal, goal))
+        self.assertTrue(
+            _webshop_instruction_matches(
+                goal,
+                goal + ", and price lower than 40.00 dollars",
+            )
+        )
+        self.assertFalse(
+            _webshop_instruction_matches(
+                goal,
+                goal + ", and color must be black",
+            )
+        )
+
+    async def test_webshop_seeds_upstream_goal_generation_before_reset(self) -> None:
+        lifecycle: list[object] = []
+
+        class Adapter:
+            def __init__(self):
+                self._env = SimpleNamespace(current_goal_index=3)
+                self.available_actions = ["click[Buy Now]"]
+
+            def reset(self, env_type, env_config, question="", extra=None):
+                lifecycle.append("reset")
+                return "Product page"
+
+            def step(self, action):
+                return "Bought", 1.0, True, {"graded_score": 1.0}
+
+        record = task(
+            "WebShop",
+            environment={
+                "env_type": "webshop",
+                "env_config": {"goal_index": 3, "env_seed": 31415},
+            },
+        )
+
+        async def run_graph(problem):
+            return "click[Buy Now]"
+
+        with (
+            patch(
+                "src.interactive.task_evaluator._load_ragen_module",
+                return_value=SimpleNamespace(
+                    RAGENAdapter=Adapter,
+                    _check_webshop=lambda: lifecycle.append("check_webshop") or True,
+                ),
+            ),
+            patch(
+                "src.interactive.task_evaluator.random.seed",
+                side_effect=lambda value: lifecycle.append(("seed", value)),
+            ) as seed,
+        ):
+            outcome = await evaluate_task(record, "", run_graph=run_graph)
+
+        self.assertTrue(outcome.valid)
+        seed.assert_called_once_with(31415)
+        self.assertEqual(["check_webshop", ("seed", 31415), "reset"], lifecycle)
+
     async def test_webshop_uses_ragen_and_a_stateful_action_prompt(self) -> None:
         prompts: list[str] = []
 
@@ -455,6 +544,358 @@ class EnvironmentEvaluatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(outcome.reward)
         self.assertEqual("environment_graph_callback_failed", outcome.reason)
 
+    async def test_environment_replay_restores_prefix_and_calls_graph_only_for_suffix(
+        self,
+    ) -> None:
+        prompts: list[str] = []
+        stepped_actions: list[str] = []
+
+        class Adapter:
+            def __init__(self):
+                self._env = SimpleNamespace(current_goal_index=21)
+                self.available_actions = ["search[coffee]"]
+
+            def reset(self, env_type, env_config, question="", extra=None):
+                return "Home"
+
+            def step(self, action):
+                stepped_actions.append(action)
+                if action == "search[coffee]":
+                    self.available_actions = ["click[P1]"]
+                    return "Results", 0.0, False, {"page": "results"}
+                if action == "click[P1]":
+                    self.available_actions = ["click[Buy Now]"]
+                    return "Product", 0.0, False, {"page": "product"}
+                return "Bought", 1.0, True, {"graded_score": 1.0}
+
+        replay_trace = [
+            {
+                "step": 0,
+                "observation": "Home",
+                "legal_actions": ["search[coffee]"],
+                "action": "search[coffee]",
+                "raw_graph_output": "<action>search[coffee]</action>",
+                "next_observation": "Results",
+                "reward": 0.0,
+                "done": False,
+                "info": {"page": "results"},
+            },
+            {
+                "step": 1,
+                "observation": "Results",
+                "legal_actions": ["click[P1]"],
+                "action": "click[P1]",
+                "raw_graph_output": "click[P1]",
+                "next_observation": "Product",
+                "reward": 0.0,
+                "done": False,
+                "info": {"page": "product"},
+            },
+        ]
+
+        async def run_graph(problem):
+            prompts.append(problem)
+            return "click[Buy Now]"
+
+        record = task(
+            "WebShop",
+            environment={
+                "env_type": "webshop",
+                "env_config": {"goal_index": 21},
+            },
+        )
+        with patch(
+            "src.interactive.task_evaluator._load_ragen_module",
+            return_value=SimpleNamespace(RAGENAdapter=Adapter),
+        ):
+            outcome = await evaluate_task(
+                record,
+                "",
+                run_graph=run_graph,
+                environment_replay_trace=replay_trace,
+            )
+
+        self.assertTrue(outcome.valid)
+        self.assertEqual(1.0, outcome.reward)
+        self.assertEqual(
+            ["search[coffee]", "click[P1]", "click[Buy Now]"],
+            stepped_actions,
+        )
+        self.assertEqual(1, len(prompts))
+        self.assertIn("already taken 2 step(s)", prompts[0])
+        self.assertIn("Action: 'search[coffee]'", prompts[0])
+        self.assertIn("Action: 'click[P1]'", prompts[0])
+        self.assertEqual(2, outcome.details["replayed_environment_steps"])
+        self.assertEqual(3.0, outcome.metrics["steps"])
+
+    async def test_environment_replay_rejects_non_sequence_before_runtime(
+        self,
+    ) -> None:
+        callback_called = False
+
+        async def run_graph(problem):
+            nonlocal callback_called
+            callback_called = True
+            return "click[Buy Now]"
+
+        record = task(
+            "WebShop",
+            environment={
+                "env_type": "webshop",
+                "env_config": {"goal_index": 21},
+            },
+        )
+        for invalid_trace in (None, "not-a-trace", b"not-a-trace", {"step": 0}):
+            with self.subTest(invalid_trace=invalid_trace):
+                with patch(
+                    "src.interactive.task_evaluator._load_ragen_module",
+                    side_effect=AssertionError("runtime must not be loaded"),
+                ) as load:
+                    outcome = await evaluate_task(
+                        record,
+                        "",
+                        run_graph=run_graph,
+                        environment_replay_trace=invalid_trace,  # type: ignore[arg-type]
+                    )
+
+                self.assertFalse(outcome.valid)
+                self.assertIsNone(outcome.reward)
+                self.assertEqual("environment_replay_trace_invalid", outcome.reason)
+                load.assert_not_called()
+        self.assertFalse(callback_called)
+
+    async def test_environment_replay_mismatches_fail_closed_before_graph_call(
+        self,
+    ) -> None:
+        cases = {
+            "observation": (
+                {"observation": "Different home"},
+                "environment_replay_state_mismatch",
+            ),
+            "legal_actions": (
+                {"legal_actions": ["click[P2]"]},
+                "environment_replay_actions_mismatch",
+            ),
+            "next_observation": (
+                {"next_observation": "Different results"},
+                "environment_replay_transition_mismatch",
+            ),
+            "reward": (
+                {"reward": 0.25},
+                "environment_replay_transition_mismatch",
+            ),
+            "done": (
+                {"done": True},
+                "environment_replay_transition_mismatch",
+            ),
+            "info": (
+                {"info": {"page": "different"}},
+                "environment_replay_transition_mismatch",
+            ),
+            "raw_graph_output": (
+                {"raw_graph_output": "click[P2]"},
+                "environment_replay_action_invalid",
+            ),
+        }
+
+        for name, (change, expected_reason) in cases.items():
+            with self.subTest(name=name):
+                callback_called = False
+
+                class Adapter:
+                    def __init__(self):
+                        self._env = SimpleNamespace(current_goal_index=22)
+                        self.available_actions = ["click[P1]"]
+
+                    def reset(self, env_type, env_config, question="", extra=None):
+                        return "Home"
+
+                    def step(self, action):
+                        self.available_actions = ["click[Buy Now]"]
+                        return "Results", 0.0, False, {"page": "results"}
+
+                async def run_graph(problem):
+                    nonlocal callback_called
+                    callback_called = True
+                    return "click[Buy Now]"
+
+                entry = {
+                    "step": 0,
+                    "observation": "Home",
+                    "legal_actions": ["click[P1]"],
+                    "action": "click[P1]",
+                    "raw_graph_output": "<action>click[P1]</action>",
+                    "next_observation": "Results",
+                    "reward": 0.0,
+                    "done": False,
+                    "info": {"page": "results"},
+                }
+                entry.update(change)
+                record = task(
+                    "WebShop",
+                    environment={
+                        "env_type": "webshop",
+                        "env_config": {"goal_index": 22},
+                    },
+                )
+                with patch(
+                    "src.interactive.task_evaluator._load_ragen_module",
+                    return_value=SimpleNamespace(RAGENAdapter=Adapter),
+                ):
+                    outcome = await evaluate_task(
+                        record,
+                        "",
+                        run_graph=run_graph,
+                        environment_replay_trace=[entry],
+                    )
+
+                self.assertFalse(outcome.valid)
+                self.assertIsNone(outcome.reward)
+                self.assertEqual(expected_reason, outcome.reason)
+                self.assertFalse(callback_called)
+
+    async def test_environment_replay_rejects_infrastructure_failure_transition(
+        self,
+    ) -> None:
+        cases = (
+            (
+                "[ENV_UNAVAILABLE] No environment initialized.",
+                {},
+            ),
+            (
+                "[ERROR] Environment step failed",
+                {"error": "environment failed"},
+            ),
+        )
+        for next_observation, info in cases:
+            with self.subTest(next_observation=next_observation):
+                callback_called = False
+
+                class Adapter:
+                    def __init__(self):
+                        self._env = SimpleNamespace(current_goal_index=23)
+                        self.available_actions = ["click[P1]"]
+
+                    def reset(self, env_type, env_config, question="", extra=None):
+                        return "Home"
+
+                    def step(self, action):
+                        return next_observation, 0.0, False, info
+
+                async def run_graph(problem):
+                    nonlocal callback_called
+                    callback_called = True
+                    return "click[P1]"
+
+                replay_trace = [
+                    {
+                        "step": 0,
+                        "observation": "Home",
+                        "legal_actions": ["click[P1]"],
+                        "action": "click[P1]",
+                        "raw_graph_output": "click[P1]",
+                        "next_observation": next_observation,
+                        "reward": 0.0,
+                        "done": False,
+                        "info": info,
+                    }
+                ]
+                record = task(
+                    "WebShop",
+                    environment={
+                        "env_type": "webshop",
+                        "env_config": {"goal_index": 23},
+                    },
+                )
+                with patch(
+                    "src.interactive.task_evaluator._load_ragen_module",
+                    return_value=SimpleNamespace(RAGENAdapter=Adapter),
+                ):
+                    outcome = await evaluate_task(
+                        record,
+                        "",
+                        run_graph=run_graph,
+                        environment_replay_trace=replay_trace,
+                    )
+
+                self.assertFalse(outcome.valid)
+                self.assertEqual(
+                    "environment_replay_transition_invalid", outcome.reason
+                )
+                self.assertFalse(callback_called)
+
+    async def test_alfworld_replayed_legal_terminal_zero_remains_valid(self) -> None:
+        target = "/games/game-a.tw-pddl"
+        callback_called = False
+
+        class AlfredEnvConfig:
+            config_file = ""
+
+        class Inventory:
+            def __init__(self, config, mode):
+                self.game_files = [target]
+
+        class Adapter:
+            def __init__(self):
+                self._env = None
+                self.available_actions = ["look"]
+
+            def reset(self, env_type, env_config, question="", extra=None):
+                self._env = SimpleNamespace(current_game_file=target)
+                return "Room"
+
+            def step(self, action):
+                return "Finished", 0.0, True, {"won": False}
+
+        async def run_graph(problem):
+            nonlocal callback_called
+            callback_called = True
+            return "look"
+
+        module = SimpleNamespace(
+            AlfredEnvConfig=AlfredEnvConfig,
+            ALFWorldEnv=Inventory,
+            RAGENAdapter=Adapter,
+        )
+        record = task(
+            "ALFWorld",
+            question="look",
+            environment={
+                "env_type": "alfworld",
+                "env_config": {"game_file": target},
+            },
+        )
+        replay_trace = [
+            {
+                "step": 0,
+                "observation": "Room",
+                "legal_actions": ["look"],
+                "action": "look",
+                "raw_graph_output": "look",
+                "next_observation": "Finished",
+                "reward": 0.0,
+                "done": True,
+                "info": {"won": False},
+            }
+        ]
+        with patch(
+            "src.interactive.task_evaluator._load_ragen_module",
+            return_value=module,
+        ):
+            outcome = await evaluate_task(
+                record,
+                "",
+                run_graph=run_graph,
+                environment_replay_trace=replay_trace,
+            )
+
+        self.assertTrue(outcome.valid)
+        self.assertEqual(0.0, outcome.reward)
+        self.assertEqual(0.0, outcome.metrics["success"])
+        self.assertEqual("evaluated", outcome.reason)
+        self.assertEqual(1, outcome.details["replayed_environment_steps"])
+        self.assertFalse(callback_called)
+
     async def test_webshop_protocol_mismatch_is_invalid_before_callback(self) -> None:
         callback_called = False
 
@@ -468,6 +909,7 @@ class EnvironmentEvaluatorTests(unittest.IsolatedAsyncioTestCase):
                     goal_split="test",
                     file_path="/data/items.json",
                     attr_path="/data/attrs.json",
+                    env_seed=1000,
                 )
                 self.available_actions = ["click[Buy Now]"]
 
@@ -490,6 +932,7 @@ class EnvironmentEvaluatorTests(unittest.IsolatedAsyncioTestCase):
                     "goal_split": "test",
                     "file_path": "/data/items.json",
                     "attr_path": "/data/attrs.json",
+                    "env_seed": 2000,
                 },
             },
         )
@@ -504,6 +947,10 @@ class EnvironmentEvaluatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             {"requested": False, "actual": True},
             outcome.details["protocol_mismatches"]["use_small"],
+        )
+        self.assertEqual(
+            {"requested": 2000, "actual": 1000},
+            outcome.details["protocol_mismatches"]["env_seed"],
         )
         self.assertFalse(callback_called)
 
@@ -663,6 +1110,146 @@ class EnvironmentEvaluatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(outcome.valid)
         self.assertEqual("alfworld_task_lock_mismatch", outcome.reason)
         self.assertFalse(callback_called)
+
+    async def test_alfworld_requires_exact_canonical_instruction(self) -> None:
+        target = "/games/game-a.tw-pddl"
+        callback_called = False
+
+        class AlfredEnvConfig:
+            config_file = ""
+
+        class Inventory:
+            def __init__(self, config, mode):
+                self.game_files = [target]
+
+        class Adapter:
+            def __init__(self):
+                self._env = None
+                self.available_actions = ["look"]
+
+            def reset(self, env_type, env_config, question="", extra=None):
+                self._env = SimpleNamespace(current_game_file=target)
+                return "Welcome. Your task is to: look at alarmclock under the desklamp."
+
+        async def run_graph(problem):
+            nonlocal callback_called
+            callback_called = True
+            return "look"
+
+        module = SimpleNamespace(
+            AlfredEnvConfig=AlfredEnvConfig,
+            ALFWorldEnv=Inventory,
+            RAGENAdapter=Adapter,
+        )
+        record = task(
+            "ALFWorld",
+            question="Look at an alarm clock by lamp light.",
+            environment={
+                "env_type": "alfworld",
+                "env_config": {"game_file": target, "max_steps": 50},
+            },
+        )
+        with patch("src.interactive.task_evaluator._load_ragen_module", return_value=module):
+            outcome = await evaluate_task(
+                record,
+                "",
+                run_graph=run_graph,
+                max_environment_steps=50,
+            )
+
+        self.assertFalse(outcome.valid)
+        self.assertEqual("alfworld_instruction_mismatch", outcome.reason)
+        self.assertFalse(callback_called)
+
+    async def test_alfworld_requires_boolean_terminal_won(self) -> None:
+        target = "/games/game-a.tw-pddl"
+
+        class AlfredEnvConfig:
+            config_file = ""
+
+        class Inventory:
+            def __init__(self, config, mode):
+                self.game_files = [target]
+
+        class Adapter:
+            def __init__(self):
+                self._env = None
+                self.available_actions = ["look"]
+
+            def reset(self, env_type, env_config, question="", extra=None):
+                self._env = SimpleNamespace(current_game_file=target)
+                return "Room"
+
+            def step(self, action):
+                return "Finished", 10.0, True, {}
+
+        module = SimpleNamespace(
+            AlfredEnvConfig=AlfredEnvConfig,
+            ALFWorldEnv=Inventory,
+            RAGENAdapter=Adapter,
+        )
+        record = task(
+            "ALFWorld",
+            question="look",
+            environment={
+                "env_type": "alfworld",
+                "env_config": {"game_file": target, "max_steps": 50},
+            },
+        )
+        with patch("src.interactive.task_evaluator._load_ragen_module", return_value=module):
+            outcome = await evaluate_task(
+                record,
+                "",
+                run_graph=lambda _: "look",
+                max_environment_steps=50,
+            )
+
+        self.assertFalse(outcome.valid)
+        self.assertEqual("alfworld_terminal_success_unavailable", outcome.reason)
+        self.assertIsNone(outcome.reward)
+
+    async def test_alfworld_pins_the_recorded_step_limit(self) -> None:
+        target = "/games/game-a.tw-pddl"
+
+        class AlfredEnvConfig:
+            config_file = ""
+
+        class Inventory:
+            def __init__(self, config, mode):
+                self.game_files = [target]
+
+        class Adapter:
+            def __init__(self):
+                self._env = None
+                self.available_actions = ["look"]
+
+            def reset(self, env_type, env_config, question="", extra=None):
+                self._env = SimpleNamespace(current_game_file=target)
+                return "Room"
+
+        module = SimpleNamespace(
+            AlfredEnvConfig=AlfredEnvConfig,
+            ALFWorldEnv=Inventory,
+            RAGENAdapter=Adapter,
+        )
+        record = task(
+            "ALFWorld",
+            question="look",
+            environment={
+                "env_type": "alfworld",
+                "env_config": {"game_file": target, "max_steps": 50},
+            },
+        )
+        with patch("src.interactive.task_evaluator._load_ragen_module", return_value=module):
+            outcome = await evaluate_task(
+                record,
+                "",
+                run_graph=lambda _: "look",
+                max_environment_steps=20,
+            )
+
+        self.assertFalse(outcome.valid)
+        self.assertEqual("alfworld_step_limit_mismatch", outcome.reason)
 
 
 if __name__ == "__main__":

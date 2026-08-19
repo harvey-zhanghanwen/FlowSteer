@@ -62,6 +62,7 @@ validate_resumed_initial_rollouts = _MODULE._validate_resumed_initial_rollouts
 audit_active_skills_after_policy_update = (
     _MODULE._audit_active_skills_after_policy_update
 )
+workflow_problem = _MODULE._workflow_problem
 
 
 SOURCE_NAMES = {
@@ -95,6 +96,29 @@ def aligned_row(task: TaskRecord) -> dict:
         "schema_version": "flowsteer.agentgraph.task.v1",
         **task.to_dict(),
     }
+
+
+def test_interactive_workflow_problem_exposes_only_the_execution_contract():
+    task = make_task("webshop", 0)
+    config = {
+        "webshop_evaluation": {
+            "direct_contract": "Return exactly one admissible WebShop action."
+        }
+    }
+
+    value = workflow_problem(task, config)
+
+    assert value.startswith(task.question + "\n\nExecution interface:")
+    assert "invoked once per environment step" in value
+    assert "current observation" in value
+    assert "Return exactly one admissible WebShop action." in value
+    assert "topology" not in value.lower()
+    assert "skill" not in value.lower()
+
+
+def test_static_workflow_problem_remains_the_immutable_question():
+    task = make_task("hotpotqa", 0)
+    assert workflow_problem(task, {}) == task.question
 
 
 def trajectory(task: TaskRecord, rollout_index: int, versions) -> TrajectoryRecord:
@@ -639,7 +663,9 @@ class SelectionTests(unittest.TestCase):
         }
         self.assertEqual("hotpotqa.official.answer.v1", versions["hotpotqa"])
         self.assertEqual("triviaqa.official.answer.v1", versions["triviaqa"])
-        self.assertEqual("skillflow.training.reward.v1", versions["aime_2026"])
+        self.assertEqual(
+            "skillflow.protocol-v10.static.integer.v1", versions["aime_2026"]
+        )
         self.assertEqual(versions["webshop"], versions["alfworld"])
         self.assertEqual(6, len(set(versions.values())))
 

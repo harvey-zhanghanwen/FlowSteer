@@ -9,15 +9,17 @@ import yaml
 
 from scripts.materialize_joint_qa_progressive_evaluations import (
     DATASETS,
+    DEFAULT_NO_SKILL_TEMPLATES,
     DEFAULT_SKILL_ON_TEMPLATES,
-    DEFAULT_STEP1_TEMPLATES,
     materialize_skill_on_evaluations,
+    materialize_step0_no_skill_evaluations,
     materialize_step1_skill_off_evaluations,
 )
 from scripts.materialize_joint_qa_progressive_skill_training import (
     DEFAULT_TEMPLATE as DEFAULT_TRAINING_TEMPLATE,
     materialize as materialize_skill_training,
 )
+from src.interactive.config_loader import load_yaml
 from src.interactive.skills import SkillEvidence, SkillRecord, SkillStatus, SkillStore
 from src.interactive.versioning import VersionBundle
 
@@ -27,6 +29,11 @@ UPDATED_POLICY = "qwen35-9b-jointqa-progressive-step-000001"
 ADAPTER = "theta_jointqa_progressive_step_000001"
 LIBRARY = "jointqa.skill-library.progressive.epoch2.v1"
 POSTERIOR = "jointqa.bayesian-linear.progressive-subgraph.v1"
+PROMPT = "agentgraph.director.progressive-subgraph.stage-conditioned-skill.v3"
+TOOL = (
+    "agentgraph.add-subgraph-nullable-output+"
+    "skillflow-stage-conditioned-forced-probe.v3"
+)
 
 
 def _active_skill(dataset: str, *, activated_epoch: int = 2) -> SkillRecord:
@@ -58,8 +65,8 @@ def _active_skill(dataset: str, *, activated_epoch: int = 2) -> SkillRecord:
             policy=POLICY,
             model_catalog="catalog-v1",
             evaluator=f"{dataset}.official.answer.v1",
-            prompt="agentgraph.director.progressive_subgraph.v1",
-            tool="agentgraph.add-subgraph+skillflow-public-retrieval.v1",
+            prompt=PROMPT,
+            tool=TOOL,
             encoder="jointqa.skill-condition.fixed.v1",
             feature_schema="jointqa.skill-candidate-dataset-interaction.v1",
             posterior=POSTERIOR,
@@ -132,6 +139,12 @@ def test_skill_on_materialization_binds_two_active_skills_without_route_drift() 
         assert receipt["policy_version"] == POLICY
         for dataset in DATASETS:
             _assert_no_placeholder(resolved[dataset])
+            assert resolved[dataset]["experiment"]["prompt_version"] == PROMPT
+            assert resolved[dataset]["experiment"]["tool_version"] == TOOL
+            assert (
+                resolved[dataset]["data"]["skill_confirmation_path"]
+                == "data/joint_qa_v2/skill_confirmation_all_round7.jsonl"
+            )
             assert resolved[dataset]["skills"]["required_skill_ids"] == [
                 records[dataset].skill_id
             ]
@@ -173,6 +186,70 @@ def test_skill_on_fails_closed_unless_both_store_records_are_active() -> None:
 
         with pytest.raises(RuntimeError, match="matching ACTIVE Skill"):
             materialize_skill_on_evaluations(
+                publication_path=publication,
+                skill_store_path=store_path,
+                output_paths=outputs,
+            )
+        assert not any(path.exists() for path in outputs.values())
+
+
+def test_no_skill_materialization_matches_v2_architecture_and_disables_retrieval() -> None:
+    with TemporaryDirectory() as directory:
+        root = Path(directory)
+        publication, store, _ = _write_publication_and_store(root)
+        outputs = _output_paths(root, "no-skill-v2")
+
+        receipt = materialize_step0_no_skill_evaluations(
+            publication_path=publication,
+            skill_store_path=store,
+            output_paths=outputs,
+        )
+        resolved = _load_outputs(outputs)
+
+        assert receipt["status"] == "materialized"
+        assert receipt["mode"] == "step0_no_skill_matched"
+        assert receipt["prompt_version"] == PROMPT
+        assert receipt["tool_version"] == TOOL
+        assert receipt["skills_visible"] is False
+        for dataset in DATASETS:
+            source = yaml.safe_load(DEFAULT_NO_SKILL_TEMPLATES[dataset].read_text())
+            skill_on = load_yaml(DEFAULT_SKILL_ON_TEMPLATES[dataset])
+            config = resolved[dataset]
+            _assert_no_placeholder(config)
+            assert config["experiment"]["prompt_version"] == PROMPT
+            assert config["experiment"]["tool_version"] == TOOL
+            assert (
+                config["data"]["skill_confirmation_path"]
+                == "data/joint_qa_v2/skill_confirmation_all_round7.jsonl"
+            )
+            assert config["director"] == skill_on["director"]
+            assert config["agent_graph"] == skill_on["agent_graph"]
+            assert config[f"{dataset}_evaluation"] == skill_on[
+                f"{dataset}_evaluation"
+            ]
+            assert config["skills"] == source["skills"]
+            assert config["skills"]["enabled"] is False
+            assert config["skills"]["retrieval_top_k"] == 0
+            assert config["deployment"]["active_skills_only"] is False
+            assert "/matched_development/step_000000_no_skill/" in config[
+                "storage"
+            ]["manifest_path"]
+
+
+def test_no_skill_materialization_still_requires_two_active_skills() -> None:
+    with TemporaryDirectory() as directory:
+        root = Path(directory)
+        publication, store_path, records = _write_publication_and_store(root)
+        raw = json.loads(store_path.read_text(encoding="utf-8"))
+        trivia = records["triviaqa"].to_dict()
+        trivia["status"] = "suspended"
+        trivia["suspended_reason"] = "policy drift"
+        raw["current"][records["triviaqa"].skill_id] = trivia
+        store_path.write_text(json.dumps(raw), encoding="utf-8")
+        outputs = _output_paths(root, "no-skill-v2")
+
+        with pytest.raises(RuntimeError, match="matching ACTIVE Skill"):
+            materialize_step0_no_skill_evaluations(
                 publication_path=publication,
                 skill_store_path=store_path,
                 output_paths=outputs,
@@ -261,6 +338,12 @@ def test_skill_training_uses_the_common_delayed_activation_epoch() -> None:
 
         assert receipt["current_epoch"] == 4
         assert resolved["skills"]["current_epoch"] == 4
+        assert (
+            resolved["data"]["skill_confirmation_path"]
+            == "data/joint_qa_v2/skill_confirmation_all_round7.jsonl"
+        )
+        assert resolved["experiment"]["prompt_version"] == PROMPT
+        assert resolved["experiment"]["tool_version"] == TOOL
         schedule = json.loads(
             Path(receipt["schedule"]["schedule"]).read_text(encoding="utf-8")
         )
@@ -269,6 +352,44 @@ def test_skill_training_uses_the_common_delayed_activation_epoch() -> None:
         }
         assert selected["hotpotqa"]["task_position"] == 9
         assert selected["triviaqa"]["task_position"] == 12
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    (
+        ("prompt_version", "wrong-prompt", "prompt version differs"),
+        ("tool_version", "wrong-tool", "tool version differs"),
+    ),
+)
+def test_skill_training_rejects_template_skill_version_drift(
+    field: str, value: str, message: str
+) -> None:
+    with TemporaryDirectory(dir=Path(__file__).resolve().parents[2]) as directory:
+        root = Path(directory)
+        publication, store, _ = _write_publication_and_store(root)
+        template = yaml.safe_load(DEFAULT_TRAINING_TEMPLATE.read_text(encoding="utf-8"))
+        template["experiment"][field] = value
+        template["data"]["joint_qa_micro"]["schedule_path"] = str(
+            root / "schedule.json"
+        )
+        template["data"]["joint_qa_micro"]["cursor_path"] = str(
+            root / "cursor.json"
+        )
+        template_path = root / "training.yaml"
+        template_path.write_text(
+            yaml.safe_dump(template, sort_keys=False, allow_unicode=True),
+            encoding="utf-8",
+        )
+
+        with pytest.raises(RuntimeError, match=message):
+            materialize_skill_training(
+                template_path=template_path,
+                publication_path=publication,
+                skill_store_path=store,
+                output_path=root / "resolved.yaml",
+            )
+        assert not (root / "schedule.json").exists()
+        assert not (root / "resolved.yaml").exists()
 
 
 def _write_training_receipts(root: Path) -> tuple[Path, Path, Path]:
@@ -307,6 +428,10 @@ def _write_training_receipts(root: Path) -> tuple[Path, Path, Path]:
     manifest = {
         "schema_version": "flowsteer.agentgraph.smoke_manifest.v1",
         "status": "completed",
+        "regime_versions": {
+            "prompt": PROMPT,
+            "tool": TOOL,
+        },
         "training": {
             "optimizer_updates": 1,
             "trainable_update_l2": 0.025,
@@ -345,6 +470,8 @@ def test_step1_materialization_binds_real_update_adapter_and_default_server_weig
         assert receipt["server_weight_version"] == "default"
         assert receipt["server_weight_source"] == "sglang_actual_default_receipt"
         assert receipt["checkpoint"] == str(checkpoint.resolve())
+        assert receipt["prompt_version"] == PROMPT
+        assert receipt["tool_version"] == TOOL
         for dataset in DATASETS:
             _assert_no_placeholder(resolved[dataset])
             director = resolved[dataset]["director"]
@@ -352,6 +479,12 @@ def test_step1_materialization_binds_real_update_adapter_and_default_server_weig
             assert director["behavior_adapter_name"] == ADAPTER
             assert director["behavior_adapter_checkpoint"] == str(checkpoint.resolve())
             assert director["expected_server_weight_version"] == "default"
+            assert resolved[dataset]["experiment"]["prompt_version"] == PROMPT
+            assert resolved[dataset]["experiment"]["tool_version"] == TOOL
+            assert (
+                resolved[dataset]["data"]["skill_confirmation_path"]
+                == "data/joint_qa_v2/skill_confirmation_all_round7.jsonl"
+            )
             assert resolved[dataset]["skills"]["enabled"] is False
             assert resolved[dataset]["skills"]["retrieval_top_k"] == 0
 
@@ -407,6 +540,34 @@ def test_step1_checks_checkpoint_policy_metadata_before_writing() -> None:
             materialize_step1_skill_off_evaluations(
                 training_manifest_path=manifest,
                 sync_receipt_path=sync,
+                output_paths=outputs,
+            )
+        assert not any(path.exists() for path in outputs.values())
+
+
+@pytest.mark.parametrize(
+    ("field", "message"),
+    (
+        ("prompt", "prompt version differs"),
+        ("tool", "tool version differs"),
+    ),
+)
+def test_step1_rejects_training_template_regime_drift(
+    field: str,
+    message: str,
+) -> None:
+    with TemporaryDirectory() as directory:
+        root = Path(directory)
+        manifest_path, sync_path, _ = _write_training_receipts(root)
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["regime_versions"][field] = f"wrong-{field}"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        outputs = _output_paths(root, "step1-version-drift")
+
+        with pytest.raises(RuntimeError, match=message):
+            materialize_step1_skill_off_evaluations(
+                training_manifest_path=manifest_path,
+                sync_receipt_path=sync_path,
                 output_paths=outputs,
             )
         assert not any(path.exists() for path in outputs.values())

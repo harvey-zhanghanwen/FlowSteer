@@ -1,0 +1,161 @@
+schema_version: "flowsteer.joint-qa.mace-bayesian-skill.v2"
+config_kind: "preregistered_stage_conditioned_paired_intervention"
+round_id: 7
+status: "prepared_not_executed"
+
+experiment_version: "jointqa.mace-skill-evidence.epoch7.v1"
+seed: 20260825
+policy_version: "qwen35-9b-hotpot-step-000000"
+adapter_name: "theta_jointqa_progressive_step_000000"
+encoder_version: "jointqa.skill-condition.fixed.v1"
+feature_schema_version: "jointqa.skill-candidate-dataset-interaction.v1"
+posterior_version: "jointqa.bayesian-linear.progressive-subgraph.epoch8.v1"
+skill_library_version: "jointqa.skill-library.progressive.epoch18.v1"
+prompt_version: "agentgraph.director.progressive-subgraph.stage-conditioned-skill.v3"
+tool_version: "agentgraph.add-subgraph-nullable-output+skillflow-stage-conditioned-forced-probe.v3"
+runtime_version: "flowsteer.agentgraph.progressive-runtime.v1"
+
+candidate_sources:
+  subject_relation_answer_type_grounding:
+    round: 2
+    artifact: "reports/joint_qa_progressive/skill_epoch_000002/experiment_manifest.json"
+  exact_answer_handoff:
+    round: 6
+    artifact: "reports/joint_qa_progressive/skill_epoch_000006/experiment_manifest.json"
+candidate_actions:
+  subject_relation_answer_type_grounding:
+    instruction: >-
+      Before FINISH, perform semantic verification only when evidence contains
+      competing entities, a comparison, a qualifier, an alias, or an answer
+      candidate whose semantic type may differ from the question. Represent the
+      supported proposition as subject, relation, answer, and qualifiers; reject
+      a different subject or relation, an intermediate value, or an answer-type
+      mismatch. Preserve the evidence span's language and necessary proper-name
+      modifiers. Route exactly one verified answer candidate and its supporting
+      span to the Output Agent, which only serializes it in one <answer> tag.
+  exact_answer_handoff:
+    instruction: >-
+      Pass exactly one supported answer candidate to the Format Agent. The
+      candidate must match the question's semantic type and preserve required
+      names, modifiers, units, and evidence language. The Format Agent only
+      copies that candidate into one <answer> tag; it must not shorten,
+      translate, expand, or add alternatives.
+candidate_conditions:
+  by_candidate_and_dataset:
+    subject_relation_answer_type_grounding:
+      hotpotqa:
+        task_family: "hotpotqa"
+        graph_stage: "construction"
+        tags: []
+      triviaqa:
+        task_family: "triviaqa"
+        graph_stage: "construction"
+        tags: []
+    exact_answer_handoff:
+      hotpotqa:
+        task_family: "hotpotqa"
+        graph_stage: "before_final_answer"
+        tags: []
+      triviaqa:
+        task_family: "triviaqa"
+        graph_stage: "before_final_answer"
+        tags: []
+baseline_action:
+  instruction: "No additional prompt prior; use the frozen Director policy."
+  prompt_prior: null
+
+selection_coordinates:
+  partition_manifest: "data/joint_qa_v2/manifest.json"
+  train_discovery:
+    path: "data/joint_qa_v2/train.jsonl"
+    start: 60
+    stop: 63
+    zero_based_stop_exclusive: true
+    task_ids:
+      hotpotqa:
+        - "hotpotqa:5adf698f5542993a75d264e2"
+        - "hotpotqa:5a8e506d5542990e94052ac8"
+        - "hotpotqa:5ac3983a554299657fa290f5"
+      triviaqa:
+        - "triviaqa:tc_307"
+        - "triviaqa:tc_308"
+        - "triviaqa:tc_309"
+  train_natural_candidate:
+    path: "data/joint_qa_v2/train.jsonl"
+    position: 63
+    task_ids:
+      hotpotqa: "hotpotqa:5ac1bfd85542994ab5c67dfb"
+      triviaqa: "triviaqa:tc_310"
+  skill_confirmation:
+    path: "data/joint_qa_v2/skill_confirmation_round7.jsonl"
+    manifest: "data/joint_qa_v2/skill_confirmation_round7_manifest.json"
+    partition: "skill_confirmation_round7"
+    canonical_candidate_range:
+      start: 984
+      stop: 1024
+      zero_based_stop_exclusive: true
+    per_dataset_range:
+      start: 0
+      stop: 40
+      zero_based_stop_exclusive: true
+  reserved_grpo_training_positions:
+    hotpotqa: 9
+    triviaqa: 12
+
+paired_intervention:
+  estimand: "stage-conditioned Skill prompt-prior assignment intent-to-treat effect"
+  intervention_scope: >-
+    The candidate prompt prior is eligible only on Director turns whose resolved
+    graph_stage exactly matches its preregistered condition: construction for
+    semantic verification, or before_final_answer for exact answer handoff. No
+    candidate is visible on empty_graph turns.
+  incumbent_prompt_prior: null
+  treatment_assigned_from_shared_empty_canvas: true
+  randomized_arm_order: true
+  shared_task_and_sampling_coordinates: true
+  terminal_primary_outcome: "official_answer_token_f1"
+  companion_outcome: "normalized_exact_match"
+  forced_probe: true
+  grpo_eligible: false
+  benchmark_eligible: false
+
+skill_gate:
+  scope: "independent_per_dataset"
+  datasets: [hotpotqa, triviaqa]
+  delta_min: 0.03
+  max_harm_probability: 0.05
+  minimum_effective_pairs: 20
+  minimum_empirical_coverage: 0.9
+  minimum_independent_problems: 20
+  minimum_positive_slice_fraction: 0.75
+  lower_thresholds_for_round7: false
+  activation: "delayed_until_independent_confirmation_passes"
+  downstream_joint_training_precondition: "both_dataset_skills_active"
+
+epochs:
+  discovery: 18
+  validation: 19
+  eligible_activation: 20
+discovery_schedule: "balanced cold start, posterior-UCB prefilter, then particle EVSI"
+evsi_budget:
+  ucb_prefilter_top_k: 2
+  posterior_particles: 1024
+  observation_samples: 2048
+
+data_exclusion_contract:
+  confirmation_excluded_from_grpo: true
+  confirmation_excluded_from_reported_development_and_test_metrics: true
+  final_test_untouched: true
+  prior_discovery_development_test_confirmation_overlap_allowed: false
+
+runner_compatibility:
+  current_runner_supports_exact_stage_condition: true
+  reason: >-
+    The candidate arm now reuses the existing per-turn SkillPromptProvider and
+    SkillQuery graph-stage boundary; the incumbent arm remains prior-free.
+    Exposure and condition_satisfied are derived from receipt-verified Director
+    prompts before the trajectory is persisted.
+  validated_by:
+    - "tests/unit/test_probe_runtime_wiring.py"
+    - "tests/unit/test_joint_qa_mace_skill_rounds.py"
+  live_execution_allowed_after_adapter_validation: true

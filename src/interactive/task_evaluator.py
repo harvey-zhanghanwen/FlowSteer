@@ -26,11 +26,16 @@ import json
 import math
 import os
 from pathlib import Path
+import random
 import re
 import string
 import sys
 from typing import Any, Awaitable, Callable, Mapping, Optional, Sequence
 
+from .aime2026_adapter import (
+    AIME2026_EVALUATOR_VERSION,
+    score_aime2026_integer,
+)
 from .records import TaskRecord
 
 
@@ -42,7 +47,7 @@ SKILLFLOW_REWARD_VERSION = "skillflow.training.reward.v1"
 HOTPOTQA_ANSWER_EVALUATOR_VERSION = "hotpotqa.official.answer.v1"
 TRIVIAQA_ANSWER_EVALUATOR_VERSION = "triviaqa.official.answer.v1"
 HEALTHBENCH_EVALUATOR_VERSION = "openai.simple-evals.healthbench.v1"
-RAGEN_EVALUATOR_VERSION = "skillflow.ragen_adapter.v1"
+RAGEN_EVALUATOR_VERSION = "skillflow.ragen_adapter.v2"
 SWEBENCH_EVALUATOR_VERSION = "swebench.harness.v1"
 UNAVAILABLE_EVALUATOR_VERSION = "agentgraph.evaluator.unavailable.v1"
 
@@ -519,6 +524,41 @@ def _evaluate_static(
     )
 
 
+def _evaluate_aime2026(
+    record: TaskRecord | Mapping[str, Any], prediction: str
+) -> EvaluationOutcome:
+    """Apply SkillFlow Protocol 10's strict INTEGER submission scorer."""
+
+    answers = _accepted_answers(record)
+    if not answers:
+        return _invalid(
+            "missing_ground_truth",
+            evaluator_version=AIME2026_EVALUATOR_VERSION,
+        )
+    try:
+        result = score_aime2026_integer(prediction, answers)
+    except (TypeError, ValueError) as exc:
+        return _invalid(
+            "aime_trusted_answer_invalid",
+            evaluator_version=AIME2026_EVALUATOR_VERSION,
+            details={"error_type": type(exc).__name__, "error": str(exc)},
+        )
+    return EvaluationOutcome(
+        valid=True,
+        reward=result.accuracy,
+        metrics={"accuracy": result.accuracy, "exact_match": result.accuracy},
+        reason="evaluated",
+        details={
+            "accepted_answer_count": len(answers),
+            "raw_prediction": result.raw_prediction,
+            "scored_prediction": result.scored_prediction,
+            "structured_answer_extracted": result.structured_answer_extracted,
+            "metric_scope": "official_integer_submission",
+        },
+        evaluator_version=AIME2026_EVALUATOR_VERSION,
+    )
+
+
 def _health_conversation(
     record: TaskRecord | Mapping[str, Any], prediction: str
 ) -> str:
@@ -702,6 +742,14 @@ def _load_ragen_module(path: Path) -> Any:
     if not source.is_file():
         raise FileNotFoundError(f"RAGEN adapter not found: {source}")
     module_name = "_flowsteer_deployed_ragen_adapter"
+    loaded = sys.modules.get(module_name)
+    loaded_source = getattr(loaded, "__file__", None) if loaded is not None else None
+    if loaded_source and Path(str(loaded_source)).expanduser().resolve() == source:
+        # Keep SkillFlow's process-local ALFWorld inventory and WebShop server
+        # caches alive across evaluator calls.  Re-executing the deployed
+        # module here would discard those upstream caches and reload the full
+        # environment once per task.
+        return loaded
     spec = importlib.util.spec_from_file_location(module_name, source)
     if spec is None or spec.loader is None:
         raise ImportError(f"cannot load RAGEN adapter: {source}")
@@ -734,6 +782,33 @@ def _environment_config(
 
 def _path_identity(value: Any) -> str:
     return os.path.realpath(os.path.abspath(os.path.expanduser(str(value))))
+
+
+def _webshop_instruction_matches(aligned_goal: str, runtime_instruction: str) -> bool:
+    """Match the public human goal to WebShop's generated price constraint.
+
+    The aligned source is WebShop's ``human_goals.json``.  Upstream
+    ``web_agent_site.engine.goal.get_human_goals`` appends exactly one optional
+    ``, and price lower than {price_upper:.2f} dollars`` suffix when it builds
+    the live goal.  The goal index and full environment protocol are checked
+    separately below, so accepting only that upstream suffix preserves task
+    identity without requiring the data converter to reimplement goal
+    generation.
+    """
+
+    aligned = " ".join(str(aligned_goal).split())
+    runtime = " ".join(str(runtime_instruction).split())
+    if not aligned or not runtime:
+        return aligned == runtime
+    if runtime == aligned:
+        return True
+    suffix = runtime[len(aligned) :] if runtime.startswith(aligned) else ""
+    return bool(
+        re.fullmatch(
+            r", and price lower than \d+(?:\.\d{2}) dollars",
+            suffix,
+        )
+    )
 
 
 def _lock_alfworld_task(module: Any, config: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -936,8 +1011,16 @@ async def _evaluate_environment(
     run_graph: Optional[RunGraphCallback],
     max_environment_steps: int,
     ragen_adapter_path: Path,
+    replay_trace: Sequence[Mapping[str, Any]] = (),
 ) -> EvaluationOutcome:
-    if run_graph is None:
+    if isinstance(replay_trace, (str, bytes)) or not isinstance(
+        replay_trace, Sequence
+    ):
+        return _invalid(
+            "environment_replay_trace_invalid",
+            evaluator_version=RAGEN_EVALUATOR_VERSION,
+        )
+    if run_graph is None and not replay_trace:
         return _invalid(
             "environment_graph_callback_unavailable",
             evaluator_version=RAGEN_EVALUATOR_VERSION,
@@ -948,6 +1031,19 @@ async def _evaluate_environment(
         lock_details: dict[str, Any] = {}
         if dataset == "alfworld":
             config, lock_details = _lock_alfworld_task(module, config)
+        elif dataset == "webshop":
+            # SkillFlow exposes ``env_seed`` on WebShopEnv, but the deployed
+            # adapter passes it to the constructor without seeding Python's
+            # RNG before upstream ``get_human_goals`` samples price bounds.
+            # Seed immediately before the synchronous reset so the live goal
+            # order exactly matches the authoritative aligned catalog.
+            check_webshop = getattr(module, "_check_webshop", None)
+            if callable(check_webshop) and not bool(check_webshop()):
+                raise RuntimeError("formal WebShop dependencies are unavailable")
+            # Importing WebShop loads modules that mutate Python's global RNG.
+            # Therefore seed only after the deployed dependency check has
+            # completed, immediately before the first SimServer construction.
+            random.seed(int(config.get("env_seed", 1000)))
         adapter = module.RAGENAdapter()
         observation = str(
             adapter.reset(
@@ -981,15 +1077,56 @@ async def _evaluate_environment(
                 evaluator_version=RAGEN_EVALUATOR_VERSION,
                 details=lock_details,
             )
+        # SkillFlow's official ALFWorld bridge rejects a reset when the exact
+        # public query differs from the canonical instruction returned by the
+        # pinned game.  The RAGENAdapter is retained here, so reproduce only
+        # that identity check at the AgentGraph record boundary.
+        requested_instruction = str(_record_field(record, "question", "")).strip()
+        actual_instruction = _environment_task_description(
+            record, dataset, observation, adapter
+        ).strip()
+        lock_details.update(
+            requested_instruction=requested_instruction,
+            actual_instruction=actual_instruction,
+        )
+        if not requested_instruction or actual_instruction != requested_instruction:
+            return _invalid(
+                "alfworld_instruction_mismatch",
+                evaluator_version=RAGEN_EVALUATOR_VERSION,
+                details=lock_details,
+            )
+        if "max_steps" in config:
+            requested_max_steps = config["max_steps"]
+            lock_details.update(
+                requested_max_steps=requested_max_steps,
+                evaluator_max_steps=max_environment_steps,
+            )
+            if (
+                isinstance(requested_max_steps, bool)
+                or not isinstance(requested_max_steps, int)
+                or requested_max_steps != max_environment_steps
+            ):
+                return _invalid(
+                    "alfworld_step_limit_mismatch",
+                    evaluator_version=RAGEN_EVALUATOR_VERSION,
+                    details=lock_details,
+                )
     elif dataset == "webshop":
         webshop_env = adapter._env
         if "goal_index" in config:
             actual_goal = getattr(webshop_env, "current_goal_index", None)
             lock_details.update(
-                requested_goal_index=int(config["goal_index"]),
+                requested_goal_index=config["goal_index"],
                 actual_goal_index=actual_goal,
             )
-            if actual_goal is not None and int(actual_goal) != int(config["goal_index"]):
+            try:
+                goal_matches = (
+                    actual_goal is not None
+                    and int(actual_goal) == int(config["goal_index"])
+                )
+            except (TypeError, ValueError):
+                goal_matches = False
+            if not goal_matches:
                 return _invalid(
                     "webshop_goal_lock_mismatch",
                     evaluator_version=RAGEN_EVALUATOR_VERSION,
@@ -1010,6 +1147,7 @@ async def _evaluate_environment(
             "goal_split",
             "file_path",
             "attr_path",
+            "env_seed",
         ):
             if field_name not in config or not hasattr(webshop_env, field_name):
                 continue
@@ -1038,9 +1176,13 @@ async def _evaluate_environment(
         ).strip()
         if (
             requested_instruction
-            and actual_instruction
-            and " ".join(requested_instruction.split())
-            != " ".join(actual_instruction.split())
+            and (
+                not actual_instruction
+                or not _webshop_instruction_matches(
+                    requested_instruction,
+                    actual_instruction,
+                )
+            )
         ):
             protocol_mismatches["goal_instruction"] = {
                 "requested": requested_instruction,
@@ -1056,6 +1198,7 @@ async def _evaluate_environment(
                 "goal_split",
                 "file_path",
                 "attr_path",
+                "env_seed",
             )
             if hasattr(webshop_env, field_name)
         }
@@ -1074,7 +1217,189 @@ async def _evaluate_environment(
     terminal = False
     terminal_reward = 0.0
     terminal_info: Mapping[str, Any] = {}
-    for step_index in range(max_environment_steps):
+
+    # An infrastructure failure can happen after several successful paid
+    # environment-policy calls.  SkillFlow classifies that as an attempt
+    # failure, not a task failure.  On evaluator retry, deterministically
+    # replay the already accepted local environment actions and continue from
+    # the first missing policy call instead of paying for the prefix again.
+    for step_index, raw_entry in enumerate(replay_trace):
+        if step_index >= max_environment_steps or not isinstance(raw_entry, Mapping):
+            return _invalid(
+                "environment_replay_trace_invalid",
+                evaluator_version=RAGEN_EVALUATOR_VERSION,
+                details={"replay_step": step_index, **lock_details},
+            )
+        entry = dict(raw_entry)
+        if (
+            isinstance(entry.get("step"), bool)
+            or not isinstance(entry.get("step"), int)
+            or entry.get("step") != step_index
+            or not isinstance(entry.get("observation"), str)
+            or entry.get("observation") != observation
+        ):
+            return _invalid(
+                "environment_replay_state_mismatch",
+                evaluator_version=RAGEN_EVALUATOR_VERSION,
+                details={"replay_step": step_index, "trace": trace, **lock_details},
+            )
+        available_actions = getattr(adapter, "available_actions", ()) or ()
+        legal_actions, webshop_has_search_bar = _environment_actions(
+            dataset, available_actions
+        )
+        if (
+            not legal_actions
+            or entry.get("legal_actions") != _detail_value(legal_actions)
+        ):
+            return _invalid(
+                "environment_replay_actions_mismatch",
+                evaluator_version=RAGEN_EVALUATOR_VERSION,
+                details={"replay_step": step_index, "trace": trace, **lock_details},
+            )
+
+        action = entry.get("action")
+        state_advanced = entry.get("state_advanced")
+        if action == "<INVALID>" and state_advanced is False:
+            stored_reward = entry.get("reward")
+            if (
+                entry.get("parse_error") is not True
+                or entry.get("feedback")
+                != "[INVALID] No valid <action> tag found."
+                or (
+                    "raw_graph_output" in entry
+                    and _parse_environment_action(
+                        entry.get("raw_graph_output"),
+                        dataset=dataset,
+                        legal_actions=legal_actions,
+                        webshop_has_search_bar=webshop_has_search_bar,
+                    )
+                    is not None
+                )
+                or entry.get("next_observation") != observation
+                or type(entry.get("done")) is not bool
+                or entry.get("done") is not False
+                or isinstance(stored_reward, bool)
+                or not isinstance(stored_reward, (int, float))
+                or not math.isfinite(float(stored_reward))
+                or float(stored_reward) != 0.0
+                or entry.get("info") != {"parse_error": True}
+            ):
+                return _invalid(
+                    "environment_replay_parse_mismatch",
+                    evaluator_version=RAGEN_EVALUATOR_VERSION,
+                    details={"replay_step": step_index, "trace": trace, **lock_details},
+                )
+            trace.append(entry)
+            continue
+
+        if (
+            entry.get("parse_error") is True
+            or state_advanced is False
+            or (state_advanced is not None and state_advanced is not True)
+            or not isinstance(action, str)
+            or (
+                "raw_graph_output" in entry
+                and _parse_environment_action(
+                    entry.get("raw_graph_output"),
+                    dataset=dataset,
+                    legal_actions=legal_actions,
+                    webshop_has_search_bar=webshop_has_search_bar,
+                )
+                != action
+            )
+            or _parse_environment_action(
+                action,
+                dataset=dataset,
+                legal_actions=legal_actions,
+                webshop_has_search_bar=webshop_has_search_bar,
+            )
+            != action
+        ):
+            return _invalid(
+                "environment_replay_action_invalid",
+                evaluator_version=RAGEN_EVALUATOR_VERSION,
+                details={"replay_step": step_index, "trace": trace, **lock_details},
+            )
+        try:
+            next_observation, raw_reward, done, info = adapter.step(action)
+            reward_value = float(raw_reward)
+        except Exception as exc:
+            return _invalid(
+                "environment_replay_step_failed",
+                evaluator_version=RAGEN_EVALUATOR_VERSION,
+                details={
+                    "replay_step": step_index,
+                    "trace": trace,
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                    **lock_details,
+                },
+            )
+        info_is_mapping = isinstance(info, Mapping)
+        info = info if info_is_mapping else {}
+        next_observation_text = str(next_observation)
+        stored_reward_raw = entry.get("reward")
+        stored_reward = (
+            float(stored_reward_raw)
+            if not isinstance(stored_reward_raw, bool)
+            and isinstance(stored_reward_raw, (int, float))
+            else math.nan
+        )
+        stored_done = entry.get("done")
+        stored_info = entry.get("info")
+        if (
+            isinstance(raw_reward, bool)
+            or not math.isfinite(reward_value)
+            or not math.isfinite(stored_reward)
+            or reward_value != stored_reward
+            or type(done) is not bool
+            or type(stored_done) is not bool
+            or bool(done) != stored_done
+            or not isinstance(next_observation, str)
+            or not isinstance(entry.get("next_observation"), str)
+            or next_observation_text != entry.get("next_observation")
+            or not info_is_mapping
+            or not isinstance(stored_info, Mapping)
+            or _detail_value(info) != _detail_value(stored_info)
+        ):
+            return _invalid(
+                "environment_replay_transition_mismatch",
+                evaluator_version=RAGEN_EVALUATOR_VERSION,
+                details={"replay_step": step_index, "trace": trace, **lock_details},
+            )
+        if info.get("error") or next_observation_text.startswith("[ENV_UNAVAILABLE]"):
+            return _invalid(
+                "environment_replay_transition_invalid",
+                evaluator_version=RAGEN_EVALUATOR_VERSION,
+                details={"replay_step": step_index, "trace": trace, **lock_details},
+            )
+        trace.append(entry)
+        observation = next_observation_text
+        terminal_reward = reward_value
+        terminal_info = info
+        if bool(done):
+            terminal = True
+            if step_index + 1 != len(replay_trace):
+                return _invalid(
+                    "environment_replay_trace_after_terminal",
+                    evaluator_version=RAGEN_EVALUATOR_VERSION,
+                    details={"replay_step": step_index, "trace": trace, **lock_details},
+                )
+            break
+
+    if trace:
+        lock_details["replayed_environment_steps"] = len(trace)
+
+    if not terminal and len(trace) < max_environment_steps and run_graph is None:
+        return _invalid(
+            "environment_graph_callback_unavailable",
+            evaluator_version=RAGEN_EVALUATOR_VERSION,
+            details={"trace": trace, **lock_details},
+        )
+
+    for step_index in range(len(trace), max_environment_steps):
+        if terminal:
+            break
         available_actions = getattr(adapter, "available_actions", ()) or ()
         legal_actions, webshop_has_search_bar = _environment_actions(
             dataset, available_actions
@@ -1202,7 +1527,29 @@ async def _evaluate_environment(
             break
 
     if dataset == "alfworld":
-        success = bool(terminal_info.get("won", terminal_reward > 0.0))
+        # SkillFlow's private ALFWorld terminal evaluator reads the boolean
+        # official goal predicate only after a simulator terminal.  A missing
+        # or non-boolean predicate is infrastructure/evaluator failure; reward
+        # magnitude is never a substitute.  Exhausting the public step budget
+        # without a simulator terminal remains the official no-submission
+        # failure (valid zero), matching SkillFlow's terminal-input boundary.
+        if terminal:
+            won = terminal_info.get("won")
+            if type(won) is not bool:
+                return _invalid(
+                    "alfworld_terminal_success_unavailable",
+                    evaluator_version=RAGEN_EVALUATOR_VERSION,
+                    details={
+                        "env_type": env_type,
+                        "terminal_observation": observation,
+                        "terminal_info": _detail_value(terminal_info),
+                        "trace": trace,
+                        **lock_details,
+                    },
+                )
+            success = won
+        else:
+            success = False
         reward = 1.0 if success else 0.0
     else:
         reward = _clip_unit(terminal_reward)
@@ -1284,6 +1631,7 @@ async def evaluate_task(
     swe_harness: Optional[SWEHarnessCallback] = None,
     max_environment_steps: int = 50,
     ragen_adapter_path: str | Path = DEFAULT_RAGEN_ADAPTER_PATH,
+    environment_replay_trace: Sequence[Mapping[str, Any]] = (),
 ) -> EvaluationOutcome:
     """Evaluate one final answer without manufacturing unavailable rewards.
 
@@ -1291,13 +1639,18 @@ async def evaluate_task(
     exactly one action string.  ``judge`` receives the official HealthBench
     grader message list and the selected judge model name.  SWE-bench remains
     invalid unless a real harness callback explicitly reports ``resolved``.
+    ``environment_replay_trace`` may contain a prior WebShop/ALFWorld evaluator
+    prefix: the environment is reset and each recorded transition is checked
+    exactly before ``run_graph`` is called for the first missing step.
     """
 
     if max_environment_steps <= 0:
         raise ValueError("max_environment_steps must be positive")
     dataset = _dataset_key(record)
-    if dataset in {"hotpotqa", "triviaqa", "aime"}:
+    if dataset in {"hotpotqa", "triviaqa"}:
         return _evaluate_static(record, str(prediction), dataset)
+    if dataset == "aime":
+        return _evaluate_aime2026(record, str(prediction))
     if dataset == "healthbench":
         return await _evaluate_healthbench(
             record,
@@ -1312,6 +1665,7 @@ async def evaluate_task(
             run_graph=run_graph,
             max_environment_steps=max_environment_steps,
             ragen_adapter_path=Path(ragen_adapter_path),
+            replay_trace=environment_replay_trace,
         )
     if dataset == "swe_bench":
         return await _evaluate_swebench(record, str(prediction), swe_harness=swe_harness)
@@ -1322,7 +1676,9 @@ __all__ = [
     "DEFAULT_RAGEN_ADAPTER_PATH",
     "EvaluationOutcome",
     "GRADER_TEMPLATE",
+    "AIME2026_EVALUATOR_VERSION",
     "HOTPOTQA_ANSWER_EVALUATOR_VERSION",
+    "SWEHarnessCallback",
     "TRIVIAQA_ANSWER_EVALUATOR_VERSION",
     "evaluate_task",
 ]

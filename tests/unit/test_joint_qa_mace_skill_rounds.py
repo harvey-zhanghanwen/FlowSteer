@@ -139,15 +139,15 @@ def test_epoch1_spec_candidates_manifest_and_publication_scope() -> None:
         "relation_grounded_evidence_fan_in",
     )
 
-    answer_instruction = spec.candidate_actions[
-        "answer_type_and_span_consistency"
-    ]["instruction"]
+    answer_instruction = spec.candidate_actions["answer_type_and_span_consistency"][
+        "instruction"
+    ]
     assert "expected answer type" in answer_instruction
     assert "canonical, minimal complete extractive span" in answer_instruction
     assert "unconditional shortest-span" in answer_instruction
-    topology_instruction = spec.candidate_actions[
-        "relation_grounded_evidence_fan_in"
-    ]["instruction"]
+    topology_instruction = spec.candidate_actions["relation_grounded_evidence_fan_in"][
+        "instruction"
+    ]
     for phrase in (
         "subject, relation, and qualifiers",
         "independent evidence subquestions",
@@ -289,9 +289,9 @@ def test_epoch2_uses_fresh_evidence_and_conditional_topology_priors() -> None:
         "subject_relation_answer_type_grounding",
         "conditional_independence_evidence_fan_in",
     )
-    semantic = spec.candidate_actions[
-        "subject_relation_answer_type_grounding"
-    ]["instruction"]
+    semantic = spec.candidate_actions["subject_relation_answer_type_grounding"][
+        "instruction"
+    ]
     for phrase in (
         "semantic verification only when",
         "subject, relation, answer, and qualifiers",
@@ -300,9 +300,9 @@ def test_epoch2_uses_fresh_evidence_and_conditional_topology_priors() -> None:
         "one <answer> tag",
     ):
         assert phrase in semantic
-    topology = spec.candidate_actions[
-        "conditional_independence_evidence_fan_in"
-    ]["instruction"]
+    topology = spec.candidate_actions["conditional_independence_evidence_fan_in"][
+        "instruction"
+    ]
     for phrase in (
         "conditionally independent",
         "one ADD_SUBGRAPH transaction",
@@ -377,9 +377,9 @@ def test_epoch3_uses_unopened_development_validation_and_component_prior() -> No
         "evidence_grounded_component_transaction",
         "evidence_span_answer_contract",
     )
-    component = spec.candidate_actions[
-        "evidence_grounded_component_transaction"
-    ]["instruction"]
+    component = spec.candidate_actions["evidence_grounded_component_transaction"][
+        "instruction"
+    ]
     for phrase in (
         "conditionally independent",
         "one ADD_SUBGRAPH transaction",
@@ -396,14 +396,15 @@ def test_epoch3_uses_unopened_development_validation_and_component_prior() -> No
 
     manifest = runner._manifest(discovery, confirmation, natural, spec)
     assert manifest["confirmation_block"] == (
-        "joint_qa_v2/development:[32:52]_per_dataset "
-        "(zero-based, stop-exclusive)"
+        "joint_qa_v2/development:[32:52]_per_dataset (zero-based, stop-exclusive)"
     )
     assert (
         "reports/joint_qa_progressive/skill_epoch_000002/publication_results.json"
         in manifest["candidate_source_artifacts"]
     )
-    assert "task IDs are read only for overlap exclusion" in manifest["final_test_block"]
+    assert (
+        "task IDs are read only for overlap exclusion" in manifest["final_test_block"]
+    )
     assert manifest["selection_coordinates"]["skill_confirmation"] == {
         "partition": "development",
         "start": 32,
@@ -421,9 +422,7 @@ def test_epoch4_uses_fresh_canonical_confirmation_and_atomic_priors() -> None:
     spec = runner._spec_for_round(4)
     discovery, confirmation, natural = runner._selected_tasks(spec)
     train_path = runner.ROOT / "data/joint_qa_v2/train.jsonl"
-    confirmation_path = (
-        runner.ROOT / "data/joint_qa_v2/skill_confirmation_round4.jsonl"
-    )
+    confirmation_path = runner.ROOT / "data/joint_qa_v2/skill_confirmation_round4.jsonl"
     development_ids = {
         task.task_id
         for task in iter_task_records(
@@ -478,9 +477,7 @@ def test_epoch4_uses_fresh_canonical_confirmation_and_atomic_priors() -> None:
         "conditional_fan_in_deferred_format",
         "exact_answer_handoff",
     )
-    fan_in = spec.candidate_actions["conditional_fan_in_deferred_format"][
-        "instruction"
-    ]
+    fan_in = spec.candidate_actions["conditional_fan_in_deferred_format"]["instruction"]
     for phrase in (
         "Only when two evidence subquestions are conditionally independent",
         "one ADD_SUBGRAPH",
@@ -530,9 +527,7 @@ def test_epoch5_revalidates_atomic_priors_after_terminal_feedback_alignment() ->
     spec = runner._spec_for_round(5)
     discovery, confirmation, natural = runner._selected_tasks(spec)
     train_path = runner.ROOT / "data/joint_qa_v2/train.jsonl"
-    confirmation_path = (
-        runner.ROOT / "data/joint_qa_v2/skill_confirmation_round5.jsonl"
-    )
+    confirmation_path = runner.ROOT / "data/joint_qa_v2/skill_confirmation_round5.jsonl"
     prior_ids: set[str] = set()
     for prior_round in range(5):
         prior_discovery, prior_confirmation, prior_natural = runner._selected_tasks(
@@ -568,14 +563,13 @@ def test_epoch5_revalidates_atomic_priors_after_terminal_feedback_alignment() ->
         )
     assert not selected_ids & prior_ids
 
-    fan_in = spec.candidate_actions["conditional_fan_in_deferred_format"][
-        "instruction"
-    ]
+    fan_in = spec.candidate_actions["conditional_fan_in_deferred_format"]["instruction"]
     assert "without output_agent_id" in fan_in
     assert "After that component executes" in fan_in
     assert "empty Canvas reports" not in fan_in
-    assert spec.candidate_actions["exact_answer_handoff"] == (
-        runner.ROUND4_CANDIDATE_ACTIONS["exact_answer_handoff"]
+    assert (
+        spec.candidate_actions["exact_answer_handoff"]
+        == (runner.ROUND4_CANDIDATE_ACTIONS["exact_answer_handoff"])
     )
 
     manifest = runner._manifest(discovery, confirmation, natural, spec)
@@ -602,13 +596,13 @@ def test_epoch5_revalidates_atomic_priors_after_terminal_feedback_alignment() ->
     }
 
 
-def test_epoch6_quarantines_aborted_round_and_uses_nullable_output_tool_version() -> None:
+def test_epoch6_quarantines_aborted_round_and_uses_nullable_output_tool_version() -> (
+    None
+):
     spec = runner._spec_for_round(6)
     discovery, confirmation, natural = runner._selected_tasks(spec)
     train_path = runner.ROOT / "data/joint_qa_v2/train.jsonl"
-    confirmation_path = (
-        runner.ROOT / "data/joint_qa_v2/skill_confirmation_round6.jsonl"
-    )
+    confirmation_path = runner.ROOT / "data/joint_qa_v2/skill_confirmation_round6.jsonl"
     prior_ids: set[str] = set()
     for prior_round in range(6):
         prior_discovery, prior_confirmation, prior_natural = runner._selected_tasks(
@@ -671,6 +665,144 @@ def test_epoch6_quarantines_aborted_round_and_uses_nullable_output_tool_version(
     }
 
 
+def test_epoch7_uses_candidate_specific_graph_stages_and_fresh_confirmation() -> None:
+    spec = runner._spec_for_round(7)
+    discovery, confirmation, natural = runner._selected_tasks(spec)
+    train_path = runner.ROOT / "data/joint_qa_v2/train.jsonl"
+    confirmation_path = runner.ROOT / "data/joint_qa_v2/skill_confirmation_round7.jsonl"
+    prior_ids: set[str] = set()
+    for prior_round in range(7):
+        prior_discovery, prior_confirmation, prior_natural = runner._selected_tasks(
+            runner._spec_for_round(prior_round)
+        )
+        prior_ids.update(
+            task.task_id
+            for dataset in runner.DATASETS
+            for task in (
+                *prior_discovery[dataset],
+                prior_natural[dataset],
+                *prior_confirmation[dataset],
+            )
+        )
+
+    selected_ids: set[str] = set()
+    for dataset in runner.DATASETS:
+        train = _dataset_records(train_path, "train", dataset)
+        validation = _dataset_records(confirmation_path, "validation", dataset)
+        assert [task.task_id for task in discovery[dataset]] == [
+            task.task_id for task in train[60:63]
+        ]
+        assert natural[dataset].task_id == train[63].task_id
+        assert [task.task_id for task in confirmation[dataset]] == [
+            task.task_id for task in validation[:40]
+        ]
+        selected_ids.update(task.task_id for task in discovery[dataset])
+        selected_ids.add(natural[dataset].task_id)
+        selected_ids.update(task.task_id for task in confirmation[dataset])
+        assert all(
+            task.metadata["joint_qa_partition"] == "skill_confirmation_round7"
+            for task in confirmation[dataset]
+        )
+    assert not selected_ids & prior_ids
+
+    assert (
+        spec.candidate_actions["subject_relation_answer_type_grounding"]
+        == (runner.ROUND2_CANDIDATE_ACTIONS["subject_relation_answer_type_grounding"])
+    )
+    assert (
+        spec.candidate_actions["exact_answer_handoff"]
+        == (runner.ROUND4_CANDIDATE_ACTIONS["exact_answer_handoff"])
+    )
+    assert spec.candidate_graph_stages == {
+        "subject_relation_answer_type_grounding": "construction",
+        "exact_answer_handoff": "before_final_answer",
+    }
+
+    manifest = runner._manifest(discovery, confirmation, natural, spec)
+    assert manifest["confirmation_block"] == (
+        "joint_qa_v2/skill_confirmation_round7:[0:40]_per_dataset "
+        "(zero-based, stop-exclusive)"
+    )
+    assert manifest["prompt_version"] == (
+        "agentgraph.director.progressive-subgraph.stage-conditioned-skill.v3"
+    )
+    assert manifest["tool_version"] == (
+        "agentgraph.add-subgraph-nullable-output+"
+        "skillflow-stage-conditioned-forced-probe.v3"
+    )
+    assert manifest["candidate_conditions"]["hotpotqa"] == {
+        "subject_relation_answer_type_grounding": {
+            "task_family": "hotpotqa",
+            "graph_stage": "construction",
+            "tags": [],
+        },
+        "exact_answer_handoff": {
+            "task_family": "hotpotqa",
+            "graph_stage": "before_final_answer",
+            "tags": [],
+        },
+    }
+    assert manifest["causal_estimand"] == (
+        "Stage-conditioned Skill prompt-prior assignment intent-to-treat effect"
+    )
+    assert manifest["epochs"] == {
+        "discovery": 18,
+        "validation": 19,
+        "eligible_activation": 20,
+    }
+    preregistered = runner.load_yaml(
+        runner.ROOT / "config/joint_qa_round7_evidence.yaml"
+    )
+    assert preregistered["experiment_version"] == spec.experiment_version
+    assert preregistered["seed"] == spec.seed
+    assert preregistered["posterior_version"] == spec.posterior_version
+    assert preregistered["skill_library_version"] == spec.skill_library_version
+    assert preregistered["prompt_version"] == spec.prompt_version
+    assert preregistered["tool_version"] == spec.tool_version
+    assert preregistered["candidate_actions"] == {
+        key: dict(value) for key, value in spec.candidate_actions.items()
+    }
+    for candidate_id, stage in spec.candidate_graph_stages.items():
+        for dataset in runner.DATASETS:
+            assert preregistered["candidate_conditions"][
+                "by_candidate_and_dataset"
+            ][candidate_id][dataset] == {
+                "task_family": dataset,
+                "graph_stage": stage,
+                "tags": [],
+            }
+
+
+def test_epoch7_backend_binds_the_preregistered_prompt_and_tool_versions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured = {}
+    sentinel = object()
+
+    def capture(config, root, *, evaluation_only):
+        captured["config"] = config
+        captured["root"] = root
+        captured["evaluation_only"] = evaluation_only
+        return sentinel
+
+    monkeypatch.setattr(
+        runner.LiveSmokeBackend,
+        "from_config",
+        capture,
+    )
+    result = runner._backend(runner.EPOCH7_SPEC)
+
+    assert result is sentinel
+    assert captured["root"] == runner.ROOT
+    assert captured["evaluation_only"] is True
+    assert captured["config"]["experiment"]["prompt_version"] == (
+        runner.EPOCH7_SPEC.prompt_version
+    )
+    assert captured["config"]["experiment"]["tool_version"] == (
+        runner.EPOCH7_SPEC.tool_version
+    )
+
+
 def test_unknown_round_is_rejected() -> None:
     with pytest.raises(ValueError, match="unsupported Skill evidence round"):
-        runner._spec_for_round(7)
+        runner._spec_for_round(8)

@@ -30,10 +30,10 @@ from src.interactive.skills import SkillStatus, SkillStore
 DEFAULT_TEMPLATE = PROJECT_ROOT / "config/training_joint_qa_progressive_skill_on_step1.yaml"
 DEFAULT_PUBLICATION = (
     PROJECT_ROOT
-    / "artifacts/joint_qa_progressive/skill_epoch_000000/publication_results.json"
+    / "artifacts/joint_qa_progressive/skill_epoch_000007/publication_results.json"
 )
 DEFAULT_STORE = (
-    PROJECT_ROOT / "artifacts/joint_qa_progressive/skill_epoch_000000/skills.json"
+    PROJECT_ROOT / "artifacts/joint_qa_progressive/skill_epoch_000007/skills.json"
 )
 DEFAULT_OUTPUT = (
     PROJECT_ROOT
@@ -89,12 +89,16 @@ def materialize(
     for dataset in DATASETS:
         payload = _mapping(publications.get(dataset), f"publications.{dataset}")
         skill_payload = _mapping(payload.get("skill"), f"publications.{dataset}.skill")
+        if skill_payload.get("status") != SkillStatus.ACTIVE.value:
+            raise RuntimeError(f"{dataset} publication is not ACTIVE")
         skill_id = str(skill_payload.get("skill_id", ""))
         record = store.get(skill_id)
         if record is None or record.status is not SkillStatus.ACTIVE:
             raise RuntimeError(f"{dataset} publication has no matching ACTIVE Skill")
         if record.condition.get("task_family") != dataset:
             raise RuntimeError(f"{dataset} ACTIVE Skill has an incompatible task condition")
+        if record.version != skill_payload.get("version"):
+            raise RuntimeError(f"{dataset} SkillStore/publication version mismatch")
         if record.activated_epoch is None:
             raise RuntimeError(f"{dataset} ACTIVE Skill has no activation epoch")
         required_ids.append(record.skill_id)
@@ -115,6 +119,12 @@ def materialize(
         raise RuntimeError("ACTIVE Skills have no visibility epoch")
 
     config = load_yaml(template_path)
+    experiment = _mapping(config["experiment"], "experiment")
+    for dataset, record in zip(DATASETS, records):
+        if experiment.get("prompt_version") != record.versions.prompt:
+            raise RuntimeError(f"{dataset} training template prompt version differs from Skill")
+        if experiment.get("tool_version") != record.versions.tool:
+            raise RuntimeError(f"{dataset} training template tool version differs from Skill")
     skills = dict(_mapping(config["skills"], "skills"))
     skills.update(
         store_path=_relative(skill_store_path),

@@ -339,8 +339,19 @@ def test_collector_materializes_exact_finish_trajectory_and_evidence(tmp_path):
             "details": {"gold": "final answer", "trace_id": "eval-1"},
         }
 
-    trajectory = asyncio.run(collector.collect(_task(), 0, evaluator))
+    workflow_problem = (
+        "What is the answer?\n\nExecution interface: return one admissible action."
+    )
+    trajectory = asyncio.run(
+        collector.collect(
+            _task(),
+            0,
+            evaluator,
+            workflow_problem=workflow_problem,
+        )
+    )
     assert trajectory.explicit_finish is True
+    assert trajectory.task.question == "What is the answer?"
     assert trajectory.termination_reason == "finish"
     assert trajectory.final_answer == "final answer"
     assert trajectory.grpo_eligible is True
@@ -371,6 +382,8 @@ def test_collector_materializes_exact_finish_trajectory_and_evidence(tmp_path):
         turn.executed_prefix_tokens < len(turn.output_token_ids)
         for turn in trajectory.turns
     )
+    initial_user_message = client.tokenizer.chat_calls[0][0][1]["content"]
+    assert "Execution interface: return one admissible action." in initial_user_message
     second_round_messages = client.tokenizer.chat_calls[1][0]
     third_round_messages = client.tokenizer.chat_calls[2][0]
     assert [item["role"] for item in second_round_messages] == [

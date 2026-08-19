@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, replace
 import importlib.util
 from pathlib import Path
+import sys
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
+from src.interactive.agent_graph import AgentGraph, AgentNode
 from src.interactive.agent_runtime import AgentResponse, AgentRuntime
 from src.interactive.model_registry import ModelRegistry, ModelSpec, ProviderSpec
 from src.interactive.records import TaskRecord
@@ -17,6 +20,28 @@ _SPEC = importlib.util.spec_from_file_location("probe_runtime_smoke", _SCRIPT)
 assert _SPEC is not None and _SPEC.loader is not None
 _MODULE = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(_MODULE)
+
+_SCRIPTS_ROOT = _SCRIPT.parent
+if str(_SCRIPTS_ROOT) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_ROOT))
+from scripts import run_joint_qa_mace_skill as _RUNNER  # noqa: E402
+
+
+@dataclass(frozen=True)
+class _TrajectoryStub:
+    turns: tuple
+    condition_satisfied: bool = False
+
+
+class _RecordingEvidenceStore:
+    def __init__(self) -> None:
+        self.events = []
+
+    def append_snapshot(self, record) -> None:
+        self.events.append(("snapshot", record))
+
+    def append_trajectory(self, record) -> None:
+        self.events.append(("trajectory", record))
 
 
 class _Gateway:
@@ -65,9 +90,7 @@ def _config() -> dict:
         },
         "agent_graph": {
             "max_agents": 6,
-            "terminal_protocol_by_source": {
-                "hotpotqa": "exact_single_answer_tag"
-            },
+            "terminal_protocol_by_source": {"hotpotqa": "exact_single_answer_tag"},
         },
         "experiment": {
             "seed": 41,
@@ -109,7 +132,15 @@ class ProbeRuntimeWiringTests(unittest.IsolatedAsyncioTestCase):
             def __init__(self, orchestrator, environment, versions, store, **kwargs):
                 captured.append((orchestrator, kwargs))
 
-            async def collect(self, task, rollout_index, evaluator_callback):
+            async def collect(
+                self,
+                task,
+                rollout_index,
+                evaluator_callback,
+                *,
+                workflow_problem=None,
+            ):
+                del task, rollout_index, evaluator_callback, workflow_problem
                 return sentinel
 
         condition = {
@@ -169,7 +200,15 @@ class ProbeRuntimeWiringTests(unittest.IsolatedAsyncioTestCase):
             def __init__(self, orchestrator, environment, versions, store, **kwargs):
                 captured.append((orchestrator, kwargs))
 
-            async def collect(self, task, rollout_index, evaluator_callback):
+            async def collect(
+                self,
+                task,
+                rollout_index,
+                evaluator_callback,
+                *,
+                workflow_problem=None,
+            ):
+                del task, rollout_index, evaluator_callback, workflow_problem
                 return object()
 
         backend = self._backend()
@@ -208,6 +247,246 @@ class ProbeRuntimeWiringTests(unittest.IsolatedAsyncioTestCase):
                 prompt_priors=(condition,),
                 forced_probe=True,
             )
+
+    async def test_stage_conditioned_probe_uses_graph_stage_and_persists_after_receipt(
+        self,
+    ) -> None:
+        captured = {}
+        store = _RecordingEvidenceStore()
+        condition = {
+            "condition_id": "candidate-stage",
+            "application_mode": "forced_probe_condition",
+            "condition": {
+                "task_family": "hotpotqa",
+                "graph_stage": "before_final_answer",
+                "tags": [],
+            },
+            "action": {"instruction": "Preserve the supported answer span."},
+            "content": "candidate",
+        }
+
+        class CapturingCollector:
+            def __init__(
+                self, orchestrator, environment, versions, evidence_store, **kwargs
+            ):
+                captured["collector_store"] = evidence_store
+                captured["provider"] = kwargs["skill_provider"]
+                captured["initial_condition_satisfied"] = kwargs["condition_satisfied"]
+                self.environment = environment
+                self.versions = versions
+
+            async def collect(
+                self,
+                task,
+                rollout_index,
+                evaluator_callback,
+                *,
+                workflow_problem=None,
+            ):
+                del rollout_index, evaluator_callback, workflow_problem
+                self.environment.reset(task.question)
+                provider = captured["provider"]
+                captured["empty"] = provider(task, self.environment, self.versions)
+                self.environment._graph = AgentGraph(
+                    (AgentNode("evidence", "qwen", "find evidence"),)
+                )
+                captured["construction"] = provider(
+                    task,
+                    self.environment,
+                    self.versions,
+                )
+                self.environment._graph = AgentGraph(
+                    (AgentNode("format", "qwen", "format answer"),),
+                    output_agent_id="format",
+                )
+                captured["before_final"] = provider(
+                    task,
+                    self.environment,
+                    self.versions,
+                )
+                turn = SimpleNamespace(
+                    round_index=2,
+                    receipt_verified=True,
+                    prompt=(
+                        '{"exploration_conditions":['
+                        '{"condition_id":"candidate-stage"}]}'
+                    ),
+                    graph_revision=1,
+                    graph_snapshot=self.environment.graph.to_dict(),
+                    graph_snapshot_id="snapshot-1",
+                    previous_graph_snapshot_id=None,
+                )
+                return _TrajectoryStub((turn,))
+
+        backend = self._backend()
+        backend.evidence_store = store
+        with patch.object(_MODULE, "AgentGraphRolloutCollector", CapturingCollector):
+            record = await backend.collect(
+                _task(),
+                0,
+                _versions(),
+                expected_task_split="validation",
+                condition_id="candidate-arm",
+                sampling_schedule_purpose="paired-probe-stage",
+                stage_conditioned_prompt_prior=condition,
+                forced_probe=True,
+                sampling_anchor_ordinal=9,
+            )
+
+        self.assertIsNone(captured["collector_store"])
+        self.assertFalse(captured["initial_condition_satisfied"])
+        self.assertEqual((), captured["empty"])
+        self.assertEqual((), captured["construction"])
+        self.assertEqual((condition,), captured["before_final"])
+        self.assertTrue(record.condition_satisfied)
+        self.assertEqual(["snapshot", "trajectory"], [name for name, _ in store.events])
+        self.assertIs(record, store.events[-1][1])
+
+    async def test_stage_conditioned_probe_requires_forced_probe_and_exact_stage(
+        self,
+    ) -> None:
+        condition = {
+            "condition_id": "candidate-stage",
+            "application_mode": "forced_probe_condition",
+            "condition": {
+                "task_family": "hotpotqa",
+                "graph_stage": "*",
+                "tags": [],
+            },
+            "action": {"instruction": "candidate"},
+        }
+        backend = self._backend()
+        with self.assertRaisesRegex(ValueError, "require forced_probe=true"):
+            await backend.collect(
+                _task(),
+                0,
+                _versions(),
+                stage_conditioned_prompt_prior=condition,
+            )
+        with self.assertRaisesRegex(ValueError, "require one exact graph_stage"):
+            await backend.collect(
+                _task(),
+                0,
+                _versions(),
+                stage_conditioned_prompt_prior=condition,
+                forced_probe=True,
+            )
+
+    async def test_unreached_stage_is_persisted_as_unexposed_itt_assignment(
+        self,
+    ) -> None:
+        store = _RecordingEvidenceStore()
+        condition = {
+            "condition_id": "candidate-never-visible",
+            "application_mode": "forced_probe_condition",
+            "condition": {
+                "task_family": "hotpotqa",
+                "graph_stage": "before_final_answer",
+                "tags": [],
+            },
+            "action": {"instruction": "Preserve the supported answer span."},
+            "content": "candidate",
+        }
+
+        class NeverExposedCollector:
+            def __init__(self, *args, **kwargs):
+                del args, kwargs
+
+            async def collect(
+                self,
+                task,
+                rollout_index,
+                evaluator_callback,
+                *,
+                workflow_problem=None,
+            ):
+                del task, rollout_index, evaluator_callback, workflow_problem
+                turn = SimpleNamespace(
+                    round_index=0,
+                    receipt_verified=True,
+                    prompt='{"current_graph":{"nodes":[]}}',
+                    graph_revision=0,
+                    graph_snapshot={
+                        "nodes": [],
+                        "relations": [],
+                        "output_agent_id": None,
+                        "revision": 0,
+                    },
+                    graph_snapshot_id="snapshot-empty",
+                    previous_graph_snapshot_id=None,
+                )
+                return _TrajectoryStub((turn,))
+
+        backend = self._backend()
+        backend.evidence_store = store
+        with patch.object(_MODULE, "AgentGraphRolloutCollector", NeverExposedCollector):
+            record = await backend.collect(
+                _task(),
+                0,
+                _versions(),
+                expected_task_split="validation",
+                condition_id="candidate-arm",
+                sampling_schedule_purpose="paired-probe-stage",
+                stage_conditioned_prompt_prior=condition,
+                forced_probe=True,
+                sampling_anchor_ordinal=10,
+            )
+
+        self.assertFalse(record.condition_satisfied)
+        self.assertEqual(
+            (),
+            backend._prompt_prior_exposure_rounds(
+                record,
+                condition["condition_id"],
+            ),
+        )
+        self.assertEqual(["snapshot", "trajectory"], [name for name, _ in store.events])
+        self.assertIs(record, store.events[-1][1])
+
+    async def test_runner_forwards_candidate_specific_stage_prior(self) -> None:
+        spec = replace(
+            _RUNNER.EPOCH6_SPEC,
+            candidate_graph_stages={
+                "conditional_fan_in_deferred_format": "construction",
+                "exact_answer_handoff": "before_final_answer",
+            },
+        )
+        prior = _RUNNER._prompt_condition(
+            "hotpotqa",
+            "exact_answer_handoff",
+            spec,
+        )
+        self.assertEqual(
+            "before_final_answer",
+            prior["condition"]["graph_stage"],
+        )
+        captured = {}
+        sentinel = object()
+
+        class Backend:
+            model_catalog_version = "catalog-test-v1"
+
+            async def collect(self, task, rollout_index, versions, **kwargs):
+                captured.update(kwargs)
+                return sentinel
+
+        result = await _RUNNER._arm(
+            Backend(),
+            {},
+            _task(),
+            condition_id="candidate-arm",
+            schedule_purpose="paired-stage",
+            prompt_priors=(),
+            stage_conditioned_prompt_prior=prior,
+            forced_probe=True,
+            anchor=11,
+            spec=spec,
+        )
+
+        self.assertIs(sentinel, result)
+        self.assertEqual((), captured["prompt_priors"])
+        self.assertEqual(prior, captured["stage_conditioned_prompt_prior"])
+        self.assertTrue(captured["forced_probe"])
 
     def test_version_bundle_can_bind_exploration_and_skill_versions(self) -> None:
         versions = _MODULE.version_bundle_for(
