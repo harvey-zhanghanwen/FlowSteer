@@ -231,6 +231,16 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(["search[red waterproof shoes]"], session.actions)
         self.assertTrue(response.metadata["environment_terminal"])
         self.assertIn("search[<your query>]", gateway.requests[0].problem)
+        self.assertIn("Do not return JSON", gateway.requests[0].problem)
+        self.assertNotIn("Agent contract:", gateway.requests[0].problem)
+        self.assertEqual(
+            "environment_action", gateway.requests[0].agent.artifact_type
+        )
+        self.assertEqual(
+            "Select exactly one native action permitted by the current "
+            "admissible-action list.",
+            gateway.requests[0].agent.contract,
+        )
 
     async def test_ragen_session_calls_deployed_adapter_signature(self) -> None:
         class FakeRAGEN:

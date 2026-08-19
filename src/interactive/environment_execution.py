@@ -434,17 +434,17 @@ def _action_prompt(
 
     actions = "\n".join(admissible_actions)
     format_instruction = (
-        "Return exactly one executable action: search[keywords] or click[value]."
+        "Return exactly one native WebShop action: search[keywords] or click[value]."
         if task_family.lower() == "webshop"
-        else "Return exactly one action copied from the admissible action list."
+        else "Return exactly one native action copied from the admissible action list."
     )
     return (
         f"Task:\n{request.problem}\n\n"
-        f"Agent contract:\n{request.agent.contract}\n\n"
         f"Previous environment turns:\n{_history_text(receipts)}\n\n"
         f"Current observation (turn {turn}):\n{observation}\n\n"
         f"Admissible actions:\n{actions}\n\n"
-        f"{format_instruction} You may enclose it in <action> tags."
+        f"{format_instruction} You may enclose that native action in one <action> "
+        "tag. Do not return JSON, an object, a code fence, or an explanation."
     )
 
 
@@ -533,9 +533,23 @@ class EnvironmentExecutionAdapter:
                     request_id=f"{request.request_id}:environment:{turn}",
                     problem=prompt,
                     # RAGEN exposes native admissible actions rather than the
-                    # generic StructuredAction protocol. The outer node remains
-                    # react; this provider turn uses the legal-action contract.
-                    agent=replace(request.agent, execution_mode="reasoning"),
+                    # generic StructuredAction protocol.  Like FlowSteer's Format
+                    # Operator boundary, the Canvas-authored contract remains in
+                    # the trajectory but cannot override the executor's native
+                    # action grammar for this provider turn.
+                    agent=replace(
+                        request.agent,
+                        execution_mode="reasoning",
+                        contract=(
+                            "Select exactly one native action permitted by the "
+                            "current admissible-action list."
+                        ),
+                        artifact_type="environment_action",
+                        completion_condition=(
+                            "The response parses as one currently admissible native "
+                            "environment action."
+                        ),
+                    ),
                 )
                 generated = await self._gateway.generate(model_request)
                 response = (

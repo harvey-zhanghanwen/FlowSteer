@@ -2718,6 +2718,10 @@ class LiveSmokeBackend:
             condition_id=resolved_condition_id,
         )
         try:
+            environment_runtime_settings = _environment_runtime_settings(
+                self.config,
+                task,
+            )
             orchestrator = AgentGraphOrchestrator(
                 self.registry,
                 self.director_client,
@@ -2744,6 +2748,11 @@ class LiveSmokeBackend:
                 ),
                 require_format_agent=(
                     terminal_protocol == "exact_single_answer_tag"
+                ),
+                required_tool_id=(
+                    f"{_dataset_key(task)}.environment"
+                    if environment_runtime_settings is not None
+                    else None
                 ),
             )
         except BaseException:

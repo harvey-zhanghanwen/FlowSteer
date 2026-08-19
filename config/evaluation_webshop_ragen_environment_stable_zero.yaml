@@ -5,16 +5,16 @@
 
 schema_version: "flowsteer.agentgraph.config.v1"
 experiment:
-  name: "webshop_ragen_environment_stable_zero"
+  name: "webshop_ragen_environment_native_action_v2_stable_zero"
   phase: "webshop_evaluation"
   training_enabled: false
   seed: 20260819
-  condition_id: "webshop_ragen_environment_stable_zero"
+  condition_id: "webshop_ragen_environment_native_action_v2_stable_zero"
   sampling_schedule_purpose: "webshop_fixed_heldout_ragen_environment_stable_zero"
   catalog_order_namespace: "webshop_ragen_environment_stable_zero"
   prompt_version: "agentgraph.director.progressive_subgraph.v1"
-  tool_version: "skillflow.ragen-environment-react.v1"
-  output_dir: "artifacts/webshop_ragen_environment_stable_zero/evaluation"
+  tool_version: "skillflow.ragen-environment-react.native-action.v2"
+  output_dir: "artifacts/webshop_ragen_environment_native_action_v2_stable_zero/evaluation"
 
 data:
   catalog_path: "config/datasets_webshop.yaml"
@@ -41,7 +41,7 @@ webshop_evaluation:
 
 environment_runtime:
   enabled: true
-  condition_id: "webshop_ragen_environment_stable_zero"
+  condition_id: "webshop_ragen_environment_native_action_v2_stable_zero"
   mode: "model_driven_ragen_react"
   dataset_scope: ["webshop"]
   ragen_adapter_path: "/home/test/SKILLEV/skillflow-bayesian-improve-deploy/src/ragen_adapter.py"
@@ -51,17 +51,17 @@ environment_runtime:
 
 storage:
   schema_version: "flowsteer.webshop.round.v4"
-  root: "artifacts/webshop_ragen_environment_stable_zero/evaluation/evidence"
-  selected_tasks_path: "artifacts/webshop_ragen_environment_stable_zero/evaluation/selected_tasks.jsonl"
-  direct_predictions_path: "artifacts/webshop_ragen_environment_stable_zero/evaluation/direct_predictions.jsonl"
-  trajectories_path: "artifacts/webshop_ragen_environment_stable_zero/evaluation/agentgraph_trajectories.jsonl"
-  failures_path: "artifacts/webshop_ragen_environment_stable_zero/evaluation/collection_failures.jsonl"
-  paired_results_path: "artifacts/webshop_ragen_environment_stable_zero/evaluation/paired_results.jsonl"
-  wrong_demos_path: "artifacts/webshop_ragen_environment_stable_zero/evaluation/wrong_demos.jsonl"
-  manifest_path: "artifacts/webshop_ragen_environment_stable_zero/evaluation/run_manifest.json"
-  preflight_receipt_path: "artifacts/webshop_ragen_environment_stable_zero/evaluation/preflight_receipt.json"
-  report_json_path: "reports/webshop_ragen_environment_stable_zero/evaluation_report.json"
-  report_markdown_path: "reports/webshop_ragen_environment_stable_zero/evaluation_report.md"
+  root: "artifacts/webshop_ragen_environment_native_action_v2_stable_zero/evaluation/evidence"
+  selected_tasks_path: "artifacts/webshop_ragen_environment_native_action_v2_stable_zero/evaluation/selected_tasks.jsonl"
+  direct_predictions_path: "artifacts/webshop_ragen_environment_native_action_v2_stable_zero/evaluation/direct_predictions.jsonl"
+  trajectories_path: "artifacts/webshop_ragen_environment_native_action_v2_stable_zero/evaluation/agentgraph_trajectories.jsonl"
+  failures_path: "artifacts/webshop_ragen_environment_native_action_v2_stable_zero/evaluation/collection_failures.jsonl"
+  paired_results_path: "artifacts/webshop_ragen_environment_native_action_v2_stable_zero/evaluation/paired_results.jsonl"
+  wrong_demos_path: "artifacts/webshop_ragen_environment_native_action_v2_stable_zero/evaluation/wrong_demos.jsonl"
+  manifest_path: "artifacts/webshop_ragen_environment_native_action_v2_stable_zero/evaluation/run_manifest.json"
+  preflight_receipt_path: "artifacts/webshop_ragen_environment_native_action_v2_stable_zero/evaluation/preflight_receipt.json"
+  report_json_path: "reports/webshop_ragen_environment_native_action_v2_stable_zero/evaluation_report.json"
+  report_markdown_path: "reports/webshop_ragen_environment_native_action_v2_stable_zero/evaluation_report.md"
 
 director:
   base_model: "${QWEN35_9B_MODEL_PATH:-/home/test/SKILLEV/skillev-new-b2-temp/model/Qwen3.5-9B-modelscope}"

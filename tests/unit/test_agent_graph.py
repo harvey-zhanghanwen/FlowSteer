@@ -1040,6 +1040,30 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(finished.execution_reused)
         self.assertEqual(2, len(gateway.requests))
 
+    async def test_finish_requires_the_configured_environment_actor(self) -> None:
+        registry = make_registry()
+        gateway = _ImmediateGateway()
+        env = AgentWorkflowEnv(
+            registry,
+            gateway,
+            problem="complete the interactive task",
+            execute_on_edit=True,
+            required_tool_id="alfworld.environment",
+        )
+        await env.step(
+            '{"action":"add_subgraph","agents":['
+            '{"agent_id":"solver","model_id":"balanced",'
+            '"contract":"solve without the environment"}'
+            '],"relations":[],"output_agent_id":"solver"}'
+        )
+
+        rejected = await env.step('{"action":"finish"}')
+
+        self.assertFalse(rejected.accepted)
+        self.assertFalse(env.finished)
+        self.assertIn("exactly one ReAct environment actor", rejected.feedback)
+        self.assertIn("alfworld.environment", rejected.feedback)
+
     async def test_noop_edit_is_rejected_without_reusing_execution(self) -> None:
         registry = make_registry()
         gateway = _ImmediateGateway()

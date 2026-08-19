@@ -902,7 +902,6 @@ def _failure_type(
             return "agentgraph_exact_match_regression"
         return "both_exact" if graph_score == 1.0 else "both_incorrect"
     metric_name = str(_BENCHMARKS[dataset_key]["primary_metric"])
-    metric_names = tuple(_BENCHMARKS[dataset_key]["metric_names"])
     if graph_score > direct_score:
         return f"agentgraph_higher_{metric_name}"
     if graph_score < direct_score:
@@ -917,6 +916,7 @@ def _paired_rows(
     dataset_key: str,
 ) -> list[dict[str, Any]]:
     metric_name = str(_BENCHMARKS[dataset_key]["primary_metric"])
+    metric_names = tuple(_BENCHMARKS[dataset_key]["metric_names"])
     rows: list[dict[str, Any]] = []
     for task in selected:
         direct_value = direct.get(task.task_id)
@@ -1433,11 +1433,26 @@ async def run_completion_benchmark_round(
                 backend, selected[0], known_prediction
             )
         else:
-            known_prediction = (
-                f"<answer>{selected[0].ground_truth}</answer>"
-                if dataset_key == "aime_2026"
-                else selected[0].ground_truth
-            )
+            if dataset_key == "aime_2026":
+                known_prediction = f"<answer>{selected[0].ground_truth}</answer>"
+            elif dataset_key in {"hotpotqa", "triviaqa"}:
+                evaluator_payload = selected[0].metadata.get(
+                    "evaluator_payload", {}
+                )
+                accepted_answers = (
+                    evaluator_payload.get("accepted_answers", ())
+                    if isinstance(evaluator_payload, Mapping)
+                    else ()
+                )
+                known_prediction = (
+                    str(accepted_answers[0])
+                    if isinstance(accepted_answers, Sequence)
+                    and not isinstance(accepted_answers, (str, bytes))
+                    and accepted_answers
+                    else selected[0].ground_truth
+                )
+            else:
+                known_prediction = selected[0].ground_truth
             known_answer = await _evaluate_prediction(
                 backend, selected[0], known_prediction
             )

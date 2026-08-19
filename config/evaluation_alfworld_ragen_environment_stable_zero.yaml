@@ -5,16 +5,16 @@
 
 schema_version: "flowsteer.agentgraph.config.v1"
 experiment:
-  name: "alfworld_ragen_environment_stable_zero"
+  name: "alfworld_ragen_required_actor_v2_stable_zero"
   phase: "alfworld_evaluation"
   training_enabled: false
   seed: 20260819
-  condition_id: "alfworld_ragen_environment_stable_zero"
+  condition_id: "alfworld_ragen_required_actor_v2_stable_zero"
   sampling_schedule_purpose: "alfworld_fixed_heldout_ragen_environment_stable_zero"
   catalog_order_namespace: "alfworld_ragen_environment_stable_zero"
   prompt_version: "agentgraph.director.progressive_subgraph.v1"
-  tool_version: "skillflow.ragen-environment-react.v1"
-  output_dir: "artifacts/alfworld_ragen_environment_stable_zero/evaluation"
+  tool_version: "skillflow.ragen-environment-react.required-actor.v2"
+  output_dir: "artifacts/alfworld_ragen_required_actor_v2_stable_zero/evaluation"
 
 data:
   catalog_path: "config/datasets_alfworld.yaml"
@@ -38,10 +38,11 @@ alfworld_evaluation:
   protocol_equivalent_to_direct: true
   direct_contract: "Return exactly one ALFWorld action copied from the current admissible-action list."
   direct_generation_seed: 20260819
+  direct_reused_from: "artifacts/alfworld_ragen_environment_stable_zero/evaluation/direct_predictions.jsonl"
 
 environment_runtime:
   enabled: true
-  condition_id: "alfworld_ragen_environment_stable_zero"
+  condition_id: "alfworld_ragen_required_actor_v2_stable_zero"
   mode: "model_driven_ragen_react"
   dataset_scope: ["alfworld"]
   ragen_adapter_path: "/home/test/SKILLEV/skillflow-bayesian-improve-deploy/src/ragen_adapter.py"
@@ -51,17 +52,17 @@ environment_runtime:
 
 storage:
   schema_version: "flowsteer.alfworld.round.v1"
-  root: "artifacts/alfworld_ragen_environment_stable_zero/evaluation/evidence"
-  selected_tasks_path: "artifacts/alfworld_ragen_environment_stable_zero/evaluation/selected_tasks.jsonl"
-  direct_predictions_path: "artifacts/alfworld_ragen_environment_stable_zero/evaluation/direct_predictions.jsonl"
-  trajectories_path: "artifacts/alfworld_ragen_environment_stable_zero/evaluation/agentgraph_trajectories.jsonl"
-  failures_path: "artifacts/alfworld_ragen_environment_stable_zero/evaluation/collection_failures.jsonl"
-  paired_results_path: "artifacts/alfworld_ragen_environment_stable_zero/evaluation/paired_results.jsonl"
-  wrong_demos_path: "artifacts/alfworld_ragen_environment_stable_zero/evaluation/wrong_demos.jsonl"
-  manifest_path: "artifacts/alfworld_ragen_environment_stable_zero/evaluation/run_manifest.json"
-  preflight_receipt_path: "artifacts/alfworld_ragen_environment_stable_zero/evaluation/preflight_receipt.json"
-  report_json_path: "reports/alfworld_ragen_environment_stable_zero/evaluation_report.json"
-  report_markdown_path: "reports/alfworld_ragen_environment_stable_zero/evaluation_report.md"
+  root: "artifacts/alfworld_ragen_required_actor_v2_stable_zero/evaluation/evidence"
+  selected_tasks_path: "artifacts/alfworld_ragen_required_actor_v2_stable_zero/evaluation/selected_tasks.jsonl"
+  direct_predictions_path: "artifacts/alfworld_ragen_required_actor_v2_stable_zero/evaluation/direct_predictions.jsonl"
+  trajectories_path: "artifacts/alfworld_ragen_required_actor_v2_stable_zero/evaluation/agentgraph_trajectories.jsonl"
+  failures_path: "artifacts/alfworld_ragen_required_actor_v2_stable_zero/evaluation/collection_failures.jsonl"
+  paired_results_path: "artifacts/alfworld_ragen_required_actor_v2_stable_zero/evaluation/paired_results.jsonl"
+  wrong_demos_path: "artifacts/alfworld_ragen_required_actor_v2_stable_zero/evaluation/wrong_demos.jsonl"
+  manifest_path: "artifacts/alfworld_ragen_required_actor_v2_stable_zero/evaluation/run_manifest.json"
+  preflight_receipt_path: "artifacts/alfworld_ragen_required_actor_v2_stable_zero/evaluation/preflight_receipt.json"
+  report_json_path: "reports/alfworld_ragen_required_actor_v2_stable_zero/evaluation_report.json"
+  report_markdown_path: "reports/alfworld_ragen_required_actor_v2_stable_zero/evaluation_report.md"
 
 director:
   base_model: "${QWEN35_9B_MODEL_PATH:-/home/test/SKILLEV/skillev-new-b2-temp/model/Qwen3.5-9B-modelscope}"

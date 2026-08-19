@@ -385,6 +385,48 @@ def test_qa_metric_receipt_requires_both_native_metrics():
     assert missing_values == {"exact_match": 0.0, "token_f1": 0.0}
 
 
+def test_qa_paired_rows_preserve_exact_match_and_token_f1():
+    task = _MODULE.TaskRecord(
+        task_id="triviaqa:one",
+        question="Who wrote Main Street?",
+        ground_truth="Sinclair Lewis",
+        split="validation",
+        metadata={"dataset_key": "triviaqa"},
+    )
+    direct = {
+        task.task_id: {
+            "final_answer": "John Galsworthy",
+            "evaluation": {
+                "valid": True,
+                "metrics": {"exact_match": 0.0, "token_f1": 0.0},
+            },
+        }
+    }
+    trajectories = {
+        task.task_id: {
+            "final_answer": "Sinclair Lewis",
+            "explicit_finish": True,
+            "termination_reason": "explicit_finish",
+            "evaluation": {
+                "valid": True,
+                "metrics": {"exact_match": 1.0, "token_f1": 1.0},
+            },
+            "turns": [],
+        }
+    }
+
+    row = _MODULE._paired_rows(
+        (task,), direct, trajectories, "triviaqa"
+    )[0]
+
+    assert row["direct"]["exact_match"] == 0.0
+    assert row["direct"]["token_f1"] == 0.0
+    assert row["agentgraph"]["exact_match"] == 1.0
+    assert row["agentgraph"]["token_f1"] == 1.0
+    assert row["delta_exact_match"] == 1.0
+    assert row["delta_token_f1"] == 1.0
+
+
 def test_interactive_direct_condition_records_every_environment_policy_call():
     registry = load_model_registry(
         _ROOT / "config" / "model_catalog_hotpotqa_deep_v6.yaml"

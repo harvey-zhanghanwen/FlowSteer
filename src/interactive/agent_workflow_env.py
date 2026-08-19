@@ -130,6 +130,7 @@ class AgentWorkflowEnv:
         max_agents_per_subgraph: int = 3,
         require_exact_answer_tag: bool = False,
         require_format_agent: bool = False,
+        required_tool_id: Optional[str] = None,
     ) -> None:
         if runtime is None and gateway is None:
             raise AgentWorkflowStateError("gateway or runtime is required")
@@ -151,6 +152,12 @@ class AgentWorkflowEnv:
             raise AgentWorkflowStateError("require_exact_answer_tag must be bool")
         if type(require_format_agent) is not bool:
             raise AgentWorkflowStateError("require_format_agent must be bool")
+        if required_tool_id is not None and (
+            not isinstance(required_tool_id, str) or not required_tool_id.strip()
+        ):
+            raise AgentWorkflowStateError(
+                "required_tool_id must be non-empty text or None"
+            )
         self.model_registry = model_registry
         self.runtime = runtime or AgentRuntime(model_registry, gateway)  # type: ignore[arg-type]
         self.execute_on_edit = execute_on_edit
@@ -158,6 +165,9 @@ class AgentWorkflowEnv:
         self.max_agents_per_subgraph = max_agents_per_subgraph
         self.require_exact_answer_tag = require_exact_answer_tag
         self.require_format_agent = require_format_agent
+        self.required_tool_id = (
+            None if required_tool_id is None else required_tool_id.strip()
+        )
         self.parser = AgentActionParser()
         self._problem = problem.strip()
         self._graph = graph.fork() if graph is not None else AgentGraph()
@@ -256,6 +266,7 @@ class AgentWorkflowEnv:
             max_agents_per_subgraph=self.max_agents_per_subgraph,
             require_exact_answer_tag=self.require_exact_answer_tag,
             require_format_agent=self.require_format_agent,
+            required_tool_id=self.required_tool_id,
         )
         result._turn_count = state.turn_count
         result._finished = state.finished
@@ -293,6 +304,12 @@ class AgentWorkflowEnv:
                 return self._reject_after_count(
                     action,
                     "cannot finish: " + format_issue,
+                )
+            required_tool_issue = self.required_tool_issue()
+            if required_tool_issue is not None:
+                return self._reject_after_count(
+                    action,
+                    "cannot finish: " + required_tool_issue,
                 )
             execution = self._cached_progressive_execution()
             execution_reused = execution is not None
@@ -585,6 +602,33 @@ class AgentWorkflowEnv:
         """
 
         return self._format_agent_issue_for(self._graph)
+
+    def required_tool_issue(self) -> Optional[str]:
+        """Return the executor-capability constraint still unmet at FINISH.
+
+        FlowSteer's terminal validation rejects an incomplete Workflow before
+        evaluation.  Interactive RAGEN tasks likewise require one stateful
+        environment actor; a prose-only graph cannot produce the native replay
+        trace consumed by the terminal evaluator.  This constraint fixes only
+        the required capability and leaves model, role, topology, and all other
+        Agents to the Director search space.
+        """
+
+        if self.required_tool_id is None:
+            return None
+        owners = tuple(
+            node.id
+            for node in self._graph.nodes
+            if node.execution_mode.value == "react"
+            and node.allowed_tools == (self.required_tool_id,)
+        )
+        if len(owners) == 1:
+            return None
+        return (
+            "AgentGraph must contain exactly one ReAct environment actor with "
+            f"allowed_tools=['{self.required_tool_id}']; found {len(owners)}. "
+            "Add or modify the required executor before retrying FINISH"
+        )
 
     def _format_agent_issue_for(self, graph: AgentGraph) -> Optional[str]:
         if not self.require_format_agent:
