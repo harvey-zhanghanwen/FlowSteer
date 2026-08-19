@@ -221,6 +221,42 @@ class ToolReactExecutionTests(unittest.IsolatedAsyncioTestCase):
             response.metadata["react_trace"][0]["allowed_action_names"],
         )
 
+    async def test_skill_action_remains_unavailable_to_executor(self) -> None:
+        gateway = SequenceGateway(
+            [
+                json.dumps(
+                    {
+                        "kind": "skill",
+                        "name": "invoke",
+                        "arguments": {},
+                        "resource_id": "wiki.search",
+                        "skill_id": "candidate.skill",
+                    }
+                ),
+                action(
+                    "complete",
+                    name="complete",
+                    arguments={"value": "Ada Lovelace"},
+                    resource_id=None,
+                ),
+            ]
+        )
+        adapter = ToolReactExecutionAdapter(
+            gateway=gateway,
+            tool_registry=registry(),
+            max_turns=2,
+            max_tool_calls=1,
+        )
+
+        response = await adapter.execute(request())
+
+        self.assertEqual("Ada Lovelace", response.text)
+        self.assertEqual(0, response.metadata["tool_calls"])
+        self.assertEqual(
+            "skill_action_not_admitted",
+            response.metadata["react_trace"][0]["public_error_code"],
+        )
+
     async def test_turn_budget_requires_explicit_completion(self) -> None:
         gateway = SequenceGateway(
             [

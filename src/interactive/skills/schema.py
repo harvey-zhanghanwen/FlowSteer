@@ -173,6 +173,22 @@ class SkillRecord:
             value = condition.get(key)
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"Skill condition requires explicit {key}")
+        required_tools = condition.get("required_tools", ())
+        if not isinstance(required_tools, tuple):
+            raise TypeError("Skill condition required_tools must be a sequence")
+        if any(
+            not isinstance(tool_id, str)
+            or not tool_id.strip()
+            or tool_id != tool_id.strip()
+            for tool_id in required_tools
+        ):
+            raise ValueError(
+                "Skill condition required_tools must contain non-empty tool IDs"
+            )
+        if tuple(sorted(set(required_tools))) != required_tools:
+            raise ValueError(
+                "Skill condition required_tools must be sorted and unique"
+            )
         if not any(key in action for key in ("model_id", "relation", "instruction", "instruction_template")):
             raise ValueError("Skill action must recommend a model, relation, or bounded instruction")
         model_id = action.get("model_id")

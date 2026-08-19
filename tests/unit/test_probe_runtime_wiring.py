@@ -10,8 +10,15 @@ from unittest.mock import patch
 
 from src.interactive.agent_graph import AgentGraph, AgentNode
 from src.interactive.agent_runtime import AgentResponse, AgentRuntime
+from src.interactive.agent_workflow_env import AgentWorkflowEnv
 from src.interactive.model_registry import ModelRegistry, ModelSpec, ProviderSpec
 from src.interactive.records import TaskRecord
+from src.interactive.tool_runtime import (
+    FakeTool,
+    ToolCapability,
+    ToolRegistration,
+    ToolRegistry,
+)
 from src.interactive.versioning import VersionBundle
 
 
@@ -78,6 +85,62 @@ def _versions() -> VersionBundle:
         evaluator="hotpotqa.official.answer.v1",
         prompt="prompt-v1",
         tool="tool-v1",
+    )
+
+
+def _tool_registration(
+    tool_id: str,
+    *,
+    dataset_scope: tuple[str, ...],
+    availability: bool,
+) -> ToolRegistration:
+    return ToolRegistration(
+        tool_id,
+        FakeTool({"search": lambda arguments: {"query": arguments["query"]}}),
+        ToolCapability(
+            tool_id=tool_id,
+            dataset_scope=dataset_scope,
+            action_schemas={
+                "search": {
+                    "type": "object",
+                    "required": ["query"],
+                    "properties": {"query": {"type": "string"}},
+                }
+            },
+            input_schema={"type": "object"},
+            output_schema={"type": "object"},
+            side_effect="none",
+            timeout_seconds=1.0,
+            version="tool-projection-test-v1",
+            availability=availability,
+        ),
+    )
+
+
+def _tool_registry() -> ToolRegistry:
+    return ToolRegistry(
+        (
+            _tool_registration(
+                "hotpotqa.search",
+                dataset_scope=("hotpotqa",),
+                availability=True,
+            ),
+            _tool_registration(
+                "hotpotqa.unavailable",
+                dataset_scope=("hotpotqa",),
+                availability=False,
+            ),
+            _tool_registration(
+                "shared.search",
+                dataset_scope=("*",),
+                availability=True,
+            ),
+            _tool_registration(
+                "triviaqa.search",
+                dataset_scope=("triviaqa",),
+                availability=True,
+            ),
+        )
     )
 
 
@@ -192,6 +255,87 @@ class ProbeRuntimeWiringTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((), second_kwargs["skills"])
         self.assertTrue(first_kwargs["forced_probe"])
         self.assertEqual("validation", first_kwargs["expected_task_split"])
+
+    def test_skill_query_projects_only_available_dataset_scoped_tool_ids(
+        self,
+    ) -> None:
+        backend = self._backend()
+        tool_registry = _tool_registry()
+        runtime = AgentRuntime(
+            backend.registry,
+            _Gateway(),
+            tool_registry=tool_registry,
+            dataset_id="hotpotqa",
+        )
+        environment = AgentWorkflowEnv(
+            backend.registry,
+            runtime=runtime,
+            problem=_task().question,
+        )
+
+        query = backend._skill_query(_task(), environment)
+
+        self.assertEqual(
+            ("hotpotqa.search", "shared.search"),
+            query.available_tools,
+        )
+        self.assertNotIn("hotpotqa.unavailable", query.available_tools)
+        self.assertNotIn("triviaqa.search", query.available_tools)
+
+    def test_skill_query_without_tool_registry_has_no_available_tools(self) -> None:
+        backend = self._backend()
+        environment = AgentWorkflowEnv(
+            backend.registry,
+            runtime=backend.runtime,
+            problem=_task().question,
+        )
+
+        query = backend._skill_query(_task(), environment)
+
+        self.assertEqual((), query.available_tools)
+
+    def test_forced_probe_required_tools_match_natural_retrieval_subset(
+        self,
+    ) -> None:
+        backend = self._backend()
+        runtime = AgentRuntime(
+            backend.registry,
+            _Gateway(),
+            tool_registry=_tool_registry(),
+            dataset_id="hotpotqa",
+        )
+        environment = AgentWorkflowEnv(
+            backend.registry,
+            runtime=runtime,
+            problem=_task().question,
+        )
+        query = backend._skill_query(_task(), environment)
+
+        def condition(required_tools: tuple[str, ...]) -> dict:
+            return {
+                "task_family": "hotpotqa",
+                "graph_stage": "empty_graph",
+                "tags": [],
+                "required_tools": list(required_tools),
+            }
+
+        for required_tools, expected in (
+            ((), True),
+            (("hotpotqa.search",), True),
+            (("hotpotqa.search", "shared.search"), True),
+            (("hotpotqa.unavailable",), False),
+            (("triviaqa.search",), False),
+        ):
+            scope = condition(required_tools)
+            forced_match = backend._forced_probe_condition_matches(
+                {"condition": scope, "action": {}},
+                query,
+            )
+            self.assertEqual(
+                query.required_tools_satisfied(scope),
+                forced_match,
+            )
+            self.assertEqual(expected, forced_match)
 
     async def test_configured_schedule_purpose_is_the_default(self) -> None:
         captured = []

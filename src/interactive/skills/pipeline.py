@@ -3,8 +3,9 @@
 This module is deliberately an orchestration layer, not another Skill system.
 It reuses :class:`TrajectoryRecord`, :class:`ProbeRecord`,
 :class:`EvidenceStore`, :class:`SkillStore`, :class:`SkillEvidenceGate`,
-:class:`SkillLifecycleManager`, and :class:`SkillRetriever` unchanged at their
-ownership boundaries.
+:class:`SkillLifecycleManager`, and :class:`SkillRetriever` at their ownership
+boundaries.  Tool applicability in the retriever is a thin port of SkillFlow's
+``required_tools <= available_tools`` predicate.
 
 SkillFlow's concrete source pattern is ``src/skills/workspace.py::retrieve``
 plus the policy-visible Skill catalog in ``training/environment.py``.  The
@@ -236,13 +237,15 @@ def render_validated_skill(skill: SkillRecord) -> str:
         raise ValueError("only an ACTIVE, gate-validated Skill can be rendered")
     condition = skill.to_dict()["condition"]
     action = skill.to_dict()["action"]
+    required_tools = condition.get("required_tools", [])
     instruction = action.get("instruction")
     if not isinstance(instruction, str) or not instruction.strip():
         instruction = canonical_json(action)
     return (
         f"Optional validated Skill {skill.skill_id}@{skill.version}. "
         f"Applicability: task_family={condition.get('task_family', '*')}, "
-        f"graph_stage={condition.get('graph_stage', '*')}. "
+        f"graph_stage={condition.get('graph_stage', '*')}, "
+        f"required_tools={canonical_json(required_tools)}. "
         f"Instruction: {instruction.strip()} "
         "This is a prompt prior only; the Director may accept, modify, or reject it."
     )

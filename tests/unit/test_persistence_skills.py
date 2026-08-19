@@ -25,6 +25,7 @@ from src.interactive.skills import (
     SkillRetriever,
     SkillStatus,
     SkillStore,
+    render_validated_skill,
 )
 from src.interactive.versioning import VersionBundle
 
@@ -216,6 +217,100 @@ class SkillTests(unittest.TestCase):
             )
             self.assertEqual(mismatched, [])
             self.assertEqual(len(store.history(active.skill_id)), 2)
+
+    def test_required_tools_must_be_available_for_retrieval(self) -> None:
+        tool_candidate = replace(
+            candidate_skill(),
+            condition={
+                "task_family": "math",
+                "graph_stage": "before_final",
+                "tags": ["long"],
+                "required_tools": ["qa.lookup", "qa.search"],
+            },
+        )
+        active = SkillLifecycleManager(self.gate()).activate(tool_candidate, 2)
+
+        covered = SkillRetriever().retrieve(
+            [active],
+            SkillQuery(
+                "math",
+                "before_final",
+                tags=["long"],
+                available_models=["qwen35"],
+                available_tools=["qa.lookup", "qa.search"],
+                current_epoch=2,
+            ),
+            versions(),
+        )
+        missing_tool = SkillRetriever().retrieve(
+            [active],
+            SkillQuery(
+                "math",
+                "before_final",
+                tags=["long"],
+                available_models=["qwen35"],
+                available_tools=["qa.lookup"],
+                current_epoch=2,
+            ),
+            versions(),
+        )
+
+        self.assertEqual([active.skill_id], [skill.skill_id for skill in covered])
+        self.assertEqual([], missing_tool)
+
+    def test_malformed_required_tools_fail_closed(self) -> None:
+        malformed_values = (
+            ["qa.search", "qa.lookup"],
+            ["qa.lookup", "qa.lookup"],
+            [""],
+        )
+        for required_tools in malformed_values:
+            with self.subTest(required_tools=required_tools):
+                with self.assertRaisesRegex(ValueError, "required_tools"):
+                    replace(
+                        candidate_skill(),
+                        condition={
+                            "task_family": "math",
+                            "graph_stage": "before_final",
+                            "tags": ["long"],
+                            "required_tools": required_tools,
+                        },
+                    )
+
+    def test_required_tools_are_rendered_and_legacy_skill_remains_retrievable(self) -> None:
+        tool_candidate = replace(
+            candidate_skill(),
+            condition={
+                "task_family": "math",
+                "graph_stage": "before_final",
+                "tags": ["long"],
+                "required_tools": ["qa.lookup", "qa.search"],
+            },
+        )
+        manager = SkillLifecycleManager(self.gate())
+        active_tool_skill = manager.activate(tool_candidate, 2)
+        rendered = render_validated_skill(active_tool_skill)
+
+        self.assertIn("required_tools", rendered)
+        self.assertIn("qa.lookup", rendered)
+        self.assertIn("qa.search", rendered)
+
+        legacy_active = manager.activate(candidate_skill(), 2)
+        legacy_retrieved = SkillRetriever().retrieve(
+            [legacy_active],
+            SkillQuery(
+                "math",
+                "before_final",
+                tags=["long"],
+                available_models=["qwen35"],
+                current_epoch=2,
+            ),
+            versions(),
+        )
+        self.assertEqual(
+            [legacy_active.skill_id],
+            [skill.skill_id for skill in legacy_retrieved],
+        )
 
     def test_context_product_tags_are_conjunctive_retrieval_conditions(self) -> None:
         context_tags = (

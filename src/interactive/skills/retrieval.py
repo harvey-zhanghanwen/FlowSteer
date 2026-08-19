@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import math
-from typing import Iterable, Mapping, Optional, Sequence
+from typing import Iterable, Mapping, Sequence
 
 from ..versioning import VersionBundle
 from .schema import SkillRecord, SkillStatus
@@ -18,6 +18,36 @@ class SkillQuery:
     tags: Sequence[str] = field(default_factory=tuple)
     available_models: Sequence[str] = field(default_factory=tuple)
     current_epoch: int = 0
+    available_tools: Sequence[str] = field(default_factory=tuple)
+
+    def __post_init__(self) -> None:
+        tools = tuple(self.available_tools)
+        if any(
+            not isinstance(tool_id, str) or not tool_id.strip()
+            for tool_id in tools
+        ):
+            raise ValueError("available_tools must contain non-empty tool IDs")
+        if tuple(sorted(set(tools))) != tools:
+            raise ValueError("available_tools must be sorted and unique")
+        object.__setattr__(self, "available_tools", tools)
+
+    def required_tools_satisfied(self, condition: Mapping[str, object]) -> bool:
+        """Apply SkillFlow's required-tools applicability predicate."""
+
+        raw_required = condition.get("required_tools", ())
+        if isinstance(raw_required, (str, bytes)) or not isinstance(
+            raw_required, Sequence
+        ):
+            return False
+        required = tuple(raw_required)
+        if any(
+            not isinstance(tool_id, str) or not tool_id.strip()
+            for tool_id in required
+        ):
+            return False
+        if tuple(sorted(set(required))) != required:
+            return False
+        return set(required).issubset(self.available_tools)
 
 
 class SkillRetriever:
@@ -56,6 +86,8 @@ class SkillRetriever:
                 continue
             stage = condition.get("graph_stage")
             if stage not in ("*", query.graph_stage):
+                continue
+            if not query.required_tools_satisfied(condition):
                 continue
             required_tags = set(condition.get("tags", ()))
             if required_tags and not required_tags.issubset(query_tags):

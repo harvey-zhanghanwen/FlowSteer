@@ -2429,11 +2429,27 @@ class LiveSmokeBackend:
             graph_stage=graph_stage,
             validation_issue_codes=issue_tags,
         )
+        tool_registry = environment.runtime.tool_registry
+        dataset_id = environment.runtime.dataset_id
+        available_tools = (
+            ()
+            if tool_registry is None
+            else tuple(
+                capability.tool_id
+                for capability in tool_registry.capabilities
+                if capability.availability
+                and (
+                    dataset_id is None
+                    or capability.supports_dataset(dataset_id)
+                )
+            )
+        )
         return SkillQuery(
             task_family=task_family,
             graph_stage=graph_stage,
             tags=query_tags,
             available_models=tuple(self.registry.model_ids),
+            available_tools=available_tools,
             current_epoch=self.skill_epoch,
         )
 
@@ -2451,6 +2467,8 @@ class LiveSmokeBackend:
         if condition.get("task_family") not in ("*", query.task_family):
             return False
         if condition.get("graph_stage") not in ("*", query.graph_stage):
+            return False
+        if not query.required_tools_satisfied(condition):
             return False
         required_tags = set(condition.get("tags", ()))
         if required_tags and not required_tags.issubset(set(query.tags)):

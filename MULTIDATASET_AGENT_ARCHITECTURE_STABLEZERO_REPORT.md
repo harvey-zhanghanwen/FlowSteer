@@ -8,10 +8,10 @@
 
 ## 实现来源分类
 
-- `DIRECT_REUSE`：FlowSteer progressive Canvas 的 edit→execute→feedback、显式 FINISH、action mask、trajectory；SkillFlow 的 StructuredAction/Tool Registry、RetrievalIndex、bounded computation、RAGEN environment、MedRAG corpus、SWE-bench worktree 与 evidence/library contract。
+- `DIRECT_REUSE`：FlowSteer progressive Canvas 的 edit→execute→feedback、显式 FINISH、action mask、trajectory；SkillFlow 的 StructuredAction/Tool Registry、RetrievalIndex、bounded computation、RAGEN environment、MedRAG corpus、SWE-bench worktree、evidence/library contract 以及 `required_tools ⊆ available_tools` Skill applicability predicate。
 - `NECESSARY_ADAPTATION`：异构 `reasoning|react|coding` dispatch、task-scoped Tool registry、typed evaluator receipt、WebShop 原生 action grammar、ALFWorld interactive FINISH 的 environment actor invariant、SWE-bench worktree ownership。
 - `PROJECT_ALGORITHM_ADDITION`：typed `CommunicationEnvelope`、`ToolCapability`、measured `ToolReceipt` 与既有 same-prefix paired AgentGraph posterior/evidence gate。
-- `NOT_IMPLEMENTED_OR_NOT_EXECUTED`：SWE-bench 官方-harness-valid Coding trajectory、evidence-gated `ACTIVE` Skill 注入以及本轮 micro-training/optimizer/policy synchronization。
+- `NOT_IMPLEMENTED_OR_NOT_EXECUTED`：SWE-bench 官方-harness-valid Coding trajectory、evidence-gated `ACTIVE` Skill 注入、Executor-side Skill invocation 以及本轮 micro-training/optimizer/policy synchronization。
 
 逐文件的上游类/函数与不兼容原因记录在 `docs/SOURCE_MAP.md`。
 
@@ -95,6 +95,8 @@
 
 最新 evidence-gated `ACTIVE` Skill 数量：**0**。因此不存在可注入新多数据集 Director condition 的版本兼容 `ACTIVE` Skill，也不满足 Skill-on micro-training 的触发条件。`CANDIDATE` instruction 仍是候选，不作为已验证 Skill。
 
+Tool-aware Skill applicability 已在架构与 CPU 定向测试层完成：SkillFlow 的 `required_tools ⊆ available_tools` 判定现在只接受当前 task-scoped `ToolRegistry` 中 `availability=true` 且 dataset-compatible 的 exact Tool ID，natural retrieval 与 forced-probe 共用同一 fail-closed predicate。由于 `ACTIVE Skill = 0` 且 Executor-side Skill invocation 仍被拒绝，这只表示 applicability/retrieval boundary ready，不表示 Skill 已注入、已使用或已提高准确率。
+
 ## 既有 bounded micro-training 证据
 
 这组证据来自当前项目此前完成的 HotpotQA/TriviaQA joint-QA Flow-Director 训练闭环；它与本轮统一 Tool/Environment/Coding Stable Zero 的版本边界分开报告，不能证明新 Tool action-selection policy 已被训练。
@@ -126,6 +128,7 @@
 
 - `ENVIRONMENT_LIMITATION`：SWE-bench regular-dev 当前尚无 official Docker harness evaluator receipt，因此 resolved_rate 不可测，不能提前归因为 Coding Agent 或 patch quality。
 - `SKILL_EVIDENCE_INSUFFICIENT`：最新独立 paired evidence 未满足 calibrated lower-bound/harm gate；`ACTIVE` Skill 数为 0。
+- `SKILL_EXECUTION_NOT_IMPLEMENTED`：Tool-aware applicability 只保护 Director-visible prompt-prior retrieval；本地 Runtime 尚未实现 SkillFlow 的 Executor invocation/credit receipt boundary，因而 `ActionKind.SKILL` 继续 fail closed。
 - `TRAINING_INSTABILITY`：既有 joint-QA bounded micro-training 完成了 2 次真实 optimizer update 与 policy sync，但固定 held-out 宏平均没有形成正向趋势；该证据不覆盖本轮新增 Tool/Environment/Coding action-selection policy。
 - `TOOL_LIMITATION`：HotpotQA 与 TriviaQA v3 的当前 Stable Zero trajectories 各自然产生 1 条成功 retrieval `ToolReceipt`；AIME-2025 development 与 HealthBench v2 未自然选择其可选 Tool。两题 canary 只能验证自然工具调用链已经出现，不能估计 tool-use policy 的总体采用率、useful rate、wasted rate 或 Skill effect。
 - `MODEL_CAPABILITY_LIMIT`：HealthBench 的 2 题 reference-judge diagnostic raw_score 较低；该 canary 不足以把差距唯一归因于模型、架构或缺少检索。
@@ -155,6 +158,7 @@ CODING_AGENT_READY = NO
 SWEBENCH_CODING_WORKFLOW_READY = NO
 
 SKILL_END_TO_END_READY = NO
+TOOL_AWARE_SKILL_APPLICABILITY_READY = YES
 SKILL_SUMMARY_VALIDATED = NO
 
 ALL_DATASETS_STABLE_ZERO_COMPLETE = NO
@@ -164,12 +168,12 @@ MICRO_TRAINING_EXECUTED = YES
 LEARNING_TREND_OBSERVED = NO
 
 LOCAL_RECOVERY_BACKUP = YES
-GITHUB_ARCHITECTURE_BACKUP = NO
+GITHUB_ARCHITECTURE_BACKUP = YES
 
 READY_FOR_FORMAL_MULTIDATASET_TRAINING = NO
 ```
 
-判定说明：`DEEP_WORKFLOW_READY` 表示 search space 与 scheduler 支持 deep/parallel/fan-in/finite-reciprocal motif，不表示当前 canary 已普遍采用深图。`CORRECT_WRONG_DEMOS_COMPLETE` 要求每个数据集同时具有当前 evaluator-valid correct 与 wrong receipt；不会为凑数量制造失败。当前 branch/tag/patch/bundle 已形成可恢复本地备份，但当前环境对配置的 GitHub remote 没有可用 HTTPS/SSH 写认证，所以 `GITHUB_ARCHITECTURE_BACKUP=NO`，不伪称已推送。
+判定说明：`DEEP_WORKFLOW_READY` 表示 search space 与 scheduler 支持 deep/parallel/fan-in/finite-reciprocal motif，不表示当前 canary 已普遍采用深图。`CORRECT_WRONG_DEMOS_COMPLETE` 要求每个数据集同时具有当前 evaluator-valid correct 与 wrong receipt；不会为凑数量制造失败。评估协议阶段与本次 Tool-aware Skill applicability 阶段均建立可恢复 branch/tag/bundle，并推送到用户现有 GitHub 仓库的阶段备份分支；密钥和运行中间文件不在 Git 记录中。
 
 ## 报告索引
 
