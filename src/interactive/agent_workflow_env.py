@@ -168,6 +168,9 @@ class AgentWorkflowEnv:
         self._progressive_execution: Optional[AgentRuntimeResult] = None
         self._progressive_execution_revision: Optional[int] = None
         self._progressive_outputs: dict[str, str] = {}
+        self._progressive_output_metadata: dict[
+            str, dict[str, object]
+        ] = {}
         self._validate_agent_limit(self._graph)
         partial = self._graph.validate(self.model_registry, require_complete=False)
         if not partial.valid:
@@ -299,6 +302,7 @@ class AgentWorkflowEnv:
                         self._graph,
                         self._problem,
                         prior_outputs=self._progressive_outputs,
+                        prior_output_metadata=self._progressive_output_metadata,
                         format_output_agent=self.require_format_agent,
                     )
                 except AgentRuntimeError as exc:
@@ -383,6 +387,7 @@ class AgentWorkflowEnv:
                         self._problem,
                         require_complete=False,
                         prior_outputs=self._progressive_outputs,
+                        prior_output_metadata=self._progressive_output_metadata,
                         dirty_agents=dirty_agents,
                         format_output_agent=self.require_format_agent,
                     )
@@ -393,6 +398,10 @@ class AgentWorkflowEnv:
                     execution_error = exc
                 else:
                     self._progressive_outputs = dict(execution.outputs)
+                    self._progressive_output_metadata = {
+                        agent_id: dict(metadata)
+                        for agent_id, metadata in execution.output_metadata.items()
+                    }
                     self._progressive_execution = execution
                     self._progressive_execution_revision = self._graph.revision
             else:
@@ -457,8 +466,18 @@ class AgentWorkflowEnv:
                         "source_agent_id": message.source_agent_id,
                         "target_agent_id": message.target_agent_id,
                         "message_type": message.message_type,
+                        "artifact_type": message.artifact_type,
                         "graph_revision": message.graph_revision,
+                        "environment_revision": message.environment_revision,
                         "request_or_dependency": message.request_or_dependency,
+                        "tool_receipt_count": len(message.tool_receipts),
+                        "tool_ids": sorted(
+                            {
+                                str(receipt.get("tool_id"))
+                                for receipt in message.tool_receipts
+                                if receipt.get("tool_id") is not None
+                            }
+                        ),
                         "content_preview": content,
                     }
                 )
@@ -476,6 +495,18 @@ class AgentWorkflowEnv:
                     "agent_id": agent_id,
                     "model_id": None if call is None else call.request.model.model_id,
                     "role_family": self._graph.get_node(agent_id).role_family,
+                    "execution_mode": self._graph.get_node(
+                        agent_id
+                    ).execution_mode.value,
+                    "allowed_tools": list(
+                        self._graph.get_node(agent_id).allowed_tools
+                    ),
+                    "artifact_type": self._graph.get_node(
+                        agent_id
+                    ).artifact_type,
+                    "completion_condition": self._graph.get_node(
+                        agent_id
+                    ).completion_condition,
                     "execution_role": (
                         "format" if agent_id == execution.output_agent_id else "worker"
                     ),
@@ -541,6 +572,7 @@ class AgentWorkflowEnv:
         self._progressive_execution = None
         self._progressive_execution_revision = None
         self._progressive_outputs.clear()
+        self._progressive_output_metadata.clear()
 
     def format_agent_issue(self) -> Optional[str]:
         """Return the terminal Format-Agent constraint that is still unmet.
@@ -651,6 +683,10 @@ class AgentWorkflowEnv:
                         model_id=item.model_id,
                         contract=item.contract,
                         role_family=item.role_family,
+                        allowed_tools=item.allowed_tools,
+                        execution_mode=item.execution_mode,
+                        artifact_type=item.artifact_type,
+                        completion_condition=item.completion_condition,
                     ),
                 )
             for item in action.relations:
@@ -690,6 +726,10 @@ class AgentWorkflowEnv:
                     action.model_id,
                     action.contract,
                     role_family=action.role_family,
+                    allowed_tools=action.allowed_tools or (),
+                    execution_mode=action.execution_mode or "reasoning",
+                    artifact_type=action.artifact_type or "text",
+                    completion_condition=action.completion_condition,
                 )
             )
             return {action.agent_id}
@@ -701,6 +741,10 @@ class AgentWorkflowEnv:
                 model_id=action.model_id,
                 contract=action.contract,
                 role_family=action.role_family,
+                allowed_tools=action.allowed_tools,
+                execution_mode=action.execution_mode,
+                artifact_type=action.artifact_type,
+                completion_condition=action.completion_condition,
             )
             return graph.dirty_closure({action.agent_id})
         elif action.action_type is AgentActionType.DELETE_AGENT:

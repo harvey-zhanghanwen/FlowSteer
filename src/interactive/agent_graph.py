@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 import hashlib
 import json
 from collections import deque
@@ -16,6 +17,14 @@ class GraphMutationError(ValueError):
 
 
 DEPENDENCY_EVIDENCE_STATUSES = frozenset({"unverified", "weak", "verified"})
+
+
+class AgentExecutionMode(str, Enum):
+    """Agent execution semantics; this is not a fixed workflow role."""
+
+    REASONING = "reasoning"
+    REACT = "react"
+    CODING = "coding"
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,6 +83,10 @@ class AgentNode:
     model_id: str
     contract: str
     role_family: Optional[str]
+    allowed_tools: Tuple[str, ...]
+    execution_mode: AgentExecutionMode
+    artifact_type: str
+    completion_condition: Optional[str]
 
     def __init__(
         self,
@@ -83,6 +96,10 @@ class AgentNode:
         *,
         prompt: Optional[str] = None,
         role_family: Optional[str] = None,
+        allowed_tools: Collection[str] = (),
+        execution_mode: Union[AgentExecutionMode, str] = AgentExecutionMode.REASONING,
+        artifact_type: str = "text",
+        completion_condition: Optional[str] = None,
     ) -> None:
         if not isinstance(id, str) or not isinstance(model_id, str):
             raise TypeError("AgentNode id and model_id must be strings")
@@ -99,17 +116,65 @@ class AgentNode:
             role_family = role_family.strip()
             if not role_family:
                 raise ValueError("AgentNode role_family must be non-empty when supplied")
+        if isinstance(allowed_tools, (str, bytes)) or not isinstance(
+            allowed_tools, Collection
+        ):
+            raise TypeError("AgentNode allowed_tools must be a collection of strings")
+        normalized_tools: List[str] = []
+        for tool_id in allowed_tools:
+            if not isinstance(tool_id, str) or not tool_id.strip():
+                raise ValueError(
+                    "AgentNode allowed_tools must contain non-empty strings"
+                )
+            normalized_tools.append(tool_id.strip())
+        if len(set(normalized_tools)) != len(normalized_tools):
+            raise ValueError("AgentNode allowed_tools must be unique")
+        if isinstance(execution_mode, str):
+            try:
+                execution_mode = AgentExecutionMode(execution_mode.strip())
+            except ValueError as exc:
+                raise ValueError(
+                    "AgentNode execution_mode must be reasoning, react, or coding"
+                ) from exc
+        if not isinstance(execution_mode, AgentExecutionMode):
+            raise TypeError(
+                "AgentNode execution_mode must be an AgentExecutionMode or string"
+            )
+        if not isinstance(artifact_type, str) or not artifact_type.strip():
+            raise ValueError("AgentNode artifact_type must be a non-empty string")
+        if completion_condition is not None:
+            if not isinstance(completion_condition, str):
+                raise TypeError(
+                    "AgentNode completion_condition must be a string when supplied"
+                )
+            completion_condition = completion_condition.strip()
+            if not completion_condition:
+                raise ValueError(
+                    "AgentNode completion_condition must be non-empty when supplied"
+                )
         object.__setattr__(self, "id", id.strip())
         object.__setattr__(self, "model_id", model_id.strip())
         object.__setattr__(self, "contract", resolved_contract.strip())
         object.__setattr__(self, "role_family", role_family)
+        object.__setattr__(self, "allowed_tools", tuple(normalized_tools))
+        object.__setattr__(self, "execution_mode", execution_mode)
+        object.__setattr__(self, "artifact_type", artifact_type.strip())
+        object.__setattr__(self, "completion_condition", completion_condition)
 
     @property
     def prompt(self) -> str:
         return self.contract
 
-    def to_dict(self) -> Dict[str, str]:
-        result = {"id": self.id, "model_id": self.model_id, "contract": self.contract}
+    def to_dict(self) -> Dict[str, object]:
+        result: Dict[str, object] = {
+            "id": self.id,
+            "model_id": self.model_id,
+            "contract": self.contract,
+            "allowed_tools": list(self.allowed_tools),
+            "execution_mode": self.execution_mode.value,
+            "artifact_type": self.artifact_type,
+            "completion_condition": self.completion_condition,
+        }
         if self.role_family is not None:
             result["role_family"] = self.role_family
         return result
@@ -550,6 +615,10 @@ class AgentGraph:
         contract: Optional[str] = None,
         prompt: Optional[str] = None,
         role_family: Optional[str] = None,
+        allowed_tools: Optional[Collection[str]] = None,
+        execution_mode: Optional[Union[AgentExecutionMode, str]] = None,
+        artifact_type: Optional[str] = None,
+        completion_condition: Optional[str] = None,
     ) -> None:
         current = self.get_node(agent_id)
         if contract is not None and prompt is not None and contract != prompt:
@@ -560,6 +629,20 @@ class AgentGraph:
             model_id=current.model_id if model_id is None else model_id,
             contract=current.contract if resolved_contract is None else resolved_contract,
             role_family=current.role_family if role_family is None else role_family,
+            allowed_tools=(
+                current.allowed_tools if allowed_tools is None else allowed_tools
+            ),
+            execution_mode=(
+                current.execution_mode if execution_mode is None else execution_mode
+            ),
+            artifact_type=(
+                current.artifact_type if artifact_type is None else artifact_type
+            ),
+            completion_condition=(
+                current.completion_condition
+                if completion_condition is None
+                else completion_condition
+            ),
         )
         if replacement == current:
             return
@@ -986,6 +1069,10 @@ class AgentGraph:
                     node.model_id,
                     node.contract,
                     node.role_family or "",
+                    node.execution_mode.value,
+                    node.allowed_tools,
+                    node.artifact_type,
+                    node.completion_condition or "",
                 ),
             )
         )
@@ -1018,6 +1105,7 @@ __all__ = [
     "AgentGraphSnapshot",
     "AgentGraphValidationError",
     "AgentGraphValidator",
+    "AgentExecutionMode",
     "AgentNode",
     "AgentRelation",
     "GraphMutationError",

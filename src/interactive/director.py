@@ -16,6 +16,7 @@ from urllib.request import Request, urlopen
 
 from .agent_workflow_env import AgentWorkflowEnv, AgentWorkflowStepResult
 from .model_registry import ModelRegistry
+from .tool_runtime import ToolRegistry
 from .scientific_sampling import (
     GenerationPhase,
     SCIENTIFIC_SAMPLING_ALGORITHM,
@@ -27,14 +28,14 @@ from .scientific_sampling import (
 DIRECTOR_SYSTEM_PROMPT = """You are the Flow-Director. Incrementally build an executable AgentGraph. Follow the latest Canvas observation and return exactly one JSON object each turn.
 
 Actions:
-{"action":"add_subgraph","agents":[{"agent_id":"...","model_id":"...","contract":"...","role_family":"..."}],"relations":[{"source_id":"...","target_id":"...","source_to_target":true,"target_to_source":false}],"output_agent_id":"..."}
-{"action":"modify_agent","agent_id":"...","model_id":"...","contract":"...","role_family":"..."}
+{"action":"add_subgraph","agents":[{"agent_id":"...","model_id":"...","contract":"...","role_family":"...","allowed_tools":[],"execution_mode":"reasoning|react|coding","artifact_type":"text","completion_condition":"..."}],"relations":[{"source_id":"...","target_id":"...","source_to_target":true,"target_to_source":false}],"output_agent_id":"..."}
+{"action":"modify_agent","agent_id":"...","model_id":"...","contract":"...","role_family":"...","allowed_tools":[],"execution_mode":"reasoning|react|coding","artifact_type":"...","completion_condition":"..."}
 {"action":"delete_agent","agent_id":"..."}
 {"action":"set_relation","source_id":"...","target_id":"...","source_to_target":true,"target_to_source":false}
 {"action":"set_output","agent_id":"..."}
 {"action":"finish"}
 
-An add_subgraph action adds one functional subgraph of one to three Agents and is executed once after the whole action is accepted. relations may be an empty array; output_agent_id is optional. Use model_id values from the supplied catalog. A directed relation routes the source artifact to the target; a bidirectional relation is one bounded two-Agent exchange. Describe each Agent's objective, required inputs, output artifact, and completion condition in concise ordinary text. role_family is optional metadata, not a fixed Operator type. Inspect execution feedback and Canvas issues before selecting the next action. Use a distinct role_family "format" Output Agent only when the observation requires the exact-answer terminal protocol; it extracts one routed semantic answer and does not solve the task. Do not assume a fixed workflow topology or an unlisted Skill."""
+An add_subgraph action adds one functional subgraph of one to three Agents and is executed once after the whole action is accepted. relations may be an empty array; output_agent_id is optional. Use model_id and allowed_tools values only from the supplied catalogs. execution_mode is execution semantics, not a fixed role; use reasoning unless a listed tool or environment requires react or coding. A directed relation routes the source artifact to the target; a bidirectional relation is one bounded two-Agent exchange. Describe each Agent's objective, required inputs, output artifact, and completion condition in concise ordinary text. role_family is optional metadata, not a fixed Operator type. Inspect execution feedback and Canvas issues before selecting the next action. Use a distinct role_family "format" Output Agent only when the observation requires the exact-answer terminal protocol; it extracts one routed semantic answer and does not solve the task. Do not assume a fixed workflow topology or an unlisted Skill."""
 
 
 DIRECTOR_TRANSCRIPT_SCHEMA = "flowsteer.director.transcript.v1"
@@ -291,6 +292,7 @@ class AgentGraphOrchestrator:
         history_window: int = 4,
         sampling_base_seed: int | None = None,
         sampling_coordinate: ScientificSamplingCoordinate | None = None,
+        tool_registry: Optional[ToolRegistry] = None,
     ) -> None:
         if max_rounds < 1:
             raise ValueError("max_rounds must be positive")
@@ -315,6 +317,7 @@ class AgentGraphOrchestrator:
         # group must see the same catalog presentation in its exact prompt.
         self.catalog_order_seed = seed if catalog_order_seed is None else catalog_order_seed
         self.history_window = history_window
+        self.tool_registry = tool_registry
 
     def generation_seed(self, round_index: int) -> int:
         """Return the exact Director action seed for one zero-based Canvas round."""
@@ -373,6 +376,20 @@ class AgentGraphOrchestrator:
             for model_id in catalog_model_ids
         ]
 
+    def _tool_catalog(self, env: AgentWorkflowEnv) -> list[dict[str, object]]:
+        if self.tool_registry is None:
+            return []
+        if env.runtime.tool_registry is not self.tool_registry:
+            raise DirectorError(
+                "Director and AgentRuntime must share the same ToolRegistry"
+            )
+        dataset_id = env.runtime.dataset_id
+        return [
+            capability.to_value()
+            for capability in self.tool_registry.capabilities
+            if dataset_id is None or capability.supports_dataset(dataset_id)
+        ]
+
     def _canvas_observation(
         self,
         env: AgentWorkflowEnv,
@@ -421,6 +438,9 @@ class AgentGraphOrchestrator:
                     "model_catalog": self._model_catalog(),
                 }
             )
+            tool_catalog = self._tool_catalog(env)
+            if tool_catalog:
+                payload["tool_catalog"] = tool_catalog
             if env.max_agents is not None:
                 payload["max_agents"] = env.max_agents
         if skills:

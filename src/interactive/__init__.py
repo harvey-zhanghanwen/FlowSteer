@@ -86,9 +86,29 @@ from .prompt_templates import (
 
 # AgentGraph v1 is additive: explicit names avoid collisions with the legacy
 # Operator-DSL Trajectory/TurnRecord API above.
-from .agent_graph import AgentGraph, AgentGraphValidator, AgentNode, RelationBits
+from .agent_graph import (
+    AgentExecutionMode,
+    AgentGraph,
+    AgentGraphValidator,
+    AgentNode,
+    RelationBits,
+)
 from .agent_action_parser import AgentAction, AgentActionParser, AgentActionType
-from .agent_runtime import AgentRuntime, AgentRuntimeResult, CommunicationCondition
+from .agent_runtime import (
+    AgentExecutionAdapter,
+    AgentRuntime,
+    AgentRuntimeResult,
+    CommunicationCondition,
+    CommunicationEnvelope,
+)
+from .tool_runtime import (
+    ToolCapability,
+    ToolReceipt,
+    ToolRegistration,
+    ToolRegistry,
+    ToolRequest,
+    ToolResult,
+)
 from .agent_workflow_env import AgentWorkflowEnv, AgentWorkflowStepResult
 from .director import AgentGraphOrchestrator, OpenAIDirectorClient
 from .sglang_manager import SGLangSupervisorManager
@@ -148,6 +168,7 @@ __all__ = [
     'create_prompt_builder',
     'get_problem_type_hint',
     'AgentGraph',
+    'AgentExecutionMode',
     'AgentGraphValidator',
     'AgentNode',
     'RelationBits',
@@ -155,8 +176,16 @@ __all__ = [
     'AgentActionParser',
     'AgentActionType',
     'AgentRuntime',
+    'AgentExecutionAdapter',
     'AgentRuntimeResult',
     'CommunicationCondition',
+    'CommunicationEnvelope',
+    'ToolCapability',
+    'ToolReceipt',
+    'ToolRegistration',
+    'ToolRegistry',
+    'ToolRequest',
+    'ToolResult',
     'AgentWorkflowEnv',
     'AgentWorkflowStepResult',
     'AgentGraphOrchestrator',

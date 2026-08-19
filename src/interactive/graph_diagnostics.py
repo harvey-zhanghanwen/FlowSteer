@@ -39,6 +39,14 @@ def graph_from_receipt(value: Mapping[str, Any]) -> AgentGraph:
                     if raw.get("role_family") is not None
                     else None
                 ),
+                allowed_tools=tuple(raw.get("allowed_tools", ())),
+                execution_mode=str(raw.get("execution_mode", "reasoning")),
+                artifact_type=str(raw.get("artifact_type", "text")),
+                completion_condition=(
+                    str(raw["completion_condition"])
+                    if raw.get("completion_condition") is not None
+                    else None
+                ),
             )
         )
     relations = []

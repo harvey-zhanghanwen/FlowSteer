@@ -74,15 +74,30 @@ def _format_upstream(
             f"source_agent: {item.source_agent_id}",
             f"target_agent: {item.target_agent_id}",
             f"message_type: {item.message_type}",
+            f"artifact_type: {item.artifact_type}",
         ]
         if item.graph_revision is not None:
             envelope.append(f"graph_revision: {item.graph_revision}")
+        if item.environment_revision is not None:
+            envelope.append(f"environment_revision: {item.environment_revision}")
         if include_dependency and item.request_or_dependency is not None:
             envelope.append(
                 f"request_or_dependency: {item.request_or_dependency}"
             )
+        if item.tool_receipts:
+            envelope.append(
+                "tool_receipts: "
+                + json.dumps(
+                    [dict(receipt) for receipt in item.tool_receipts],
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            )
         envelope.extend(
             [
+                # Keep FlowSteer's model-visible label stable; the persisted
+                # communication envelope carries the canonical artifact_body.
                 "artifact:",
                 _visible_message_content(item.artifact, condition),
             ]
@@ -183,8 +198,27 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
             f"source_agent: {request.peer_draft.source_agent_id}\n"
             f"target_agent: {request.peer_draft.target_agent_id}\n"
             f"message_type: {request.peer_draft.message_type}\n"
+            f"artifact_type: {request.peer_draft.artifact_type}\n"
             f"graph_revision: {request.peer_draft.graph_revision}\n"
-            "artifact:\n"
+            + (
+                "environment_revision: "
+                f"{request.peer_draft.environment_revision}\n"
+                if request.peer_draft.environment_revision is not None
+                else ""
+            )
+            + (
+                "tool_receipts: "
+                + json.dumps(
+                    [dict(receipt) for receipt in request.peer_draft.tool_receipts],
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n"
+                if request.peer_draft.tool_receipts
+                else ""
+            )
+            + "artifact:\n"
             f"{_visible_message_content(request.peer_draft.content, request.communication_condition)}"
         )
     else:  # pragma: no cover - enum exhaustiveness guard

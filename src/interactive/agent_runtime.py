@@ -16,6 +16,7 @@ from .agent_graph import (
     AgentRelation,
 )
 from .model_registry import ModelRegistry, ModelSpec, ProviderSpec
+from .tool_runtime import ToolRegistry
 
 
 class ExecutionPhase(str, Enum):
@@ -48,12 +49,23 @@ def _communication_condition(
 
 @dataclass(frozen=True, slots=True)
 class UpstreamMessage:
+    """Typed public communication envelope between AgentGraph nodes.
+
+    ``content``/``message_type`` are retained for trajectory compatibility.
+    ``artifact_type`` and the remaining receipt fields implement the project's
+    minimal typed-envelope extension required because FlowSteer's text-only
+    messages cannot represent tool, environment, or coding observations.
+    """
+
     source_agent_id: str
     target_agent_id: str
     content: str
     message_type: str = "artifact"
     graph_revision: Optional[int] = None
     request_or_dependency: Optional[str] = None
+    artifact_type: str = "text"
+    environment_revision: Optional[int] = None
+    tool_receipts: Tuple[Mapping[str, object], ...] = ()
 
     def __post_init__(self) -> None:
         for value, name in (
@@ -61,6 +73,7 @@ class UpstreamMessage:
             (self.target_agent_id, "target_agent_id"),
             (self.content, "content"),
             (self.message_type, "message_type"),
+            (self.artifact_type, "artifact_type"),
         ):
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"{name} must be a non-empty string")
@@ -77,21 +90,54 @@ class UpstreamMessage:
             raise ValueError(
                 "request_or_dependency must be non-empty when supplied"
             )
+        if self.environment_revision is not None and (
+            isinstance(self.environment_revision, bool)
+            or not isinstance(self.environment_revision, int)
+            or self.environment_revision < 0
+        ):
+            raise ValueError("environment_revision must be non-negative when supplied")
+        if not isinstance(self.tool_receipts, tuple) or any(
+            not isinstance(item, Mapping) for item in self.tool_receipts
+        ):
+            raise TypeError("tool_receipts must be a tuple of mappings")
+        object.__setattr__(
+            self,
+            "tool_receipts",
+            tuple(MappingProxyType(dict(item)) for item in self.tool_receipts),
+        )
 
     @property
     def artifact(self) -> str:
         return self.content
+
+    @property
+    def artifact_body(self) -> str:
+        return self.content
+
+    @property
+    def dependency(self) -> Optional[str]:
+        return self.request_or_dependency
 
     def to_dict(self) -> Dict[str, object]:
         return {
             "source_agent_id": self.source_agent_id,
             "target_agent_id": self.target_agent_id,
             "message_type": self.message_type,
+            "artifact_type": self.artifact_type,
             "artifact": self.content,
+            "artifact_body": self.content,
             "content": self.content,
             "graph_revision": self.graph_revision,
+            "environment_revision": self.environment_revision,
             "request_or_dependency": self.request_or_dependency,
+            "dependency": self.request_or_dependency,
+            "tool_receipts": [dict(item) for item in self.tool_receipts],
         }
+
+
+# Public terminology from the project design; the legacy name remains the
+# canonical class so persisted trajectories and downstream imports stay valid.
+CommunicationEnvelope = UpstreamMessage
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,6 +192,45 @@ class AgentGateway(Protocol):
         ...
 
 
+class AgentExecutionAdapter(Protocol):
+    """Unified execution boundary for reasoning, ReAct, and coding nodes."""
+
+    async def execute(self, request: AgentRequest) -> GatewayResponse:
+        ...
+
+
+@dataclass(frozen=True, slots=True)
+class ReasoningExecutionAdapter:
+    """Thin adapter retaining the existing provider-gateway execution path."""
+
+    gateway: AgentGateway
+
+    async def execute(self, request: AgentRequest) -> GatewayResponse:
+        return await self.gateway.generate(request)
+
+
+def _tool_receipts_from_metadata(
+    metadata: Mapping[str, object],
+) -> Tuple[Mapping[str, object], ...]:
+    """Return only concrete serialized receipts emitted by an adapter."""
+
+    raw = metadata.get("tool_receipts", ())
+    if not isinstance(raw, (list, tuple)):
+        return ()
+    return tuple(
+        MappingProxyType(dict(item)) for item in raw if isinstance(item, Mapping)
+    )
+
+
+def _environment_revision_from_metadata(
+    metadata: Mapping[str, object],
+) -> Optional[int]:
+    raw = metadata.get("environment_revision")
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+        return None
+    return raw
+
+
 @dataclass(frozen=True, slots=True)
 class AgentCallRecord:
     request: AgentRequest
@@ -164,6 +249,10 @@ class AgentRuntimeResult:
     executed_agent_ids: Tuple[str, ...] = ()
     reused_agent_ids: Tuple[str, ...] = ()
     communication_condition: CommunicationCondition = CommunicationCondition.NORMAL
+    output_metadata: Mapping[str, Mapping[str, object]] = field(
+        default_factory=dict,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "outputs", MappingProxyType(dict(self.outputs)))
@@ -171,6 +260,16 @@ class AgentRuntimeResult:
             self,
             "communication_condition",
             _communication_condition(self.communication_condition),
+        )
+        object.__setattr__(
+            self,
+            "output_metadata",
+            MappingProxyType(
+                {
+                    agent_id: MappingProxyType(dict(metadata))
+                    for agent_id, metadata in self.output_metadata.items()
+                }
+            ),
         )
 
 
@@ -218,6 +317,9 @@ class AgentRuntime:
         *,
         max_concurrency: Optional[int] = None,
         timeout_seconds: Optional[float] = None,
+        execution_adapters: Optional[Mapping[str, AgentExecutionAdapter]] = None,
+        tool_registry: Optional[ToolRegistry] = None,
+        dataset_id: Optional[str] = None,
     ) -> None:
         if max_concurrency is not None and (
             type(max_concurrency) is not int or max_concurrency <= 0
@@ -225,8 +327,28 @@ class AgentRuntime:
             raise ValueError("max_concurrency must be a positive integer")
         if timeout_seconds is not None and timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
+        if dataset_id is not None and (
+            not isinstance(dataset_id, str) or not dataset_id.strip()
+        ):
+            raise ValueError("dataset_id must be non-empty when supplied")
         self.model_registry = model_registry
         self.gateway = gateway
+        adapters: Dict[str, AgentExecutionAdapter] = {
+            "reasoning": ReasoningExecutionAdapter(gateway)
+        }
+        for mode, adapter in dict(execution_adapters or {}).items():
+            if mode not in {"reasoning", "react", "coding"}:
+                raise ValueError(
+                    "execution adapter mode must be reasoning, react, or coding"
+                )
+            if not hasattr(adapter, "execute"):
+                raise TypeError("execution adapters must implement execute")
+            adapters[mode] = adapter
+        self.execution_adapters: Mapping[str, AgentExecutionAdapter] = (
+            MappingProxyType(adapters)
+        )
+        self.tool_registry = tool_registry
+        self.dataset_id = None if dataset_id is None else dataset_id.strip()
         self.timeout_seconds = timeout_seconds
         self._global_semaphore = (
             asyncio.Semaphore(max_concurrency) if max_concurrency is not None else None
@@ -247,6 +369,9 @@ class AgentRuntime:
         run_id: Optional[str] = None,
         require_complete: bool = True,
         prior_outputs: Optional[Mapping[str, str]] = None,
+        prior_output_metadata: Optional[
+            Mapping[str, Mapping[str, object]]
+        ] = None,
         dirty_agents: Optional[Collection[str]] = None,
         format_output_agent: bool = False,
         communication_condition: Union[
@@ -274,6 +399,7 @@ class AgentRuntime:
         resolved_condition = _communication_condition(communication_condition)
         plan = self._build_plan(execution_graph, validation.components)
         nodes = {node.id: node for node in execution_graph.nodes}
+        self._validate_execution_contracts(tuple(nodes.values()))
         if format_output_agent and execution_graph.output_agent_id is not None:
             format_node = nodes[execution_graph.output_agent_id]
             if (format_node.role_family or "").casefold() != "format":
@@ -282,11 +408,19 @@ class AgentRuntime:
                     "role_family='format'"
                 )
         outputs: Dict[str, str] = {}
+        output_metadata: Dict[str, Mapping[str, object]] = {}
         for agent_id, output in dict(prior_outputs or {}).items():
             if agent_id in nodes:
                 if not isinstance(output, str):
                     raise TypeError("prior_outputs values must be strings")
                 outputs[agent_id] = output
+        for agent_id, metadata in dict(prior_output_metadata or {}).items():
+            if agent_id in outputs:
+                if not isinstance(metadata, Mapping):
+                    raise TypeError(
+                        "prior_output_metadata values must be mappings"
+                    )
+                output_metadata[agent_id] = MappingProxyType(dict(metadata))
         if dirty_agents is None:
             dirty = set(nodes)
         else:
@@ -327,6 +461,7 @@ class AgentRuntime:
                     resolved_run_id,
                     snapshot.revision,
                     calls,
+                    output_metadata,
                     output_agent_id=execution_graph.output_agent_id,
                     format_output_agent=format_output_agent,
                     communication_condition=resolved_condition,
@@ -401,7 +536,54 @@ class AgentRuntime:
             executed_agent_ids=tuple(sorted(executed_agents)),
             reused_agent_ids=tuple(sorted(reused_agents)),
             communication_condition=resolved_condition,
+            output_metadata=output_metadata,
         )
+
+    def _validate_execution_contracts(
+        self,
+        nodes: Tuple[AgentNode, ...],
+    ) -> None:
+        """Validate Director-selected execution semantics before scheduling."""
+
+        for node in nodes:
+            mode_value = getattr(node.execution_mode, "value", node.execution_mode)
+            if mode_value not in self.execution_adapters:
+                raise AgentRuntimeError(
+                    f"agent {node.id!r} requires unregistered execution adapter "
+                    f"{mode_value!r}"
+                )
+            if not node.allowed_tools:
+                continue
+            if mode_value == "reasoning":
+                raise AgentRuntimeError(
+                    f"reasoning agent {node.id!r} cannot declare allowed_tools"
+                )
+            if self.tool_registry is None:
+                raise AgentRuntimeError(
+                    f"agent {node.id!r} declares tools but no ToolRegistry is configured"
+                )
+            for tool_id in node.allowed_tools:
+                if tool_id not in self.tool_registry.resource_ids:
+                    raise AgentRuntimeError(
+                        f"agent {node.id!r} references unknown tool {tool_id!r}"
+                    )
+                try:
+                    capability = self.tool_registry.require_capability(tool_id)
+                except KeyError as exc:
+                    raise AgentRuntimeError(
+                        f"agent {node.id!r} tool {tool_id!r} has no capability metadata"
+                    ) from exc
+                if not capability.availability:
+                    raise AgentRuntimeError(
+                        f"agent {node.id!r} tool {tool_id!r} is unavailable"
+                    )
+                if self.dataset_id is not None and not capability.supports_dataset(
+                    self.dataset_id
+                ):
+                    raise AgentRuntimeError(
+                        f"agent {node.id!r} tool {tool_id!r} is outside dataset scope "
+                        f"{self.dataset_id!r}"
+                    )
 
     def _build_plan(
         self,
@@ -445,6 +627,7 @@ class AgentRuntime:
         run_id: str,
         graph_revision: int,
         calls: List[AgentCallRecord],
+        output_metadata: Dict[str, Mapping[str, object]],
         *,
         output_agent_id: Optional[str],
         format_output_agent: bool,
@@ -461,6 +644,7 @@ class AgentRuntime:
                     outputs,
                     nodes=nodes,
                     graph_revision=graph_revision,
+                    output_metadata=output_metadata,
                 ),
                 problem=problem,
                 run_id=run_id,
@@ -470,6 +654,7 @@ class AgentRuntime:
                 communication_condition=communication_condition,
             )
             response = await self._invoke(request, calls)
+            output_metadata[agent_id] = response.metadata
             return {agent_id: response.text}
 
         if len(component) != 2:
@@ -481,6 +666,7 @@ class AgentRuntime:
             outputs,
             nodes=nodes,
             graph_revision=graph_revision,
+            output_metadata=output_metadata,
         )
         right_upstream = self._upstream(
             right_id,
@@ -488,6 +674,7 @@ class AgentRuntime:
             outputs,
             nodes=nodes,
             graph_revision=graph_revision,
+            output_metadata=output_metadata,
         )
         left_draft_request = self._request(
             agent=nodes[left_id],
@@ -528,6 +715,11 @@ class AgentRuntime:
                 message_type="candidate",
                 graph_revision=graph_revision,
                 request_or_dependency=nodes[left_id].contract,
+                artifact_type=getattr(nodes[right_id], "artifact_type", "text"),
+                environment_revision=_environment_revision_from_metadata(
+                    right_draft.metadata
+                ),
+                tool_receipts=_tool_receipts_from_metadata(right_draft.metadata),
             ),
             problem=problem,
             run_id=run_id,
@@ -548,6 +740,11 @@ class AgentRuntime:
                 message_type="candidate",
                 graph_revision=graph_revision,
                 request_or_dependency=nodes[right_id].contract,
+                artifact_type=getattr(nodes[left_id], "artifact_type", "text"),
+                environment_revision=_environment_revision_from_metadata(
+                    left_draft.metadata
+                ),
+                tool_receipts=_tool_receipts_from_metadata(left_draft.metadata),
             ),
             problem=problem,
             run_id=run_id,
@@ -560,6 +757,8 @@ class AgentRuntime:
             self._invoke(left_revision_request, calls),
             self._invoke(right_revision_request, calls),
         )
+        output_metadata[left_id] = left_revision.metadata
+        output_metadata[right_id] = right_revision.metadata
         return {left_id: left_revision.text, right_id: right_revision.text}
 
     def _upstream(
@@ -570,6 +769,7 @@ class AgentRuntime:
         *,
         nodes: Mapping[str, AgentNode],
         graph_revision: int,
+        output_metadata: Mapping[str, Mapping[str, object]],
     ) -> Tuple[UpstreamMessage, ...]:
         target_component = plan.component_for[target_agent_id]
         messages = []
@@ -594,6 +794,15 @@ class AgentRuntime:
                         message_type="artifact",
                         graph_revision=graph_revision,
                         request_or_dependency=nodes[target_id].contract,
+                        artifact_type=getattr(
+                            nodes[source_id], "artifact_type", "text"
+                        ),
+                        environment_revision=_environment_revision_from_metadata(
+                            output_metadata.get(source_id, {})
+                        ),
+                        tool_receipts=_tool_receipts_from_metadata(
+                            output_metadata.get(source_id, {})
+                        ),
                     )
                 )
         return tuple(
@@ -643,11 +852,21 @@ class AgentRuntime:
         calls: List[AgentCallRecord],
     ) -> AgentResponse:
         async def call_gateway() -> GatewayResponse:
+            mode_value = getattr(
+                request.agent.execution_mode,
+                "value",
+                request.agent.execution_mode,
+            )
+            adapter = self.execution_adapters.get(mode_value)
+            if adapter is None:
+                raise AgentRuntimeError(
+                    f"no execution adapter registered for {mode_value!r}"
+                )
             provider_semaphore = self._provider_semaphores.get(request.provider.provider_id)
             if provider_semaphore is None:
-                return await self.gateway.generate(request)
+                return await adapter.execute(request)
             async with provider_semaphore:
-                return await self.gateway.generate(request)
+                return await adapter.execute(request)
 
         try:
             if self._global_semaphore is None:
@@ -679,13 +898,16 @@ class AgentRuntime:
 __all__ = [
     "AgentCallRecord",
     "AgentGateway",
+    "AgentExecutionAdapter",
     "AgentRequest",
     "AgentResponse",
     "AgentRuntime",
     "AgentRuntimeError",
     "AgentRuntimeResult",
     "CommunicationCondition",
+    "CommunicationEnvelope",
     "ExecutionPhase",
     "GatewayResponse",
+    "ReasoningExecutionAdapter",
     "UpstreamMessage",
 ]
