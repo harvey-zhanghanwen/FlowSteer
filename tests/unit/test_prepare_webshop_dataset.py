@@ -37,6 +37,11 @@ def _catalog(tmp_path: Path, output_name: str = "aligned") -> Path:
                 "display_name": "WebShop",
                 "task_type": "interactive_agent",
                 "metric": "success_rate",
+                "native_split_ranges": {
+                    "test": [0, 500],
+                    "validation": [500, 1500],
+                    "train": [1500, None],
+                },
                 # Fake providers make these inert; keeping them here exercises
                 # the exact config that is persisted into every record.
                 "ragen_adapter_path": str(tmp_path / "ragen_adapter.py"),
@@ -84,7 +89,7 @@ def _records(path: Path) -> list[dict[str, Any]]:
 
 def test_live_goal_order_and_exact_instruction_are_preserved(tmp_path: Path) -> None:
     catalog_path = _catalog(tmp_path)
-    live_goals = _goals(700)
+    live_goals = _goals(2100)
     received_configs: list[Mapping[str, Any]] = []
 
     def fake_provider(env_config: Mapping[str, Any]):
@@ -95,25 +100,28 @@ def test_live_goal_order_and_exact_instruction_are_preserved(tmp_path: Path) -> 
 
     validation = _records(output / "validation.jsonl")
     train = _records(output / "train.jsonl")
-    assert _records(output / "test.jsonl") == []
+    test = _records(output / "test.jsonl")
     assert len(received_configs) == 1
     assert "goal_index" not in received_configs[0]
     assert received_configs[0]["env_seed"] == 731
     assert len(validation) == 128
     assert len(train) == 512
+    assert len(test) == 500
     assert [row["env_config"]["goal_index"] for row in validation] == list(
-        range(128)
+        range(500, 628)
     )
     assert [row["env_config"]["goal_index"] for row in train] == list(
-        range(128, 640)
+        range(1500, 2012)
     )
+    assert [row["env_config"]["goal_index"] for row in test] == list(range(500))
 
     first = validation[0]
-    instruction = live_goals[0]["instruction_text"]
+    instruction = live_goals[500]["instruction_text"]
     assert first["question"] == instruction
     assert first["extra"]["goal"] == instruction
     assert first["extra"]["instruction_text"] == instruction
-    assert first["extra"]["goal_index"] == 0
+    assert first["extra"]["goal_index"] == 500
+    assert first["extra"]["native_split"] == "validation"
     assert first["extra"]["env_seed"] == 731
     assert first["env_config"]["env_seed"] == 731
     assert first["env_config"]["human_goals"] is True
@@ -122,14 +130,17 @@ def test_live_goal_order_and_exact_instruction_are_preserved(tmp_path: Path) -> 
     assert first["env_config"]["goal_split"] == "all"
     assert first["metadata"]["environment"]["env_config"] == first["env_config"]
     assert first["metadata"]["sampling"]["selection_index"] == 0
-    assert train[0]["task_id"] == "webshop:00128"
+    assert first["metadata"]["native_split"] == "validation"
+    assert train[0]["task_id"] == "webshop:01500"
+    assert train[0]["metadata"]["native_split"] == "train"
+    assert test[0]["metadata"]["native_split"] == "test"
 
 
 def test_short_inventory_cycles_only_the_remaining_training_goals(
     tmp_path: Path,
 ) -> None:
     catalog_path = _catalog(tmp_path)
-    live_goals = _goals(131)
+    live_goals = _goals(1503)
 
     output = _MODULE.prepare(catalog_path, goal_provider=lambda _: live_goals)
 
@@ -137,11 +148,21 @@ def test_short_inventory_cycles_only_the_remaining_training_goals(
     train = _records(output / "train.jsonl")
     validation_indices = [row["env_config"]["goal_index"] for row in validation]
     train_indices = [row["env_config"]["goal_index"] for row in train]
-    assert validation_indices == list(range(128))
-    assert train_indices[:9] == [128, 129, 130, 128, 129, 130, 128, 129, 130]
-    assert set(train_indices) == {128, 129, 130}
+    assert validation_indices == list(range(500, 628))
+    assert train_indices[:9] == [
+        1500,
+        1501,
+        1502,
+        1500,
+        1501,
+        1502,
+        1500,
+        1501,
+        1502,
+    ]
+    assert set(train_indices) == {1500, 1501, 1502}
     assert set(validation_indices).isdisjoint(train_indices)
-    assert train[3]["task_id"] == "webshop:00128:cycle-0001"
+    assert train[3]["task_id"] == "webshop:01500:cycle-0001"
     assert train[3]["metadata"]["sampling"]["cycled_training_sample"] is True
 
     manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
@@ -151,7 +172,7 @@ def test_short_inventory_cycles_only_the_remaining_training_goals(
 
 
 def test_fake_provider_outputs_are_deterministic(tmp_path: Path) -> None:
-    goals = _goals(641)
+    goals = _goals(2100)
     first_catalog = _catalog(tmp_path, "first")
     second_catalog = _catalog(tmp_path, "second")
 
@@ -179,7 +200,40 @@ def test_repository_catalog_expands_the_default_environment_seed(
     assert env_config["human_goals"] is True
     assert env_config["use_small"] is False
     assert env_config["goal_split"] == "all"
-    assert catalog["aligned_dir"] == "data/webshop_v2"
+    assert catalog["aligned_dir"] == "data/webshop_v3"
+    assert source["native_split_ranges"] == {
+        "test": [0, 500],
+        "validation": [500, 1500],
+        "train": [1500, None],
+    }
+
+
+def test_incomplete_native_inventory_fails_closed(tmp_path: Path) -> None:
+    catalog_path = _catalog(tmp_path)
+
+    try:
+        _MODULE.prepare(catalog_path, goal_provider=lambda _: _goals(1500))
+    except ValueError as exc:
+        assert "no native train goal" in str(exc)
+    else:  # pragma: no cover - fail-closed guard
+        raise AssertionError("WebShop accepted an inventory without native train")
+
+
+def test_native_range_drift_fails_closed(tmp_path: Path) -> None:
+    catalog_path = _catalog(tmp_path)
+    catalog = yaml.safe_load(catalog_path.read_text(encoding="utf-8"))
+    catalog["sources"]["webshop"]["native_split_ranges"]["validation"] = [0, 128]
+    catalog_path.write_text(
+        yaml.safe_dump(catalog, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    try:
+        _MODULE.prepare(catalog_path, goal_provider=lambda _: _goals(2100))
+    except ValueError as exc:
+        assert "native goal ranges" in str(exc)
+    else:  # pragma: no cover - fail-closed guard
+        raise AssertionError("WebShop accepted drifted native ranges")
 
 
 def test_default_provider_seeds_before_the_deployed_reset(

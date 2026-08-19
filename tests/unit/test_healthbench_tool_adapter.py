@@ -144,6 +144,10 @@ class HealthBenchToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             HEALTHBENCH_PROFESSIONAL_DATASET_SCOPE,
             capability.dataset_scope,
         )
+        self.assertEqual(("search",), capability.action_names)
+        self.assertEqual(
+            capability.input_schema, capability.action_schemas["search"]
+        )
         self.assertTrue(capability.supports_dataset("healthbench_professional"))
         self.assertFalse(capability.supports_dataset("hotpotqa"))
         self.assertEqual(["query"], capability.input_schema["required"])

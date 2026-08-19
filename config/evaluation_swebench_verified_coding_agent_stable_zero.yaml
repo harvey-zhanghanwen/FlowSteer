@@ -1,4 +1,4 @@
-# Protocol-separated SWE-bench Verified Coding Agent Stable Zero condition.
+# Protocol-separated SWE-bench regular-dev Coding Agent Stable Zero condition.
 # The AgentGraph arm uses the SkillFlow-derived detached worktree lifecycle,
 # repository ToolRegistry and bounded CodingExecutionAdapter.  Formal scoring
 # remains exclusively the pinned official SWE-bench Docker harness resolved
@@ -9,28 +9,28 @@
 
 schema_version: "flowsteer.agentgraph.config.v1"
 experiment:
-  name: "swebench_verified_coding_agent_stable_zero"
+  name: "swebench_regular_dev_coding_agent_stable_zero"
   phase: "swebench_evaluation"
   training_enabled: false
   seed: 20260819
-  condition_id: "swebench_verified_coding_agent_stable_zero"
-  sampling_schedule_purpose: "swebench_verified_fixed_heldout_coding_agent_stable_zero"
-  catalog_order_namespace: "swebench_verified_coding_agent_stable_zero"
+  condition_id: "swebench_regular_dev_coding_agent_stable_zero"
+  sampling_schedule_purpose: "swebench_regular_dev_fixed_coding_agent_stable_zero"
+  catalog_order_namespace: "swebench_regular_dev_coding_agent_stable_zero"
   prompt_version: "agentgraph.director.progressive_subgraph.v1"
   tool_version: "skillflow.swebench-repository-coding.v1"
-  output_dir: "artifacts/swebench_verified_coding_agent_stable_zero/evaluation"
+  output_dir: "artifacts/swebench_regular_dev_coding_agent_stable_zero/development"
 
 data:
-  catalog_path: "config/datasets_agentgraph.yaml"
-  train_path: "data/agentgraph_v1/train.jsonl"
-  validation_path: "data/agentgraph_v1/validation.jsonl"
-  test_path: "data/agentgraph_v1/test.jsonl"
+  catalog_path: "config/datasets_swebench.yaml"
+  train_path: "data/swebench_v2/train.jsonl"
+  validation_path: "data/swebench_v2/validation.jsonl"
+  test_path: "data/swebench_v2/test.jsonl"
   enforce_split_isolation: true
   task_schema_version: "flowsteer.agentgraph.task.v1"
 
 swebench_evaluation:
   dataset_key: "swe_bench"
-  stage: "evaluation"
+  stage: "development"
   split: "validation"
   selection: "sequential"
   sample_count: 128
@@ -57,7 +57,7 @@ swebench_evaluation:
 
 swe_coding_runtime:
   enabled: true
-  condition_id: "swebench_verified_coding_agent_stable_zero"
+  condition_id: "swebench_regular_dev_coding_agent_stable_zero"
   mode: "iterative_repository_coding"
   dataset_scope: ["swe_bench"]
   repository_store: "/ssd1/iclr/.private/skillflow-resources/swe-repositories"
@@ -69,18 +69,18 @@ swe_coding_runtime:
   cleanup_timeout_seconds: 10.0
 
 storage:
-  schema_version: "flowsteer.swebench_verified.round.v1"
-  root: "artifacts/swebench_verified_coding_agent_stable_zero/evaluation/evidence"
-  selected_tasks_path: "artifacts/swebench_verified_coding_agent_stable_zero/evaluation/selected_tasks.jsonl"
-  direct_predictions_path: "artifacts/swebench_verified_coding_agent_stable_zero/evaluation/direct_predictions.jsonl"
-  trajectories_path: "artifacts/swebench_verified_coding_agent_stable_zero/evaluation/agentgraph_trajectories.jsonl"
-  failures_path: "artifacts/swebench_verified_coding_agent_stable_zero/evaluation/collection_failures.jsonl"
-  paired_results_path: "artifacts/swebench_verified_coding_agent_stable_zero/evaluation/paired_results.jsonl"
-  wrong_demos_path: "artifacts/swebench_verified_coding_agent_stable_zero/evaluation/wrong_demos.jsonl"
-  manifest_path: "artifacts/swebench_verified_coding_agent_stable_zero/evaluation/run_manifest.json"
-  preflight_receipt_path: "artifacts/swebench_verified_coding_agent_stable_zero/evaluation/preflight_receipt.json"
-  report_json_path: "reports/swebench_verified_coding_agent_stable_zero/evaluation_report.json"
-  report_markdown_path: "reports/swebench_verified_coding_agent_stable_zero/evaluation_report.md"
+  schema_version: "flowsteer.swebench.round.v2"
+  root: "artifacts/swebench_regular_dev_coding_agent_stable_zero/development/evidence"
+  selected_tasks_path: "artifacts/swebench_regular_dev_coding_agent_stable_zero/development/selected_tasks.jsonl"
+  direct_predictions_path: "artifacts/swebench_regular_dev_coding_agent_stable_zero/development/direct_predictions.jsonl"
+  trajectories_path: "artifacts/swebench_regular_dev_coding_agent_stable_zero/development/agentgraph_trajectories.jsonl"
+  failures_path: "artifacts/swebench_regular_dev_coding_agent_stable_zero/development/collection_failures.jsonl"
+  paired_results_path: "artifacts/swebench_regular_dev_coding_agent_stable_zero/development/paired_results.jsonl"
+  wrong_demos_path: "artifacts/swebench_regular_dev_coding_agent_stable_zero/development/wrong_demos.jsonl"
+  manifest_path: "artifacts/swebench_regular_dev_coding_agent_stable_zero/development/run_manifest.json"
+  preflight_receipt_path: "artifacts/swebench_regular_dev_coding_agent_stable_zero/development/preflight_receipt.json"
+  report_json_path: "reports/swebench_regular_dev_coding_agent_stable_zero/development_report.json"
+  report_markdown_path: "reports/swebench_regular_dev_coding_agent_stable_zero/development_report.md"
 
 director:
   base_model: "${QWEN35_9B_MODEL_PATH:-/home/test/SKILLEV/skillev-new-b2-temp/model/Qwen3.5-9B-modelscope}"
@@ -88,7 +88,7 @@ director:
   backend: "sglang"
   api_base: "http://127.0.0.1:${FLOWSTEER_SUPERVISOR_PORT:-8015}/v1"
   served_model_name: "supervisor_theta"
-  behavior_policy_version: "qwen35-9b-swebench-coding-agent-stable-zero-step-000000"
+  behavior_policy_version: "qwen35-9b-swebench-regular-dev-coding-stable-zero-step-000000"
   behavior_adapter_name: "theta_jointqa_progressive_step_000000"
   behavior_adapter_checkpoint: "artifacts/hotpotqa_multiagent_skill/policy_step_000000/theta"
   updated_policy_version: "unused-evaluation-only"
@@ -130,8 +130,9 @@ evaluation:
   swebench_harness_enabled: true
   swebench_evaluator_path: "/home/test/SKILLEV/skillflow-bayesian-improve-deploy/training/swe_bench_eval.py"
   swebench_harness_path: "/ssd1/iclr/.private/skillflow-resources/SWE-bench-harness-d83"
-  swebench_verified_path: "/ssd1/iclr/.private/skillflow-resources/swebench-verified"
-  swebench_evaluation_root: "artifacts/swebench_verified_coding_agent_stable_zero/evaluation/official_harness"
+  swebench_dataset_source: "regular_dev"
+  swebench_dataset_path: "data/swebench_v2/validation.jsonl"
+  swebench_evaluation_root: "artifacts/swebench_regular_dev_coding_agent_stable_zero/development/official_harness"
   swebench_docker_namespace: "swebench"
   swebench_timeout_seconds: 900
   invalid_evaluator_action: "persist_and_exclude"

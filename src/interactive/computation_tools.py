@@ -229,33 +229,37 @@ def create_aime_computation_registry(
             "observation": {"type": "string"},
         },
     }
+    calculator_input_schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["expression"],
+        "properties": {
+            "expression": {"type": "string", "minLength": 1},
+        },
+    }
     calculator_capability = ToolCapability(
         tool_id=AIME_CALCULATOR_TOOL_ID,
         dataset_scope=AIME_DATASET_SCOPE,
-        input_schema={
-            "type": "object",
-            "additionalProperties": False,
-            "required": ["expression"],
-            "properties": {
-                "expression": {"type": "string", "minLength": 1},
-            },
-        },
+        action_schemas={"calculator": calculator_input_schema},
+        input_schema=calculator_input_schema,
         output_schema=output_schema,
         side_effect="none",
         timeout_seconds=calculator_timeout_seconds,
         version=AIME_COMPUTATION_TOOL_VERSION,
     )
+    python_input_schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["code"],
+        "properties": {
+            "code": {"type": "string", "minLength": 1},
+        },
+    }
     python_capability = ToolCapability(
         tool_id=AIME_PYTHON_EXEC_TOOL_ID,
         dataset_scope=AIME_DATASET_SCOPE,
-        input_schema={
-            "type": "object",
-            "additionalProperties": False,
-            "required": ["code"],
-            "properties": {
-                "code": {"type": "string", "minLength": 1},
-            },
-        },
+        action_schemas={"python_exec": python_input_schema},
+        input_schema=python_input_schema,
         output_schema=output_schema,
         side_effect="isolated_child_process",
         # Keep the registry timeout outside SkillFlow's internal process

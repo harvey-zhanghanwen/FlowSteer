@@ -64,12 +64,14 @@ class CodingExecutionAdapter(ToolReactExecutionAdapter):
         tool_registry: ToolRegistry,
         max_turns: int,
         max_tool_calls: int,
+        max_action_tokens: int = 512,
     ) -> None:
         super().__init__(
             gateway=gateway,
             tool_registry=tool_registry,
             max_turns=max_turns,
             max_tool_calls=max_tool_calls,
+            max_action_tokens=max_action_tokens,
             execution_mode="coding",
         )
 

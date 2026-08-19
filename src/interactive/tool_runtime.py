@@ -183,6 +183,7 @@ class ToolCapability:
 
     tool_id: str
     dataset_scope: tuple[str, ...]
+    action_schemas: Mapping[str, Mapping[str, object]]
     input_schema: Mapping[str, object]
     output_schema: Mapping[str, object]
     side_effect: str
@@ -208,6 +209,22 @@ class ToolCapability:
             or len(set(self.dataset_scope)) != len(self.dataset_scope)
         ):
             raise ValueError("dataset_scope must contain unique non-empty strings")
+        if not isinstance(self.action_schemas, Mapping):
+            raise TypeError("action_schemas must be a mapping")
+        raw_action_schemas: dict[str, object] = {}
+        for name, schema in self.action_schemas.items():
+            if (
+                not isinstance(name, str)
+                or not name.strip()
+                or not isinstance(schema, Mapping)
+            ):
+                raise ValueError(
+                    "action_schemas must map non-empty action names to JSON schemas"
+                )
+            normalized_name = name.strip()
+            if normalized_name in raw_action_schemas:
+                raise ValueError("action_schemas action names must be unique")
+            raw_action_schemas[normalized_name] = dict(schema)
         if self.timeout_seconds is not None and self.timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive when supplied")
         if type(self.availability) is not bool:
@@ -224,8 +241,29 @@ class ToolCapability:
         )
         object.__setattr__(self, "side_effect", self.side_effect.strip())
         object.__setattr__(self, "version", self.version.strip())
+        action_schemas = _normalize_json(raw_action_schemas)
         object.__setattr__(self, "input_schema", MappingProxyType(input_schema))
         object.__setattr__(self, "output_schema", MappingProxyType(output_schema))
+        if not isinstance(action_schemas, dict) or any(
+            not isinstance(schema, dict) for schema in action_schemas.values()
+        ):
+            raise TypeError("action_schemas must contain JSON objects")
+        object.__setattr__(
+            self,
+            "action_schemas",
+            MappingProxyType(action_schemas),
+        )
+
+    @property
+    def action_names(self) -> tuple[str, ...]:
+        """Return the fixed StructuredAction domain, if this Tool has one.
+
+        Stateful environment Tools deliberately return an empty tuple: their
+        native action space is supplied by the live environment observation
+        rather than a static StructuredAction schema.
+        """
+
+        return tuple(self.action_schemas)
 
     def supports_dataset(self, dataset_id: str) -> bool:
         return "*" in self.dataset_scope or dataset_id in self.dataset_scope
@@ -234,6 +272,10 @@ class ToolCapability:
         return {
             "tool_id": self.tool_id,
             "dataset_scope": list(self.dataset_scope),
+            "action_names": list(self.action_names),
+            "action_schemas": {
+                name: dict(schema) for name, schema in self.action_schemas.items()
+            },
             "input_schema": dict(self.input_schema),
             "output_schema": dict(self.output_schema),
             "side_effect": self.side_effect,

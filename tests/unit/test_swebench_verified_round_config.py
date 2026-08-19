@@ -30,26 +30,23 @@ _CONFIG_CASES = (
     (
         "development_swebench_verified_round_01.yaml",
         "development",
-        "train",
+        "validation",
         32,
+        "regular_dev",
     ),
     (
         "evaluation_swebench_verified_round_01.yaml",
         "evaluation",
-        "validation",
+        "test",
         128,
+        "verified",
     ),
 )
 _SKILLFLOW_EVALUATOR = (
-    "/home/test/SKILLEV/skillflow-bayesian-improve-deploy/"
-    "training/swe_bench_eval.py"
+    "/home/test/SKILLEV/skillflow-bayesian-improve-deploy/training/swe_bench_eval.py"
 )
-_OFFICIAL_HARNESS = (
-    "/ssd1/iclr/.private/skillflow-resources/SWE-bench-harness-d83"
-)
-_OFFICIAL_VERIFIED = (
-    "/ssd1/iclr/.private/skillflow-resources/swebench-verified"
-)
+_OFFICIAL_HARNESS = "/ssd1/iclr/.private/skillflow-resources/SWE-bench-harness-d83"
+_OFFICIAL_VERIFIED = "/ssd1/iclr/.private/skillflow-resources/swebench-verified"
 
 
 def _config(name: str) -> dict:
@@ -57,7 +54,7 @@ def _config(name: str) -> dict:
 
 
 @pytest.mark.parametrize(
-    ("name", "stage", "split", "sample_count"),
+    ("name", "stage", "split", "sample_count", "dataset_source"),
     _CONFIG_CASES,
 )
 def test_swebench_configs_freeze_official_harness_and_resolved_rate(
@@ -65,6 +62,7 @@ def test_swebench_configs_freeze_official_harness_and_resolved_rate(
     stage: str,
     split: str,
     sample_count: int,
+    dataset_source: str,
 ) -> None:
     config = _config(name)
 
@@ -82,13 +80,18 @@ def test_swebench_configs_freeze_official_harness_and_resolved_rate(
     assert bounded["concurrency"] == 1
     assert bounded["official_metric"] == "resolved_rate"
     assert bounded["proxy_metrics_allowed"] is False
-    assert config["data"]["catalog_path"] == "config/datasets_agentgraph.yaml"
+    assert config["data"]["catalog_path"] == "config/datasets_swebench.yaml"
 
     evaluation = config["evaluation"]
     assert evaluation["swebench_harness_enabled"] is True
     assert evaluation["swebench_evaluator_path"] == _SKILLFLOW_EVALUATOR
     assert evaluation["swebench_harness_path"] == _OFFICIAL_HARNESS
-    assert evaluation["swebench_verified_path"] == _OFFICIAL_VERIFIED
+    assert evaluation["swebench_dataset_source"] == dataset_source
+    assert evaluation["swebench_dataset_path"] == (
+        "data/swebench_v2/validation.jsonl"
+        if dataset_source == "regular_dev"
+        else _OFFICIAL_VERIFIED
+    )
     assert evaluation["swebench_docker_namespace"] == "swebench"
     assert evaluation["swebench_timeout_seconds"] == 900
     assert _RUNNER._BENCHMARKS["swe_bench"]["primary_metric"] == "resolved"
@@ -100,7 +103,8 @@ def test_swebench_configs_freeze_official_harness_and_resolved_rate(
         ("swebench_harness_enabled", False),
         ("swebench_evaluator_path", ""),
         ("swebench_harness_path", ""),
-        ("swebench_verified_path", ""),
+        ("swebench_dataset_path", ""),
+        ("swebench_dataset_source", "unknown"),
         ("swebench_evaluation_root", ""),
         ("swebench_docker_namespace", ""),
         ("swebench_timeout_seconds", 0),
@@ -154,6 +158,24 @@ def test_swebench_report_exposes_only_official_resolved_rate() -> None:
     }.intersection(report["agentgraph"])
 
 
+def test_regular_dev_report_keeps_its_dataset_source_distinct() -> None:
+    config = _config("development_swebench_verified_round_01.yaml")
+    report = _RUNNER._report([], config)
+
+    assert report["benchmark_slice"] == "regular_dev"
+    assert report["metric_scope"] == (
+        "SWE_bench_regular_dev_official_Docker_harness_resolved_rate"
+    )
+
+
+def test_dataset_source_and_project_split_must_match() -> None:
+    config = deepcopy(_config("evaluation_swebench_verified_round_01.yaml"))
+    config["swebench_evaluation"]["split"] = "validation"
+
+    with pytest.raises(ConfigurationError, match="dataset_source_split_isolation"):
+        _RUNNER.validate_completion_benchmark_config(config)
+
+
 def test_swebench_prepare_only_needs_neither_backend_nor_docker(
     tmp_path: Path,
 ) -> None:
@@ -162,15 +184,20 @@ def test_swebench_prepare_only_needs_neither_backend_nor_docker(
 
     data_dir = tmp_path / "data"
     data_dir.mkdir()
-    selected_source = data_dir / "validation.jsonl"
+    selected_source = data_dir / "test.jsonl"
     task = TaskRecord(
         task_id="swe-bench:owner__repo-1",
         question="Fix the issue",
         ground_truth="",
-        split="validation",
+        split="test",
         metadata={
             "dataset_key": "swe_bench",
-            "evaluator_payload": {"instance_id": "owner__repo-1"},
+            "dataset_source": "verified",
+            "benchmark_slice": "verified",
+            "evaluator_payload": {
+                "instance_id": "owner__repo-1",
+                "dataset_source": "verified",
+            },
         },
     )
     selected_source.write_text(
@@ -186,8 +213,8 @@ def test_swebench_prepare_only_needs_neither_backend_nor_docker(
     config["data"].update(
         {
             "train_path": str(data_dir / "train.jsonl"),
-            "validation_path": str(selected_source),
-            "test_path": str(data_dir / "test.jsonl"),
+            "validation_path": str(data_dir / "validation.jsonl"),
+            "test_path": str(selected_source),
         }
     )
 
@@ -250,10 +277,15 @@ def test_docker_preflight_failure_does_not_attach_swebench_harness() -> None:
         task_id="swe-bench:owner__repo-1",
         question="Fix the issue",
         ground_truth="",
-        split="validation",
+        split="test",
         metadata={
             "dataset_key": "swe_bench",
-            "evaluator_payload": {"instance_id": "owner__repo-1"},
+            "dataset_source": "verified",
+            "benchmark_slice": "verified",
+            "evaluator_payload": {
+                "instance_id": "owner__repo-1",
+                "dataset_source": "verified",
+            },
         },
     )
     harness = Mock()
@@ -274,5 +306,5 @@ def test_docker_preflight_failure_does_not_attach_swebench_harness() -> None:
                 (task,),
             )
 
-    harness.preflight.assert_called_once_with(["owner__repo-1"])
+    harness.preflight.assert_called_once_with((task,))
     assert backend.swe_harness is None

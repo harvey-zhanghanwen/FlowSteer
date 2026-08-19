@@ -1,57 +1,67 @@
-# Frozen final-evaluation slice of the official SWE-bench Verified release.
-# A result is measurable only through the pinned official Docker harness; no
-# text similarity, patch-shape heuristic, or other proxy is a formal metric.
+# Protocol-separated AIME computation-Tool Stable Zero condition.  Architecture
+# development uses the complete AIME 2025 validation population; the existing
+# AIME 2026 test condition remains a separate final-evaluation configuration.
 
 schema_version: "flowsteer.agentgraph.config.v1"
 experiment:
-  name: "swebench_verified_evaluation_round_01"
-  phase: "swebench_evaluation"
+  name: "aime2026_computation_tool_development_stable_zero"
+  phase: "aime2026_evaluation"
   training_enabled: false
-  seed: 20260819
-  condition_id: "swebench_verified_evaluation_skill_off"
-  sampling_schedule_purpose: "swebench_verified_fixed_heldout_evaluation"
-  catalog_order_namespace: "swebench_verified_round_01"
-  prompt_version: "agentgraph.director.progressive_subgraph.v1"
-  tool_version: "agentgraph.add-subgraph+swebench-official-docker-harness.v1"
-  output_dir: "artifacts/swebench_verified_round_01/final_evaluation"
+  seed: 20260818
+  condition_id: "aime2026_computation_tool_development_stable_zero"
+  sampling_schedule_purpose: "aime2025_development_computation_tool_stable_zero"
+  catalog_order_namespace: "aime2026_computation_tool_development_stable_zero"
+  prompt_version: "agentgraph.director.progressive-subgraph.stage-conditioned-skill.v3"
+  tool_version: "skillflow.training-tools.computation-react.v1"
+  output_dir: "artifacts/aime2026_computation_tool_stable_zero/development"
 
 data:
-  catalog_path: "config/datasets_swebench.yaml"
-  train_path: "data/swebench_v2/train.jsonl"
-  validation_path: "data/swebench_v2/validation.jsonl"
-  test_path: "data/swebench_v2/test.jsonl"
+  catalog_path: "config/datasets_aime2026.yaml"
+  train_path: "data/aime2026_v1/train.jsonl"
+  validation_path: "data/aime2026_v1/validation.jsonl"
+  test_path: "data/aime2026_v1/test.jsonl"
   enforce_split_isolation: true
   task_schema_version: "flowsteer.agentgraph.task.v1"
 
-swebench_evaluation:
-  dataset_key: "swe_bench"
-  stage: "evaluation"
-  split: "test"
+aime2026_evaluation:
+  dataset_key: "aime_2026"
+  stage: "development"
+  split: "validation"
+  benchmark_slice: "development_aime_2025"
   selection: "sequential"
-  sample_count: 128
+  sample_count: 30
   stable_zero_sample_count: 2
   rollouts_per_task: 1
-  concurrency: 1
+  concurrency: 4
   direct_model_id: "qwen3.5-9b-local"
-  direct_protocol: "qwen35_single_call_swebench_unified_diff_v1"
-  direct_contract: "Return only a valid unified diff patch for the repository at the specified base commit; do not wrap the patch in Markdown."
-  direct_generation_seed: 20260819
-  official_metric: "resolved_rate"
-  proxy_metrics_allowed: false
+  direct_protocol: "skillflow_protocol10_integer_submission_v1"
+  protocol_equivalent_to_direct: false
+  direct_contract: "Solve the problem and return exactly one integer inside a single <answer>...</answer> tag."
+  direct_generation_seed: 20260818
+
+aime_tool_runtime:
+  enabled: true
+  condition_id: "aime2026_computation_tool_development_stable_zero"
+  mode: "model_driven_computation"
+  dataset_scope: ["aime_2026"]
+  max_turns_per_agent_call: 6
+  max_tool_calls_per_agent_call: 4
+  calculator_timeout_seconds: 2.0
+  python_timeout_seconds: 30.0
 
 storage:
-  schema_version: "flowsteer.swebench.round.v2"
-  root: "artifacts/swebench_verified_round_01/final_evaluation/evidence"
-  selected_tasks_path: "artifacts/swebench_verified_round_01/final_evaluation/selected_tasks.jsonl"
-  direct_predictions_path: "artifacts/swebench_verified_round_01/final_evaluation/direct_predictions.jsonl"
-  trajectories_path: "artifacts/swebench_verified_round_01/final_evaluation/agentgraph_trajectories.jsonl"
-  failures_path: "artifacts/swebench_verified_round_01/final_evaluation/collection_failures.jsonl"
-  paired_results_path: "artifacts/swebench_verified_round_01/final_evaluation/paired_results.jsonl"
-  wrong_demos_path: "artifacts/swebench_verified_round_01/final_evaluation/wrong_demos.jsonl"
-  manifest_path: "artifacts/swebench_verified_round_01/final_evaluation/run_manifest.json"
-  preflight_receipt_path: "artifacts/swebench_verified_round_01/final_evaluation/preflight_receipt.json"
-  report_json_path: "reports/swebench_verified_round_01/final_evaluation_report.json"
-  report_markdown_path: "reports/swebench_verified_round_01/final_evaluation_report.md"
+  schema_version: "flowsteer.completion_benchmark.round.v1"
+  root: "artifacts/aime2026_computation_tool_stable_zero/development/evidence"
+  selected_tasks_path: "artifacts/aime2026_computation_tool_stable_zero/development/selected_tasks.jsonl"
+  direct_predictions_path: "artifacts/aime2026_computation_tool_stable_zero/development/direct_predictions.jsonl"
+  trajectories_path: "artifacts/aime2026_computation_tool_stable_zero/development/agentgraph_trajectories.jsonl"
+  failures_path: "artifacts/aime2026_computation_tool_stable_zero/development/collection_failures.jsonl"
+  paired_results_path: "artifacts/aime2026_computation_tool_stable_zero/development/paired_results.jsonl"
+  wrong_demos_path: "artifacts/aime2026_computation_tool_stable_zero/development/wrong_demos.jsonl"
+  manifest_path: "artifacts/aime2026_computation_tool_stable_zero/development/run_manifest.json"
+  preflight_receipt_path: "artifacts/aime2026_computation_tool_stable_zero/development/preflight_receipt.json"
+  report_json_path: "reports/aime2026_computation_tool_stable_zero/development_report.json"
+  report_markdown_path: "reports/aime2026_computation_tool_stable_zero/development_report.md"
 
 director:
   base_model: "${QWEN35_9B_MODEL_PATH:-/home/test/SKILLEV/skillev-new-b2-temp/model/Qwen3.5-9B-modelscope}"
@@ -59,7 +69,7 @@ director:
   backend: "sglang"
   api_base: "http://127.0.0.1:${FLOWSTEER_SUPERVISOR_PORT:-8015}/v1"
   served_model_name: "supervisor_theta"
-  behavior_policy_version: "qwen35-9b-swebench-verified-round-01-step-000000"
+  behavior_policy_version: "qwen35-9b-aime2025-computation-tool-development-step-000000"
   behavior_adapter_name: "theta_jointqa_progressive_step_000000"
   behavior_adapter_checkpoint: "artifacts/hotpotqa_multiagent_skill/policy_step_000000/theta"
   updated_policy_version: "unused-evaluation-only"
@@ -92,20 +102,13 @@ agent_graph:
   require_unique_output: true
   require_all_agents_reach_output: true
   terminal_protocol_by_source:
-    swe_bench: "none"
-  model_catalog_path: "config/model_catalog_hotpotqa_deep_v6.yaml"
+    aime_2026: "exact_single_answer_tag"
+  model_catalog_path: "config/model_catalog_multidataset_tool_v1.yaml"
 
 evaluation:
   healthbench_judge_model: ""
   max_environment_steps: 20
-  swebench_harness_enabled: true
-  swebench_evaluator_path: "/home/test/SKILLEV/skillflow-bayesian-improve-deploy/training/swe_bench_eval.py"
-  swebench_harness_path: "/ssd1/iclr/.private/skillflow-resources/SWE-bench-harness-d83"
-  swebench_dataset_source: "verified"
-  swebench_dataset_path: "/ssd1/iclr/.private/skillflow-resources/swebench-verified"
-  swebench_evaluation_root: "artifacts/swebench_verified_round_01/final_evaluation/official_harness"
-  swebench_docker_namespace: "swebench"
-  swebench_timeout_seconds: 900
+  swebench_harness_enabled: false
   invalid_evaluator_action: "persist_and_exclude"
 
 grpo:
@@ -133,7 +136,7 @@ grpo:
 policy_sync:
   enabled: false
   api_base: "http://127.0.0.1:${FLOWSTEER_SUPERVISOR_PORT:-8015}"
-  adapter_name_prefix: "theta_swebench_verified_unused_"
+  adapter_name_prefix: "theta_aime2025_tool_development_unused_"
   request_timeout_seconds: 120
   max_retries: 0
   retry_backoff_seconds: 1

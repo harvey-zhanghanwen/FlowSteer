@@ -97,6 +97,14 @@ class AIMEComputationToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(("aime_2026",), AIME_DATASET_SCOPE)
         self.assertEqual(AIME_DATASET_SCOPE, calculator.dataset_scope)
         self.assertEqual(AIME_DATASET_SCOPE, python_exec.dataset_scope)
+        self.assertEqual(("calculator",), calculator.action_names)
+        self.assertEqual(("python_exec",), python_exec.action_names)
+        self.assertEqual(
+            calculator.input_schema, calculator.action_schemas["calculator"]
+        )
+        self.assertEqual(
+            python_exec.input_schema, python_exec.action_schemas["python_exec"]
+        )
         self.assertFalse(calculator.supports_dataset("hotpotqa"))
         self.assertEqual(["expression"], calculator.input_schema["required"])
         self.assertFalse(calculator.input_schema["additionalProperties"])

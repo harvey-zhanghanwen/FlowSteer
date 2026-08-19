@@ -1,20 +1,21 @@
-# Protocol-separated two-task Stable Zero condition.  This keeps the frozen
-# held-out HealthBench Professional validation selection and evaluator-only
-# public reference judge from round 01, while exposing only frozen MedRAG
-# textbook BM25 search to Tool-enabled workflow agents.
+# Protocol-separated two-task Stable Zero rerun after the StructuredAction
+# contract was aligned with SkillFlow's exact action-name/argument-schema
+# boundary.  The public HealthBench release is used only as a fixed internal
+# validation diagnostic; this condition is not an official leaderboard
+# protocol and must not be used for test-set tuning or a SOTA claim.
 
 schema_version: "flowsteer.agentgraph.config.v1"
 experiment:
-  name: "healthbench_professional_medrag_tool_stable_zero"
+  name: "healthbench_professional_medrag_tool_stable_zero_v2"
   phase: "healthbench_evaluation"
   training_enabled: false
   seed: 20260818
-  condition_id: "healthbench_professional_medrag_tool_stable_zero"
-  sampling_schedule_purpose: "healthbench_professional_fixed_heldout_medrag_tool_stable_zero"
-  catalog_order_namespace: "healthbench_professional_medrag_tool_stable_zero"
+  condition_id: "healthbench_professional_medrag_tool_stable_zero_v2"
+  sampling_schedule_purpose: "healthbench_professional_fixed_internal_validation_medrag_tool_stable_zero_v2"
+  catalog_order_namespace: "healthbench_professional_medrag_tool_stable_zero_v2"
   prompt_version: "agentgraph.director.progressive_subgraph.v1"
-  tool_version: "skillflow.medrag-textbooks-bm25-react.v1"
-  output_dir: "artifacts/healthbench_professional_medrag_tool_stable_zero/evaluation"
+  tool_version: "skillflow.medrag-textbooks-bm25-react.exact-action-schema.v2"
+  output_dir: "artifacts/healthbench_professional_medrag_tool_stable_zero_v2/development"
 
 data:
   catalog_path: "config/datasets_agentgraph.yaml"
@@ -26,7 +27,7 @@ data:
 
 healthbench_evaluation:
   dataset_key: "healthbench_professional"
-  stage: "evaluation"
+  stage: "development"
   split: "validation"
   selection: "sequential"
   sample_count: 128
@@ -41,7 +42,7 @@ healthbench_evaluation:
 
 healthbench_tool_runtime:
   enabled: true
-  condition_id: "healthbench_professional_medrag_tool_stable_zero"
+  condition_id: "healthbench_professional_medrag_tool_stable_zero_v2"
   mode: "model_driven_medrag_search"
   dataset_scope: ["healthbench_professional"]
   resource_dir: "/ssd1/iclr/.private/skillflow-resources/medrag-textbooks-runtime"
@@ -54,17 +55,17 @@ healthbench_tool_runtime:
 
 storage:
   schema_version: "flowsteer.healthbench_professional.round.v1"
-  root: "artifacts/healthbench_professional_medrag_tool_stable_zero/evaluation/evidence"
-  selected_tasks_path: "artifacts/healthbench_professional_medrag_tool_stable_zero/evaluation/selected_tasks.jsonl"
-  direct_predictions_path: "artifacts/healthbench_professional_medrag_tool_stable_zero/evaluation/direct_predictions.jsonl"
-  trajectories_path: "artifacts/healthbench_professional_medrag_tool_stable_zero/evaluation/agentgraph_trajectories.jsonl"
-  failures_path: "artifacts/healthbench_professional_medrag_tool_stable_zero/evaluation/collection_failures.jsonl"
-  paired_results_path: "artifacts/healthbench_professional_medrag_tool_stable_zero/evaluation/paired_results.jsonl"
-  wrong_demos_path: "artifacts/healthbench_professional_medrag_tool_stable_zero/evaluation/wrong_demos.jsonl"
-  manifest_path: "artifacts/healthbench_professional_medrag_tool_stable_zero/evaluation/run_manifest.json"
-  preflight_receipt_path: "artifacts/healthbench_professional_medrag_tool_stable_zero/evaluation/preflight_receipt.json"
-  report_json_path: "reports/healthbench_professional_medrag_tool_stable_zero/evaluation_report.json"
-  report_markdown_path: "reports/healthbench_professional_medrag_tool_stable_zero/evaluation_report.md"
+  root: "artifacts/healthbench_professional_medrag_tool_stable_zero_v2/development/evidence"
+  selected_tasks_path: "artifacts/healthbench_professional_medrag_tool_stable_zero_v2/development/selected_tasks.jsonl"
+  direct_predictions_path: "artifacts/healthbench_professional_medrag_tool_stable_zero_v2/development/direct_predictions.jsonl"
+  trajectories_path: "artifacts/healthbench_professional_medrag_tool_stable_zero_v2/development/agentgraph_trajectories.jsonl"
+  failures_path: "artifacts/healthbench_professional_medrag_tool_stable_zero_v2/development/collection_failures.jsonl"
+  paired_results_path: "artifacts/healthbench_professional_medrag_tool_stable_zero_v2/development/paired_results.jsonl"
+  wrong_demos_path: "artifacts/healthbench_professional_medrag_tool_stable_zero_v2/development/wrong_demos.jsonl"
+  manifest_path: "artifacts/healthbench_professional_medrag_tool_stable_zero_v2/development/run_manifest.json"
+  preflight_receipt_path: "artifacts/healthbench_professional_medrag_tool_stable_zero_v2/development/preflight_receipt.json"
+  report_json_path: "reports/healthbench_professional_medrag_tool_stable_zero_v2/development_report.json"
+  report_markdown_path: "reports/healthbench_professional_medrag_tool_stable_zero_v2/development_report.md"
 
 director:
   base_model: "${QWEN35_9B_MODEL_PATH:-/home/test/SKILLEV/skillev-new-b2-temp/model/Qwen3.5-9B-modelscope}"
@@ -72,7 +73,7 @@ director:
   backend: "sglang"
   api_base: "http://127.0.0.1:${FLOWSTEER_SUPERVISOR_PORT:-8015}/v1"
   served_model_name: "supervisor_theta"
-  behavior_policy_version: "qwen35-9b-healthbench-medrag-tool-stable-zero-step-000000"
+  behavior_policy_version: "qwen35-9b-healthbench-medrag-tool-stable-zero-v2-step-000000"
   behavior_adapter_name: "theta_jointqa_progressive_step_000000"
   behavior_adapter_checkpoint: "artifacts/hotpotqa_multiagent_skill/policy_step_000000/theta"
   updated_policy_version: "unused-evaluation-only"
@@ -141,7 +142,7 @@ grpo:
 policy_sync:
   enabled: false
   api_base: "http://127.0.0.1:${FLOWSTEER_SUPERVISOR_PORT:-8015}"
-  adapter_name_prefix: "theta_healthbench_medrag_stable_zero_unused_"
+  adapter_name_prefix: "theta_healthbench_medrag_stable_zero_v2_unused_"
   request_timeout_seconds: 120
   max_retries: 0
   retry_backoff_seconds: 1

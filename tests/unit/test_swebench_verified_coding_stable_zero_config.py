@@ -9,9 +9,7 @@ from src.interactive.config_loader import load_model_registry, load_yaml
 
 _ROOT = Path(__file__).resolve().parents[2]
 _CONFIG = (
-    _ROOT
-    / "config"
-    / "evaluation_swebench_verified_coding_agent_stable_zero.yaml"
+    _ROOT / "config" / "evaluation_swebench_verified_coding_agent_stable_zero.yaml"
 )
 _RUNNER_PATH = _ROOT / "scripts" / "evaluate_completion_benchmark_round.py"
 _SPEC = importlib.util.spec_from_file_location(
@@ -29,6 +27,7 @@ def test_swe_coding_stable_zero_config_is_fixed_and_evaluation_only() -> None:
     _RUNNER.validate_completion_benchmark_config(config)
     bounded = config["swebench_evaluation"]
     assert bounded["dataset_key"] == "swe_bench"
+    assert bounded["stage"] == "development"
     assert bounded["split"] == "validation"
     assert bounded["selection"] == "sequential"
     assert bounded["sample_count"] == 128
@@ -37,6 +36,14 @@ def test_swe_coding_stable_zero_config_is_fixed_and_evaluation_only() -> None:
     assert bounded["concurrency"] == 1
     assert bounded["official_metric"] == "resolved_rate"
     assert bounded["proxy_metrics_allowed"] is False
+    assert config["data"] == {
+        "catalog_path": "config/datasets_swebench.yaml",
+        "train_path": "data/swebench_v2/train.jsonl",
+        "validation_path": "data/swebench_v2/validation.jsonl",
+        "test_path": "data/swebench_v2/test.jsonl",
+        "enforce_split_isolation": True,
+        "task_schema_version": "flowsteer.agentgraph.task.v1",
+    }
     assert config["experiment"]["training_enabled"] is False
     assert config["grpo"]["enabled"] is False
     assert config["grpo"]["optimization_passes_per_rollout_batch"] == 0
@@ -53,15 +60,13 @@ def test_swe_coding_agentgraph_arm_uses_the_shared_runtime_contract() -> None:
 
     assert runtime == {
         "enabled": True,
-        "condition_id": "swebench_verified_coding_agent_stable_zero",
+        "condition_id": "swebench_regular_dev_coding_agent_stable_zero",
         "mode": "iterative_repository_coding",
         "dataset_scope": ["swe_bench"],
         "repository_store": (
             "/ssd1/iclr/.private/skillflow-resources/swe-repositories"
         ),
-        "worktree_root": (
-            "/ssd1/iclr/.private/skillflow-resources/swe-worktrees"
-        ),
+        "worktree_root": ("/ssd1/iclr/.private/skillflow-resources/swe-worktrees"),
         "max_turns_per_agent_call": 6,
         "max_tool_calls_per_agent_call": 6,
         "max_test_timeout_seconds": 60.0,
@@ -71,12 +76,8 @@ def test_swe_coding_agentgraph_arm_uses_the_shared_runtime_contract() -> None:
     assert config["agent_graph"]["model_catalog_path"] == (
         "config/model_catalog_multidataset_tool_v1.yaml"
     )
-    registry = load_model_registry(
-        _ROOT / config["agent_graph"]["model_catalog_path"]
-    )
-    assert registry.require_model("qwen3.5-9b-local").model_id == (
-        "qwen3.5-9b-local"
-    )
+    registry = load_model_registry(_ROOT / config["agent_graph"]["model_catalog_path"])
+    assert registry.require_model("qwen3.5-9b-local").model_id == ("qwen3.5-9b-local")
 
 
 def test_direct_arm_is_the_supported_single_coding_agent_baseline() -> None:
@@ -116,9 +117,8 @@ def test_swe_coding_stable_zero_uses_only_the_official_resolved_metric() -> None
     assert evaluation["swebench_harness_path"] == (
         "/ssd1/iclr/.private/skillflow-resources/SWE-bench-harness-d83"
     )
-    assert evaluation["swebench_verified_path"] == (
-        "/ssd1/iclr/.private/skillflow-resources/swebench-verified"
-    )
+    assert evaluation["swebench_dataset_source"] == "regular_dev"
+    assert evaluation["swebench_dataset_path"] == "data/swebench_v2/validation.jsonl"
     assert evaluation["swebench_docker_namespace"] == "swebench"
     assert evaluation["swebench_timeout_seconds"] == 900
     assert _RUNNER._BENCHMARKS["swe_bench"]["metric_names"] == ("resolved",)

@@ -383,20 +383,59 @@ def create_swebench_repository_registration(
         repo_root,
         max_test_timeout_seconds=timeout_seconds,
     )
+    action_schemas = {
+        "list_files": {
+            "type": "object",
+            "properties": {"file_pattern": {"type": "string"}},
+        },
+        "search_code": {
+            "type": "object",
+            "required": ["query"],
+            "properties": {
+                "query": {"type": "string", "minLength": 1},
+                "file_pattern": {"type": "string"},
+            },
+        },
+        "view_file": {
+            "type": "object",
+            "required": ["path"],
+            "properties": {
+                "path": {"type": "string", "minLength": 1},
+                "start_line": {"type": "integer"},
+                "end_line": {"type": "integer"},
+            },
+        },
+        "exact_edit": {
+            "type": "object",
+            "required": ["path", "old_str", "new_str"],
+            "properties": {
+                "path": {"type": "string", "minLength": 1},
+                "old_str": {"type": "string", "minLength": 1},
+                "new_str": {"type": "string"},
+            },
+        },
+        "diff": {"type": "object", "properties": {}},
+        "run_tests": {
+            "type": "object",
+            "required": ["command"],
+            "properties": {
+                "command": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {"type": "string", "minLength": 1},
+                },
+                "timeout_seconds": {
+                    "type": "number",
+                    "exclusiveMinimum": 0,
+                },
+            },
+        },
+    }
     capability = ToolCapability(
         tool_id=tool_id,
         dataset_scope=dataset_scope,
-        input_schema={
-            "type": "object",
-            "actions": [
-                "list_files",
-                "search_code",
-                "view_file",
-                "exact_edit",
-                "diff",
-                "run_tests",
-            ],
-        },
+        action_schemas=action_schemas,
+        input_schema={"type": "object"},
         output_schema={"type": "object"},
         side_effect="repository_read_write_and_test_process",
         timeout_seconds=timeout_seconds,

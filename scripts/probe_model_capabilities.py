@@ -226,6 +226,7 @@ def _build_request(
     provider: ProviderSpec,
     definition: Mapping[str, object],
     request_index: int,
+    chat_template_enable_thinking: Optional[bool] = None,
 ) -> AgentRequest:
     execution_mode = definition["execution_mode"]
     if not isinstance(execution_mode, AgentExecutionMode):
@@ -233,11 +234,16 @@ def _build_request(
     allowed_tools = definition["allowed_tools"]
     if not isinstance(allowed_tools, tuple):
         raise TypeError("probe allowed_tools are incompatible")
+    model_metadata = {"max_tokens": "256"}
+    if chat_template_enable_thinking is not None:
+        model_metadata["chat_template_enable_thinking"] = (
+            "true" if chat_template_enable_thinking else "false"
+        )
     model = ModelSpec(
         model_id=model_id,
         provider_id=provider.provider_id,
         model_name=model_id,
-        metadata={"max_tokens": "256"},
+        metadata=model_metadata,
     )
     return AgentRequest(
         request_id=f"capability-canary-{request_index:04d}",
@@ -277,6 +283,9 @@ def _request_receipt(request: AgentRequest) -> dict[str, object]:
             "top_p": 1.0,
             "max_tokens": 256,
             "seed": 20260820,
+            "chat_template_enable_thinking": request.model.metadata.get(
+                "chat_template_enable_thinking"
+            ),
         },
     }
 
@@ -422,6 +431,7 @@ async def run_probe_matrix(
     timeout: float,
     concurrency: int,
     gateway: Optional[object] = None,
+    chat_template_enable_thinking: Optional[bool] = None,
 ) -> list[dict[str, object]]:
     """Run exactly three independent, no-fallback probes per selected ID."""
 
@@ -453,6 +463,7 @@ async def run_probe_matrix(
                 provider=provider,
                 definition=definition,
                 request_index=request_index,
+                chat_template_enable_thinking=chat_template_enable_thinking,
             )
             tasks.append(
                 _run_probe(
@@ -477,6 +488,7 @@ async def audit_model_capabilities(
     concurrency: int,
     fetcher: ModelFetcher = fetch_models_with_receipt,
     gateway: Optional[object] = None,
+    chat_template_enable_thinking: Optional[bool] = None,
 ) -> dict[str, object]:
     """Discover first, then list, plan, or probe exact discovered IDs."""
 
@@ -509,6 +521,7 @@ async def audit_model_capabilities(
             timeout=timeout,
             concurrency=concurrency,
             gateway=gateway,
+            chat_template_enable_thinking=chat_template_enable_thinking,
         )
 
     passed = sum(item.get("status") == "passed" for item in probes)
@@ -588,6 +601,15 @@ def main() -> int:
     parser.add_argument("--timeout", type=float, default=30.0)
     parser.add_argument("--concurrency", type=int, default=1)
     parser.add_argument(
+        "--chat-template-enable-thinking",
+        choices=("true", "false"),
+        default=None,
+        help=(
+            "optional Qwen chat-template setting; use the same value as the "
+            "frozen model catalog"
+        ),
+    )
+    parser.add_argument(
         "--output",
         default=str(DEFAULT_OUTPUT),
         help="non-secret discovery/probe receipt path",
@@ -609,6 +631,11 @@ def main() -> int:
                 mode=selected_mode,
                 timeout=args.timeout,
                 concurrency=args.concurrency,
+                chat_template_enable_thinking=(
+                    args.chat_template_enable_thinking == "true"
+                    if args.chat_template_enable_thinking is not None
+                    else None
+                ),
             )
         )
     except ModelSelectionError as exc:

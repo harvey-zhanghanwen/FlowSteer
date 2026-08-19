@@ -170,10 +170,14 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
         capability = runtime.tool_registry.require_capability(runtime.tool_id)
         self.assertTrue(capability.availability)
         self.assertEqual(("alfworld",), capability.dataset_scope)
+        self.assertEqual({}, dict(capability.action_schemas))
+        self.assertEqual((), capability.action_names)
         receipts = response.metadata["environment_receipts"]
         self.assertEqual([1, 2], [item["environment_revision_after"] for item in receipts])
         self.assertEqual("room one", receipts[0]["next_observation"])
         self.assertIn("room one", gateway.requests[1].problem)
+        self.assertEqual("512", gateway.requests[0].model.metadata["max_tokens"])
+        self.assertEqual("512", gateway.requests[1].model.metadata["max_tokens"])
         self.assertEqual("reasoning", gateway.requests[0].agent.execution_mode.value)
         # Reward and the official success predicate remain evaluator-only.
         self.assertNotIn("reward", receipts[0])

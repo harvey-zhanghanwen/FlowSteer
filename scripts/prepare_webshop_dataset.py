@@ -2,9 +2,11 @@
 """Prepare official live WebShop goals for the AgentGraph task contract.
 
 The goal inventory comes from the deployed SkillFlow ``RAGENAdapter`` and its
-live ``server.goals`` list.  Record construction, held-out-first sampling, and
+live ``server.goals`` list.  Record construction, training-only cycling, and
 atomic split publication are delegated to ``prepare_agentgraph_datasets.py``
 so preparation and evaluation use one environment and one record protocol.
+Native WebShop partitions remain test ``[0, 500)``, validation ``[500, 1500)``,
+and train ``[1500, N)``.
 
 This command prepares JSONL only.  It never starts a model service, calls an
 API, or performs training.
@@ -31,6 +33,11 @@ DEFAULT_RAGEN_ADAPTER_PATH = Path(
 )
 HELDOUT_COUNT = 128
 TRAIN_COUNT = 512
+NATIVE_SPLIT_RANGES = {
+    "test": (0, 500),
+    "validation": (500, 1500),
+    "train": (1500, None),
+}
 
 
 def _load_python_module(name: str, path: Path) -> Any:
@@ -111,6 +118,41 @@ def _alignment_recipe(catalog: Mapping[str, Any]) -> Mapping[str, Any]:
             + json.dumps(mismatches, sort_keys=True)
         )
     return recipe
+
+
+def _native_split_ranges(
+    source: Mapping[str, Any],
+) -> Mapping[str, tuple[int, int | None]]:
+    """Require the three upstream WebShop human-goal ranges exactly."""
+
+    configured = source.get("native_split_ranges")
+    if not isinstance(configured, Mapping):
+        raise ValueError(
+            "catalog.sources.webshop.native_split_ranges must be a mapping"
+        )
+    normalized: dict[str, tuple[int, int | None]] = {}
+    for split, expected in NATIVE_SPLIT_RANGES.items():
+        value = configured.get(split)
+        if not isinstance(value, list) or len(value) != 2:
+            raise ValueError(
+                f"WebShop native_split_ranges.{split} must be a two-item list"
+            )
+        start, stop = value
+        if type(start) is not int or (
+            stop is not None and type(stop) is not int
+        ):
+            raise ValueError(
+                f"WebShop native_split_ranges.{split} has invalid bounds"
+            )
+        normalized[split] = (start, stop)
+        if normalized[split] != expected:
+            raise ValueError(
+                "WebShop native goal ranges must remain "
+                "test=[0,500), validation=[500,1500), train=[1500,N)"
+            )
+    if set(configured) != set(NATIVE_SPLIT_RANGES):
+        raise ValueError("WebShop native_split_ranges contains unknown splits")
+    return normalized
 
 
 def _environment_config(source: Mapping[str, Any], *, base: Path) -> dict[str, Any]:
@@ -255,12 +297,25 @@ def _candidate_records(
     goals: Iterable[Mapping[str, Any]],
     source: Mapping[str, Any],
     env_config: Mapping[str, Any],
+    native_ranges: Mapping[str, tuple[int, int | None]],
 ) -> Iterable[dict[str, Any]]:
     display_name = str(source.get("display_name", "WebShop"))
     task_type = str(source.get("task_type", "interactive_agent"))
     metric = str(source.get("metric", "success_rate"))
     env_seed = int(env_config["env_seed"])
     for goal_index, goal in enumerate(goals):
+        native_split = next(
+            (
+                split
+                for split, (start, stop) in native_ranges.items()
+                if goal_index >= start and (stop is None or goal_index < stop)
+            ),
+            None,
+        )
+        if native_split is None:
+            raise ValueError(
+                f"WebShop goal_index={goal_index} is outside native partitions"
+            )
         instruction = str(goal["instruction_text"])
         record_env_config = dict(env_config)
         record_env_config["goal_index"] = goal_index
@@ -269,6 +324,7 @@ def _candidate_records(
             "instruction_text": instruction,
             "goal_index": goal_index,
             "env_seed": env_seed,
+            "native_split": native_split,
         }
         category = goal.get("category")
         if isinstance(category, str) and category.strip():
@@ -279,7 +335,7 @@ def _candidate_records(
             task_id=f"webshop:{goal_index:05d}",
             question=instruction,
             ground_truth="environment_success",
-            split="train",
+            split=native_split,
             task_type=task_type,
             metric=metric,
             env_type="webshop",
@@ -294,12 +350,74 @@ def _candidate_records(
         yield record
 
 
+def _goal_indices(records: Iterable[Mapping[str, Any]]) -> set[int]:
+    indices: set[int] = set()
+    for record in records:
+        config = record.get("env_config")
+        if (
+            not isinstance(config, Mapping)
+            or type(config.get("goal_index")) is not int
+        ):
+            raise ValueError("WebShop record has no integer goal_index")
+        indices.add(int(config["goal_index"]))
+    return indices
+
+
+def _assert_native_split_isolation(
+    *,
+    test: Iterable[Mapping[str, Any]],
+    validation: Iterable[Mapping[str, Any]],
+    train: Iterable[Mapping[str, Any]],
+) -> None:
+    """Fail closed on native-range drift or cross-partition goal reuse."""
+
+    materialized = {
+        "test": tuple(test),
+        "validation": tuple(validation),
+        "train": tuple(train),
+    }
+    expected_counts = {
+        "test": 500,
+        "validation": HELDOUT_COUNT,
+        "train": TRAIN_COUNT,
+    }
+    for split, expected_count in expected_counts.items():
+        if len(materialized[split]) != expected_count:
+            raise ValueError(
+                f"WebShop project {split} must contain exactly "
+                f"{expected_count} records"
+            )
+    by_split = {
+        split: _goal_indices(records)
+        for split, records in materialized.items()
+    }
+    if by_split["test"] != set(range(0, 500)):
+        raise ValueError("WebShop project test must preserve native goals [0,500)")
+    if by_split["validation"] != set(range(500, 628)):
+        raise ValueError(
+            "WebShop project validation must be native goals [500,628)"
+        )
+    if not by_split["train"] or any(
+        index < 1500 for index in by_split["train"]
+    ):
+        raise ValueError("WebShop project train must use only native train goals")
+    for left, right in (
+        ("test", "validation"),
+        ("test", "train"),
+        ("validation", "train"),
+    ):
+        if by_split[left] & by_split[right]:
+            raise ValueError(
+                f"WebShop native goal overlap between {left} and {right}"
+            )
+
+
 def prepare(
     catalog_path: Path,
     *,
     goal_provider: GoalProvider | None = None,
 ) -> Path:
-    """Publish deterministic validation/train records from live goal order."""
+    """Publish deterministic native test/validation/train records."""
 
     catalog_path = catalog_path.expanduser().resolve()
     with catalog_path.open("r", encoding="utf-8") as handle:
@@ -310,6 +428,7 @@ def prepare(
         raise ValueError("unsupported dataset catalog schema")
     recipe = _alignment_recipe(catalog)
     source = _source_config(catalog)
+    native_ranges = _native_split_ranges(source)
     repo_root = catalog_path.parent.parent
     env_config = _environment_config(source, base=repo_root)
     raw_goals = (
@@ -318,16 +437,49 @@ def prepare(
         else _default_goal_provider(source, env_config, base=repo_root)
     )
     goals = _validated_goals(raw_goals)
+    candidates = tuple(
+        _candidate_records(goals, source, env_config, native_ranges)
+    )
+    test_start, test_stop = native_ranges["test"]
+    validation_start, validation_stop = native_ranges["validation"]
+    train_start, _ = native_ranges["train"]
+    assert test_stop is not None and validation_stop is not None
+    if len(candidates) < validation_stop:
+        raise ValueError(
+            "WebShop live goal inventory does not contain the complete native "
+            "test and validation ranges"
+        )
+    if len(candidates) <= train_start:
+        raise ValueError("WebShop live goal inventory has no native train goal")
+    test_base = candidates[test_start:test_stop]
+    validation_base = candidates[validation_start:validation_stop]
+    train_base = candidates[train_start:]
+    # Only the fixed development prefix and disjoint native training
+    # population enter the shared sampler.  Unused validation goals can never
+    # become training candidates.
     heldout, train, unique_train_count = _SHARED._uniform_sample(
-        _candidate_records(goals, source, env_config),
+        (*validation_base[:HELDOUT_COUNT], *train_base),
         heldout_split="validation",
         heldout_count=HELDOUT_COUNT,
         train_count=TRAIN_COUNT,
     )
+    test = [
+        _SHARED._retag_record(
+            record,
+            split="test",
+            selection_index=index,
+        )
+        for index, record in enumerate(test_base)
+    ]
+    _assert_native_split_isolation(
+        test=test,
+        validation=heldout,
+        train=train,
+    )
 
     output_dir = _expanded_path(catalog.get("aligned_dir"), base=repo_root)
     writers = _SHARED.SplitWriters(output_dir)
-    for record in (*heldout, *train):
+    for record in (*test, *heldout, *train):
         writers.write(record)
 
     counts_by_split = {
@@ -352,6 +504,14 @@ def prepare(
         "sources": {
             "webshop": {
                 "live_goal_count": len(goals),
+                "native_split_ranges": {
+                    "test": [0, 500],
+                    "validation": [500, 1500],
+                    "train": [1500, None],
+                },
+                "native_test_count": len(test_base),
+                "native_validation_count": len(validation_base),
+                "native_train_count": len(train_base),
                 "heldout_split": "validation",
                 "heldout_count": len(heldout),
                 "train_count": len(train),

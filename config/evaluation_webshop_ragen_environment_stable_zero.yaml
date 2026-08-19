@@ -1,32 +1,32 @@
-# Protocol-separated WebShop Stable Zero condition.  It preserves the frozen
-# Round04 held-out selection and native RAGEN success evaluator while enabling
-# one task-scoped model-driven environment episode through the deployed
-# SkillFlow RAGENAdapter.
+# Protocol-equivalent WebShop Stable Zero condition over the native validation
+# partition.  Goals 0--499 remain final-test-only; this development condition
+# freezes goals 500--627 and uses the same RAGEN environment/evaluator in the
+# Direct and AgentGraph arms.
 
 schema_version: "flowsteer.agentgraph.config.v1"
 experiment:
-  name: "webshop_ragen_environment_native_action_v2_stable_zero"
+  name: "webshop_ragen_environment_native_action_v4_stable_zero"
   phase: "webshop_evaluation"
   training_enabled: false
   seed: 20260819
-  condition_id: "webshop_ragen_environment_native_action_v2_stable_zero"
-  sampling_schedule_purpose: "webshop_fixed_heldout_ragen_environment_stable_zero"
-  catalog_order_namespace: "webshop_ragen_environment_stable_zero"
+  condition_id: "webshop_ragen_environment_native_action_v4_stable_zero"
+  sampling_schedule_purpose: "webshop_native_validation_ragen_environment_stable_zero_v4"
+  catalog_order_namespace: "webshop_ragen_environment_stable_zero_v4"
   prompt_version: "agentgraph.director.progressive_subgraph.v1"
-  tool_version: "skillflow.ragen-environment-react.native-action.v2"
-  output_dir: "artifacts/webshop_ragen_environment_native_action_v2_stable_zero/evaluation"
+  tool_version: "skillflow.ragen-environment-react.native-validation.v4"
+  output_dir: "artifacts/webshop_ragen_environment_native_action_v4_stable_zero/development"
 
 data:
   catalog_path: "config/datasets_webshop.yaml"
-  train_path: "data/webshop_v2/train.jsonl"
-  validation_path: "data/webshop_v2/validation.jsonl"
-  test_path: "data/webshop_v2/test.jsonl"
+  train_path: "data/webshop_v3/train.jsonl"
+  validation_path: "data/webshop_v3/validation.jsonl"
+  test_path: "data/webshop_v3/test.jsonl"
   enforce_split_isolation: true
   task_schema_version: "flowsteer.agentgraph.task.v1"
 
 webshop_evaluation:
   dataset_key: "webshop"
-  stage: "evaluation"
+  stage: "development"
   split: "validation"
   selection: "sequential"
   sample_count: 128
@@ -41,27 +41,30 @@ webshop_evaluation:
 
 environment_runtime:
   enabled: true
-  condition_id: "webshop_ragen_environment_native_action_v2_stable_zero"
+  condition_id: "webshop_ragen_environment_native_action_v4_stable_zero"
   mode: "model_driven_ragen_react"
   dataset_scope: ["webshop"]
   ragen_adapter_path: "/home/test/SKILLEV/skillflow-bayesian-improve-deploy/src/ragen_adapter.py"
   tool_timeout_seconds: 30.0
+  # SkillFlow RolloutDecoding.max_action_tokens adapted to the 8K local
+  # Qwen context; an environment turn emits only one native action.
+  max_action_tokens: 256
   max_environment_steps_by_source:
     webshop: 10
 
 storage:
   schema_version: "flowsteer.webshop.round.v4"
-  root: "artifacts/webshop_ragen_environment_native_action_v2_stable_zero/evaluation/evidence"
-  selected_tasks_path: "artifacts/webshop_ragen_environment_native_action_v2_stable_zero/evaluation/selected_tasks.jsonl"
-  direct_predictions_path: "artifacts/webshop_ragen_environment_native_action_v2_stable_zero/evaluation/direct_predictions.jsonl"
-  trajectories_path: "artifacts/webshop_ragen_environment_native_action_v2_stable_zero/evaluation/agentgraph_trajectories.jsonl"
-  failures_path: "artifacts/webshop_ragen_environment_native_action_v2_stable_zero/evaluation/collection_failures.jsonl"
-  paired_results_path: "artifacts/webshop_ragen_environment_native_action_v2_stable_zero/evaluation/paired_results.jsonl"
-  wrong_demos_path: "artifacts/webshop_ragen_environment_native_action_v2_stable_zero/evaluation/wrong_demos.jsonl"
-  manifest_path: "artifacts/webshop_ragen_environment_native_action_v2_stable_zero/evaluation/run_manifest.json"
-  preflight_receipt_path: "artifacts/webshop_ragen_environment_native_action_v2_stable_zero/evaluation/preflight_receipt.json"
-  report_json_path: "reports/webshop_ragen_environment_native_action_v2_stable_zero/evaluation_report.json"
-  report_markdown_path: "reports/webshop_ragen_environment_native_action_v2_stable_zero/evaluation_report.md"
+  root: "artifacts/webshop_ragen_environment_native_action_v4_stable_zero/development/evidence"
+  selected_tasks_path: "artifacts/webshop_ragen_environment_native_action_v4_stable_zero/development/selected_tasks.jsonl"
+  direct_predictions_path: "artifacts/webshop_ragen_environment_native_action_v4_stable_zero/development/direct_predictions.jsonl"
+  trajectories_path: "artifacts/webshop_ragen_environment_native_action_v4_stable_zero/development/agentgraph_trajectories.jsonl"
+  failures_path: "artifacts/webshop_ragen_environment_native_action_v4_stable_zero/development/collection_failures.jsonl"
+  paired_results_path: "artifacts/webshop_ragen_environment_native_action_v4_stable_zero/development/paired_results.jsonl"
+  wrong_demos_path: "artifacts/webshop_ragen_environment_native_action_v4_stable_zero/development/wrong_demos.jsonl"
+  manifest_path: "artifacts/webshop_ragen_environment_native_action_v4_stable_zero/development/run_manifest.json"
+  preflight_receipt_path: "artifacts/webshop_ragen_environment_native_action_v4_stable_zero/development/preflight_receipt.json"
+  report_json_path: "reports/webshop_ragen_environment_native_action_v4_stable_zero/development_report.json"
+  report_markdown_path: "reports/webshop_ragen_environment_native_action_v4_stable_zero/development_report.md"
 
 director:
   base_model: "${QWEN35_9B_MODEL_PATH:-/home/test/SKILLEV/skillev-new-b2-temp/model/Qwen3.5-9B-modelscope}"
@@ -69,7 +72,7 @@ director:
   backend: "sglang"
   api_base: "http://127.0.0.1:${FLOWSTEER_SUPERVISOR_PORT:-8015}/v1"
   served_model_name: "supervisor_theta"
-  behavior_policy_version: "qwen35-9b-webshop-ragen-environment-stable-zero-step-000000"
+  behavior_policy_version: "qwen35-9b-webshop-ragen-environment-v4-stable-zero-step-000000"
   behavior_adapter_name: "theta_jointqa_progressive_step_000000"
   behavior_adapter_checkpoint: "artifacts/hotpotqa_multiagent_skill/policy_step_000000/theta"
   updated_policy_version: "unused-evaluation-only"
@@ -138,7 +141,7 @@ grpo:
 policy_sync:
   enabled: false
   api_base: "http://127.0.0.1:${FLOWSTEER_SUPERVISOR_PORT:-8015}"
-  adapter_name_prefix: "theta_webshop_ragen_environment_stable_zero_unused_"
+  adapter_name_prefix: "theta_webshop_ragen_environment_v4_stable_zero_unused_"
   request_timeout_seconds: 120
   max_retries: 0
   retry_backoff_seconds: 1

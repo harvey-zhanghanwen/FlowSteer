@@ -359,6 +359,9 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("not a fixed Operator type", DIRECTOR_SYSTEM_PROMPT)
         self.assertIn("does not solve the task", DIRECTOR_SYSTEM_PROMPT)
+        self.assertIn("top level of add_subgraph", DIRECTOR_SYSTEM_PROMPT)
+        self.assertIn("exact tool_id from tool_catalog", DIRECTOR_SYSTEM_PROMPT)
+        self.assertIn("action_names are Executor actions", DIRECTOR_SYSTEM_PROMPT)
         self.assertIn("bidirectional relation is one bounded two-Agent exchange", DIRECTOR_SYSTEM_PROMPT)
         self.assertIn(
             "Do not assume a fixed workflow topology or an unlisted Skill",

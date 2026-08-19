@@ -1179,6 +1179,7 @@ class EnvironmentRuntimeWiringTests(unittest.TestCase):
                 "dataset_scope": [source],
                 "ragen_adapter_path": "vendor/SkillFlow/src/ragen_adapter.py",
                 "tool_timeout_seconds": 9.0,
+                "max_action_tokens": 256,
                 "max_environment_steps_by_source": {
                     source: runtime_budget,
                 },
@@ -1285,6 +1286,7 @@ class EnvironmentRuntimeWiringTests(unittest.TestCase):
             session_factory=session_factory,
             task_family="webshop",
             max_turns=3,
+            max_action_tokens=256,
             timeout_seconds=9.0,
         )
         self.assertIs(shared_registry, runtime.tool_registry)

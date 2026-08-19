@@ -54,6 +54,7 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
         capability = ToolCapability(
             tool_id=tool_id,
             dataset_scope=("webshop",),
+            action_schemas={"step": {"type": "object"}},
             input_schema={"type": "object"},
             output_schema={"type": "object"},
             side_effect="environment_state_transition",

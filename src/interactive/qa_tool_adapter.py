@@ -250,18 +250,20 @@ def build_qa_tool_registry(
             "retrieval_backend": {"type": "string"},
         },
     }
+    search_input_schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["query", "limit"],
+        "properties": {
+            "query": {"type": "string", "minLength": 1},
+            "limit": {"type": "integer", "minimum": 1},
+        },
+    }
     search_capability = ToolCapability(
         tool_id=QA_RETRIEVAL_SEARCH_TOOL_ID,
         dataset_scope=scope,
-        input_schema={
-            "type": "object",
-            "additionalProperties": False,
-            "required": ["query", "limit"],
-            "properties": {
-                "query": {"type": "string", "minLength": 1},
-                "limit": {"type": "integer", "minimum": 1},
-            },
-        },
+        action_schemas={"search": search_input_schema},
+        input_schema=search_input_schema,
         output_schema={
             "type": "object",
             "additionalProperties": False,
@@ -286,17 +288,19 @@ def build_qa_tool_registry(
         timeout_seconds=timeout_seconds,
         version=version,
     )
+    read_input_schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["passage_id"],
+        "properties": {
+            "passage_id": {"type": "string", "minLength": 1},
+        },
+    }
     read_capability = ToolCapability(
         tool_id=QA_RETRIEVAL_READ_TOOL_ID,
         dataset_scope=scope,
-        input_schema={
-            "type": "object",
-            "additionalProperties": False,
-            "required": ["passage_id"],
-            "properties": {
-                "passage_id": {"type": "string", "minLength": 1},
-            },
-        },
+        action_schemas={"read": read_input_schema},
+        input_schema=read_input_schema,
         output_schema={
             "type": "object",
             "additionalProperties": False,

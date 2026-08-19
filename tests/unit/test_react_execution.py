@@ -52,6 +52,13 @@ def registry() -> ToolRegistry:
                 ToolCapability(
                     tool_id="wiki.search",
                     dataset_scope=("triviaqa",),
+                    action_schemas={
+                        "search": {
+                            "type": "object",
+                            "required": ["query"],
+                            "properties": {"query": {"type": "string"}},
+                        }
+                    },
                     input_schema={"type": "object"},
                     output_schema={"type": "object"},
                     side_effect="none",
@@ -95,6 +102,37 @@ class SequenceGateway:
 
 
 class ToolReactExecutionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_fixed_action_adapter_rejects_dynamic_native_capability(self) -> None:
+        gateway = SequenceGateway([])
+        dynamic_registry = ToolRegistry(
+            (
+                ToolRegistration(
+                    "wiki.search",
+                    FakeTool({}),
+                    ToolCapability(
+                        tool_id="wiki.search",
+                        dataset_scope=("triviaqa",),
+                        action_schemas={},
+                        input_schema={"type": "object"},
+                        output_schema={"type": "object"},
+                        side_effect="environment_state_transition",
+                        timeout_seconds=1.0,
+                        version="dynamic-test-v1",
+                    ),
+                ),
+            )
+        )
+        adapter = ToolReactExecutionAdapter(
+            gateway=gateway,
+            tool_registry=dynamic_registry,
+            max_turns=1,
+            max_tool_calls=1,
+        )
+
+        with self.assertRaisesRegex(ReactExecutionError, "fixed action schemas"):
+            await adapter.execute(request())
+        self.assertEqual([], gateway.requests)
+
     async def test_parse_error_tool_observation_and_explicit_completion(self) -> None:
         gateway = SequenceGateway(
             [
@@ -118,6 +156,7 @@ class ToolReactExecutionTests(unittest.IsolatedAsyncioTestCase):
             tool_registry=registry(),
             max_turns=4,
             max_tool_calls=2,
+            max_action_tokens=256,
         )
 
         response = await adapter.execute(request())
@@ -131,7 +170,56 @@ class ToolReactExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             "wiki.search", response.metadata["tool_receipts"][0]["tool_id"]
         )
+        self.assertIn('"name":"search"', gateway.requests[0].agent.contract)
+        self.assertIn('"required":["query"]', gateway.requests[0].agent.contract)
+        self.assertNotIn('"name":"tool action"', gateway.requests[0].agent.contract)
         self.assertIn("passage_ids", gateway.requests[2].agent.contract)
+        self.assertIn("executed_action", gateway.requests[2].agent.contract)
+        self.assertEqual("256", gateway.requests[0].model.metadata["max_tokens"])
+
+    async def test_unregistered_action_name_is_rejected_before_backend(self) -> None:
+        gateway = SequenceGateway(
+            [
+                action(
+                    "tool",
+                    name="tool action",
+                    arguments={"query": "wrong action name"},
+                    resource_id="wiki.search",
+                ),
+                action(
+                    "tool",
+                    name="search",
+                    arguments={"query": "Ada Lovelace"},
+                    resource_id="wiki.search",
+                ),
+                action(
+                    "complete",
+                    name="complete",
+                    arguments={"value": "Ada Lovelace"},
+                    resource_id=None,
+                ),
+            ]
+        )
+        adapter = ToolReactExecutionAdapter(
+            gateway=gateway,
+            tool_registry=registry(),
+            max_turns=3,
+            max_tool_calls=2,
+        )
+
+        response = await adapter.execute(request())
+
+        self.assertEqual("Ada Lovelace", response.text)
+        self.assertEqual(1, response.metadata["tool_calls"])
+        self.assertEqual(1, len(response.metadata["tool_receipts"]))
+        self.assertEqual(
+            "tool_action_not_registered",
+            response.metadata["react_trace"][0]["public_error_code"],
+        )
+        self.assertEqual(
+            ["search"],
+            response.metadata["react_trace"][0]["allowed_action_names"],
+        )
 
     async def test_turn_budget_requires_explicit_completion(self) -> None:
         gateway = SequenceGateway(
@@ -150,8 +238,14 @@ class ToolReactExecutionTests(unittest.IsolatedAsyncioTestCase):
             max_turns=1,
             max_tool_calls=1,
         )
-        with self.assertRaisesRegex(ReactExecutionError, "exhausted"):
+        with self.assertRaisesRegex(ReactExecutionError, "exhausted") as raised:
             await adapter.execute(request())
+        self.assertEqual(1, len(raised.exception.react_trace))
+        self.assertEqual(1, len(raised.exception.tool_receipts))
+        self.assertEqual(1, len(raised.exception.model_calls))
+        self.assertEqual(
+            "wiki.search", raised.exception.tool_receipts[0]["tool_id"]
+        )
 
 
 if __name__ == "__main__":

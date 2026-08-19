@@ -302,17 +302,19 @@ def build_healthbench_medrag_tool_registry(
             "retrieval_backend": {"const": "bm25"},
         },
     }
+    search_input_schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["query"],
+        "properties": {
+            "query": {"type": "string", "minLength": 1},
+        },
+    }
     capability = ToolCapability(
         tool_id=HEALTHBENCH_MEDRAG_SEARCH_TOOL_ID,
         dataset_scope=HEALTHBENCH_PROFESSIONAL_DATASET_SCOPE,
-        input_schema={
-            "type": "object",
-            "additionalProperties": False,
-            "required": ["query"],
-            "properties": {
-                "query": {"type": "string", "minLength": 1},
-            },
-        },
+        action_schemas={"search": search_input_schema},
+        input_schema=search_input_schema,
         output_schema={
             "type": "object",
             "additionalProperties": False,

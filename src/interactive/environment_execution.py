@@ -462,6 +462,7 @@ class EnvironmentExecutionAdapter:
         tool_registry: ToolRegistry,
         environment_backend: EnvironmentToolBackend,
         max_turns: int,
+        max_action_tokens: int = 512,
     ) -> None:
         if not hasattr(gateway, "generate"):
             raise TypeError("gateway must implement generate")
@@ -471,6 +472,8 @@ class EnvironmentExecutionAdapter:
             raise TypeError("environment_backend must be an EnvironmentToolBackend")
         if type(max_turns) is not int or max_turns < 1:
             raise ValueError("max_turns must be a positive integer")
+        if type(max_action_tokens) is not int or max_action_tokens < 1:
+            raise ValueError("max_action_tokens must be a positive integer")
         if environment_backend.tool_id not in tool_registry.resource_ids:
             raise ValueError("environment backend tool is absent from ToolRegistry")
         capability = tool_registry.require_capability(environment_backend.tool_id)
@@ -483,6 +486,11 @@ class EnvironmentExecutionAdapter:
         self._environment_backend = environment_backend
         self._tool_id = environment_backend.tool_id
         self._max_turns = max_turns
+        # SkillFlow carries this bound as RolloutDecoding.max_action_tokens.
+        # Native environment turns return one short action, so retaining the
+        # generic Executor completion budget can make input+output exceed the
+        # local Qwen context window after several long WebShop observations.
+        self._max_action_tokens = max_action_tokens
 
     async def execute(self, request: AgentRequest) -> GatewayResponse:
         if request.agent.allowed_tools != (self._tool_id,):
@@ -549,6 +557,13 @@ class EnvironmentExecutionAdapter:
                             "The response parses as one currently admissible native "
                             "environment action."
                         ),
+                    ),
+                    model=replace(
+                        request.model,
+                        metadata={
+                            **dict(request.model.metadata),
+                            "max_tokens": str(self._max_action_tokens),
+                        },
                     ),
                 )
                 generated = await self._gateway.generate(model_request)
@@ -705,6 +720,7 @@ def build_environment_execution_resources(
     session_factory: EnvironmentSessionFactory,
     task_family: str,
     max_turns: int,
+    max_action_tokens: int = 512,
     tool_version: str = "skillflow.ragen_adapter.v2",
     timeout_seconds: Optional[float] = None,
 ) -> EnvironmentExecutionResources:
@@ -735,6 +751,9 @@ def build_environment_execution_resources(
     capability = ToolCapability(
         tool_id=tool_id,
         dataset_scope=(family,),
+        # The executable domain is the live session's admissible native
+        # actions, not a fixed StructuredAction name catalog.
+        action_schemas={},
         input_schema={
             "action": {
                 "type": "string",
@@ -764,6 +783,7 @@ def build_environment_execution_resources(
         tool_registry=registry,
         environment_backend=backend,
         max_turns=max_turns,
+        max_action_tokens=max_action_tokens,
     )
     return EnvironmentExecutionResources(tool_id, registry, adapter)
 

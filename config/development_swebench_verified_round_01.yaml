@@ -1,32 +1,32 @@
-# SWE-bench Verified development-side architecture adaptation.  The records
-# come only from the local official Verified release and scoring is delegated
-# exclusively to the pinned SkillFlow/SWE-bench Docker harness.
+# SWE-bench regular-dev architecture adaptation.  The complete Verified
+# release remains final-evaluation-only; scoring is still delegated exclusively
+# to the pinned SkillFlow/SWE-bench Docker harness.
 
 schema_version: "flowsteer.agentgraph.config.v1"
 experiment:
-  name: "swebench_verified_development_round_01"
+  name: "swebench_regular_dev_development_round_01"
   phase: "swebench_evaluation"
   training_enabled: false
   seed: 20260819
-  condition_id: "swebench_verified_development_skill_off"
-  sampling_schedule_purpose: "swebench_verified_architecture_development"
-  catalog_order_namespace: "swebench_verified_round_01"
+  condition_id: "swebench_regular_dev_development_skill_off"
+  sampling_schedule_purpose: "swebench_regular_dev_architecture_development"
+  catalog_order_namespace: "swebench_split_isolated_round_01"
   prompt_version: "agentgraph.director.progressive_subgraph.v1"
   tool_version: "agentgraph.add-subgraph+swebench-official-docker-harness.v1"
-  output_dir: "artifacts/swebench_verified_round_01/development"
+  output_dir: "artifacts/swebench_regular_dev_round_01/development"
 
 data:
-  catalog_path: "config/datasets_agentgraph.yaml"
-  train_path: "data/agentgraph_v1/train.jsonl"
-  validation_path: "data/agentgraph_v1/validation.jsonl"
-  test_path: "data/agentgraph_v1/test.jsonl"
+  catalog_path: "config/datasets_swebench.yaml"
+  train_path: "data/swebench_v2/train.jsonl"
+  validation_path: "data/swebench_v2/validation.jsonl"
+  test_path: "data/swebench_v2/test.jsonl"
   enforce_split_isolation: true
   task_schema_version: "flowsteer.agentgraph.task.v1"
 
 swebench_evaluation:
   dataset_key: "swe_bench"
   stage: "development"
-  split: "train"
+  split: "validation"
   selection: "sequential"
   sample_count: 32
   stable_zero_sample_count: 2
@@ -40,18 +40,18 @@ swebench_evaluation:
   proxy_metrics_allowed: false
 
 storage:
-  schema_version: "flowsteer.swebench_verified.round.v1"
-  root: "artifacts/swebench_verified_round_01/development/evidence"
-  selected_tasks_path: "artifacts/swebench_verified_round_01/development/selected_tasks.jsonl"
-  direct_predictions_path: "artifacts/swebench_verified_round_01/development/direct_predictions.jsonl"
-  trajectories_path: "artifacts/swebench_verified_round_01/development/agentgraph_trajectories.jsonl"
-  failures_path: "artifacts/swebench_verified_round_01/development/collection_failures.jsonl"
-  paired_results_path: "artifacts/swebench_verified_round_01/development/paired_results.jsonl"
-  wrong_demos_path: "artifacts/swebench_verified_round_01/development/wrong_demos.jsonl"
-  manifest_path: "artifacts/swebench_verified_round_01/development/run_manifest.json"
-  preflight_receipt_path: "artifacts/swebench_verified_round_01/development/preflight_receipt.json"
-  report_json_path: "reports/swebench_verified_round_01/development_report.json"
-  report_markdown_path: "reports/swebench_verified_round_01/development_report.md"
+  schema_version: "flowsteer.swebench.round.v2"
+  root: "artifacts/swebench_regular_dev_round_01/development/evidence"
+  selected_tasks_path: "artifacts/swebench_regular_dev_round_01/development/selected_tasks.jsonl"
+  direct_predictions_path: "artifacts/swebench_regular_dev_round_01/development/direct_predictions.jsonl"
+  trajectories_path: "artifacts/swebench_regular_dev_round_01/development/agentgraph_trajectories.jsonl"
+  failures_path: "artifacts/swebench_regular_dev_round_01/development/collection_failures.jsonl"
+  paired_results_path: "artifacts/swebench_regular_dev_round_01/development/paired_results.jsonl"
+  wrong_demos_path: "artifacts/swebench_regular_dev_round_01/development/wrong_demos.jsonl"
+  manifest_path: "artifacts/swebench_regular_dev_round_01/development/run_manifest.json"
+  preflight_receipt_path: "artifacts/swebench_regular_dev_round_01/development/preflight_receipt.json"
+  report_json_path: "reports/swebench_regular_dev_round_01/development_report.json"
+  report_markdown_path: "reports/swebench_regular_dev_round_01/development_report.md"
 
 director:
   base_model: "${QWEN35_9B_MODEL_PATH:-/home/test/SKILLEV/skillev-new-b2-temp/model/Qwen3.5-9B-modelscope}"
@@ -59,7 +59,7 @@ director:
   backend: "sglang"
   api_base: "http://127.0.0.1:${FLOWSTEER_SUPERVISOR_PORT:-8015}/v1"
   served_model_name: "supervisor_theta"
-  behavior_policy_version: "qwen35-9b-swebench-verified-round-01-step-000000"
+  behavior_policy_version: "qwen35-9b-swebench-regular-dev-round-01-step-000000"
   behavior_adapter_name: "theta_jointqa_progressive_step_000000"
   behavior_adapter_checkpoint: "artifacts/hotpotqa_multiagent_skill/policy_step_000000/theta"
   updated_policy_version: "unused-evaluation-only"
@@ -101,8 +101,9 @@ evaluation:
   swebench_harness_enabled: true
   swebench_evaluator_path: "/home/test/SKILLEV/skillflow-bayesian-improve-deploy/training/swe_bench_eval.py"
   swebench_harness_path: "/ssd1/iclr/.private/skillflow-resources/SWE-bench-harness-d83"
-  swebench_verified_path: "/ssd1/iclr/.private/skillflow-resources/swebench-verified"
-  swebench_evaluation_root: "artifacts/swebench_verified_round_01/development/official_harness"
+  swebench_dataset_source: "regular_dev"
+  swebench_dataset_path: "data/swebench_v2/validation.jsonl"
+  swebench_evaluation_root: "artifacts/swebench_regular_dev_round_01/development/official_harness"
   swebench_docker_namespace: "swebench"
   swebench_timeout_seconds: 900
   invalid_evaluator_action: "persist_and_exclude"
@@ -173,4 +174,3 @@ deployment:
   allow_forced_probes: false
   active_skills_only: false
   require_version_compatible_skills: true
-

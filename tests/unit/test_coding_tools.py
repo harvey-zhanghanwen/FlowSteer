@@ -126,6 +126,28 @@ class RepositoryToolRegistryTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((SWEBENCH_REPOSITORY_TOOL_ID,), registry.resource_ids)
             capability = registry.require_capability(SWEBENCH_REPOSITORY_TOOL_ID)
             self.assertEqual(("swe_bench",), capability.dataset_scope)
+            self.assertEqual(
+                (
+                    "diff",
+                    "exact_edit",
+                    "list_files",
+                    "run_tests",
+                    "search_code",
+                    "view_file",
+                ),
+                capability.action_names,
+            )
+            self.assertEqual(
+                ["path", "old_str", "new_str"],
+                capability.action_schemas["exact_edit"]["required"],
+            )
+            self.assertEqual(
+                ["command"],
+                capability.action_schemas["run_tests"]["required"],
+            )
+            self.assertEqual(
+                ["path"], capability.action_schemas["view_file"]["required"]
+            )
             result = await registry.ainvoke(
                 SWEBENCH_REPOSITORY_TOOL_ID,
                 ToolRequest("view_file", {"path": "module.py"}),

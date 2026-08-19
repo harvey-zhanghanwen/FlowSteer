@@ -31,6 +31,23 @@ from .tool_runtime import (
 class ReactExecutionError(RuntimeError):
     """A bounded Tool/ReAct node did not produce a valid completion."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        react_trace: tuple[Mapping[str, object], ...] = (),
+        tool_receipts: tuple[Mapping[str, object], ...] = (),
+        model_calls: tuple[Mapping[str, object], ...] = (),
+    ) -> None:
+        super().__init__(message)
+        # DIRECT_REUSE: SkillFlow persists every bounded-agent action and
+        # observation even when the turn budget is exhausted.  Carry the same
+        # public failure receipt through AgentRuntime's exception chain so a
+        # diagnostic failure is not misreported as "no Tool call".
+        self.react_trace = tuple(dict(item) for item in react_trace)
+        self.tool_receipts = tuple(dict(item) for item in tool_receipts)
+        self.model_calls = tuple(dict(item) for item in model_calls)
+
 
 def _parse_structured_action(text: str) -> StructuredAction:
     if not isinstance(text, str) or not text.strip():
@@ -64,6 +81,7 @@ class ToolReactExecutionAdapter:
         tool_registry: ToolRegistry,
         max_turns: int,
         max_tool_calls: int,
+        max_action_tokens: int = 512,
         execution_mode: str = "react",
     ) -> None:
         if not hasattr(gateway, "generate"):
@@ -74,12 +92,19 @@ class ToolReactExecutionAdapter:
             raise ValueError("max_turns must be a positive integer")
         if type(max_tool_calls) is not int or max_tool_calls < 0:
             raise ValueError("max_tool_calls must be a non-negative integer")
+        if type(max_action_tokens) is not int or max_action_tokens < 1:
+            raise ValueError("max_action_tokens must be a positive integer")
         if execution_mode not in {"react", "coding"}:
             raise ValueError("execution_mode must be react or coding")
         self._gateway = gateway
         self._tool_registry = tool_registry
         self._max_turns = max_turns
         self._max_tool_calls = max_tool_calls
+        # DIRECT_REUSE: SkillFlow RolloutDecoding.max_action_tokens bounds one
+        # action generation independently from the outer Agent completion
+        # budget.  ReAct observations grow over turns, so reusing the generic
+        # 4096-token completion allowance can exceed an 8K context window.
+        self._max_action_tokens = max_action_tokens
         self._execution_mode = execution_mode
 
     def _contract(
@@ -87,17 +112,32 @@ class ToolReactExecutionAdapter:
         request: AgentRequest,
         observations: list[Mapping[str, object]],
     ) -> str:
-        tools = [
-            self._tool_registry.require_capability(tool_id).to_value()
+        capabilities = [
+            self._tool_registry.require_capability(tool_id)
             for tool_id in request.agent.allowed_tools
         ]
-        action_schema = {
-            "kind": "tool",
-            "name": "tool action",
-            "arguments": {},
-            "resource_id": "one allowed tool_id",
-            "skill_id": None,
-        }
+        without_fixed_actions = [
+            capability.tool_id
+            for capability in capabilities
+            if not capability.action_schemas
+        ]
+        if without_fixed_actions:
+            raise ReactExecutionError(
+                "generic Tool/ReAct execution requires fixed action schemas for "
+                + ", ".join(without_fixed_actions)
+            )
+        tools = [capability.to_value() for capability in capabilities]
+        action_schemas = [
+            {
+                "kind": "tool",
+                "name": action_name,
+                "arguments": dict(argument_schema),
+                "resource_id": capability.tool_id,
+                "skill_id": None,
+            }
+            for capability in capabilities
+            for action_name, argument_schema in capability.action_schemas.items()
+        ]
         completion_schema = {
             "kind": "complete",
             "name": "complete",
@@ -105,13 +145,44 @@ class ToolReactExecutionAdapter:
             "resource_id": None,
             "skill_id": None,
         }
+        # DIRECT_REUSE: SkillFlow's ReAct prompt carries action_history and
+        # the latest public observation into the next turn.  State explicitly
+        # that this is continuation state; otherwise the local policy can
+        # restart the first action on every turn even though the observation
+        # is present.  This does not choose an action or encode a workflow.
+        continuation_guidance = (
+            "\nContinue from the newest public observation; do not restart "
+            "the first step. Do not repeat an identical successful Tool "
+            "request unless that observation explicitly reports failure."
+            if observations
+            else ""
+        )
         return (
             request.agent.contract
             + f"\n\nExecution mode: {self._execution_mode}. Return exactly one JSON StructuredAction "
             "and no other text. Use a tool action only from allowed_tools, or "
             "complete when the declared completion condition is met.\n"
-            + "Tool action schema: "
-            + json.dumps(action_schema, sort_keys=True, separators=(",", ":"))
+            # DIRECT_REUSE: this is the exact public action guidance and
+            # five-field wire contract enforced by SkillFlow
+            # rollout/context.py::_ACTION_GUIDANCE and
+            # runtime/contracts.py::StructuredAction.from_value.  The local
+            # Qwen service otherwise sometimes emits the legacy
+            # {"action": ..., "arguments": ...} ToolRequest shape, which is
+            # not an admitted StructuredAction.
+            + "Every action object must contain exactly these five fields: "
+            "arguments, kind, name, resource_id, skill_id. Do not use an "
+            "action field. For a tool action use kind=tool, the exact name and "
+            "resource_id below, and skill_id=null. For completion use "
+            "kind=complete, name=complete, arguments={\"value\": ...}, "
+            "resource_id=null, and skill_id=null.\n"
+            + "Tool action schemas (name and resource_id are exact; arguments "
+            "must satisfy the shown JSON schema): "
+            + json.dumps(
+                action_schemas,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
             + "\nCompletion schema: "
             + json.dumps(completion_schema, sort_keys=True, separators=(",", ":"))
             + "\nAllowed tools: "
@@ -125,6 +196,7 @@ class ToolReactExecutionAdapter:
                 sort_keys=True,
                 separators=(",", ":"),
             )
+            + continuation_guidance
         )
 
     async def execute(self, request: AgentRequest) -> GatewayResponse:
@@ -148,6 +220,13 @@ class ToolReactExecutionAdapter:
                 request,
                 request_id=f"{request.request_id}:react:{turn}",
                 agent=agent,
+                model=replace(
+                    request.model,
+                    metadata={
+                        **dict(request.model.metadata),
+                        "max_tokens": str(self._max_action_tokens),
+                    },
+                ),
             )
             generated = await self._gateway.generate(turn_request)
             response = (
@@ -271,6 +350,26 @@ class ToolReactExecutionAdapter:
                 trace.append(entry)
                 observations.append(observation)
                 continue
+            capability = self._tool_registry.require_capability(action.resource_id)
+            # NECESSARY_ADAPTATION: SkillFlow publishes the fixed action domain
+            # in model-visible task context and leaves semantic validation to
+            # the environment.  AgentGraph carries that same domain in
+            # ToolCapability, so reject an unpublished name before dispatch;
+            # the concrete backend remains authoritative for arguments and
+            # all operation-specific semantics.
+            if action.name not in capability.action_names:
+                observation = MappingProxyType(
+                    {
+                        "observation_status": "schema_invalid",
+                        "public_error_code": "tool_action_not_registered",
+                        "tool_id": action.resource_id,
+                        "allowed_action_names": list(capability.action_names),
+                    }
+                )
+                entry.update(observation)
+                trace.append(entry)
+                observations.append(observation)
+                continue
             if tool_calls >= self._max_tool_calls:
                 observation = MappingProxyType(
                     {
@@ -306,6 +405,11 @@ class ToolReactExecutionAdapter:
                     {
                         "observation_status": "tool_error",
                         "tool_id": action.resource_id,
+                        # SkillFlow's next-turn action_history includes the
+                        # already generated action beside its observation.
+                        # Preserve that public continuation state so the
+                        # policy can distinguish a retry from the next step.
+                        "executed_action": action.to_value(),
                         "error_type": receipt.error_type,
                     }
                 )
@@ -314,6 +418,7 @@ class ToolReactExecutionAdapter:
                     {
                         "observation_status": "success",
                         "tool_id": action.resource_id,
+                        "executed_action": action.to_value(),
                         "tool_version": receipt.tool_version,
                         "result": result.value,
                         "completed": result.completed,
@@ -326,7 +431,10 @@ class ToolReactExecutionAdapter:
         raise ReactExecutionError(
             f"{self._execution_mode} agent {request.agent.id!r} exhausted "
             f"{self._max_turns} turns "
-            "without a valid completion"
+            "without a valid completion",
+            react_trace=tuple(trace),
+            tool_receipts=tuple(tool_receipts),
+            model_calls=tuple(model_calls),
         )
 
     def _completion_error(

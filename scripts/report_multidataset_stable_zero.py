@@ -19,6 +19,13 @@ ROOT = Path(__file__).resolve().parents[1]
 REPORT_ROOT = ROOT / "reports" / "multidataset_stablezero"
 TOTAL_REPORT = ROOT / "MULTIDATASET_AGENT_ARCHITECTURE_STABLEZERO_REPORT.md"
 
+TOOL_DIAGNOSTIC_RECEIPTS = {
+    "hotpotqa": "artifacts/tool_exact_schema_canary/hotpotqa_exact_wire_v7_20260820.json",
+    "triviaqa": "artifacts/tool_exact_schema_canary/triviaqa_exact_wire_v2_20260820.json",
+    "aime_2026": "artifacts/tool_exact_schema_canary/aime_2026_exact_wire_v3_20260820.json",
+    "healthbench_professional": "artifacts/tool_exact_schema_canary/healthbench_professional_exact_wire_v2_20260820.json",
+}
+
 
 @dataclass(frozen=True)
 class DatasetSpec:
@@ -31,6 +38,9 @@ class DatasetSpec:
     metrics: tuple[str, ...]
     capability: str
     protocol: str
+    evidence_scope: str = "fixed validation canary"
+    protocol_limitations: tuple[str, ...] = ()
+    excluded_evidence: tuple[str, ...] = ()
 
 
 SPECS = (
@@ -38,56 +48,85 @@ SPECS = (
         "hotpotqa",
         "HotpotQA",
         "HOTPOTQA_ARCH_REPORT.md",
-        "artifacts/qa_tool_react_stable_zero/hotpotqa/protocol_separated_results.jsonl",
-        "artifacts/qa_tool_react_stable_zero/hotpotqa/tool_agentgraph_trajectories.jsonl",
-        "artifacts/qa_tool_react_stable_zero/hotpotqa/run_manifest.json",
+        "artifacts/qa_tool_react_exact_wire_v3_stable_zero/hotpotqa/protocol_separated_results.jsonl",
+        "artifacts/qa_tool_react_exact_wire_v3_stable_zero/hotpotqa/tool_agentgraph_trajectories.jsonl",
+        "artifacts/qa_tool_react_exact_wire_v3_stable_zero/hotpotqa/run_manifest.json",
         ("exact_match", "token_f1"),
         "闭卷上下文推理 + 冻结 Wikipedia RetrievalIndex/ReAct 能力",
         "Direct 使用给定上下文；AgentGraph 允许使用检索 Tool。两者属于 protocol-separated 条件，差值只作描述性统计。",
+        excluded_evidence=(
+            "v1 exact-schema 前的自然策略 canary 仅保留为历史结果；v2 因 Director schema/tool_id 边界含混导致 1/2 max_rounds，仅作为 v3 修复前失败诊断。",
+        ),
     ),
     DatasetSpec(
         "triviaqa",
         "TriviaQA",
         "TRIVIAQA_ARCH_REPORT.md",
-        "artifacts/qa_tool_react_stable_zero/triviaqa/protocol_separated_results.jsonl",
-        "artifacts/qa_tool_react_stable_zero/triviaqa/tool_agentgraph_trajectories.jsonl",
-        "artifacts/qa_tool_react_stable_zero/triviaqa/run_manifest.json",
+        "artifacts/qa_tool_react_exact_wire_v3_stable_zero/triviaqa/protocol_separated_results.jsonl",
+        "artifacts/qa_tool_react_exact_wire_v3_stable_zero/triviaqa/tool_agentgraph_trajectories.jsonl",
+        "artifacts/qa_tool_react_exact_wire_v3_stable_zero/triviaqa/run_manifest.json",
         ("exact_match", "token_f1"),
         "仅问题推理 + 冻结 Wikipedia RetrievalIndex/ReAct 能力",
         "Direct 仅接收问题；AgentGraph 允许使用检索 Tool。两者属于 protocol-separated 条件，差值只作描述性统计。",
+        excluded_evidence=(
+            "v1 exact-schema 前的自然策略 canary 只保留为历史结果，不进入当前 v3 指标。",
+        ),
     ),
     DatasetSpec(
         "aime_2026",
-        "AIME 2026",
+        "AIME-2025 Development（AIME 2026 目标适配）",
         "AIME2026_ARCH_REPORT.md",
-        "artifacts/aime2026_computation_tool_stable_zero/evaluation/paired_results.jsonl",
-        "artifacts/aime2026_computation_tool_stable_zero/evaluation/agentgraph_trajectories.jsonl",
-        "artifacts/aime2026_computation_tool_stable_zero/evaluation/run_manifest.json",
+        "artifacts/aime2026_computation_tool_stable_zero/development/paired_results.jsonl",
+        "artifacts/aime2026_computation_tool_stable_zero/development/agentgraph_trajectories.jsonl",
+        "artifacts/aime2026_computation_tool_stable_zero/development/run_manifest.json",
         ("exact_match",),
         "推理 + 有界 calculator/Python execution 能力",
-        "Direct 与允许使用计算 Tool 的 AgentGraph 分别报告，不作 protocol-equivalent 因果比较。",
+        "开发阶段使用 AIME 2025 官方题目与整数 exact match；Direct 与允许使用计算 Tool 的 AgentGraph 分别报告，不作 protocol-equivalent 因果比较。",
+        "AIME 2025 development canary；不是 AIME 2026 benchmark 成绩",
+        (
+            "仅 2 题 Stable Zero canary，不是正式 benchmark 估计。",
+            "可选计算 Tool 未被自然选择时，只能报告 capability 已接线，不能声称 Tool 已验证有效。",
+        ),
+        (
+            "artifacts/aime2026_computation_tool_stable_zero/evaluation：使用 AIME 2026 official test 的旧结果，仅保留为历史诊断，不进入开发指标。",
+        ),
     ),
     DatasetSpec(
         "healthbench_professional",
-        "HealthBench Professional",
+        "HealthBench Professional（reference-judge diagnostic）",
         "HEALTHBENCH_PROFESSIONAL_ARCH_REPORT.md",
-        "artifacts/healthbench_professional_medrag_tool_stable_zero/evaluation/paired_results.jsonl",
-        "artifacts/healthbench_professional_medrag_tool_stable_zero/evaluation/agentgraph_trajectories.jsonl",
-        "artifacts/healthbench_professional_medrag_tool_stable_zero/evaluation/run_manifest.json",
+        "artifacts/healthbench_professional_medrag_tool_stable_zero_v2/development/paired_results.jsonl",
+        "artifacts/healthbench_professional_medrag_tool_stable_zero_v2/development/agentgraph_trajectories.jsonl",
+        "artifacts/healthbench_professional_medrag_tool_stable_zero_v2/development/run_manifest.json",
         ("raw_score",),
         "临床推理 + 冻结教材语料 MedRAG search 能力",
-        "Direct 与允许使用 MedRAG 的 AgentGraph 分别报告；raw_score 来自配置的 reference judge。",
+        "Direct 与允许使用 MedRAG 的 AgentGraph 分别报告；raw_score 来自 openai/simple-evals-compatible reference judge，不等同于 HealthBench 私有官方评测服务。",
+        "fixed internal validation diagnostic",
+        (
+            "reference-judge diagnostic 只验证公开 rubric/judge 接口，不能表述为私有官方 leaderboard 成绩。",
+            "可选 MedRAG Tool 未被自然选择时，不能把 raw_score 差值归因于检索能力。",
+        ),
+        (
+            "artifacts/healthbench_professional_medrag_tool_stable_zero/evaluation：旧 v1 条件，不进入当前 v2 exact-action-schema development 指标。",
+        ),
     ),
     DatasetSpec(
         "webshop",
         "WebShop",
         "WEBSHOP_ARCH_REPORT.md",
-        "artifacts/webshop_ragen_environment_native_action_v2_stable_zero/evaluation/paired_results.jsonl",
-        "artifacts/webshop_ragen_environment_native_action_v2_stable_zero/evaluation/agentgraph_trajectories.jsonl",
-        "artifacts/webshop_ragen_environment_native_action_v2_stable_zero/evaluation/run_manifest.json",
+        "artifacts/webshop_ragen_environment_native_action_v4_stable_zero/development/paired_results.jsonl",
+        "artifacts/webshop_ragen_environment_native_action_v4_stable_zero/development/agentgraph_trajectories.jsonl",
+        "artifacts/webshop_ragen_environment_native_action_v4_stable_zero/development/run_manifest.json",
         ("success",),
         "request-scoped SkillFlow/RAGEN environment ReAct",
-        "Direct 与 AgentGraph 使用相同原生环境、task lock、action budget 和 evaluator。",
+        "Direct 与 AgentGraph 使用相同原生 WebShop validation 环境、task lock、action budget 和 evaluator。",
+        "native validation indices 500..627；2-task canary when executed",
+        (
+            "只有完整原生 environment transition receipt 与 terminal success 才计入 success。",
+        ),
+        (
+            "artifacts/webshop_ragen_environment_native_action_v2_stable_zero/evaluation：旧结果取自 native test 范围，属于 test-contaminated adaptation evidence，不进入 v4 development 指标；v3 development 因未传递 SkillFlow max_action_tokens 导致本地 Direct 上下文超限，仅保留为失败诊断。",
+        ),
     ),
     DatasetSpec(
         "alfworld",
@@ -102,16 +141,119 @@ SPECS = (
     ),
     DatasetSpec(
         "swe_bench",
-        "SWE-bench Verified",
+        "SWE-bench Regular Dev",
         "SWEBENCH_ARCH_REPORT.md",
-        None,
-        None,
-        "artifacts/swebench_verified_coding_agent_stable_zero/evaluation/run_manifest.json",
+        "artifacts/swebench_regular_dev_coding_agent_stable_zero/development/paired_results.jsonl",
+        "artifacts/swebench_regular_dev_coding_agent_stable_zero/development/agentgraph_trajectories.jsonl",
+        "artifacts/swebench_regular_dev_coding_agent_stable_zero/development/run_manifest.json",
         ("resolved",),
         "detached task-pinned worktree + iterative CodingExecutionAdapter + official Docker harness",
-        "唯一接受的指标是官方 resolved_rate；禁止使用代理评分。",
+        "架构适配只使用 SWE-bench regular dev；唯一接受的 terminal 指标是官方 Docker harness resolved/resolved_rate，禁止使用代理评分。",
+        "SWE-bench regular-dev architecture development；Verified 完整保留给最终评测",
+        (
+            "没有 official Docker harness receipt 时，Direct、AgentGraph 与 Stable Zero 均为不可测。",
+            "worktree preflight、generated diff、LLM judgement 或 local proxy test 都不能替代 resolved。",
+        ),
+        (
+            "旧 swebench_verified_* development/evaluation：Verified 曾被用于适配，按数据隔离规则排除；完整 Verified 只允许用于最终评测。",
+        ),
     ),
 )
+
+
+@dataclass(frozen=True)
+class PreservedFailureSpec:
+    condition: str
+    paired_path: str
+    trajectory_path: str
+    task_id: str
+    classification: str
+    first_error: str
+
+
+@dataclass(frozen=True)
+class PreservedCorrectSpec:
+    condition: str
+    paired_path: str
+    trajectory_path: str
+    task_id: str
+
+
+PRESERVED_FAILURES = {
+    "hotpotqa": PreservedFailureSpec(
+        condition="qa_tool_react_exact_wire_v2_stable_zero (pre-v3 schema clarification)",
+        paired_path=(
+            "artifacts/qa_tool_react_exact_wire_v2_stable_zero/"
+            "hotpotqa/protocol_separated_results.jsonl"
+        ),
+        trajectory_path=(
+            "artifacts/qa_tool_react_exact_wire_v2_stable_zero/"
+            "hotpotqa/tool_agentgraph_trajectories.jsonl"
+        ),
+        task_id="hotpotqa:5a879ab05542996e4f30887e",
+        classification="Director action-schema / Tool resource identifier / terminal control",
+        first_error=(
+            "前五个 Director action 把 top-level output_agent_id 放入 Agent object，"
+            "随后又把 action_name `search`/`read` 当成 allowed_tools 的 resource_id；"
+            "Canvas 均 fail closed。第 20 轮得到正确输出后已无剩余显式 FINISH turn，"
+            "因此以 max_rounds 终止。v3 只澄清字段层级和 exact tool_id 边界。"
+        ),
+    ),
+    "webshop": PreservedFailureSpec(
+        condition="ragen_environment_v1 (pre-native-action adaptation)",
+        paired_path=(
+            "artifacts/webshop_ragen_environment_stable_zero/"
+            "evaluation/wrong_demos.jsonl"
+        ),
+        trajectory_path=(
+            "artifacts/webshop_ragen_environment_stable_zero/"
+            "evaluation/agentgraph_trajectories.jsonl"
+        ),
+        task_id="webshop:00000",
+        classification="ReAct action serialization / environment interface",
+        first_error=(
+            "第 1 个 environment step 输出 JSON action object，而原生 WebShop parser "
+            "只接受 search[...] 或 click[...]；状态未推进并连续产生 parse_error。"
+        ),
+    ),
+}
+
+
+DIRECT_CONTRAST_FAILURES = {
+    "aime_2026": {
+        "task_id": "aime-2025:i:01",
+        "classification": "Direct model reasoning",
+        "first_error": (
+            "Direct arm 的 terminal submission 为 11，AIME-2025 整数 Ground Truth 为 70；"
+            "该 Direct receipt 不保存更早的内部 reasoning，因此不能进一步缩窄错误位置。"
+        ),
+    },
+    "alfworld": {
+        "task_id": "alfworld:train:00006",
+        "classification": "ReAct action selection / state tracking / stopping",
+        "first_error": (
+            "Direct arm 在第 3 个 environment step 首次产生 <INVALID>，随后重复 "
+            "examine pillow 1，最终触发 50-step environment_step_limit；"
+            "同题 v2 AgentGraph 用 6 个原生 action 成功。"
+        ),
+    },
+}
+
+
+PRESERVED_CORRECTS = {
+    "healthbench_professional": PreservedCorrectSpec(
+        condition="healthbench_professional_round_01/development",
+        paired_path=(
+            "artifacts/healthbench_professional_round_01/"
+            "development/paired_results.jsonl"
+        ),
+        trajectory_path=(
+            "artifacts/healthbench_professional_round_01/"
+            "development/agentgraph_trajectories.jsonl"
+        ),
+        task_id="healthbench-professional:1d45010f49e42dcfb9d635ff1aa58828",
+    ),
+}
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -119,6 +261,41 @@ def _load_json(path: Path) -> dict[str, Any]:
         return {}
     value = json.loads(path.read_text(encoding="utf-8"))
     return value if isinstance(value, dict) else {}
+
+
+def _tool_diagnostic_section(dataset_key: str) -> str:
+    relative = TOOL_DIAGNOSTIC_RECEIPTS.get(dataset_key)
+    if relative is None:
+        return ""
+    receipt = _load_json(ROOT / relative)
+    if not receipt:
+        return ""
+    compliance = receipt.get("compliance", {})
+    if not isinstance(compliance, Mapping):
+        compliance = {}
+    schema = compliance.get("schema_compliance", {})
+    backend = compliance.get("backend_compliance", {})
+    model = compliance.get("model_compliance", {})
+    observed = compliance.get("observed_sequence", ())
+    sequence = " → ".join(
+        str(item.get("name"))
+        for item in observed
+        if isinstance(item, Mapping) and isinstance(item.get("name"), str)
+    ) or "none"
+    return f"""
+
+## Exact-schema Tool forced probe（不计入 benchmark）
+
+- Receipt：`{relative}`
+- Controls：`diagnostic_only=true`、`forced_probe=true`、`grpo_eligible=false`、`skill_evidence_eligible=false`
+- Overall status：`{receipt.get('status', 'missing')}`
+- StructuredAction schema compliance：`{str(bool(isinstance(schema, Mapping) and schema.get('passed') is True)).lower()}`
+- Tool backend compliance：`{str(bool(isinstance(backend, Mapping) and backend.get('passed') is True)).lower()}`；successful receipts=`{backend.get('successful_receipts', 0) if isinstance(backend, Mapping) else 0}`
+- Model action/termination compliance：`{str(bool(isinstance(model, Mapping) and model.get('passed') is True)).lower()}`
+- Observed action sequence：`{sequence}`
+
+该 receipt 只回答 exact `StructuredAction`、真实 backend dispatch 和有界 ReAct termination 是否可执行；不含 evaluator、Ground Truth、benchmark metric、Skill evidence 或训练数据。forced probe 失败不覆盖同条件自然策略成绩，反之亦然。
+"""
 
 
 def _load_jsonl(path: Path | None) -> list[dict[str, Any]]:
@@ -152,11 +329,44 @@ def _short(value: object, limit: int = 420) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
-def _metric_mean(rows: Sequence[Mapping[str, Any]], arm: str, metric: str) -> float:
-    return _mean(float(row.get(arm, {}).get(metric, 0.0)) for row in rows)
+def _metric_values(
+    rows: Sequence[Mapping[str, Any]],
+    arm: str,
+    metric: str,
+) -> list[float]:
+    values: list[float] = []
+    for row in rows:
+        payload = row.get(arm)
+        if not isinstance(payload, Mapping):
+            continue
+        value = payload.get(metric)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            values.append(float(value))
+    return values
 
 
-def _metric_display(metric: str, value: float) -> str:
+def _metric_mean(
+    rows: Sequence[Mapping[str, Any]],
+    arm: str,
+    metric: str,
+) -> float | None:
+    values = _metric_values(rows, arm, metric)
+    return _mean(values) if values else None
+
+
+def _row_metric(row: Mapping[str, Any], arm: str, metric: str) -> float | None:
+    payload = row.get(arm)
+    if not isinstance(payload, Mapping):
+        return None
+    value = payload.get(metric)
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return None
+    return float(value)
+
+
+def _metric_display(metric: str, value: float | None) -> str:
+    if value is None:
+        return "不可测"
     if metric == "raw_score":
         return f"{value:.4f}"
     return f"{100 * value:.2f}%"
@@ -225,6 +435,73 @@ def _tool_receipts(trajectory: Mapping[str, Any]) -> list[dict[str, Any]]:
             if isinstance(raw, Sequence) and not isinstance(raw, (str, bytes)):
                 receipts.extend(dict(item) for item in raw if isinstance(item, Mapping))
     return receipts
+
+
+def _execution_responses(
+    trajectory: Mapping[str, Any],
+) -> list[tuple[Mapping[str, Any], Mapping[str, Any]]]:
+    """Return the saved execution request/response pairs without inferring events."""
+
+    responses: list[tuple[Mapping[str, Any], Mapping[str, Any]]] = []
+    turns = trajectory.get("turns", ())
+    if not isinstance(turns, Sequence) or isinstance(turns, (str, bytes)):
+        return responses
+    for turn in turns:
+        executions = turn.get("executions", ()) if isinstance(turn, Mapping) else ()
+        if not isinstance(executions, Sequence) or isinstance(executions, (str, bytes)):
+            continue
+        for execution in executions:
+            if not isinstance(execution, Mapping):
+                continue
+            metadata = execution.get("metadata", {})
+            if not isinstance(metadata, Mapping):
+                continue
+            request = metadata.get("request", {})
+            response = metadata.get("response", {})
+            if isinstance(request, Mapping) and isinstance(response, Mapping):
+                responses.append((request, response))
+    return responses
+
+
+def _environment_receipts(trajectory: Mapping[str, Any]) -> list[dict[str, Any]]:
+    receipts: list[dict[str, Any]] = []
+    for _, response in _execution_responses(trajectory):
+        raw = response.get("environment_receipts", ())
+        if isinstance(raw, Sequence) and not isinstance(raw, (str, bytes)):
+            receipts.extend(dict(item) for item in raw if isinstance(item, Mapping))
+    return receipts
+
+
+def _coding_receipts(trajectory: Mapping[str, Any]) -> list[dict[str, Any]]:
+    receipts: list[dict[str, Any]] = []
+    for request, response in _execution_responses(trajectory):
+        agent = request.get("agent", {})
+        if not isinstance(agent, Mapping) or agent.get("execution_mode") != "coding":
+            continue
+        raw = response.get("tool_receipts", ())
+        if isinstance(raw, Sequence) and not isinstance(raw, (str, bytes)):
+            receipts.extend(dict(item) for item in raw if isinstance(item, Mapping))
+    return receipts
+
+
+def _protocol_sections(spec: DatasetSpec) -> str:
+    limitations = "\n".join(
+        f"- {item}" for item in spec.protocol_limitations
+    ) or "- 无额外限制记录。"
+    exclusions = "\n".join(
+        f"- {item}" for item in spec.excluded_evidence
+    ) or "- 无需隔离的旧结果。"
+    return f"""## Evidence scope 与协议限制
+
+- Evidence scope：{spec.evidence_scope}
+- Protocol：{spec.protocol}
+
+{limitations}
+
+### 明确排除的历史结果
+
+{exclusions}
+"""
 
 
 def _max_parallel_width(trajectory: Mapping[str, Any]) -> int:
@@ -355,6 +632,54 @@ def _demo(
     return "\n".join(lines)
 
 
+def _direct_failure_demo(
+    row: Mapping[str, Any],
+    *,
+    classification: str,
+    first_error: str,
+) -> str:
+    direct = row.get("direct", {})
+    trace = _environment_trace(row, "direct")
+    lines = [
+        f"### Direct Failure Contrast: `{row.get('task_id')}`",
+        "",
+        f"- Task：{_short(row.get('question'), 700)}",
+        f"- Ground Truth：{_short(row.get('ground_truth'), 350)}",
+        f"- Direct Final Answer：{_short(direct.get('final_answer'), 700)}",
+        "- Evaluator：`{}`".format(
+            json.dumps(
+                direct.get("evaluation", {}).get("metrics", {}),
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        ),
+        f"- Failure classification：`{classification}`",
+    ]
+    if trace:
+        actions = [str(item.get("action")) for item in trace]
+        lines.extend(
+            [
+                "",
+                f"Direct ReAct trace（{len(actions)} 个 action）："
+                f"`{' → '.join(actions[:14])}`"
+                + (" …" if len(actions) > 14 else ""),
+            ]
+        )
+    lines.extend(["", f"FIRST ERROR：{first_error}"])
+    return "\n".join(lines)
+
+
+def _load_task_row(path: Path, task_id: str) -> dict[str, Any] | None:
+    return next(
+        (
+            row
+            for row in _load_jsonl(path)
+            if str(row.get("task_id") or _task_id(row)) == task_id
+        ),
+        None,
+    )
+
+
 def _first_error(row: Mapping[str, Any], spec: DatasetSpec) -> str:
     graph = row.get("agentgraph", {})
     if graph.get("available") is not True or graph.get("valid") is not True:
@@ -403,46 +728,113 @@ def _first_error_with_receipts(
     return _first_error(row, spec)
 
 
-def _report_for(spec: DatasetSpec) -> tuple[str, dict[str, Any]]:
-    manifest = _load_json(ROOT / spec.manifest_path)
-    if spec.paired_path is None:
-        error = str(manifest.get("error", "official evaluator unavailable"))
-        text = f"""# {spec.title} 架构报告
+def _unmeasured_report(
+    spec: DatasetSpec,
+    manifest: Mapping[str, Any],
+    trajectories: Sequence[Mapping[str, Any]],
+) -> tuple[str, dict[str, Any]]:
+    status = str(manifest.get("status", "missing"))
+    error = str(manifest.get("error") or manifest.get("blocked_reason") or "")
+    optimizer = manifest.get("optimizer_updates")
+    optimizer_text = str(optimizer) if isinstance(optimizer, int) else "不可测"
+    stable_state = "FAIL" if status in {"failed", "runtime_preflight_failed"} else "NOT_RUN"
+    tool_receipts = [
+        receipt for trajectory in trajectories for receipt in _tool_receipts(trajectory)
+    ]
+    environment_receipts = [
+        receipt
+        for trajectory in trajectories
+        for receipt in _environment_receipts(trajectory)
+    ]
+    coding_receipts = [
+        receipt for trajectory in trajectories for receipt in _coding_receipts(trajectory)
+    ]
+    explicit_finish = sum(
+        trajectory.get("explicit_finish") is True for trajectory in trajectories
+    )
+    metric_rows = "\n".join(
+        f"| {metric} | 不可测 | 不可测 |" for metric in spec.metrics
+    )
+    reason = error or "尚无 paired result 与原生 evaluator receipt。"
+    text = f"""# {spec.title} 架构报告
 
 ## Stable Zero
 
 - 能力边界：{spec.capability}
-- Protocol：{spec.protocol}
-- 冻结任务数：**{int(manifest.get('sample_count', 0) or 0)}**
-- Runtime status：`{manifest.get('status', 'missing')}`
-- 官方指标：`resolved_rate`
-- 结果：**不可测**；`{error}`
-- `STABLE_ZERO = FAIL`
+- 配置固定任务数：**{int(manifest.get('sample_count', 0) or 0)}**
+- Runtime status：`{status}`
+- 结果：**不可测**；{reason}
+- 显式 FINISH receipt：**{explicit_finish}/{len(trajectories)}**
+- Tool receipt：**{len(tool_receipts)}**
+- Environment transition receipt：**{len(environment_receipts)}**
+- Coding action receipt：**{len(coding_receipts)}**
+- optimizer update：**{optimizer_text}**
+- `STABLE_ZERO = {stable_state}`
 
-两个固定 `astropy/astropy` base commit 的 repository/worktree preflight 已通过，但官方 Docker harness 不可用。fail-closed preflight 后没有执行模型/API 调用或 Coding Agent trajectory，也没有报告代理指标。
+| 原生指标 | Direct/Simple Baseline | AgentGraph |
+|---|---:|---:|
+{metric_rows}
 
-## Coding trace
+缺少原生 evaluator-valid paired result 时不填 0、不使用代理指标，也不从旧条件迁移成绩。
 
-不存在通过官方 evaluator 验证的 coding trajectory，因此不虚构 inspected files、edits、commands、tests、revisions 或 resolved status。
+{_protocol_sections(spec)}
 
-## 问题分类
+## Correct Demo
 
-`ENVIRONMENT_LIMITATION`：当前 runtime 中官方 SWE-bench Docker harness 无法连接 Docker daemon。
+无。没有当前 evidence scope 下的 evaluator-valid paired result，不能复用旧 test 结果或构造 Correct Demo。
+
+## Wrong / Failure Demo
+
+### Runtime state
+
+- 当前边界：`{status}`
+- 原生 evaluator receipt：无
+- 记录的错误：`{error or '无；当前状态表示尚未执行至 evaluator，而不是任务失败。'}`
+
+FIRST ERROR：当前运行尚未形成可评分的 terminal receipt；不能归因为 Director、AgentGraph、Tool、environment action、Coding Agent 或模型能力。
 """
-        summary = {
-            "dataset": spec.title,
-            "stable_zero": "FAIL",
-            "n": 0,
-            "metrics": {},
-            "correct": 0,
-            "wrong": 0,
-            "capability": spec.capability,
-            "status": manifest.get("status"),
-        }
-        return text, summary
+    summary = {
+        "key": spec.key,
+        "dataset": spec.title,
+        "stable_zero": stable_state,
+        "n": 0,
+        "configured_n": int(manifest.get("sample_count", 0) or 0),
+        "metrics": {
+            metric: {"direct": None, "agentgraph": None}
+            for metric in spec.metrics
+        },
+        "correct": 0,
+        "wrong": 0,
+        "capability": spec.capability,
+        "status": status,
+        "tool_calls": len(tool_receipts),
+        "tool_success": sum(
+            receipt.get("error_type") in (None, "")
+            and receipt.get("result") is not None
+            for receipt in tool_receipts
+        ),
+        "environment_receipts": len(environment_receipts),
+        "coding_receipts": len(coding_receipts),
+        "explicit_finish": explicit_finish,
+        "optimizer_updates": optimizer if isinstance(optimizer, int) else None,
+        "evidence_scope": spec.evidence_scope,
+    }
+    return text, summary
 
-    rows = _load_jsonl(ROOT / spec.paired_path)
-    trajectories = _load_jsonl(ROOT / spec.trajectory_path) if spec.trajectory_path else []
+
+def _report_for(spec: DatasetSpec) -> tuple[str, dict[str, Any]]:
+    manifest = _load_json(ROOT / spec.manifest_path)
+    paired_path = ROOT / spec.paired_path if spec.paired_path is not None else None
+    trajectory_path = (
+        ROOT / spec.trajectory_path if spec.trajectory_path is not None else None
+    )
+    available_rows = _load_jsonl(paired_path)
+    available_trajectories = _load_jsonl(trajectory_path)
+    if not available_rows:
+        return _unmeasured_report(spec, manifest, available_trajectories)
+
+    rows = available_rows
+    trajectories = available_trajectories
     trajectory_by_task = {_task_id(item): item for item in trajectories}
     stable = manifest.get("stable_zero", {})
     stable_pass = bool(isinstance(stable, Mapping) and stable.get("passed") is True)
@@ -466,6 +858,16 @@ def _report_for(spec: DatasetSpec) -> tuple[str, dict[str, Any]]:
         receipt
         for trajectory in trajectories
         for receipt in _tool_receipts(trajectory)
+    ]
+    environment_receipts = [
+        receipt
+        for trajectory in trajectories
+        for receipt in _environment_receipts(trajectory)
+    ]
+    coding_receipts = [
+        receipt
+        for trajectory in trajectories
+        for receipt in _coding_receipts(trajectory)
     ]
     tool_success = sum(
         receipt.get("error_type") in (None, "") and receipt.get("result") is not None
@@ -512,8 +914,19 @@ def _report_for(spec: DatasetSpec) -> tuple[str, dict[str, Any]]:
         for row in rows
     )
     primary = spec.metrics[0]
-    correct = [row for row in rows if float(row.get("agentgraph", {}).get(primary, 0.0)) >= 1.0]
-    wrong = [row for row in rows if float(row.get("agentgraph", {}).get(primary, 0.0)) < 1.0]
+    evaluable = [
+        row for row in rows if _row_metric(row, "agentgraph", primary) is not None
+    ]
+    correct = [
+        row
+        for row in evaluable
+        if (_row_metric(row, "agentgraph", primary) or 0.0) >= 1.0
+    ]
+    wrong = [
+        row
+        for row in evaluable
+        if (_row_metric(row, "agentgraph", primary) or 0.0) < 1.0
+    ]
 
     metric_header = " | ".join(metric for metric in spec.metrics)
     direct_metric = " | ".join(
@@ -522,6 +935,14 @@ def _report_for(spec: DatasetSpec) -> tuple[str, dict[str, Any]]:
     )
     graph_metric = " | ".join(
         _metric_display(metric, _metric_mean(rows, "agentgraph", metric))
+        for metric in spec.metrics
+    )
+    direct_metric_inline = "; ".join(
+        f"{metric}={_metric_display(metric, _metric_mean(rows, 'direct', metric))}"
+        for metric in spec.metrics
+    )
+    graph_metric_inline = "; ".join(
+        f"{metric}={_metric_display(metric, _metric_mean(rows, 'agentgraph', metric))}"
         for metric in spec.metrics
     )
     topology_lines = "\n".join(
@@ -535,6 +956,24 @@ def _report_for(spec: DatasetSpec) -> tuple[str, dict[str, Any]]:
         float(_max_parallel_width(trajectory_by_task.get(str(row.get("task_id")), {})))
         for row in rows
     )
+    tool_task_count = sum(
+        bool(_tool_receipts(trajectory_by_task.get(str(row.get("task_id")), {})))
+        for row in rows
+    )
+    architecture_final_note = (
+        "current v4 development condition after native-action, split-isolation and action-token-budget adaptation"
+        if spec.key == "webshop"
+        else "current v3 condition after exact Director field/resource-ID clarification"
+        if spec.key in {"hotpotqa", "triviaqa"}
+        else "current v2 condition after receipt-driven minimal adaptation"
+        if spec.key == "alfworld"
+        else "current Stable Zero condition; no later architecture version was run"
+    )
+    capability_observation = (
+        f"declared capability; actual Tool receipts={len(tool_receipts)}"
+        if spec.key not in {"webshop", "alfworld"}
+        else f"native environment replay; actual actions={graph_actions}"
+    )
     text = f"""# {spec.title} 架构报告
 
 ## Stable Zero
@@ -545,14 +984,28 @@ def _report_for(spec: DatasetSpec) -> tuple[str, dict[str, Any]]:
 - 显式 FINISH：**{sum(row.get('agentgraph', {}).get('explicit_finish') is True for row in rows)}/{len(rows)}**
 - 有效原生 evaluator receipt：**{sum(row.get('agentgraph', {}).get('valid') is True for row in rows)}/{len(rows)}**
 - `STABLE_ZERO = {'PASS' if stable_pass else 'FAIL'}`
-- 本轮 training/optimizer/LoRA publication：**无**
+- optimizer update：**{manifest.get('optimizer_updates', '不可测')}**
+- 本轮 GRPO/backward/LoRA publication：**无**
 
 | Condition | {metric_header} |
 |---|{'---:|' * len(spec.metrics)}
 | Direct/Simple Baseline | {direct_metric} |
 | AgentGraph | {graph_metric} |
 
-以上是固定 2 题 Stable Zero 行为结果，不是正式 benchmark 或 SOTA 声明。
+以上是当前 evidence scope 中 {len(rows)} 题的 Stable Zero 行为结果，不是正式 benchmark 或 SOTA 声明。
+
+{_protocol_sections(spec)}
+
+## Baseline Comparison
+
+| Stage | Result | Protocol note |
+|---|---|---|
+| Simple Baseline | {direct_metric_inline} | {spec.protocol} |
+| AgentGraph Stable Zero | {graph_metric_inline} | fixed tasks, explicit FINISH, native evaluator |
+| Architecture-final AgentGraph | {graph_metric_inline} | {architecture_final_note} |
+| Tool/ReAct/Coding-enabled AgentGraph | {graph_metric_inline} | {capability_observation} |
+
+同一 receipt 同时代表多个 stage 时不会重复解释为独立实验，也不会把 protocol-separated 条件的差值解释为因果增益。
 
 ## Workflow 分布
 
@@ -574,6 +1027,11 @@ def _report_for(spec: DatasetSpec) -> tuple[str, dict[str, Any]]:
 ## Tool / ReAct 使用情况
 
 - Tool call：**{len(tool_receipts)}**；成功：**{tool_success}**；失败：**{len(tool_receipts) - tool_success}**
+- Tool call task rate：**{tool_task_count}/{len(rows)}**
+- Tool useful rate：**不可测**；当前 receipt 没有独立的 causal usefulness annotation
+- Tool wasted rate：**不可测**；Tool error 单独报告，不能等同于无效信息价值
+- Environment transition receipt：**{len(environment_receipts)}**
+- Coding action receipt：**{len(coding_receipts)}**
 - AgentGraph 原生 environment action：**{graph_actions}**；invalid action：**{graph_invalid}**
 - Direct 原生 environment action：**{direct_actions}**；invalid action：**{direct_invalid}**
 
@@ -584,6 +1042,7 @@ def _report_for(spec: DatasetSpec) -> tuple[str, dict[str, Any]]:
 | Direct | {direct_attempts} | {direct_tokens} | {direct_latency / 1000:.2f} |
 | AgentGraph | {graph_attempts} | {graph_tokens} | {graph_latency / 1000:.2f} |
 """
+    text += _tool_diagnostic_section(spec.key)
     if correct:
         selected = correct[: min(3, len(correct))]
         text += "\n## Correct Demo\n\n" + "\n\n".join(
@@ -595,7 +1054,33 @@ def _report_for(spec: DatasetSpec) -> tuple[str, dict[str, Any]]:
             for row in selected
         )
     else:
-        text += "\n## Correct Demo\n\n该 2 题样本中不存在满分 AgentGraph demo；不进行虚构。\n"
+        text += "\n## Correct Demo\n\n"
+        preserved_correct = PRESERVED_CORRECTS.get(spec.key)
+        if preserved_correct is not None:
+            correct_row = _load_task_row(
+                ROOT / preserved_correct.paired_path,
+                preserved_correct.task_id,
+            )
+            correct_trajectory = _load_task_row(
+                ROOT / preserved_correct.trajectory_path,
+                preserved_correct.task_id,
+            )
+            if correct_row is not None:
+                text += (
+                    "当前 2 题 Stable Zero 中没有满分样本；以下保留一个真实、"
+                    "evaluator-valid 的历史 Correct Demo，并明确不混入当前指标。\n\n"
+                    f"- Preserved condition：`{preserved_correct.condition}`\n\n"
+                    + _demo(
+                        correct_row,
+                        correct_trajectory,
+                        label="Preserved Correct Demo",
+                    )
+                    + "\n"
+                )
+            else:
+                text += "未找到可验证的满分 receipt；不进行虚构。\n"
+        else:
+            text += "该 2 题样本中不存在满分 AgentGraph demo；不进行虚构。\n"
     if wrong:
         selected = wrong[: min(3, len(wrong))]
         chunks = []
@@ -615,14 +1100,62 @@ def _report_for(spec: DatasetSpec) -> tuple[str, dict[str, Any]]:
             )
         text += "\n## Wrong Demo\n\n" + "\n\n".join(chunks)
     else:
-        text += "\n## Wrong Demo\n\n该 2 题样本中没有 AgentGraph 错例；不进行虚构。\n"
+        text += "\n## Wrong / Failure Demo\n\n"
+        direct_failure = DIRECT_CONTRAST_FAILURES.get(spec.key)
+        preserved_failure = PRESERVED_FAILURES.get(spec.key)
+        if direct_failure is not None:
+            direct_row = next(
+                (
+                    row
+                    for row in rows
+                    if str(row.get("task_id")) == direct_failure["task_id"]
+                ),
+                None,
+            )
+            if direct_row is not None:
+                text += (
+                    "当前 AgentGraph 2 题均成功；以下保留同一 fixed task 的真实 "
+                    "Direct failure contrast，不把它计为 AgentGraph wrong case。\n\n"
+                    + _direct_failure_demo(
+                        direct_row,
+                        classification=str(direct_failure["classification"]),
+                        first_error=str(direct_failure["first_error"]),
+                    )
+                    + "\n"
+                )
+        elif preserved_failure is not None:
+            failure_row = _load_task_row(
+                ROOT / preserved_failure.paired_path,
+                preserved_failure.task_id,
+            )
+            failure_trajectory = _load_task_row(
+                ROOT / preserved_failure.trajectory_path,
+                preserved_failure.task_id,
+            )
+            if failure_row is not None:
+                text += (
+                    "当前 AgentGraph 2 题均成功；以下是相同任务或固定条件中保留的真实"
+                    "适配前 failure receipt。该结果只用于 root-cause 对照，不混入当前 "
+                    "Stable Zero 指标。\n\n"
+                    f"- Preserved condition：`{preserved_failure.condition}`\n"
+                    f"- Failure classification：`{preserved_failure.classification}`\n\n"
+                    + _demo(
+                        failure_row,
+                        failure_trajectory,
+                        label="Preserved Wrong Demo",
+                    )
+                    + "\n\n"
+                    + f"FIRST ERROR：{preserved_failure.first_error}\n"
+                )
+        else:
+            text += "该 2 题样本中没有 AgentGraph 错例，也没有适用的 preserved failure receipt；不进行虚构。\n"
 
     if spec.key == "webshop":
         text += """
 
 ## 最小架构适配
 
-保留的 v1 receipt 显示连续 10 次 `parse_error` transition：Executor 输出 JSON action object，而 WebShop 只接受原生 `search[...]` / `click[...]` action。修正后，executor action grammar 对自由文本 Canvas contract 具有执行优先级；在相同 2 个固定任务上，AgentGraph success 从 **1/2 变为 2/2**。这是接口修正，不是 benchmark-specific workflow template。
+保留的 v1 receipt 显示连续 10 次 `parse_error` transition：Executor 输出 JSON action object，而 WebShop 只接受原生 `search[...]` / `click[...]` action。executor action grammar 对自由文本 Canvas contract 具有执行优先级。当前 v4 使用 native validation indices 500..627，并在两题 canary 上完成 2/2 full-chain Stable Zero；Direct 与 AgentGraph success 均为 1/2。旧 v2 native-test 结果明确排除；v3 development 因未传递 SkillFlow `max_action_tokens` 导致本地 Direct 上下文超限，仅保留为失败诊断。以上是接口与数据隔离修正，不是 benchmark-specific workflow template。
 """
     if spec.key == "alfworld":
         text += """
@@ -633,6 +1166,7 @@ def _report_for(spec: DatasetSpec) -> tuple[str, dict[str, Any]]:
 """
 
     summary = {
+        "key": spec.key,
         "dataset": spec.title,
         "stable_zero": "PASS" if stable_pass else "FAIL",
         "n": len(rows),
@@ -648,6 +1182,19 @@ def _report_for(spec: DatasetSpec) -> tuple[str, dict[str, Any]]:
         "capability": spec.capability,
         "topologies": dict(topologies),
         "tool_calls": len(tool_receipts),
+        "tool_success": tool_success,
+        "environment_receipts": len(environment_receipts),
+        "coding_receipts": len(coding_receipts),
+        "explicit_finish": sum(
+            row.get("agentgraph", {}).get("explicit_finish") is True for row in rows
+        ),
+        "optimizer_updates": (
+            manifest.get("optimizer_updates")
+            if isinstance(manifest.get("optimizer_updates"), int)
+            else None
+        ),
+        "evidence_scope": spec.evidence_scope,
+        "status": manifest.get("status"),
         "model_families": dict(family_counts),
         "multi_model": multi_model,
     }
@@ -695,8 +1242,8 @@ def _total_report(summaries: Sequence[Mapping[str, Any]]) -> str:
     table_lines = []
     for item in summaries:
         metric_text = "; ".join(
-            f"{name}: Direct={_metric_display(name, float(values['direct']))}, "
-            f"AgentGraph={_metric_display(name, float(values['agentgraph']))}"
+            f"{name}: Direct={_metric_display(name, values.get('direct'))}, "
+            f"AgentGraph={_metric_display(name, values.get('agentgraph'))}"
             for name, values in item.get("metrics", {}).items()
         ) or "不可测"
         table_lines.append(
@@ -704,13 +1251,113 @@ def _total_report(summaries: Sequence[Mapping[str, Any]]) -> str:
             f"{item['correct']} | {item['wrong']} | {metric_text} | {item['capability']} |"
         )
     skill_text, skill_state = _skill_section()
+    optimizer_values = [
+        item.get("optimizer_updates")
+        for item in summaries
+        if isinstance(item.get("optimizer_updates"), int)
+    ]
+    optimizer_text = (
+        str(sum(optimizer_values))
+        if len(optimizer_values) == len(summaries)
+        else "不可测（至少一个 manifest 未记录）"
+    )
+    tool_receipts = sum(int(item.get("tool_calls", 0) or 0) for item in summaries)
+    non_environment_tool_receipts = sum(
+        int(by_item.get("tool_calls", 0) or 0)
+        for by_item in summaries
+        if str(by_item.get("key"))
+        in {"hotpotqa", "triviaqa", "aime_2026", "healthbench_professional"}
+    )
+    environment_receipts = sum(
+        int(item.get("environment_receipts", 0) or 0) for item in summaries
+    )
+    coding_receipts = sum(
+        int(item.get("coding_receipts", 0) or 0) for item in summaries
+    )
+    explicit_finish = sum(
+        int(item.get("explicit_finish", 0) or 0) for item in summaries
+    )
+    by_key = {str(item.get("key")): item for item in summaries}
+    diagnostic_rows: list[str] = []
+    for key, relative in TOOL_DIAGNOSTIC_RECEIPTS.items():
+        receipt = _load_json(ROOT / relative)
+        compliance = receipt.get("compliance", {})
+        if not isinstance(compliance, Mapping):
+            compliance = {}
+        schema = compliance.get("schema_compliance", {})
+        backend = compliance.get("backend_compliance", {})
+        model = compliance.get("model_compliance", {})
+        diagnostic_rows.append(
+            "| {dataset} | {status} | {schema} | {backend} | {model} | {count} |".format(
+                dataset=by_key.get(key, {}).get("dataset", key),
+                status=receipt.get("status", "missing"),
+                schema="PASS" if isinstance(schema, Mapping) and schema.get("passed") is True else "FAIL",
+                backend="PASS" if isinstance(backend, Mapping) and backend.get("passed") is True else "FAIL",
+                model="PASS" if isinstance(model, Mapping) and model.get("passed") is True else "FAIL",
+                count=(backend.get("successful_receipts", 0) if isinstance(backend, Mapping) else 0),
+            )
+        )
+    diagnostic_table = "\n".join(diagnostic_rows) or "| 无 | missing | FAIL | FAIL | FAIL | 0 |"
+    webshop = by_key.get("webshop", {})
+    swebench = by_key.get("swe_bench", {})
+    alfworld = by_key.get("alfworld", {})
+    webshop_measured = int(webshop.get("n", 0) or 0) > 0
+    swebench_measured = int(swebench.get("n", 0) or 0) > 0
+    qa_tool_use_validated = any(
+        int(by_key.get(key, {}).get("tool_success", 0) or 0) > 0
+        for key in (
+            "hotpotqa",
+            "triviaqa",
+            "aime_2026",
+            "healthbench_professional",
+        )
+    )
+    webshop_react_ready = (
+        webshop.get("stable_zero") == "PASS"
+        and int(webshop.get("environment_receipts", 0) or 0) > 0
+    )
+    alfworld_react_ready = (
+        alfworld.get("stable_zero") == "PASS"
+        and int(alfworld.get("environment_receipts", 0) or 0) > 0
+    )
+    swebench_coding_ready = (
+        swebench.get("stable_zero") == "PASS"
+        and int(swebench.get("coding_receipts", 0) or 0) > 0
+    )
+    all_stable = all(item.get("stable_zero") == "PASS" for item in summaries)
+    demos_complete = all(int(item.get("n", 0) or 0) > 0 for item in summaries)
+    webshop_result_note = (
+        "WebShop v4 只报告当前 native-validation paired receipts。"
+        if webshop_measured
+        else "WebShop v4 尚无 paired result，不迁移旧 native-test 成绩。"
+    )
+    swebench_result_note = (
+        "SWE-bench regular-dev 只报告当前 official-harness paired receipts。"
+        if swebench_measured
+        else "SWE-bench regular-dev 尚无 paired result，不以代理零分替代。"
+    )
+    webshop_issue = (
+        "WebShop v4 已形成 native-validation paired receipt；旧 v2 native-test success 仍不进入当前指标，v3 仅保留为上下文预算失败诊断。"
+        if webshop_measured
+        else "WebShop native-action 接口已修正，但 v4 validation canary 尚无 paired receipt；旧 v2 test-range success 不作为当前验证证据。"
+    )
+    swebench_issue = (
+        "SWE-bench regular-dev 已形成 official-harness paired receipt；完整 Verified 仍保留给最终评测。"
+        if swebench_measured
+        else "SWE-bench regular-dev 当前尚无 official Docker harness evaluator receipt，因此 resolved_rate 不可测，不能提前归因为 Coding Agent 或 patch quality。"
+    )
+    skill_gate_note = (
+        "因此不存在可注入新多数据集 Director condition 的版本兼容 `ACTIVE` Skill，也不满足 Skill-on micro-training 的触发条件。"
+        if skill_state["active"] == 0
+        else "存在 `ACTIVE` Skill；是否实际注入仍必须以 condition receipt 与版本兼容检查为准。"
+    )
     return f"""# 多数据集 Agent 架构 Stable Zero 报告
 
 ## 架构完成情况
 
 控制路径保持为：本地 Qwen3.5-9B Flow-Director、one-atomic-edit progressive Canvas、execute-after-edit feedback、dynamic AgentGraph、显式 FINISH、数据集原生 evaluator 与完整 trajectory receipt。统一 AgentRuntime 分发 `reasoning`、Tool/ReAct、environment ReAct 和 `coding` execution adapter。Tool assignment、model selection、自由文本 contract、dependency、artifact type 与 completion condition 仍属于 Director search space。
 
-本轮未执行大规模训练、GRPO、backward、optimizer update、LoRA publication 或新的 Skill activation。
+当前所读 manifests 的 optimizer update 总数：**{optimizer_text}**。本轮未执行大规模训练、GRPO、backward、LoRA publication 或新的 Skill activation。
 
 ## 实现来源分类
 
@@ -727,21 +1374,46 @@ def _total_report(summaries: Sequence[Mapping[str, Any]]) -> str:
 |---|---:|---:|---:|---:|---|---|
 {chr(10).join(table_lines)}
 
-以上均为固定 2 题 Stable Zero 行为结果（AIME 从 30 个官方任务中固定选取），不是正式 benchmark 或 SOTA 估计。SWE-bench 标记为不可测，不以代理零分替代。
+只有存在当前 evidence scope 下的 paired result 与原生 evaluator receipt 时才显示数值；缺失项显示“不可测”，不填 0。AIME 数值来自 AIME-2025 development canary，**不是 AIME 2026 benchmark 成绩**；{webshop_result_note}{swebench_result_note}
+
+## Runtime receipts
+
+- 显式 FINISH：**{explicit_finish}** 条 trajectory
+- ToolReceipt（含 environment action）：**{tool_receipts}**
+- QA / computation / MedRAG 自然策略 ToolReceipt：**{non_environment_tool_receipts}**
+- Environment transition receipt：**{environment_receipts}**
+- Coding action receipt：**{coding_receipts}**
+
+## Exact-schema Tool forced probe（不计入 benchmark）
+
+| Dataset | Overall | Schema | Backend | Model/termination | Successful ToolReceipt |
+|---|---:|---:|---:|---:|---:|
+{diagnostic_table}
+
+这些 receipt 均为 `diagnostic_only=true`、`forced_probe=true`，没有 evaluator、Ground Truth、benchmark metric、Skill evidence、GRPO 或 optimizer update；不能与自然策略 Tool adoption 混合计数。
+
+## Protocol audit
+
+- HotpotQA、TriviaQA 与 AIME-2025 development：Direct 与 Tool-capable AgentGraph 分别报告；未把 protocol-separated delta 解释为 architecture causal effect 或 SOTA improvement。
+- HealthBench Professional v2：只报告 openai/simple-evals-compatible **reference-judge diagnostic**；不是私有官方评测服务或 leaderboard 成绩。
+- WebShop v4：只接受 native validation indices 500..627 的原生环境结果；旧 v2 native-test 结果作为 test-contaminated adaptation evidence 排除，v3 仅保留为上下文预算失败诊断。
+- ALFWorld：Direct/Simple ReAct 和 AgentGraph 使用相同 task lock、原生环境、action budget 与 evaluator，可进行同条件描述性比较。
+- SWE-bench：架构开发只使用 regular dev；完整 Verified 保留给最终评测。没有官方 Docker harness receipt 时 resolved/resolved_rate 不可测。
+- 所有原生 evaluator 都是唯一 terminal metric source；LLM self-judgement、文本相似度或 local proxy test 均未替代正式指标。
 
 ## Skill evidence gate
 
 {skill_text}
 
-最新 evidence-gated `ACTIVE` Skill 数量：**{skill_state['active']}**。因此不存在可注入新多数据集 Director condition 的版本兼容 `ACTIVE` Skill，也不满足 Skill-on micro-training 的触发条件。`CANDIDATE` instruction 仍是候选，不作为已验证 Skill。
+最新 evidence-gated `ACTIVE` Skill 数量：**{skill_state['active']}**。{skill_gate_note}`CANDIDATE` instruction 仍是候选，不作为已验证 Skill。
 
 ## 剩余问题分类
 
-- `ENVIRONMENT_LIMITATION`：SWE-bench 官方 Docker harness 无法访问 Docker daemon，官方 `resolved_rate` 不可测。
+- {swebench_issue}
 - `SKILL_EVIDENCE_INSUFFICIENT`：最新独立 paired evidence 未满足 calibrated lower-bound/harm gate；`ACTIVE` Skill 数为 0。
-- `POLICY_LEARNING_PROBLEM`：Tool 能力已经接线，但 HotpotQA、TriviaQA 与 AIME 的 Stable Zero graph 没有自然选择可选 retrieval/computation Tool。
-- `MODEL_CAPABILITY_LIMIT`：HealthBench 的 2 题样本在 evaluator-valid execution 下 raw_score 仍低；该样本不足以证明更窄的架构缺陷。
-- `ARCHITECTURE_DEFECT`（已修复）：WebShop JSON/native-action 不匹配和 ALFWorld 缺少 environment actor 的 terminal condition 已通过最小 executor/terminal adaptation 修正并独立复跑。
+- HotpotQA 与 TriviaQA v3 的当前 Stable Zero trajectories 各自然产生 1 条成功 retrieval `ToolReceipt`；AIME-2025 development 与 HealthBench v2 未自然选择其可选 Tool。两题 canary 只能验证自然工具调用链已经出现，不能估计 tool-use policy 的总体采用率、收益或 Skill effect。
+- HealthBench 的 2 题 reference-judge diagnostic raw_score 较低；该 canary 不足以证明模型能力或架构的单一原因。
+- {webshop_issue}
 
 ## 最终判定
 
@@ -755,38 +1427,29 @@ COLLABORATION_DIVERSITY_READY = YES
 
 QA_TOOL_REGISTRY_READY = YES
 QA_DATABASE_SELECTION_READY = YES
-QA_TOOL_USE_VALIDATED = NO
+QA_TOOL_USE_VALIDATED = {'YES' if qa_tool_use_validated else 'NO'}
 
-ALFWORLD_REACT_READY = YES
-WEBSHOP_REACT_READY = YES
+ALFWORLD_REACT_READY = {'YES' if alfworld_react_ready else 'NO'}
+WEBSHOP_REACT_READY = {'YES' if webshop_react_ready else 'NO'}
 
 CODING_AGENT_READY = YES
-SWEBENCH_CODING_WORKFLOW_READY = NO
+SWEBENCH_CODING_WORKFLOW_READY = {'YES' if swebench_coding_ready else 'NO'}
 
-SKILL_END_TO_END_READY = YES
+SKILL_END_TO_END_READY = {'YES' if skill_state['active'] > 0 else 'NO'}
 SKILL_SUMMARY_VALIDATED = NO
 
-ALL_DATASETS_STABLE_ZERO_COMPLETE = NO
-CORRECT_WRONG_DEMOS_COMPLETE = NO
+ALL_DATASETS_STABLE_ZERO_COMPLETE = {'YES' if all_stable else 'NO'}
+CORRECT_WRONG_DEMOS_COMPLETE = {'YES' if demos_complete else 'NO'}
 
 MICRO_TRAINING_EXECUTED = NO
 LEARNING_TREND_OBSERVED = NO
 
-GITHUB_ARCHITECTURE_BACKUP = NO
+GITHUB_ARCHITECTURE_BACKUP = NOT_EVALUATED_BY_REPORT_GENERATOR
 
 READY_FOR_FORMAL_MULTIDATASET_TRAINING = NO
 ```
 
-`GITHUB_ARCHITECTURE_BACKUP = NO` 表示当前 branch 在本地可恢复，但生成报告时远端认证不可用；正常认证的 `git push` 成功前，不得表述为已推送。
-
-## 备份状态
-
-- 当前架构 commit：`9f38701`（`architecture: validate multidataset stable-zero runtime`）。
-- 本地统一备份 branch/tag：`backup/multidataset-stablezero-arch-20260820`。
-- 数据集恢复 branch：HotpotQA、TriviaQA、AIME 2026、HealthBench Professional、WebShop v2、ALFWorld v2、SWE-bench coding preflight 各有独立命名的本地 branch。
-- Patch：`/ssd1/iclr/1/0001-architecture-validate-multidataset-stable-zero-runti.patch`。
-- Bundle：`/ssd1/iclr/1/FlowSteer-multidataset-stablezero-20260820.bundle`。
-- GitHub push：`BLOCKED`；使用仓库现有配置执行非交互式 push 时，没有可用的 GitHub credential。未把 token 写入命令、remote、日志或 commit。
+判定说明：`DEEP_WORKFLOW_READY` 表示 search space 与 scheduler 支持 deep/parallel/fan-in/finite-reciprocal motif，不表示当前 canary 已普遍采用深图。`CORRECT_WRONG_DEMOS_COMPLETE` 只表示七个数据集是否都已有 evaluator-valid paired result；不要求为获得错例而人为制造失败。报告生成器不执行或验证 Git push，因此不对远端备份状态作结论。
 
 ## 报告索引
 

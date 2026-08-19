@@ -23,6 +23,7 @@ def capability(tool_id: str = "wiki.search") -> ToolCapability:
     return ToolCapability(
         tool_id=tool_id,
         dataset_scope=("triviaqa",),
+        action_schemas={"search": {"type": "object"}},
         input_schema={"type": "object"},
         output_schema={"type": "object"},
         side_effect="none",
@@ -81,6 +82,27 @@ class AgentExecutionContractTests(unittest.TestCase):
 
 
 class ToolRegistryTests(unittest.IsolatedAsyncioTestCase):
+    def test_capability_serializes_fixed_and_dynamic_action_domains(self) -> None:
+        fixed = capability()
+        self.assertEqual(("search",), fixed.action_names)
+        self.assertEqual(
+            {"search": {"type": "object"}},
+            fixed.to_value()["action_schemas"],
+        )
+
+        dynamic = ToolCapability(
+            tool_id="alfworld.environment",
+            dataset_scope=("alfworld",),
+            action_schemas={},
+            input_schema={"type": "object"},
+            output_schema={"type": "object"},
+            side_effect="environment_state_transition",
+            timeout_seconds=1.0,
+            version="native-actions-v1",
+        )
+        self.assertEqual((), dynamic.action_names)
+        self.assertEqual({}, dynamic.to_value()["action_schemas"])
+
     async def test_skillflow_registry_port_emits_measured_receipt(self) -> None:
         backend = FakeTool({"search": lambda arguments: {"query": arguments["query"]}})
         registry = ToolRegistry(

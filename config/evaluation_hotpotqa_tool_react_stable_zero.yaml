@@ -6,18 +6,18 @@
 
 schema_version: "flowsteer.agentgraph.config.v1"
 experiment:
-  name: "hotpotqa_tool_react_stable_zero"
+  name: "hotpotqa_tool_react_exact_wire_v3_stable_zero"
   phase: "hotpotqa_evaluation"
-  baseline_id: "hotpotqa_tool_react_stable_zero_v1"
+  baseline_id: "hotpotqa_tool_react_stable_zero_v3"
   step_id: "stable_zero"
   training_enabled: false
   seed: 20260815
-  condition_id: "hotpotqa_tool_react_stable_zero"
+  condition_id: "hotpotqa_tool_react_exact_wire_v3_stable_zero"
   sampling_schedule_purpose: "hotpotqa_fixed_heldout_tool_react"
-  catalog_order_namespace: "hotpotqa_tool_react_v1"
-  prompt_version: "agentgraph.director.minimal.v2"
-  tool_version: "skillflow.qa-retrieval.search-read.v1"
-  output_dir: "artifacts/qa_tool_react_stable_zero/hotpotqa"
+  catalog_order_namespace: "hotpotqa_tool_react_v3"
+  prompt_version: "agentgraph.director.minimal.v3"
+  tool_version: "skillflow.qa-retrieval.search-read.exact-structured-action.v2"
+  output_dir: "artifacts/qa_tool_react_exact_wire_v3_stable_zero/hotpotqa"
 
 data:
   catalog_path: "config/datasets_agentgraph.yaml"
@@ -45,28 +45,30 @@ hotpotqa_evaluation:
 
 qa_tool_runtime:
   enabled: true
-  condition_id: "hotpotqa_tool_react_stable_zero"
+  condition_id: "hotpotqa_tool_react_exact_wire_v3_stable_zero"
   mode: "model_driven_search_read"
   dataset_scope: ["hotpotqa"]
   skillflow_source: "/home/test/SKILLEV/skillflow-bayesian-improve-deploy/src"
   index_path: "/ssd1/iclr/SKILLEV/skillev-new-b2-temp/data/datasets/dpr-wikipedia/atlas-retrieval.sqlite3"
   max_turns_per_agent_call: 6
   max_tool_calls_per_agent_call: 4
-  tool_timeout_seconds: 10.0
+  # The frozen SQLite index takes about 16 seconds for a cold measured query
+  # on this host; the prior 10-second boundary rejected every valid search.
+  tool_timeout_seconds: 30.0
 
 storage:
   schema_version: "flowsteer.completion_benchmark.round.v1"
-  root: "artifacts/qa_tool_react_stable_zero/hotpotqa/evidence"
-  selected_tasks_path: "artifacts/qa_tool_react_stable_zero/hotpotqa/selected_tasks.jsonl"
-  direct_predictions_path: "artifacts/qa_tool_react_stable_zero/hotpotqa/direct_closed_context_predictions.jsonl"
-  trajectories_path: "artifacts/qa_tool_react_stable_zero/hotpotqa/tool_agentgraph_trajectories.jsonl"
-  failures_path: "artifacts/qa_tool_react_stable_zero/hotpotqa/collection_failures.jsonl"
-  paired_results_path: "artifacts/qa_tool_react_stable_zero/hotpotqa/protocol_separated_results.jsonl"
-  wrong_demos_path: "artifacts/qa_tool_react_stable_zero/hotpotqa/wrong_demos.jsonl"
-  manifest_path: "artifacts/qa_tool_react_stable_zero/hotpotqa/run_manifest.json"
-  preflight_receipt_path: "artifacts/qa_tool_react_stable_zero/hotpotqa/preflight_receipt.json"
-  report_json_path: "reports/qa_tool_react_stable_zero/hotpotqa_report.json"
-  report_markdown_path: "reports/qa_tool_react_stable_zero/hotpotqa_report.md"
+  root: "artifacts/qa_tool_react_exact_wire_v3_stable_zero/hotpotqa/evidence"
+  selected_tasks_path: "artifacts/qa_tool_react_exact_wire_v3_stable_zero/hotpotqa/selected_tasks.jsonl"
+  direct_predictions_path: "artifacts/qa_tool_react_exact_wire_v3_stable_zero/hotpotqa/direct_closed_context_predictions.jsonl"
+  trajectories_path: "artifacts/qa_tool_react_exact_wire_v3_stable_zero/hotpotqa/tool_agentgraph_trajectories.jsonl"
+  failures_path: "artifacts/qa_tool_react_exact_wire_v3_stable_zero/hotpotqa/collection_failures.jsonl"
+  paired_results_path: "artifacts/qa_tool_react_exact_wire_v3_stable_zero/hotpotqa/protocol_separated_results.jsonl"
+  wrong_demos_path: "artifacts/qa_tool_react_exact_wire_v3_stable_zero/hotpotqa/wrong_demos.jsonl"
+  manifest_path: "artifacts/qa_tool_react_exact_wire_v3_stable_zero/hotpotqa/run_manifest.json"
+  preflight_receipt_path: "artifacts/qa_tool_react_exact_wire_v3_stable_zero/hotpotqa/preflight_receipt.json"
+  report_json_path: "reports/qa_tool_react_exact_wire_v3_stable_zero/hotpotqa_report.json"
+  report_markdown_path: "reports/qa_tool_react_exact_wire_v3_stable_zero/hotpotqa_report.md"
 
 director:
   base_model: "${QWEN35_9B_MODEL_PATH:-/home/test/SKILLEV/skillev-new-b2-temp/model/Qwen3.5-9B-modelscope}"

@@ -894,11 +894,27 @@ def _environment_runtime_settings(
         raise ConfigurationError(
             "environment_runtime.tool_timeout_seconds must be positive"
         )
+    director_value = config.get("director", {})
+    director = (
+        director_value if isinstance(director_value, Mapping) else {}
+    )
+    max_action_tokens = section.get(
+        "max_action_tokens", director.get("max_action_tokens", 512)
+    )
+    if (
+        isinstance(max_action_tokens, bool)
+        or not isinstance(max_action_tokens, int)
+        or max_action_tokens < 1
+    ):
+        raise ConfigurationError(
+            "environment_runtime.max_action_tokens must be a positive integer"
+        )
     return {
         "source_key": source_key,
         "ragen_adapter_path": ragen_adapter_path.strip(),
         "max_turns": int(runtime_budget),
         "tool_timeout_seconds": float(timeout_seconds),
+        "max_action_tokens": max_action_tokens,
     }
 
 
@@ -1886,6 +1902,20 @@ class LiveSmokeBackend:
         if enabled_runtimes == 0:
             return self.runtime, None, lambda: None
 
+        director_value = self.config.get("director", {})
+        if not isinstance(director_value, Mapping):
+            raise ConfigurationError("director must be a mapping")
+        director_section = director_value
+        tool_action_tokens = director_section.get("max_action_tokens", 512)
+        if (
+            isinstance(tool_action_tokens, bool)
+            or not isinstance(tool_action_tokens, int)
+            or tool_action_tokens < 1
+        ):
+            raise ConfigurationError(
+                "director.max_action_tokens must be a positive integer"
+            )
+
         if swe_coding_settings is not None:
             source_key = str(swe_coding_settings["source_key"])
             prepared = prepare_swebench_worktree_for_task(
@@ -1918,6 +1948,7 @@ class LiveSmokeBackend:
                     tool_registry=tool_registry,
                     max_turns=int(swe_coding_settings["max_turns"]),
                     max_tool_calls=int(swe_coding_settings["max_tool_calls"]),
+                    max_action_tokens=tool_action_tokens,
                 )
                 runtime = AgentRuntime(
                     self.registry,
@@ -1946,6 +1977,7 @@ class LiveSmokeBackend:
                 tool_registry=tool_registry,
                 max_turns=int(aime_settings["max_turns"]),
                 max_tool_calls=int(aime_settings["max_tool_calls"]),
+                max_action_tokens=tool_action_tokens,
             )
             runtime = AgentRuntime(
                 self.registry,
@@ -1978,6 +2010,7 @@ class LiveSmokeBackend:
                     tool_registry=opened.registry,
                     max_turns=int(healthbench_settings["max_turns"]),
                     max_tool_calls=int(healthbench_settings["max_tool_calls"]),
+                    max_action_tokens=tool_action_tokens,
                 )
                 runtime = AgentRuntime(
                     self.registry,
@@ -2008,6 +2041,9 @@ class LiveSmokeBackend:
                 session_factory=session_factory,
                 task_family=source_key,
                 max_turns=int(environment_settings["max_turns"]),
+                max_action_tokens=int(
+                    environment_settings["max_action_tokens"]
+                ),
                 timeout_seconds=float(
                     environment_settings["tool_timeout_seconds"]
                 ),
@@ -2052,6 +2088,7 @@ class LiveSmokeBackend:
                 tool_registry=opened.registry,
                 max_turns=int(qa_settings["max_turns"]),
                 max_tool_calls=int(qa_settings["max_tool_calls"]),
+                max_action_tokens=tool_action_tokens,
             )
             runtime = AgentRuntime(
                 self.registry,

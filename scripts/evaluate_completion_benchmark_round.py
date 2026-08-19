@@ -15,7 +15,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 from collections import Counter
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, timezone
 import json
 import math
@@ -258,7 +258,7 @@ def validate_completion_benchmark_config(config: Mapping[str, Any]) -> None:
         for field_name in (
             "swebench_evaluator_path",
             "swebench_harness_path",
-            "swebench_verified_path",
+            "swebench_dataset_path",
             "swebench_evaluation_root",
             "swebench_docker_namespace",
         ):
@@ -268,6 +268,18 @@ def validate_completion_benchmark_config(config: Mapping[str, Any]) -> None:
         timeout = evaluation.get("swebench_timeout_seconds")
         checks["evaluation.swebench_timeout_seconds"] = bool(
             type(timeout) is int and timeout > 0
+        )
+        dataset_source = evaluation.get("swebench_dataset_source")
+        checks["evaluation.swebench_dataset_source"] = dataset_source in {
+            "regular_dev",
+            "verified",
+        }
+        expected_split = {
+            "regular_dev": "validation",
+            "verified": "test",
+        }.get(dataset_source)
+        checks["swe_bench.dataset_source_split_isolation"] = (
+            expected_split is not None and bounded.get("split") == expected_split
         )
         swe_runtime = config.get("swe_coding_runtime")
         if isinstance(swe_runtime, Mapping) and swe_runtime.get("enabled") is True:
@@ -581,6 +593,29 @@ async def _direct_one(
 
     if dataset_key in _INTERACTIVE_BENCHMARKS:
         executions: list[dict[str, Any]] = []
+        runtime_section = _mapping(
+            backend.config.get("environment_runtime", {}),
+            "environment_runtime",
+        )
+        director_section = _mapping(backend.config.get("director", {}), "director")
+        max_action_tokens = runtime_section.get(
+            "max_action_tokens", director_section.get("max_action_tokens", 512)
+        )
+        if (
+            isinstance(max_action_tokens, bool)
+            or not isinstance(max_action_tokens, int)
+            or max_action_tokens < 1
+        ):
+            raise CompletionBenchmarkRoundError(
+                "environment max_action_tokens must be a positive integer"
+            )
+        action_model = replace(
+            model,
+            metadata={
+                **dict(model.metadata),
+                "max_tokens": str(max_action_tokens),
+            },
+        )
 
         async def direct_action(environment_prompt: str) -> str:
             step_index = len(executions)
@@ -590,7 +625,7 @@ async def _direct_one(
                 graph_revision=0,
                 problem=environment_prompt,
                 agent=AgentNode("direct", model_id, contract),
-                model=model,
+                model=action_model,
                 provider=provider,
                 phase=ExecutionPhase.SINGLE,
                 is_output_agent=True,
@@ -1057,7 +1092,13 @@ def _report(
         "dataset_key": dataset_key,
         "dataset": specification["label"],
         "project_split": str(bounded["split"]),
-        "benchmark_slice": bounded.get("benchmark_slice"),
+        "benchmark_slice": (
+            _mapping(config["evaluation"], "evaluation").get(
+                "swebench_dataset_source"
+            )
+            if dataset_key == "swe_bench"
+            else bounded.get("benchmark_slice")
+        ),
         "sample_count": len(rows),
         "primary_metric": metric_name,
         "protocol_equivalent_to_direct": bool(
@@ -1077,7 +1118,14 @@ def _report(
             if dataset_key == "aime_2026"
             else "OpenAI_simple_evals_HealthBench_rubric_raw_score"
             if dataset_key == "healthbench_professional"
-            else "SWE_bench_Verified_official_Docker_harness_resolved_rate"
+            else (
+                "SWE_bench_regular_dev_official_Docker_harness_resolved_rate"
+                if _mapping(config["evaluation"], "evaluation").get(
+                    "swebench_dataset_source"
+                )
+                == "regular_dev"
+                else "SWE_bench_Verified_official_Docker_harness_resolved_rate"
+            )
             if dataset_key == "swe_bench"
             else "SkillFlow_RAGEN_official_environment_terminal_success"
         ),
@@ -1236,7 +1284,8 @@ def _attach_swebench_official_harness(
     harness = OfficialSWEbenchHarness(
         evaluator_path=_resolve(root, str(evaluation["swebench_evaluator_path"])),
         harness_path=_resolve(root, str(evaluation["swebench_harness_path"])),
-        verified_path=_resolve(root, str(evaluation["swebench_verified_path"])),
+        dataset_source=str(evaluation["swebench_dataset_source"]),
+        dataset_path=_resolve(root, str(evaluation["swebench_dataset_path"])),
         evaluation_root=_resolve(root, str(evaluation["swebench_evaluation_root"])),
         docker_namespace=str(evaluation["swebench_docker_namespace"]),
         timeout_seconds=int(evaluation["swebench_timeout_seconds"]),
@@ -1250,7 +1299,7 @@ def _attach_swebench_official_harness(
                 f"selected SWE-bench task {task.task_id} has no instance_id"
             )
         instance_ids.append(instance_id.strip())
-    receipt = harness.preflight(instance_ids)
+    receipt = harness.preflight(selected)
     backend.swe_harness = harness
     return receipt
 

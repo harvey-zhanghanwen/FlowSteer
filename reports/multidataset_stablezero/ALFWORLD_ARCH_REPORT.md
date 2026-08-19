@@ -8,14 +8,38 @@
 - 显式 FINISH：**2/2**
 - 有效原生 evaluator receipt：**2/2**
 - `STABLE_ZERO = PASS`
-- 本轮 training/optimizer/LoRA publication：**无**
+- optimizer update：**0**
+- 本轮 GRPO/backward/LoRA publication：**无**
 
 | Condition | success |
 |---|---:|
 | Direct/Simple Baseline | 50.00% |
 | AgentGraph | 100.00% |
 
-以上是固定 2 题 Stable Zero 行为结果，不是正式 benchmark 或 SOTA 声明。
+以上是当前 evidence scope 中 2 题的 Stable Zero 行为结果，不是正式 benchmark 或 SOTA 声明。
+
+## Evidence scope 与协议限制
+
+- Evidence scope：fixed validation canary
+- Protocol：Direct 与 AgentGraph 使用相同原生游戏、task lock、50-step budget 和 evaluator。
+
+- 无额外限制记录。
+
+### 明确排除的历史结果
+
+- 无需隔离的旧结果。
+
+
+## Baseline Comparison
+
+| Stage | Result | Protocol note |
+|---|---|---|
+| Simple Baseline | success=50.00% | Direct 与 AgentGraph 使用相同原生游戏、task lock、50-step budget 和 evaluator。 |
+| AgentGraph Stable Zero | success=100.00% | fixed tasks, explicit FINISH, native evaluator |
+| Architecture-final AgentGraph | success=100.00% | current v2 condition after receipt-driven minimal adaptation |
+| Tool/ReAct/Coding-enabled AgentGraph | success=100.00% | native environment replay; actual actions=10 |
+
+同一 receipt 同时代表多个 stage 时不会重复解释为独立实验，也不会把 protocol-separated 条件的差值解释为因果增益。
 
 ## Workflow 分布
 
@@ -39,6 +63,11 @@
 ## Tool / ReAct 使用情况
 
 - Tool call：**10**；成功：**10**；失败：**0**
+- Tool call task rate：**2/2**
+- Tool useful rate：**不可测**；当前 receipt 没有独立的 causal usefulness annotation
+- Tool wasted rate：**不可测**；Tool error 单独报告，不能等同于无效信息价值
+- Environment transition receipt：**10**
+- Coding action receipt：**0**
 - AgentGraph 原生 environment action：**10**；invalid action：**0**
 - Direct 原生 environment action：**54**；invalid action：**1**
 
@@ -103,9 +132,21 @@ Tool receipts：
 - tool=`alfworld.environment`, status=`completed`; request={"action": "go to shelf 1", "arguments": {}}
 - tool=`alfworld.environment`, status=`completed`; request={"action": "go to dresser 1", "arguments": {}}
 - tool=`alfworld.environment`, status=`completed`; request={"action": "use desklamp 1", "arguments": {}}
-## Wrong Demo
+## Wrong / Failure Demo
 
-该 2 题样本中没有 AgentGraph 错例；不进行虚构。
+当前 AgentGraph 2 题均成功；以下保留同一 fixed task 的真实 Direct failure contrast，不把它计为 AgentGraph wrong case。
+
+### Direct Failure Contrast: `alfworld:train:00006`
+
+- Task：examine the pillow with the desklamp.
+- Ground Truth：environment_success
+- Direct Final Answer：<action>examine pillow 1</action>
+- Evaluator：`{"environment_return": 0.0, "steps": 50.0, "success": 0.0, "terminal": 0.0}`
+- Failure classification：`ReAct action selection / state tracking / stopping`
+
+Direct ReAct trace（50 个 action）：`go to bed 1 → take pillow 1 from bed 1 → examine pillow 1 → <INVALID> → examine pillow 1 → examine pillow 1 → examine pillow 1 → examine pillow 1 → examine pillow 1 → examine pillow 1 → examine pillow 1 → examine pillow 1 → examine pillow 1 → examine pillow 1` …
+
+FIRST ERROR：Direct arm 在第 3 个 environment step 首次产生 <INVALID>，随后重复 examine pillow 1，最终触发 50-step environment_step_limit；同题 v2 AgentGraph 用 6 个原生 action 成功。
 
 
 ## 最小架构适配
