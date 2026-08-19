@@ -90,7 +90,7 @@ and judge service remain external to this source backup.
 Materialize the ignored local data:
 
 ```bash
-/ssd1/iclr/gpf/venvs/skillflow/bin/python \
+"$FLOWSTEER_PYTHON_BIN" \
   scripts/prepare_agentgraph_datasets.py \
   --datasets healthbench_professional
 ```
@@ -98,7 +98,7 @@ Materialize the ignored local data:
 Validate the configuration without starting a model:
 
 ```bash
-/ssd1/iclr/gpf/venvs/skillflow/bin/python \
+"$FLOWSTEER_PYTHON_BIN" \
   scripts/evaluate_completion_benchmark_round.py \
   --config config/development_healthbench_professional_round_01.yaml \
   --prepare-only
@@ -112,12 +112,21 @@ set -a
 source .env
 set +a
 
-/ssd1/iclr/gpf/venvs/skillflow/bin/python \
+"$FLOWSTEER_PYTHON_BIN" \
+  scripts/evaluate_completion_benchmark_round.py \
+  --config config/development_healthbench_professional_round_01.yaml \
+  --canary-only
+
+"$FLOWSTEER_PYTHON_BIN" \
+  scripts/evaluate_completion_benchmark_round.py \
+  --config config/development_healthbench_professional_round_01.yaml
+
+"$FLOWSTEER_PYTHON_BIN" \
   scripts/evaluate_completion_benchmark_round.py \
   --config config/evaluation_healthbench_professional_round_01.yaml \
   --canary-only
 
-/ssd1/iclr/gpf/venvs/skillflow/bin/python \
+"$FLOWSTEER_PYTHON_BIN" \
   scripts/evaluate_completion_benchmark_round.py \
   --config config/evaluation_healthbench_professional_round_01.yaml
 ```
