@@ -779,6 +779,15 @@ READY_FOR_FORMAL_MULTIDATASET_TRAINING = NO
 
 `GITHUB_ARCHITECTURE_BACKUP = NO` 表示当前 branch 在本地可恢复，但生成报告时远端认证不可用；正常认证的 `git push` 成功前，不得表述为已推送。
 
+## 备份状态
+
+- 当前架构 commit：`9f38701`（`architecture: validate multidataset stable-zero runtime`）。
+- 本地统一备份 branch/tag：`backup/multidataset-stablezero-arch-20260820`。
+- 数据集恢复 branch：HotpotQA、TriviaQA、AIME 2026、HealthBench Professional、WebShop v2、ALFWorld v2、SWE-bench coding preflight 各有独立命名的本地 branch。
+- Patch：`/ssd1/iclr/1/0001-architecture-validate-multidataset-stable-zero-runti.patch`。
+- Bundle：`/ssd1/iclr/1/FlowSteer-multidataset-stablezero-20260820.bundle`。
+- GitHub push：`BLOCKED`；使用仓库现有配置执行非交互式 push 时，没有可用的 GitHub credential。未把 token 写入命令、remote、日志或 commit。
+
 ## 报告索引
 
 {chr(10).join(f"- [{spec.title}](reports/multidataset_stablezero/{spec.report_name})" for spec in SPECS)}
