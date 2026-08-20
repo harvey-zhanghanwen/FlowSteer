@@ -88,8 +88,9 @@ class CodingExecutionTests(unittest.IsolatedAsyncioTestCase):
                 [
                     tool("view_file", {"path": "bug.py"}),
                     tool(
-                        "exact_edit",
+                        "str_replace_editor",
                         {
+                            "command": "str_replace",
                             "path": "bug.py",
                             "old_str": "return a - b",
                             "new_str": "return a + b",
@@ -121,6 +122,57 @@ class CodingExecutionTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual("coding", response.metadata["execution_mode"])
             self.assertEqual(4, response.metadata["tool_calls"])
             self.assertIn("return a + b", (root / "bug.py").read_text())
+
+    async def test_codex_apply_patch_is_a_fresh_changed_edit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "bug.py").write_text(
+                "def add(a, b):\n    return a - b\n",
+                encoding="utf-8",
+            )
+            registry = create_swebench_repository_registry(root)
+            patch_input = (
+                "*** Begin Patch\n"
+                "*** Update File: bug.py\n"
+                "@@\n"
+                "-    return a - b\n"
+                "+    return a + b\n"
+                "*** End Patch"
+            )
+            gateway = SequenceGateway(
+                [
+                    tool("apply_patch", {"patch": patch_input}),
+                    tool(
+                        "run_tests",
+                        {
+                            "command": [
+                                sys.executable,
+                                "-c",
+                                "from bug import add; assert add(2, 3) == 5",
+                            ]
+                        },
+                    ),
+                    tool("diff", {}),
+                    complete("submit current repository state"),
+                ]
+            )
+            adapter = CodingExecutionAdapter(
+                gateway=gateway,
+                tool_registry=registry,
+                max_turns=4,
+                max_tool_calls=3,
+            )
+
+            response = await adapter.execute(coding_request())
+
+            self.assertIn("+    return a + b", response.text)
+            self.assertEqual(
+                ["apply_patch", "run_tests", "diff"],
+                [
+                    receipt["request"]["action"]
+                    for receipt in response.metadata["tool_receipts"]
+                ],
+            )
 
     async def test_revision_requires_new_test_and_diff_before_completion(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -3,9 +3,14 @@
 This module is a dependency-light port of the repository primitives in
 SkillFlow ``training/environment.py``: ``_resolve_repo_path``,
 ``_handle_list_files``, ``_handle_search_code``, ``_handle_view_file``,
-``_sre_str_replace``, ``_generate_workspace_diff``, and the local branch of
-``_handle_run_tests``.  The backend is registered through this project's
-SkillFlow-derived :mod:`src.interactive.tool_runtime` contracts.
+``_handle_bash``, ``_handle_str_replace_editor`` and its create/replace/insert/
+undo primitives, ``_generate_filemap``, ``_generate_workspace_diff``, and the
+local branch of ``_handle_run_tests``.  The backend is registered through this
+project's SkillFlow-derived :mod:`src.interactive.tool_runtime` contracts.
+
+The ``apply_patch`` action delegates to the local official Codex CLI's
+``--codex-run-as-apply-patch`` entry point instead of reimplementing Codex's
+patch grammar or hunk matcher.
 
 SkillFlow's worktree setup and ``_run_tests_in_swe_env`` depend on its private
 Verified-dataset cache, repository store, environment resolver, and monolithic
@@ -16,6 +21,7 @@ an already prepared repository root; official patch evaluation remains in
 
 from __future__ import annotations
 
+import ast
 import difflib
 import fnmatch
 import os
@@ -36,11 +42,13 @@ from .tool_runtime import (
 
 
 SWEBENCH_REPOSITORY_TOOL_ID = "swebench_repository"
-SWEBENCH_REPOSITORY_TOOL_VERSION = "skillflow.repository-tools.v1"
+SWEBENCH_REPOSITORY_TOOL_VERSION = "skillflow.repository-tools.v2"
+CODEX_APPLY_PATCH_EXECUTABLE = "/home/test/.local/bin/codex"
 _SOURCE_SUFFIXES = frozenset({".py"})
 _IGNORED_SOURCE_DIRECTORIES = frozenset(
     {".git", "doc", "docs", "example", "examples", "test", "tests", "testing"}
 )
+_MAX_BASH_OUTPUT = 10_000
 
 
 def _error(action: str, message: str) -> ToolResult:
@@ -69,13 +77,21 @@ class RepositoryToolBackend:
         self.max_view_lines = int(max_view_lines)
         self.max_search_matches = int(max_search_matches)
         self.max_test_timeout_seconds = float(max_test_timeout_seconds)
-        self._original_contents: dict[str, str] = {}
+        # ``None`` records that a path did not exist before the first edit.
+        # This lets the workspace diff represent SkillFlow ``create`` actions.
+        self._original_contents: dict[str, str | None] = {}
+        # SkillFlow's ``str_replace_editor`` stores one previous revision per
+        # path and consumes it on ``undo_edit``.
+        self._edit_history: dict[str, str] = {}
         self._lock = threading.RLock()
 
     def invoke(self, request: ToolRequest) -> ToolResult:
         handlers = {
+            "apply_patch": self._apply_patch,
+            "bash": self._bash,
             "list_files": self._list_files,
             "search_code": self._search_code,
+            "str_replace_editor": self._str_replace_editor,
             "view_file": self._view_file,
             "exact_edit": self._exact_edit,
             "diff": self._diff,
@@ -100,20 +116,46 @@ class RepositoryToolBackend:
             raise ValueError("path resolves outside the repository") from exc
         return candidate, relative
 
+    @staticmethod
+    def _matches_file_pattern(path: Path, relative: str, file_pattern: str) -> bool:
+        """Match SkillFlow's explicit ``file_pattern`` forms.
+
+        An explicit pattern addresses repository files directly, so it is not
+        restricted to Python source and does not inherit the default
+        tests/docs exclusions.
+        """
+
+        pattern = file_pattern.strip().lstrip("./")
+        if not pattern:
+            return True
+        if fnmatch.fnmatch(relative, pattern) or fnmatch.fnmatch(path.name, pattern):
+            return True
+        if "/" not in pattern:
+            return (
+                fnmatch.fnmatch(path.name, pattern if "." in pattern else f"*{pattern}*")
+                or pattern in relative
+            )
+        return fnmatch.fnmatch(relative, f"*{pattern}*")
+
     def _source_paths(self, file_pattern: str = "") -> list[Path]:
         paths: list[Path] = []
         normalized_pattern = file_pattern.strip().lstrip("./")
         for path in self.repo_root.rglob("*"):
-            if not path.is_file() or path.suffix not in _SOURCE_SUFFIXES:
+            if not path.is_file():
                 continue
             relative = path.relative_to(self.repo_root)
-            if any(part in _IGNORED_SOURCE_DIRECTORIES for part in relative.parts[:-1]):
+            if ".git" in relative.parts:
                 continue
             relative_text = relative.as_posix()
-            if normalized_pattern and not (
-                fnmatch.fnmatch(relative_text, normalized_pattern)
-                or fnmatch.fnmatch(path.name, normalized_pattern)
-                or fnmatch.fnmatch(relative_text, f"*{normalized_pattern}*")
+            if normalized_pattern:
+                if not self._matches_file_pattern(path, relative_text, normalized_pattern):
+                    continue
+            elif (
+                path.suffix not in _SOURCE_SUFFIXES
+                or any(
+                    part in _IGNORED_SOURCE_DIRECTORIES
+                    for part in relative.parts[:-1]
+                )
             ):
                 continue
             paths.append(path)
@@ -123,7 +165,10 @@ class RepositoryToolBackend:
         raw_pattern = arguments.get("file_pattern", "")
         if not isinstance(raw_pattern, str):
             return _error("list_files", "file_pattern must be text")
-        files = [path.relative_to(self.repo_root).as_posix() for path in self._source_paths(raw_pattern)]
+        files = [
+            path.relative_to(self.repo_root).as_posix()
+            for path in self._source_paths(raw_pattern)
+        ]
         return ToolResult(
             {
                 "action": "list_files",
@@ -176,6 +221,52 @@ class RepositoryToolBackend:
             }
         )
 
+    @staticmethod
+    def _generate_filemap(content: str, path: str) -> str | None:
+        """Return SkillFlow's AST file structure for a long Python file."""
+
+        del path
+        try:
+            tree = ast.parse(content)
+        except SyntaxError:
+            return None
+
+        lines = content.split("\n")
+        result: list[tuple[float, str]] = []
+        for node in ast.walk(tree):
+            if not isinstance(
+                node,
+                (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef),
+            ):
+                continue
+            start = node.lineno
+            end = node.end_lineno or start
+            body_len = end - start
+            signature = lines[start - 1].rstrip()
+            result.append((float(start), f"{start:4d} | {signature}"))
+            minimum_body = 5 if isinstance(node, ast.ClassDef) else 3
+            if body_len > minimum_body:
+                result.append(
+                    (start + 0.5, f"     | ...({body_len} lines)")
+                )
+
+        imports = []
+        for index, line in enumerate(lines[:15], start=1):
+            if line.strip().startswith(("import ", "from ")):
+                imports.append(f"{index:4d} | {line.rstrip()}")
+        if not result and not imports:
+            return None
+
+        result.sort(key=lambda item: item[0])
+        output = "\n".join(imports[:5])
+        if imports:
+            output += "\n     | ..."
+        if result:
+            output += ("\n" if output else "") + "\n".join(
+                entry for _, entry in result
+            )
+        return output
+
     def _view_file(self, arguments: Mapping[str, object]) -> ToolResult:
         try:
             path, relative = self._resolve_repo_path(arguments.get("path", ""))
@@ -200,6 +291,20 @@ class RepositoryToolBackend:
             return _error("view_file", f"cannot read {relative}: {exc}")
         lines = content.splitlines()
         total = len(lines)
+        has_explicit_range = "start_line" in arguments or "end_line" in arguments
+        if not has_explicit_range and total > 500 and path.suffix == ".py":
+            filemap = self._generate_filemap(content, relative)
+            if filemap:
+                return ToolResult(
+                    {
+                        "action": "view_file",
+                        "ok": True,
+                        "path": relative,
+                        "kind": "filemap",
+                        "total_lines": total,
+                        "filemap": filemap,
+                    }
+                )
         try:
             start_line = int(arguments.get("start_line", 1))
             end_line = int(arguments.get("end_line", max(total, 1)))
@@ -226,42 +331,56 @@ class RepositoryToolBackend:
             }
         )
 
-    def _exact_edit(self, arguments: Mapping[str, object]) -> ToolResult:
+    def _remember_original(self, relative: str, content: str | None) -> None:
+        if relative not in self._original_contents:
+            self._original_contents[relative] = content
+
+    def _replace_file(
+        self,
+        arguments: Mapping[str, object],
+        *,
+        action: str,
+        editor_command: str | None = None,
+    ) -> ToolResult:
         try:
             path, relative = self._resolve_repo_path(arguments.get("path", ""))
         except ValueError as exc:
-            return _error("exact_edit", str(exc))
+            return _error(action, str(exc))
         old_str = arguments.get("old_str", "")
         new_str = arguments.get("new_str", "")
         if not isinstance(old_str, str) or not old_str:
-            return _error("exact_edit", "old_str must be non-empty text")
+            return _error(action, "old_str must be non-empty text")
         if not isinstance(new_str, str):
-            return _error("exact_edit", "new_str must be text")
+            return _error(action, "new_str must be text")
         if not path.is_file():
-            return _error("exact_edit", f"file not found: {relative}")
+            return _error(action, f"file not found: {relative}")
         try:
             content = path.read_text(encoding="utf-8", errors="replace")
         except OSError as exc:
-            return _error("exact_edit", f"cannot read {relative}: {exc}")
+            return _error(action, f"cannot read {relative}: {exc}")
         match_count = content.count(old_str)
         if match_count == 0:
-            return _error("exact_edit", "old_str was not found exactly")
+            return _error(action, "old_str was not found exactly")
         if match_count > 1:
-            return _error("exact_edit", f"old_str appears {match_count} times; include more context")
+            return _error(
+                action,
+                f"old_str appears {match_count} times; include more context",
+            )
         updated = content.replace(old_str, new_str, 1)
         if path.suffix == ".py":
             try:
                 compile(updated, relative, "exec")
             except SyntaxError as exc:
                 return _error(
-                    "exact_edit",
+                    action,
                     f"Python syntax error at line {exc.lineno}: {exc.msg}",
                 )
-        self._original_contents.setdefault(relative, content)
+        self._remember_original(relative, content)
+        self._edit_history[str(path)] = content
         try:
             path.write_text(updated, encoding="utf-8")
         except OSError as exc:
-            return _error("exact_edit", f"cannot write {relative}: {exc}")
+            return _error(action, f"cannot write {relative}: {exc}")
         line_number = content[: content.index(old_str)].count("\n") + 1
         updated_lines = updated.splitlines()
         snippet_start = max(1, line_number - 3)
@@ -272,12 +391,344 @@ class RepositoryToolBackend:
         ]
         return ToolResult(
             {
-                "action": "exact_edit",
+                "action": action,
                 "ok": True,
                 "path": relative,
                 "changed": updated != content,
                 "line": line_number,
                 "snippet": snippet,
+                **(
+                    {"command": editor_command}
+                    if editor_command is not None
+                    else {}
+                ),
+            }
+        )
+
+    def _exact_edit(self, arguments: Mapping[str, object]) -> ToolResult:
+        """Compatibility alias for SkillFlow ``str_replace``."""
+
+        return self._replace_file(arguments, action="exact_edit")
+
+    def _create_file(
+        self,
+        arguments: Mapping[str, object],
+        *,
+        action: str,
+    ) -> ToolResult:
+        try:
+            path, relative = self._resolve_repo_path(arguments.get("path", ""))
+        except ValueError as exc:
+            return _error(action, str(exc))
+        file_text = arguments.get("file_text", "")
+        if not isinstance(file_text, str):
+            return _error(action, "file_text must be text")
+        if path.exists():
+            return _error(
+                action,
+                f"{relative} already exists; use str_replace to edit it",
+            )
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            self._remember_original(relative, None)
+            path.write_text(file_text, encoding="utf-8")
+        except OSError as exc:
+            return _error(action, f"cannot create {relative}: {exc}")
+        return ToolResult(
+            {
+                "action": action,
+                "command": "create",
+                "ok": True,
+                "path": relative,
+                "changed": True,
+            }
+        )
+
+    def _insert_file(
+        self,
+        arguments: Mapping[str, object],
+        *,
+        action: str,
+    ) -> ToolResult:
+        try:
+            path, relative = self._resolve_repo_path(arguments.get("path", ""))
+        except ValueError as exc:
+            return _error(action, str(exc))
+        if not path.is_file():
+            return _error(action, f"file not found: {relative}")
+        if "insert_line" not in arguments:
+            return _error(action, "insert_line is required")
+        try:
+            insert_line = int(arguments["insert_line"])
+        except (TypeError, ValueError):
+            return _error(action, "insert_line must be an integer")
+        new_str = arguments.get("new_str", "")
+        if not isinstance(new_str, str):
+            return _error(action, "new_str must be text")
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines(
+                keepends=True
+            )
+        except OSError as exc:
+            return _error(action, f"cannot read {relative}: {exc}")
+        content = "".join(lines)
+        insert_line = max(0, min(len(lines), insert_line))
+        inserted_lines = [line + "\n" for line in new_str.split("\n")]
+        updated_lines = list(lines)
+        updated_lines[insert_line:insert_line] = inserted_lines
+        updated = "".join(updated_lines)
+        self._remember_original(relative, content)
+        self._edit_history[str(path)] = content
+        try:
+            path.write_text(updated, encoding="utf-8")
+        except OSError as exc:
+            return _error(action, f"cannot write {relative}: {exc}")
+        return ToolResult(
+            {
+                "action": action,
+                "command": "insert",
+                "ok": True,
+                "path": relative,
+                "changed": updated != content,
+                "insert_line": insert_line,
+            }
+        )
+
+    def _undo_edit(
+        self,
+        arguments: Mapping[str, object],
+        *,
+        action: str,
+    ) -> ToolResult:
+        try:
+            path, relative = self._resolve_repo_path(arguments.get("path", ""))
+        except ValueError as exc:
+            return _error(action, str(exc))
+        history_key = str(path)
+        if history_key not in self._edit_history:
+            return _error(action, f"no edit history for {relative}")
+        current = (
+            path.read_text(encoding="utf-8", errors="replace")
+            if path.is_file()
+            else ""
+        )
+        restored = self._edit_history.pop(history_key)
+        try:
+            path.write_text(restored, encoding="utf-8")
+        except OSError as exc:
+            return _error(action, f"cannot undo {relative}: {exc}")
+        return ToolResult(
+            {
+                "action": action,
+                "command": "undo_edit",
+                "ok": True,
+                "path": relative,
+                "changed": current != restored,
+            }
+        )
+
+    def _str_replace_editor(self, arguments: Mapping[str, object]) -> ToolResult:
+        command = arguments.get("command", "")
+        if not isinstance(command, str):
+            return _error("str_replace_editor", "command must be text")
+        if command == "str_replace":
+            return self._replace_file(
+                arguments,
+                action="str_replace_editor",
+                editor_command="str_replace",
+            )
+        if command == "create":
+            return self._create_file(arguments, action="str_replace_editor")
+        if command == "insert":
+            return self._insert_file(arguments, action="str_replace_editor")
+        if command == "undo_edit":
+            return self._undo_edit(arguments, action="str_replace_editor")
+        if command == "view":
+            view_arguments: dict[str, object] = {"path": arguments.get("path", "")}
+            view_range = arguments.get("view_range")
+            if isinstance(view_range, Sequence) and not isinstance(
+                view_range,
+                (str, bytes),
+            ):
+                values = list(view_range)
+                if values:
+                    view_arguments["start_line"] = values[0]
+                if len(values) > 1 and values[1] != -1:
+                    view_arguments["end_line"] = values[1]
+            result = self._view_file(view_arguments)
+            value = result.value
+            if isinstance(value, dict):
+                return ToolResult(
+                    {
+                        **value,
+                        "action": "str_replace_editor",
+                        "command": "view",
+                    }
+                )
+            return result
+        return _error(
+            "str_replace_editor",
+            "unknown command; use view, create, str_replace, insert, or undo_edit",
+        )
+
+    @staticmethod
+    def _truncate_bash_output(output: str) -> str:
+        if len(output) <= _MAX_BASH_OUTPUT:
+            return output
+        half = _MAX_BASH_OUTPUT // 2
+        omitted = len(output) - _MAX_BASH_OUTPUT
+        return (
+            output[:half]
+            + f"\n\n... ({omitted} chars truncated) ...\n\n"
+            + output[-half:]
+        )
+
+    def _bash(self, arguments: Mapping[str, object]) -> ToolResult:
+        """Thin ToolResult adapter over SkillFlow ``_handle_bash``."""
+
+        command = arguments.get("command", "")
+        if not isinstance(command, str) or not command.strip():
+            return _error("bash", "command must be non-empty text")
+        if any(
+            marker in command
+            for marker in ("rm -rf /", "mkfs", "dd if=", "> /dev/")
+        ):
+            return _error("bash", "command rejected by the SkillFlow bash contract")
+        try:
+            completed = subprocess.run(
+                command,
+                shell=True,
+                cwd=self.repo_root,
+                capture_output=True,
+                text=True,
+                timeout=self.max_test_timeout_seconds,
+                env={
+                    **os.environ,
+                    "CUDA_VISIBLE_DEVICES": "",
+                    "PAGER": "cat",
+                    "GIT_PAGER": "cat",
+                },
+            )
+        except subprocess.TimeoutExpired as exc:
+            stdout = str(exc.stdout or "")
+            stderr = str(exc.stderr or "")
+            return ToolResult(
+                {
+                    "action": "bash",
+                    "ok": True,
+                    "command": command,
+                    "timed_out": True,
+                    "timeout_seconds": self.max_test_timeout_seconds,
+                    "returncode": None,
+                    "stdout": stdout[-5000:],
+                    "stderr": stderr[-5000:],
+                    "output": self._truncate_bash_output(stdout + stderr),
+                }
+            )
+        except OSError as exc:
+            return _error("bash", f"command process could not start: {exc}")
+        output = self._truncate_bash_output(completed.stdout + completed.stderr)
+        return ToolResult(
+            {
+                "action": "bash",
+                "ok": True,
+                "command": command,
+                "timed_out": False,
+                "returncode": completed.returncode,
+                "stdout": completed.stdout[-5000:],
+                "stderr": completed.stderr[-5000:],
+                "output": output,
+            }
+        )
+
+    def _repository_text_snapshot(self) -> dict[str, str]:
+        snapshot: dict[str, str] = {}
+        for path in self.repo_root.rglob("*"):
+            if not path.is_file():
+                continue
+            relative_path = path.relative_to(self.repo_root)
+            if ".git" in relative_path.parts:
+                continue
+            try:
+                snapshot[relative_path.as_posix()] = path.read_text(
+                    encoding="utf-8",
+                    errors="replace",
+                )
+            except OSError:
+                continue
+        return snapshot
+
+    def _record_snapshot_changes(
+        self,
+        before: Mapping[str, str],
+        after: Mapping[str, str],
+    ) -> list[str]:
+        changed_paths = sorted(
+            relative
+            for relative in set(before) | set(after)
+            if before.get(relative) != after.get(relative)
+        )
+        for relative in changed_paths:
+            self._remember_original(relative, before.get(relative))
+        return changed_paths
+
+    def _apply_patch(self, arguments: Mapping[str, object]) -> ToolResult:
+        """Invoke the local official Codex apply-patch entry point."""
+
+        patch = arguments.get("patch", "")
+        if not isinstance(patch, str) or not patch.strip():
+            return _error("apply_patch", "patch must be non-empty text")
+        before = self._repository_text_snapshot()
+        try:
+            completed = subprocess.run(
+                [
+                    CODEX_APPLY_PATCH_EXECUTABLE,
+                    "--codex-run-as-apply-patch",
+                    patch,
+                ],
+                cwd=self.repo_root,
+                capture_output=True,
+                text=True,
+                timeout=self.max_test_timeout_seconds,
+                env={
+                    **os.environ,
+                    "CUDA_VISIBLE_DEVICES": "",
+                    "PAGER": "cat",
+                    "GIT_PAGER": "cat",
+                },
+            )
+        except subprocess.TimeoutExpired as exc:
+            after = self._repository_text_snapshot()
+            changed_paths = self._record_snapshot_changes(before, after)
+            return ToolResult(
+                {
+                    "action": "apply_patch",
+                    "ok": False,
+                    "applied": False,
+                    "changed": bool(changed_paths),
+                    "changed_paths": changed_paths,
+                    "timed_out": True,
+                    "timeout_seconds": self.max_test_timeout_seconds,
+                    "stdout": str(exc.stdout or "")[-5000:],
+                    "stderr": str(exc.stderr or "")[-5000:],
+                }
+            )
+        except OSError as exc:
+            return _error("apply_patch", f"Codex apply_patch could not start: {exc}")
+        after = self._repository_text_snapshot()
+        changed_paths = self._record_snapshot_changes(before, after)
+        applied = completed.returncode == 0
+        return ToolResult(
+            {
+                "action": "apply_patch",
+                "ok": applied,
+                "applied": applied,
+                "changed": bool(changed_paths),
+                "changed_paths": changed_paths,
+                "timed_out": False,
+                "returncode": completed.returncode,
+                "stdout": completed.stdout[-5000:],
+                "stderr": completed.stderr[-5000:],
             }
         )
 
@@ -286,16 +737,29 @@ class RepositoryToolBackend:
         for relative in sorted(self._original_contents):
             original = self._original_contents[relative]
             path = self.repo_root / relative
-            current = path.read_text(encoding="utf-8", errors="replace") if path.is_file() else ""
+            current = (
+                path.read_text(encoding="utf-8", errors="replace")
+                if path.is_file()
+                else None
+            )
             if original == current:
                 continue
             unified = difflib.unified_diff(
-                original.splitlines(keepends=True),
-                current.splitlines(keepends=True),
-                fromfile=f"a/{relative}",
-                tofile=f"b/{relative}",
+                [] if original is None else original.splitlines(keepends=True),
+                [] if current is None else current.splitlines(keepends=True),
+                fromfile="/dev/null" if original is None else f"a/{relative}",
+                tofile="/dev/null" if current is None else f"b/{relative}",
             )
-            parts.append(f"diff --git a/{relative} b/{relative}\n" + "".join(unified))
+            metadata = ""
+            if original is None:
+                metadata = "new file mode 100644\n"
+            elif current is None:
+                metadata = "deleted file mode 100644\n"
+            parts.append(
+                f"diff --git a/{relative} b/{relative}\n"
+                + metadata
+                + "".join(unified)
+            )
         return "\n".join(parts)
 
     def _diff(self, arguments: Mapping[str, object]) -> ToolResult:
@@ -384,6 +848,20 @@ def create_swebench_repository_registration(
         max_test_timeout_seconds=timeout_seconds,
     )
     action_schemas = {
+        "apply_patch": {
+            "type": "object",
+            "required": ["patch"],
+            "properties": {
+                "patch": {"type": "string", "minLength": 1},
+            },
+        },
+        "bash": {
+            "type": "object",
+            "required": ["command"],
+            "properties": {
+                "command": {"type": "string", "minLength": 1},
+            },
+        },
         "list_files": {
             "type": "object",
             "properties": {"file_pattern": {"type": "string"}},
@@ -412,6 +890,31 @@ def create_swebench_repository_registration(
                 "path": {"type": "string", "minLength": 1},
                 "old_str": {"type": "string", "minLength": 1},
                 "new_str": {"type": "string"},
+            },
+        },
+        "str_replace_editor": {
+            "type": "object",
+            "required": ["command", "path"],
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "enum": [
+                        "view",
+                        "create",
+                        "str_replace",
+                        "insert",
+                        "undo_edit",
+                    ],
+                },
+                "path": {"type": "string", "minLength": 1},
+                "file_text": {"type": "string"},
+                "old_str": {"type": "string"},
+                "new_str": {"type": "string"},
+                "insert_line": {"type": "integer"},
+                "view_range": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                },
             },
         },
         "diff": {"type": "object", "properties": {}},

@@ -33,9 +33,18 @@ def _receipt_value(receipt: dict[str, object]) -> Optional[dict[str, object]]:
 
 
 def _changed_edit(receipt: dict[str, object]) -> bool:
-    if _receipt_action(receipt) != "exact_edit":
+    action = _receipt_action(receipt)
+    if action not in {"apply_patch", "exact_edit", "str_replace_editor"}:
         return False
     value = _receipt_value(receipt)
+    if action == "str_replace_editor" and value is not None:
+        if value.get("command") not in {
+            "create",
+            "insert",
+            "str_replace",
+            "undo_edit",
+        }:
+            return False
     return (
         value is not None
         and value.get("ok") is True

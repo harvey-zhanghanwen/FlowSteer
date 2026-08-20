@@ -1137,8 +1137,9 @@ def _unmeasured_report(
 ### Coding Agent contract status
 
 - 已接线：task-pinned detached worktree、bounded Coding/ReAct、list/search/view/exact-edit/test/diff、ToolReceipt、official `resolved` evaluator。
-- 终止时序：最后一次 changed `exact_edit` 之后必须有 `run_tests`，其后必须重新取得 changed `diff`，再执行 `complete`；旧 diff 不能跨 revision 提交。当前预算为 9 turns / 8 Tool calls。
-- 尚未实现：完整 symbol/reference、general command、multi-file apply-patch 以及 create/delete/move Tool contract。因此 Coding Agent 是 partial implementation，不能标为 ready。
+- Tool surface：SkillFlow `list/search/view/bash/str_replace_editor/run_tests/diff` 已接入；长文件使用 AST file map，显式 pattern 可查 tests/docs/非 Python 文件；multi-file add/update/delete/move patch 直接调用官方 Codex `apply_patch`，没有项目自写 patch parser。
+- 终止时序：最后一次 changed edit（`exact_edit`、mutating `str_replace_editor` 或 Codex `apply_patch`）之后必须有 `run_tests`，其后必须重新取得 changed `diff`，再执行 `complete`；旧 diff 不能跨 revision 提交。当前预算为 9 turns / 8 Tool calls。
+- 边界：当前提供 AST document structure 与 textual reference search，不是 LSP symbol/reference engine。Tool contract 和 128 个 task-pinned base commit 已完成 canary；official Docker harness 仍阻塞，所以 Coding trajectory/`resolved` 尚不可测。
 - 当前额外资源缺口：固定 regular-dev canary 需要的 `sqlfluff` repository mirror 尚不存在；Docker harness 可用后仍需先准备该 task-pinned repository。
 """
         if spec.key == "swe_bench"

@@ -73,6 +73,29 @@ def test_checked_in_registry_validates_all_seven_runtime_bindings() -> None:
         assert receipt["skipped_checks"] == []
 
 
+@pytest.mark.parametrize(
+    ("config_name", "dataset_key"),
+    [
+        ("development_aime_family_128_computation_tool_eval128.yaml", "aime_2026"),
+        ("evaluation_swebench_regular_dev_coding_agent_v2.yaml", "swe_bench"),
+    ],
+)
+def test_current_128_task_conditions_are_registry_bound(
+    config_name: str,
+    dataset_key: str,
+) -> None:
+    config = load_yaml(_ROOT / "config" / config_name)
+
+    _MODULE.validate_completion_benchmark_config(config)
+    receipt = _MODULE._validate_runtime_dataset_registry(config, _ROOT)
+
+    assert receipt is not None
+    assert receipt["registry_dataset_key"] == dataset_key
+    section_name, bounded = _MODULE._evaluation_section(config)
+    assert section_name
+    assert bounded["sample_count"] == 128
+
+
 def test_legacy_config_does_not_enable_runtime_registry_validation() -> None:
     config = load_yaml(_ROOT / "config" / "evaluation_hotpotqa_tool_react_stable_zero.yaml")
 
