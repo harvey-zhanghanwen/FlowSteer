@@ -12,6 +12,15 @@ Current Multi-Agent/Skill Step0-to-StepN HotpotQA branch:
 
 `dataset/hotpotqa-multiagent-skill-step0-to-n`
 
+Current fixed development architecture backups:
+
+- HotpotQA v6.2: `backup/hotpotqa-v6.2-20260821`
+- TriviaQA v6.2: `backup/triviaqa-v6.2-20260821`
+
+These two branches preserve evaluation-only inference/orchestration versions.
+They do not claim held-out test performance, ACTIVE Skill evidence, or a
+training update.
+
 Its exact pre-change backup is:
 
 `backup/hotpotqa_pre_multiagent_skill_step0_v1` at `fc298ae`. The diagnostic

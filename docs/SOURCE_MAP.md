@@ -658,6 +658,52 @@ of three-Agent graphs is higher than two-Agent graphs, but there is no paired
 topology intervention, so this result does not justify forcing a non-chain
 topology or adding structural reward.
 
+### TriviaQA development evidence for v6.2
+
+The frozen TriviaQA development-128 run uses the same effective v6.2 source
+boundaries: FlowSteer's progressive Canvas and imported `FORMAT_PROMPT`,
+SkillFlow's unified `qa-retrieval` search/read action domain and public
+continuation state, the heterogeneous Executor catalog, and explicit
+current-revision `FINISH`. It completed with 128 valid evaluator receipts and
+no final collection failure. Question-only local Qwen3.5-9B Direct scored EM
+`35.15625%` / token F1 `40.81597%`; AgentGraph scored EM `51.5625%` / token F1
+`60.10441%`, with 116 explicit `FINISH` submissions and 12 `max_rounds`
+terminations. These are exposed development measurements, not held-out test
+estimates, and no training or Skill injection occurred.
+
+The older v3 run contains the same 128 task IDs, questions, accepted answers
+and evaluator payloads, but it used a different Director condition, sampling
+purpose, derived action seeds, Tool projection and handoff prompt. Its EM
+`50.78125%` / F1 `63.36493%` and 125 explicit completions are therefore a
+descriptive reference, not a single-variable paired comparison. V6.2 improves
+EM by `0.78125` percentage points but reduces F1 by `3.26052` points and has
+nine fewer explicit completions, so it is not reported as an overall v3
+improvement.
+
+TriviaQA v6.2 persisted 192 non-empty upstream artifacts; all 116 explicitly
+finished trajectories have one non-empty semantic predecessor in the Output
+inbox. The 186 actual QA Tool dispatch receipts (137 search, 49 read) all
+completed at the backend. The dominant failures are instead retrieval
+relevance, semantic answer/granularity, 6-turn ReAct exhaustion, and Director
+action parsing (188 parse failures and 391 rejected turns). The final topology
+distribution is `empty=4`, `single=3`, `serial_2=76`, `serial_3_plus=45`; no
+natural fan-in or reciprocal topology was committed, so no topology reward or
+forced graph pattern is introduced.
+
+One necessary-adaptation candidate was tested and rejected. Some semantic
+Agents execute before a later edit makes them the direct Format predecessor;
+ordinary FlowSteer dirty-closure then reuses their old artifact even though
+the project-specific `is_format_predecessor` flag changes the model-visible
+protocol. A candidate invalidated those Agents and their descendants when the
+execution role changed. On the 13 development tasks whose v6.2 terminal
+artifact lacked the explicit handoff, the candidate held EM at `69.2308%` and
+raised F1 from `71.4286%` to `73.6264%`, but reduced explicit `FINISH` from
+13/13 to 12/13 and caused two task regressions. The effective source was
+restored to v6.2; its fixed panel, trajectories and report remain under
+`triviaqa_format_predecessor_v6_3_panel` as rejection evidence. This result
+does not justify changing cache invalidation globally, adding an answer rule,
+or letting Format re-solve the task.
+
 ### Coding source boundary
 
 Codex is used only as a reference for a bounded model/tool/result loop,

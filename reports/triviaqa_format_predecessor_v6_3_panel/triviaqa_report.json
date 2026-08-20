@@ -1,0 +1,707 @@
+{
+  "agentgraph": {
+    "completed": 13,
+    "completed_only_exact_match": 0.6923076923076923,
+    "completed_only_token_f1": 0.7362637362637362,
+    "denominator": 13,
+    "evaluator_valid": 13,
+    "strict_exact_match": 0.6923076923076923,
+    "strict_token_f1": 0.7362637362637362
+  },
+  "agentgraph_minus_direct": {
+    "exact_match": 0.23076923076923073,
+    "token_f1": 0.2362637362637362
+  },
+  "below_full_score_demo_count": 4,
+  "benchmark_slice": null,
+  "comparison_interpretation": "separate_protocol_descriptive_comparison",
+  "completed_at": "2026-08-20T22:36:08.919783+00:00",
+  "dataset": "TriviaQA",
+  "dataset_key": "triviaqa",
+  "direct_local_baseline": {
+    "completed": 13,
+    "completed_only_exact_match": 0.46153846153846156,
+    "completed_only_token_f1": 0.5,
+    "denominator": 13,
+    "evaluator_valid": 13,
+    "strict_exact_match": 0.46153846153846156,
+    "strict_token_f1": 0.5
+  },
+  "explicit_finished_count": 12,
+  "failure_types": {
+    "agentgraph_higher_exact_match": 4,
+    "agentgraph_terminal_failure": 1,
+    "equal_exact_match": 8
+  },
+  "graph_search_diagnostics": {
+    "action_counts": {
+      "add_subgraph": 30,
+      "delete_agent": 7,
+      "finish": 18,
+      "modify_agent": 13,
+      "parse_failed": 12,
+      "set_output": 3
+    },
+    "action_sequence_counts": {
+      "add_subgraph -> add_subgraph -> add_subgraph -> modify_agent -> modify_agent -> finish": 1,
+      "add_subgraph -> add_subgraph -> finish": 2,
+      "add_subgraph -> add_subgraph -> set_output -> set_output -> modify_agent -> modify_agent -> finish": 1,
+      "add_subgraph -> finish": 1,
+      "add_subgraph -> modify_agent -> finish": 1,
+      "add_subgraph -> modify_agent -> finish -> delete_agent -> delete_agent -> parse_failed -> add_subgraph -> parse_failed -> modify_agent -> delete_agent -> parse_failed -> add_subgraph -> add_subgraph -> finish -> finish -> modify_agent -> finish -> modify_agent -> parse_failed -> modify_agent": 1,
+      "delete_agent -> add_subgraph -> add_subgraph -> add_subgraph -> finish": 1,
+      "parse_failed -> add_subgraph -> add_subgraph -> finish": 2,
+      "parse_failed -> add_subgraph -> add_subgraph -> parse_failed -> add_subgraph -> modify_agent -> delete_agent -> finish": 1,
+      "parse_failed -> add_subgraph -> delete_agent -> add_subgraph -> modify_agent -> finish -> set_output -> parse_failed -> add_subgraph -> finish -> modify_agent -> delete_agent -> finish": 1,
+      "parse_failed -> add_subgraph -> parse_failed -> add_subgraph -> finish": 1
+    },
+    "agent_count_distribution": {
+      "2": 6,
+      "3": 7
+    },
+    "atomic_cost_by_agent_count": {
+      "2": {
+        "mean_edit_overhead": 4.166666666666667,
+        "mean_minimum_final_construction_actions": 4.833333333333333,
+        "mean_observed_turns": 8.666666666666666,
+        "mean_turn_overhead": 3.8333333333333335,
+        "tasks": 6
+      },
+      "3": {
+        "mean_edit_overhead": 0.7142857142857143,
+        "mean_minimum_final_construction_actions": 7.0,
+        "mean_observed_turns": 4.428571428571429,
+        "mean_turn_overhead": -2.5714285714285716,
+        "tasks": 7
+      }
+    },
+    "depth_three_plus_count": 7,
+    "effective_dependency_depth_distribution": {
+      "2": 6,
+      "3": 7
+    },
+    "effective_dependency_status_distribution": {
+      "weak": 13
+    },
+    "execution_turn_count": 15,
+    "executor_call_count": 35,
+    "explicit_finish_count": 12,
+    "full_structural_depth_evidence_status_distribution": {
+      "weak": 13
+    },
+    "max_rounds_termination_count": 1,
+    "max_rounds_values_seen": {},
+    "maximum_prompt_characters": 24801,
+    "maximum_turn_count": 20,
+    "maximum_visible_history": 4,
+    "mean_prompt_characters": 15265.748562975486,
+    "mean_turn_count": 6.384615384615385,
+    "parse_failure_count": 12,
+    "rejected_turn_count": 38,
+    "rejected_turn_rate": 0.4578313253012048,
+    "role_family_distribution": {
+      "executor": 2,
+      "extractor": 3,
+      "format": 13,
+      "reasoner": 3,
+      "reasoning": 2,
+      "research": 3,
+      "retriever": 1,
+      "search_read": 1,
+      "searcher": 3,
+      "solver": 1,
+      "synthesizer": 1
+    },
+    "set_output_before_last_relation_count": 0,
+    "structural_depth_distribution": {
+      "2": 6,
+      "3": 7
+    },
+    "task_count": 13,
+    "tasks_with_execution": 13,
+    "three_plus_agent_count": 7,
+    "topology_family_distribution": {
+      "serial_2": 6,
+      "serial_3_plus": 7
+    },
+    "trajectories": [
+      {
+        "action_sequence": [
+          "parse_failed",
+          "add_subgraph",
+          "parse_failed",
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 3,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 6,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 7,
+        "parse_failure_count": 2,
+        "prompt_character_max": 23226,
+        "prompt_character_mean": 15187.0,
+        "rejected_turn_count": 3,
+        "relation_count": 2,
+        "role_families": [
+          "search_read",
+          "reasoning",
+          "format"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 3,
+        "task_id": "triviaqa:tc_36",
+        "termination_reason": "finish",
+        "topology_family": "serial_3_plus",
+        "topology_motifs": [
+          "serial_3_plus"
+        ],
+        "turn_count": 5,
+        "turn_overhead": -2,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 3,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 6,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 7,
+        "parse_failure_count": 0,
+        "prompt_character_max": 19943,
+        "prompt_character_mean": 13680.0,
+        "rejected_turn_count": 1,
+        "relation_count": 2,
+        "role_families": [
+          "format",
+          "research",
+          "reasoning"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 3,
+        "task_id": "triviaqa:tc_44",
+        "termination_reason": "finish",
+        "topology_family": "serial_3_plus",
+        "topology_motifs": [
+          "serial_3_plus"
+        ],
+        "turn_count": 3,
+        "turn_overhead": -4,
+        "visible_history_max": 2
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 17424,
+        "prompt_character_mean": 12728.666666666666,
+        "rejected_turn_count": 1,
+        "relation_count": 1,
+        "role_families": [
+          "format",
+          "solver"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "triviaqa:tc_109",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 3,
+        "turn_overhead": -2,
+        "visible_history_max": 2
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "add_subgraph",
+          "add_subgraph",
+          "modify_agent",
+          "modify_agent",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 2,
+        "effective_dependency_depth": 3,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 8,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 7,
+        "parse_failure_count": 0,
+        "prompt_character_max": 24192,
+        "prompt_character_mean": 15784.833333333334,
+        "rejected_turn_count": 2,
+        "relation_count": 2,
+        "role_families": [
+          "format",
+          "searcher",
+          "reasoner"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 3,
+        "task_id": "triviaqa:tc_94",
+        "termination_reason": "finish",
+        "topology_family": "serial_3_plus",
+        "topology_motifs": [
+          "serial_3_plus"
+        ],
+        "turn_count": 6,
+        "turn_overhead": -1,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "parse_failed",
+          "add_subgraph",
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 1,
+        "prompt_character_max": 20019,
+        "prompt_character_mean": 14045.0,
+        "rejected_turn_count": 2,
+        "relation_count": 1,
+        "role_families": [
+          "executor",
+          "format"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "triviaqa:tc_135",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 4,
+        "turn_overhead": -1,
+        "visible_history_max": 3
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "modify_agent",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 1,
+        "effective_dependency_depth": 3,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 7,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 7,
+        "parse_failure_count": 0,
+        "prompt_character_max": 20338,
+        "prompt_character_mean": 14480.0,
+        "rejected_turn_count": 0,
+        "relation_count": 2,
+        "role_families": [
+          "extractor",
+          "format",
+          "reasoner"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 3,
+        "task_id": "triviaqa:tc_124",
+        "termination_reason": "finish",
+        "topology_family": "serial_3_plus",
+        "topology_motifs": [
+          "serial_3_plus"
+        ],
+        "turn_count": 3,
+        "turn_overhead": -4,
+        "visible_history_max": 2
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 3,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 6,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 7,
+        "parse_failure_count": 0,
+        "prompt_character_max": 16063,
+        "prompt_character_mean": 12728.0,
+        "rejected_turn_count": 0,
+        "relation_count": 2,
+        "role_families": [
+          "format",
+          "extractor",
+          "searcher"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 3,
+        "task_id": "triviaqa:tc_205",
+        "termination_reason": "finish",
+        "topology_family": "serial_3_plus",
+        "topology_motifs": [
+          "serial_3_plus"
+        ],
+        "turn_count": 2,
+        "turn_overhead": -5,
+        "visible_history_max": 1
+      },
+      {
+        "action_sequence": [
+          "parse_failed",
+          "add_subgraph",
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 1,
+        "prompt_character_max": 17620,
+        "prompt_character_mean": 12411.25,
+        "rejected_turn_count": 2,
+        "relation_count": 1,
+        "role_families": [
+          "executor",
+          "format"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "triviaqa:tc_210",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 4,
+        "turn_overhead": -1,
+        "visible_history_max": 3
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "modify_agent",
+          "finish",
+          "delete_agent",
+          "delete_agent",
+          "parse_failed",
+          "add_subgraph",
+          "parse_failed",
+          "modify_agent",
+          "delete_agent",
+          "parse_failed",
+          "add_subgraph",
+          "add_subgraph",
+          "finish",
+          "finish",
+          "modify_agent",
+          "finish",
+          "modify_agent",
+          "parse_failed",
+          "modify_agent"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 13,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 3,
+        "executor_call_count": 4,
+        "explicit_finish": false,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 17,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 4,
+        "parse_failure_count": 4,
+        "prompt_character_max": 21214,
+        "prompt_character_mean": 18189.7,
+        "rejected_turn_count": 10,
+        "relation_count": 1,
+        "role_families": [
+          "research",
+          "format"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "triviaqa:tc_99",
+        "termination_reason": "max_rounds",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 20,
+        "turn_overhead": 16,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "add_subgraph",
+          "set_output",
+          "set_output",
+          "modify_agent",
+          "modify_agent",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 2,
+        "effective_dependency_depth": 3,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 8,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 7,
+        "parse_failure_count": 0,
+        "prompt_character_max": 24801,
+        "prompt_character_mean": 18405.14285714286,
+        "rejected_turn_count": 3,
+        "relation_count": 2,
+        "role_families": [
+          "format",
+          "searcher",
+          "synthesizer"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 3,
+        "task_id": "triviaqa:tc_215",
+        "termination_reason": "finish",
+        "topology_family": "serial_3_plus",
+        "topology_motifs": [
+          "serial_3_plus"
+        ],
+        "turn_count": 7,
+        "turn_overhead": 0,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "delete_agent",
+          "add_subgraph",
+          "add_subgraph",
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 3,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 6,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 7,
+        "parse_failure_count": 0,
+        "prompt_character_max": 24000,
+        "prompt_character_mean": 14871.6,
+        "rejected_turn_count": 3,
+        "relation_count": 2,
+        "role_families": [
+          "retriever",
+          "reasoner",
+          "format"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 3,
+        "task_id": "triviaqa:tc_223",
+        "termination_reason": "finish",
+        "topology_family": "serial_3_plus",
+        "topology_motifs": [
+          "serial_3_plus"
+        ],
+        "turn_count": 5,
+        "turn_overhead": -2,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "parse_failed",
+          "add_subgraph",
+          "add_subgraph",
+          "parse_failed",
+          "add_subgraph",
+          "modify_agent",
+          "delete_agent",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 4,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 8,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 2,
+        "prompt_character_max": 24248,
+        "prompt_character_mean": 18059.0,
+        "rejected_turn_count": 4,
+        "relation_count": 1,
+        "role_families": [
+          "research",
+          "format"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "triviaqa:tc_194",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 8,
+        "turn_overhead": 3,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "parse_failed",
+          "add_subgraph",
+          "delete_agent",
+          "add_subgraph",
+          "modify_agent",
+          "finish",
+          "set_output",
+          "parse_failed",
+          "add_subgraph",
+          "finish",
+          "modify_agent",
+          "delete_agent",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 8,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 1,
+        "executor_call_count": 2,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 12,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 2,
+        "prompt_character_max": 22802,
+        "prompt_character_mean": 17884.53846153846,
+        "rejected_turn_count": 7,
+        "relation_count": 1,
+        "role_families": [
+          "format",
+          "extractor"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "triviaqa:tc_66",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 13,
+        "turn_overhead": 8,
+        "visible_history_max": 4
+      }
+    ],
+    "turn_count_distribution": {
+      "13": 1,
+      "2": 1,
+      "20": 1,
+      "3": 3,
+      "4": 2,
+      "5": 2,
+      "6": 1,
+      "7": 1,
+      "8": 1
+    }
+  },
+  "metric_scope": "TriviaQA_official_normalization_exact_match_and_token_F1",
+  "model_catalog_path": "config/model_catalog_multidataset_tool_v2.yaml",
+  "operational_failure_count": 0,
+  "policy_adapter": "theta_jointqa_progressive_step_000000",
+  "policy_version": "qwen35-9b-hotpot-step-000000",
+  "primary_metric": "exact_match",
+  "project_split": "validation",
+  "protocol_equivalent_to_direct": false,
+  "sample_count": 13,
+  "schema_version": "flowsteer.completion_benchmark.round_report.v1",
+  "skill_evaluation_mode": "memory_off",
+  "skill_injection_performed": false,
+  "skill_store_path": null,
+  "terminal_failure_count": 1,
+  "training_performed": false,
+  "typical_below_full_score_task_ids": [
+    "triviaqa:tc_36",
+    "triviaqa:tc_99",
+    "triviaqa:tc_194",
+    "triviaqa:tc_210"
+  ]
+}
