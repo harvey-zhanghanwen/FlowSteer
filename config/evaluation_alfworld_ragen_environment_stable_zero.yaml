@@ -32,7 +32,15 @@ alfworld_evaluation:
   sample_count: 128
   stable_zero_sample_count: 2
   rollouts_per_task: 1
-  concurrency: 1
+  # Keep four independent task-scoped RAGEN sessions in flight.  The
+  # EnvironmentToolBackend isolates simulator state with one ContextVar-bound
+  # adapter per request; the ordered collector remains the sole checkpoint
+  # writer.
+  concurrency: 4
+  # Match FlowSteer's AFlowExecutor wall-clock boundary.  A timed-out Canvas
+  # rollout is recorded as an operational failure and is never converted into
+  # a native ALFWorld task failure.
+  task_timeout_seconds: 300
   direct_model_id: "qwen3.5-9b-local"
   direct_protocol: "skillflow_ragen_alfworld_react_v1"
   protocol_equivalent_to_direct: true

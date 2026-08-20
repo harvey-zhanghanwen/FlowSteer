@@ -6,9 +6,10 @@
 - 配置固定任务数：**128**
 - Runtime status：`failed_runtime_preflight`
 - 结果：**不可测**；SWEbenchHarnessUnavailable: official SWE-bench Docker harness is unavailable
-- Raw receipts：manifest=`artifacts/swebench_regular_dev_coding_agent_stable_zero/development/run_manifest.json`; paired=`artifacts/swebench_regular_dev_coding_agent_stable_zero/development/paired_results.jsonl`; trajectory=`artifacts/swebench_regular_dev_coding_agent_stable_zero/development/agentgraph_trajectories.jsonl`
+- Frozen selection 与失败 receipt：manifest=`artifacts/eval128_current/swebench_regular_dev/run_manifest.json`; selected tasks=`artifacts/eval128_current/swebench_regular_dev/selected_tasks.jsonl`
+- Repository/Tool receipts：repository preflight=`artifacts/eval128_current/swebench_regular_dev/repository_preflight_receipt.json`; no-model canary=`artifacts/eval128_current/swebench_regular_dev/coding_tool_canary_receipt.json`
 - 显式 FINISH receipt：**0/0**
-- Tool receipt：**0**
+- Model trajectory Tool receipt：**0**；no-model Coding Tool canary：**1 passed**
 - Environment transition receipt：**0**
 - Coding action receipt：**0**
 - optimizer update：**0**
@@ -29,10 +30,12 @@
 
 ### Coding Agent contract status
 
-- 已接线：task-pinned detached worktree、bounded Coding/ReAct、list/search/view/exact-edit/test/diff、ToolReceipt、official `resolved` evaluator。
-- 终止时序：最后一次 changed `exact_edit` 之后必须有 `run_tests`，其后必须重新取得 changed `diff`，再执行 `complete`；旧 diff 不能跨 revision 提交。当前预算为 9 turns / 8 Tool calls。
-- 尚未实现：完整 symbol/reference、general command、multi-file apply-patch 以及 create/delete/move Tool contract。因此 Coding Agent 是 partial implementation，不能标为 ready。
-- 当前额外资源缺口：固定 regular-dev canary 需要的 `sqlfluff` repository mirror 尚不存在；Docker harness 可用后仍需先准备该 task-pinned repository。
+- 已接线：SkillFlow-derived task-pinned detached worktree、bounded Coding/ReAct、`list_files`、`search_code`、`view_file`、`bash`、`str_replace_editor`、AST filemap、`run_tests`、`diff`、ToolReceipt 与 official `resolved` evaluator。`str_replace_editor` 支持 view/create/str_replace/insert/undo_edit；保留 `exact_edit` 兼容入口。
+- `apply_patch` 由官方 Codex CLI `--codex-run-as-apply-patch` 执行；项目没有自行实现 patch parser。显式 `file_pattern` 可搜索 tests、docs 与非 Python 文件。
+- 终止时序：最后一次成功 changed edit 之后必须有有效 `run_tests` observation，其后必须重新取得 changed `diff`，再执行 `complete`；旧 test/diff 不能跨 edit revision 提交。当前预算为 9 turns / 8 Tool calls。
+- 代码导航边界：提供 Python AST document structure 与 textual reference search；没有把它声明为 LSP symbol/reference implementation。
+- Repository readiness：regular-dev 的四个仓库均已准备；SQLFluff 50、pvlib 63、marshmallow 9、astroid 6，共 128/128 base commit 可用于 task-pinned worktree。
+- 实际 no-model canary `sqlfluff__sqlfluff-4764` 已覆盖 `str_replace_editor → apply_patch → run_tests → diff → bash → cleanup`。该 receipt 只证明 Tool/worktree contract 可运行，不是 SWE-bench resolved 结果。
 
 
 ## Evidence scope 与协议限制
@@ -61,3 +64,5 @@
 - 记录的错误：`SWEbenchHarnessUnavailable: official SWE-bench Docker harness is unavailable`
 
 FIRST INFRASTRUCTURE BLOCKER：`SWEbenchHarnessUnavailable: official SWE-bench Docker harness is unavailable`；官方 Docker harness preflight 未通过，因此没有启动 Direct/Coding Agent、没有 workspace edit/test、也没有 evaluator-valid resolved receipt。
+
+这里的“没有 workspace edit/test”仅指正式模型 evaluation trajectory；独立 no-model Coding Tool canary 已完成编辑、测试、diff 与清理，但不进入 `resolved_rate`。

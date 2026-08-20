@@ -187,6 +187,75 @@ def test_graph_evaluation_uses_task_local_rollout_zero(tmp_path):
     assert backend.rollout_indices == [0, 0, 0]
 
 
+def test_graph_task_timeout_is_an_operational_failure(tmp_path):
+    task = _MODULE.TaskRecord(
+        task_id="hotpotqa:timeout",
+        question="question",
+        ground_truth="answer",
+        split="validation",
+        metadata={"dataset_key": "hotpotqa"},
+    )
+
+    class EmptyTrajectoryStore:
+        def payloads(self):
+            return ()
+
+    class Backend:
+        model_catalog_version = "catalog-v1"
+        evidence_store = type("Evidence", (), {"trajectories": EmptyTrajectoryStore()})()
+
+        async def collect(
+            self,
+            task,
+            rollout_index,
+            versions,
+            *,
+            expected_task_split="train",
+        ):
+            await asyncio.Event().wait()
+
+    failures = []
+    config = {
+        "experiment": {
+            "condition_id": "condition",
+            "prompt_version": "prompt-v1",
+            "tool_version": "tool-v1",
+        },
+        "director": {"behavior_policy_version": "policy-v1"},
+        "hotpotqa_evaluation": {
+            "concurrency": 1,
+            "split": "validation",
+            "task_timeout_seconds": 0.01,
+        },
+    }
+    result = asyncio.run(
+        _MODULE._collect_graph(
+            Backend(),
+            (task,),
+            config,
+            tmp_path / "trajectories.jsonl",
+            failures,
+            {},
+            tmp_path / "manifest.json",
+            failure_path=tmp_path / "failures.jsonl",
+        )
+    )
+
+    assert result == {}
+    assert len(failures) == 1
+    assert failures[0]["task_id"] == task.task_id
+    assert failures[0]["condition"] == "agentgraph"
+    assert failures[0]["stage"] == "collect"
+    assert "TimeoutError" in failures[0]["error"]
+    persisted = [
+        json.loads(line)
+        for line in (tmp_path / "failures.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert persisted == failures
+
+
 def test_graph_resume_rejects_invalid_evaluator_receipt():
     task = _MODULE.TaskRecord(
         task_id="hotpotqa:resume",

@@ -339,6 +339,15 @@ def validate_completion_benchmark_config(config: Mapping[str, Any]) -> None:
     concurrency = bounded.get("concurrency")
     if isinstance(concurrency, bool) or not isinstance(concurrency, int) or concurrency < 1:
         raise ConfigurationError(f"{section_name}.concurrency must be positive")
+    task_timeout_seconds = bounded.get("task_timeout_seconds")
+    if task_timeout_seconds is not None and (
+        isinstance(task_timeout_seconds, bool)
+        or not isinstance(task_timeout_seconds, (int, float))
+        or task_timeout_seconds <= 0
+    ):
+        raise ConfigurationError(
+            f"{section_name}.task_timeout_seconds must be positive when supplied"
+        )
     if bounded.get("selection") == "task_ids":
         task_ids = bounded.get("task_ids")
         if (
@@ -1834,6 +1843,8 @@ async def run_completion_benchmark_round(
             "configured_rollout_physical": configured_rollout_gpu,
             "effective_rollout_physical": effective_rollout_gpu,
             "resource_adaptation": effective_rollout_gpu != configured_rollout_gpu,
+            "evaluation_concurrency": int(bounded["concurrency"]),
+            "task_timeout_seconds": bounded.get("task_timeout_seconds"),
             "supervisor_port": int(
                 os.environ.get("FLOWSTEER_SUPERVISOR_PORT", "8015")
             ),
@@ -1996,6 +2007,7 @@ async def run_completion_benchmark_round(
         failures,
         manifest,
         paths["manifest"],
+        failure_path=paths["failures"],
     )
     _atomic_jsonl(paths["failures"], failures)
 

@@ -13,11 +13,11 @@ the incomplete TriviaQA `.part` archive are not used.
 | --- | --- | --- |
 | HotpotQA | `/home/test/datasets/HotpotQA_HF/distractor` | complete Parquet train/validation copy |
 | TriviaQA | `/home/test/datasets/TriviaQA_HF/rc.nocontext` | complete selected closed-book Parquet copy |
-| AIME 2026 | `/home/test/datasets/AIME_2026` plus SkillFlow's local historical-AIME pool | 30 official 2026 tasks plus 500 unique historical tasks |
+| AIME family | `/home/test/datasets/AIME_2026`, the FlowSteer AIME 2025 development set, and SkillFlow's local historical-AIME pool | protocol-separated development, training, and untouched 2026 final-test populations |
 | HealthBench Professional | `/home/test/datasets/HealthBench_Professional` | complete 525-record public release |
 | WebShop | `/home/test/datasets/WebShop` | products and 12,087 human goals present; Lucene index still needs a later runtime build |
 | ALFWorld | `/home/test/datasets/ALFWorld` | official text-game data/code present |
-| SWE-bench | main data under `/home/test/datasets/SWE-bench`; Verified cache under `/ssd1/iclr/.private/skillflow-resources/swebench-verified` | static instances present; repository/Docker execution remains a later runtime step |
+| SWE-bench | regular train/dev under `/home/test/datasets/SWE-bench`; Verified cache under `/ssd1/iclr/.private/skillflow-resources/swebench-verified` | 128 regular-dev instances and all pinned repositories are ready; official Docker evaluation remains externally unavailable |
 
 ## Unified record
 
@@ -45,7 +45,7 @@ Evaluator-only values are never concatenated into `question`:
 - WebShop/ALFWorld environment target;
 - SWE-bench gold patch and test payload.
 
-## Required 128/512 recipe
+## Initial unified 128/512 alignment
 
 The checked-in catalog implements the user's deterministic rule without a
 shuffle:
@@ -69,8 +69,8 @@ Current aligned counts:
 | SWE-bench Verified | 128 | 512 | 372 | 140 |
 | **Total** | **896** | **3,584** | **3,219** | **365** |
 
-AIME 2026 has only 30 official tasks.  To satisfy 128 held-out records without
-putting an official 2026 task into training, the candidate sequence is:
+AIME 2026 has only 30 official tasks.  The initial unified alignment used the
+following candidate sequence:
 
 ```text
 30 official AIME 2026 + 98 historical AIME held out
@@ -85,6 +85,44 @@ and training base-task sets have zero overlap for all seven datasets.
 This 128/512 view is a custom project recipe, not an untouched official
 leaderboard split.  Official benchmark evaluation must later use separately
 frozen full test views and the corresponding environment/rubric/harness.
+
+## Current protocol-separated evaluation views
+
+The architecture-validation runs no longer interpret the initial generic view
+as an official AIME or SWE-bench result.
+
+### AIME family development-128
+
+`config/datasets_aime_development128.yaml` defines the current fixed
+architecture-development condition:
+
+```text
+development: 30 AIME 2025 tasks + 98 historical AIME tasks
+training candidates: the next 512 historical tasks, with maximum year 2024
+final test: all 30 official AIME 2026 tasks, untouched
+```
+
+The 128-task score must therefore be reported as **AIME-family
+development-128**, not as AIME 2026 accuracy.  Training is disabled in the
+current condition.
+
+### SWE-bench regular-dev Coding Agent
+
+`config/datasets_swebench.yaml` keeps the three populations disjoint:
+
+```text
+training: 512 regular-train instances
+architecture development: all 128 regular-dev instances
+final test: complete SWE-bench Verified population
+```
+
+For the development condition, all 128 task-pinned repositories and base
+commits are available.  The SkillFlow-derived detached-worktree lifecycle and
+repository tools are connected through `CodingExecutionAdapter`; formal
+scoring is exclusively the pinned official SWE-bench Docker harness
+`resolved_rate`.  If that harness is unavailable, the condition is reported
+as **unmeasurable**, never as zero and never with local test success used as a
+proxy metric.
 
 ## Commands
 

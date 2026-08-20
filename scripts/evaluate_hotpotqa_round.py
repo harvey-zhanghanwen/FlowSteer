@@ -753,6 +753,7 @@ async def _collect_graph(
     failures: list[dict[str, Any]],
     manifest: dict[str, Any],
     manifest_path: Path,
+    failure_path: Optional[Path] = None,
 ) -> dict[str, dict[str, Any]]:
     bounded = _mapping(config["hotpotqa_evaluation"], "hotpotqa_evaluation")
     experiment = _mapping(config["experiment"], "experiment")
@@ -839,6 +840,10 @@ async def _collect_graph(
     }
     _write_json(manifest_path, manifest)
     semaphore = asyncio.Semaphore(int(bounded["concurrency"]))
+    task_timeout_raw = bounded.get("task_timeout_seconds")
+    task_timeout_seconds = (
+        None if task_timeout_raw is None else float(task_timeout_raw)
+    )
 
     async def run(task: TaskRecord) -> tuple[TaskRecord, str, Any]:
         async with semaphore:
@@ -846,7 +851,7 @@ async def _collect_graph(
             try:
                 if mode == "terminal_evaluator_retry":
                     source, attempt = retry_sources[task.task_id]
-                    result = await _retry_terminal_evaluator(
+                    invocation = _retry_terminal_evaluator(
                         backend,
                         task,
                         source,
@@ -854,12 +859,20 @@ async def _collect_graph(
                         attempt=attempt,
                     )
                 else:
-                    result = await backend.collect(
+                    invocation = backend.collect(
                         task,
                         0,
                         versions[task.task_id],
                         expected_task_split=str(bounded.get("split", "validation")),
                     )
+                result = (
+                    await invocation
+                    if task_timeout_seconds is None
+                    else await asyncio.wait_for(
+                        invocation,
+                        timeout=task_timeout_seconds,
+                    )
+                )
                 return task, mode, result
             except BaseException as exc:
                 return task, mode, exc
@@ -931,6 +944,8 @@ async def _collect_graph(
             ),
         }
         _write_json(manifest_path, manifest)
+        if failure_path is not None:
+            _atomic_jsonl(failure_path, failures)
     return by_task
 
 
@@ -1480,6 +1495,7 @@ async def run_hotpot_round(
         failures,
         manifest,
         paths["manifest"],
+        failure_path=paths["failures"],
     )
     _atomic_jsonl(paths["failures"], failures)
 

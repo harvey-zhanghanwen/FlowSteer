@@ -106,6 +106,21 @@ def test_supported_configs_are_evaluation_only():
             raise AssertionError("an optimizer-enabled evaluation config was accepted")
 
 
+def test_graph_task_timeout_must_be_positive_when_configured():
+    config = _evaluation_config("alfworld")
+    config["alfworld_evaluation"]["task_timeout_seconds"] = 300
+    _MODULE.validate_completion_benchmark_config(config)
+
+    invalid = deepcopy(config)
+    invalid["alfworld_evaluation"]["task_timeout_seconds"] = 0
+    try:
+        _MODULE.validate_completion_benchmark_config(invalid)
+    except Exception as exc:
+        assert "task_timeout_seconds" in str(exc)
+    else:  # pragma: no cover - fail-closed guard
+        raise AssertionError("a non-positive graph task timeout was accepted")
+
+
 def test_webshop_round04_production_configs_use_the_frozen_live_catalog():
     for name, split, count in (
         ("development_webshop_round_04.yaml", "train", 16),
