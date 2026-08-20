@@ -105,6 +105,8 @@ class MessageTests(unittest.TestCase):
         system = messages[0]["content"]
         self.assertIn("intermediate AgentGraph node", system)
         self.assertIn("do not use <answer> tags", system)
+        self.assertIn("original relation, qualifiers, comparison criterion", system)
+        self.assertIn("independently reconstruct that evidence", system)
         self.assertNotIn("unique Output Agent", system)
 
     def test_react_output_turn_uses_structured_action_not_answer_wrapper(self) -> None:
@@ -124,7 +126,10 @@ class MessageTests(unittest.TestCase):
         self.assertIn("terminal Format Agent", system)
         self.assertIn("exactly one routed upstream artifact", system)
         self.assertIn("Do not solve the task again", system)
-        self.assertIn("shortest value that directly answers", system)
+        self.assertIn("shortest evidence-aligned value", system)
+        self.assertIn("multiple candidates or aliases unresolved", system)
+        self.assertIn("Never map unknown, uncertain, or cannot determine to no", system)
+        self.assertIn("preserving required units and qualifiers", system)
         self.assertIn("emit only yes or no", system)
         self.assertIn("omit surrounding relations and modifiers", system)
         self.assertIn("return exactly <answer></answer>", system)

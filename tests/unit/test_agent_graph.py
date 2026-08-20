@@ -612,6 +612,32 @@ class _CountingRuntime(AgentRuntime):
 
 
 class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
+    async def test_execution_contract_is_rejected_before_canvas_commit(self) -> None:
+        registry = make_registry()
+        gateway = _ImmediateGateway()
+        runtime = _CountingRuntime(registry, gateway)
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=runtime,
+            problem="question",
+            execute_on_edit=True,
+        )
+
+        rejected = await env.step(
+            '{"action":"add_agent","agent_id":"retriever",'
+            '"model_id":"balanced","contract":"retrieve evidence",'
+            '"allowed_tools":["qa-retrieval.search"],'
+            '"execution_mode":"reasoning"}'
+        )
+
+        self.assertFalse(rejected.accepted)
+        self.assertIn("execution contract invalid", rejected.feedback)
+        self.assertIn("execution_mode='react' or 'coding'", rejected.feedback)
+        self.assertEqual(0, env.revision)
+        self.assertEqual((), env.graph.nodes)
+        self.assertEqual(0, runtime.execute_count)
+        self.assertEqual([], gateway.requests)
+
     async def test_null_output_executes_an_output_free_component(self) -> None:
         registry = make_registry()
         gateway = _ImmediateGateway()
@@ -776,6 +802,62 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(finished.accepted)
         self.assertTrue(finished.execution_reused)
         self.assertEqual(2, runtime.execute_count)
+
+    async def test_reciprocal_evidence_block_routes_one_answer_to_format(self) -> None:
+        registry = make_registry()
+
+        class FormatGateway(_ImmediateGateway):
+            async def generate(self, request: AgentRequest) -> str:
+                self.requests.append(request)
+                if request.is_format_agent:
+                    return "<answer>Paris</answer>"
+                return f"evidence:{request.agent.id}"
+
+        gateway = FormatGateway()
+        runtime = _CountingRuntime(registry, gateway)
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=runtime,
+            problem="question",
+            execute_on_edit=True,
+            require_exact_answer_tag=True,
+            require_format_agent=True,
+        )
+
+        evidence = await env.step(
+            '{"action":"add_subgraph","agents":['
+            '{"agent_id":"reader","model_id":"cheap",'
+            '"contract":"construct a source-grounded answer"},'
+            '{"agent_id":"verifier","model_id":"balanced",'
+            '"contract":"independently verify the answer"}'
+            '],"relations":['
+            '{"source_id":"reader","target_id":"verifier",'
+            '"source_to_target":true,"target_to_source":true}'
+            ']}'
+        )
+        formatted = await env.step(
+            '{"action":"add_subgraph","agents":['
+            '{"agent_id":"format","model_id":"fast",'
+            '"contract":"serialize one verified answer","role_family":"format"}'
+            '],"relations":['
+            '{"source_id":"verifier","target_id":"format",'
+            '"source_to_target":true,"target_to_source":false}'
+            '],"output_agent_id":"format"}'
+        )
+        finished = await env.step('{"action":"finish"}')
+
+        self.assertTrue(evidence.accepted)
+        self.assertTrue(formatted.accepted)
+        self.assertTrue(finished.accepted)
+        self.assertEqual(2, runtime.execute_count)
+        self.assertIn("reciprocal", env.graph.topology_statistics()["topology_motifs"])
+        self.assertIsNone(env.format_agent_issue())
+        self.assertEqual(5, len(gateway.requests))
+        self.assertEqual(["verifier"], [
+            item.source_agent_id
+            for item in formatted.execution.calls[-1].request.upstream
+        ])
+        self.assertEqual("<answer>Paris</answer>", finished.final_answer)
 
     async def test_two_agent_bidirectional_subgraph_executes_one_bounded_block(self) -> None:
         registry = make_registry()

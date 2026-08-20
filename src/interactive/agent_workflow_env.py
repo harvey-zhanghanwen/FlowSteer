@@ -377,6 +377,18 @@ class AgentWorkflowEnv:
                 f"edit rejected: {self._format_issues(validation)}",
                 validation.issues,
             )
+        try:
+            # Reuse the Runtime's execution-contract boundary before the
+            # candidate Canvas revision is committed.  FlowSteer's edit then
+            # remains transactional: an invalid execution declaration is
+            # rejected without executing or persisting the candidate graph.
+            self.runtime.validate_execution_contracts(candidate.nodes)
+        except AgentRuntimeError as exc:
+            return self._reject_after_count(
+                action,
+                "edit rejected: execution contract invalid: "
+                + " ".join(str(exc).split()),
+            )
         if (
             action.action_type in {
                 AgentActionType.SET_OUTPUT,
@@ -656,12 +668,18 @@ class AgentWorkflowEnv:
             (),
         )
         if len(component) != 1:
-            return "Format Agent must be a singleton terminal component"
+            return (
+                "Format Agent must be a singleton terminal component; keep "
+                "reciprocal exchange between non-Format Agents and route one "
+                "semantic-answer artifact to the Format Agent"
+            )
         predecessors = graph.directed_predecessors(output_agent_id)
         if len(predecessors) != 1:
             return (
                 "Format Agent must consume exactly one upstream semantic-answer "
-                f"artifact; received {len(predecessors)}"
+                f"artifact; received {len(predecessors)}; add or retain one "
+                "semantic-answer Agent and one directed relation from that Agent "
+                "to the Format Agent before FINISH"
             )
         return None
 

@@ -399,7 +399,7 @@ class AgentRuntime:
         resolved_condition = _communication_condition(communication_condition)
         plan = self._build_plan(execution_graph, validation.components)
         nodes = {node.id: node for node in execution_graph.nodes}
-        self._validate_execution_contracts(tuple(nodes.values()))
+        self.validate_execution_contracts(tuple(nodes.values()))
         self._validate_stateful_resource_ownership(nodes, plan)
         if format_output_agent and execution_graph.output_agent_id is not None:
             format_node = nodes[execution_graph.output_agent_id]
@@ -549,11 +549,16 @@ class AgentRuntime:
             output_metadata=output_metadata,
         )
 
-    def _validate_execution_contracts(
+    def validate_execution_contracts(
         self,
         nodes: Tuple[AgentNode, ...],
     ) -> None:
-        """Validate Director-selected execution semantics before scheduling."""
+        """Validate Director-selected execution semantics before scheduling.
+
+        The Canvas also calls this boundary before committing a graph edit so
+        an execution-mode/tool mismatch becomes immediate edit feedback rather
+        than a persisted graph revision that can only fail at runtime.
+        """
 
         for node in nodes:
             mode_value = getattr(node.execution_mode, "value", node.execution_mode)
@@ -566,7 +571,9 @@ class AgentRuntime:
                 continue
             if mode_value == "reasoning":
                 raise AgentRuntimeError(
-                    f"reasoning agent {node.id!r} cannot declare allowed_tools"
+                    f"reasoning agent {node.id!r} cannot declare allowed_tools; "
+                    "set execution_mode='react' or 'coding' for registered tools, "
+                    "or clear allowed_tools"
                 )
             if self.tool_registry is None:
                 raise AgentRuntimeError(

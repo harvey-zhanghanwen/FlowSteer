@@ -364,6 +364,15 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("action_names are Executor actions", DIRECTOR_SYSTEM_PROMPT)
         self.assertIn("bidirectional relation is one bounded two-Agent exchange", DIRECTOR_SYSTEM_PROMPT)
         self.assertIn(
+            "original relation, qualifiers, comparison criterion, and answer type",
+            DIRECTOR_SYSTEM_PROMPT,
+        )
+        self.assertIn("source-grounded evidence", DIRECTOR_SYSTEM_PROMPT)
+        self.assertIn(
+            "Format Agent must remain a separate sink with one semantic predecessor",
+            DIRECTOR_SYSTEM_PROMPT,
+        )
+        self.assertIn(
             "Do not assume a fixed workflow topology or an unlisted Skill",
             DIRECTOR_SYSTEM_PROMPT,
         )
