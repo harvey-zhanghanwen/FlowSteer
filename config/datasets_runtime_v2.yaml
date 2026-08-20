@@ -45,17 +45,17 @@ datasets:
       test: "data/joint_qa_v2/test.jsonl"
 
   aime_2026:
-    protocol_label: "aime_year_isolated_v1"
-    preparation_catalog_path: "config/datasets_aime2026.yaml"
+    protocol_label: "aime_family_development128_year_isolated_v2"
+    preparation_catalog_path: "config/datasets_aime_development128.yaml"
     preparation_catalog_schema_version: "flowsteer.agentgraph.aime2026.dataset.v1"
     manifest:
-      path: "data/aime2026_v1/manifest.json"
+      path: "data/aime_development128_v1/manifest.json"
       schema_version: "flowsteer.agentgraph.aime2026.dataset.v1"
       provenance_field: "catalog"
     paths:
-      train: "data/aime2026_v1/train.jsonl"
-      validation: "data/aime2026_v1/validation.jsonl"
-      test: "data/aime2026_v1/test.jsonl"
+      train: "data/aime_development128_v1/train.jsonl"
+      validation: "data/aime_development128_v1/validation.jsonl"
+      test: "data/aime_development128_v1/test.jsonl"
 
   healthbench_professional:
     protocol_label: "healthbench_public_internal_validation_v1"

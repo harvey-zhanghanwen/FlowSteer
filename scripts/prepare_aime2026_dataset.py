@@ -6,7 +6,8 @@ The record shape and atomic split writer are reused from
 SkillFlow Protocol 10 and FlowSteer's checked-in AIME 2025 evaluation source:
 
 * the local year-labelled AIME 2000--2024 subset supplies 512 training tasks;
-* AIME 2025 is development/validation; and
+* AIME 2025 is development/validation, optionally followed by a disjoint
+  historical development supplement requested by the dataset catalog; and
 * all 30 official AIME 2026 problems are final-evaluation-only.
 
 This command only aligns data.  It does not start a model, an API request,
@@ -189,6 +190,35 @@ def _historical_records(
     return records
 
 
+def _historical_development_record(record: Mapping[str, Any]) -> dict[str, Any]:
+    """Relabel one training-pool record as a held-out development record.
+
+    This is used only by an explicit development-128 catalog.  The record is
+    selected before the 512 training candidates, so statement identity and
+    task identity remain disjoint from both training and official AIME 2026.
+    """
+
+    result = dict(record)
+    result["split"] = "validation"
+    metadata = dict(result["metadata"])
+    metadata.update(
+        {
+            "benchmark_slice": "heldout_historical_aime_2000_2024",
+            "evaluation_role": "development",
+        }
+    )
+    result["metadata"] = metadata
+    extra = dict(result["extra"])
+    extra.update(
+        {
+            "benchmark_slice": "heldout_historical_aime_2000_2024",
+            "evaluation_role": "development",
+        }
+    )
+    result["extra"] = extra
+    return result
+
+
 def _development_records(path: Path) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     part_counts: Counter[str] = Counter()
@@ -267,17 +297,33 @@ def prepare(catalog_path: Path) -> Path:
 
     sources = catalog["sources"]
     split_policy = catalog["split_policy"]
-    train = _historical_records(
+    historical = _historical_records(
         _path(str(sources["historical_path"])),
         maximum_year=int(split_policy["training_maximum_year"]),
     )
     train_count = int(split_policy["train_count"])
-    if len(train) < train_count:
+    development_historical_count = int(
+        split_policy.get("development_historical_count", 0)
+    )
+    if development_historical_count < 0:
+        raise ValueError("development_historical_count must be non-negative")
+    if len(historical) < development_historical_count + train_count:
         raise ValueError(
-            f"historical AIME provides {len(train)} training tasks, expected {train_count}"
+            "historical AIME provides "
+            f"{len(historical)} tasks, expected at least "
+            f"{development_historical_count + train_count} for disjoint "
+            "development and training"
         )
-    train = train[:train_count]
-    development = _development_records(_path(str(sources["development_path"])))
+    historical_development = [
+        _historical_development_record(item)
+        for item in historical[:development_historical_count]
+    ]
+    train = historical[
+        development_historical_count : development_historical_count + train_count
+    ]
+    development = _development_records(
+        _path(str(sources["development_path"]))
+    ) + historical_development
     final = _final_records(_path(str(sources["final_path"])))
     expected_development = int(split_policy["development_count"])
     expected_final = int(split_policy["final_count"])
@@ -309,8 +355,14 @@ def prepare(catalog_path: Path) -> Path:
         "evaluator_version": AIME2026_EVALUATOR_VERSION,
         "task_family": AIME2026_TASK_FAMILY,
         "split_policy": {
-            "train": "historical AIME 2000--2024, first 512 in source order",
-            "validation": "complete AIME 2025 development population",
+            "train": (
+                "historical AIME 2000--2024 after the held-out historical "
+                f"development prefix, next {len(train)} in source order"
+            ),
+            "validation": (
+                "complete AIME 2025 development population plus "
+                f"{len(historical_development)} held-out historical tasks"
+            ),
             "test": "complete official AIME 2026 final-evaluation population",
         },
         "counts_by_split": {

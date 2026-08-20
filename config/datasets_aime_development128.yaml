@@ -1,0 +1,25 @@
+# AIME-family architecture-development population with 128 unique held-out
+# tasks.  The 30 AIME 2025 problems are followed by 98 historical AIME tasks;
+# the subsequent 512 historical tasks are training candidates.  Official AIME
+# 2026 remains the untouched 30-task test split and is never reported as a
+# 128-task benchmark.
+
+schema_version: "flowsteer.agentgraph.aime2026.dataset.v1"
+task_schema_version: "flowsteer.agentgraph.task.v1"
+aligned_dir: "data/aime_development128_v1"
+
+sources:
+  historical_path: "${FLOWSTEER_AIME_HISTORY_PATH:-/ssd1/iclr/2/datasets/aime_2000_2025/aime_2000_2025.jsonl}"
+  development_path: "${FLOWSTEER_AIME2025_PATH:-/ssd1/iclr/owner/skillflow-iclr/resources/datasets/FlowSteer-Dataset/eval/aime2025.jsonl}"
+  final_path: "${FLOWSTEER_DATASETS_ROOT:-/home/test/datasets}/AIME_2026/data/train-*.parquet"
+
+split_policy:
+  training_maximum_year: 2024
+  development_historical_count: 98
+  train_count: 512
+  development_year: 2025
+  development_count: 128
+  final_year: 2026
+  final_count: 30
+  final_evaluation_only: true
+  training_enabled: false

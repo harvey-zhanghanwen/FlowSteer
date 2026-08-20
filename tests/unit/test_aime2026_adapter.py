@@ -113,8 +113,9 @@ def test_preparation_keeps_2025_development_and_2026_final_isolated(
                 '  final_path: "unused-*.parquet"',
                 "split_policy:",
                 "  training_maximum_year: 2024",
+                "  development_historical_count: 1",
                 "  train_count: 3",
-                "  development_count: 2",
+                "  development_count: 3",
                 "  final_count: 2",
             ]
         )
@@ -130,9 +131,11 @@ def test_preparation_keeps_2025_development_and_2026_final_isolated(
     )
     final = list(iter_task_records(output / "test.jsonl", expected_split="test"))
     assert len(train) == 3
+    assert "aime-historical:2024:i:01" not in {task.task_id for task in train}
     assert [task.task_id for task in validation] == [
         "aime-2025:i:01",
         "aime-2025:ii:01",
+        "aime-historical:2024:i:01",
     ]
     assert [task.task_id for task in final] == ["aime-2026:01", "aime-2026:02"]
     assert all(task.metadata["task_family"] == AIME2026_TASK_FAMILY for task in final)
@@ -143,6 +146,9 @@ def test_preparation_keeps_2025_development_and_2026_final_isolated(
     assert {task.metadata["evaluation_role"] for task in validation} == {
         "development"
     }
+    assert validation[-1].metadata["benchmark_slice"] == (
+        "heldout_historical_aime_2000_2024"
+    )
     assert {task.metadata["evaluation_role"] for task in final} == {
         "final-evaluation"
     }
