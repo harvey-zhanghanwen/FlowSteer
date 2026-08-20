@@ -12,14 +12,23 @@ from collections import Counter
 from dataclasses import dataclass
 import json
 from pathlib import Path
+import sys
 from typing import Any, Iterable, Mapping, Sequence
 
 import yaml
 
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 REPORT_ROOT = ROOT / "reports" / "multidataset_stablezero"
 TOTAL_REPORT = ROOT / "MULTIDATASET_AGENT_ARCHITECTURE_STABLEZERO_REPORT.md"
+HOTPOT_TOOL_PAIR_ROOT = (
+    ROOT / "artifacts" / "hotpotqa_tool_availability_pair_v1" / "development"
+)
+HOTPOT_TOOL_PAIR_REPORT_ROOT = (
+    ROOT / "reports" / "hotpotqa_tool_availability_pair_v1"
+)
 
 TOOL_DIAGNOSTIC_RECEIPTS = {
     "hotpotqa": "artifacts/tool_exact_schema_canary/hotpotqa_exact_wire_v7_20260820.json",
@@ -1978,7 +1987,407 @@ def _micro_training_section() -> tuple[str, dict[str, Any]]:
     }
 
 
-def _total_report(summaries: Sequence[Mapping[str, Any]]) -> str:
+def _pair_final_snapshot(trajectory: Mapping[str, Any]) -> Mapping[str, Any]:
+    turns = trajectory.get("turns", ())
+    if not isinstance(turns, Sequence) or isinstance(turns, (str, bytes)):
+        return {}
+    for turn in reversed(turns):
+        if isinstance(turn, Mapping) and isinstance(turn.get("graph_snapshot"), Mapping):
+            return turn["graph_snapshot"]
+    return {}
+
+
+def _pair_topology(snapshot: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Reuse the runtime's topology implementation for a persisted snapshot."""
+
+    from src.interactive.agent_graph import AgentGraph, AgentNode, AgentRelation
+
+    raw_nodes = snapshot.get("nodes", ())
+    raw_relations = snapshot.get("relations", ())
+    nodes = [
+        AgentNode(
+            id=str(node["id"]),
+            model_id=str(node["model_id"]),
+            contract=str(node["contract"]),
+            role_family=(
+                str(node["role_family"]) if node.get("role_family") is not None else None
+            ),
+            allowed_tools=tuple(str(item) for item in node.get("allowed_tools", ())),
+            execution_mode=str(node.get("execution_mode", "reasoning")),
+            artifact_type=str(node.get("artifact_type", "text")),
+            completion_condition=(
+                str(node["completion_condition"])
+                if node.get("completion_condition") is not None
+                else None
+            ),
+        )
+        for node in raw_nodes
+        if isinstance(node, Mapping)
+    ]
+    relations = [
+        AgentRelation(
+            source_id=str(relation["source_id"]),
+            target_id=str(relation["target_id"]),
+            source_to_target=relation.get("source_to_target") is True,
+            target_to_source=relation.get("target_to_source") is True,
+        )
+        for relation in raw_relations
+        if isinstance(relation, Mapping)
+    ]
+    return AgentGraph(
+        nodes=nodes,
+        relations=relations,
+        output_agent_id=(
+            str(snapshot["output_agent_id"])
+            if snapshot.get("output_agent_id") is not None
+            else None
+        ),
+        revision=int(snapshot.get("revision", 0) or 0),
+    ).topology_statistics()
+
+
+def _pair_action_name(action: object) -> str:
+    if isinstance(action, Mapping):
+        return str(action.get("kind", action.get("action", "invalid")))
+    return str(action)
+
+
+def _hotpot_tool_pair_report() -> tuple[str, dict[str, Any], str]:
+    """Render the OFF/ON availability diagnostic without changing its estimand."""
+
+    manifest_path = HOTPOT_TOOL_PAIR_ROOT / "run_manifest.json"
+    pair_path = HOTPOT_TOOL_PAIR_ROOT / "paired_results.jsonl"
+    trajectory_path = HOTPOT_TOOL_PAIR_ROOT / "tool_availability_trajectories.jsonl"
+    direct_path = HOTPOT_TOOL_PAIR_ROOT / "direct_reused_v3.jsonl"
+    manifest = _load_json(manifest_path)
+    pairs = _load_jsonl(pair_path)
+    trajectories = _load_jsonl(trajectory_path)
+    direct = _load_jsonl(direct_path)
+    by_id = {str(item.get("trajectory_id")): item for item in trajectories}
+
+    trajectory_summaries: list[dict[str, Any]] = []
+    for trajectory in trajectories:
+        turns = trajectory.get("turns", ())
+        if not isinstance(turns, Sequence) or isinstance(turns, (str, bytes)):
+            turns = ()
+        snapshot = _pair_final_snapshot(trajectory)
+        recovery = []
+        for turn in turns:
+            if not isinstance(turn, Mapping):
+                continue
+            feedback = str(turn.get("canvas_feedback", ""))
+            if "reject" in feedback.casefold() or "error" in feedback.casefold():
+                recovery.append(
+                    {
+                        "round_index": turn.get("round_index"),
+                        "action": _pair_action_name(turn.get("action")),
+                        "feedback": _short(feedback),
+                    }
+                )
+        trajectory_summaries.append(
+            {
+                "trajectory_id": trajectory.get("trajectory_id"),
+                "task_id": _task_id(trajectory),
+                "condition_id": trajectory.get("condition_id"),
+                "question": trajectory.get("task", {}).get("question"),
+                "ground_truth": trajectory.get("task", {}).get("ground_truth"),
+                "final_answer": trajectory.get("final_answer"),
+                "evaluation": trajectory.get("evaluation"),
+                "explicit_finish": trajectory.get("explicit_finish"),
+                "termination_reason": trajectory.get("termination_reason"),
+                "final_graph": dict(snapshot),
+                "graph_diagnostic": dict(_pair_topology(snapshot)),
+                "director_edit_sequence": [
+                    _pair_action_name(turn.get("action"))
+                    for turn in turns
+                    if isinstance(turn, Mapping)
+                ],
+                "recovery_events": recovery,
+                "communication_envelopes": _communication_envelopes(trajectory),
+                "react_trace": _react_trace_entries(trajectory),
+                "tool_receipts": _tool_receipts(trajectory),
+                "active_skill_ids": trajectory.get("active_skill_ids", []),
+                "retrieved_skill_ids": trajectory.get("retrieved_skill_ids", []),
+                "invoked_skill_ids": trajectory.get("invoked_skill_ids", []),
+                "director_usage": _director_usage([trajectory]),
+                "executor_usage": _aggregate_model_usage(
+                    _execution_records(trajectory)
+                ),
+            }
+        )
+
+    arms: dict[str, dict[str, Any]] = {}
+    for arm_name in ("tool_off", "tool_on"):
+        arm_rows = [
+            row.get("arms", {}).get(arm_name, {})
+            for row in pairs
+            if isinstance(row.get("arms"), Mapping)
+            and isinstance(row.get("arms", {}).get(arm_name), Mapping)
+        ]
+        arm_trajectories = [
+            by_id.get(str(row.get("trajectory_id")), {}) for row in arm_rows
+        ]
+        topologies = [
+            _pair_topology(_pair_final_snapshot(item))
+            for item in arm_trajectories
+            if item
+        ]
+        model_groups = [
+            [
+                str(node.get("model_id", "unknown"))
+                for node in _pair_final_snapshot(item).get("nodes", ())
+                if isinstance(node, Mapping)
+            ]
+            for item in arm_trajectories
+        ]
+        arms[arm_name] = {
+            "tasks": len(arm_rows),
+            "evaluator_valid": sum(
+                row.get("evaluation_receipt", {}).get("valid") is True
+                for row in arm_rows
+                if isinstance(row.get("evaluation_receipt"), Mapping)
+            ),
+            "explicit_finish": sum(
+                item.get("explicit_finish") is True for item in arm_trajectories
+            ),
+            "mean_exact_match": _mean(
+                float(row.get("exact_match", 0.0)) for row in arm_rows
+            ),
+            "mean_token_f1": _mean(
+                float(row.get("token_f1", 0.0)) for row in arm_rows
+            ),
+            "tool_invoked_tasks": sum(row.get("tool_invoked") is True for row in arm_rows),
+            "tool_receipts": sum(len(row.get("tool_receipts", ())) for row in arm_rows),
+            "topology_family": dict(
+                Counter(str(item.get("topology_family", "unknown")) for item in topologies)
+            ),
+            "structural_depths": [
+                int(item.get("structural_depth", 0) or 0) for item in topologies
+            ],
+            "parallel_widths": [
+                int(item.get("max_width", 0) or 0) for item in topologies
+            ],
+            "final_model_ids": [model for group in model_groups for model in group],
+            "multi_model_workflows": sum(len(set(group)) > 1 for group in model_groups),
+        }
+
+    direct_metrics = [
+        item.get("evaluation", {}).get("metrics", {})
+        for item in direct
+        if isinstance(item.get("evaluation"), Mapping)
+    ]
+    effects = {
+        "mean_exact_match": _mean(
+            float(row.get("effects", {}).get("exact_match", 0.0)) for row in pairs
+        ),
+        "mean_token_f1": _mean(
+            float(row.get("effects", {}).get("token_f1", 0.0)) for row in pairs
+        ),
+    }
+    exposure_verified = sum(
+        row.get("treatment_exposure_receipt", {}).get(
+            "non_treatment_observation_projection_equal"
+        )
+        is True
+        for row in pairs
+        if isinstance(row.get("treatment_exposure_receipt"), Mapping)
+    )
+    director_usage = _director_usage(trajectories)
+    executor_usage = _aggregate_model_usage(
+        execution
+        for trajectory in trajectories
+        for execution in _execution_records(trajectory)
+    )
+    payload = {
+        "schema_version": "flowsteer.hotpotqa.qa-tool-availability-pair-report.v1",
+        "status": (
+            "complete"
+            if manifest.get("status") == "complete"
+            and len(pairs) == 2
+            and len(trajectories) == 4
+            else "incomplete"
+        ),
+        "evidence_scope": (
+            "two exposed development tasks; forced diagnostic; not held-out or benchmark evidence"
+        ),
+        "raw_receipts": {
+            "manifest": str(manifest_path.relative_to(ROOT)),
+            "pairs": str(pair_path.relative_to(ROOT)),
+            "trajectories": str(trajectory_path.relative_to(ROOT)),
+            "direct_reuse": str(direct_path.relative_to(ROOT)),
+        },
+        "manifest": {
+            "pair_progress": manifest.get("pair_progress"),
+            "direct_reuse": manifest.get("direct_reuse"),
+            "behavior_policy_preflight": manifest.get("behavior_policy_preflight"),
+            "versions": manifest.get("versions"),
+        },
+        "pair_count": len(pairs),
+        "trajectory_count": len(trajectories),
+        "direct_reuse": {
+            "tasks": len(direct_metrics),
+            "mean_exact_match": _mean(
+                float(item.get("exact_match", 0.0)) for item in direct_metrics
+            ),
+            "mean_token_f1": _mean(
+                float(item.get("token_f1", 0.0)) for item in direct_metrics
+            ),
+            "new_model_calls": 0,
+        },
+        "arms": arms,
+        "intent_to_treat_effects": effects,
+        "treatment_exposure_verified_pairs": exposure_verified,
+        "tool_use_validated": False,
+        "skill_receipts_empty": all(
+            not trajectory.get(field)
+            for trajectory in trajectories
+            for field in ("active_skill_ids", "retrieved_skill_ids", "invoked_skill_ids")
+        ),
+        "training": {
+            "training_performed": False,
+            "optimizer_updates": 0,
+            "policy_published": False,
+        },
+        "director_usage": director_usage,
+        "executor_usage": executor_usage,
+        "trajectory_summaries": trajectory_summaries,
+    }
+
+    executor_calls = sum(int(item["calls"]) for item in executor_usage.values())
+    executor_attempts = sum(int(item["attempts"]) for item in executor_usage.values())
+    executor_tokens = sum(int(item["tokens"]) for item in executor_usage.values())
+    executor_latency = sum(float(item["latency_ms"]) for item in executor_usage.values())
+    demos = []
+    for item in trajectory_summaries:
+        graph = item["final_graph"]
+        node_lines = "\n".join(
+            f"- `{node.get('id')}`: role=`{node.get('role_family')}`, "
+            f"model=`{node.get('model_id')}`, mode=`{node.get('execution_mode')}`, "
+            f"tools=`{node.get('allowed_tools', [])}`; contract={_short(node.get('contract'), 220)}"
+            for node in graph.get("nodes", ())
+            if isinstance(node, Mapping)
+        ) or "- 无"
+        communication_lines = "\n".join(
+            f"- `{envelope.get('source_agent_id')}` → "
+            f"`{envelope.get('target_agent_id')}`; "
+            f"artifact_type=`{envelope.get('artifact_type')}`; "
+            f"graph_revision={envelope.get('graph_revision')}; "
+            f"ToolReceipt={len(envelope.get('tool_receipts', ()))}; "
+            f"body={_short(envelope.get('artifact_body'), 280)}"
+            for envelope in item["communication_envelopes"]
+            if isinstance(envelope, Mapping)
+        ) or "- 无跨 Agent artifact"
+        react_lines = "\n".join(
+            f"- agent=`{entry.get('agent_id')}`; "
+            f"action=`{entry.get('action', {})}`; "
+            f"observation_status=`{entry.get('observation_status')}`"
+            for entry in item["react_trace"]
+            if isinstance(entry, Mapping)
+        ) or "- 无公开 ReAct action"
+        recovery_lines = "\n".join(
+            f"- round={event['round_index']}, action=`{event['action']}`: {event['feedback']}"
+            for event in item["recovery_events"]
+        ) or "- 无记录到的 rejection/execution error"
+        metrics = item.get("evaluation", {}).get("metrics", {})
+        demos.append(
+            f"""### `{item['task_id']}` / `{str(item['condition_id']).split(':')[-1]}`
+
+- Question：{_short(item['question'], 520)}
+- Ground Truth：`{item['ground_truth']}`
+- Final Answer：`{item['final_answer']}`
+- Official evaluator：EM={float(metrics.get('exact_match', 0.0)):.2f}, F1={float(metrics.get('token_f1', 0.0)):.2f}
+- Trajectory：`{item['trajectory_id']}`；explicit FINISH=`{str(item['explicit_finish']).lower()}`
+- Director atomic edit：`{' → '.join(item['director_edit_sequence'])}`
+- Final topology：`{item['graph_diagnostic'].get('topology_family')}`；depth={item['graph_diagnostic'].get('structural_depth')}；width={item['graph_diagnostic'].get('max_width')}
+
+Agent：
+
+{node_lines}
+
+实际 CommunicationEnvelope：
+
+{communication_lines}
+
+公开 ReAct trace：
+
+{react_lines}
+
+真实恢复事件：
+
+{recovery_lines}
+"""
+        )
+
+    markdown = f"""# HotpotQA Tool availability OFF/ON 配对诊断
+
+## 结论
+
+两个已暴露 development task 上完成 2 个随机化 OFF/ON pair 和 4 条 evaluator-valid trajectory。Tool-OFF 与 Tool-ON 均为 EM=100%、F1=100%，availability assignment ITT 为 ΔEM=0、ΔF1=0。两个 Tool-ON arm 均未实际调用检索 Tool，因此只验证 treatment exposure 与 paired runtime，不能证明 Tool usefulness、retrieval usefulness 或 Skill effect。
+
+该结果不是 held-out accuracy、benchmark estimate 或 SOTA 证据；`forced_probe=true`、`grpo_eligible=false`。
+
+## Receipt 与协议
+
+- Raw manifest：`{payload['raw_receipts']['manifest']}`
+- Pair receipt：`{payload['raw_receipts']['pairs']}`
+- 完整 trajectory：`{payload['raw_receipts']['trajectories']}`
+- Direct reuse：`{payload['raw_receipts']['direct_reuse']}`
+- Direct 严格复用 2 条，新增 Direct API call=0；EM={100 * payload['direct_reuse']['mean_exact_match']:.2f}%，F1={100 * payload['direct_reuse']['mean_token_f1']:.2f}%
+- OFF catalog：空；ON catalog：`qa-retrieval.search`、`qa-retrieval.read`
+- non-treatment observation projection equal：{exposure_verified}/2
+- ACTIVE/retrieved/invoked Skill ID：全部为空
+- training/backward/optimizer update/policy publication：均未执行
+
+## 指标
+
+| Condition | n | Evaluator valid | Explicit FINISH | EM | F1 | Tool-invoked task | ToolReceipt |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Tool-OFF | {arms['tool_off']['tasks']} | {arms['tool_off']['evaluator_valid']} | {arms['tool_off']['explicit_finish']} | {100 * arms['tool_off']['mean_exact_match']:.2f}% | {100 * arms['tool_off']['mean_token_f1']:.2f}% | {arms['tool_off']['tool_invoked_tasks']} | {arms['tool_off']['tool_receipts']} |
+| Tool-ON | {arms['tool_on']['tasks']} | {arms['tool_on']['evaluator_valid']} | {arms['tool_on']['explicit_finish']} | {100 * arms['tool_on']['mean_exact_match']:.2f}% | {100 * arms['tool_on']['mean_token_f1']:.2f}% | {arms['tool_on']['tool_invoked_tasks']} | {arms['tool_on']['tool_receipts']} |
+
+## Workflow 与模型采用
+
+- Tool-OFF：topology={arms['tool_off']['topology_family']}，depth={arms['tool_off']['structural_depths']}，width={arms['tool_off']['parallel_widths']}
+- Tool-ON：topology={arms['tool_on']['topology_family']}，depth={arms['tool_on']['structural_depths']}，width={arms['tool_on']['parallel_widths']}
+- 4 条终图均为 serial DAG；parallel、fan-in、fan-out、reciprocal 均未采用。
+- Final graph model IDs：OFF={arms['tool_off']['final_model_ids']}；ON={arms['tool_on']['final_model_ids']}
+- Multi-model workflow：OFF={arms['tool_off']['multi_model_workflows']}/2，ON={arms['tool_on']['multi_model_workflows']}/2，合计={arms['tool_off']['multi_model_workflows'] + arms['tool_on']['multi_model_workflows']}/4。
+
+## 已持久化成本
+
+| Layer | Accepted calls | API attempts | Tokens | Latency (s) |
+|---|---:|---:|---:|---:|
+| Flow-Director | {director_usage['calls']} | {director_usage['attempts']} | {director_usage['tokens']} | {director_usage['latency_ms'] / 1000:.2f} |
+| Executor | {executor_calls} | {executor_attempts} | {executor_tokens} | {executor_latency / 1000:.2f} |
+
+失败 provider call 没有完整 token/latency receipt，因此不能重建为精确总调用成本；上表仅汇总已持久化记录，并保留中间恢复阶段已经保存的 Executor 调用。
+
+## 四条真实 Demo
+
+{chr(10).join(demos)}
+
+## Wrong Demo 与诊断
+
+- Terminal Wrong Demo：0；四条 trajectory 均由原生 evaluator 判定正确，不制造失败样本。
+- Tool adoption：0/2 Tool-ON task。只能记录为当前 policy 没有采用检索，不能由两题推出检索无效。
+- Non-chain adoption：0/4。search space/runtime 能力与 policy adoption 分开报告。
+- `QA_TOOL_USE_VALIDATED = NO`；`SKILL_END_TO_END_READY = NO`。
+"""
+    compact = f"""## HotpotQA Tool availability OFF/ON 配对诊断
+
+| Scope | Pair | Trajectory | OFF EM/F1 | ON EM/F1 | ΔEM/ΔF1 | ON Tool invocation |
+|---|---:|---:|---:|---:|---:|---:|
+| exposed development forced probe | {len(pairs)} | {len(trajectories)} | {100 * arms['tool_off']['mean_exact_match']:.2f}% / {100 * arms['tool_off']['mean_token_f1']:.2f}% | {100 * arms['tool_on']['mean_exact_match']:.2f}% / {100 * arms['tool_on']['mean_token_f1']:.2f}% | {effects['mean_exact_match']:+.2f} / {effects['mean_token_f1']:+.2f} | {arms['tool_on']['tool_invoked_tasks']}/{arms['tool_on']['tasks']} |
+
+OFF 未暴露 Tool catalog，ON 精确暴露 `qa-retrieval.search/read`，2/2 pair 的 non-treatment observation projection 相同；但 ON 未产生 Tool call 或 ToolReceipt。该结果只属于 Tool availability assignment ITT 诊断，不计入自然策略 Stable Zero、ToolReceipt 总数、Skill evidence、GRPO 或 benchmark accuracy。完整报告见 `reports/hotpotqa_tool_availability_pair_v1/report.md`。
+"""
+    return markdown, payload, compact
+
+
+def _total_report(
+    summaries: Sequence[Mapping[str, Any]],
+    hotpot_tool_pair_compact: str = "",
+) -> str:
     table_lines = []
     for item in summaries:
         metric_text = "; ".join(
@@ -2091,8 +2500,9 @@ def _total_report(summaries: Sequence[Mapping[str, Any]]) -> str:
         )
     )
     # Natural successful calls prove the Tool execution path, not counterfactual
-    # usefulness.  The current evidence stores have no same-prefix Tool ON/OFF
-    # paired intervention, so the broader use-validation claim remains false.
+    # usefulness.  The new same-task Tool-OFF/ON pair validates treatment
+    # exposure, but neither Tool-ON arm invoked a Tool, so use validation remains
+    # false and the pair is kept outside natural-policy aggregates.
     qa_tool_use_validated = False
     webshop_react_ready = (
         webshop.get("stable_zero") == "PASS"
@@ -2188,10 +2598,13 @@ def _total_report(summaries: Sequence[Mapping[str, Any]]) -> str:
 
 这些 receipt 均为 `diagnostic_only=true`、`forced_probe=true`，没有 evaluator、Ground Truth、benchmark metric、Skill evidence、GRPO 或 optimizer update；不能与自然策略 Tool adoption 混合计数。
 
+{hotpot_tool_pair_compact}
+
 ## Protocol audit
 
 - HotpotQA 与 TriviaQA：当前 v3 的两题均为 exposed development canary；这些 task ID 在先前架构诊断与 progressive evaluation artifacts 中重复出现，构成 evaluation contamination，因此不能作为 unseen held-out evidence。模型可见边界仍由 `TaskRecord.question`、AgentGraph execution request 与 recorded upstream artifacts 构成；现有 prompt/trajectory receipt 未显示 `ground_truth` 或 `evaluator_payload` 被注入模型输入。两者必须同时陈述，不能用“没有 prompt leakage”推导出“样本未被开发过程暴露”。详见 `reports/multidataset_stablezero/HOTPOTQA_EVALUATION_LEAKAGE_AUDIT.md`。
 - HotpotQA distractor protocol：题目提供的 passages 本来就包含支持事实，使用这些 passages 作答不属于 Ground Truth 字段泄漏。v3 中观察到的 Atlas DPR Wikipedia 检索来自只读公开语料 `atlas-dpr-wikipedia-psgs-w100`；known-answer preflight 只验证 evaluator，并不进入模型请求。
+- HotpotQA Tool availability pair：同一两题、同一 policy/catalog/evaluator/sampling coordinate 下随机化 OFF/ON arm order；OFF 无 Tool catalog，ON 精确暴露 `qa-retrieval.search/read`。两条 ON trajectory 都没有实际 Tool call，因此零 ITT 不能解释为 Tool usefulness 或 Skill effect。
 - HotpotQA、TriviaQA 与 AIME-2025 development：Direct 与 Tool-capable AgentGraph 分别报告；未把 protocol-separated delta 解释为 architecture causal effect 或 SOTA improvement。
 - HealthBench Professional v2：只报告 openai/simple-evals-compatible **reference-judge diagnostic**；不是私有官方评测服务或 leaderboard 成绩。
 - WebShop v4：只接受 native validation indices 500..627 的原生环境结果；旧 v2 native-test 结果作为 test-contaminated adaptation evidence 排除，v3 仅保留为上下文预算失败诊断。
@@ -2221,7 +2634,7 @@ Tool-aware Skill applicability 已在架构与 CPU 定向测试层完成：Skill
 - `SKILL_EVIDENCE_INSUFFICIENT`：最新独立 paired evidence 未满足 calibrated lower-bound/harm gate；`ACTIVE` Skill 数为 0。
 - `SKILL_EXECUTION_NOT_IMPLEMENTED`：Tool-aware applicability 只保护 Director-visible prompt-prior retrieval；本地 Runtime 尚未实现 SkillFlow 的 Executor invocation/credit receipt boundary，因而 `ActionKind.SKILL` 继续 fail closed。
 - `TRAINING_INSTABILITY`：既有 joint-QA bounded micro-training 完成了 {micro_training_state['validated_updates']} 次真实 optimizer update 与 policy sync，但固定 held-out 宏平均没有形成正向趋势；该证据不覆盖本轮新增 Tool/Environment/Coding action-selection policy。
-- `TOOL_LIMITATION`：HotpotQA 与 TriviaQA v3 的当前 Stable Zero trajectories 各自然产生 1 条成功 retrieval `ToolReceipt`；AIME-2025 development 与 HealthBench v2 未自然选择其可选 Tool。两题 canary 只能验证自然工具调用链已经出现，不能估计 tool-use policy 的总体采用率、useful rate、wasted rate 或 Skill effect。
+- `TOOL_LIMITATION`：HotpotQA 与 TriviaQA v3 的当前 Stable Zero trajectories 各自然产生 1 条成功 retrieval `ToolReceipt`；AIME-2025 development 与 HealthBench v2 未自然选择其可选 Tool。HotpotQA availability pair 已执行，但两个 Tool-ON arm 均未调用 Tool，只验证 treatment exposure/paired runtime，仍不能估计 useful rate、wasted rate 或 Skill effect。
 - `MODEL_CAPABILITY_LIMIT`：HealthBench 的 2 题 reference-judge diagnostic raw_score 较低；该 canary 不足以把差距唯一归因于模型、架构或缺少检索。
 - `ARCHITECTURE_DEFECT`：当前没有新的 confirmed open defect。WebShop 的 action serialization / token-budget 缺陷已按 preserved failure receipt 修复；{webshop_issue}
 - `POLICY_LEARNING_PROBLEM`：尚未成立。当前自然 policy 没有采用非链式 topology，但 SWE Coding、ACTIVE Skill 和 Tool usefulness 闭环仍未齐全，不能先把缺口归因于 policy learning。
@@ -2269,27 +2682,43 @@ READY_FOR_FORMAL_MULTIDATASET_TRAINING = NO
 ## 报告索引
 
 {chr(10).join(f"- [{spec.title}](reports/multidataset_stablezero/{spec.report_name})" for spec in SPECS)}
+- [HotpotQA Tool availability OFF/ON paired diagnostic](reports/hotpotqa_tool_availability_pair_v1/report.md)
 """
 
 
 def main() -> None:
     REPORT_ROOT.mkdir(parents=True, exist_ok=True)
+    HOTPOT_TOOL_PAIR_REPORT_ROOT.mkdir(parents=True, exist_ok=True)
+    pair_report, pair_payload, pair_compact = _hotpot_tool_pair_report()
+    (HOTPOT_TOOL_PAIR_REPORT_ROOT / "report.md").write_text(
+        pair_report.rstrip() + "\n",
+        encoding="utf-8",
+    )
+    (HOTPOT_TOOL_PAIR_REPORT_ROOT / "report.json").write_text(
+        json.dumps(pair_payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
     summaries = []
     for spec in SPECS:
         report, summary = _report_for(spec)
+        if spec.key == "hotpotqa":
+            report = report.rstrip() + "\n\n" + pair_compact
         (REPORT_ROOT / spec.report_name).write_text(
             report.rstrip() + "\n",
             encoding="utf-8",
         )
         summaries.append(summary)
     TOTAL_REPORT.write_text(
-        _total_report(summaries).rstrip() + "\n",
+        _total_report(summaries, pair_compact).rstrip() + "\n",
         encoding="utf-8",
     )
     print(
         json.dumps(
             {
                 "report": str(TOTAL_REPORT),
+                "hotpot_tool_pair_report": str(
+                    HOTPOT_TOOL_PAIR_REPORT_ROOT / "report.md"
+                ),
                 "dataset_reports": [
                     str(REPORT_ROOT / spec.report_name) for spec in SPECS
                 ],

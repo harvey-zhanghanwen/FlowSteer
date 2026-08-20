@@ -271,3 +271,11 @@ Executor ReAct trace（公开 StructuredAction/observation）：
 - agent=`reader`; turn=`1`; action={"arguments": {"value": "Delhi"}, "kind": "complete", "name": "complete", "resource_id": null, "skill_id": null}; observation_status=`completed`; observation=null
 
 FIRST ERROR：前五个 Director action 把 top-level output_agent_id 放入 Agent object，随后又把 action_name `search`/`read` 当成 allowed_tools 的 resource_id；Canvas 均 fail closed。第 20 轮得到正确输出后已无剩余显式 FINISH turn，因此以 max_rounds 终止。v3 只澄清字段层级和 exact tool_id 边界。
+
+## HotpotQA Tool availability OFF/ON 配对诊断
+
+| Scope | Pair | Trajectory | OFF EM/F1 | ON EM/F1 | ΔEM/ΔF1 | ON Tool invocation |
+|---|---:|---:|---:|---:|---:|---:|
+| exposed development forced probe | 2 | 4 | 100.00% / 100.00% | 100.00% / 100.00% | +0.00 / +0.00 | 0/2 |
+
+OFF 未暴露 Tool catalog，ON 精确暴露 `qa-retrieval.search/read`，2/2 pair 的 non-treatment observation projection 相同；但 ON 未产生 Tool call 或 ToolReceipt。该结果只属于 Tool availability assignment ITT 诊断，不计入自然策略 Stable Zero、ToolReceipt 总数、Skill evidence、GRPO 或 benchmark accuracy。完整报告见 `reports/hotpotqa_tool_availability_pair_v1/report.md`。

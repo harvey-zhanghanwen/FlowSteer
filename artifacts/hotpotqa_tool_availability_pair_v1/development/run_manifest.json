@@ -1,0 +1,94 @@
+{
+  "behavior_policy_preflight": {
+    "adapter_name": "theta_jointqa_progressive_step_000000",
+    "canary_succeeded": true,
+    "checkpoint_path": "/ssd1/iclr/1/FlowSteer/artifacts/hotpotqa_multiagent_skill/policy_step_000000/theta",
+    "completed_at": "2026-08-20T00:30:14.872222+00:00",
+    "duration_seconds": 0.3691771188750863,
+    "loaded_now": true,
+    "models_after": [
+      "supervisor_theta",
+      "theta_jointqa_progressive_step_000000"
+    ],
+    "models_before": [
+      "supervisor_theta"
+    ],
+    "policy_published": false,
+    "request_attempts": {
+      "canary": 1,
+      "load_adapter": 1,
+      "models_after": 1,
+      "models_before": 1
+    },
+    "started_at": "2026-08-20T00:30:14.503043+00:00",
+    "status": "ready",
+    "success": true,
+    "training_performed": false
+  },
+  "completed_at": "2026-08-20T00:37:57.003862+00:00",
+  "direct_reuse": {
+    "gateway_calls": 0,
+    "model_and_scoring_semantics_exact": true,
+    "newly_collected_records": 0,
+    "reused_records": 2,
+    "selected_records": 2,
+    "source": "/ssd1/iclr/1/FlowSteer/artifacts/qa_tool_react_exact_wire_v3_stable_zero/hotpotqa/direct_closed_context_predictions.jsonl"
+  },
+  "joint_qa_partition": "development",
+  "model_api_calls": 0,
+  "pair_preregistration": {
+    "condition_ids": {
+      "tool_off": "hotpotqa_tool_availability_pair_v1:tool_off",
+      "tool_on": "hotpotqa_tool_availability_pair_v1:tool_on"
+    },
+    "estimand": "qa_tool_availability_assignment_intent_to_treat_effect_on_hotpotqa_official_answer_metrics",
+    "forced_probe": true,
+    "grpo_eligible": false,
+    "not_an_estimand": [
+      "Tool invocation",
+      "Tool usefulness",
+      "Skill usefulness"
+    ],
+    "randomize_arm_order": true,
+    "rollout_index": 0,
+    "sampling_anchor_ordinal": 0,
+    "sampling_probability": 0.5,
+    "sampling_schedule_purpose": "hotpotqa_tool_availability_itt_pair_v1",
+    "shared_canvas_state": {
+      "nodes": [],
+      "output_agent_id": null,
+      "relations": []
+    },
+    "treatment": "QA Tool availability assignment"
+  },
+  "pair_progress": {
+    "completed": 2,
+    "expected": 2
+  },
+  "prepare_only_constructed_backend": false,
+  "prepared_at": "2026-08-20T00:30:13.903917+00:00",
+  "schema_version": "flowsteer.hotpotqa.qa-tool-availability-pair-manifest.v1",
+  "status": "complete",
+  "task_ids": [
+    "hotpotqa:5a7a06935542990198eaf050",
+    "hotpotqa:5a879ab05542996e4f30887e"
+  ],
+  "task_split": "validation",
+  "trajectory_ids": {
+    "hotpotqa:5a7a06935542990198eaf050": {
+      "tool_off": "trajectory_23b95c8a32bcc9e54b5ae51a",
+      "tool_on": "trajectory_24ebf95e33c6adaa180a1e3b"
+    },
+    "hotpotqa:5a879ab05542996e4f30887e": {
+      "tool_off": "trajectory_737f2db740b9066ac3f1659b",
+      "tool_on": "trajectory_d9d84e66a9d5f12e5ed5de7d"
+    }
+  },
+  "versions": {
+    "evaluator": "hotpotqa.official.answer.v1",
+    "model_catalog": "2301335a6dd324fc96f9c15adda1ed1aeda4708530f382fabd2a918ab4353c1f",
+    "policy": "qwen35-9b-hotpot-step-000000",
+    "prompt": "agentgraph.director.minimal.v3",
+    "tool": "skillflow.qa-retrieval.search-read.exact-structured-action.v2"
+  }
+}

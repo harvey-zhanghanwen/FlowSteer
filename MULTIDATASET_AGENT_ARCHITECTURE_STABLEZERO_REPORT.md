@@ -77,10 +77,20 @@
 
 这些 receipt 均为 `diagnostic_only=true`、`forced_probe=true`，没有 evaluator、Ground Truth、benchmark metric、Skill evidence、GRPO 或 optimizer update；不能与自然策略 Tool adoption 混合计数。
 
+## HotpotQA Tool availability OFF/ON 配对诊断
+
+| Scope | Pair | Trajectory | OFF EM/F1 | ON EM/F1 | ΔEM/ΔF1 | ON Tool invocation |
+|---|---:|---:|---:|---:|---:|---:|
+| exposed development forced probe | 2 | 4 | 100.00% / 100.00% | 100.00% / 100.00% | +0.00 / +0.00 | 0/2 |
+
+OFF 未暴露 Tool catalog，ON 精确暴露 `qa-retrieval.search/read`，2/2 pair 的 non-treatment observation projection 相同；但 ON 未产生 Tool call 或 ToolReceipt。该结果只属于 Tool availability assignment ITT 诊断，不计入自然策略 Stable Zero、ToolReceipt 总数、Skill evidence、GRPO 或 benchmark accuracy。完整报告见 `reports/hotpotqa_tool_availability_pair_v1/report.md`。
+
+
 ## Protocol audit
 
 - HotpotQA 与 TriviaQA：当前 v3 的两题均为 exposed development canary；这些 task ID 在先前架构诊断与 progressive evaluation artifacts 中重复出现，构成 evaluation contamination，因此不能作为 unseen held-out evidence。模型可见边界仍由 `TaskRecord.question`、AgentGraph execution request 与 recorded upstream artifacts 构成；现有 prompt/trajectory receipt 未显示 `ground_truth` 或 `evaluator_payload` 被注入模型输入。两者必须同时陈述，不能用“没有 prompt leakage”推导出“样本未被开发过程暴露”。详见 `reports/multidataset_stablezero/HOTPOTQA_EVALUATION_LEAKAGE_AUDIT.md`。
 - HotpotQA distractor protocol：题目提供的 passages 本来就包含支持事实，使用这些 passages 作答不属于 Ground Truth 字段泄漏。v3 中观察到的 Atlas DPR Wikipedia 检索来自只读公开语料 `atlas-dpr-wikipedia-psgs-w100`；known-answer preflight 只验证 evaluator，并不进入模型请求。
+- HotpotQA Tool availability pair：同一两题、同一 policy/catalog/evaluator/sampling coordinate 下随机化 OFF/ON arm order；OFF 无 Tool catalog，ON 精确暴露 `qa-retrieval.search/read`。两条 ON trajectory 都没有实际 Tool call，因此零 ITT 不能解释为 Tool usefulness 或 Skill effect。
 - HotpotQA、TriviaQA 与 AIME-2025 development：Direct 与 Tool-capable AgentGraph 分别报告；未把 protocol-separated delta 解释为 architecture causal effect 或 SOTA improvement。
 - HealthBench Professional v2：只报告 openai/simple-evals-compatible **reference-judge diagnostic**；不是私有官方评测服务或 leaderboard 成绩。
 - WebShop v4：只接受 native validation indices 500..627 的原生环境结果；旧 v2 native-test 结果作为 test-contaminated adaptation evidence 排除，v3 仅保留为上下文预算失败诊断。
@@ -130,7 +140,7 @@ Tool-aware Skill applicability 已在架构与 CPU 定向测试层完成：Skill
 - `SKILL_EVIDENCE_INSUFFICIENT`：最新独立 paired evidence 未满足 calibrated lower-bound/harm gate；`ACTIVE` Skill 数为 0。
 - `SKILL_EXECUTION_NOT_IMPLEMENTED`：Tool-aware applicability 只保护 Director-visible prompt-prior retrieval；本地 Runtime 尚未实现 SkillFlow 的 Executor invocation/credit receipt boundary，因而 `ActionKind.SKILL` 继续 fail closed。
 - `TRAINING_INSTABILITY`：既有 joint-QA bounded micro-training 完成了 2 次真实 optimizer update 与 policy sync，但固定 held-out 宏平均没有形成正向趋势；该证据不覆盖本轮新增 Tool/Environment/Coding action-selection policy。
-- `TOOL_LIMITATION`：HotpotQA 与 TriviaQA v3 的当前 Stable Zero trajectories 各自然产生 1 条成功 retrieval `ToolReceipt`；AIME-2025 development 与 HealthBench v2 未自然选择其可选 Tool。两题 canary 只能验证自然工具调用链已经出现，不能估计 tool-use policy 的总体采用率、useful rate、wasted rate 或 Skill effect。
+- `TOOL_LIMITATION`：HotpotQA 与 TriviaQA v3 的当前 Stable Zero trajectories 各自然产生 1 条成功 retrieval `ToolReceipt`；AIME-2025 development 与 HealthBench v2 未自然选择其可选 Tool。HotpotQA availability pair 已执行，但两个 Tool-ON arm 均未调用 Tool，只验证 treatment exposure/paired runtime，仍不能估计 useful rate、wasted rate 或 Skill effect。
 - `MODEL_CAPABILITY_LIMIT`：HealthBench 的 2 题 reference-judge diagnostic raw_score 较低；该 canary 不足以把差距唯一归因于模型、架构或缺少检索。
 - `ARCHITECTURE_DEFECT`：当前没有新的 confirmed open defect。WebShop 的 action serialization / token-budget 缺陷已按 preserved failure receipt 修复；WebShop v4 已形成 native-validation paired receipt；旧 v2 native-test success 仍不进入当前指标，v3 仅保留为上下文预算失败诊断。
 - `POLICY_LEARNING_PROBLEM`：尚未成立。当前自然 policy 没有采用非链式 topology，但 SWE Coding、ACTIVE Skill 和 Tool usefulness 闭环仍未齐全，不能先把缺口归因于 policy learning。
@@ -184,3 +194,4 @@ READY_FOR_FORMAL_MULTIDATASET_TRAINING = NO
 - [WebShop](reports/multidataset_stablezero/WEBSHOP_ARCH_REPORT.md)
 - [ALFWorld](reports/multidataset_stablezero/ALFWORLD_ARCH_REPORT.md)
 - [SWE-bench Regular Dev](reports/multidataset_stablezero/SWEBENCH_ARCH_REPORT.md)
+- [HotpotQA Tool availability OFF/ON paired diagnostic](reports/hotpotqa_tool_availability_pair_v1/report.md)
