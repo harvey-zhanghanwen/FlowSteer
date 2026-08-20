@@ -1131,6 +1131,19 @@ def _unmeasured_report(
         f"| {metric} | 不可测 | 不可测 |" for metric in spec.metrics
     )
     reason = error or "尚无 paired result 与原生 evaluator receipt。"
+    coding_contract_note = (
+        """
+
+### Coding Agent contract status
+
+- 已接线：task-pinned detached worktree、bounded Coding/ReAct、list/search/view/exact-edit/test/diff、ToolReceipt、official `resolved` evaluator。
+- 终止时序：最后一次 changed `exact_edit` 之后必须有 `run_tests`，其后必须重新取得 changed `diff`，再执行 `complete`；旧 diff 不能跨 revision 提交。当前预算为 9 turns / 8 Tool calls。
+- 尚未实现：完整 symbol/reference、general command、multi-file apply-patch 以及 create/delete/move Tool contract。因此 Coding Agent 是 partial implementation，不能标为 ready。
+- 当前额外资源缺口：固定 regular-dev canary 需要的 `sqlfluff` repository mirror 尚不存在；Docker harness 可用后仍需先准备该 task-pinned repository。
+"""
+        if spec.key == "swe_bench"
+        else ""
+    )
     text = f"""# {spec.title} 架构报告
 
 ## Stable Zero
@@ -1152,6 +1165,13 @@ def _unmeasured_report(
 {metric_rows}
 
 缺少原生 evaluator-valid paired result 时不填 0、不使用代理指标，也不从旧条件迁移成绩。
+
+## Runtime / Search-space capability 与 Director natural policy adoption
+
+- Runtime / search-space capability：配置声明了 `{spec.capability}`；没有 evaluator-valid AgentGraph trajectory 时，这只表示接口与搜索空间边界，不能解释为该能力已经被自然策略采用。
+- Director natural policy adoption：**不可测**。当前没有完成的 AgentGraph trajectory，因而不能从配置项推断 topology、Tool、environment 或 Coding action 的实际采用。
+
+{coding_contract_note}
 
 {_protocol_sections(spec)}
 
@@ -1446,19 +1466,14 @@ def _report_for(spec: DatasetSpec) -> tuple[str, dict[str, Any]]:
         bool(_tool_receipts(trajectory_by_task.get(str(row.get("task_id")), {})))
         for row in rows
     )
-    architecture_final_note = (
-        "current v4 development condition after native-action, split-isolation and action-token-budget adaptation"
-        if spec.key == "webshop"
-        else "current v3 condition after exact Director field/resource-ID clarification"
-        if spec.key in {"hotpotqa", "triviaqa"}
-        else "current v2 condition after receipt-driven minimal adaptation"
-        if spec.key == "alfworld"
-        else "current Stable Zero condition; no later architecture version was run"
-    )
-    capability_observation = (
-        f"declared capability; actual Tool receipts={len(tool_receipts)}"
+    topology_observation = ", ".join(
+        f"{name}={count}" for name, count in sorted(topologies.items())
+    ) or "none"
+    policy_adoption_observation = (
+        f"observed topology: {topology_observation}; actual ToolReceipt={len(tool_receipts)} "
+        f"across {tool_task_count}/{len(rows)} tasks"
         if spec.key not in {"webshop", "alfworld"}
-        else f"native environment replay; actual actions={graph_actions}"
+        else f"observed topology: {topology_observation}; native environment actions={graph_actions}"
     )
     text = f"""# {spec.title} 架构报告
 
@@ -1483,16 +1498,21 @@ def _report_for(spec: DatasetSpec) -> tuple[str, dict[str, Any]]:
 
 {_protocol_sections(spec)}
 
-## Baseline Comparison
+## Receipt-distinct Evaluation Conditions
 
-| Stage | Result | Protocol note |
+| Receipt-distinct condition | Result | Protocol note |
 |---|---|---|
 | Simple Baseline | {direct_metric_inline} | {spec.protocol} |
-| AgentGraph Stable Zero | {graph_metric_inline} | fixed tasks, explicit FINISH, native evaluator |
-| Architecture-final AgentGraph | {graph_metric_inline} | {architecture_final_note} |
-| Tool/ReAct/Coding-enabled AgentGraph | {graph_metric_inline} | {capability_observation} |
+| Current AgentGraph Stable Zero | {graph_metric_inline} | fixed tasks, explicit FINISH, native evaluator |
 
-同一 receipt 同时代表多个 stage 时不会重复解释为独立实验，也不会把 protocol-separated 条件的差值解释为因果增益。
+`architecture-final` 与 Tool/ReAct/Coding-enabled 是当前 AgentGraph condition 的版本/能力属性，不是额外运行的实验条件；因此不再重复列出同一 graph metric。protocol-separated 条件的差值也不解释为因果增益。
+
+## Runtime / Search-space capability 与 Director natural policy adoption
+
+| Layer | Receipt-backed statement |
+|---|---|
+| Runtime / search-space capability | `{spec.capability}` 已在当前配置/Runtime 边界中暴露；只有对应 execution receipt 才能证明某条轨迹实际执行该能力。 |
+| Director natural policy adoption | {policy_adoption_observation}。这是当前 fixed-task trajectory 的观测采用情况，不等同于 Runtime 能力上限。 |
 
 ## Workflow 分布
 
@@ -1755,8 +1775,63 @@ def _skill_section() -> tuple[str, dict[str, Any]]:
                     reasons=gate.get("reasons") if isinstance(gate, Mapping) else None,
                 )
             )
-    text = "\n".join(lines) or "- No evidence-gate publication receipt was found."
-    return text, {"active": active, "publication_count": len(lines)}
+    publication_text = (
+        "\n".join(lines) or "- No evidence-gate publication receipt was found."
+    )
+
+    current_trajectories = [
+        trajectory
+        for spec in SPECS
+        if spec.trajectory_path is not None
+        for trajectory in _load_jsonl(ROOT / spec.trajectory_path)
+    ]
+
+    def has_ids(trajectory: Mapping[str, Any], field: str) -> bool:
+        values = trajectory.get(field, ())
+        return bool(
+            isinstance(values, Sequence)
+            and not isinstance(values, (str, bytes))
+            and values
+        )
+
+    active_receipts = sum(
+        has_ids(trajectory, "active_skill_ids")
+        for trajectory in current_trajectories
+    )
+    director_prior_receipts = sum(
+        has_ids(trajectory, "retrieved_skill_ids")
+        for trajectory in current_trajectories
+    )
+    executor_invocation_receipts = sum(
+        has_ids(trajectory, "invoked_skill_ids")
+        for trajectory in current_trajectories
+    )
+    # The current unified Runtime exposes retrieved Skill instructions to the
+    # Director as prompt priors.  It does not yet publish a versioned
+    # Executor-side ActionKind.SKILL invocation schema/credit contract.
+    executor_invocation_schema_versioned = False
+    text = f"""### Evidence-gated publication state
+
+{publication_text}
+
+### Skill pipeline boundary
+
+| Stage | Current state | Evidence interpretation |
+|---|---|---|
+| Evidence gate / library | `ACTIVE` publications={active} | `CANDIDATE` is not executable evidence. |
+| Director-visible Skill prior | retrieval/applicability interface present; observed retrieved-Skill trajectory receipts={director_prior_receipts}/{len(current_trajectories)} | A retrieved instruction is a Director prompt prior; it is not an Executor invocation. |
+| Versioned Executor Skill invocation schema | **MISSING** | The unified Runtime has no versioned Executor-side `ActionKind.SKILL` action/admission/observation schema; Skill actions remain fail closed. |
+| Executor Skill invocation receipt | observed invoked-Skill trajectory receipts={executor_invocation_receipts}/{len(current_trajectories)} | An `invoked_skill_ids` credit receipt cannot be inferred from Director-visible text. |
+"""
+    return text, {
+        "active": active,
+        "publication_count": len(lines),
+        "trajectory_count": len(current_trajectories),
+        "active_receipts": active_receipts,
+        "director_prior_receipts": director_prior_receipts,
+        "executor_invocation_receipts": executor_invocation_receipts,
+        "executor_invocation_schema_versioned": executor_invocation_schema_versioned,
+    }
 
 
 def _model_canary_section() -> tuple[str, dict[str, Any]]:
@@ -1961,10 +2036,12 @@ def _micro_training_section() -> tuple[str, dict[str, Any]]:
             or macro_values[-1][2] > macro_values[0][2]
         )
     )
-    executed = validated_updates == len(MICRO_TRAINING_MANIFESTS)
-    text = f"""## 既有 bounded micro-training 证据
+    historical_joint_qa_executed = (
+        validated_updates == len(MICRO_TRAINING_MANIFESTS)
+    )
+    text = f"""## Historical joint-QA bounded micro-training（不属于当前 unified Runtime）
 
-这组证据来自当前项目此前完成的 HotpotQA/TriviaQA joint-QA Flow-Director 训练闭环；它与本轮统一 Tool/Environment/Coding Stable Zero 的版本边界分开报告，不能证明新 Tool action-selection policy 已被训练。
+这组证据只来自此前 HotpotQA/TriviaQA joint-QA Flow-Director 训练闭环。其 policy、trajectory schema 与 task scope 不等于当前统一 Tool/Environment/Coding Runtime；不能据此把当前 unified Runtime 标成“已训练”，也不能证明新 Tool action-selection policy 已更新。
 
 | Manifest | Behavior policy | Updated policy | Optimizer updates | Trainable update L2 | Policy sync | Post-update canary |
 |---|---|---|---:|---:|---:|---:|
@@ -1977,10 +2054,11 @@ def _micro_training_section() -> tuple[str, dict[str, Any]]:
 |---|---|---:|---:|
 {chr(10).join(curve_rows) or '| 不可测 | missing | 不可测 | 不可测 |'}
 
-该证据证明 LoRA 参数更新、optimizer state、policy publication、route switch 和 post-update canary 的闭环可执行。固定 held-out 的最终宏平均没有超过 Step 0，因此不能声称观察到正向 learning trend；按方案应优先继续检查 architecture/search-space 与 evidence quality，而不是扩大训练规模。
+该历史 joint-QA receipt 证明当时的 LoRA 参数更新、optimizer state、policy publication、route switch 和 post-update canary 闭环可执行。固定 held-out 的最终宏平均没有超过 Step 0，因此不能声称观察到正向 learning trend。**当前 unified Runtime micro-training/optimizer/policy synchronization 未执行。**
 """
     return text, {
-        "executed": executed,
+        "historical_joint_qa_executed": historical_joint_qa_executed,
+        "unified_runtime_executed": False,
         "validated_updates": validated_updates,
         "curve_verified": curve_verified,
         "positive_trend": positive_trend,
@@ -2464,6 +2542,11 @@ def _total_report(
         f"{name}={aggregate_families.get(name, 0)}"
         for name in ("Qwen", "DeepSeek", "Gemini", "GPT", "MiniMax", "Grok", "GLM", "Other")
     )
+    non_chain_adoption_count = sum(
+        aggregate_topologies.get(name, 0)
+        for name in ("parallel", "fan_in", "fan_out", "reciprocal", "mixed")
+    )
+    deep_serial_adoption_count = aggregate_topologies.get("serial_3_plus", 0)
     by_key = {str(item.get("key")): item for item in summaries}
     diagnostic_rows: list[str] = []
     for key, relative in TOOL_DIAGNOSTIC_RECEIPTS.items():
@@ -2547,20 +2630,26 @@ def _total_report(
         if skill_state["active"] == 0
         else "存在 `ACTIVE` Skill；是否实际注入仍必须以 condition receipt 与版本兼容检查为准。"
     )
+    skill_end_to_end_ready = bool(
+        skill_state["active"] > 0
+        and skill_state["director_prior_receipts"] > 0
+        and skill_state["executor_invocation_schema_versioned"]
+        and skill_state["executor_invocation_receipts"] > 0
+    )
     return f"""# 多数据集 Agent 架构 Stable Zero 报告
 
 ## 架构完成情况
 
 控制路径保持为：本地 Qwen3.5-9B Flow-Director、one-atomic-edit progressive Canvas、execute-after-edit feedback、dynamic AgentGraph、显式 FINISH、数据集原生 evaluator 与完整 trajectory receipt。统一 AgentRuntime 分发 `reasoning`、Tool/ReAct、environment ReAct 和 `coding` execution adapter。Tool assignment、model selection、自由文本 contract、dependency、artifact type 与 completion condition 仍属于 Director search space。
 
-当前所读 manifests 的 optimizer update 总数：**{optimizer_text}**。本轮未执行大规模训练、GRPO、backward、LoRA publication 或新的 Skill activation。
+当前 unified Runtime Stable Zero manifests 的 optimizer update 总数：**{optimizer_text}**。本轮未执行大规模训练、GRPO、backward、LoRA publication 或新的 Skill activation；下文旧 joint-QA optimizer receipt 单独列为历史证据。
 
 ## 实现来源分类
 
 - `DIRECT_REUSE`：FlowSteer progressive Canvas 的 edit→execute→feedback、显式 FINISH、action mask、trajectory；SkillFlow 的 StructuredAction/Tool Registry、RetrievalIndex、bounded computation、RAGEN environment、MedRAG corpus、SWE-bench worktree、evidence/library contract 以及 `required_tools ⊆ available_tools` Skill applicability predicate。
 - `NECESSARY_ADAPTATION`：异构 `reasoning|react|coding` dispatch、task-scoped Tool registry、typed evaluator receipt、WebShop 原生 action grammar、ALFWorld interactive FINISH 的 environment actor invariant、SWE-bench worktree ownership。
 - `PROJECT_ALGORITHM_ADDITION`：typed `CommunicationEnvelope`、`ToolCapability`、measured `ToolReceipt` 与既有 same-prefix paired AgentGraph posterior/evidence gate。
-- `NOT_IMPLEMENTED_OR_NOT_EXECUTED`：SWE-bench 官方-harness-valid Coding trajectory、evidence-gated `ACTIVE` Skill 注入、Executor-side Skill invocation 以及本轮 micro-training/optimizer/policy synchronization。
+- `NOT_IMPLEMENTED_OR_NOT_EXECUTED`：SWE-bench 官方-harness-valid Coding trajectory、evidence-gated `ACTIVE` Skill 注入、版本化 Executor-side Skill invocation schema/receipt，以及当前 unified Runtime micro-training/optimizer/policy synchronization。
 
 逐文件的上游类/函数与不兼容原因记录在 `docs/SOURCE_MAP.md`。
 
@@ -2582,11 +2671,14 @@ def _total_report(
 
 ## Natural Stable Zero workflow/model adoption
 
+- Runtime / search-space capability：scheduler 与 action space 支持 deep、parallel、fan-in、fan-out 和 finite reciprocal topology；模型 catalog 支持异构 Executor。
+- Director natural policy adoption：以下计数只来自当前 fixed-task AgentGraph trajectories，不由 capability 配置反推。
 - Exclusive topology family：{aggregate_topology_text}
 - Declared Executor node family：{aggregate_family_text}
 - Multi-model workflow：**{multi_model_workflows}/{total_measured}**
+- Non-chain topology adoption：**{non_chain_adoption_count}/{total_measured}**
 
-当前 {total_measured} 条自然 AgentGraph trajectory 只观察到 single/serial topology；parallel、fan-in、fan-out 与 reciprocal 在独立 non-chain runtime diagnostic 中可执行，但尚未被当前 fixed-task Director policy 自然采用。因此 `DEEP_WORKFLOW_READY` 只表示 search space/runtime capability，不能解释为 policy adoption 或性能收益。
+当前 {total_measured} 条自然 AgentGraph trajectory 的 topology/model 采用如上；独立 non-chain runtime diagnostic 只验证可执行性，不计作 Director natural policy adoption，也不构成性能收益证据。
 
 {model_canary_text}
 
@@ -2618,11 +2710,11 @@ def _total_report(
 
 最新 evidence-gated `ACTIVE` Skill 数量：**{skill_state['active']}**。{skill_gate_note}`CANDIDATE` instruction 仍是候选，不作为已验证 Skill。
 
-Tool-aware Skill applicability 已在架构与 CPU 定向测试层完成：SkillFlow 的 `required_tools ⊆ available_tools` 判定现在只接受当前 task-scoped `ToolRegistry` 中 `availability=true` 且 dataset-compatible 的 exact Tool ID，natural retrieval 与 forced-probe 共用同一 fail-closed predicate。由于 `ACTIVE Skill = 0` 且 Executor-side Skill invocation 仍被拒绝，这只表示 applicability/retrieval boundary ready，不表示 Skill 已注入、已使用或已提高准确率。
+Tool-aware Skill applicability 已在架构与 CPU 定向测试层完成：SkillFlow 的 `required_tools ⊆ available_tools` 判定只接受当前 task-scoped `ToolRegistry` 中 `availability=true` 且 dataset-compatible 的 exact Tool ID。该边界只服务于 **Director-visible Skill prior**；它不等于 Executor 调用。由于 `ACTIVE Skill = 0`，且当前 unified Runtime 缺少版本化 Executor-side `ActionKind.SKILL` invocation/admission/observation schema，不能声称 Skill 已注入、已调用、已获得 credit 或提高准确率。
 
 {micro_training_text}
 
-## Current add_subgraph micro-training preflight
+## Current unified Runtime add_subgraph micro-training preflight
 
 - Decision：`NO_GO`
 - Receipt report：`reports/multidataset_stablezero/MICROTRAINING_PREFLIGHT.md`
@@ -2632,7 +2724,7 @@ Tool-aware Skill applicability 已在架构与 CPU 定向测试层完成：Skill
 
 - `ENVIRONMENT_LIMITATION`：{swebench_issue}
 - `SKILL_EVIDENCE_INSUFFICIENT`：最新独立 paired evidence 未满足 calibrated lower-bound/harm gate；`ACTIVE` Skill 数为 0。
-- `SKILL_EXECUTION_NOT_IMPLEMENTED`：Tool-aware applicability 只保护 Director-visible prompt-prior retrieval；本地 Runtime 尚未实现 SkillFlow 的 Executor invocation/credit receipt boundary，因而 `ActionKind.SKILL` 继续 fail closed。
+- `SKILL_EXECUTION_NOT_IMPLEMENTED`：Tool-aware applicability 只保护 Director-visible prompt-prior retrieval；当前 unified Runtime 缺少版本化 Executor `ActionKind.SKILL` invocation/admission/observation schema 与 credit receipt boundary，因而 Skill action 继续 fail closed。
 - `TRAINING_INSTABILITY`：既有 joint-QA bounded micro-training 完成了 {micro_training_state['validated_updates']} 次真实 optimizer update 与 policy sync，但固定 held-out 宏平均没有形成正向趋势；该证据不覆盖本轮新增 Tool/Environment/Coding action-selection policy。
 - `TOOL_LIMITATION`：HotpotQA 与 TriviaQA v3 的当前 Stable Zero trajectories 各自然产生 1 条成功 retrieval `ToolReceipt`；AIME-2025 development 与 HealthBench v2 未自然选择其可选 Tool。HotpotQA availability pair 已执行，但两个 Tool-ON arm 均未调用 Tool，只验证 treatment exposure/paired runtime，仍不能估计 useful rate、wasted rate 或 Skill effect。
 - `MODEL_CAPABILITY_LIMIT`：HealthBench 的 2 题 reference-judge diagnostic raw_score 较低；该 canary 不足以把差距唯一归因于模型、架构或缺少检索。
@@ -2646,8 +2738,13 @@ FLOWSTEER_CORE_PRESERVED = YES
 
 MODEL_POOL_EXPANDED = YES
 MULTI_MODEL_WORKFLOW_READY = YES
-DEEP_WORKFLOW_READY = YES
-COLLABORATION_DIVERSITY_READY = YES
+DEEP_WORKFLOW_READY = {'YES' if deep_serial_adoption_count > 0 else 'NO'}
+COLLABORATION_DIVERSITY_READY = {'YES' if non_chain_adoption_count > 0 else 'NO'}
+NON_CHAIN_TOPOLOGY_SEARCH_SPACE_READY = YES
+NON_CHAIN_TOPOLOGY_RUNTIME_DIAGNOSTIC_VALIDATED = YES
+DIRECTOR_DEEP_SERIAL_ADOPTION_OBSERVED = {'YES' if deep_serial_adoption_count > 0 else 'NO'}
+DIRECTOR_NON_CHAIN_TOPOLOGY_ADOPTION_OBSERVED = {'YES' if non_chain_adoption_count > 0 else 'NO'}
+DIRECTOR_MULTI_MODEL_WORKFLOW_ADOPTION_OBSERVED = {'YES' if multi_model_workflows > 0 else 'NO'}
 
 QA_TOOL_REGISTRY_READY = YES
 QA_DATABASE_SELECTION_READY = YES
@@ -2657,19 +2754,26 @@ QA_TOOL_USE_VALIDATED = {'YES' if qa_tool_use_validated else 'NO'}
 ALFWORLD_REACT_READY = {'YES' if alfworld_react_ready else 'NO'}
 WEBSHOP_REACT_READY = {'YES' if webshop_react_ready else 'NO'}
 
-CODING_AGENT_IMPLEMENTED = YES
+CODING_AGENT_IMPLEMENTED = PARTIAL
 CODING_AGENT_READY = {'YES' if swebench_coding_ready else 'NO'}
 SWEBENCH_CODING_WORKFLOW_READY = {'YES' if swebench_coding_ready else 'NO'}
 
-SKILL_END_TO_END_READY = {'YES' if skill_state['active'] > 0 else 'NO'}
+DIRECTOR_VISIBLE_SKILL_PRIOR_INTERFACE_READY = YES
+DIRECTOR_VISIBLE_SKILL_PRIOR_RECEIPT_OBSERVED = {'YES' if skill_state['director_prior_receipts'] > 0 else 'NO'}
+EXECUTOR_SKILL_INVOCATION_SCHEMA_VERSIONED = {'YES' if skill_state['executor_invocation_schema_versioned'] else 'NO'}
+EXECUTOR_SKILL_INVOCATION_RECEIPT_OBSERVED = {'YES' if skill_state['executor_invocation_receipts'] > 0 else 'NO'}
+SKILL_END_TO_END_READY = {'YES' if skill_end_to_end_ready else 'NO'}
 TOOL_AWARE_SKILL_APPLICABILITY_READY = YES
 SKILL_SUMMARY_VALIDATED = NO
 
 ALL_DATASETS_STABLE_ZERO_COMPLETE = {'YES' if all_stable else 'NO'}
 CORRECT_WRONG_DEMOS_COMPLETE = {'YES' if demos_complete else 'NO'}
 
-MICRO_TRAINING_EXECUTED = {'YES' if micro_training_state['executed'] else 'NO'}
-LEARNING_TREND_OBSERVED = {'YES' if micro_training_state['positive_trend'] else 'NO'}
+HISTORICAL_JOINT_QA_MICRO_TRAINING_EXECUTED = {'YES' if micro_training_state['historical_joint_qa_executed'] else 'NO'}
+HISTORICAL_JOINT_QA_LEARNING_TREND_OBSERVED = {'YES' if micro_training_state['positive_trend'] else 'NO'}
+UNIFIED_RUNTIME_MICRO_TRAINING_EXECUTED = {'YES' if micro_training_state['unified_runtime_executed'] else 'NO'}
+MICRO_TRAINING_EXECUTED = {'YES' if micro_training_state['unified_runtime_executed'] else 'NO'}
+LEARNING_TREND_OBSERVED = NO
 
 LOCAL_RECOVERY_BACKUP = YES
 GITHUB_ARCHITECTURE_BACKUP = YES
@@ -2677,7 +2781,7 @@ GITHUB_ARCHITECTURE_BACKUP = YES
 READY_FOR_FORMAL_MULTIDATASET_TRAINING = NO
 ```
 
-判定说明：`DEEP_WORKFLOW_READY` 表示 search space 与 scheduler 支持 deep/parallel/fan-in/finite-reciprocal motif，不表示当前 canary 已普遍采用深图。`CORRECT_WRONG_DEMOS_COMPLETE` 要求每个数据集同时具有当前 evaluator-valid correct 与 wrong receipt；不会为凑数量制造失败。评估协议阶段与本次 Tool-aware Skill applicability 阶段均建立可恢复 branch/tag/bundle，并推送到用户现有 GitHub 仓库的阶段备份分支；密钥和运行中间文件不在 Git 记录中。
+判定说明：方案第 69 节中的 `DEEP_WORKFLOW_READY` 按自然轨迹中的 `serial_3_plus` adoption 判定，`COLLABORATION_DIVERSITY_READY` 按非链式 topology adoption 判定；`NON_CHAIN_TOPOLOGY_SEARCH_SPACE_READY` 与 `NON_CHAIN_TOPOLOGY_RUNTIME_DIAGNOSTIC_VALIDATED` 只表示 capability。`MICRO_TRAINING_EXECUTED` 只指当前 unified Runtime，历史 joint-QA training 另列。`CORRECT_WRONG_DEMOS_COMPLETE` 要求每个数据集同时具有当前 evaluator-valid correct 与 wrong receipt；不会为凑数量制造失败。
 
 ## 报告索引
 

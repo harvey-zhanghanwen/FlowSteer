@@ -31,16 +31,21 @@
 - v1 exact-schema 前的自然策略 canary 只保留为历史结果，不进入当前 v3 指标。
 
 
-## Baseline Comparison
+## Receipt-distinct Evaluation Conditions
 
-| Stage | Result | Protocol note |
+| Receipt-distinct condition | Result | Protocol note |
 |---|---|---|
 | Simple Baseline | exact_match=50.00%; token_f1=50.00% | Direct 仅接收问题；AgentGraph 允许使用检索 Tool。两者属于 protocol-separated 条件，差值只作描述性统计。 |
-| AgentGraph Stable Zero | exact_match=100.00%; token_f1=100.00% | fixed tasks, explicit FINISH, native evaluator |
-| Architecture-final AgentGraph | exact_match=100.00%; token_f1=100.00% | current v3 condition after exact Director field/resource-ID clarification |
-| Tool/ReAct/Coding-enabled AgentGraph | exact_match=100.00%; token_f1=100.00% | declared capability; actual Tool receipts=1 |
+| Current AgentGraph Stable Zero | exact_match=100.00%; token_f1=100.00% | fixed tasks, explicit FINISH, native evaluator |
 
-同一 receipt 同时代表多个 stage 时不会重复解释为独立实验，也不会把 protocol-separated 条件的差值解释为因果增益。
+`architecture-final` 与 Tool/ReAct/Coding-enabled 是当前 AgentGraph condition 的版本/能力属性，不是额外运行的实验条件；因此不再重复列出同一 graph metric。protocol-separated 条件的差值也不解释为因果增益。
+
+## Runtime / Search-space capability 与 Director natural policy adoption
+
+| Layer | Receipt-backed statement |
+|---|---|
+| Runtime / search-space capability | `仅问题推理 + 冻结 Wikipedia RetrievalIndex/ReAct 能力` 已在当前配置/Runtime 边界中暴露；只有对应 execution receipt 才能证明某条轨迹实际执行该能力。 |
+| Director natural policy adoption | observed topology: serial_2=2; actual ToolReceipt=1 across 1/2 tasks。这是当前 fixed-task trajectory 的观测采用情况，不等同于 Runtime 能力上限。 |
 
 ## Workflow 分布
 

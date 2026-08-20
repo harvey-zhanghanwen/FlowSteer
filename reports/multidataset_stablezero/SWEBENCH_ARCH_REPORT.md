@@ -20,6 +20,21 @@
 
 缺少原生 evaluator-valid paired result 时不填 0、不使用代理指标，也不从旧条件迁移成绩。
 
+## Runtime / Search-space capability 与 Director natural policy adoption
+
+- Runtime / search-space capability：配置声明了 `detached task-pinned worktree + iterative CodingExecutionAdapter + official Docker harness`；没有 evaluator-valid AgentGraph trajectory 时，这只表示接口与搜索空间边界，不能解释为该能力已经被自然策略采用。
+- Director natural policy adoption：**不可测**。当前没有完成的 AgentGraph trajectory，因而不能从配置项推断 topology、Tool、environment 或 Coding action 的实际采用。
+
+
+
+### Coding Agent contract status
+
+- 已接线：task-pinned detached worktree、bounded Coding/ReAct、list/search/view/exact-edit/test/diff、ToolReceipt、official `resolved` evaluator。
+- 终止时序：最后一次 changed `exact_edit` 之后必须有 `run_tests`，其后必须重新取得 changed `diff`，再执行 `complete`；旧 diff 不能跨 revision 提交。当前预算为 9 turns / 8 Tool calls。
+- 尚未实现：完整 symbol/reference、general command、multi-file apply-patch 以及 create/delete/move Tool contract。因此 Coding Agent 是 partial implementation，不能标为 ready。
+- 当前额外资源缺口：固定 regular-dev canary 需要的 `sqlfluff` repository mirror 尚不存在；Docker harness 可用后仍需先准备该 task-pinned repository。
+
+
 ## Evidence scope 与协议限制
 
 - Evidence scope：SWE-bench regular-dev architecture development；Verified 完整保留给最终评测

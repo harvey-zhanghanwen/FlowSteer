@@ -32,16 +32,21 @@
 - artifacts/aime2026_computation_tool_stable_zero/evaluation：使用 AIME 2026 official test 的旧结果，仅保留为历史诊断，不进入开发指标。
 
 
-## Baseline Comparison
+## Receipt-distinct Evaluation Conditions
 
-| Stage | Result | Protocol note |
+| Receipt-distinct condition | Result | Protocol note |
 |---|---|---|
 | Simple Baseline | exact_match=0.00% | 开发阶段使用 AIME 2025 官方题目与整数 exact match；Direct 与允许使用计算 Tool 的 AgentGraph 分别报告，不作 protocol-equivalent 因果比较。 |
-| AgentGraph Stable Zero | exact_match=50.00% | fixed tasks, explicit FINISH, native evaluator |
-| Architecture-final AgentGraph | exact_match=50.00% | current Stable Zero condition; no later architecture version was run |
-| Tool/ReAct/Coding-enabled AgentGraph | exact_match=50.00% | declared capability; actual Tool receipts=0 |
+| Current AgentGraph Stable Zero | exact_match=50.00% | fixed tasks, explicit FINISH, native evaluator |
 
-同一 receipt 同时代表多个 stage 时不会重复解释为独立实验，也不会把 protocol-separated 条件的差值解释为因果增益。
+`architecture-final` 与 Tool/ReAct/Coding-enabled 是当前 AgentGraph condition 的版本/能力属性，不是额外运行的实验条件；因此不再重复列出同一 graph metric。protocol-separated 条件的差值也不解释为因果增益。
+
+## Runtime / Search-space capability 与 Director natural policy adoption
+
+| Layer | Receipt-backed statement |
+|---|---|
+| Runtime / search-space capability | `推理 + 有界 calculator/Python execution 能力` 已在当前配置/Runtime 边界中暴露；只有对应 execution receipt 才能证明某条轨迹实际执行该能力。 |
+| Director natural policy adoption | observed topology: serial_2=2; actual ToolReceipt=0 across 0/2 tasks。这是当前 fixed-task trajectory 的观测采用情况，不等同于 Runtime 能力上限。 |
 
 ## Workflow 分布
 

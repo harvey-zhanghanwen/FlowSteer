@@ -67,8 +67,8 @@ def test_swe_coding_agentgraph_arm_uses_the_shared_runtime_contract() -> None:
             "/ssd1/iclr/.private/skillflow-resources/swe-repositories"
         ),
         "worktree_root": ("/ssd1/iclr/.private/skillflow-resources/swe-worktrees"),
-        "max_turns_per_agent_call": 6,
-        "max_tool_calls_per_agent_call": 6,
+        "max_turns_per_agent_call": 9,
+        "max_tool_calls_per_agent_call": 8,
         "max_test_timeout_seconds": 60.0,
         "setup_timeout_seconds": 30.0,
         "cleanup_timeout_seconds": 10.0,

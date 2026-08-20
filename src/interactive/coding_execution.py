@@ -9,7 +9,7 @@ SWE-bench resolution remains exclusively in ``swebench_adapter.py``.
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Callable, Optional
 
 from .agent_runtime import AgentGateway
 from .react_execution import ToolReactExecutionAdapter
@@ -24,29 +24,75 @@ def _receipt_action(receipt: dict[str, object]) -> Optional[str]:
     return action if isinstance(action, str) else None
 
 
+def _receipt_value(receipt: dict[str, object]) -> Optional[dict[str, object]]:
+    result = receipt.get("result")
+    if not isinstance(result, dict):
+        return None
+    value = result.get("value")
+    return value if isinstance(value, dict) else None
+
+
+def _changed_edit(receipt: dict[str, object]) -> bool:
+    if _receipt_action(receipt) != "exact_edit":
+        return False
+    value = _receipt_value(receipt)
+    return (
+        value is not None
+        and value.get("ok") is True
+        and value.get("changed") is True
+    )
+
+
+def _observed_test(receipt: dict[str, object]) -> bool:
+    """Return whether run_tests produced a public pass/fail observation.
+
+    SkillFlow admits a code-generation terminal diff without requiring a
+    passing test.  Preserve that upstream semantic here: both ``passed=True``
+    and ``passed=False`` are observations, while an invalid request or Tool
+    dispatch error is not evidence that a test ran.
+    """
+
+    if _receipt_action(receipt) != "run_tests":
+        return False
+    value = _receipt_value(receipt)
+    return (
+        value is not None
+        and value.get("ok") is True
+        and type(value.get("passed")) is bool
+    )
+
+
 def _changed_diff(receipt: dict[str, object]) -> bool:
     if _receipt_action(receipt) != "diff":
         return False
-    result = receipt.get("result")
-    if not isinstance(result, dict):
-        return False
-    value = result.get("value")
-    return isinstance(value, dict) and value.get("changed") is True
+    value = _receipt_value(receipt)
+    return value is not None and value.get("changed") is True
+
+
+def _last_receipt_index(
+    tool_receipts: list[dict[str, object]],
+    predicate: Callable[[dict[str, object]], bool],
+    *,
+    after_index: int = -1,
+) -> Optional[int]:
+    for index in range(len(tool_receipts) - 1, after_index, -1):
+        if predicate(tool_receipts[index]):
+            return index
+    return None
 
 
 def _submitted_workspace_diff(
     tool_receipts: list[dict[str, object]],
+    *,
+    after_index: int = -1,
 ) -> Optional[str]:
-    """Return the most recent non-empty workspace diff observation."""
+    """Return the newest non-empty diff observed after ``after_index``."""
 
-    for receipt in reversed(tool_receipts):
+    for receipt in reversed(tool_receipts[after_index + 1 :]):
         if not _changed_diff(receipt):
             continue
-        result = receipt.get("result")
-        if not isinstance(result, dict):
-            continue
-        value = result.get("value")
-        if not isinstance(value, dict):
+        value = _receipt_value(receipt)
+        if value is None:
             continue
         diff = value.get("diff")
         if isinstance(diff, str) and diff.strip():
@@ -83,12 +129,23 @@ class CodingExecutionAdapter(ToolReactExecutionAdapter):
         tool_receipts: list[dict[str, object]],
     ) -> Optional[str]:
         del action
-        actions = [_receipt_action(receipt) for receipt in tool_receipts]
-        if "exact_edit" not in actions:
+        last_edit = _last_receipt_index(tool_receipts, _changed_edit)
+        if last_edit is None:
             return "coding_completion_requires_edit"
-        if "run_tests" not in actions:
+        last_test = _last_receipt_index(
+            tool_receipts,
+            _observed_test,
+            after_index=last_edit,
+        )
+        if last_test is None:
             return "coding_completion_requires_test"
-        if _submitted_workspace_diff(tool_receipts) is None:
+        if (
+            _submitted_workspace_diff(
+                tool_receipts,
+                after_index=last_test,
+            )
+            is None
+        ):
             return "coding_completion_requires_changed_diff"
         return None
 
@@ -99,12 +156,29 @@ class CodingExecutionAdapter(ToolReactExecutionAdapter):
         artifact: str,
         tool_receipts: list[dict[str, object]],
     ) -> str:
-        # SkillFlow submits ``_generate_workspace_diff()`` at terminal time;
-        # prose or a model-reconstructed patch is never substituted for the
-        # actual prepared worktree state.  The changed-diff admission above
-        # guarantees this lookup succeeds.
+        # SkillFlow submits repository state rather than model prose.  This
+        # adapter additionally requires an inspected diff receipt; select only
+        # one observed after the latest changed edit and subsequent test so a
+        # pre-revision receipt cannot submit a stale patch.
         del action, artifact
-        workspace_diff = _submitted_workspace_diff(tool_receipts)
+        last_edit = _last_receipt_index(tool_receipts, _changed_edit)
+        last_test = (
+            None
+            if last_edit is None
+            else _last_receipt_index(
+                tool_receipts,
+                _observed_test,
+                after_index=last_edit,
+            )
+        )
+        workspace_diff = (
+            None
+            if last_test is None
+            else _submitted_workspace_diff(
+                tool_receipts,
+                after_index=last_test,
+            )
+        )
         if workspace_diff is None:  # pragma: no cover - guarded by admission
             raise RuntimeError("coding completion has no workspace diff")
         return workspace_diff

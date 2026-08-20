@@ -26,6 +26,11 @@ from src.interactive.config_loader import load_yaml
 
 POLICY = "qwen35-9b-jointqa-progressive-step-000001"
 ADAPTER = "theta_jointqa_progressive_step_000001"
+PROMPT = "agentgraph.director.progressive-subgraph.stage-conditioned-skill.v3"
+TOOL = (
+    "agentgraph.add-subgraph-nullable-output+"
+    "skillflow-stage-conditioned-forced-probe.v3"
+)
 
 
 def _write_step1_receipts(root: Path) -> tuple[Path, Path]:
@@ -59,6 +64,10 @@ def _write_step1_receipts(root: Path) -> tuple[Path, Path]:
     }
     manifest = {
         "status": "completed",
+        "regime_versions": {
+            "prompt": PROMPT,
+            "tool": TOOL,
+        },
         "training": {
             "optimizer_updates": 1,
             "trainable_update_l2": 0.025,

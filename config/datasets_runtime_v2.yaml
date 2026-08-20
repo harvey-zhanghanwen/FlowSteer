@@ -1,0 +1,114 @@
+# Future-only runtime dataset registry for the seven AgentGraph benchmarks.
+#
+# Existing evaluation configurations and persisted selections predate this
+# registry and remain immutable.  A new condition opts in only by declaring
+# both data.registry_path and data.registry_dataset_key.  The completion
+# runner then verifies its explicit split paths against this registry before
+# selecting any task.
+
+schema_version: "flowsteer.agentgraph.runtime-datasets.v2"
+task_schema_version: "flowsteer.agentgraph.task.v1"
+
+datasets:
+  hotpotqa:
+    protocol_label: "joint_qa_partitioned_v2"
+    preparation_catalog_path: "config/joint_qa_partitions_v2.yaml"
+    preparation_catalog_schema_version: "flowsteer.joint-qa.partitions.v2"
+    manifest:
+      path: "data/joint_qa_v2/manifest.json"
+      schema_version: "flowsteer.joint-qa.partitions.v2"
+      provenance_field: "config"
+    manifest_partition_keys:
+      train: "train"
+      validation: "development"
+      test: "test"
+    paths:
+      train: "data/joint_qa_v2/train.jsonl"
+      validation: "data/joint_qa_v2/development.jsonl"
+      test: "data/joint_qa_v2/test.jsonl"
+
+  triviaqa:
+    protocol_label: "joint_qa_partitioned_v2"
+    preparation_catalog_path: "config/joint_qa_partitions_v2.yaml"
+    preparation_catalog_schema_version: "flowsteer.joint-qa.partitions.v2"
+    manifest:
+      path: "data/joint_qa_v2/manifest.json"
+      schema_version: "flowsteer.joint-qa.partitions.v2"
+      provenance_field: "config"
+    manifest_partition_keys:
+      train: "train"
+      validation: "development"
+      test: "test"
+    paths:
+      train: "data/joint_qa_v2/train.jsonl"
+      validation: "data/joint_qa_v2/development.jsonl"
+      test: "data/joint_qa_v2/test.jsonl"
+
+  aime_2026:
+    protocol_label: "aime_year_isolated_v1"
+    preparation_catalog_path: "config/datasets_aime2026.yaml"
+    preparation_catalog_schema_version: "flowsteer.agentgraph.aime2026.dataset.v1"
+    manifest:
+      path: "data/aime2026_v1/manifest.json"
+      schema_version: "flowsteer.agentgraph.aime2026.dataset.v1"
+      provenance_field: "catalog"
+    paths:
+      train: "data/aime2026_v1/train.jsonl"
+      validation: "data/aime2026_v1/validation.jsonl"
+      test: "data/aime2026_v1/test.jsonl"
+
+  healthbench_professional:
+    protocol_label: "healthbench_public_internal_validation_v1"
+    preparation_catalog_path: "config/datasets_agentgraph.yaml"
+    preparation_catalog_schema_version: "flowsteer.agentgraph.datasets.v1"
+    manifest:
+      path: "data/agentgraph_v1/manifest.json"
+      schema_version: "flowsteer.agentgraph.datasets.v1"
+      provenance_field: "catalog"
+    paths:
+      train: "data/agentgraph_v1/train.jsonl"
+      validation: "data/agentgraph_v1/validation.jsonl"
+      test: "data/agentgraph_v1/test.jsonl"
+
+  webshop:
+    protocol_label: "skillflow_ragen_webshop_native_split_v3"
+    preparation_catalog_path: "config/datasets_webshop.yaml"
+    preparation_catalog_schema_version: "flowsteer.agentgraph.datasets.v1"
+    manifest:
+      path: "data/webshop_v3/manifest.json"
+      schema_version: "flowsteer.agentgraph.datasets.v1"
+      provenance_field: "catalog"
+    paths:
+      train: "data/webshop_v3/train.jsonl"
+      validation: "data/webshop_v3/validation.jsonl"
+      test: "data/webshop_v3/test.jsonl"
+
+  alfworld:
+    protocol_label: "skillflow_ragen_alfworld_live_inventory_v2"
+    preparation_catalog_path: "config/datasets_alfworld.yaml"
+    preparation_catalog_schema_version: "flowsteer.agentgraph.datasets.v1"
+    manifest:
+      path: "data/alfworld_v2/manifest.json"
+      schema_version: "flowsteer.agentgraph.datasets.v1"
+      provenance_field: "catalog"
+    paths:
+      train: "data/alfworld_v2/train.jsonl"
+      validation: "data/alfworld_v2/validation.jsonl"
+      test: "data/alfworld_v2/test.jsonl"
+
+  swe_bench:
+    protocol_label: "swebench_regular_development_verified_final_v2"
+    preparation_catalog_path: "config/datasets_swebench.yaml"
+    preparation_catalog_schema_version: "flowsteer.agentgraph.swebench.dataset.v1"
+    manifest:
+      path: "data/swebench_v2/manifest.json"
+      schema_version: "flowsteer.agentgraph.swebench.dataset.v1"
+      provenance_field: "catalog"
+    paths:
+      train: "data/swebench_v2/train.jsonl"
+      validation: "data/swebench_v2/validation.jsonl"
+      test: "data/swebench_v2/test.jsonl"
+    swebench_dataset_source_by_split:
+      train: "regular_train"
+      validation: "regular_dev"
+      test: "verified"

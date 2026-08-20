@@ -59,7 +59,7 @@ from src.interactive.graph_diagnostics import (
 from src.interactive.records import TaskRecord
 from src.interactive.rollout_collector import execution_record_from_call
 from src.interactive.swebench_adapter import OfficialSWEbenchHarness
-from src.interactive.task_dataset import iter_task_records
+from src.interactive.task_dataset import TASK_SCHEMA_VERSION, iter_task_records
 from src.interactive.task_evaluator import evaluate_task
 
 
@@ -139,6 +139,7 @@ _BENCHMARKS: Mapping[str, Mapping[str, Any]] = {
 }
 
 _INTERACTIVE_BENCHMARKS = frozenset({"webshop", "alfworld"})
+_RUNTIME_DATASET_REGISTRY_SCHEMA = "flowsteer.agentgraph.runtime-datasets.v2"
 
 
 def _utc_now() -> str:
@@ -211,6 +212,7 @@ def validate_completion_benchmark_config(config: Mapping[str, Any]) -> None:
     dataset_key = str(bounded["dataset_key"])
     specification = _BENCHMARKS[dataset_key]
     experiment = _mapping(config.get("experiment"), "experiment")
+    data = _mapping(config.get("data"), "data")
     director = _mapping(config.get("director"), "director")
     grpo = _mapping(config.get("grpo"), "grpo")
     exploration = _mapping(config.get("exploration"), "exploration")
@@ -350,6 +352,14 @@ def validate_completion_benchmark_config(config: Mapping[str, Any]) -> None:
             )
     if bounded.get("official_2026_only") is True and dataset_key != "aime_2026":
         raise ConfigurationError("official_2026_only is valid only for AIME 2026")
+    registry_coordinates = _runtime_dataset_registry_coordinates(data)
+    if (
+        registry_coordinates is not None
+        and registry_coordinates[1] != dataset_key
+    ):
+        raise ConfigurationError(
+            "data.registry_dataset_key must match the evaluation dataset_key"
+        )
     for name in (
         "behavior_policy_version",
         "behavior_adapter_name",
@@ -358,6 +368,351 @@ def validate_completion_benchmark_config(config: Mapping[str, Any]) -> None:
     ):
         if not str(director.get(name, "")).strip():
             raise ConfigurationError(f"director.{name} must be non-empty")
+
+
+def _runtime_dataset_registry_coordinates(
+    data: Mapping[str, Any],
+) -> Optional[tuple[str, str]]:
+    """Return the future-only registry coordinates or reject partial opt-in."""
+
+    registry_path_present = "registry_path" in data
+    registry_key_present = "registry_dataset_key" in data
+    if not registry_path_present and not registry_key_present:
+        return None
+    registry_path = data.get("registry_path")
+    registry_key = data.get("registry_dataset_key")
+    if (
+        not registry_path_present
+        or not registry_key_present
+        or not isinstance(registry_path, str)
+        or not registry_path.strip()
+        or not isinstance(registry_key, str)
+        or not registry_key.strip()
+    ):
+        raise ConfigurationError(
+            "runtime dataset registry opt-in requires non-empty "
+            "data.registry_path and data.registry_dataset_key"
+        )
+    return registry_path.strip(), registry_key.strip()
+
+
+def _load_json_mapping(path: Path, name: str) -> Mapping[str, Any]:
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            value = json.load(handle)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ConfigurationError(f"cannot load {name}: {path}") from exc
+    if not isinstance(value, Mapping):
+        raise ConfigurationError(f"{name} must contain a mapping: {path}")
+    return value
+
+
+def _same_resolved_path(root: Path, left: str, right: str) -> bool:
+    return _resolve(root, left).resolve() == _resolve(root, right).resolve()
+
+
+def _validate_runtime_dataset_registry(
+    config: Mapping[str, Any], root: Path
+) -> Optional[Mapping[str, Any]]:
+    """Validate an explicitly opted-in runtime dataset registry entry.
+
+    Legacy conditions have neither registry coordinate and return ``None``.
+    The validation intentionally uses only fields that are present in the
+    versioned registry and an existing preparation manifest.  A missing
+    optional provenance field is recorded rather than inferred.
+    """
+
+    data = _mapping(config.get("data"), "data")
+    coordinates = _runtime_dataset_registry_coordinates(data)
+    if coordinates is None:
+        return None
+    registry_value, registry_dataset_key = coordinates
+    section_name, bounded = _evaluation_section(config)
+    dataset_key = str(bounded["dataset_key"])
+    if registry_dataset_key != dataset_key:
+        raise ConfigurationError(
+            "data.registry_dataset_key must match the evaluation dataset_key"
+        )
+
+    registry_path = _resolve(root, registry_value)
+    registry = load_yaml(registry_path)
+    if registry.get("schema_version") != _RUNTIME_DATASET_REGISTRY_SCHEMA:
+        raise ConfigurationError(
+            "unsupported runtime dataset registry schema: "
+            f"{registry.get('schema_version')!r}"
+        )
+    registry_task_schema = registry.get("task_schema_version")
+    if registry_task_schema != TASK_SCHEMA_VERSION:
+        raise ConfigurationError(
+            "runtime dataset registry task schema differs from the loader"
+        )
+    datasets = _mapping(registry.get("datasets"), "runtime registry.datasets")
+    if registry_dataset_key not in datasets:
+        raise ConfigurationError(
+            f"runtime dataset registry has no entry for {registry_dataset_key!r}"
+        )
+    entry = _mapping(
+        datasets[registry_dataset_key],
+        f"runtime registry.datasets.{registry_dataset_key}",
+    )
+    protocol_label = entry.get("protocol_label")
+    if not isinstance(protocol_label, str) or not protocol_label.strip():
+        raise ConfigurationError("runtime dataset protocol_label must be non-empty")
+
+    preparation_catalog_value = entry.get("preparation_catalog_path")
+    if (
+        not isinstance(preparation_catalog_value, str)
+        or not preparation_catalog_value.strip()
+    ):
+        raise ConfigurationError(
+            "runtime dataset preparation_catalog_path must be non-empty"
+        )
+    preparation_catalog_path = _resolve(root, preparation_catalog_value)
+    if not preparation_catalog_path.is_file():
+        raise ConfigurationError(
+            "runtime dataset preparation catalog does not exist: "
+            f"{preparation_catalog_path}"
+        )
+    expected_catalog_schema = entry.get("preparation_catalog_schema_version")
+    if (
+        not isinstance(expected_catalog_schema, str)
+        or not expected_catalog_schema.strip()
+    ):
+        raise ConfigurationError(
+            "runtime dataset preparation_catalog_schema_version must be non-empty"
+        )
+    preparation_catalog = load_yaml(preparation_catalog_path)
+    if preparation_catalog.get("schema_version") != expected_catalog_schema:
+        raise ConfigurationError(
+            "runtime dataset preparation catalog schema differs from the registry"
+        )
+
+    registry_paths = _mapping(entry.get("paths"), "runtime dataset paths")
+    validated_paths: dict[str, str] = {}
+    for split, data_field in (
+        ("train", "train_path"),
+        ("validation", "validation_path"),
+        ("test", "test_path"),
+    ):
+        registry_split_path = registry_paths.get(split)
+        configured_split_path = data.get(data_field)
+        if (
+            not isinstance(registry_split_path, str)
+            or not registry_split_path.strip()
+            or not isinstance(configured_split_path, str)
+            or not configured_split_path.strip()
+        ):
+            raise ConfigurationError(
+                f"runtime dataset {split} path must be non-empty"
+            )
+        if not _same_resolved_path(
+            root, registry_split_path, configured_split_path
+        ):
+            raise ConfigurationError(
+                f"data.{data_field} differs from the runtime dataset registry"
+            )
+        resolved_split_path = _resolve(root, registry_split_path)
+        if not resolved_split_path.is_file():
+            raise ConfigurationError(
+                f"runtime dataset {split} file does not exist: "
+                f"{resolved_split_path}"
+            )
+        validated_paths[split] = str(resolved_split_path.resolve())
+
+    configured_task_schema = data.get("task_schema_version")
+    if configured_task_schema != registry_task_schema:
+        raise ConfigurationError(
+            "data.task_schema_version differs from the runtime dataset registry"
+        )
+
+    manifest_spec = _mapping(entry.get("manifest"), "runtime dataset manifest")
+    manifest_value = manifest_spec.get("path")
+    expected_manifest_schema = manifest_spec.get("schema_version")
+    if not isinstance(manifest_value, str) or not manifest_value.strip():
+        raise ConfigurationError("runtime dataset manifest.path must be non-empty")
+    if (
+        not isinstance(expected_manifest_schema, str)
+        or not expected_manifest_schema.strip()
+    ):
+        raise ConfigurationError(
+            "runtime dataset manifest.schema_version must be non-empty"
+        )
+    manifest_path = _resolve(root, manifest_value)
+    manifest = _load_json_mapping(manifest_path, "runtime dataset manifest")
+    if manifest.get("schema_version") != expected_manifest_schema:
+        raise ConfigurationError(
+            "runtime dataset manifest schema differs from the registry"
+        )
+
+    checks: dict[str, Any] = {
+        "registry_dataset_key_matches_evaluation": True,
+        "preparation_catalog_schema_matches_registry": True,
+        "explicit_split_paths_match_registry": True,
+        "split_files_exist": True,
+        "task_schema_matches_loader_and_config": True,
+        "manifest_schema_matches_registry": True,
+    }
+    skipped_checks: list[Mapping[str, str]] = []
+    manifest_task_schema = manifest.get("task_schema_version")
+    if manifest_task_schema is None:
+        skipped_checks.append(
+            {
+                "check": "manifest_task_schema",
+                "reason": "manifest has no task_schema_version field",
+            }
+        )
+    elif manifest_task_schema != registry_task_schema:
+        raise ConfigurationError(
+            "runtime dataset manifest task schema differs from the registry"
+        )
+    else:
+        checks["manifest_task_schema_matches_registry"] = True
+
+    provenance_field = manifest_spec.get("provenance_field")
+    if not isinstance(provenance_field, str) or not provenance_field.strip():
+        skipped_checks.append(
+            {
+                "check": "manifest_preparation_provenance",
+                "reason": "registry manifest spec has no provenance_field",
+            }
+        )
+    else:
+        observed_provenance = manifest.get(provenance_field)
+        if not isinstance(observed_provenance, str) or not observed_provenance.strip():
+            skipped_checks.append(
+                {
+                    "check": "manifest_preparation_provenance",
+                    "reason": (
+                        "manifest has no non-empty "
+                        f"{provenance_field!r} field"
+                    ),
+                }
+            )
+        elif not _same_resolved_path(
+            root, observed_provenance, preparation_catalog_value
+        ):
+            raise ConfigurationError(
+                "runtime dataset manifest provenance differs from the registry"
+            )
+        else:
+            checks["manifest_preparation_provenance_matches_registry"] = True
+
+    manifest_files = manifest.get("files")
+    if isinstance(manifest_files, Mapping):
+        for split, resolved_path in validated_paths.items():
+            if manifest_files.get(split) != Path(resolved_path).name:
+                raise ConfigurationError(
+                    f"runtime dataset manifest {split} file differs from the registry"
+                )
+        checks["manifest_split_files_match_registry"] = True
+    else:
+        manifest_partition_keys = entry.get("manifest_partition_keys")
+        manifest_partitions = manifest.get("partitions")
+        if isinstance(manifest_partition_keys, Mapping) and isinstance(
+            manifest_partitions, Mapping
+        ):
+            for split, resolved_path in validated_paths.items():
+                partition_key = manifest_partition_keys.get(split)
+                partition = manifest_partitions.get(partition_key)
+                if (
+                    not isinstance(partition_key, str)
+                    or not isinstance(partition, Mapping)
+                    or partition.get("file") != Path(resolved_path).name
+                ):
+                    raise ConfigurationError(
+                        "runtime dataset manifest partition file differs from "
+                        f"the registry for {split}"
+                    )
+            checks["manifest_partition_files_match_registry"] = True
+        else:
+            skipped_checks.append(
+                {
+                    "check": "manifest_split_files",
+                    "reason": (
+                        "manifest has no files mapping and the registry has no "
+                        "reliable manifest_partition_keys mapping"
+                    ),
+                }
+            )
+
+    selected_split = str(bounded["split"])
+    if dataset_key == "swe_bench":
+        evaluation = _mapping(config.get("evaluation"), "evaluation")
+        source_by_split = entry.get("swebench_dataset_source_by_split")
+        split_policy = manifest.get("split_policy")
+        source_field_by_split = {
+            "train": "train_source",
+            "validation": "validation_source",
+            "test": "test_source",
+        }
+        if not isinstance(source_by_split, Mapping) or not isinstance(
+            split_policy, Mapping
+        ):
+            raise ConfigurationError(
+                "SWE-bench runtime registry requires manifest-bound split sources"
+            )
+        for split, source_field in source_field_by_split.items():
+            expected_source = source_by_split.get(split)
+            if (
+                not isinstance(expected_source, str)
+                or not expected_source.strip()
+                or split_policy.get(source_field) != expected_source
+            ):
+                raise ConfigurationError(
+                    "SWE-bench runtime registry split source differs from the manifest"
+                )
+        checks["swebench_split_sources_match_manifest"] = True
+        evaluator_dataset_path = evaluation.get("swebench_dataset_path")
+        if (
+            not isinstance(evaluator_dataset_path, str)
+            or not evaluator_dataset_path.strip()
+            or not _same_resolved_path(
+                root, evaluator_dataset_path, str(registry_paths[selected_split])
+            )
+        ):
+            raise ConfigurationError(
+                "evaluation.swebench_dataset_path differs from the selected "
+                "runtime registry split"
+            )
+        checks["swebench_evaluator_dataset_path_matches_selected_split"] = True
+        expected_source = (
+            source_by_split.get(selected_split)
+            if isinstance(source_by_split, Mapping)
+            else None
+        )
+        if isinstance(expected_source, str) and expected_source.strip():
+            if evaluation.get("swebench_dataset_source") != expected_source:
+                raise ConfigurationError(
+                    "evaluation.swebench_dataset_source differs from the runtime "
+                    "dataset registry"
+                )
+            checks["swebench_dataset_source_matches_selected_split"] = True
+        else:
+            skipped_checks.append(
+                {
+                    "check": "swebench_dataset_source",
+                    "reason": (
+                        "registry has no reliable source binding for the selected "
+                        "split"
+                    ),
+                }
+            )
+
+    return {
+        "schema_version": "flowsteer.runtime-dataset-registry-validation.v1",
+        "enabled": True,
+        "registry_path": str(registry_path.resolve()),
+        "registry_schema_version": _RUNTIME_DATASET_REGISTRY_SCHEMA,
+        "registry_dataset_key": registry_dataset_key,
+        "evaluation_section": section_name,
+        "selected_split": selected_split,
+        "protocol_label": protocol_label.strip(),
+        "preparation_catalog_path": str(preparation_catalog_path.resolve()),
+        "manifest_path": str(manifest_path.resolve()),
+        "validated_paths": validated_paths,
+        "checks": checks,
+        "skipped_checks": skipped_checks,
+    }
 
 
 def _paths(config: Mapping[str, Any], root: Path) -> dict[str, Path]:
@@ -1431,6 +1786,7 @@ async def run_completion_benchmark_round(
     validate_completion_benchmark_config(config)
     section_name, bounded = _evaluation_section(config)
     dataset_key = str(bounded["dataset_key"])
+    dataset_registry_validation = _validate_runtime_dataset_registry(config, root)
     paths = _paths(config, root)
     selected = _select_tasks(config, root, paths["selected"])
     failures = _read_jsonl(paths["failures"])
@@ -1453,6 +1809,7 @@ async def run_completion_benchmark_round(
         "fixed_split": str(bounded["split"]),
         "evaluation_stage": str(bounded.get("stage", "legacy_unspecified")),
         "required_partition": bounded.get("required_partition"),
+        "dataset_registry_validation": dataset_registry_validation,
         "metric_interpretation": (
             "stable_zero_chain_only_not_a_benchmark_estimate"
             if canary_only

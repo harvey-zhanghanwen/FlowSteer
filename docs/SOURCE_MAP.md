@@ -599,3 +599,15 @@ session management, approvals, sandbox product policy, telemetry, user
 interface, and workflow planning are not copied.  The Flow-Director remains
 the sole graph editor and every structural change remains one FlowSteer Canvas
 action.
+
+## Runtime dataset registry source boundary
+
+| Current module | Classification | Reference source | Reused boundary | Minimal adaptation | Scope |
+| --- | --- | --- | --- | --- | --- |
+| `config/datasets_runtime_v2.yaml`; `scripts/evaluate_completion_benchmark_round.py::{_runtime_dataset_registry_coordinates,_validate_runtime_dataset_registry}` | Necessary compatibility adaptation | Existing dataset-specific preparation catalogs and their published manifests; `task_dataset.py::{TASK_SCHEMA_VERSION,iter_task_records}`; completion runner `_select_tasks` frozen-selection comparison | Existing aligned JSONL files, task schema, split labels, dataset-specific preparation protocols, manifest provenance fields and frozen `selected_tasks` remain unchanged | A future condition may opt in only with both `data.registry_path` and `data.registry_dataset_key`. Before task selection, the runner fail-closes if its explicit train/validation/test paths, configured task schema, preparation manifest schema or available provenance disagree with the versioned registry. SWE-bench additionally requires the official evaluator dataset path/source to match the selected registry split. Missing optional manifest evidence is recorded in `skipped_checks` and is never inferred. Legacy conditions without the two coordinates retain their historical path and receipt semantics | All seven datasets; future conditions only |
+
+## Coding completion freshness source boundary
+
+| Current module | Classification | Reference source | Reused boundary | Minimal adaptation | Scope |
+| --- | --- | --- | --- | --- | --- |
+| `src/interactive/coding_execution.py::{CodingExecutionAdapter._completion_error,_completion_artifact}`; `config/evaluation_swebench_verified_coding_agent_stable_zero.yaml` | Necessary compatibility adaptation | SkillFlow `training/environment.py::{GenericTaskEnvironment.step,_generate_workspace_diff,_handle_run_tests}` and its one-action/observation iterative code-generation loop | Final output is derived from repository state rather than model prose; a public test pass/fail observation and a non-empty workspace diff are retained as execution evidence. SkillFlow does not require a passing test at terminal time, so this adapter does not invent that requirement | SkillFlow computes the current diff directly from monolithic episode state. The AgentGraph adapter instead receives ordered Tool receipts, so it requires `last changed exact_edit < subsequent run_tests < subsequent changed diff < complete` and submits only that fresh diff. The 9-turn/8-Tool-call budget covers one bounded inspect/search/edit/test-failure/re-edit/re-test/diff/complete path without prescribing a workflow topology | SWE-bench Coding Agent |

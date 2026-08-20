@@ -40,6 +40,27 @@ def complete(value: str) -> str:
     )
 
 
+def coding_request() -> AgentRequest:
+    return AgentRequest(
+        request_id="run:1:coder:single",
+        run_id="run",
+        graph_revision=1,
+        problem="Fix add so it returns the requested result.",
+        agent=AgentNode(
+            "coder",
+            "m",
+            "inspect, edit, test, and return a patch",
+            allowed_tools=(SWEBENCH_REPOSITORY_TOOL_ID,),
+            execution_mode="coding",
+            artifact_type="patch_candidate",
+            completion_condition="return the tested unified diff",
+        ),
+        model=ModelSpec("m", "fake"),
+        provider=ProviderSpec("fake", kind="test"),
+        phase=ExecutionPhase.SINGLE,
+    )
+
+
 class SequenceGateway:
     def __init__(self, outputs: list[str]) -> None:
         self.outputs = list(outputs)
@@ -94,31 +115,151 @@ class CodingExecutionTests(unittest.IsolatedAsyncioTestCase):
                 max_turns=6,
                 max_tool_calls=5,
             )
-            request = AgentRequest(
-                request_id="run:1:coder:single",
-                run_id="run",
-                graph_revision=1,
-                problem="Fix add so it returns the sum.",
-                agent=AgentNode(
-                    "coder",
-                    "m",
-                    "inspect, edit, test, and return a patch",
-                    allowed_tools=(SWEBENCH_REPOSITORY_TOOL_ID,),
-                    execution_mode="coding",
-                    artifact_type="patch_candidate",
-                    completion_condition="return the tested unified diff",
-                ),
-                model=ModelSpec("m", "fake"),
-                provider=ProviderSpec("fake", kind="test"),
-                phase=ExecutionPhase.SINGLE,
-            )
-
-            response = await adapter.execute(request)
+            response = await adapter.execute(coding_request())
 
             self.assertEqual(patch, response.text)
             self.assertEqual("coding", response.metadata["execution_mode"])
             self.assertEqual(4, response.metadata["tool_calls"])
             self.assertIn("return a + b", (root / "bug.py").read_text())
+
+    async def test_revision_requires_new_test_and_diff_before_completion(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "bug.py").write_text(
+                "def add(a, b):\n    return a - b\n",
+                encoding="utf-8",
+            )
+            registry = create_swebench_repository_registry(root)
+            gateway = SequenceGateway(
+                [
+                    tool(
+                        "exact_edit",
+                        {
+                            "path": "bug.py",
+                            "old_str": "return a - b",
+                            "new_str": "return a + b",
+                        },
+                    ),
+                    tool(
+                        "run_tests",
+                        {
+                            "command": [
+                                sys.executable,
+                                "-c",
+                                "from bug import add; assert add(2, 3) == 6",
+                            ]
+                        },
+                    ),
+                    tool("diff", {}),
+                    tool(
+                        "exact_edit",
+                        {
+                            "path": "bug.py",
+                            "old_str": "return a + b",
+                            "new_str": "return a * b",
+                        },
+                    ),
+                    complete("must reject the pre-revision test and diff"),
+                    tool(
+                        "run_tests",
+                        {
+                            "command": [
+                                sys.executable,
+                                "-c",
+                                "from bug import add; assert add(2, 3) == 6",
+                            ]
+                        },
+                    ),
+                    complete("must reject the pre-revision diff"),
+                    tool("diff", {}),
+                    complete("model prose must not replace the fresh diff"),
+                ]
+            )
+            adapter = CodingExecutionAdapter(
+                gateway=gateway,
+                tool_registry=registry,
+                max_turns=9,
+                max_tool_calls=8,
+            )
+
+            response = await adapter.execute(coding_request())
+
+            self.assertIn("-    return a - b", response.text)
+            self.assertIn("+    return a * b", response.text)
+            self.assertNotIn("+    return a + b", response.text)
+            error_codes = [
+                entry.get("public_error_code")
+                for entry in response.metadata["react_trace"]
+                if "public_error_code" in entry
+            ]
+            self.assertEqual(
+                [
+                    "coding_completion_requires_test",
+                    "coding_completion_requires_changed_diff",
+                ],
+                error_codes,
+            )
+            receipts = response.metadata["tool_receipts"]
+            self.assertFalse(receipts[1]["result"]["value"]["passed"])
+            self.assertTrue(receipts[4]["result"]["value"]["passed"])
+            self.assertEqual(
+                [
+                    "exact_edit",
+                    "run_tests",
+                    "diff",
+                    "exact_edit",
+                    "run_tests",
+                    "diff",
+                ],
+                [receipt["request"]["action"] for receipt in receipts],
+            )
+
+    async def test_fresh_failed_test_preserves_skillflow_terminal_semantics(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "bug.py").write_text(
+                "def add(a, b):\n    return a - b\n",
+                encoding="utf-8",
+            )
+            registry = create_swebench_repository_registry(root)
+            gateway = SequenceGateway(
+                [
+                    tool(
+                        "exact_edit",
+                        {
+                            "path": "bug.py",
+                            "old_str": "return a - b",
+                            "new_str": "return a + b",
+                        },
+                    ),
+                    tool(
+                        "run_tests",
+                        {
+                            "command": [
+                                sys.executable,
+                                "-c",
+                                "raise SystemExit(1)",
+                            ]
+                        },
+                    ),
+                    tool("diff", {}),
+                    complete("submit current repository state"),
+                ]
+            )
+            adapter = CodingExecutionAdapter(
+                gateway=gateway,
+                tool_registry=registry,
+                max_turns=4,
+                max_tool_calls=3,
+            )
+
+            response = await adapter.execute(coding_request())
+
+            self.assertIn("+    return a + b", response.text)
+            test_receipt = response.metadata["tool_receipts"][1]
+            self.assertFalse(test_receipt["result"]["value"]["passed"])
 
 
 if __name__ == "__main__":

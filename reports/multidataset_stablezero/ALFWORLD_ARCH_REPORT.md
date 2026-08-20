@@ -31,16 +31,21 @@
 - 无需隔离的旧结果。
 
 
-## Baseline Comparison
+## Receipt-distinct Evaluation Conditions
 
-| Stage | Result | Protocol note |
+| Receipt-distinct condition | Result | Protocol note |
 |---|---|---|
 | Simple Baseline | success=50.00% | Direct 与 AgentGraph 使用相同原生游戏、task lock、50-step budget 和 evaluator。 |
-| AgentGraph Stable Zero | success=100.00% | fixed tasks, explicit FINISH, native evaluator |
-| Architecture-final AgentGraph | success=100.00% | current v2 condition after receipt-driven minimal adaptation |
-| Tool/ReAct/Coding-enabled AgentGraph | success=100.00% | native environment replay; actual actions=10 |
+| Current AgentGraph Stable Zero | success=100.00% | fixed tasks, explicit FINISH, native evaluator |
 
-同一 receipt 同时代表多个 stage 时不会重复解释为独立实验，也不会把 protocol-separated 条件的差值解释为因果增益。
+`architecture-final` 与 Tool/ReAct/Coding-enabled 是当前 AgentGraph condition 的版本/能力属性，不是额外运行的实验条件；因此不再重复列出同一 graph metric。protocol-separated 条件的差值也不解释为因果增益。
+
+## Runtime / Search-space capability 与 Director natural policy adoption
+
+| Layer | Receipt-backed statement |
+|---|---|
+| Runtime / search-space capability | `request-scoped SkillFlow/RAGEN environment ReAct` 已在当前配置/Runtime 边界中暴露；只有对应 execution receipt 才能证明某条轨迹实际执行该能力。 |
+| Director natural policy adoption | observed topology: serial_2=1, single=1; native environment actions=10。这是当前 fixed-task trajectory 的观测采用情况，不等同于 Runtime 能力上限。 |
 
 ## Workflow 分布
 

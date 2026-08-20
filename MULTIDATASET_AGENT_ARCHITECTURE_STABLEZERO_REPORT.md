@@ -4,14 +4,14 @@
 
 控制路径保持为：本地 Qwen3.5-9B Flow-Director、one-atomic-edit progressive Canvas、execute-after-edit feedback、dynamic AgentGraph、显式 FINISH、数据集原生 evaluator 与完整 trajectory receipt。统一 AgentRuntime 分发 `reasoning`、Tool/ReAct、environment ReAct 和 `coding` execution adapter。Tool assignment、model selection、自由文本 contract、dependency、artifact type 与 completion condition 仍属于 Director search space。
 
-当前所读 manifests 的 optimizer update 总数：**0**。本轮未执行大规模训练、GRPO、backward、LoRA publication 或新的 Skill activation。
+当前 unified Runtime Stable Zero manifests 的 optimizer update 总数：**0**。本轮未执行大规模训练、GRPO、backward、LoRA publication 或新的 Skill activation；下文旧 joint-QA optimizer receipt 单独列为历史证据。
 
 ## 实现来源分类
 
 - `DIRECT_REUSE`：FlowSteer progressive Canvas 的 edit→execute→feedback、显式 FINISH、action mask、trajectory；SkillFlow 的 StructuredAction/Tool Registry、RetrievalIndex、bounded computation、RAGEN environment、MedRAG corpus、SWE-bench worktree、evidence/library contract 以及 `required_tools ⊆ available_tools` Skill applicability predicate。
 - `NECESSARY_ADAPTATION`：异构 `reasoning|react|coding` dispatch、task-scoped Tool registry、typed evaluator receipt、WebShop 原生 action grammar、ALFWorld interactive FINISH 的 environment actor invariant、SWE-bench worktree ownership。
 - `PROJECT_ALGORITHM_ADDITION`：typed `CommunicationEnvelope`、`ToolCapability`、measured `ToolReceipt` 与既有 same-prefix paired AgentGraph posterior/evidence gate。
-- `NOT_IMPLEMENTED_OR_NOT_EXECUTED`：SWE-bench 官方-harness-valid Coding trajectory、evidence-gated `ACTIVE` Skill 注入、Executor-side Skill invocation 以及本轮 micro-training/optimizer/policy synchronization。
+- `NOT_IMPLEMENTED_OR_NOT_EXECUTED`：SWE-bench 官方-harness-valid Coding trajectory、evidence-gated `ACTIVE` Skill 注入、版本化 Executor-side Skill invocation schema/receipt，以及当前 unified Runtime micro-training/optimizer/policy synchronization。
 
 逐文件的上游类/函数与不兼容原因记录在 `docs/SOURCE_MAP.md`。
 
@@ -39,11 +39,14 @@
 
 ## Natural Stable Zero workflow/model adoption
 
+- Runtime / search-space capability：scheduler 与 action space 支持 deep、parallel、fan-in、fan-out 和 finite reciprocal topology；模型 catalog 支持异构 Executor。
+- Director natural policy adoption：以下计数只来自当前 fixed-task AgentGraph trajectories，不由 capability 配置反推。
 - Exclusive topology family：single=1, serial_2=8, serial_3_plus=3, parallel=0, fan_in=0, fan_out=0, reciprocal=0, verification=0, mixed=0
 - Declared Executor node family：Qwen=8, DeepSeek=6, Gemini=0, GPT=11, MiniMax=0, Grok=0, GLM=1, Other=0
 - Multi-model workflow：**5/12**
+- Non-chain topology adoption：**0/12**
 
-当前 12 条自然 AgentGraph trajectory 只观察到 single/serial topology；parallel、fan-in、fan-out 与 reciprocal 在独立 non-chain runtime diagnostic 中可执行，但尚未被当前 fixed-task Director policy 自然采用。因此 `DEEP_WORKFLOW_READY` 只表示 search space/runtime capability，不能解释为 policy adoption 或性能收益。
+当前 12 条自然 AgentGraph trajectory 的 topology/model 采用如上；独立 non-chain runtime diagnostic 只验证可执行性，不计作 Director natural policy adoption，也不构成性能收益证据。
 
 ## Model capability Canary
 
@@ -100,16 +103,28 @@ OFF 未暴露 Tool catalog，ON 精确暴露 `qa-retrieval.search/read`，2/2 pa
 
 ## Skill evidence gate
 
+### Evidence-gated publication state
+
 - `hotpotqa`: Skill=`jointqa.hotpotqa.exact_answer_handoff`, status=`candidate`, effective_pairs=40, paired_effect_mean=-0.0035714285714285726, calibrated_interval=[-0.10357142857142858, 0.1], harm_probability=0.51185; gate reasons=['calibrated lower bound does not exceed delta_min', 'negative-transfer probability exceeds harm limit', 'effect direction is inconsistent across task slices']
 - `triviaqa`: Skill=`jointqa.triviaqa.exact_answer_handoff`, status=`candidate`, effective_pairs=40, paired_effect_mean=0.05361111111111111, calibrated_interval=[-0.04083333333333333, 0.15638888888888886], harm_probability=0.1322; gate reasons=['calibrated lower bound does not exceed delta_min', 'negative-transfer probability exceeds harm limit']
 
+### Skill pipeline boundary
+
+| Stage | Current state | Evidence interpretation |
+|---|---|---|
+| Evidence gate / library | `ACTIVE` publications=0 | `CANDIDATE` is not executable evidence. |
+| Director-visible Skill prior | retrieval/applicability interface present; observed retrieved-Skill trajectory receipts=0/12 | A retrieved instruction is a Director prompt prior; it is not an Executor invocation. |
+| Versioned Executor Skill invocation schema | **MISSING** | The unified Runtime has no versioned Executor-side `ActionKind.SKILL` action/admission/observation schema; Skill actions remain fail closed. |
+| Executor Skill invocation receipt | observed invoked-Skill trajectory receipts=0/12 | An `invoked_skill_ids` credit receipt cannot be inferred from Director-visible text. |
+
+
 最新 evidence-gated `ACTIVE` Skill 数量：**0**。因此不存在可注入新多数据集 Director condition 的版本兼容 `ACTIVE` Skill，也不满足 Skill-on micro-training 的触发条件。`CANDIDATE` instruction 仍是候选，不作为已验证 Skill。
 
-Tool-aware Skill applicability 已在架构与 CPU 定向测试层完成：SkillFlow 的 `required_tools ⊆ available_tools` 判定现在只接受当前 task-scoped `ToolRegistry` 中 `availability=true` 且 dataset-compatible 的 exact Tool ID，natural retrieval 与 forced-probe 共用同一 fail-closed predicate。由于 `ACTIVE Skill = 0` 且 Executor-side Skill invocation 仍被拒绝，这只表示 applicability/retrieval boundary ready，不表示 Skill 已注入、已使用或已提高准确率。
+Tool-aware Skill applicability 已在架构与 CPU 定向测试层完成：SkillFlow 的 `required_tools ⊆ available_tools` 判定只接受当前 task-scoped `ToolRegistry` 中 `availability=true` 且 dataset-compatible 的 exact Tool ID。该边界只服务于 **Director-visible Skill prior**；它不等于 Executor 调用。由于 `ACTIVE Skill = 0`，且当前 unified Runtime 缺少版本化 Executor-side `ActionKind.SKILL` invocation/admission/observation schema，不能声称 Skill 已注入、已调用、已获得 credit 或提高准确率。
 
-## 既有 bounded micro-training 证据
+## Historical joint-QA bounded micro-training（不属于当前 unified Runtime）
 
-这组证据来自当前项目此前完成的 HotpotQA/TriviaQA joint-QA Flow-Director 训练闭环；它与本轮统一 Tool/Environment/Coding Stable Zero 的版本边界分开报告，不能证明新 Tool action-selection policy 已被训练。
+这组证据只来自此前 HotpotQA/TriviaQA joint-QA Flow-Director 训练闭环。其 policy、trajectory schema 与 task scope 不等于当前统一 Tool/Environment/Coding Runtime；不能据此把当前 unified Runtime 标成“已训练”，也不能证明新 Tool action-selection policy 已更新。
 
 | Manifest | Behavior policy | Updated policy | Optimizer updates | Trainable update L2 | Policy sync | Post-update canary |
 |---|---|---|---:|---:|---:|---:|
@@ -125,10 +140,10 @@ Tool-aware Skill applicability 已在架构与 CPU 定向测试层完成：Skill
 | Step 1 | qwen35-9b-jointqa-step-000001 | 56.25% | 66.41% |
 | Step 2 | qwen35-9b-jointqa-step-000002 | 54.69% | 65.31% |
 
-该证据证明 LoRA 参数更新、optimizer state、policy publication、route switch 和 post-update canary 的闭环可执行。固定 held-out 的最终宏平均没有超过 Step 0，因此不能声称观察到正向 learning trend；按方案应优先继续检查 architecture/search-space 与 evidence quality，而不是扩大训练规模。
+该历史 joint-QA receipt 证明当时的 LoRA 参数更新、optimizer state、policy publication、route switch 和 post-update canary 闭环可执行。固定 held-out 的最终宏平均没有超过 Step 0，因此不能声称观察到正向 learning trend。**当前 unified Runtime micro-training/optimizer/policy synchronization 未执行。**
 
 
-## Current add_subgraph micro-training preflight
+## Current unified Runtime add_subgraph micro-training preflight
 
 - Decision：`NO_GO`
 - Receipt report：`reports/multidataset_stablezero/MICROTRAINING_PREFLIGHT.md`
@@ -138,7 +153,7 @@ Tool-aware Skill applicability 已在架构与 CPU 定向测试层完成：Skill
 
 - `ENVIRONMENT_LIMITATION`：SWE-bench regular-dev 当前尚无 official Docker harness evaluator receipt，因此 resolved_rate 不可测，不能提前归因为 Coding Agent 或 patch quality。
 - `SKILL_EVIDENCE_INSUFFICIENT`：最新独立 paired evidence 未满足 calibrated lower-bound/harm gate；`ACTIVE` Skill 数为 0。
-- `SKILL_EXECUTION_NOT_IMPLEMENTED`：Tool-aware applicability 只保护 Director-visible prompt-prior retrieval；本地 Runtime 尚未实现 SkillFlow 的 Executor invocation/credit receipt boundary，因而 `ActionKind.SKILL` 继续 fail closed。
+- `SKILL_EXECUTION_NOT_IMPLEMENTED`：Tool-aware applicability 只保护 Director-visible prompt-prior retrieval；当前 unified Runtime 缺少版本化 Executor `ActionKind.SKILL` invocation/admission/observation schema 与 credit receipt boundary，因而 Skill action 继续 fail closed。
 - `TRAINING_INSTABILITY`：既有 joint-QA bounded micro-training 完成了 2 次真实 optimizer update 与 policy sync，但固定 held-out 宏平均没有形成正向趋势；该证据不覆盖本轮新增 Tool/Environment/Coding action-selection policy。
 - `TOOL_LIMITATION`：HotpotQA 与 TriviaQA v3 的当前 Stable Zero trajectories 各自然产生 1 条成功 retrieval `ToolReceipt`；AIME-2025 development 与 HealthBench v2 未自然选择其可选 Tool。HotpotQA availability pair 已执行，但两个 Tool-ON arm 均未调用 Tool，只验证 treatment exposure/paired runtime，仍不能估计 useful rate、wasted rate 或 Skill effect。
 - `MODEL_CAPABILITY_LIMIT`：HealthBench 的 2 题 reference-judge diagnostic raw_score 较低；该 canary 不足以把差距唯一归因于模型、架构或缺少检索。
@@ -153,7 +168,12 @@ FLOWSTEER_CORE_PRESERVED = YES
 MODEL_POOL_EXPANDED = YES
 MULTI_MODEL_WORKFLOW_READY = YES
 DEEP_WORKFLOW_READY = YES
-COLLABORATION_DIVERSITY_READY = YES
+COLLABORATION_DIVERSITY_READY = NO
+NON_CHAIN_TOPOLOGY_SEARCH_SPACE_READY = YES
+NON_CHAIN_TOPOLOGY_RUNTIME_DIAGNOSTIC_VALIDATED = YES
+DIRECTOR_DEEP_SERIAL_ADOPTION_OBSERVED = YES
+DIRECTOR_NON_CHAIN_TOPOLOGY_ADOPTION_OBSERVED = NO
+DIRECTOR_MULTI_MODEL_WORKFLOW_ADOPTION_OBSERVED = YES
 
 QA_TOOL_REGISTRY_READY = YES
 QA_DATABASE_SELECTION_READY = YES
@@ -163,10 +183,14 @@ QA_TOOL_USE_VALIDATED = NO
 ALFWORLD_REACT_READY = YES
 WEBSHOP_REACT_READY = YES
 
-CODING_AGENT_IMPLEMENTED = YES
+CODING_AGENT_IMPLEMENTED = PARTIAL
 CODING_AGENT_READY = NO
 SWEBENCH_CODING_WORKFLOW_READY = NO
 
+DIRECTOR_VISIBLE_SKILL_PRIOR_INTERFACE_READY = YES
+DIRECTOR_VISIBLE_SKILL_PRIOR_RECEIPT_OBSERVED = NO
+EXECUTOR_SKILL_INVOCATION_SCHEMA_VERSIONED = NO
+EXECUTOR_SKILL_INVOCATION_RECEIPT_OBSERVED = NO
 SKILL_END_TO_END_READY = NO
 TOOL_AWARE_SKILL_APPLICABILITY_READY = YES
 SKILL_SUMMARY_VALIDATED = NO
@@ -174,7 +198,10 @@ SKILL_SUMMARY_VALIDATED = NO
 ALL_DATASETS_STABLE_ZERO_COMPLETE = NO
 CORRECT_WRONG_DEMOS_COMPLETE = NO
 
-MICRO_TRAINING_EXECUTED = YES
+HISTORICAL_JOINT_QA_MICRO_TRAINING_EXECUTED = YES
+HISTORICAL_JOINT_QA_LEARNING_TREND_OBSERVED = NO
+UNIFIED_RUNTIME_MICRO_TRAINING_EXECUTED = NO
+MICRO_TRAINING_EXECUTED = NO
 LEARNING_TREND_OBSERVED = NO
 
 LOCAL_RECOVERY_BACKUP = YES
@@ -183,7 +210,7 @@ GITHUB_ARCHITECTURE_BACKUP = YES
 READY_FOR_FORMAL_MULTIDATASET_TRAINING = NO
 ```
 
-判定说明：`DEEP_WORKFLOW_READY` 表示 search space 与 scheduler 支持 deep/parallel/fan-in/finite-reciprocal motif，不表示当前 canary 已普遍采用深图。`CORRECT_WRONG_DEMOS_COMPLETE` 要求每个数据集同时具有当前 evaluator-valid correct 与 wrong receipt；不会为凑数量制造失败。评估协议阶段与本次 Tool-aware Skill applicability 阶段均建立可恢复 branch/tag/bundle，并推送到用户现有 GitHub 仓库的阶段备份分支；密钥和运行中间文件不在 Git 记录中。
+判定说明：方案第 69 节中的 `DEEP_WORKFLOW_READY` 按自然轨迹中的 `serial_3_plus` adoption 判定，`COLLABORATION_DIVERSITY_READY` 按非链式 topology adoption 判定；`NON_CHAIN_TOPOLOGY_SEARCH_SPACE_READY` 与 `NON_CHAIN_TOPOLOGY_RUNTIME_DIAGNOSTIC_VALIDATED` 只表示 capability。`MICRO_TRAINING_EXECUTED` 只指当前 unified Runtime，历史 joint-QA training 另列。`CORRECT_WRONG_DEMOS_COMPLETE` 要求每个数据集同时具有当前 evaluator-valid correct 与 wrong receipt；不会为凑数量制造失败。
 
 ## 报告索引
 

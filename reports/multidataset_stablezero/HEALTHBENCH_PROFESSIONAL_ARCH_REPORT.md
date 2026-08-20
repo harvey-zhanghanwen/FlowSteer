@@ -32,16 +32,21 @@
 - artifacts/healthbench_professional_medrag_tool_stable_zero/evaluation：旧 v1 条件，不进入当前 v2 exact-action-schema development 指标。
 
 
-## Baseline Comparison
+## Receipt-distinct Evaluation Conditions
 
-| Stage | Result | Protocol note |
+| Receipt-distinct condition | Result | Protocol note |
 |---|---|---|
 | Simple Baseline | raw_score=0.2000 | Direct 与允许使用 MedRAG 的 AgentGraph 分别报告；raw_score 来自 openai/simple-evals-compatible reference judge，不等同于 HealthBench 私有官方评测服务。 |
-| AgentGraph Stable Zero | raw_score=0.2000 | fixed tasks, explicit FINISH, native evaluator |
-| Architecture-final AgentGraph | raw_score=0.2000 | current Stable Zero condition; no later architecture version was run |
-| Tool/ReAct/Coding-enabled AgentGraph | raw_score=0.2000 | declared capability; actual Tool receipts=0 |
+| Current AgentGraph Stable Zero | raw_score=0.2000 | fixed tasks, explicit FINISH, native evaluator |
 
-同一 receipt 同时代表多个 stage 时不会重复解释为独立实验，也不会把 protocol-separated 条件的差值解释为因果增益。
+`architecture-final` 与 Tool/ReAct/Coding-enabled 是当前 AgentGraph condition 的版本/能力属性，不是额外运行的实验条件；因此不再重复列出同一 graph metric。protocol-separated 条件的差值也不解释为因果增益。
+
+## Runtime / Search-space capability 与 Director natural policy adoption
+
+| Layer | Receipt-backed statement |
+|---|---|
+| Runtime / search-space capability | `临床推理 + 冻结教材语料 MedRAG search 能力` 已在当前配置/Runtime 边界中暴露；只有对应 execution receipt 才能证明某条轨迹实际执行该能力。 |
+| Director natural policy adoption | observed topology: serial_2=1, serial_3_plus=1; actual ToolReceipt=0 across 0/2 tasks。这是当前 fixed-task trajectory 的观测采用情况，不等同于 Runtime 能力上限。 |
 
 ## Workflow 分布
 
