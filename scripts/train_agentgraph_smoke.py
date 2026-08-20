@@ -486,9 +486,11 @@ def _qa_tool_runtime_settings(
     """Return one explicit task-scoped QA Tool/ReAct condition.
 
     Absence (or ``enabled: false``) retains the existing closed-context
-    runtime exactly.  Enabling this condition requires a distinct experiment
-    condition ID so cached closed-context trajectories cannot be reused under
-    a tool-enabled search space.
+    runtime exactly.  A normal enabled condition keeps the existing exact
+    experiment/rollout condition match.  A paired probe may additionally
+    declare distinct ``tool_off`` and ``tool_on`` rollout condition IDs under
+    that frozen experiment condition, so the two cache namespaces cannot be
+    confused while both arms retain one preregistered pair identity.
     """
 
     raw = config.get("qa_tool_runtime")
@@ -527,9 +529,10 @@ def _qa_tool_runtime_settings(
         )
 
     experiment = _mapping(config.get("experiment"), "experiment")
+    experiment_condition_id = str(experiment.get("condition_id", "")).strip()
     configured_condition_id = section.get("condition_id")
     active_condition_id = (
-        str(experiment.get("condition_id", "")).strip()
+        experiment_condition_id
         if condition_id is None
         else condition_id.strip()
         if isinstance(condition_id, str)
@@ -538,14 +541,61 @@ def _qa_tool_runtime_settings(
     if (
         not isinstance(configured_condition_id, str)
         or not configured_condition_id.strip()
-        or configured_condition_id.strip()
-        != str(experiment.get("condition_id", "")).strip()
-        or configured_condition_id.strip() != active_condition_id
+        or configured_condition_id.strip() != experiment_condition_id
     ):
         raise ConfigurationError(
-            "qa_tool_runtime.condition_id must exactly match both the experiment "
-            "and active rollout condition_id"
+            "qa_tool_runtime.condition_id must exactly match the experiment "
+            "condition_id"
         )
+    runtime_arm = "tool_on"
+    paired_condition_ids = section.get("paired_probe_condition_ids")
+    if paired_condition_ids is None:
+        if configured_condition_id.strip() != active_condition_id:
+            raise ConfigurationError(
+                "qa_tool_runtime.condition_id must exactly match the active "
+                "rollout condition_id"
+            )
+    else:
+        if (
+            not isinstance(paired_condition_ids, Mapping)
+            or set(paired_condition_ids) != {"tool_off", "tool_on"}
+        ):
+            raise ConfigurationError(
+                "qa_tool_runtime.paired_probe_condition_ids must contain exactly "
+                "tool_off and tool_on"
+            )
+        normalized_pair_ids: dict[str, str] = {}
+        for arm_name in ("tool_off", "tool_on"):
+            arm_condition_id = paired_condition_ids[arm_name]
+            if (
+                not isinstance(arm_condition_id, str)
+                or not arm_condition_id.strip()
+            ):
+                raise ConfigurationError(
+                    "qa_tool_runtime.paired_probe_condition_ids values must be "
+                    "non-empty text"
+                )
+            normalized_pair_ids[arm_name] = arm_condition_id.strip()
+        if len(set(normalized_pair_ids.values())) != 2:
+            raise ConfigurationError(
+                "qa_tool_runtime paired Tool arms require distinct condition IDs"
+            )
+        if experiment_condition_id in set(normalized_pair_ids.values()):
+            raise ConfigurationError(
+                "qa_tool_runtime experiment condition_id must be distinct from "
+                "both paired Tool arm condition IDs"
+            )
+        matching_arms = tuple(
+            arm_name
+            for arm_name, arm_condition_id in normalized_pair_ids.items()
+            if arm_condition_id == active_condition_id
+        )
+        if len(matching_arms) != 1:
+            raise ConfigurationError(
+                "active rollout condition_id must exactly match one declared "
+                "qa_tool_runtime paired Tool arm"
+            )
+        runtime_arm = matching_arms[0]
     for field_name in ("skillflow_source", "index_path"):
         value = section.get(field_name)
         if not isinstance(value, str) or not value.strip():
@@ -572,6 +622,8 @@ def _qa_tool_runtime_settings(
         raise ConfigurationError(
             "qa_tool_runtime.tool_timeout_seconds must be positive"
         )
+    if runtime_arm == "tool_off":
+        return None
     return {
         "source_key": source_key,
         "skillflow_source": section["skillflow_source"].strip(),
@@ -2844,6 +2896,15 @@ class LiveSmokeBackend:
                         if self.skill_pipeline is not None and not static_conditions
                         else None
                     )
+                ),
+                active_skill_provider=(
+                    (
+                        lambda _task, _environment, provider_versions: (
+                            self.skill_pipeline.active_skill_ids(provider_versions)
+                        )
+                    )
+                    if self.skill_pipeline is not None
+                    else None
                 ),
                 condition_satisfied=(
                     False if dynamic_forced_probe else condition_satisfied

@@ -49,6 +49,9 @@ from .records import (
     TrajectoryRecord,
     TurnRecord,
     VALID_SPLITS,
+    canonical_active_skill_ids,
+    canonical_invoked_skill_ids,
+    ordered_skill_ids,
 )
 from .versioning import VersionBundle
 
@@ -673,6 +676,34 @@ SkillPromptProvider = Callable[
     [TaskRecord, AgentWorkflowEnv, VersionBundle],
     Sequence[Mapping[str, Any]],
 ]
+ActiveSkillProvider = Callable[
+    [TaskRecord, AgentWorkflowEnv, VersionBundle],
+    Sequence[str],
+]
+
+
+def _retrieved_skill_ids(
+    prompt_context: Sequence[Mapping[str, Any]],
+) -> Tuple[str, ...]:
+    """Project retrieved prompt priors into canonical Skill IDs.
+
+    Forced paired-intervention conditions share the Director prompt boundary
+    but are not ACTIVE Skills and therefore cannot appear in a Skill receipt.
+    Every ordinary Skill prior must carry the stable identity emitted by
+    ``PromptSkillPrior.to_dict``.
+    """
+
+    skill_ids: list[str] = []
+    for item in prompt_context:
+        if item.get("application_mode") == "forced_probe_condition":
+            continue
+        skill_id = item.get("skill_id")
+        if not isinstance(skill_id, str) or not skill_id.strip():
+            raise ReceiptValidationError(
+                "Director-visible Skill prior has no stable skill_id"
+            )
+        skill_ids.append(skill_id)
+    return ordered_skill_ids(skill_ids, field_name="retrieved_skill_ids")
 
 
 def _evaluation_receipt(value: EvaluationValue) -> EvaluationReceipt:
@@ -1072,6 +1103,7 @@ class AgentGraphRolloutCollector:
         condition_id: str = "exploit",
         skills: Sequence[Mapping[str, Any]] = (),
         skill_provider: Optional[SkillPromptProvider] = None,
+        active_skill_provider: Optional[ActiveSkillProvider] = None,
         condition_satisfied: bool = True,
         forced_probe: bool = False,
         api_fallback_used: bool = False,
@@ -1105,8 +1137,11 @@ class AgentGraphRolloutCollector:
         self.condition_id = condition_id.strip()
         if skills and skill_provider is not None:
             raise ValueError("static skills and a dynamic skill_provider are mutually exclusive")
+        if active_skill_provider is not None and not callable(active_skill_provider):
+            raise TypeError("active_skill_provider must be callable when supplied")
         self.skills = tuple(dict(skill) for skill in skills)
         self.skill_provider = skill_provider
+        self.active_skill_provider = active_skill_provider
         self.condition_satisfied = condition_satisfied
         self.forced_probe = forced_probe
         self.api_fallback_used = api_fallback_used
@@ -1190,6 +1225,16 @@ class AgentGraphRolloutCollector:
             },
         )
 
+        raw_active_skill_ids = (
+            ()
+            if self.active_skill_provider is None
+            else self.active_skill_provider(task, env, self.versions)
+        )
+        active_skill_ids = canonical_active_skill_ids(
+            raw_active_skill_ids,
+            field_name="active_skill_ids",
+        )
+
         def visible_skills() -> tuple[Mapping[str, Any], ...]:
             raw = (
                 self.skill_provider(task, env, self.versions)
@@ -1199,6 +1244,15 @@ class AgentGraphRolloutCollector:
             return tuple(dict(skill) for skill in raw)
 
         current_skills = visible_skills()
+        current_retrieved_skill_ids = _retrieved_skill_ids(current_skills)
+        if current_retrieved_skill_ids and self.active_skill_provider is None:
+            raise ReceiptValidationError(
+                "retrieved Skills require an independent ACTIVE-library provider"
+            )
+        if not set(current_retrieved_skill_ids).issubset(active_skill_ids):
+            raise ReceiptValidationError(
+                "retrieved Skills are absent from the version-compatible ACTIVE library"
+            )
         prompt = self.orchestrator.build_prompt(env, 0, current_skills)
         for round_index in range(self.orchestrator.max_rounds):
             generation_seed = self.orchestrator.generation_seed(round_index)
@@ -1309,6 +1363,11 @@ class AgentGraphRolloutCollector:
                 server_weight_version=server_weight_version,
                 reconstructed_context=False,
                 receipt_verified=True,
+                retrieved_skill_ids=current_retrieved_skill_ids,
+                # AgentGraphOrchestrator exposes every ordinary retrieved
+                # Skill prior in ``available_skills``. Forced paired-probe
+                # conditions are rendered separately and excluded above.
+                visible_skill_ids=current_retrieved_skill_ids,
             )
             turns.append(turn)
             snapshots.append(snapshot)
@@ -1319,11 +1378,21 @@ class AgentGraphRolloutCollector:
                 final_answer = canvas.final_answer
                 final_runtime = canvas.execution
                 break
+            current_skills = visible_skills()
+            current_retrieved_skill_ids = _retrieved_skill_ids(current_skills)
+            if current_retrieved_skill_ids and self.active_skill_provider is None:
+                raise ReceiptValidationError(
+                    "retrieved Skills require an independent ACTIVE-library provider"
+                )
+            if not set(current_retrieved_skill_ids).issubset(active_skill_ids):
+                raise ReceiptValidationError(
+                    "retrieved Skills are absent from the version-compatible ACTIVE library"
+                )
             prompt = self.orchestrator.continue_prompt(
                 prompt,
                 self.orchestrator.consumed_assistant_content(response, canvas),
                 env,
-                visible_skills(),
+                current_skills,
             )
 
         termination_reason = "finish" if explicit_finish else "max_rounds"
@@ -1361,6 +1430,13 @@ class AgentGraphRolloutCollector:
             forced_probe=self.forced_probe,
             api_fallback_used=self.api_fallback_used,
             manual_repair_used=self.manual_repair_used,
+            active_skill_ids=active_skill_ids,
+            # SkillFlow's trajectory-level retrieved IDs are the ranked H0
+            # retrieval. Later stage-conditioned retrievals remain on turns.
+            retrieved_skill_ids=(
+                tuple(turns[0].retrieved_skill_ids) if turns else ()
+            ),
+            invoked_skill_ids=canonical_invoked_skill_ids(turns),
         )
 
         if self.evidence_store is not None:
@@ -1373,6 +1449,7 @@ class AgentGraphRolloutCollector:
 __all__ = [
     "AGENTGRAPH_SMOKE_SOURCES",
     "AgentGraphRolloutCollector",
+    "ActiveSkillProvider",
     "EvaluatorCallback",
     "ReceiptValidationError",
     "RolloutGate",

@@ -620,6 +620,11 @@ def test_collector_refreshes_skill_priors_at_each_graph_stage():
         AgentWorkflowEnv(registry, gateway=FakeGateway(), execute_on_edit=True),
         _versions(),
         skill_provider=skill_provider,
+        active_skill_provider=lambda task, environment, versions: (
+            "validated-before_final_answer",
+            "validated-construction",
+            "validated-empty_graph",
+        ),
     )
 
     def evaluator(task, final_answer, final_graph, runtime):
@@ -641,6 +646,23 @@ def test_collector_refreshes_skill_priors_at_each_graph_stage():
     assert "validated-empty_graph" in client.tokenizer.chat_calls[0][0][-1]["content"]
     assert "validated-construction" in client.tokenizer.chat_calls[1][0][-1]["content"]
     assert "validated-before_final_answer" in client.tokenizer.chat_calls[2][0][-1]["content"]
+    assert [turn.retrieved_skill_ids for turn in trajectory.turns] == [
+        ("validated-empty_graph",),
+        ("validated-construction",),
+        ("validated-before_final_answer",),
+    ]
+    assert [turn.visible_skill_ids for turn in trajectory.turns] == [
+        ("validated-empty_graph",),
+        ("validated-construction",),
+        ("validated-before_final_answer",),
+    ]
+    assert trajectory.active_skill_ids == (
+        "validated-before_final_answer",
+        "validated-construction",
+        "validated-empty_graph",
+    )
+    assert trajectory.retrieved_skill_ids == ("validated-empty_graph",)
+    assert trajectory.invoked_skill_ids == ()
 
 
 def test_collector_returns_complete_max_rounds_trajectory():

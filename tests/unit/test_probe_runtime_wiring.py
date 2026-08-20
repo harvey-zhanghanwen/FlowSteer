@@ -169,11 +169,31 @@ def _config() -> dict:
     }
 
 
+def _paired_tool_config() -> dict:
+    config = _config()
+    config["qa_tool_runtime"] = {
+        "enabled": True,
+        "condition_id": config["experiment"]["condition_id"],
+        "paired_probe_condition_ids": {
+            "tool_off": "qa-tool-usefulness:tool_off",
+            "tool_on": "qa-tool-usefulness:tool_on",
+        },
+        "mode": "model_driven_search_read",
+        "dataset_scope": ["hotpotqa"],
+        "skillflow_source": "vendor/SkillFlow/src",
+        "index_path": "data/public-retrieval.sqlite3",
+        "tool_timeout_seconds": 7.0,
+        "max_turns_per_agent_call": 5,
+        "max_tool_calls_per_agent_call": 3,
+    }
+    return config
+
+
 class ProbeRuntimeWiringTests(unittest.IsolatedAsyncioTestCase):
-    def _backend(self):
+    def _backend(self, config=None):
         registry = _registry()
         return _MODULE.LiveSmokeBackend(
-            config=_config(),
+            config=_config() if config is None else config,
             registry=registry,
             runtime=AgentRuntime(registry, _Gateway()),
             director_client=_DirectorClient(),
@@ -185,7 +205,7 @@ class ProbeRuntimeWiringTests(unittest.IsolatedAsyncioTestCase):
             judge_model="",
         )
 
-    async def test_paired_arms_share_sampling_coordinate_not_condition_receipt(
+    async def test_tool_off_on_arms_share_sampling_coordinate_not_condition_receipt(
         self,
     ) -> None:
         captured = []
@@ -193,6 +213,87 @@ class ProbeRuntimeWiringTests(unittest.IsolatedAsyncioTestCase):
 
         class CapturingCollector:
             def __init__(self, orchestrator, environment, versions, store, **kwargs):
+                captured.append((orchestrator, environment, kwargs))
+
+            async def collect(
+                self,
+                task,
+                rollout_index,
+                evaluator_callback,
+                *,
+                workflow_problem=None,
+            ):
+                del task, rollout_index, evaluator_callback, workflow_problem
+                return sentinel
+
+        backend = self._backend(_paired_tool_config())
+        opened = SimpleNamespace(registry=_tool_registry(), closed=False)
+
+        def close() -> None:
+            opened.closed = True
+
+        opened.close = close
+        with (
+            patch.object(_MODULE, "AgentGraphRolloutCollector", CapturingCollector),
+            patch.object(_MODULE, "open_qa_tool_registry", return_value=opened) as open_tool,
+        ):
+            tool_off = await backend.collect(
+                _task(),
+                0,
+                _versions(),
+                expected_task_split="validation",
+                condition_id="qa-tool-usefulness:tool_off",
+                sampling_schedule_purpose="paired-probe-17",
+                forced_probe=True,
+                condition_satisfied=True,
+                sampling_anchor_ordinal=7,
+            )
+            tool_on = await backend.collect(
+                _task(),
+                0,
+                _versions(),
+                expected_task_split="validation",
+                condition_id="qa-tool-usefulness:tool_on",
+                sampling_schedule_purpose="paired-probe-17",
+                forced_probe=True,
+                condition_satisfied=True,
+                sampling_anchor_ordinal=7,
+            )
+
+        self.assertIs(tool_off, sentinel)
+        self.assertIs(tool_on, sentinel)
+        off_orchestrator, off_environment, off_kwargs = captured[0]
+        on_orchestrator, on_environment, on_kwargs = captured[1]
+        self.assertEqual(
+            off_orchestrator.sampling_coordinate,
+            on_orchestrator.sampling_coordinate,
+        )
+        self.assertEqual(
+            off_orchestrator.generation_seed(0),
+            on_orchestrator.generation_seed(0),
+        )
+        self.assertEqual("qa-tool-usefulness:tool_off", off_kwargs["condition_id"])
+        self.assertEqual("qa-tool-usefulness:tool_on", on_kwargs["condition_id"])
+        self.assertIs(backend.runtime, off_environment.runtime)
+        self.assertIsNone(off_environment.runtime.tool_registry)
+        self.assertIs(opened.registry, on_environment.runtime.tool_registry)
+        self.assertIsNone(off_orchestrator.tool_registry)
+        self.assertIs(opened.registry, on_orchestrator.tool_registry)
+        self.assertTrue(off_kwargs["forced_probe"])
+        self.assertTrue(on_kwargs["forced_probe"])
+        self.assertEqual("validation", off_kwargs["expected_task_split"])
+        open_tool.assert_called_once()
+        self.assertTrue(opened.closed)
+
+    async def test_skill_prior_arms_share_sampling_coordinate_not_condition_receipt(
+        self,
+    ) -> None:
+        captured = []
+        sentinel = object()
+
+        class CapturingCollector:
+            def __init__(self, orchestrator, environment, versions, store, **kwargs):
+                del environment, versions, store
                 captured.append((orchestrator, kwargs))
 
             async def collect(
@@ -213,7 +314,7 @@ class ProbeRuntimeWiringTests(unittest.IsolatedAsyncioTestCase):
         }
         backend = self._backend()
         with patch.object(_MODULE, "AgentGraphRolloutCollector", CapturingCollector):
-            first = await backend.collect(
+            candidate = await backend.collect(
                 _task(),
                 0,
                 _versions(),
@@ -225,7 +326,7 @@ class ProbeRuntimeWiringTests(unittest.IsolatedAsyncioTestCase):
                 condition_satisfied=True,
                 sampling_anchor_ordinal=7,
             )
-            second = await backend.collect(
+            incumbent = await backend.collect(
                 _task(),
                 0,
                 _versions(),
@@ -237,24 +338,77 @@ class ProbeRuntimeWiringTests(unittest.IsolatedAsyncioTestCase):
                 sampling_anchor_ordinal=7,
             )
 
-        self.assertIs(first, sentinel)
-        self.assertIs(second, sentinel)
-        first_orchestrator, first_kwargs = captured[0]
-        second_orchestrator, second_kwargs = captured[1]
+        self.assertIs(candidate, sentinel)
+        self.assertIs(incumbent, sentinel)
+        candidate_orchestrator, candidate_kwargs = captured[0]
+        incumbent_orchestrator, incumbent_kwargs = captured[1]
         self.assertEqual(
-            first_orchestrator.sampling_coordinate,
-            second_orchestrator.sampling_coordinate,
+            candidate_orchestrator.sampling_coordinate,
+            incumbent_orchestrator.sampling_coordinate,
         )
         self.assertEqual(
-            first_orchestrator.generation_seed(0),
-            second_orchestrator.generation_seed(0),
+            candidate_orchestrator.generation_seed(0),
+            incumbent_orchestrator.generation_seed(0),
         )
-        self.assertEqual("candidate-arm", first_kwargs["condition_id"])
-        self.assertEqual("incumbent-arm", second_kwargs["condition_id"])
-        self.assertEqual((condition,), first_kwargs["skills"])
-        self.assertEqual((), second_kwargs["skills"])
-        self.assertTrue(first_kwargs["forced_probe"])
-        self.assertEqual("validation", first_kwargs["expected_task_split"])
+        self.assertEqual("candidate-arm", candidate_kwargs["condition_id"])
+        self.assertEqual("incumbent-arm", incumbent_kwargs["condition_id"])
+        self.assertEqual((condition,), candidate_kwargs["skills"])
+        self.assertEqual((), incumbent_kwargs["skills"])
+        self.assertTrue(candidate_kwargs["forced_probe"])
+        self.assertEqual("validation", candidate_kwargs["expected_task_split"])
+
+    def test_paired_runtime_selector_rejects_unknown_or_mismatched_conditions(
+        self,
+    ) -> None:
+        backend = self._backend(_paired_tool_config())
+        with self.assertRaisesRegex(
+            _MODULE.ConfigurationError,
+            "exactly match one declared",
+        ):
+            backend._runtime_for_task(
+                _task(),
+                condition_id="qa-tool-usefulness:unknown",
+            )
+
+        mismatched = _paired_tool_config()
+        mismatched["qa_tool_runtime"]["condition_id"] = "different-pair"
+        mismatch_backend = self._backend(mismatched)
+        with self.assertRaisesRegex(
+            _MODULE.ConfigurationError,
+            "exactly match the experiment",
+        ):
+            mismatch_backend._runtime_for_task(
+                _task(),
+                condition_id="qa-tool-usefulness:tool_on",
+            )
+
+        aliased = _paired_tool_config()
+        aliased["experiment"]["condition_id"] = "qa-tool-usefulness:tool_off"
+        aliased["qa_tool_runtime"]["condition_id"] = (
+            "qa-tool-usefulness:tool_off"
+        )
+        alias_backend = self._backend(aliased)
+        with self.assertRaisesRegex(
+            _MODULE.ConfigurationError,
+            "distinct from both paired Tool arm",
+        ):
+            alias_backend._runtime_for_task(
+                _task(),
+                condition_id="qa-tool-usefulness:tool_off",
+            )
+
+    def test_paired_runtime_selector_preserves_dataset_scope(self) -> None:
+        config = _paired_tool_config()
+        config["qa_tool_runtime"]["dataset_scope"] = ["triviaqa"]
+        backend = self._backend(config)
+        with self.assertRaisesRegex(
+            _MODULE.ConfigurationError,
+            "not configured for dataset",
+        ):
+            backend._runtime_for_task(
+                _task(),
+                condition_id="qa-tool-usefulness:tool_off",
+            )
 
     def test_skill_query_projects_only_available_dataset_scoped_tool_ids(
         self,

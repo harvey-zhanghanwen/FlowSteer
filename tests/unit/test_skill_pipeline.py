@@ -251,6 +251,16 @@ class SkillPipelineTests(unittest.TestCase):
             result.skill.provenance["executor_versions"],
             EXECUTOR_VERSIONS,
         )
+        self.assertEqual(
+            self.pipeline.active_skill_ids(versions()),
+            ("hotpot-use-bridge-artifact-v1",),
+        )
+        self.assertEqual(
+            self.pipeline.active_skill_ids(
+                replace(versions(), policy="different-policy")
+            ),
+            (),
+        )
 
         priors = self.pipeline.retrieve_prompt_priors(
             SkillQuery(

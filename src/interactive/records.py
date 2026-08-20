@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+import json
 import math
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
@@ -24,6 +25,55 @@ from .versioning import VersionBundle
 
 SCHEMA_VERSION = "flowsteer.agentgraph.v2"
 VALID_SPLITS = frozenset({"train", "validation", "test"})
+
+
+def canonical_active_skill_ids(
+    values: Sequence[str],
+    *,
+    field_name: str,
+) -> Tuple[str, ...]:
+    """Return SkillFlow's sorted, unique ACTIVE-library identifier set.
+
+    This is the dependency-light part of SkillFlow's canonical Skill
+    invocation contract.  IDs, rather than rendered Skill instructions, are
+    persisted so trajectory validation never needs to inspect model reasoning
+    or reconstruct prompt text.
+    """
+
+    if isinstance(values, (str, bytes)) or not isinstance(values, Sequence):
+        raise ValueError(f"{field_name} must be a sequence of Skill IDs")
+    normalized: list[str] = []
+    for value in values:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{field_name} must contain non-empty Skill IDs")
+        if value != value.strip():
+            raise ValueError(f"{field_name} Skill IDs must not contain whitespace")
+        normalized.append(value)
+    canonical = tuple(normalized)
+    if tuple(sorted(set(canonical))) != canonical:
+        raise ValueError(f"{field_name} must be sorted and unique")
+    return canonical
+
+
+def ordered_skill_ids(
+    values: Sequence[str],
+    *,
+    field_name: str,
+) -> Tuple[str, ...]:
+    """Validate a unique Skill ranking without changing its prompt order."""
+
+    if isinstance(values, (str, bytes)) or not isinstance(values, Sequence):
+        raise ValueError(f"{field_name} must be a sequence of Skill IDs")
+    normalized: list[str] = []
+    for value in values:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{field_name} must contain non-empty Skill IDs")
+        if value != value.strip():
+            raise ValueError(f"{field_name} Skill IDs must not contain whitespace")
+        normalized.append(value)
+    if len(normalized) != len(set(normalized)):
+        raise ValueError(f"{field_name} must contain unique Skill IDs")
+    return tuple(normalized)
 
 
 def utc_now() -> str:
@@ -159,6 +209,8 @@ class TurnRecord:
     reconstructed_context: bool = False
     receipt_verified: bool = False
     created_at: str = field(default_factory=utc_now)
+    retrieved_skill_ids: Sequence[str] = field(default_factory=tuple)
+    visible_skill_ids: Sequence[str] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
         if self.round_index < 0:
@@ -195,6 +247,20 @@ class TurnRecord:
             raise ValueError("director_generation_seed must be non-negative when supplied")
         if not isinstance(self.runtime_summary, Mapping):
             raise ValueError("runtime_summary must be a mapping")
+        retrieved_skill_ids = ordered_skill_ids(
+            self.retrieved_skill_ids,
+            field_name="retrieved_skill_ids",
+        )
+        visible_skill_ids = ordered_skill_ids(
+            self.visible_skill_ids,
+            field_name="visible_skill_ids",
+        )
+        if visible_skill_ids != retrieved_skill_ids:
+            raise ValueError(
+                "visible Skill IDs must equal the ranked retrieved Skill IDs"
+            )
+        object.__setattr__(self, "retrieved_skill_ids", retrieved_skill_ids)
+        object.__setattr__(self, "visible_skill_ids", visible_skill_ids)
 
     @property
     def snapshot_receipt_verified(self) -> bool:
@@ -213,6 +279,8 @@ class TurnRecord:
     def to_dict(self) -> Dict[str, Any]:
         result = asdict(self)
         result["executions"] = [item.to_dict() for item in self.executions]
+        result["retrieved_skill_ids"] = list(self.retrieved_skill_ids)
+        result["visible_skill_ids"] = list(self.visible_skill_ids)
         return result
 
     @classmethod
@@ -263,7 +331,94 @@ class TurnRecord:
             reconstructed_context=value.get("reconstructed_context", False),
             receipt_verified=value.get("receipt_verified", False),
             created_at=value.get("created_at", utc_now()),
+            retrieved_skill_ids=tuple(value.get("retrieved_skill_ids", ())),
+            visible_skill_ids=tuple(value.get("visible_skill_ids", ())),
         )
+
+
+def canonical_invoked_skill_ids(turns: Sequence[TurnRecord]) -> Tuple[str, ...]:
+    """Derive credited Skill invocations from admitted execution receipts.
+
+    Executor-side Skill actions are intentionally not admitted in the current
+    runtime.  A model may still emit ``ActionKind.SKILL`` and receive the
+    public ``skill_action_not_admitted`` observation; that rejected attempt is
+    behavior data, not Skill credit.  Until the SkillFlow executor invocation
+    boundary is implemented, any successful-looking or explicitly credited
+    Skill action fails closed.
+    """
+
+    if isinstance(turns, (str, bytes)) or not isinstance(turns, Sequence):
+        raise ValueError("turns must be a sequence")
+    for turn in turns:
+        if not isinstance(turn, TurnRecord):
+            raise ValueError("turns must contain TurnRecord values")
+        for execution in turn.executions:
+            metadata = execution.metadata
+            nested_response = metadata.get("response")
+            receipt_sources = [metadata]
+            if isinstance(nested_response, Mapping):
+                receipt_sources.append(nested_response)
+            for receipt_source in receipt_sources:
+                raw_credited = receipt_source.get("invoked_skill_ids", ())
+                credited = canonical_active_skill_ids(
+                    raw_credited,  # type: ignore[arg-type]
+                    field_name="execution invoked_skill_ids",
+                )
+                if credited:
+                    raise ValueError(
+                        "Executor Skill invocation credit is not admitted by this runtime"
+                    )
+                raw_trace = receipt_source.get("react_trace", ())
+                if not isinstance(raw_trace, Sequence) or isinstance(
+                    raw_trace, (str, bytes)
+                ):
+                    continue
+                for entry in raw_trace:
+                    if not isinstance(entry, Mapping):
+                        continue
+                    action_text = entry.get("action_text")
+                    if not isinstance(action_text, str):
+                        continue
+                    try:
+                        action = json.loads(action_text)
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        continue
+                    if not isinstance(action, Mapping) or set(action) != {
+                        "arguments",
+                        "kind",
+                        "name",
+                        "resource_id",
+                        "skill_id",
+                    }:
+                        continue
+                    kind = action.get("kind")
+                    name = action.get("name")
+                    resource_id = action.get("resource_id")
+                    skill_id = action.get("skill_id")
+                    if kind not in {"tool", "skill", "complete"}:
+                        continue
+                    if not isinstance(name, str) or not name:
+                        continue
+                    if kind in {"tool", "skill"} and (
+                        not isinstance(resource_id, str) or not resource_id
+                    ):
+                        continue
+                    if kind == "complete" and resource_id is not None:
+                        continue
+                    if kind != "skill":
+                        continue
+                    if not isinstance(skill_id, str) or not skill_id:
+                        continue
+                    if (
+                        entry.get("observation_status") == "schema_invalid"
+                        and entry.get("public_error_code")
+                        == "skill_action_not_admitted"
+                    ):
+                        continue
+                    raise ValueError(
+                        "ActionKind.SKILL has no admitted invocation receipt"
+                    )
+    return ()
 
 
 @dataclass(frozen=True)
@@ -326,10 +481,76 @@ class TrajectoryRecord:
     manual_repair_used: bool = False
     created_at: str = field(default_factory=utc_now)
     schema_version: str = SCHEMA_VERSION
+    active_skill_ids: Sequence[str] = field(default_factory=tuple)
+    retrieved_skill_ids: Sequence[str] = field(default_factory=tuple)
+    invoked_skill_ids: Sequence[str] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
         if not isinstance(self.director_sampling, Mapping):
             raise ValueError("director_sampling must be a mapping")
+        initial_retrieved = (
+            tuple(self.turns[0].retrieved_skill_ids) if self.turns else ()
+        )
+        retrieved_skill_ids = ordered_skill_ids(
+            self.retrieved_skill_ids,
+            field_name="trajectory retrieved_skill_ids",
+        )
+        if retrieved_skill_ids != initial_retrieved:
+            raise ValueError(
+                "trajectory retrieved Skill IDs differ from the initial Director turn"
+            )
+        active_skill_ids = canonical_active_skill_ids(
+            self.active_skill_ids,
+            field_name="active_skill_ids",
+        )
+        all_turn_retrieved = {
+            skill_id
+            for turn in self.turns
+            for skill_id in turn.retrieved_skill_ids
+        }
+        if not all_turn_retrieved.issubset(active_skill_ids):
+            raise ValueError(
+                "every turn's retrieved Skill IDs must be a subset of active Skill IDs"
+            )
+        invoked_skill_ids = canonical_active_skill_ids(
+            self.invoked_skill_ids,
+            field_name="invoked_skill_ids",
+        )
+        canonical_invoked = canonical_invoked_skill_ids(self.turns)
+        if invoked_skill_ids != canonical_invoked:
+            raise ValueError(
+                "trajectory invoked Skill IDs differ from admitted execution receipts"
+            )
+        if not set(invoked_skill_ids).issubset(all_turn_retrieved):
+            raise ValueError(
+                "invoked Skill IDs must be a subset of turn-retrieved Skill IDs"
+            )
+        object.__setattr__(self, "active_skill_ids", active_skill_ids)
+        object.__setattr__(self, "retrieved_skill_ids", retrieved_skill_ids)
+        object.__setattr__(self, "invoked_skill_ids", invoked_skill_ids)
+
+    @property
+    def skill_receipt_verified(self) -> bool:
+        """Whether exposure and invocation IDs match the persisted turns."""
+
+        try:
+            initial_retrieved = (
+                tuple(self.turns[0].retrieved_skill_ids) if self.turns else ()
+            )
+            all_turn_retrieved = {
+                skill_id
+                for turn in self.turns
+                for skill_id in turn.retrieved_skill_ids
+            }
+            return bool(
+                tuple(self.retrieved_skill_ids) == initial_retrieved
+                and all_turn_retrieved.issubset(self.active_skill_ids)
+                and tuple(self.invoked_skill_ids)
+                == canonical_invoked_skill_ids(self.turns)
+                and set(self.invoked_skill_ids).issubset(all_turn_retrieved)
+            )
+        except (TypeError, ValueError):
+            return False
 
     @property
     def group_key(self) -> Tuple[str, str, str]:
@@ -445,6 +666,10 @@ class TrajectoryRecord:
             "forced_probe": self.forced_probe,
             "api_fallback_used": self.api_fallback_used,
             "manual_repair_used": self.manual_repair_used,
+            "active_skill_ids": list(self.active_skill_ids),
+            "retrieved_skill_ids": list(self.retrieved_skill_ids),
+            "invoked_skill_ids": list(self.invoked_skill_ids),
+            "skill_receipt_verified": self.skill_receipt_verified,
             "grpo_eligible": self.grpo_eligible,
             "created_at": self.created_at,
         }
@@ -487,10 +712,14 @@ class TrajectoryRecord:
             manual_repair_used=value.get("manual_repair_used", False),
             created_at=value.get("created_at", utc_now()),
             schema_version=value["schema_version"],
+            active_skill_ids=tuple(value.get("active_skill_ids", ())),
+            retrieved_skill_ids=tuple(value.get("retrieved_skill_ids", ())),
+            invoked_skill_ids=tuple(value.get("invoked_skill_ids", ())),
         )
         derived = {
             "terminal_failure": record.terminal_failure,
             "sampling_receipt_verified": record.sampling_receipt_verified,
+            "skill_receipt_verified": record.skill_receipt_verified,
             "grpo_eligible": record.grpo_eligible,
         }
         for name, expected in derived.items():

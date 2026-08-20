@@ -487,6 +487,34 @@ class SkillEvidencePipeline:
             for skill in skills
         )
 
+    def active_skill_ids(self, versions: VersionBundle) -> tuple[str, ...]:
+        """Return the version-compatible ACTIVE library identity snapshot.
+
+        SkillFlow's canonical initial context records this independently from
+        the ranked retrieval result.  Applicability and ranking remain the
+        retriever's responsibility; this method only projects the immutable
+        library state and its version-compatibility boundary.
+        """
+
+        if not isinstance(versions, VersionBundle):
+            raise TypeError("versions must be a VersionBundle")
+        library = (
+            self.skill_store.list()
+            if self._retrieval_snapshot is None
+            else list(self._retrieval_snapshot)
+        )
+        return tuple(
+            sorted(
+                skill.skill_id
+                for skill in library
+                if skill.status is SkillStatus.ACTIVE
+                and skill.versions.is_compatible_with(
+                    versions,
+                    SkillRetriever.VERSION_FIELDS,
+                )
+            )
+        )
+
     @staticmethod
     def _executor_versions(value: Mapping[str, str]) -> dict[str, str]:
         normalized = _json_mapping(value, field_name="executor_versions")
