@@ -152,6 +152,7 @@ class AgentRequest:
     phase: ExecutionPhase
     is_output_agent: bool = False
     is_format_agent: bool = False
+    is_format_predecessor: bool = False
     communication_condition: CommunicationCondition = CommunicationCondition.NORMAL
     upstream: Tuple[UpstreamMessage, ...] = ()
     own_draft: Optional[str] = None
@@ -162,8 +163,12 @@ class AgentRequest:
             raise TypeError("is_output_agent must be bool")
         if type(self.is_format_agent) is not bool:
             raise TypeError("is_format_agent must be bool")
+        if type(self.is_format_predecessor) is not bool:
+            raise TypeError("is_format_predecessor must be bool")
         if self.is_format_agent and not self.is_output_agent:
             raise ValueError("Format Agent must be the Output Agent")
+        if self.is_format_agent and self.is_format_predecessor:
+            raise ValueError("Format Agent cannot be its own predecessor")
         object.__setattr__(
             self,
             "communication_condition",
@@ -692,6 +697,14 @@ class AgentRuntime:
         format_output_agent: bool,
         communication_condition: CommunicationCondition,
     ) -> Dict[str, str]:
+        format_predecessor_ids = {
+            source_id
+            for relation in plan.relations
+            for source_id, target_id in relation.directed_edges()
+            if format_output_agent
+            and output_agent_id is not None
+            and target_id == output_agent_id
+        }
         if len(component) == 1:
             agent_id = component[0]
             request = self._request(
@@ -710,6 +723,7 @@ class AgentRuntime:
                 graph_revision=graph_revision,
                 output_agent_id=output_agent_id,
                 format_output_agent=format_output_agent,
+                is_format_predecessor=agent_id in format_predecessor_ids,
                 communication_condition=communication_condition,
             )
             response = await self._invoke(request, calls)
@@ -744,6 +758,7 @@ class AgentRuntime:
             graph_revision=graph_revision,
             output_agent_id=output_agent_id,
             format_output_agent=format_output_agent,
+            is_format_predecessor=left_id in format_predecessor_ids,
             communication_condition=communication_condition,
         )
         right_draft_request = self._request(
@@ -755,6 +770,7 @@ class AgentRuntime:
             graph_revision=graph_revision,
             output_agent_id=output_agent_id,
             format_output_agent=format_output_agent,
+            is_format_predecessor=right_id in format_predecessor_ids,
             communication_condition=communication_condition,
         )
         left_draft, right_draft = await _gather_pair(
@@ -785,6 +801,7 @@ class AgentRuntime:
             graph_revision=graph_revision,
             output_agent_id=output_agent_id,
             format_output_agent=format_output_agent,
+            is_format_predecessor=left_id in format_predecessor_ids,
             communication_condition=communication_condition,
         )
         right_revision_request = self._request(
@@ -810,6 +827,7 @@ class AgentRuntime:
             graph_revision=graph_revision,
             output_agent_id=output_agent_id,
             format_output_agent=format_output_agent,
+            is_format_predecessor=right_id in format_predecessor_ids,
             communication_condition=communication_condition,
         )
         left_revision, right_revision = await _gather_pair(
@@ -881,6 +899,7 @@ class AgentRuntime:
         peer_draft: Optional[UpstreamMessage] = None,
         output_agent_id: Optional[str],
         format_output_agent: bool,
+        is_format_predecessor: bool,
         communication_condition: CommunicationCondition,
     ) -> AgentRequest:
         model = self.model_registry.require_model(agent.model_id)
@@ -899,6 +918,7 @@ class AgentRuntime:
             is_format_agent=(
                 format_output_agent and agent.id == output_agent_id
             ),
+            is_format_predecessor=is_format_predecessor,
             communication_condition=communication_condition,
             upstream=upstream,
             own_draft=own_draft,

@@ -53,8 +53,7 @@ from src.interactive.healthbench_tool_adapter import (  # noqa: E402
     HEALTHBENCH_MEDRAG_SEARCH_TOOL_ID,
 )
 from src.interactive.qa_tool_adapter import (  # noqa: E402
-    QA_RETRIEVAL_READ_TOOL_ID,
-    QA_RETRIEVAL_SEARCH_TOOL_ID,
+    QA_RETRIEVAL_TOOL_ID,
 )
 from src.interactive.react_execution import ReactExecutionError  # noqa: E402
 from src.interactive.records import TaskRecord  # noqa: E402
@@ -111,16 +110,13 @@ def _specification(dataset_key: str) -> CanarySpecification:
     if dataset_key in {"hotpotqa", "triviaqa"}:
         return CanarySpecification(
             dataset_key=dataset_key,
-            required_resource_ids=(
-                QA_RETRIEVAL_READ_TOOL_ID,
-                QA_RETRIEVAL_SEARCH_TOOL_ID,
-            ),
+            required_resource_ids=(QA_RETRIEVAL_TOOL_ID,),
             admitted_sequences=(
                 (
                     ActionStep(
-                        "tool", "search", QA_RETRIEVAL_SEARCH_TOOL_ID
+                        "tool", "search", QA_RETRIEVAL_TOOL_ID
                     ),
-                    ActionStep("tool", "read", QA_RETRIEVAL_READ_TOOL_ID),
+                    ActionStep("tool", "read", QA_RETRIEVAL_TOOL_ID),
                     complete,
                 ),
             ),

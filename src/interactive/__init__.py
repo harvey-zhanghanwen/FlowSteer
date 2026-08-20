@@ -123,8 +123,8 @@ from .environment_execution import (
 )
 from .qa_tool_adapter import (
     OpenQAToolRegistry,
-    QA_RETRIEVAL_READ_TOOL_ID,
-    QA_RETRIEVAL_SEARCH_TOOL_ID,
+    QARetrievalReactExecutionAdapter,
+    QA_RETRIEVAL_TOOL_ID,
     build_qa_tool_registry,
     open_qa_tool_registry,
 )
@@ -238,8 +238,8 @@ __all__ = [
     'RAGENEnvironmentSession',
     'RAGENEnvironmentSessionFactory',
     'OpenQAToolRegistry',
-    'QA_RETRIEVAL_READ_TOOL_ID',
-    'QA_RETRIEVAL_SEARCH_TOOL_ID',
+    'QARetrievalReactExecutionAdapter',
+    'QA_RETRIEVAL_TOOL_ID',
     'build_qa_tool_registry',
     'open_qa_tool_registry',
     'RepositoryToolBackend',

@@ -26,6 +26,7 @@ def request(
     keyed: bool = False,
     is_output_agent: bool = True,
     is_format_agent: bool = False,
+    is_format_predecessor: bool = False,
     execution_mode: str = "reasoning",
     communication_condition: CommunicationCondition = CommunicationCondition.NORMAL,
 ) -> AgentRequest:
@@ -57,6 +58,7 @@ def request(
         phase=phase,
         is_output_agent=is_output_agent,
         is_format_agent=is_format_agent,
+        is_format_predecessor=is_format_predecessor,
         communication_condition=communication_condition,
         upstream=(
             UpstreamMessage(
@@ -107,7 +109,36 @@ class MessageTests(unittest.TestCase):
         self.assertIn("do not use <answer> tags", system)
         self.assertIn("original relation, qualifiers, comparison criterion", system)
         self.assertIn("independently reconstruct that evidence", system)
+        self.assertNotIn("direct semantic predecessor", system)
         self.assertNotIn("unique Output Agent", system)
+
+    def test_format_predecessor_has_explicit_semantic_handoff_contract(self) -> None:
+        messages = build_agent_messages(
+            request(is_output_agent=False, is_format_predecessor=True)
+        )
+        system = messages[0]["content"]
+
+        self.assertIn("direct semantic predecessor", system)
+        self.assertIn("Candidate answer: ...", system)
+        self.assertIn("only the answer value", system)
+        self.assertIn("Evidence: ...", system)
+        self.assertIn("only yes or no", system)
+        self.assertIn("Do not use <answer> tags", system)
+
+    def test_react_format_predecessor_applies_handoff_to_complete_action(self) -> None:
+        messages = build_agent_messages(
+            request(
+                is_output_agent=False,
+                is_format_predecessor=True,
+                execution_mode="react",
+            )
+        )
+        system = messages[0]["content"]
+
+        self.assertIn("StructuredAction JSON object", system)
+        self.assertIn("complete action", system)
+        self.assertIn("Candidate answer: ...", system)
+        self.assertIn("Evidence: ...", system)
 
     def test_react_output_turn_uses_structured_action_not_answer_wrapper(self) -> None:
         messages = build_agent_messages(request(execution_mode="react"))
@@ -123,19 +154,19 @@ class MessageTests(unittest.TestCase):
         system = messages[0]["content"]
         user = messages[1]["content"]
 
-        self.assertIn("terminal Format Agent", system)
+        self.assertIn("terminal FlowSteer Format Operator", system)
         self.assertIn("exactly one routed upstream artifact", system)
-        self.assertIn("Do not solve the task again", system)
-        self.assertIn("shortest evidence-aligned value", system)
-        self.assertIn("multiple candidates or aliases unresolved", system)
-        self.assertIn("Never map unknown, uncertain, or cannot determine to no", system)
-        self.assertIn("preserving required units and qualifiers", system)
-        self.assertIn("emit only yes or no", system)
-        self.assertIn("omit surrounding relations and modifiers", system)
-        self.assertIn("return exactly <answer></answer>", system)
+        self.assertIn("do not solve, verify, or extend", system)
+        self.assertIn("has ALREADY been computed as: evidence", user)
+        self.assertIn("Your ONLY job is to extract the final answer", user)
+        self.assertIn("OUTPUT ANSWER VALUE ONLY", user)
+        self.assertIn("PRESERVE ORIGINAL NON-MATH FORMATS", user)
+        self.assertIn("exactly one <answer>...</answer> wrapper", user)
+        self.assertIn("return exactly <answer></answer>", user)
         self.assertNotIn("Contract:\nverify carefully", system)
         self.assertNotIn("request_or_dependency: verify carefully", user)
-        self.assertIn("artifact:\nevidence", user)
+        self.assertNotIn("External upstream messages", user)
+        self.assertNotIn("source_agent:", user)
 
     def test_masked_condition_preserves_receipt_but_masks_visible_messages(self) -> None:
         item = request(

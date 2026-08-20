@@ -460,7 +460,7 @@ class QAToolRuntimeWiringTests(unittest.TestCase):
         rendered = messages[-1]["content"]
         state = json.loads(rendered.split("\n\n", 1)[1])
         self.assertEqual(
-            {"qa-retrieval.search", "qa-retrieval.read"},
+            {"qa-retrieval"},
             {item["tool_id"] for item in state["tool_catalog"]},
         )
         self.assertNotIn(task.ground_truth, rendered)

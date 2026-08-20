@@ -588,6 +588,37 @@ class AgentWorkflowEnv:
             "modify the Output Agent contract/model or graph before retrying"
         )
 
+    def finish_admissibility(self) -> dict[str, object]:
+        """Return the revision-local explicit-FINISH admission state.
+
+        FlowSteer exposes terminal constraint feedback before accepting
+        ``FINISH`` and SkillFlow validates a completion before marking a
+        bounded episode terminal.  This read-only projection never executes a
+        model and never substitutes an intermediate artifact for an explicit
+        Director submission.
+        """
+
+        validation = self._graph.validate(
+            self.model_registry,
+            require_complete=True,
+        )
+        if not validation.valid:
+            return {"admissible": False}
+        if self.format_agent_issue() is not None:
+            return {"admissible": False}
+        if self.required_tool_issue() is not None:
+            return {"admissible": False}
+        execution = self._cached_progressive_execution()
+        if execution is None or execution.final_answer is None:
+            return {"admissible": False}
+        if self._terminal_validation_error(execution.final_answer) is not None:
+            return {"admissible": False}
+        return {
+            "admissible": True,
+            "graph_revision": self._graph.revision,
+            "submission_semantics": "explicit_finish",
+        }
+
     def _cached_progressive_execution(self) -> Optional[AgentRuntimeResult]:
         if self._progressive_execution_revision != self._graph.revision:
             return None

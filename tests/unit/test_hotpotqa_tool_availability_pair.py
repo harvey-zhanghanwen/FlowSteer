@@ -131,8 +131,7 @@ def _fake_record(
     }
     if arm in {"on", "tool_on"}:
         observation["tool_catalog"] = [
-            {"tool_id": "qa-retrieval.search"},
-            {"tool_id": "qa-retrieval.read"},
+            {"tool_id": "qa-retrieval"},
         ]
     prompt = encode_director_transcript(
         (
@@ -264,8 +263,7 @@ def test_pair_persists_assignment_separately_from_actual_tool_invocation():
     assert row["treatment_exposure_receipt"] == {
         "tool_off_catalog_tool_ids": [],
         "tool_on_catalog_tool_ids": [
-            "qa-retrieval.search",
-            "qa-retrieval.read",
+            "qa-retrieval",
         ],
         "non_treatment_observation_projection_equal": True,
     }

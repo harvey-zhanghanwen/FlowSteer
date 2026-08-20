@@ -340,6 +340,65 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("terminal_format_issue", state)
         self.assertIn("distinct Format Agent", state["terminal_format_issue"])
 
+    async def test_canvas_exposes_only_positive_revision_local_finish_admission(
+        self,
+    ) -> None:
+        model_registry = registry()
+
+        class FormatGateway(FakeGateway):
+            async def generate(self, request):
+                self.requests.append(request)
+                if request.is_format_agent:
+                    return AgentResponse("<answer>Paris</answer>")
+                return AgentResponse("Candidate answer: Paris\nEvidence: supplied fact")
+
+        env = AgentWorkflowEnv(
+            model_registry,
+            gateway=FormatGateway(),
+            problem="question",
+            execute_on_edit=True,
+            require_exact_answer_tag=True,
+            require_format_agent=True,
+        )
+        orchestrator = AgentGraphOrchestrator(
+            model_registry,
+            ScriptedDirector([]),
+        )
+        initial = observation_payload(
+            transcript_messages(orchestrator.build_prompt(env, 0, ()))[-1]
+        )
+        self.assertNotIn("finish_admissibility", initial)
+
+        action = (
+            '{"action":"add_subgraph","agents":['
+            '{"agent_id":"solver","model_id":"qwen",'
+            '"contract":"compute one semantic answer"},'
+            '{"agent_id":"format","model_id":"other",'
+            '"contract":"serialize one candidate","role_family":"format"}'
+            '],"relations":['
+            '{"source_id":"solver","target_id":"format",'
+            '"source_to_target":true,"target_to_source":false}'
+            '],"output_agent_id":"format"}'
+        )
+        accepted = await env.step(action)
+        self.assertTrue(accepted.accepted)
+        prompt = orchestrator.continue_prompt(
+            orchestrator.build_prompt(env.fork(), 0, ()),
+            action,
+            env,
+            (),
+        )
+        state = observation_payload(transcript_messages(prompt)[-1])
+        self.assertEqual(
+            {
+                "admissible": True,
+                "graph_revision": env.revision,
+                "submission_semantics": "explicit_finish",
+            },
+            state["finish_admissibility"],
+        )
+        self.assertNotIn("remaining_rounds", state)
+
     async def test_director_terminal_policy_is_issue_driven_without_role_template(
         self,
     ) -> None:
@@ -368,6 +427,7 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
             DIRECTOR_SYSTEM_PROMPT,
         )
         self.assertIn("source-grounded evidence", DIRECTOR_SYSTEM_PROMPT)
+        self.assertIn("one explicit bare answer span", DIRECTOR_SYSTEM_PROMPT)
         self.assertIn(
             "Format Agent must remain a separate sink with one semantic predecessor",
             DIRECTOR_SYSTEM_PROMPT,

@@ -54,7 +54,10 @@ from src.interactive.joint_qa_training_schedule import (
 )
 from src.interactive.openai_gateway import OpenAICompatibleGateway
 from src.interactive.persistence import EvidenceStore, GraphSnapshotEvent
-from src.interactive.qa_tool_adapter import open_qa_tool_registry
+from src.interactive.qa_tool_adapter import (
+    QARetrievalReactExecutionAdapter,
+    open_qa_tool_registry,
+)
 from src.interactive.qa_retrieval import (
     SkillFlowQARetriever,
     augment_task_with_retrieval,
@@ -2135,7 +2138,7 @@ class LiveSmokeBackend:
             timeout_seconds=float(qa_settings["tool_timeout_seconds"]),
         )
         try:
-            adapter = ToolReactExecutionAdapter(
+            adapter = QARetrievalReactExecutionAdapter(
                 gateway=self.runtime.gateway,
                 tool_registry=opened.registry,
                 max_turns=int(qa_settings["max_turns"]),

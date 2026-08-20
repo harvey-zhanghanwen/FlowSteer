@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from pathlib import Path
 import unittest
 from unittest.mock import patch
 
+from src.interactive.agent_graph import AgentNode
+from src.interactive.agent_runtime import AgentRequest, AgentResponse, ExecutionPhase
+from src.interactive.model_registry import ModelSpec, ProviderSpec
 from src.interactive.qa_tool_adapter import (
-    QA_RETRIEVAL_READ_TOOL_ID,
-    QA_RETRIEVAL_SEARCH_TOOL_ID,
+    QARetrievalReactExecutionAdapter,
+    QA_RETRIEVAL_TOOL_ID,
     build_qa_tool_registry,
     open_qa_tool_registry,
 )
@@ -68,7 +72,7 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         registry = build_qa_tool_registry(index)
 
         result, receipt = await registry.ainvoke_with_receipt(
-            QA_RETRIEVAL_SEARCH_TOOL_ID,
+            QA_RETRIEVAL_TOOL_ID,
             ToolRequest("search", {"query": "Ada Lovelace", "limit": 3}),
         )
 
@@ -100,7 +104,7 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         registry = build_qa_tool_registry(index)
 
         result, receipt = await registry.ainvoke_with_receipt(
-            QA_RETRIEVAL_READ_TOOL_ID,
+            QA_RETRIEVAL_TOOL_ID,
             ToolRequest("read", {"passage_id": "p1"}),
         )
 
@@ -116,7 +120,7 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         registry = build_qa_tool_registry(index)
 
         result, receipt = await registry.ainvoke_with_receipt(
-            QA_RETRIEVAL_SEARCH_TOOL_ID,
+            QA_RETRIEVAL_TOOL_ID,
             ToolRequest(
                 "search",
                 {
@@ -131,24 +135,29 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("ValueError", receipt.error_type)
         self.assertEqual([], index.search_calls)
 
-    def test_registry_exposes_distinct_search_and_read_capabilities(self) -> None:
+    def test_registry_exposes_one_skillflow_search_read_resource(self) -> None:
         registry = build_qa_tool_registry(FakeIndex())
 
+        self.assertEqual((QA_RETRIEVAL_TOOL_ID,), registry.resource_ids)
+        retrieval = registry.require_capability(QA_RETRIEVAL_TOOL_ID)
+        self.assertEqual(("hotpotqa", "triviaqa"), retrieval.dataset_scope)
+        self.assertEqual(("read", "search"), retrieval.action_names)
         self.assertEqual(
-            (QA_RETRIEVAL_READ_TOOL_ID, QA_RETRIEVAL_SEARCH_TOOL_ID),
-            registry.resource_ids,
+            ["query", "limit"],
+            retrieval.action_schemas["search"]["required"],
         )
-        search = registry.require_capability(QA_RETRIEVAL_SEARCH_TOOL_ID)
-        read = registry.require_capability(QA_RETRIEVAL_READ_TOOL_ID)
-        self.assertEqual(("hotpotqa", "triviaqa"), search.dataset_scope)
-        self.assertEqual(("search",), search.action_names)
-        self.assertEqual(("read",), read.action_names)
-        self.assertEqual(search.input_schema, search.action_schemas["search"])
-        self.assertEqual(read.input_schema, read.action_schemas["read"])
-        self.assertEqual("frozen-index-v1", search.version)
-        self.assertEqual(["query", "limit"], search.input_schema["required"])
-        self.assertEqual(["passage_id"], read.input_schema["required"])
-        self.assertEqual("none", search.side_effect)
+        self.assertEqual(
+            ["passage_id"],
+            retrieval.action_schemas["read"]["required"],
+        )
+        self.assertIn(
+            "successful search",
+            retrieval.action_schemas["read"]["properties"]["passage_id"][
+                "description"
+            ],
+        )
+        self.assertEqual("frozen-index-v1", retrieval.version)
+        self.assertEqual("none", retrieval.side_effect)
 
     def test_open_factory_uses_skillflow_open_and_owns_close(self) -> None:
         index = FakeIndex()
@@ -174,7 +183,7 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
                     opened.retrieval_index_identity["index_id"],
                 )
                 self.assertIn(
-                    QA_RETRIEVAL_SEARCH_TOOL_ID, opened.registry.resource_ids
+                    QA_RETRIEVAL_TOOL_ID, opened.registry.resource_ids
                 )
                 self.assertFalse(index.closed)
 
@@ -183,6 +192,72 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             FakeRetrievalIndexClass.opened_path,
         )
         self.assertTrue(index.closed)
+
+    async def test_react_read_requires_canonical_id_from_successful_search(self) -> None:
+        index = FakeIndex()
+        registry = build_qa_tool_registry(index)
+
+        def action(name: str, arguments: object) -> str:
+            return json.dumps(
+                {
+                    "arguments": arguments,
+                    "kind": "complete" if name == "complete" else "tool",
+                    "name": name,
+                    "resource_id": (
+                        None if name == "complete" else QA_RETRIEVAL_TOOL_ID
+                    ),
+                    "skill_id": None,
+                }
+            )
+
+        class SequenceGateway:
+            def __init__(self) -> None:
+                self.outputs = [
+                    action("read", {"passage_id": "Ada Lovelace"}),
+                    action("search", {"query": "Ada Lovelace", "limit": 1}),
+                    action("read", {"passage_id": "wrong-id"}),
+                    action("read", {"passage_id": "p1"}),
+                    action("complete", {"value": "Ada Lovelace"}),
+                ]
+
+            async def generate(self, request: AgentRequest) -> AgentResponse:
+                del request
+                return AgentResponse(self.outputs.pop(0))
+
+        request = AgentRequest(
+            request_id="qa:react",
+            run_id="qa",
+            graph_revision=1,
+            problem="Who wrote the first published algorithm?",
+            agent=AgentNode(
+                "retriever",
+                "model",
+                "retrieve one public passage and answer",
+                allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                execution_mode="react",
+            ),
+            model=ModelSpec("model", "provider"),
+            provider=ProviderSpec("provider", kind="test"),
+            phase=ExecutionPhase.SINGLE,
+        )
+        response = await QARetrievalReactExecutionAdapter(
+            gateway=SequenceGateway(),
+            tool_registry=registry,
+            max_turns=5,
+            max_tool_calls=2,
+        ).execute(request)
+
+        self.assertEqual("Ada Lovelace", response.text)
+        self.assertEqual(2, response.metadata["tool_calls"])
+        self.assertEqual(["p1"], index.read_calls)
+        self.assertEqual(
+            "qa_read_requires_successful_search",
+            response.metadata["react_trace"][0]["public_error_code"],
+        )
+        self.assertEqual(
+            "qa_read_passage_id_not_from_search",
+            response.metadata["react_trace"][2]["public_error_code"],
+        )
 
 
 if __name__ == "__main__":

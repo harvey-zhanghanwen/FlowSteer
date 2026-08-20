@@ -11,6 +11,8 @@ from typing import Any, Dict, Mapping, Optional, Sequence
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from scripts.prompts.prompt import FORMAT_PROMPT
+
 from .agent_runtime import (
     AgentRequest,
     AgentResponse,
@@ -129,29 +131,29 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
             "observation; a complete action supplies the declared node "
             "artifact. Do not emit <answer> tags in this internal action."
         )
+        if request.is_format_predecessor:
+            protocol += (
+                " In a complete action that supplies the semantic answer to the "
+                "terminal Format Agent, set content to exactly two fields: one line "
+                "`Candidate answer: ...` containing only the answer value, followed by "
+                "one `Evidence: ...` field. Do not put a sentence or question restatement "
+                "in the Candidate answer field."
+            )
     elif request.is_format_agent:
         protocol = (
-            "You are the terminal Format Agent. The semantic answer must already have "
-            "been computed in exactly one routed upstream artifact. Your only task is to "
-            "extract that answer and serialize it for the task protocol. Do not solve the "
-            "task again, verify the answer, combine candidates, or add explanation. "
-            "Extract only one explicit, source-grounded answer candidate from the upstream "
-            "artifact. If the upstream artifact is uncertain, unsupported, or leaves multiple "
-            "candidates or aliases unresolved, return exactly <answer></answer>. Never map "
-            "unknown, uncertain, or cannot determine to no. The answer span must be the "
-            "shortest evidence-aligned value that directly answers the question while "
-            "preserving required units and qualifiers, "
-            "not a restatement, sentence, equation, explanation, or key-value report. For a "
-            "yes/no question, emit only yes or no. For a requested name, entity, title, "
-            "category, property, location, or event, emit only that value; omit surrounding "
-            "relations and modifiers already supplied by the question unless they are part "
-            "of the answer's proper name. Preserve the solution's original spelling and "
-            "non-math date/name format. These extraction rules take precedence over any "
-            "free contract that asks for an explanatory sentence. If no upstream artifact "
-            "is present, return exactly <answer></answer>. For a factual or numeric task, "
-            "return exactly <answer>answer span</answer> with no text outside the tag. If "
-            "the task supplies legal or admissible actions and asks for one action, return "
-            "exactly one listed executable action with no explanation."
+            "You are the terminal FlowSteer Format Operator. The solution has already "
+            "been computed in exactly one routed upstream artifact. Follow the extraction "
+            "instructions in the user message; do not solve, verify, or extend the answer."
+        )
+    elif request.is_format_predecessor:
+        protocol = (
+            "You are the direct semantic predecessor of the terminal Format Agent. "
+            "Follow your assigned contract and compute the answer from the task and routed "
+            "evidence. Return exactly one `Candidate answer: ...` line containing only the "
+            "answer value—not a sentence, explanation, or question restatement—followed by "
+            "one `Evidence: ...` field. Preserve the evidence-aligned full proper name, date, "
+            "number, unit, and qualifier when the question asks for it. For a yes/no question, "
+            "the Candidate answer value must be only yes or no. Do not use <answer> tags."
         )
     elif request.is_output_agent:
         protocol = (
@@ -205,11 +207,35 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
         request.communication_condition,
         include_dependency=not request.is_format_agent,
     )
-    common = (
-        f"Task:\n{request.problem}\n\n"
-        "External upstream messages:\n"
-        f"{upstream_text}"
-    )
+    if request.is_format_agent:
+        # Directly reuse FlowSteer's Format Operator prompt and its clean
+        # ``problem + computed solution`` call boundary.  The AgentGraph
+        # adaptation changes only the terminal wrapper; typed communication
+        # envelopes remain intact in trajectory receipts but do not burden the
+        # extraction-only model input.
+        solution = (
+            _visible_message_content(
+                request.upstream[0].artifact,
+                request.communication_condition,
+            )
+            if len(request.upstream) == 1
+            else ""
+        )
+        common = FORMAT_PROMPT.format(
+            problem_description=request.problem,
+            solution=solution,
+        ) + (
+            "\nFor this AgentGraph terminal protocol, enclose only that extracted "
+            "answer value in exactly one <answer>...</answer> wrapper. Do not put a "
+            "sentence or explanation inside the wrapper. If the computed solution "
+            "does not contain one answer candidate, return exactly <answer></answer>."
+        )
+    else:
+        common = (
+            f"Task:\n{request.problem}\n\n"
+            "External upstream messages:\n"
+            f"{upstream_text}"
+        )
     if request.phase is ExecutionPhase.SINGLE:
         phase = "Produce your response now."
     elif request.phase is ExecutionPhase.DRAFT:

@@ -17,8 +17,7 @@ from src.interactive.healthbench_tool_adapter import (
 )
 from src.interactive.model_registry import ModelRegistry, ModelSpec, ProviderSpec
 from src.interactive.qa_tool_adapter import (
-    QA_RETRIEVAL_READ_TOOL_ID,
-    QA_RETRIEVAL_SEARCH_TOOL_ID,
+    QA_RETRIEVAL_TOOL_ID,
 )
 from src.interactive.react_execution import ToolReactExecutionAdapter
 from src.interactive.records import TaskRecord
@@ -92,49 +91,41 @@ def _qa_registry() -> ToolRegistry:
             "limit": {"type": "integer", "minimum": 1},
         },
     }
-    search_capability = ToolCapability(
-        tool_id=QA_RETRIEVAL_SEARCH_TOOL_ID,
+    read_schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["passage_id"],
+        "properties": {"passage_id": {"type": "string", "minLength": 1}},
+    }
+    retrieval_capability = ToolCapability(
+        tool_id=QA_RETRIEVAL_TOOL_ID,
         dataset_scope=("triviaqa",),
-        action_schemas={"search": search_schema},
-        input_schema=search_schema,
+        action_schemas={"search": search_schema, "read": read_schema},
+        input_schema={"oneOf": [search_schema, read_schema]},
         output_schema={"type": "object"},
         side_effect="none",
         timeout_seconds=2.0,
         version="test-v1",
     )
-    read_capability = _capability(
-        QA_RETRIEVAL_READ_TOOL_ID,
-        "read",
-        "passage_id",
-        dataset="triviaqa",
-    )
     return ToolRegistry(
         (
             ToolRegistration(
-                QA_RETRIEVAL_SEARCH_TOOL_ID,
+                QA_RETRIEVAL_TOOL_ID,
                 FakeTool(
                     {
                         "search": lambda arguments: {
                             "operation": "search",
                             "passage_ids": ["p1"],
                             "query": arguments["query"],
-                        }
-                    }
-                ),
-                search_capability,
-            ),
-            ToolRegistration(
-                QA_RETRIEVAL_READ_TOOL_ID,
-                FakeTool(
-                    {
+                        },
                         "read": lambda arguments: {
                             "operation": "read",
                             "passage_id": arguments["passage_id"],
                             "text": "public passage",
-                        }
+                        },
                     }
                 ),
-                read_capability,
+                retrieval_capability,
             ),
         )
     )
@@ -274,13 +265,13 @@ class ToolExactSchemaCanaryTests(unittest.IsolatedAsyncioTestCase):
                     ActionKind.TOOL,
                     "search",
                     {"query": "Public question", "limit": 1},
-                    QA_RETRIEVAL_SEARCH_TOOL_ID,
+                    QA_RETRIEVAL_TOOL_ID,
                 ),
                 _action(
                     ActionKind.TOOL,
                     "read",
                     {"passage_id": "p1"},
-                    QA_RETRIEVAL_READ_TOOL_ID,
+                    QA_RETRIEVAL_TOOL_ID,
                 ),
                 _action(
                     ActionKind.COMPLETE,
@@ -379,7 +370,7 @@ class ToolExactSchemaCanaryTests(unittest.IsolatedAsyncioTestCase):
                     ActionKind.TOOL,
                     "search",
                     {"query": "missing limit"},
-                    QA_RETRIEVAL_SEARCH_TOOL_ID,
+                    QA_RETRIEVAL_TOOL_ID,
                 ),
                 _action(
                     ActionKind.COMPLETE,
@@ -413,7 +404,7 @@ class ToolExactSchemaCanaryTests(unittest.IsolatedAsyncioTestCase):
             ActionKind.TOOL,
             "search",
             {"query": "Public question", "limit": 1},
-            QA_RETRIEVAL_SEARCH_TOOL_ID,
+            QA_RETRIEVAL_TOOL_ID,
         )
         receipt = await _MODULE.execute_tool_canary(
             backend=_Backend(_qa_registry(), _SequenceGateway([repeated] * 6)),
@@ -425,7 +416,7 @@ class ToolExactSchemaCanaryTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual("failed", receipt["status"])
         self.assertEqual(6, len(receipt["react_trace"]))
-        self.assertEqual(4, len(receipt["tool_receipts"]))
+        self.assertEqual(1, len(receipt["tool_receipts"]))
         self.assertTrue(receipt["compliance"]["schema_compliance"]["passed"])
         self.assertTrue(receipt["compliance"]["backend_compliance"]["passed"])
         self.assertFalse(receipt["compliance"]["model_compliance"]["passed"])

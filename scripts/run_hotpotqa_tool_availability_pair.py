@@ -57,8 +57,7 @@ from src.interactive.director import decode_director_transcript
 from src.interactive.exploration.paired_probe import randomize_probe_order
 from src.interactive.persistence import stable_id
 from src.interactive.qa_tool_adapter import (
-    QA_RETRIEVAL_READ_TOOL_ID,
-    QA_RETRIEVAL_SEARCH_TOOL_ID,
+    QA_RETRIEVAL_TOOL_ID,
 )
 from src.interactive.records import ProbeRecord, TaskRecord, TrajectoryRecord
 from src.interactive.scientific_sampling import ScientificSamplingCoordinate
@@ -462,10 +461,10 @@ def _validate_tool_catalog_exposure(
     ):
         raise ToolAvailabilityPairError("tool_on initial Tool catalog is invalid")
     tool_ids = [item.get("tool_id") for item in on_catalog]
-    expected = {QA_RETRIEVAL_SEARCH_TOOL_ID, QA_RETRIEVAL_READ_TOOL_ID}
-    if len(tool_ids) != 2 or set(tool_ids) != expected:
+    expected = {QA_RETRIEVAL_TOOL_ID}
+    if len(tool_ids) != 1 or set(tool_ids) != expected:
         raise ToolAvailabilityPairError(
-            "tool_on must expose exactly QA retrieval search/read"
+            "tool_on must expose exactly one QA retrieval resource"
         )
     if off_observation != on_observation:
         raise ToolAvailabilityPairError(

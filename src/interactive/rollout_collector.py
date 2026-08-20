@@ -933,6 +933,7 @@ def _request_record(call: AgentCallRecord) -> Mapping[str, Any]:
         "is_output_agent": request.is_output_agent,
         "execution_role": "format" if request.is_format_agent else "worker",
         "is_format_agent": request.is_format_agent,
+        "is_format_predecessor": request.is_format_predecessor,
         "communication_condition": request.communication_condition.value,
         "upstream": [item.to_dict() for item in request.upstream],
         "own_draft": request.own_draft,

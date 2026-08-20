@@ -16,6 +16,7 @@ import inspect
 from pathlib import Path
 from typing import Mapping, Protocol, Sequence
 
+from .react_execution import ToolReactExecutionAdapter
 from .qa_retrieval import (
     DEFAULT_QA_RETRIEVAL_INDEX,
     DEFAULT_SKILLFLOW_SOURCE,
@@ -23,6 +24,8 @@ from .qa_retrieval import (
     _load_retrieval_index_class,
 )
 from .tool_runtime import (
+    ActionKind,
+    StructuredAction,
     ToolCapability,
     ToolRegistration,
     ToolRegistry,
@@ -31,8 +34,11 @@ from .tool_runtime import (
 )
 
 
-QA_RETRIEVAL_SEARCH_TOOL_ID = "qa-retrieval.search"
-QA_RETRIEVAL_READ_TOOL_ID = "qa-retrieval.read"
+# DIRECT_REUSE: SkillFlow's QARetrievalEnvironment publishes one resource ID
+# with the two executable action names ``search`` and ``read``.  Keeping them
+# under one capability prevents the Canvas from assigning ``read`` without the
+# search action that produces its opaque passage_id.
+QA_RETRIEVAL_TOOL_ID = "qa-retrieval"
 DEFAULT_QA_DATASET_SCOPE = ("hotpotqa", "triviaqa")
 
 
@@ -215,6 +221,77 @@ class QAReadToolBackend:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class QARetrievalToolBackend:
+    """Dispatch SkillFlow's unified QA retrieval action domain."""
+
+    index: _RetrievalIndex
+    index_identity: Mapping[str, object]
+
+    async def invoke(self, request: ToolRequest) -> ToolResult:
+        if request.action == "search":
+            return await QASearchToolBackend(
+                self.index,
+                self.index_identity,
+            ).invoke(request)
+        if request.action == "read":
+            return await QAReadToolBackend(
+                self.index,
+                self.index_identity,
+            ).invoke(request)
+        raise ValueError(
+            f"retrieval backend received unsupported action {request.action!r}"
+        )
+
+
+class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
+    """Bounded QA retrieval with canonical search-to-read admission."""
+
+    def _tool_action_error(
+        self,
+        *,
+        action: StructuredAction,
+        observations: list[Mapping[str, object]],
+    ) -> str | None:
+        if (
+            action.kind is not ActionKind.TOOL
+            or action.resource_id != QA_RETRIEVAL_TOOL_ID
+            or action.name != "read"
+        ):
+            return None
+        arguments = action.arguments
+        if not isinstance(arguments, dict):
+            return None
+        passage_id = arguments.get("passage_id")
+        if not isinstance(passage_id, str) or not passage_id.strip():
+            return None
+
+        admitted_passage_ids: set[str] = set()
+        for observation in observations:
+            if observation.get("observation_status") != "success":
+                continue
+            result = observation.get("result")
+            if not isinstance(result, Mapping) or result.get("operation") != "search":
+                continue
+            raw_ids = result.get("passage_ids")
+            if isinstance(raw_ids, list):
+                admitted_passage_ids.update(
+                    value for value in raw_ids if isinstance(value, str) and value
+                )
+            raw_hits = result.get("hits")
+            if isinstance(raw_hits, list):
+                for hit in raw_hits:
+                    if isinstance(hit, Mapping) and isinstance(
+                        hit.get("passage_id"), str
+                    ):
+                        admitted_passage_ids.add(str(hit["passage_id"]))
+        if not admitted_passage_ids:
+            return "qa_read_requires_successful_search"
+        if passage_id not in admitted_passage_ids:
+            return "qa_read_passage_id_not_from_search"
+        return None
+
+
 def build_qa_tool_registry(
     index: _RetrievalIndex,
     *,
@@ -259,63 +336,80 @@ def build_qa_tool_registry(
             "limit": {"type": "integer", "minimum": 1},
         },
     }
-    search_capability = ToolCapability(
-        tool_id=QA_RETRIEVAL_SEARCH_TOOL_ID,
-        dataset_scope=scope,
-        action_schemas={"search": search_input_schema},
-        input_schema=search_input_schema,
-        output_schema={
-            "type": "object",
-            "additionalProperties": False,
-            "required": [
-                "operation",
-                "retrieval_index",
-                "query",
-                "top_k",
-                "passage_ids",
-                "hits",
-            ],
-            "properties": {
-                "operation": {"const": "search"},
-                "retrieval_index": identity_schema,
-                "query": {"type": "string"},
-                "top_k": {"type": "integer"},
-                "passage_ids": {"type": "array", "items": {"type": "string"}},
-                "hits": {"type": "array", "items": {"type": "object"}},
-            },
-        },
-        side_effect="none",
-        timeout_seconds=timeout_seconds,
-        version=version,
+    search_input_schema["properties"]["query"]["description"] = (
+        "A focused query for the missing public fact or relation."
+    )
+    search_input_schema["properties"]["limit"]["description"] = (
+        "The positive number of ranked public passages to return."
     )
     read_input_schema = {
         "type": "object",
         "additionalProperties": False,
         "required": ["passage_id"],
         "properties": {
-            "passage_id": {"type": "string", "minLength": 1},
+            "passage_id": {
+                "type": "string",
+                "minLength": 1,
+                "description": (
+                    "The exact canonical passage_id returned by a successful "
+                    "search action in this execution; a title or document_id "
+                    "is not a passage_id."
+                ),
+            },
         },
     }
-    read_capability = ToolCapability(
-        tool_id=QA_RETRIEVAL_READ_TOOL_ID,
+    retrieval_capability = ToolCapability(
+        tool_id=QA_RETRIEVAL_TOOL_ID,
         dataset_scope=scope,
-        action_schemas={"read": read_input_schema},
-        input_schema=read_input_schema,
+        action_schemas={
+            "search": search_input_schema,
+            "read": read_input_schema,
+        },
+        input_schema={
+            "oneOf": [search_input_schema, read_input_schema],
+        },
         output_schema={
-            "type": "object",
-            "additionalProperties": False,
-            "required": [
-                "operation",
-                "retrieval_index",
-                "passage_id",
-                "passage",
+            "oneOf": [
+                {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": [
+                        "operation",
+                        "retrieval_index",
+                        "query",
+                        "top_k",
+                        "passage_ids",
+                        "hits",
+                    ],
+                    "properties": {
+                        "operation": {"const": "search"},
+                        "retrieval_index": identity_schema,
+                        "query": {"type": "string"},
+                        "top_k": {"type": "integer"},
+                        "passage_ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                        },
+                        "hits": {"type": "array", "items": {"type": "object"}},
+                    },
+                },
+                {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": [
+                        "operation",
+                        "retrieval_index",
+                        "passage_id",
+                        "passage",
+                    ],
+                    "properties": {
+                        "operation": {"const": "read"},
+                        "retrieval_index": identity_schema,
+                        "passage_id": {"type": "string"},
+                        "passage": {"type": "object"},
+                    },
+                },
             ],
-            "properties": {
-                "operation": {"const": "read"},
-                "retrieval_index": identity_schema,
-                "passage_id": {"type": "string"},
-                "passage": {"type": "object"},
-            },
         },
         side_effect="none",
         timeout_seconds=timeout_seconds,
@@ -324,14 +418,9 @@ def build_qa_tool_registry(
     return ToolRegistry(
         (
             ToolRegistration(
-                QA_RETRIEVAL_SEARCH_TOOL_ID,
-                QASearchToolBackend(index, identity),
-                search_capability,
-            ),
-            ToolRegistration(
-                QA_RETRIEVAL_READ_TOOL_ID,
-                QAReadToolBackend(index, identity),
-                read_capability,
+                QA_RETRIEVAL_TOOL_ID,
+                QARetrievalToolBackend(index, identity),
+                retrieval_capability,
             ),
         )
     )
@@ -401,9 +490,10 @@ def open_qa_tool_registry(
 __all__ = [
     "DEFAULT_QA_DATASET_SCOPE",
     "OpenQAToolRegistry",
+    "QARetrievalReactExecutionAdapter",
+    "QARetrievalToolBackend",
     "QAReadToolBackend",
-    "QA_RETRIEVAL_READ_TOOL_ID",
-    "QA_RETRIEVAL_SEARCH_TOOL_ID",
+    "QA_RETRIEVAL_TOOL_ID",
     "QASearchToolBackend",
     "build_qa_tool_registry",
     "open_qa_tool_registry",

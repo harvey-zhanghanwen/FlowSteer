@@ -193,10 +193,13 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
             format_output_agent=True,
         )
         formatter = next(item for item in gateway.requests if item.agent.id == "fmt")
+        solver = next(item for item in gateway.requests if item.agent.id == "solver")
 
         self.assertTrue(formatter.is_output_agent)
         self.assertTrue(formatter.is_format_agent)
-        self.assertFalse(next(item for item in gateway.requests if item.agent.id == "solver").is_format_agent)
+        self.assertFalse(solver.is_format_agent)
+        self.assertTrue(solver.is_format_predecessor)
+        self.assertFalse(formatter.is_format_predecessor)
         self.assertEqual("fmt[solver:solver[]]", result.final_answer)
 
     async def test_format_execution_rejects_non_format_output_metadata(self) -> None:

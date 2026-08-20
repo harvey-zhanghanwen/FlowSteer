@@ -938,6 +938,14 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             ["solver"],
             [message.source_agent_id for message in output_request.upstream],
         )
+        self.assertEqual(
+            {
+                "admissible": True,
+                "graph_revision": env.revision,
+                "submission_semantics": "explicit_finish",
+            },
+            env.finish_admissibility(),
+        )
 
         finished = await env.step('{"action":"finish"}')
         self.assertTrue(finished.accepted)

@@ -168,6 +168,9 @@ class ToolReactExecutionTests(unittest.IsolatedAsyncioTestCase):
             "parse_error", response.metadata["react_trace"][0]["observation_status"]
         )
         self.assertEqual(
+            "not JSON", response.metadata["react_trace"][0]["action_text"]
+        )
+        self.assertEqual(
             "wiki.search", response.metadata["tool_receipts"][0]["tool_id"]
         )
         self.assertIn('"name":"search"', gateway.requests[0].agent.contract)
@@ -282,6 +285,59 @@ class ToolReactExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             "wiki.search", raised.exception.tool_receipts[0]["tool_id"]
         )
+
+    async def test_identical_failed_tool_request_is_not_dispatched_twice(self) -> None:
+        class FailingTool:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def invoke(self, request):
+                del request
+                self.calls += 1
+                raise TimeoutError("public timeout")
+
+        backend = FailingTool()
+        tool_registry = ToolRegistry(
+            (
+                ToolRegistration(
+                    "wiki.search",
+                    backend,
+                    registry().require_capability("wiki.search"),
+                ),
+            )
+        )
+        repeated = action(
+            "tool",
+            name="search",
+            arguments={"query": "same failed query"},
+            resource_id="wiki.search",
+        )
+        gateway = SequenceGateway(
+            [
+                repeated,
+                repeated,
+                action(
+                    "complete",
+                    name="complete",
+                    arguments={"value": "insufficient evidence"},
+                    resource_id=None,
+                ),
+            ]
+        )
+        response = await ToolReactExecutionAdapter(
+            gateway=gateway,
+            tool_registry=tool_registry,
+            max_turns=3,
+            max_tool_calls=3,
+        ).execute(request())
+
+        self.assertEqual(1, backend.calls)
+        self.assertEqual(1, response.metadata["tool_calls"])
+        self.assertEqual(
+            "duplicate_tool_request",
+            response.metadata["react_trace"][1]["public_error_code"],
+        )
+        self.assertIn("executed_action", gateway.requests[2].agent.contract)
 
 
 if __name__ == "__main__":

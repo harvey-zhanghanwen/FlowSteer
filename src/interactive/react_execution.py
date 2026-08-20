@@ -152,8 +152,9 @@ class ToolReactExecutionAdapter:
         # is present.  This does not choose an action or encode a workflow.
         continuation_guidance = (
             "\nContinue from the newest public observation; do not restart "
-            "the first step. Do not repeat an identical successful Tool "
-            "request unless that observation explicitly reports failure."
+            "the first step. Do not repeat an identical Tool request after "
+            "either success or failure; after a failure, change the request "
+            "or complete with an explicit insufficient-evidence artifact."
             if observations
             else ""
         )
@@ -210,6 +211,7 @@ class ToolReactExecutionAdapter:
         tool_receipts: list[dict[str, object]] = []
         model_calls: list[dict[str, object]] = []
         tool_calls = 0
+        dispatched_tool_actions: set[str] = set()
 
         for turn in range(1, self._max_turns + 1):
             agent = replace(
@@ -250,6 +252,12 @@ class ToolReactExecutionAdapter:
                     {
                         "observation_status": "parse_error",
                         "public_error_code": type(exc).__name__,
+                        # SkillFlow renders the exact prior Action beside its
+                        # public Observation in the next bounded turn.  Keep
+                        # the sampled text visible after a local parse failure
+                        # as well; it is public policy output, not hidden
+                        # reasoning.
+                        "action_text": response.text,
                     }
                 )
                 entry.update(observation)
@@ -264,6 +272,7 @@ class ToolReactExecutionAdapter:
                         {
                             "observation_status": "schema_invalid",
                             "public_error_code": "completion_schema_invalid",
+                            "executed_action": action.to_value(),
                         }
                     )
                     entry.update(observation)
@@ -276,6 +285,7 @@ class ToolReactExecutionAdapter:
                         {
                             "observation_status": "schema_invalid",
                             "public_error_code": "completion_empty",
+                            "executed_action": action.to_value(),
                         }
                     )
                     entry.update(observation)
@@ -292,6 +302,7 @@ class ToolReactExecutionAdapter:
                         {
                             "observation_status": "schema_invalid",
                             "public_error_code": completion_error,
+                            "executed_action": action.to_value(),
                         }
                     )
                     entry.update(observation)
@@ -308,6 +319,7 @@ class ToolReactExecutionAdapter:
                         {
                             "observation_status": "schema_invalid",
                             "public_error_code": "completion_artifact_empty",
+                            "executed_action": action.to_value(),
                         }
                     )
                     entry.update(observation)
@@ -333,6 +345,7 @@ class ToolReactExecutionAdapter:
                     {
                         "observation_status": "schema_invalid",
                         "public_error_code": "skill_action_not_admitted",
+                        "executed_action": action.to_value(),
                     }
                 )
                 entry.update(observation)
@@ -344,6 +357,7 @@ class ToolReactExecutionAdapter:
                     {
                         "observation_status": "schema_invalid",
                         "public_error_code": "tool_not_allowed",
+                        "executed_action": action.to_value(),
                     }
                 )
                 entry.update(observation)
@@ -364,6 +378,23 @@ class ToolReactExecutionAdapter:
                         "public_error_code": "tool_action_not_registered",
                         "tool_id": action.resource_id,
                         "allowed_action_names": list(capability.action_names),
+                        "executed_action": action.to_value(),
+                    }
+                )
+                entry.update(observation)
+                trace.append(entry)
+                observations.append(observation)
+                continue
+            admission_error = self._tool_action_error(
+                action=action,
+                observations=observations,
+            )
+            if admission_error is not None:
+                observation = MappingProxyType(
+                    {
+                        "observation_status": "schema_invalid",
+                        "public_error_code": admission_error,
+                        "executed_action": action.to_value(),
                     }
                 )
                 entry.update(observation)
@@ -375,6 +406,7 @@ class ToolReactExecutionAdapter:
                     {
                         "observation_status": "budget_exhausted",
                         "public_error_code": "tool_call_budget_exhausted",
+                        "executed_action": action.to_value(),
                     }
                 )
                 entry.update(observation)
@@ -386,6 +418,7 @@ class ToolReactExecutionAdapter:
                     {
                         "observation_status": "schema_invalid",
                         "public_error_code": "tool_arguments_not_object",
+                        "executed_action": action.to_value(),
                     }
                 )
                 entry.update(observation)
@@ -393,6 +426,29 @@ class ToolReactExecutionAdapter:
                 observations.append(observation)
                 continue
 
+            action_key = json.dumps(
+                action.to_value(),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            if action_key in dispatched_tool_actions:
+                # SkillFlow's environment history treats an exact repeated
+                # executable action as already observed.  Do not spend another
+                # Tool call or hide the duplicate from the policy.
+                observation = MappingProxyType(
+                    {
+                        "observation_status": "schema_invalid",
+                        "public_error_code": "duplicate_tool_request",
+                        "executed_action": action.to_value(),
+                    }
+                )
+                entry.update(observation)
+                trace.append(entry)
+                observations.append(observation)
+                continue
+
+            dispatched_tool_actions.add(action_key)
             tool_calls += 1
             result, receipt = await self._tool_registry.ainvoke_with_receipt(
                 action.resource_id,
@@ -447,6 +503,17 @@ class ToolReactExecutionAdapter:
         """Dataset adapters may add public completion admission checks."""
 
         del action, artifact, tool_receipts
+        return None
+
+    def _tool_action_error(
+        self,
+        *,
+        action: StructuredAction,
+        observations: list[Mapping[str, object]],
+    ) -> Optional[str]:
+        """Dataset adapters may add public action-admission checks."""
+
+        del action, observations
         return None
 
     def _completion_artifact(
