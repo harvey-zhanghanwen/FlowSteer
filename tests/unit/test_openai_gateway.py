@@ -122,8 +122,18 @@ class MessageTests(unittest.TestCase):
         self.assertIn("Candidate answer: ...", system)
         self.assertIn("only the answer value", system)
         self.assertIn("Evidence: ...", system)
-        self.assertIn("only yes or no", system)
         self.assertIn("Do not use <answer> tags", system)
+        for treatment_only_rule in (
+            "expected answer type and granularity",
+            "minimal sufficient answer span",
+            "full proper name",
+            "date, number expression, unit",
+            "qualifier",
+            "alias",
+            "abbreviation",
+            "only yes or no",
+        ):
+            self.assertNotIn(treatment_only_rule, system)
 
     def test_react_format_predecessor_applies_handoff_to_complete_action(self) -> None:
         messages = build_agent_messages(

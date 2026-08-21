@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 from pathlib import Path
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -14,6 +15,7 @@ from src.interactive.qa_tool_adapter import (
     QA_RETRIEVAL_TOOL_ID,
     build_qa_tool_registry,
     open_qa_tool_registry,
+    open_provided_context_qa_tool_registry,
 )
 from src.interactive.tool_runtime import ToolRequest
 
@@ -193,6 +195,107 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(index.closed)
 
+    def test_provided_context_factory_reuses_skillflow_builder_and_removes_temp_index(self) -> None:
+        index = FakeIndex()
+        captured: dict[str, object] = {}
+
+        class FakeDocumentPassage:
+            def __init__(self, **kwargs: object) -> None:
+                self.__dict__.update(kwargs)
+
+        class FakeRetrievalIndexClass:
+            @classmethod
+            def open(cls, path: Path) -> FakeIndex:
+                captured["opened_path"] = path
+                return index
+
+        def build(path: Path, passages: tuple[object, ...], **kwargs: object) -> None:
+            captured["built_path"] = path
+            captured["passages"] = passages
+            captured["identity"] = kwargs
+            path.write_text("fixture", encoding="utf-8")
+
+        module = SimpleNamespace(
+            DocumentPassage=FakeDocumentPassage,
+            RetrievalIndex=FakeRetrievalIndexClass,
+            build_retrieval_index=build,
+        )
+        with patch(
+            "src.interactive.qa_tool_adapter._load_retrieval_module",
+            return_value=module,
+        ):
+            opened = open_provided_context_qa_tool_registry(
+                ["[Widsith] Widsith preserves a list of kings."],
+                skillflow_source="/tmp/skillflow-source",
+            )
+            built_path = captured["built_path"]
+            assert isinstance(built_path, Path)
+            self.assertTrue(built_path.is_file())
+            supplied = captured["passages"]
+            assert isinstance(supplied, tuple)
+            self.assertEqual("Widsith", supplied[0].title)
+            self.assertEqual(
+                "Widsith preserves a list of kings.", supplied[0].text
+            )
+            self.assertEqual(
+                "benchmark-provided-context",
+                captured["identity"]["corpus_name"],
+            )
+            opened.close()
+
+        self.assertTrue(index.closed)
+        self.assertFalse(built_path.parent.exists())
+
+    def test_multi_hop_adapter_injects_upstream_skillflow_guidance(self) -> None:
+        request = AgentRequest(
+            request_id="qa:contract",
+            run_id="qa",
+            graph_revision=1,
+            problem="What book contains Widsith?",
+            agent=AgentNode(
+                "retriever",
+                "model",
+                "find and chain the relevant passages",
+                allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                execution_mode="react",
+            ),
+            model=ModelSpec("model", "provider"),
+            provider=ProviderSpec("provider", kind="test"),
+            phase=ExecutionPhase.SINGLE,
+        )
+        adapter = QARetrievalReactExecutionAdapter(
+            gateway=SimpleNamespace(generate=lambda request: None),
+            tool_registry=build_qa_tool_registry(FakeIndex()),
+            max_turns=3,
+            max_tool_calls=2,
+            task_type="multi_hop_qa",
+        )
+
+        rendered = adapter._contract(request, [])
+
+        self.assertIn("Chain evidence across passages", rendered)
+        self.assertIn("specific entity names (not the full question)", rendered)
+        self.assertNotIn('"value":"final artifact"', rendered)
+        self.assertIn(
+            "The completed artifact required by the Agent contract",
+            rendered,
+        )
+
+        format_predecessor = AgentRequest(
+            request_id=request.request_id,
+            run_id=request.run_id,
+            graph_revision=request.graph_revision,
+            problem=request.problem,
+            agent=request.agent,
+            model=request.model,
+            provider=request.provider,
+            phase=request.phase,
+            is_format_predecessor=True,
+        )
+        rendered_predecessor = adapter._contract(format_predecessor, [])
+        self.assertIn("Candidate answer:", rendered_predecessor)
+        self.assertIn("Evidence:", rendered_predecessor)
+
     async def test_react_read_requires_canonical_id_from_successful_search(self) -> None:
         index = FakeIndex()
         registry = build_qa_tool_registry(index)
@@ -258,6 +361,186 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             "qa_read_passage_id_not_from_search",
             response.metadata["react_trace"][2]["public_error_code"],
         )
+
+    async def test_react_rejects_initial_completion_then_continues_after_dispatch(self) -> None:
+        index = FakeIndex()
+
+        def action(name: str, arguments: object) -> str:
+            return json.dumps(
+                {
+                    "arguments": arguments,
+                    "kind": "complete" if name == "complete" else "tool",
+                    "name": name,
+                    "resource_id": (
+                        None if name == "complete" else QA_RETRIEVAL_TOOL_ID
+                    ),
+                    "skill_id": None,
+                }
+            )
+
+        class SequenceGateway:
+            def __init__(self) -> None:
+                self.outputs = [
+                    action("complete", {"value": "unsupported answer"}),
+                    action("search", {"query": "Ada Lovelace", "limit": 1}),
+                    action("complete", {"value": "Ada Lovelace"}),
+                ]
+                self.requests: list[AgentRequest] = []
+
+            async def generate(self, request: AgentRequest) -> AgentResponse:
+                self.requests.append(request)
+                return AgentResponse(self.outputs.pop(0))
+
+        gateway = SequenceGateway()
+        request = AgentRequest(
+            request_id="qa:completion-admission",
+            run_id="qa",
+            graph_revision=1,
+            problem="Who wrote the first published algorithm?",
+            agent=AgentNode(
+                "retriever",
+                "model",
+                "retrieve evidence and answer",
+                allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                execution_mode="react",
+            ),
+            model=ModelSpec("model", "provider"),
+            provider=ProviderSpec("provider", kind="test"),
+            phase=ExecutionPhase.SINGLE,
+        )
+
+        response = await QARetrievalReactExecutionAdapter(
+            gateway=gateway,
+            tool_registry=build_qa_tool_registry(index),
+            max_turns=3,
+            max_tool_calls=1,
+        ).execute(request)
+
+        self.assertEqual("Ada Lovelace", response.text)
+        self.assertEqual(1, response.metadata["tool_calls"])
+        self.assertEqual(
+            "qa_completion_requires_retrieval_dispatch",
+            response.metadata["react_trace"][0]["public_error_code"],
+        )
+        self.assertIn(
+            "qa_completion_requires_retrieval_dispatch",
+            gateway.requests[1].agent.contract,
+        )
+        self.assertEqual([("Ada Lovelace", 1)], index.search_calls)
+
+    async def test_react_failed_retrieval_receipt_admits_explicit_completion(self) -> None:
+        class FailingIndex(FakeIndex):
+            def search(self, query: str, *, limit: int) -> tuple[FakeHit, ...]:
+                self.search_calls.append((query, limit))
+                raise TimeoutError("public retrieval timeout")
+
+        def action(name: str, arguments: object) -> str:
+            return json.dumps(
+                {
+                    "arguments": arguments,
+                    "kind": "complete" if name == "complete" else "tool",
+                    "name": name,
+                    "resource_id": (
+                        None if name == "complete" else QA_RETRIEVAL_TOOL_ID
+                    ),
+                    "skill_id": None,
+                }
+            )
+
+        class SequenceGateway:
+            def __init__(self) -> None:
+                self.outputs = [
+                    action("search", {"query": "Ada Lovelace", "limit": 1}),
+                    action("complete", {"value": "insufficient evidence"}),
+                ]
+
+            async def generate(self, request: AgentRequest) -> AgentResponse:
+                del request
+                return AgentResponse(self.outputs.pop(0))
+
+        response = await QARetrievalReactExecutionAdapter(
+            gateway=SequenceGateway(),
+            tool_registry=build_qa_tool_registry(FailingIndex()),
+            max_turns=2,
+            max_tool_calls=1,
+        ).execute(
+            AgentRequest(
+                request_id="qa:failed-retrieval",
+                run_id="qa",
+                graph_revision=1,
+                problem="Who wrote the first published algorithm?",
+                agent=AgentNode(
+                    "retriever",
+                    "model",
+                    "retrieve evidence and answer",
+                    allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                    execution_mode="react",
+                ),
+                model=ModelSpec("model", "provider"),
+                provider=ProviderSpec("provider", kind="test"),
+                phase=ExecutionPhase.SINGLE,
+            )
+        )
+
+        self.assertEqual("insufficient evidence", response.text)
+        self.assertEqual(1, response.metadata["tool_calls"])
+        self.assertEqual("TimeoutError", response.metadata["tool_receipts"][0]["error_type"])
+
+    async def test_react_direct_completion_remains_valid_when_dispatch_is_impossible(self) -> None:
+        def complete(value: str) -> str:
+            return json.dumps(
+                {
+                    "arguments": {"value": value},
+                    "kind": "complete",
+                    "name": "complete",
+                    "resource_id": None,
+                    "skill_id": None,
+                }
+            )
+
+        class OneShotGateway:
+            async def generate(self, request: AgentRequest) -> AgentResponse:
+                del request
+                return AgentResponse(complete("Ada Lovelace"))
+
+        for allowed_tools, max_tool_calls in (
+            ((QA_RETRIEVAL_TOOL_ID,), 0),
+            ((), 2),
+        ):
+            with self.subTest(
+                allowed_tools=allowed_tools,
+                max_tool_calls=max_tool_calls,
+            ):
+                response = await QARetrievalReactExecutionAdapter(
+                    gateway=OneShotGateway(),
+                    tool_registry=build_qa_tool_registry(FakeIndex()),
+                    max_turns=1,
+                    max_tool_calls=max_tool_calls,
+                ).execute(
+                    AgentRequest(
+                        request_id="qa:no-dispatch",
+                        run_id="qa",
+                        graph_revision=1,
+                        problem="Who wrote the first published algorithm?",
+                        agent=AgentNode(
+                            "retriever",
+                            "model",
+                            "answer",
+                            allowed_tools=allowed_tools,
+                            execution_mode="react",
+                        ),
+                        model=ModelSpec("model", "provider"),
+                        provider=ProviderSpec("provider", kind="test"),
+                        phase=ExecutionPhase.SINGLE,
+                    )
+                )
+
+                self.assertEqual("Ada Lovelace", response.text)
+                self.assertEqual(0, response.metadata["tool_calls"])
+                self.assertEqual(
+                    "completed",
+                    response.metadata["react_trace"][0]["observation_status"],
+                )
 
 
 if __name__ == "__main__":

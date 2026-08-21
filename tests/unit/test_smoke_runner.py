@@ -352,7 +352,11 @@ class QAToolRuntimeWiringTests(unittest.TestCase):
             return None
 
     @staticmethod
-    def _config(*, enabled: bool = True) -> dict:
+    def _config(
+        *,
+        enabled: bool = True,
+        passage_source: str = "external_corpus",
+    ) -> dict:
         config = {
             "experiment": {"condition_id": "hotpotqa_tool_react_stable_zero"},
         }
@@ -364,6 +368,7 @@ class QAToolRuntimeWiringTests(unittest.TestCase):
                 "dataset_scope": ["hotpotqa"],
                 "skillflow_source": "vendor/SkillFlow/src",
                 "index_path": "data/public-retrieval.sqlite3",
+                "passage_source": passage_source,
                 "tool_timeout_seconds": 7.0,
                 "max_turns_per_agent_call": 5,
                 "max_tool_calls_per_agent_call": 3,
@@ -466,6 +471,60 @@ class QAToolRuntimeWiringTests(unittest.TestCase):
         self.assertNotIn(task.ground_truth, rendered)
         close_runtime()
         self.assertTrue(owner.closed)
+
+    def test_hotpot_provided_context_opens_task_scoped_skillflow_index(self) -> None:
+        root = Path(self._temp_dir.name)
+        task = TaskRecord(
+            task_id="HotpotQA:provided-context",
+            question="What book contains Widsith?",
+            ground_truth="EVALUATOR_TRUTH_MUST_NOT_APPEAR",
+            split="validation",
+            metadata={
+                "dataset_key": "hotpotqa",
+                "source": "HotpotQA",
+                "skillflow": {
+                    "task_type": "multi_hop_qa",
+                    "context": [
+                        "[Widsith] Widsith survives in the Exeter Book."
+                    ],
+                },
+            },
+        )
+        registry = load_model_registry(
+            Path(__file__).resolve().parents[2]
+            / "config/model_catalog_triviaqa_v1.yaml"
+        )
+        tool_registry = build_qa_tool_registry(self._Index())
+        owner = SimpleNamespace(registry=tool_registry, close=lambda: None)
+        backend = object.__new__(_MODULE.LiveSmokeBackend)
+        backend.config = self._config(passage_source="provided_context")
+        backend.registry = registry
+        backend.runtime = AgentRuntime(registry, self._Gateway())
+        backend.project_root = root
+
+        with patch.object(
+            _MODULE,
+            "open_provided_context_qa_tool_registry",
+            return_value=owner,
+        ) as opened_context, patch.object(
+            _MODULE,
+            "open_qa_tool_registry",
+            side_effect=AssertionError("external corpus must not open"),
+        ):
+            runtime, shared_registry, close_runtime = backend._runtime_for_task(task)
+
+        opened_context.assert_called_once_with(
+            ["[Widsith] Widsith survives in the Exeter Book."],
+            skillflow_source=root / "vendor/SkillFlow/src",
+            dataset_scope=("hotpotqa",),
+            timeout_seconds=7.0,
+        )
+        self.assertIs(shared_registry, tool_registry)
+        self.assertEqual(
+            "multi_hop_qa",
+            runtime.execution_adapters["react"]._task_type,
+        )
+        close_runtime()
 
     def test_tool_condition_rejects_condition_or_dataset_aliasing(self) -> None:
         task = make_task("hotpotqa", 0)

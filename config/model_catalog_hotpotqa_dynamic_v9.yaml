@@ -1,0 +1,200 @@
+# HotpotQA v9 development Executor catalog.
+#
+# Shared capability records are copied from model_catalog_multidataset_tool_v2;
+# the additional text-QA arms are copied from model_catalog_hotpotqa_deep_v6.
+# All numeric selection priors stay equal.  Director-visible ``profile`` values
+# contain capability descriptions only.  The three HotpotQA capacity results
+# are retained below as offline diagnostic receipt metadata; ``Director._model_catalog``
+# does not render those receipt keys into the model-visible catalog.  They are
+# bounded six-example development diagnostics with the Director off and a fixed
+# semantic-reasoning -> singleton-Format topology, not validation estimates or
+# evidence for a global role recipe.
+
+providers:
+  - provider_id: "local-director"
+    kind: "openai-compatible"
+    endpoint: "http://127.0.0.1:8015/v1"
+    max_concurrency: 32
+
+  - provider_id: "vectorengine"
+    kind: "openai-compatible"
+    endpoint: "${VECTOR_ENGINE_BASE_URL:-https://api.vectorengine.ai/v1}"
+    max_concurrency: 32
+    api_key_env: "VECTOR_ENGINE_API_KEY"
+
+models:
+  - model_id: "qwen3.5-9b-local"
+    provider_id: "local-director"
+    model_name: "supervisor_theta"
+    selection_weight: 1.0
+    cheap_weight: 1.0
+    fast_weight: 1.0
+    context_window: 8192
+    metadata:
+      family: "qwen"
+      profile: "provider=local-director;locality=local;instruction=chat;context=8192;capabilities=text,structured-action,coding-format"
+      capability_canary: "passed_2026-08-20"
+      canary_source: "artifacts/model_capability_canary/local_qwen35_9b_nonthinking_20260820.json"
+      text_capable: "true"
+      tool_capable: "true"
+      tool_capability_scope: "flowsteer-structured-action"
+      coding_capable: "true"
+      coding_capability_scope: "structured-action-and-unified-diff-format"
+      chat_template_enable_thinking: "false"
+      max_tokens: "4096"
+
+  - model_id: "qwen3.5-flash"
+    provider_id: "vectorengine"
+    model_name: "qwen3.5-flash"
+    selection_weight: 1.0
+    cheap_weight: 1.0
+    fast_weight: 1.0
+    metadata:
+      family: "qwen"
+      profile: "provider=vectorengine;locality=remote;instruction=chat;capabilities=text,structured-action,coding-format"
+      capability_canary: "passed_2026-08-19"
+      canary_source: "artifacts/model_capability_canary/cheap_fast_20260819.json"
+      text_capable: "true"
+      tool_capable: "true"
+      tool_capability_scope: "flowsteer-structured-action"
+      coding_capable: "true"
+      coding_capability_scope: "structured-action-and-unified-diff-format"
+      hotpotqa_development_diagnostic: "strict_exact_match=5/6; evaluator_valid=6/6; operational_failures=0/6; diagnostic_only=true"
+      hotpotqa_development_diagnostic_scope: "six_preselected_development_examples;director_off;fixed_semantic_reasoning_to_singleton_format;no_generalization_claim"
+      hotpotqa_development_diagnostic_source: "artifacts/hotpotqa_executor_capacity/qwen35_flash_six_v1.json"
+      max_tokens: "4096"
+
+  - model_id: "qwen3.5-plus"
+    provider_id: "vectorengine"
+    model_name: "qwen3.5-plus"
+    selection_weight: 1.0
+    cheap_weight: 1.0
+    fast_weight: 1.0
+    metadata:
+      family: "qwen"
+      profile: "provider=vectorengine;locality=remote;instruction=chat;capabilities=text,structured-action,coding-format"
+      text_qa_canary: "passed_2026-08-16"
+      canary_source: "hotpotqa_multiagent_skill/model_catalog_v6/evidence_manifest.json"
+      hotpotqa_development_diagnostic: "strict_exact_match=6/6; evaluator_valid=6/6; operational_failures=0/6; diagnostic_only=true"
+      hotpotqa_development_diagnostic_scope: "six_preselected_development_examples;director_off;fixed_semantic_reasoning_to_singleton_format;no_generalization_claim"
+      hotpotqa_development_diagnostic_source: "artifacts/hotpotqa_executor_capacity/qwen35_plus_six_v1.json"
+      max_tokens: "4096"
+
+  - model_id: "deepseek-v4-flash"
+    provider_id: "vectorengine"
+    model_name: "deepseek-v4-flash"
+    selection_weight: 1.0
+    cheap_weight: 1.0
+    fast_weight: 1.0
+    metadata:
+      family: "deepseek"
+      profile: "provider=vectorengine;locality=remote;instruction=chat;capabilities=text,structured-action,coding-format"
+      capability_canary: "passed_2026-08-19"
+      canary_source: "artifacts/model_capability_canary/cheap_fast_20260819.json"
+      text_capable: "true"
+      tool_capable: "true"
+      tool_capability_scope: "flowsteer-structured-action"
+      coding_capable: "true"
+      coding_capability_scope: "structured-action-and-unified-diff-format"
+      max_tokens: "4096"
+
+  - model_id: "deepseek-v4-pro"
+    provider_id: "vectorengine"
+    model_name: "deepseek-v4-pro"
+    selection_weight: 1.0
+    cheap_weight: 1.0
+    fast_weight: 1.0
+    metadata:
+      family: "deepseek"
+      profile: "provider=vectorengine;locality=remote;instruction=chat;capabilities=text,structured-action,coding-format"
+      text_qa_canary: "passed_2026-08-16"
+      canary_source: "hotpotqa_multiagent_skill/model_catalog_v6/evidence_manifest.json"
+      hotpotqa_development_diagnostic: "strict_exact_match=5/6; evaluator_valid=5/6; operational_failures=1/6; diagnostic_only=true"
+      hotpotqa_development_diagnostic_scope: "six_preselected_development_examples;director_off;fixed_semantic_reasoning_to_singleton_format;no_generalization_claim"
+      hotpotqa_development_diagnostic_source: "artifacts/hotpotqa_executor_capacity/deepseek_v4_pro_six_v1.json"
+      max_tokens: "4096"
+
+  - model_id: "gpt-4o-mini"
+    provider_id: "vectorengine"
+    model_name: "gpt-4o-mini"
+    selection_weight: 1.0
+    cheap_weight: 1.0
+    fast_weight: 1.0
+    metadata:
+      family: "gpt"
+      profile: "provider=vectorengine;locality=remote;instruction=chat;capabilities=text,structured-action,coding-format"
+      capability_canary: "passed_2026-08-19"
+      canary_source: "artifacts/model_capability_canary/cheap_fast_20260819.json"
+      text_capable: "true"
+      tool_capable: "true"
+      tool_capability_scope: "flowsteer-structured-action"
+      coding_capable: "true"
+      coding_capability_scope: "structured-action-and-unified-diff-format"
+      max_tokens: "4096"
+
+  - model_id: "MiniMax-M2.5"
+    provider_id: "vectorengine"
+    model_name: "MiniMax-M2.5"
+    selection_weight: 1.0
+    cheap_weight: 1.0
+    fast_weight: 1.0
+    metadata:
+      family: "minimax"
+      profile: "provider=vectorengine;locality=remote;instruction=chat;capabilities=text,structured-action,coding-format"
+      capability_canary: "passed_2026-08-19"
+      canary_source: "artifacts/model_capability_canary/cheap_fast_20260819.json"
+      text_capable: "true"
+      tool_capable: "true"
+      tool_capability_scope: "flowsteer-structured-action"
+      coding_capable: "true"
+      coding_capability_scope: "structured-action-and-unified-diff-format"
+      max_tokens: "4096"
+
+  - model_id: "MiniMax-M3"
+    provider_id: "vectorengine"
+    model_name: "MiniMax-M3"
+    selection_weight: 1.0
+    cheap_weight: 1.0
+    fast_weight: 1.0
+    metadata:
+      family: "minimax"
+      profile: "provider=vectorengine;locality=remote;instruction=chat;capabilities=text,structured-action,coding-format"
+      capability_canary: "passed_2026-08-19"
+      canary_source: "artifacts/model_capability_canary/cheap_fast_20260819.json"
+      text_capable: "true"
+      tool_capable: "true"
+      tool_capability_scope: "flowsteer-structured-action"
+      coding_capable: "true"
+      coding_capability_scope: "structured-action-and-unified-diff-format"
+      max_tokens: "4096"
+
+  - model_id: "glm-4.5-flash"
+    provider_id: "vectorengine"
+    model_name: "glm-4.5-flash"
+    selection_weight: 1.0
+    cheap_weight: 1.0
+    fast_weight: 1.0
+    metadata:
+      family: "glm"
+      profile: "provider=vectorengine;locality=remote;instruction=chat;capabilities=text,structured-action,coding-format"
+      capability_canary: "passed_2026-08-19"
+      canary_source: "artifacts/model_capability_canary/cheap_fast_20260819.json"
+      text_capable: "true"
+      tool_capable: "true"
+      tool_capability_scope: "flowsteer-structured-action"
+      coding_capable: "true"
+      coding_capability_scope: "structured-action-and-unified-diff-format"
+      max_tokens: "4096"
+
+  - model_id: "kimi-k2"
+    provider_id: "vectorengine"
+    model_name: "kimi-k2"
+    selection_weight: 1.0
+    cheap_weight: 1.0
+    fast_weight: 1.0
+    metadata:
+      family: "kimi"
+      profile: "provider=vectorengine;locality=remote;instruction=chat;capabilities=text,structured-action,coding-format"
+      text_qa_canary: "passed_2026-08-16"
+      canary_source: "hotpotqa_multiagent_skill/model_catalog_v6/evidence_manifest.json"
+      max_tokens: "4096"

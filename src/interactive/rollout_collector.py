@@ -39,6 +39,7 @@ from .director import (
     DirectorError,
     DirectorResponse,
     decode_director_transcript,
+    director_state_conditioned_sampling_json_schema_text,
 )
 from .openai_gateway import build_agent_messages
 from .persistence import EvidenceStore, GraphSnapshotEvent, stable_id
@@ -261,6 +262,8 @@ class SGLangReceiptDirectorClient:
         max_tokens: int = 768,
         timeout_seconds: float = 180.0,
         max_retries: int = 2,
+        action_json_schema: Optional[str] = None,
+        action_json_schema_version: Optional[str] = None,
     ) -> None:
         if not hasattr(tokenizer, "apply_chat_template") or not hasattr(tokenizer, "decode"):
             raise ValueError("tokenizer must expose apply_chat_template() and decode()")
@@ -279,6 +282,23 @@ class SGLangReceiptDirectorClient:
             raise ValueError("Director token, timeout, and retry limits are invalid")
         if not isinstance(policy_version, str) or not policy_version.strip():
             raise ValueError("policy_version must be non-empty")
+        if action_json_schema is not None and (
+            not isinstance(action_json_schema, str)
+            or not action_json_schema.strip()
+        ):
+            raise ValueError("action_json_schema must be non-empty text or None")
+        if (action_json_schema is None) != (action_json_schema_version is None):
+            raise ValueError(
+                "action_json_schema and action_json_schema_version must be "
+                "supplied together"
+            )
+        if action_json_schema_version is not None and (
+            not isinstance(action_json_schema_version, str)
+            or not action_json_schema_version.strip()
+        ):
+            raise ValueError(
+                "action_json_schema_version must be non-empty text or None"
+            )
         if (
             expected_server_weight_version is not None
             and not expected_server_weight_version.strip()
@@ -307,6 +327,8 @@ class SGLangReceiptDirectorClient:
         self.max_tokens = int(max_tokens)
         self.timeout_seconds = float(timeout_seconds)
         self.max_retries = int(max_retries)
+        self.action_json_schema = action_json_schema
+        self.action_json_schema_version = action_json_schema_version
 
     @property
     def generate_url(self) -> str:
@@ -395,6 +417,10 @@ class SGLangReceiptDirectorClient:
         prompt: str,
         adapter_name: Optional[str],
         seed: Optional[int] = None,
+        *,
+        action_json_schema: Optional[str] = None,
+        action_json_schema_version: Optional[str] = None,
+        action_schema_branch: Optional[str] = None,
     ) -> Mapping[str, Any]:
         if seed is not None and (
             isinstance(seed, bool) or not isinstance(seed, int) or seed < 0
@@ -423,6 +449,22 @@ class SGLangReceiptDirectorClient:
             # deployed SGLang 0.5.15 native /generate SamplingParams exposes
             # the equivalent field as ``sampling_seed``.
             payload["sampling_params"]["sampling_seed"] = seed
+        (
+            resolved_action_schema,
+            _,
+            _,
+        ) = self._resolve_action_schema(
+            action_json_schema=action_json_schema,
+            action_json_schema_version=action_json_schema_version,
+            action_schema_branch=action_schema_branch,
+        )
+        if resolved_action_schema is not None:
+            # NECESSARY_ADAPTATION: deployed SGLang 0.5.15 exposes
+            # SamplingParams.json_schema.  Evaluation may use the schema that
+            # mirrors the strict AgentActionParser.  Training keeps this off
+            # until its HF loss path applies the identical grammar mask and
+            # constrained-policy normalization.
+            payload["sampling_params"]["json_schema"] = resolved_action_schema
         if adapter_name is not None:
             payload["lora_path"] = adapter_name
         return payload
@@ -432,22 +474,108 @@ class SGLangReceiptDirectorClient:
         prompt: str,
         *,
         seed: Optional[int] = None,
+        action_json_schema: Optional[str] = None,
+        action_json_schema_version: Optional[str] = None,
+        action_schema_branch: Optional[str] = None,
     ) -> Mapping[str, Any]:
         _, adapter_name, _ = self._policy_route()
-        return self._request_payload(prompt, adapter_name, seed)
+        return self._request_payload(
+            prompt,
+            adapter_name,
+            seed,
+            action_json_schema=action_json_schema,
+            action_json_schema_version=action_json_schema_version,
+            action_schema_branch=action_schema_branch,
+        )
+
+    def _resolve_action_schema(
+        self,
+        *,
+        action_json_schema: Optional[str],
+        action_json_schema_version: Optional[str],
+        action_schema_branch: Optional[str],
+    ) -> tuple[Optional[str], Optional[str], Optional[str]]:
+        override_requested = any(
+            value is not None
+            for value in (
+                action_json_schema,
+                action_json_schema_version,
+                action_schema_branch,
+            )
+        )
+        if not override_requested:
+            return (
+                self.action_json_schema,
+                self.action_json_schema_version,
+                None,
+            )
+        if any(
+            not isinstance(value, str) or not value.strip()
+            for value in (
+                action_json_schema,
+                action_json_schema_version,
+                action_schema_branch,
+            )
+        ):
+            raise ValueError(
+                "per-request action schema, version, and branch must be "
+                "supplied together as non-empty text"
+            )
+        assert action_json_schema is not None
+        assert action_json_schema_version is not None
+        assert action_schema_branch is not None
+        try:
+            supplied_schema = json.loads(action_json_schema)
+            expected_schema = json.loads(
+                director_state_conditioned_sampling_json_schema_text(
+                    action_schema_branch.strip()
+                )
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "per-request action schema must be the strict schema for its branch"
+            ) from exc
+        if supplied_schema != expected_schema:
+            raise ValueError(
+                "per-request action schema does not match its declared branch"
+            )
+        return (
+            action_json_schema.strip(),
+            action_json_schema_version.strip(),
+            action_schema_branch.strip(),
+        )
 
     async def propose(
         self,
         prompt: str,
         *,
         seed: Optional[int] = None,
+        action_json_schema: Optional[str] = None,
+        action_json_schema_version: Optional[str] = None,
+        action_schema_branch: Optional[str] = None,
     ) -> DirectorResponse:
         await self.rollout_gate.acquire()
         try:
             policy_version, adapter_name, expected_server_weight_version = (
                 self._policy_route()
             )
-            payload = self._request_payload(prompt, adapter_name, seed)
+            (
+                resolved_action_schema,
+                resolved_action_schema_version,
+                resolved_action_schema_branch,
+            ) = self._resolve_action_schema(
+                action_json_schema=action_json_schema,
+                action_json_schema_version=action_json_schema_version,
+                action_schema_branch=action_schema_branch,
+            )
+            payload = self._request_payload(
+                prompt,
+                adapter_name,
+                seed,
+                action_json_schema=action_json_schema,
+                action_json_schema_version=action_json_schema_version,
+                action_schema_branch=action_schema_branch,
+            )
             last_error: BaseException | None = None
             started_at = time.monotonic()
             for attempt in range(self.max_retries + 1):
@@ -460,6 +588,12 @@ class SGLangReceiptDirectorClient:
                         policy_version=policy_version,
                         adapter_name=adapter_name,
                         expected_server_weight_version=expected_server_weight_version,
+                        action_json_schema_version=(
+                            resolved_action_schema_version
+                            if resolved_action_schema is not None
+                            else None
+                        ),
+                        action_schema_branch=resolved_action_schema_branch,
                         latency_ms=max(
                             (time.monotonic() - started_at) * 1000.0,
                             0.0,
@@ -525,6 +659,8 @@ class SGLangReceiptDirectorClient:
         policy_version: str,
         adapter_name: Optional[str],
         expected_server_weight_version: Optional[str],
+        action_json_schema_version: Optional[str],
+        action_schema_branch: Optional[str],
         latency_ms: float,
         attempt_count: int,
     ) -> DirectorResponse:
@@ -595,6 +731,8 @@ class SGLangReceiptDirectorClient:
                 "generation_seed": payload.get("sampling_params", {}).get(
                     "sampling_seed"
                 ),
+                "action_json_schema_version": action_json_schema_version,
+                "action_schema_branch": action_schema_branch,
                 "receipt_verified": True,
             },
         )
@@ -1257,15 +1395,30 @@ class AgentGraphRolloutCollector:
         prompt = self.orchestrator.build_prompt(env, 0, current_skills)
         for round_index in range(self.orchestrator.max_rounds):
             generation_seed = self.orchestrator.generation_seed(round_index)
+            schema_request = self.orchestrator.action_schema_request(env)
             response = await self.orchestrator.client.propose(
                 prompt,
                 seed=generation_seed,
+                **schema_request,
             )
             canvas = await env.step(response.text)
             metadata = response.metadata
 
             if metadata.get("receipt_verified") is not True:
                 raise ReceiptValidationError("Director turn lacks an exact behavior receipt")
+            if schema_request:
+                if metadata.get("action_json_schema_version") != schema_request.get(
+                    "action_json_schema_version"
+                ):
+                    raise ReceiptValidationError(
+                        "Director action schema version differs from the request"
+                    )
+                if metadata.get("action_schema_branch") != schema_request.get(
+                    "action_schema_branch"
+                ):
+                    raise ReceiptValidationError(
+                        "Director action schema branch differs from the request"
+                    )
             if metadata.get("prompt_text") != prompt:
                 raise ReceiptValidationError("Director receipt is bound to a different prompt")
             if _optional_int(metadata.get("generation_seed")) != generation_seed:
@@ -1331,6 +1484,17 @@ class AgentGraphRolloutCollector:
                 if canvas.execution is not None and not canvas.execution_reused
                 else ()
             )
+            runtime_summary = dict(_runtime_summary(canvas.execution))
+            action_schema_version = metadata.get("action_json_schema_version")
+            if action_schema_version is not None:
+                runtime_summary["director_action_schema_version"] = (
+                    action_schema_version
+                )
+            action_schema_branch = metadata.get("action_schema_branch")
+            if action_schema_branch is not None:
+                runtime_summary["director_action_schema_branch"] = (
+                    action_schema_branch
+                )
             turn = TurnRecord(
                 turn_id=stable_id(
                     "turn",
@@ -1353,7 +1517,7 @@ class AgentGraphRolloutCollector:
                 graph_snapshot_id=snapshot.snapshot_id,
                 previous_graph_snapshot_id=previous_snapshot_id,
                 executions=execution_records,
-                runtime_summary=_runtime_summary(canvas.execution),
+                runtime_summary=runtime_summary,
                 execution_reused=canvas.execution_reused,
                 director_request_id=director_request_id,
                 director_latency_ms=_optional_float(metadata.get("latency_ms")),

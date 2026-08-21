@@ -33,7 +33,15 @@ from src.interactive.config_loader import (
 from src.interactive.computation_tools import create_aime_computation_registry
 from src.interactive.coding_execution import CodingExecutionAdapter
 from src.interactive.coding_tools import create_swebench_repository_registry
-from src.interactive.director import AgentGraphOrchestrator
+from src.interactive.director import (
+    AgentGraphOrchestrator,
+    DIRECTOR_PROGRESSIVE_ACTION_MASK_PROFILE,
+    DIRECTOR_PROMPT_VERSION,
+    DIRECTOR_SGLANG_SAMPLING_SCHEMA_VERSION,
+    DIRECTOR_STATE_CONDITIONED_ACTION_SCHEMA_VERSION,
+    decode_director_transcript,
+    director_sglang_sampling_json_schema_text,
+)
 from src.interactive.environment_execution import (
     build_environment_execution_resources,
     evaluator_locked_ragen_session_factory,
@@ -57,6 +65,7 @@ from src.interactive.persistence import EvidenceStore, GraphSnapshotEvent
 from src.interactive.qa_tool_adapter import (
     QARetrievalReactExecutionAdapter,
     open_qa_tool_registry,
+    open_provided_context_qa_tool_registry,
 )
 from src.interactive.qa_retrieval import (
     SkillFlowQARetriever,
@@ -108,7 +117,7 @@ from src.interactive.task_evaluator import (
 from src.interactive.versioning import VersionBundle
 
 
-PROMPT_VERSION = "agentgraph.director.minimal.v1"
+PROMPT_VERSION = DIRECTOR_PROMPT_VERSION
 TOOL_VERSION = "agentgraph.atomic-actions.v1"
 
 QA_TOOL_RUNTIME_MODE = "model_driven_search_read"
@@ -605,6 +614,17 @@ def _qa_tool_runtime_settings(
             raise ConfigurationError(
                 f"qa_tool_runtime.{field_name} must be non-empty text"
             )
+    passage_source = section.get("passage_source", "external_corpus")
+    if passage_source not in {"external_corpus", "provided_context"}:
+        raise ConfigurationError(
+            "qa_tool_runtime.passage_source must be external_corpus or "
+            "provided_context"
+        )
+    if passage_source == "provided_context" and source_key != "hotpotqa":
+        raise ConfigurationError(
+            "qa_tool_runtime.passage_source=provided_context is currently "
+            "supported only for HotpotQA records with supplied passages"
+        )
 
     integer_fields = {
         "max_turns_per_agent_call": 1,
@@ -629,6 +649,7 @@ def _qa_tool_runtime_settings(
         return None
     return {
         "source_key": source_key,
+        "passage_source": passage_source,
         "skillflow_source": section["skillflow_source"].strip(),
         "index_path": section["index_path"].strip(),
         "max_turns": int(section["max_turns_per_agent_call"]),
@@ -1104,31 +1125,38 @@ def _skill_query_tags(
 
     tags = {str(code) for code in validation_issue_codes}
 
+    dataset_key = _dataset_key(task)
     task_context: dict[str, Any] = {
-        "dataset_key": _dataset_key(task),
+        "dataset_key": dataset_key,
         "task_family": task_family,
     }
-    metadata_task_type = task.metadata.get("task_type")
-    if isinstance(metadata_task_type, str) and metadata_task_type.strip():
-        task_context["task_type"] = metadata_task_type.strip()
-    skillflow = task.metadata.get("skillflow")
-    if isinstance(skillflow, Mapping):
-        skillflow_task_type = skillflow.get("task_type")
-        if (
-            "task_type" not in task_context
-            and isinstance(skillflow_task_type, str)
-            and skillflow_task_type.strip()
-        ):
-            task_context["task_type"] = skillflow_task_type.strip()
-        extra = skillflow.get("extra")
-        if isinstance(extra, Mapping):
-            for source_key, condition_key in (
-                ("type", "task_subtype"),
-                ("level", "difficulty"),
+    # HotpotQA's strict public protocol exposes the question and supplied
+    # passages, not native benchmark type/difficulty annotations.  Keep Skill
+    # retrieval on the model-visible task family and decision-time graph state.
+    # Other datasets retain their existing metadata compatibility until their
+    # own public protocols adopt an explicit allowlist.
+    if dataset_key != "hotpotqa":
+        metadata_task_type = task.metadata.get("task_type")
+        if isinstance(metadata_task_type, str) and metadata_task_type.strip():
+            task_context["task_type"] = metadata_task_type.strip()
+        skillflow = task.metadata.get("skillflow")
+        if isinstance(skillflow, Mapping):
+            skillflow_task_type = skillflow.get("task_type")
+            if (
+                "task_type" not in task_context
+                and isinstance(skillflow_task_type, str)
+                and skillflow_task_type.strip()
             ):
-                value = extra.get(source_key)
-                if isinstance(value, str) and value.strip():
-                    task_context[condition_key] = value.strip()
+                task_context["task_type"] = skillflow_task_type.strip()
+            extra = skillflow.get("extra")
+            if isinstance(extra, Mapping):
+                for source_key, condition_key in (
+                    ("type", "task_subtype"),
+                    ("level", "difficulty"),
+                ):
+                    value = extra.get(source_key)
+                    if isinstance(value, str) and value.strip():
+                        task_context[condition_key] = value.strip()
     for field_name, value in task_context.items():
         tags.add(_skill_context_tag("task_context", field_name, value))
 
@@ -2129,14 +2157,46 @@ class LiveSmokeBackend:
             )
 
         assert qa_settings is not None
-        opened = open_qa_tool_registry(
-            index_path=_resolve(self.project_root, str(qa_settings["index_path"])),
-            skillflow_source=_resolve(
-                self.project_root, str(qa_settings["skillflow_source"])
-            ),
-            dataset_scope=(str(qa_settings["source_key"]),),
-            timeout_seconds=float(qa_settings["tool_timeout_seconds"]),
-        )
+        source_key = str(qa_settings["source_key"])
+        skillflow_metadata = task.metadata.get("skillflow", {})
+        if not isinstance(skillflow_metadata, Mapping):
+            skillflow_metadata = {}
+        task_type = skillflow_metadata.get("task_type")
+        if task_type not in {"multi_hop_qa", "factual_qa"}:
+            task_type = "multi_hop_qa" if source_key == "hotpotqa" else "factual_qa"
+        if qa_settings["passage_source"] == "provided_context":
+            raw_context = skillflow_metadata.get("context")
+            if (
+                not isinstance(raw_context, list)
+                or not raw_context
+                or not all(
+                    isinstance(value, str) and value.strip()
+                    for value in raw_context
+                )
+            ):
+                raise ConfigurationError(
+                    "HotpotQA provided_context retrieval requires non-empty "
+                    "answer-free task passages"
+                )
+            opened = open_provided_context_qa_tool_registry(
+                raw_context,
+                skillflow_source=_resolve(
+                    self.project_root, str(qa_settings["skillflow_source"])
+                ),
+                dataset_scope=(source_key,),
+                timeout_seconds=float(qa_settings["tool_timeout_seconds"]),
+            )
+        else:
+            opened = open_qa_tool_registry(
+                index_path=_resolve(
+                    self.project_root, str(qa_settings["index_path"])
+                ),
+                skillflow_source=_resolve(
+                    self.project_root, str(qa_settings["skillflow_source"])
+                ),
+                dataset_scope=(source_key,),
+                timeout_seconds=float(qa_settings["tool_timeout_seconds"]),
+            )
         try:
             adapter = QARetrievalReactExecutionAdapter(
                 gateway=self.runtime.gateway,
@@ -2144,13 +2204,14 @@ class LiveSmokeBackend:
                 max_turns=int(qa_settings["max_turns"]),
                 max_tool_calls=int(qa_settings["max_tool_calls"]),
                 max_action_tokens=tool_action_tokens,
+                task_type=str(task_type),
             )
             runtime = AgentRuntime(
                 self.registry,
                 self.runtime.gateway,
                 execution_adapters={"react": adapter},
                 tool_registry=opened.registry,
-                dataset_id=str(qa_settings["source_key"]),
+                dataset_id=source_key,
             )
         except BaseException:
             opened.close()
@@ -2217,6 +2278,60 @@ class LiveSmokeBackend:
         behavior_adapter = director.get("behavior_adapter_name")
         if behavior_adapter is not None:
             behavior_adapter = str(behavior_adapter).strip() or None
+        action_decoding = director.get("action_decoding", "unconstrained")
+        if action_decoding not in {"unconstrained", "json_schema"}:
+            raise ConfigurationError(
+                "director.action_decoding must be unconstrained or json_schema"
+            )
+        if action_decoding == "json_schema" and not evaluation_only:
+            raise ConfigurationError(
+                "json_schema Director decoding is evaluation-only until the "
+                "trainer applies the identical grammar mask and constrained "
+                "policy normalization"
+            )
+        raw_sampling_action_profile = director.get("sampling_action_profile")
+        sampling_action_profile = (
+            None
+            if raw_sampling_action_profile is None
+            else str(raw_sampling_action_profile).strip()
+        )
+        if sampling_action_profile not in {
+            None,
+            DIRECTOR_PROGRESSIVE_ACTION_MASK_PROFILE,
+        }:
+            raise ConfigurationError(
+                "director.sampling_action_profile must be "
+                f"{DIRECTOR_PROGRESSIVE_ACTION_MASK_PROFILE!r} or omitted"
+            )
+        if sampling_action_profile is not None and action_decoding != "json_schema":
+            raise ConfigurationError(
+                "director.sampling_action_profile requires evaluation-only "
+                "json_schema action decoding"
+            )
+        sampling_schema_version = str(
+            director.get(
+                "sampling_schema_version",
+                (
+                    DIRECTOR_STATE_CONDITIONED_ACTION_SCHEMA_VERSION
+                    if sampling_action_profile is not None
+                    else DIRECTOR_SGLANG_SAMPLING_SCHEMA_VERSION
+                ),
+            )
+        ).strip()
+        if not sampling_schema_version:
+            raise ConfigurationError(
+                "director.sampling_schema_version must be non-empty"
+            )
+        if (
+            sampling_action_profile is not None
+            and sampling_schema_version
+            != DIRECTOR_STATE_CONDITIONED_ACTION_SCHEMA_VERSION
+        ):
+            raise ConfigurationError(
+                "state-conditioned Director sampling requires "
+                "director.sampling_schema_version="
+                f"{DIRECTOR_STATE_CONDITIONED_ACTION_SCHEMA_VERSION!r}"
+            )
         director_client = SGLangReceiptDirectorClient(
             tokenizer,
             base_url=str(director["api_base"]),
@@ -2231,6 +2346,24 @@ class LiveSmokeBackend:
             top_p=float(director["top_p"]),
             top_k=int(director["top_k"]),
             max_tokens=int(director["max_action_tokens"]),
+            action_json_schema=(
+                director_sglang_sampling_json_schema_text(
+                    tuple(str(value) for value in graph_config["actions"])
+                )
+                if (
+                    action_decoding == "json_schema"
+                    and sampling_action_profile is None
+                )
+                else None
+            ),
+            action_json_schema_version=(
+                sampling_schema_version
+                if (
+                    action_decoding == "json_schema"
+                    and sampling_action_profile is None
+                )
+                else None
+            ),
         )
 
         gateway = OpenAICompatibleGateway(default_seed=int(experiment["seed"]))
@@ -2532,23 +2665,84 @@ class LiveSmokeBackend:
         return not model_id or model_id in set(query.available_models)
 
     @staticmethod
+    def _prompt_prior_exposure_receipt(
+        trajectory: TrajectoryRecord,
+        condition_id: str,
+    ) -> Mapping[str, tuple[int, ...]]:
+        """Separate current-stage exposure from retained transcript context.
+
+        FlowSteer's persistent Director transcript retains the immutable first
+        user message and a bounded history.  The stage-conditioned assignment
+        receipt is therefore the latest observation, while earlier conditions
+        may remain visible to the policy as transcript context.  Keeping both
+        views prevents either interpretation from being silently substituted.
+        """
+
+        def observation(message: str, *, wrapped: bool) -> Mapping[str, Any] | None:
+            raw_observation = message
+            if wrapped:
+                _, separator, payload = raw_observation.rpartition("\n\n")
+                if not separator:
+                    return None
+                raw_observation = payload
+            try:
+                value = json.loads(raw_observation)
+            except (TypeError, ValueError):
+                return None
+            return value if isinstance(value, Mapping) else None
+
+        def contains_condition(value: Mapping[str, Any] | None) -> bool:
+            if value is None:
+                return False
+            conditions = value.get("exploration_conditions", ())
+            if isinstance(conditions, (str, bytes)) or not isinstance(
+                conditions, Sequence
+            ):
+                return False
+            return any(
+                isinstance(condition, Mapping)
+                and condition.get("condition_id") == condition_id
+                for condition in conditions
+            )
+
+        current_rounds: list[int] = []
+        retained_rounds: list[int] = []
+        for turn in trajectory.turns:
+            if not turn.receipt_verified:
+                continue
+            messages = decode_director_transcript(turn.prompt)
+            if messages is None:
+                visible = contains_condition(observation(turn.prompt, wrapped=False))
+                if visible:
+                    current_rounds.append(turn.round_index)
+                    retained_rounds.append(turn.round_index)
+                continue
+            user_observations = [
+                observation(str(message.get("content", "")), wrapped=True)
+                for message in messages
+                if message.get("role") == "user"
+            ]
+            if user_observations and contains_condition(user_observations[-1]):
+                current_rounds.append(turn.round_index)
+            if any(contains_condition(value) for value in user_observations):
+                retained_rounds.append(turn.round_index)
+        return {
+            "current_observation_rounds": tuple(current_rounds),
+            "transcript_retained_rounds": tuple(retained_rounds),
+        }
+
+    @classmethod
     def _prompt_prior_exposure_rounds(
+        cls,
         trajectory: TrajectoryRecord,
         condition_id: str,
     ) -> tuple[int, ...]:
-        """Read assignment exposure only from exact verified Director prompts."""
+        """Return exact current-observation exposure for condition admission."""
 
-        condition_id_fragment = json.dumps(
-            {"condition_id": condition_id},
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )[1:-1]
-        return tuple(
-            turn.round_index
-            for turn in trajectory.turns
-            if turn.receipt_verified and condition_id_fragment in turn.prompt
-        )
+        return cls._prompt_prior_exposure_receipt(
+            trajectory,
+            condition_id,
+        )["current_observation_rounds"]
 
     async def evaluate_final_graph(
         self,
@@ -2844,6 +3038,17 @@ class LiveSmokeBackend:
                 sampling_base_seed=base_seed,
                 sampling_coordinate=sampling_coordinate,
                 tool_registry=task_tool_registry,
+                sampling_action_profile=(
+                    str(director["sampling_action_profile"]).strip()
+                    if director.get("sampling_action_profile") is not None
+                    else None
+                ),
+                sampling_action_schema_version=str(
+                    director.get(
+                        "sampling_schema_version",
+                        DIRECTOR_STATE_CONDITIONED_ACTION_SCHEMA_VERSION,
+                    )
+                ),
             )
             environment = AgentWorkflowEnv(
                 self.registry,

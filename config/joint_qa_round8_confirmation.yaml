@@ -1,0 +1,17 @@
+schema_version: "flowsteer.joint-qa.additional-confirmation.v1"
+dataset_catalog_path: "config/datasets_agentgraph.yaml"
+base_manifest_path: "data/joint_qa_v2/manifest.json"
+base_confirmation_path: "data/joint_qa_v2/skill_confirmation_all_round7.jsonl"
+output_path: "data/joint_qa_v2/skill_confirmation_round8.jsonl"
+combined_output_path: "data/joint_qa_v2/skill_confirmation_all_round8.jsonl"
+manifest_path: "data/joint_qa_v2/skill_confirmation_round8_manifest.json"
+datasets: [hotpotqa]
+partition: "skill_confirmation_round8"
+task_split: "validation"
+
+# Round 8 reserves the next untouched HotpotQA-only canonical block after the
+# Round 7 reservation [984, 1024).  Materialization remains write-once, is
+# excluded from GRPO and reported task metrics, and does not touch fixed test.
+candidate_range:
+  start: 1024
+  stop: 1064

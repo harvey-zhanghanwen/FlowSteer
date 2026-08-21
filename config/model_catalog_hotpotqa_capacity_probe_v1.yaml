@@ -1,0 +1,45 @@
+providers:
+  - provider_id: "vectorengine"
+    kind: "openai-compatible"
+    endpoint: "${VECTOR_ENGINE_BASE_URL:-https://api.vectorengine.ai/v1}"
+    max_concurrency: 16
+    api_key_env: "VECTOR_ENGINE_API_KEY"
+
+# This bounded development probe reuses model IDs and provider capability
+# receipts already recorded by model_catalog_hotpotqa_deep_v6.yaml.  The only
+# adaptation is a 1024-token completion cap: topology Agents return typed QA
+# artifacts, not long-form essays, and the full 4096-token catalog limit made a
+# six-call condition unnecessarily slow without changing the search space.
+models:
+  - model_id: "qwen3.5-plus"
+    provider_id: "vectorengine"
+    model_name: "qwen3.5-plus"
+    selection_weight: 1.0
+    cheap_weight: 1.0
+    fast_weight: 1.0
+    metadata:
+      family: "qwen"
+      profile: "text_qa;availability=current-list-and-canary;probe=max_tokens_1024"
+      max_tokens: "1024"
+
+  - model_id: "deepseek-v4-pro"
+    provider_id: "vectorengine"
+    model_name: "deepseek-v4-pro"
+    selection_weight: 1.0
+    cheap_weight: 1.0
+    fast_weight: 1.0
+    metadata:
+      family: "deepseek"
+      profile: "text_qa;availability=current-list-and-canary;probe=max_tokens_1024"
+      max_tokens: "1024"
+
+  - model_id: "gpt-4o-mini"
+    provider_id: "vectorengine"
+    model_name: "gpt-4o-mini"
+    selection_weight: 1.0
+    cheap_weight: 1.0
+    fast_weight: 1.0
+    metadata:
+      family: "gpt"
+      profile: "text_qa;availability=current-list-and-existing-execution-evidence;probe=max_tokens_1024"
+      max_tokens: "1024"

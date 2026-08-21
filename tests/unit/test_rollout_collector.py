@@ -6,13 +6,22 @@ import threading
 import time
 
 import pytest
+from jsonschema import Draft202012Validator
 
-from src.interactive.agent_action_parser import AgentActionParser
+from src.interactive.agent_action_parser import AgentActionParseError, AgentActionParser
 from src.interactive.agent_runtime import AgentResponse
 from src.interactive.agent_workflow_env import AgentWorkflowEnv
 from src.interactive.director import (
     AgentGraphOrchestrator,
+    DIRECTOR_ACTION_JSON_SCHEMA,
+    DIRECTOR_ACTION_JSON_SCHEMA_TEXT,
+    DIRECTOR_PROGRESSIVE_ACTION_MASK_PROFILE,
+    DIRECTOR_SGLANG_SAMPLING_SCHEMA_VERSION,
+    DIRECTOR_STATE_CONDITIONED_ACTION_SCHEMA_VERSION,
     DIRECTOR_SYSTEM_PROMPT,
+    director_action_json_schema_text,
+    director_sglang_sampling_json_schema_text,
+    director_state_conditioned_sampling_json_schema_text,
     encode_director_transcript,
 )
 from src.interactive.model_registry import ModelRegistry, ModelSpec, ProviderSpec
@@ -233,6 +242,7 @@ def _orchestrator(
     max_rounds: int,
     base_seed: int = 7,
     rollout_ordinal: int = 0,
+    sampling_action_profile: str | None = None,
 ) -> AgentGraphOrchestrator:
     coordinate = ScientificSamplingCoordinate(
         sampling_schedule_hash=scientific_sampling_schedule_hash(base_seed=base_seed),
@@ -249,6 +259,7 @@ def _orchestrator(
         seed=base_seed,
         sampling_base_seed=base_seed,
         sampling_coordinate=coordinate,
+        sampling_action_profile=sampling_action_profile,
     )
 
 
@@ -260,6 +271,8 @@ def test_native_sglang_receipt_uses_real_input_ids_and_separates_versions():
         adapter_name="theta_live",
         expected_server_weight_version="default",
         base_url="http://127.0.0.1:8015/v1",
+        action_json_schema=DIRECTOR_ACTION_JSON_SCHEMA_TEXT,
+        action_json_schema_version="agentgraph.canvas-action-json-schema.v1",
     )
 
     response = asyncio.run(client.propose("ordinary prompt", seed=23))
@@ -277,12 +290,18 @@ def test_native_sglang_receipt_uses_real_input_ids_and_separates_versions():
     assert payload["return_logprob"] is True
     assert payload["lora_path"] == "theta_live"
     assert payload["sampling_params"]["sampling_seed"] == 23
+    assert json.loads(payload["sampling_params"]["json_schema"]) == (
+        DIRECTOR_ACTION_JSON_SCHEMA
+    )
     assert response.metadata["policy_version"] == POLICY_VERSION
     assert response.metadata["server_weight_version"] == "default"
     assert response.metadata["adapter_name"] == "theta_live"
     assert response.metadata["latency_ms"] >= 0.0
     assert response.metadata["attempt_count"] == 1
     assert response.metadata["generation_seed"] == 23
+    assert response.metadata["action_json_schema_version"] == (
+        "agentgraph.canvas-action-json-schema.v1"
+    )
     assert len(response.metadata["output_token_ids"]) == len(
         response.metadata["behavior_log_probs"]
     )
@@ -291,6 +310,146 @@ def test_native_sglang_receipt_uses_real_input_ids_and_separates_versions():
     consumed = client.executed_prefix_tokens(response, action)
     assert consumed == action.consumed_end
     assert consumed < len(response.metadata["output_token_ids"])
+
+
+def test_native_sglang_per_request_schema_does_not_mutate_client_default():
+    client = ScriptedSGLangClient(
+        ['{"action":"add_subgraph","agents":[],"relations":[]}', '{"action":"finish"}'],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+        action_json_schema=DIRECTOR_ACTION_JSON_SCHEMA_TEXT,
+        action_json_schema_version="agentgraph.canvas-action-json-schema.v1",
+    )
+    add_schema = director_state_conditioned_sampling_json_schema_text("add_subgraph")
+
+    overridden = asyncio.run(
+        client.propose(
+            "first prompt",
+            action_json_schema=add_schema,
+            action_json_schema_version=(
+                DIRECTOR_STATE_CONDITIONED_ACTION_SCHEMA_VERSION
+            ),
+            action_schema_branch="add_subgraph",
+        )
+    )
+    defaulted = asyncio.run(client.propose("second prompt"))
+
+    assert client.payloads[0]["sampling_params"]["json_schema"] == add_schema
+    assert client.payloads[1]["sampling_params"]["json_schema"] == (
+        DIRECTOR_ACTION_JSON_SCHEMA_TEXT
+    )
+    assert overridden.metadata["action_json_schema_version"] == (
+        DIRECTOR_STATE_CONDITIONED_ACTION_SCHEMA_VERSION
+    )
+    assert overridden.metadata["action_schema_branch"] == "add_subgraph"
+    assert defaulted.metadata["action_json_schema_version"] == (
+        "agentgraph.canvas-action-json-schema.v1"
+    )
+    assert defaulted.metadata["action_schema_branch"] is None
+
+    with pytest.raises(ValueError, match="must be supplied together"):
+        client.request_payload(
+            "invalid override",
+            action_json_schema=add_schema,
+        )
+    with pytest.raises(ValueError, match="does not match its declared branch"):
+        client.request_payload(
+            "mismatched override",
+            action_json_schema=add_schema,
+            action_json_schema_version=(
+                DIRECTOR_STATE_CONDITIONED_ACTION_SCHEMA_VERSION
+            ),
+            action_schema_branch="finish",
+        )
+
+
+def test_director_action_schema_preserves_legacy_add_and_relation_removal():
+    branches = DIRECTOR_ACTION_JSON_SCHEMA["oneOf"]
+    by_action = {
+        branch["properties"]["action"]["const"]: branch
+        for branch in branches
+    }
+
+    assert "add_agent" in by_action
+    assert "anyOf" not in by_action["set_relation"]
+
+    subgraph_profile = json.loads(
+        director_action_json_schema_text(
+            (
+                "add_subgraph",
+                "modify_agent",
+                "delete_agent",
+                "set_relation",
+                "set_output",
+                "finish",
+            )
+        )
+    )
+    admitted = {
+        branch["properties"]["action"]["const"]
+        for branch in subgraph_profile["oneOf"]
+    }
+    assert "add_subgraph" in admitted
+    assert "add_agent" not in admitted
+
+
+def test_sglang_sampling_schema_flattens_only_the_top_level_union():
+    actions = (
+        "add_subgraph",
+        "modify_agent",
+        "set_relation",
+        "finish",
+    )
+    schema = json.loads(director_sglang_sampling_json_schema_text(actions))
+
+    assert "oneOf" not in schema
+    assert schema["additionalProperties"] is False
+    assert schema["required"] == ["action"]
+    assert schema["properties"]["action"] == {"enum": list(actions)}
+    assert schema["properties"]["agents"]["items"]["additionalProperties"] is False
+    assert schema["properties"]["relations"]["items"]["additionalProperties"] is False
+    assert DIRECTOR_SGLANG_SAMPLING_SCHEMA_VERSION == (
+        "agentgraph.sglang-flat-action-sampling-schema.v1"
+    )
+
+    validator = Draft202012Validator(schema)
+    assert not list(validator.iter_errors({"action": "finish"}))
+    assert list(
+        validator.iter_errors({"action": "finish", "legacy_prompt": "forbidden"})
+    )
+    assert list(validator.iter_errors({"action": "delete_agent"}))
+    assert list(
+        validator.iter_errors(
+            {
+                "action": "add_subgraph",
+                "agents": [
+                    {
+                        "agent_id": "solver",
+                        "model_id": "model",
+                        "contract": "solve",
+                        "legacy_prompt": "forbidden",
+                    }
+                ],
+                "relations": [],
+            }
+        )
+    )
+
+
+def test_sglang_sampling_schema_does_not_change_strict_action_schema_or_parser():
+    strict_before = json.loads(DIRECTOR_ACTION_JSON_SCHEMA_TEXT)
+    sampling = json.loads(
+        director_sglang_sampling_json_schema_text(("add_subgraph", "finish"))
+    )
+
+    assert strict_before == DIRECTOR_ACTION_JSON_SCHEMA
+    assert "oneOf" in strict_before
+    assert sampling["properties"]["action"]["enum"] == [
+        "add_subgraph",
+        "finish",
+    ]
+    with pytest.raises(AgentActionParseError):
+        AgentActionParser().parse('{"action":"finish","agents":[]}')
 
 
 def test_native_sglang_receipt_submits_exact_transcript_messages():
@@ -543,6 +702,64 @@ def test_collector_materializes_exact_finish_trajectory_and_evidence(tmp_path):
     json.dumps(trajectory.to_dict())
     assert len(evidence.snapshots) == 3
     assert len(evidence.trajectories) == 1
+
+
+def test_collector_uses_state_conditioned_schema_on_every_progressive_turn():
+    registry = _registry()
+    client = ScriptedSGLangClient(
+        [
+            (
+                '{"action":"add_subgraph","agents":['
+                '{"agent_id":"solver","model_id":"cheap-model",'
+                '"contract":"solve directly"}],"relations":[],'
+                '"output_agent_id":"solver"}'
+            ),
+            '{"action":"finish"}',
+        ],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+    )
+    collector = AgentGraphRolloutCollector(
+        _orchestrator(
+            registry,
+            client,
+            max_rounds=2,
+            sampling_action_profile=DIRECTOR_PROGRESSIVE_ACTION_MASK_PROFILE,
+        ),
+        AgentWorkflowEnv(
+            registry,
+            gateway=FakeGateway(),
+            execute_on_edit=True,
+        ),
+        _versions(),
+    )
+
+    def evaluator(task, final_answer, final_graph, runtime):
+        return {
+            "evaluator_version": EVALUATOR_VERSION,
+            "valid": True,
+            "reward": 1.0,
+            "metrics": {"f1": 1.0},
+        }
+
+    trajectory = asyncio.run(collector.collect(_task(), 0, evaluator))
+
+    assert trajectory.explicit_finish is True
+    assert [
+        turn.runtime_summary["director_action_schema_branch"]
+        for turn in trajectory.turns
+    ] == ["add_subgraph", "finish"]
+    assert all(
+        turn.runtime_summary["director_action_schema_version"]
+        == DIRECTOR_STATE_CONDITIONED_ACTION_SCHEMA_VERSION
+        for turn in trajectory.turns
+    )
+    assert client.payloads[0]["sampling_params"]["json_schema"] == (
+        director_state_conditioned_sampling_json_schema_text("add_subgraph")
+    )
+    assert client.payloads[1]["sampling_params"]["json_schema"] == (
+        director_state_conditioned_sampling_json_schema_text("finish")
+    )
 
 
 def test_collector_does_not_duplicate_reused_progressive_execution():

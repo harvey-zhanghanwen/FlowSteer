@@ -269,6 +269,93 @@ def test_healthbench_evaluation_receives_the_backend_judge():
     assert calls[0][1] == "configured-healthbench-judge"
 
 
+def test_evaluator_preflight_static_fixtures_are_synthetic_and_non_test():
+    for dataset_key in (
+        "hotpotqa",
+        "triviaqa",
+        "aime_2026",
+        "healthbench_professional",
+        "swe_bench",
+    ):
+        task, _prediction = _MODULE._synthetic_evaluator_preflight_fixture(
+            dataset_key
+        )
+
+        assert task.task_id == f"evaluator-preflight:{dataset_key}:synthetic-v1"
+        assert task.split == "train"
+        assert task.metadata["dataset_key"] == dataset_key
+
+
+def test_evaluator_preflight_receipt_drops_answer_bearing_outcome_fields():
+    outcome = EvaluationOutcome(
+        valid=True,
+        reward=1.0,
+        metrics={"exact_match": 1.0, "token_f1": 1.0},
+        reason="evaluated",
+        details={
+            "raw_prediction": "fixture answer",
+            "scored_prediction": "fixture answer",
+        },
+        evaluator_version="hotpotqa.official.answer.v1",
+    )
+
+    receipt = _MODULE._evaluator_preflight_receipt(outcome, "hotpotqa")
+
+    assert receipt == {
+        "passed": True,
+        "evaluator_version": "hotpotqa.official.answer.v1",
+    }
+    assert "metrics" not in receipt
+    assert "details" not in receipt
+    assert "reward" not in receipt
+
+
+def test_environment_preflight_uses_fixed_training_record(tmp_path):
+    config = _evaluation_config("webshop")
+    train_path = tmp_path / "train.jsonl"
+    config["data"]["train_path"] = str(train_path)
+    task = _MODULE.TaskRecord(
+        task_id="webshop:train:fixture",
+        question="fixed non-test environment fixture",
+        ground_truth="environment_success",
+        split="train",
+        metadata={"dataset_key": "webshop"},
+    )
+    _MODULE._atomic_jsonl(
+        train_path,
+        [{"schema_version": "flowsteer.agentgraph.task.v1", **task.to_dict()}],
+    )
+
+    fixture = _MODULE._non_test_environment_preflight_task(
+        config, tmp_path, "webshop"
+    )
+
+    assert fixture.task_id == "webshop:train:fixture"
+    assert fixture.split == "train"
+
+
+def test_swebench_evaluator_preflight_does_not_call_selected_task_harness():
+    backend = SimpleNamespace(
+        swe_harness=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("the selected-task harness must not be used")
+        )
+    )
+
+    receipt = asyncio.run(
+        _MODULE._run_evaluator_preflight(
+            backend,
+            _evaluation_config("hotpotqa"),
+            _ROOT,
+            "swe_bench",
+        )
+    )
+
+    assert receipt == {
+        "passed": True,
+        "evaluator_version": "swebench.harness.v1",
+    }
+
+
 def test_stable_zero_requires_dataset_evaluator_receipts():
     task = _MODULE.TaskRecord(
         task_id="aime-2026:01",

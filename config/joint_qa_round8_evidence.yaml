@@ -1,0 +1,256 @@
+schema_version: "flowsteer.joint-qa.mace-bayesian-skill.v2"
+config_kind: "preregistered_stage_conditioned_paired_intervention"
+round_id: 8
+status: "prepared_not_executed"
+execution_blocker: >-
+  The reserved HotpotQA native candidate range [1024, 1064) has 40 unique
+  records and no frozen-test task-ID overlap in a read-only precheck, but it has
+  not been materialized with a write-once skill_confirmation_round8 manifest.
+  The runner must not execute Round 8 until that manifest exists and the
+  existing persisted overlap guard passes.
+
+experiment_version: "hotpotqa.mace-skill-evidence.epoch8.v2"
+seed: 20260826
+datasets: [hotpotqa]
+policy_version: "qwen35-9b-hotpot-step-000000"
+adapter_name: "theta_jointqa_progressive_step_000000"
+encoder_version: "jointqa.skill-condition.fixed.v1"
+feature_schema_version: "jointqa.skill-candidate-dataset-interaction.v1"
+posterior_version: "hotpotqa.bayesian-linear.progressive-subgraph.epoch9.v1"
+skill_library_version: "hotpotqa.skill-library.progressive.epoch21.v1"
+prompt_version: "agentgraph.director.minimal-neutral.v9"
+tool_version: "skillflow.qa-retrieval.provided-context.v6"
+action_schema_version: "agentgraph.canvas-action-json-schema.v1"
+sampling_schema_version: "agentgraph.state-conditioned-action-mask.v1"
+sampling_action_profile: "progressive_add_subgraph_then_finish"
+topology_diagnostic_protocol: "flowsteer.hotpotqa.progressive_topology_diagnostic.v4"
+runtime_version: "flowsteer.agentgraph.progressive-runtime.v1"
+backend_config: "config/development_hotpotqa_dynamic_stable_zero_v9_2.yaml"
+
+source_mapping:
+  implementation_classification:
+    direct_reuse:
+      - "FlowSteer progressive Canvas execution and terminal Format sink"
+      - "SkillPromptProvider stage-conditioned exposure receipts"
+      - "randomized paired intervention, Bayesian posterior/EVSI, and SkillEvidencePipeline gate"
+    necessary_adaptation:
+      - "HotpotQA-only empty_graph exposure under the minimal-neutral v9 Director"
+      - "neutral Director-visible model profiles and Candidate-answer/Evidence-only global Format predecessor handoff"
+    project_algorithm_addition:
+      - "three MD-motivated, development-derived, independently rejectable Round 8 Skill candidates"
+    not_implemented:
+      - "ACTIVE publication before independent confirmation passes the existing Skill gate"
+      - "GRPO, backward, optimizer update, or LoRA publication"
+  paired_intervention_runner:
+    reuse: "scripts/run_joint_qa_mace_skill.py"
+    components:
+      - "randomized paired arm order"
+      - "shared empty-Canvas sampling coordinates"
+      - "SkillPromptProvider stage-conditioned exposure receipts"
+      - "JointQAPosteriorScheduler posterior-UCB and EVSI"
+      - "SkillEvidencePipeline and SkillGateConfig"
+  skillflow_prompt_boundary:
+    reuse:
+      - "src/interactive/rollout_collector.py:SkillPromptProvider"
+      - "src/interactive/skills/retrieval.py"
+    adaptation: >-
+      All three candidates use the existing exact graph_stage match and are visible
+      only at empty_graph. They remain optional prompt priors and cannot mutate
+      Canvas state.
+  skillflow_qa_react_boundary:
+    reuse:
+      - "SkillFlow:training/environment.py:389-416"
+      - "src/interactive/react_execution.py"
+    adaptation: >-
+      provided-context v6 preserves SkillFlow's completion admission after a
+      zero-tool reasoning turn; this changes runtime admission only and does not
+      expose evaluator state or labels to the Director or Executors.
+  flowsteer_progressive_canvas:
+    reuse:
+      - "src/interactive/agent_workflow_env.py:AgentWorkflowEnv.step"
+      - "scripts/compare_hotpotqa_topologies.py"
+    adaptation: >-
+      The candidates describe conditional dependency routing; the Director still
+      chooses legal ADD_SUBGRAPH transactions and receives execution feedback
+      after each functional component.
+  saved_development_evidence:
+    artifacts:
+      - "reports/qa_disambiguation_v8_wrong21_panel/hotpotqa_report.json"
+      - "artifacts/qa_disambiguation_v8_wrong21_panel/hotpotqa/tool_agentgraph_trajectories.jsonl"
+      - "artifacts/hotpotqa_topology_diagnostic_v4/qwen35plus_reciprocal_first6_bounded.json"
+      - "artifacts/hotpotqa_topology_diagnostic_v4/qwen35plus_fan_in_modifier_case.json"
+      - "artifacts/hotpotqa_executor_capacity/qwen35_flash_six_v1.json"
+      - "artifacts/hotpotqa_executor_capacity/qwen35_plus_six_v1.json"
+      - "artifacts/hotpotqa_executor_capacity/deepseek_v4_pro_six_v1.json"
+    supported_findings:
+      - "answer-span shortening dropped an evidence-aligned proper-name modifier before Format"
+      - "fan-in preserved the evidence-aligned answer span on the bounded modifier case"
+      - "fixed-topology diagnostics support dependency conditioning, not a universal topology"
+      - "three Executor diagnostics have n=6, Director off, and no generalization claim"
+
+candidate_actions:
+  evidence_aligned_answer_span_preservation:
+    instruction: >-
+      Preserve one evidence-aligned answer span through terminal handoff,
+      including required proper-name modifiers, plurality, date, unit, and
+      qualifier. Treat abbreviation, expansion, shortening, or other alias
+      normalization as candidate disagreement that semantic verification must
+      resolve before handoff, not as a Format operation. Route one resolved
+      candidate to a singleton Format Agent, which only copies it into one
+      <answer> tag. This is a rejectable prior.
+  dependency_conditioned_agentgraph:
+    instruction: >-
+      Using only the model-visible question and the evidence dependencies you
+      infer, use a directed path for sequential dependencies and fan-out
+      followed by semantic fan-in for independent dependencies. Use one bounded
+      reciprocal exchange only for an explicit comparison or an independent
+      candidate conflict. Do not force a topology or prescribe an Agent count.
+      This is a rejectable prior.
+  receipt_backed_executor_capacity:
+    instruction: >-
+      Use this saved bounded development receipt only as a weak prior when
+      choosing semantic-reasoning and verification Executors: under one fixed
+      semantic-reasoning to singleton-Format diagnostic topology with the
+      Director off, Qwen3.5-Plus obtained 6/6 strict exact matches with no
+      operational failure, Qwen3.5-Flash obtained 5/6 with no operational
+      failure, and DeepSeek-V4-Pro obtained 5/6 with one operational failure.
+      These six preselected development examples do not establish
+      generalization. The Director remains the local Qwen3.5-9B; do not turn
+      this weak model-selection prior into a fixed global role or model recipe.
+      This is a rejectable prior.
+
+candidate_conditions:
+  by_candidate_and_dataset:
+    evidence_aligned_answer_span_preservation:
+      hotpotqa:
+        task_family: "hotpotqa"
+        graph_stage: "empty_graph"
+        tags: []
+    dependency_conditioned_agentgraph:
+      hotpotqa:
+        task_family: "hotpotqa"
+        graph_stage: "empty_graph"
+        tags: []
+    receipt_backed_executor_capacity:
+      hotpotqa:
+        task_family: "hotpotqa"
+        graph_stage: "empty_graph"
+        tags: []
+
+director_observation_contract:
+  allowed:
+    - "model-visible question text"
+    - "provided-context passages"
+    - "current Canvas state"
+    - "execution feedback and routed Agent artifacts"
+    - "legal action and model-catalog boundaries"
+  prohibited:
+    - "native HotpotQA question type"
+    - "reference answer or aliases"
+    - "supporting-fact labels"
+    - "evaluator output before terminal evaluation"
+    - "task-ID-specific rule"
+  topology_is_forced: false
+  candidate_is_rejectable: true
+
+baseline_action:
+  instruction: "No additional prompt prior; use the frozen Director policy."
+  prompt_prior: null
+
+selection_coordinates:
+  partition_manifest: "data/joint_qa_v2/manifest.json"
+  train_discovery:
+    path: "data/joint_qa_v2/train.jsonl"
+    start: 64
+    stop: 67
+    zero_based_stop_exclusive: true
+  train_natural_candidate:
+    path: "data/joint_qa_v2/train.jsonl"
+    position: 67
+  skill_confirmation:
+    expected_path: "data/joint_qa_v2/skill_confirmation_round8.jsonl"
+    expected_manifest: "data/joint_qa_v2/skill_confirmation_round8_manifest.json"
+    partition: "skill_confirmation_round8"
+    canonical_candidate_range:
+      start: 1024
+      stop: 1064
+      zero_based_stop_exclusive: true
+    per_dataset_range:
+      start: 0
+      stop: 40
+      zero_based_stop_exclusive: true
+    materialized: false
+    overlap_check_required_before_execution: true
+    read_only_precheck:
+      candidate_count: 40
+      unique_task_id_count: 40
+      frozen_test_overlap_count: 0
+      final_test_answers_or_metrics_used: false
+  reserved_grpo_training_positions:
+    hotpotqa: 9
+
+paired_intervention:
+  estimand: "empty-graph Skill prompt-prior assignment intent-to-treat effect"
+  incumbent_prompt_prior: null
+  treatment_assigned_from_shared_empty_canvas: true
+  randomized_arm_order: true
+  shared_task_and_sampling_coordinates: true
+  terminal_primary_outcome: "official_answer_token_f1"
+  companion_outcome: "normalized_exact_match"
+  forced_probe: true
+  grpo_eligible: false
+  benchmark_eligible: false
+  topology_adoption_verified_by_terminal_score: false
+  exposure_admission:
+    fail_closed_before_skill_gate_or_publication: true
+    treatment_requires_preregistered_stage_exposure: true
+    incumbent_requires_zero_current_and_retained_exposure: true
+    empty_graph_requires_exact_round: 0
+  director_action_identity:
+    action_schema_version: "agentgraph.canvas-action-json-schema.v1"
+    sampling_schema_version: "agentgraph.state-conditioned-action-mask.v1"
+    sampling_action_profile: "progressive_add_subgraph_then_finish"
+    per_turn_receipt_required: true
+
+skill_gate:
+  scope: "hotpotqa_only"
+  datasets: [hotpotqa]
+  delta_min: 0.03
+  max_harm_probability: 0.05
+  minimum_effective_pairs: 20
+  minimum_empirical_coverage: 0.9
+  minimum_independent_problems: 20
+  minimum_positive_slice_fraction: 0.75
+  lower_thresholds_for_round8: false
+  activation: "delayed_until_independent_confirmation_passes"
+
+epochs:
+  discovery: 21
+  validation: 22
+  eligible_activation: 23
+discovery_schedule: "balanced cold start, posterior-UCB prefilter, then particle EVSI"
+evsi_budget:
+  ucb_prefilter_top_k: 2
+  posterior_particles: 1024
+  observation_samples: 2048
+
+data_exclusion_contract:
+  confirmation_excluded_from_grpo: true
+  confirmation_excluded_from_reported_development_and_test_metrics: true
+  final_test_untouched: true
+  reference_answer_not_visible_to_director_or_agents: true
+  supporting_fact_labels_not_visible_to_director_or_agents: true
+  native_question_type_not_visible_to_director: true
+  frozen_test_overlap_source: "manifest.json opaque ordered_task_ids.test only"
+  test_jsonl_opened_by_round8_runner: false
+
+runner_compatibility:
+  round_spec_registered: true
+  current_runner_supports_hotpotqa_only_dataset_scope: true
+  current_runner_supports_three_candidates: true
+  current_runner_supports_exact_empty_graph_condition: true
+  live_execution_allowed: false
+  unblock_requires:
+    - "materialize the write-once skill_confirmation_round8 HotpotQA block"
+    - "persist its ordered task IDs and native candidate coordinates"
+    - "pass the existing prior-evidence, reserved-training, fixed-development, and frozen-test overlap guards"

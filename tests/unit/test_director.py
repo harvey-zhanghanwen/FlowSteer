@@ -8,10 +8,16 @@ from src.interactive.agent_runtime import AgentResponse
 from src.interactive.agent_workflow_env import AgentWorkflowEnv
 from src.interactive.director import (
     AgentGraphOrchestrator,
+    DIRECTOR_PROGRESSIVE_ACTION_MASK_PROFILE,
+    DIRECTOR_PROMPT_VERSION,
+    DIRECTOR_STATE_CONDITIONED_ACTION_SCHEMA_VERSION,
     DIRECTOR_SYSTEM_PROMPT,
+    LEGACY_DIRECTOR_SYSTEM_PROMPT_V8,
     DirectorResponse,
     OpenAIDirectorClient,
     decode_director_transcript,
+    director_action_json_schema_text,
+    director_state_conditioned_sampling_json_schema_text,
     encode_director_transcript,
 )
 from src.interactive.model_registry import ModelRegistry, ModelSpec, ProviderSpec
@@ -27,10 +33,26 @@ class ScriptedDirector:
         self.actions = list(actions)
         self.prompts = []
         self.seeds = []
+        self.schema_requests = []
 
-    async def propose(self, prompt, *, seed=None):
+    async def propose(
+        self,
+        prompt,
+        *,
+        seed=None,
+        action_json_schema=None,
+        action_json_schema_version=None,
+        action_schema_branch=None,
+    ):
         self.prompts.append(prompt)
         self.seeds.append(seed)
+        self.schema_requests.append(
+            {
+                "action_json_schema": action_json_schema,
+                "action_json_schema_version": action_json_schema_version,
+                "action_schema_branch": action_schema_branch,
+            }
+        )
         return DirectorResponse(self.actions.pop(0), {"policy_version": "test"})
 
 
@@ -84,6 +106,27 @@ def observation_payload(message: dict[str, str]) -> dict[str, object]:
 
 
 class DirectorTests(unittest.IsolatedAsyncioTestCase):
+    async def test_legacy_canonical_transcript_remains_decodable(self) -> None:
+        legacy = encode_director_transcript(
+            (
+                {
+                    "role": "system",
+                    "content": LEGACY_DIRECTOR_SYSTEM_PROMPT_V8,
+                },
+                {"role": "user", "content": "legacy Canvas observation"},
+            )
+        )
+
+        decoded = decode_director_transcript(legacy)
+
+        self.assertIsNotNone(decoded)
+        assert decoded is not None
+        self.assertEqual(LEGACY_DIRECTOR_SYSTEM_PROMPT_V8, decoded[0]["content"])
+        self.assertEqual(
+            "agentgraph.director.minimal-neutral.v9",
+            DIRECTOR_PROMPT_VERSION,
+        )
+
     async def test_openai_director_boundary_is_local_qwen_supervisor(self) -> None:
         OpenAIDirectorClient(
             base_url="http://127.0.0.1:8015/v1",
@@ -269,6 +312,15 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         initial_state = observation_payload(transcript_messages(initial_prompt)[-1])
         self.assertNotIn("structural_issues", initial_state)
         self.assertNotIn("terminal_format_issue", initial_state)
+        self.assertEqual(
+            {
+                "explicit_finish_required": True,
+                "require_exact_answer_tag": True,
+                "require_format_agent": True,
+                "required_tool_id": None,
+            },
+            initial_state["terminal_constraints"],
+        )
 
         component = await env.step(component_action)
         self.assertTrue(component.accepted)
@@ -402,10 +454,10 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
     async def test_director_terminal_policy_is_issue_driven_without_role_template(
         self,
     ) -> None:
-        self.assertIn("exactly one JSON object each turn", DIRECTOR_SYSTEM_PROMPT)
-        self.assertIn('"action":"add_subgraph"', DIRECTOR_SYSTEM_PROMPT)
+        self.assertIn("exactly one valid JSON action each turn", DIRECTOR_SYSTEM_PROMPT)
+        self.assertIn("Legal actions are add_subgraph", DIRECTOR_SYSTEM_PROMPT)
         self.assertIn(
-            "one functional subgraph of one to three Agents and is executed once",
+            "one functional subgraph of one to three Agents as one transaction",
             DIRECTOR_SYSTEM_PROMPT,
         )
         self.assertIn(
@@ -413,36 +465,30 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
             DIRECTOR_SYSTEM_PROMPT,
         )
         self.assertIn(
-            'Use a distinct role_family "format" Output Agent only when the observation requires',
+            "Each accepted edit is executed once",
             DIRECTOR_SYSTEM_PROMPT,
         )
-        self.assertIn("not a fixed Operator type", DIRECTOR_SYSTEM_PROMPT)
-        self.assertIn("does not solve the task", DIRECTOR_SYSTEM_PROMPT)
-        self.assertIn("top level of add_subgraph", DIRECTOR_SYSTEM_PROMPT)
-        self.assertIn("exact tool_id from tool_catalog", DIRECTOR_SYSTEM_PROMPT)
-        self.assertIn("action_names are Executor actions", DIRECTOR_SYSTEM_PROMPT)
-        self.assertIn("bidirectional relation is one bounded two-Agent exchange", DIRECTOR_SYSTEM_PROMPT)
         self.assertIn(
-            "original relation, qualifiers, comparison criterion, and answer type",
-            DIRECTOR_SYSTEM_PROMPT,
-        )
-        self.assertIn("source-grounded evidence", DIRECTOR_SYSTEM_PROMPT)
-        self.assertIn("one explicit bare answer span", DIRECTOR_SYSTEM_PROMPT)
-        self.assertIn(
-            "Format Agent must remain a separate sink with one semantic predecessor",
+            "Use finish only when finish_admissibility is present and admissible",
             DIRECTOR_SYSTEM_PROMPT,
         )
         self.assertIn(
             "Do not assume a fixed workflow topology or an unlisted Skill",
             DIRECTOR_SYSTEM_PROMPT,
         )
-        self.assertNotIn("fan-in", DIRECTOR_SYSTEM_PROMPT)
-        self.assertNotIn("one cohesive dependency", DIRECTOR_SYSTEM_PROMPT)
-        self.assertNotIn("prefer finish", DIRECTOR_SYSTEM_PROMPT.lower())
-        self.assertNotIn("Researcher", DIRECTOR_SYSTEM_PROMPT)
-        self.assertNotIn("Critic", DIRECTOR_SYSTEM_PROMPT)
-        self.assertNotIn("must use three", DIRECTOR_SYSTEM_PROMPT.lower())
-        self.assertNotIn("singleton", DIRECTOR_SYSTEM_PROMPT.lower())
+        for prohibited in (
+            "answer span",
+            "answer type",
+            "source-grounded evidence",
+            "qualifier",
+            "Format Agent",
+            "fan-in",
+            "Researcher",
+            "Critic",
+            "must use three",
+            "singleton",
+        ):
+            self.assertNotIn(prohibited.casefold(), DIRECTOR_SYSTEM_PROMPT.casefold())
 
     async def test_history_window_keeps_real_recent_message_pairs(self) -> None:
         model_registry = registry()
@@ -594,6 +640,80 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result.explicit_finish)
         self.assertEqual("max_rounds", result.termination_reason)
         self.assertEqual(1, len(result.turns))
+
+    async def test_progressive_action_mask_switches_only_after_finish_admission(
+        self,
+    ) -> None:
+        model_registry = registry()
+        client = ScriptedDirector(
+            [
+                (
+                    '{"action":"add_subgraph","agents":['
+                    '{"agent_id":"solver","model_id":"qwen",'
+                    '"contract":"solve"}],"relations":[],'
+                    '"output_agent_id":"solver"}'
+                ),
+                '{"action":"finish"}',
+            ]
+        )
+        env = AgentWorkflowEnv(
+            model_registry,
+            gateway=FakeGateway(),
+            execute_on_edit=True,
+        )
+
+        result = await AgentGraphOrchestrator(
+            model_registry,
+            client,
+            max_rounds=2,
+            sampling_action_profile=DIRECTOR_PROGRESSIVE_ACTION_MASK_PROFILE,
+        ).run(env, "task")
+
+        self.assertTrue(result.explicit_finish)
+        self.assertEqual(
+            ["add_subgraph", "finish"],
+            [item["action_schema_branch"] for item in client.schema_requests],
+        )
+        self.assertEqual(
+            director_state_conditioned_sampling_json_schema_text("add_subgraph"),
+            client.schema_requests[0]["action_json_schema"],
+        )
+        self.assertEqual(
+            director_state_conditioned_sampling_json_schema_text("finish"),
+            client.schema_requests[1]["action_json_schema"],
+        )
+        self.assertEqual(
+            [DIRECTOR_STATE_CONDITIONED_ACTION_SCHEMA_VERSION] * 2,
+            [
+                item["action_json_schema_version"]
+                for item in client.schema_requests
+            ],
+        )
+
+    def test_state_conditioned_relation_schema_repeats_full_object_contract(self) -> None:
+        schema = json.loads(
+            director_state_conditioned_sampling_json_schema_text("add_subgraph")
+        )
+        relation = schema["properties"]["relations"]["items"]
+        expected_required = [
+            "source_id",
+            "target_id",
+            "source_to_target",
+            "target_to_source",
+        ]
+        self.assertEqual(2, len(relation["anyOf"]))
+        for branch in relation["anyOf"]:
+            self.assertEqual(expected_required, branch["required"])
+            self.assertEqual(set(expected_required), set(branch["properties"]))
+            self.assertFalse(branch["additionalProperties"])
+        self.assertEqual(
+            {"const": True},
+            relation["anyOf"][0]["properties"]["source_to_target"],
+        )
+        self.assertEqual(
+            {"const": True},
+            relation["anyOf"][1]["properties"]["target_to_source"],
+        )
 
 
 if __name__ == "__main__":

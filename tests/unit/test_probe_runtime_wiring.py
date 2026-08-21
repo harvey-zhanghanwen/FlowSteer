@@ -640,6 +640,91 @@ class ProbeRuntimeWiringTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(["snapshot", "trajectory"], [name for name, _ in store.events])
         self.assertIs(record, store.events[-1][1])
 
+    def test_empty_graph_prior_exposure_is_bound_to_current_observation(self) -> None:
+        """An entry-stage prior is exposed once, not on every retained turn."""
+
+        backend = self._backend()
+        task = _task()
+        environment = AgentWorkflowEnv(
+            backend.registry,
+            runtime=backend.runtime,
+            problem=task.question,
+        )
+        condition = {
+            "condition_id": "candidate-entry-stage",
+            "application_mode": "forced_probe_condition",
+            "condition": {
+                "task_family": "hotpotqa",
+                "graph_stage": "empty_graph",
+                "tags": [],
+            },
+            "action": {
+                "instruction": "Use this prior only when it fits the task."
+            },
+            "content": "optional candidate",
+            "rejectable": True,
+        }
+
+        empty_query = backend._skill_query(task, environment)
+        self.assertEqual("empty_graph", empty_query.graph_stage)
+        self.assertTrue(
+            backend._forced_probe_condition_matches(condition, empty_query)
+        )
+
+        orchestrator = _MODULE.AgentGraphOrchestrator(
+            backend.registry,
+            backend.director_client,
+            max_rounds=2,
+        )
+        initial_prompt = orchestrator.build_prompt(environment, 0, (condition,))
+        environment._graph = AgentGraph(
+            (AgentNode("format", "qwen", "format routed candidate"),),
+            output_agent_id="format",
+        )
+        complete_query = backend._skill_query(task, environment)
+        self.assertEqual("before_final_answer", complete_query.graph_stage)
+        self.assertFalse(
+            backend._forced_probe_condition_matches(condition, complete_query)
+        )
+        continued_prompt = orchestrator.continue_prompt(
+            initial_prompt,
+            '{"action":"add_subgraph"}',
+            environment,
+            (),
+        )
+        trajectory = _TrajectoryStub(
+            (
+                SimpleNamespace(
+                    round_index=0,
+                    receipt_verified=True,
+                    prompt=initial_prompt,
+                ),
+                SimpleNamespace(
+                    round_index=1,
+                    receipt_verified=True,
+                    prompt=continued_prompt,
+                ),
+            )
+        )
+
+        exposure = backend._prompt_prior_exposure_receipt(
+            trajectory,
+            condition["condition_id"],
+        )
+        self.assertEqual((0,), exposure["current_observation_rounds"])
+        self.assertEqual((0, 1), exposure["transcript_retained_rounds"])
+
+        # condition_satisfied keeps its existing exact-stage semantics.  The
+        # separate retained view prevents that field from being misread as a
+        # complete account of everything still visible in policy context.
+        self.assertEqual(
+            (0,),
+            backend._prompt_prior_exposure_rounds(
+                trajectory,
+                condition["condition_id"],
+            ),
+        )
+
     async def test_stage_conditioned_probe_requires_forced_probe_and_exact_stage(
         self,
     ) -> None:

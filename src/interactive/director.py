@@ -25,7 +25,7 @@ from .scientific_sampling import (
 )
 
 
-DIRECTOR_SYSTEM_PROMPT = """You are the Flow-Director. Incrementally build an executable AgentGraph. Follow the latest Canvas observation and return exactly one JSON object each turn.
+LEGACY_DIRECTOR_SYSTEM_PROMPT_V8 = """You are the Flow-Director. Incrementally build an executable AgentGraph. Follow the latest Canvas observation and return exactly one JSON object each turn.
 
 Actions:
 {"action":"add_subgraph","agents":[{"agent_id":"...","model_id":"...","contract":"...","role_family":"...","allowed_tools":[],"execution_mode":"reasoning|react|coding","artifact_type":"text","completion_condition":"..."}],"relations":[{"source_id":"...","target_id":"...","source_to_target":true,"target_to_source":false}],"output_agent_id":"..."}
@@ -36,6 +36,304 @@ Actions:
 {"action":"finish"}
 
 An add_subgraph action adds one functional subgraph of one to three Agents and is executed once after the whole action is accepted. relations may be an empty array; output_agent_id is optional and belongs only at the top level of add_subgraph, never inside an Agent object. Use model_id values only from model_catalog. Every allowed_tools entry must be an exact tool_id from tool_catalog; action_names are Executor actions, not allowed_tools identifiers. execution_mode is execution semantics, not a fixed role; use reasoning unless a listed tool or environment requires react or coding. A directed relation routes the source artifact to the target; a bidirectional relation is one bounded two-Agent exchange. Describe each Agent's objective, required inputs, output artifact, and completion condition in concise ordinary text. Keep every contract faithful to the task's original relation, qualifiers, comparison criterion, and answer type; require source-grounded evidence when the answer depends on multiple facts. A completed semantic-answer artifact states one explicit bare answer span, not a sentence or question restatement, in the requested answer type and preserves its evidence-aligned lexical form, units, qualifiers, date, and full proper name. Independent evidence branches may merge at one semantic-answer Agent, but the Format Agent must remain a separate sink with one semantic predecessor. role_family is optional metadata, not a fixed Operator type. Inspect execution feedback and Canvas issues before selecting the next action. Use a distinct role_family "format" Output Agent only when the observation requires the exact-answer terminal protocol; it extracts one routed semantic answer and does not solve the task. Do not assume a fixed workflow topology or an unlisted Skill."""
+
+
+# SkillFlow keeps the Supervisor instruction short, while FlowSteer exposes
+# legal edits and execution feedback through the progressive Canvas.  This
+# prompt therefore defines only the policy/environment boundary.  Task-solving
+# recipes belong in evidence-gated Skills or graph-authored Agent contracts.
+DIRECTOR_SYSTEM_PROMPT = """You are the Flow-Director. Incrementally edit the executable AgentGraph from the latest Canvas observation. Return exactly one valid JSON action each turn and no other text.
+
+Legal actions are add_subgraph, modify_agent, delete_agent, set_relation, set_output, and finish. add_subgraph adds one functional subgraph of one to three Agents as one transaction. Use only model_id values from model_catalog and exact tool_id values from tool_catalog. execution_mode is reasoning, react, or coding.
+
+A directed relation routes the source artifact to the target. A bidirectional relation performs one bounded two-Agent exchange. Each accepted edit is executed once, and its Canvas validation and execution feedback appear in the next observation. Inspect that state before choosing the next action. Use finish only when finish_admissibility is present and admissible. Do not assume a fixed workflow topology or an unlisted Skill."""
+
+DIRECTOR_PROMPT_VERSION = "agentgraph.director.minimal-neutral.v9"
+_SUPPORTED_DIRECTOR_SYSTEM_PROMPTS = frozenset(
+    {DIRECTOR_SYSTEM_PROMPT, LEGACY_DIRECTOR_SYSTEM_PROMPT_V8}
+)
+
+
+_NON_EMPTY_STRING_SCHEMA = {"type": "string", "minLength": 1}
+_AGENT_SPEC_JSON_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["agent_id", "model_id", "contract"],
+    "properties": {
+        "agent_id": _NON_EMPTY_STRING_SCHEMA,
+        "model_id": _NON_EMPTY_STRING_SCHEMA,
+        "contract": _NON_EMPTY_STRING_SCHEMA,
+        "role_family": _NON_EMPTY_STRING_SCHEMA,
+        "allowed_tools": {
+            "type": "array",
+            "items": _NON_EMPTY_STRING_SCHEMA,
+            "uniqueItems": True,
+        },
+        "execution_mode": {"enum": ["reasoning", "react", "coding"]},
+        "artifact_type": _NON_EMPTY_STRING_SCHEMA,
+        "completion_condition": _NON_EMPTY_STRING_SCHEMA,
+    },
+}
+_RELATION_SPEC_JSON_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "source_id",
+        "target_id",
+        "source_to_target",
+        "target_to_source",
+    ],
+    "properties": {
+        "source_id": _NON_EMPTY_STRING_SCHEMA,
+        "target_id": _NON_EMPTY_STRING_SCHEMA,
+        "source_to_target": {"type": "boolean"},
+        "target_to_source": {"type": "boolean"},
+    },
+    "anyOf": [
+        {"properties": {"source_to_target": {"const": True}}},
+        {"properties": {"target_to_source": {"const": True}}},
+    ],
+}
+_MUTABLE_AGENT_PROPERTIES = {
+    "model_id": _NON_EMPTY_STRING_SCHEMA,
+    "contract": _NON_EMPTY_STRING_SCHEMA,
+    "role_family": _NON_EMPTY_STRING_SCHEMA,
+    "allowed_tools": {
+        "type": "array",
+        "items": _NON_EMPTY_STRING_SCHEMA,
+        "uniqueItems": True,
+    },
+    "execution_mode": {"enum": ["reasoning", "react", "coding"]},
+    "artifact_type": _NON_EMPTY_STRING_SCHEMA,
+    "completion_condition": _NON_EMPTY_STRING_SCHEMA,
+}
+DIRECTOR_ACTION_JSON_SCHEMA = {
+    "type": "object",
+    "oneOf": [
+        {
+            "additionalProperties": False,
+            "required": ["action", "agents", "relations"],
+            "properties": {
+                "action": {"const": "add_subgraph"},
+                "agents": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 3,
+                    "items": _AGENT_SPEC_JSON_SCHEMA,
+                },
+                "relations": {
+                    "type": "array",
+                    "items": _RELATION_SPEC_JSON_SCHEMA,
+                },
+                "output_agent_id": {
+                    "anyOf": [_NON_EMPTY_STRING_SCHEMA, {"type": "null"}]
+                },
+            },
+        },
+        {
+            "additionalProperties": False,
+            "required": ["action", "agent_id", "model_id", "contract"],
+            "properties": {
+                "action": {"const": "add_agent"},
+                "agent_id": _NON_EMPTY_STRING_SCHEMA,
+                "model_id": _NON_EMPTY_STRING_SCHEMA,
+                "contract": _NON_EMPTY_STRING_SCHEMA,
+                "role_family": _NON_EMPTY_STRING_SCHEMA,
+                "allowed_tools": _MUTABLE_AGENT_PROPERTIES["allowed_tools"],
+                "execution_mode": _MUTABLE_AGENT_PROPERTIES["execution_mode"],
+                "artifact_type": _NON_EMPTY_STRING_SCHEMA,
+                "completion_condition": _NON_EMPTY_STRING_SCHEMA,
+            },
+        },
+        {
+            "additionalProperties": False,
+            "required": ["action", "agent_id"],
+            "properties": {
+                "action": {"const": "modify_agent"},
+                "agent_id": _NON_EMPTY_STRING_SCHEMA,
+                **_MUTABLE_AGENT_PROPERTIES,
+            },
+            "anyOf": [
+                {"required": [field_name]}
+                for field_name in _MUTABLE_AGENT_PROPERTIES
+            ],
+        },
+        {
+            "additionalProperties": False,
+            "required": ["action", "agent_id"],
+            "properties": {
+                "action": {"const": "delete_agent"},
+                "agent_id": _NON_EMPTY_STRING_SCHEMA,
+            },
+        },
+        {
+            "additionalProperties": False,
+            "required": [
+                "action",
+                "source_id",
+                "target_id",
+                "source_to_target",
+                "target_to_source",
+            ],
+            "properties": {
+                "action": {"const": "set_relation"},
+                **_RELATION_SPEC_JSON_SCHEMA["properties"],
+            },
+        },
+        {
+            "additionalProperties": False,
+            "required": ["action", "agent_id"],
+            "properties": {
+                "action": {"const": "set_output"},
+                "agent_id": _NON_EMPTY_STRING_SCHEMA,
+            },
+        },
+        {
+            "additionalProperties": False,
+            "required": ["action"],
+            "properties": {"action": {"const": "finish"}},
+        },
+    ],
+}
+DIRECTOR_ACTION_SCHEMA_VERSION = "agentgraph.canvas-action-json-schema.v1"
+DIRECTOR_SGLANG_SAMPLING_SCHEMA_VERSION = (
+    "agentgraph.sglang-flat-action-sampling-schema.v1"
+)
+DIRECTOR_PROGRESSIVE_ACTION_MASK_PROFILE = (
+    "progressive_add_subgraph_then_finish"
+)
+DIRECTOR_STATE_CONDITIONED_ACTION_SCHEMA_VERSION = (
+    "agentgraph.state-conditioned-action-mask.v2"
+)
+DIRECTOR_ACTION_JSON_SCHEMA_TEXT = json.dumps(
+    DIRECTOR_ACTION_JSON_SCHEMA,
+    ensure_ascii=False,
+    sort_keys=True,
+    separators=(",", ":"),
+)
+
+
+def director_action_json_schema_text(actions: Sequence[str]) -> str:
+    """Render the existing parser schema for one configured Canvas profile."""
+
+    if isinstance(actions, (str, bytes)) or not actions:
+        raise ValueError("Canvas actions must be a non-empty sequence")
+    by_name = {
+        branch["properties"]["action"]["const"]: branch
+        for branch in DIRECTOR_ACTION_JSON_SCHEMA["oneOf"]
+    }
+    normalized = tuple(actions)
+    if (
+        any(not isinstance(action, str) or action not in by_name for action in normalized)
+        or len(normalized) != len(set(normalized))
+    ):
+        raise ValueError("Canvas actions contain an unknown or duplicate action")
+    return json.dumps(
+        {
+            "type": "object",
+            "oneOf": [by_name[action] for action in normalized],
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def director_sglang_sampling_json_schema_text(actions: Sequence[str]) -> str:
+    """Render the evaluation-only constrained-decoding schema for SGLang.
+
+    NECESSARY_ADAPTATION (SGLang 0.5.15): the deployed constrained decoder
+    merges mutually exclusive top-level ``oneOf`` branches. Sampling therefore
+    uses one flat top-level object. The unchanged ``AgentActionParser`` remains
+    authoritative for action-specific required fields and semantics.
+    """
+
+    strict_profile = json.loads(director_action_json_schema_text(actions))
+    branches = strict_profile["oneOf"]
+    properties: dict[str, Any] = {
+        "action": {
+            "enum": [branch["properties"]["action"]["const"] for branch in branches]
+        }
+    }
+    for branch in branches:
+        for field_name, field_schema in branch["properties"].items():
+            if field_name == "action":
+                continue
+            existing = properties.get(field_name)
+            if existing is not None and existing != field_schema:
+                raise ValueError(
+                    f"Canvas actions disagree on sampling schema for {field_name}"
+                )
+            properties[field_name] = field_schema
+    return json.dumps(
+        {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["action"],
+            "properties": properties,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def director_state_conditioned_sampling_json_schema_text(action: str) -> str:
+    """Render one exact SGLang action branch without JSON-Schema intersections.
+
+    The deployed xgrammar converter does not preserve an object-level
+    ``required``/``properties`` intersection with the relation schema's
+    direction ``anyOf``.  It consequently admitted relation objects that
+    contained only one direction flag.  This evaluation-only compatibility
+    schema expresses the same relation invariant as two self-contained object
+    alternatives.  The unchanged strict ``AgentActionParser`` remains the
+    authoritative post-generation validator.
+    """
+
+    if action not in {"add_subgraph", "finish"}:
+        raise ValueError("state-conditioned sampling supports add_subgraph or finish")
+    by_name = {
+        branch["properties"]["action"]["const"]: branch
+        for branch in DIRECTOR_ACTION_JSON_SCHEMA["oneOf"]
+    }
+    # A JSON round trip makes a request-local copy without changing the strict
+    # parser schema shared by the rest of the runtime.
+    branch = json.loads(json.dumps(by_name[action]))
+    if action == "add_subgraph":
+        relation_schema = branch["properties"]["relations"]["items"]
+        relation_properties = relation_schema["properties"]
+        relation_required = relation_schema["required"]
+        branch["properties"]["relations"]["items"] = {
+            # ``anyOf`` preserves the bidirectional case, which satisfies both
+            # complete object alternatives.  ``oneOf`` would incorrectly
+            # reject a reciprocal relation.
+            "anyOf": [
+                {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": relation_required,
+                    "properties": {
+                        **relation_properties,
+                        "source_to_target": {"const": True},
+                    },
+                },
+                {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": relation_required,
+                    "properties": {
+                        **relation_properties,
+                        "target_to_source": {"const": True},
+                    },
+                },
+            ]
+        }
+    return json.dumps(
+        branch,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
 
 
 DIRECTOR_TRANSCRIPT_SCHEMA = "flowsteer.director.transcript.v1"
@@ -56,11 +354,14 @@ def encode_director_transcript(
         if not isinstance(content, str) or not content:
             raise ValueError("Director transcript messages require non-empty content")
         normalized.append({"role": role, "content": content})
-    if len(normalized) < 2 or normalized[0] != {
-        "role": "system",
-        "content": DIRECTOR_SYSTEM_PROMPT,
-    }:
-        raise ValueError("Director transcript must start with the fixed system prompt")
+    if (
+        len(normalized) < 2
+        or normalized[0]["role"] != "system"
+        or normalized[0]["content"] not in _SUPPORTED_DIRECTOR_SYSTEM_PROMPTS
+    ):
+        raise ValueError(
+            "Director transcript must start with a supported versioned system prompt"
+        )
     if normalized[1]["role"] != "user":
         raise ValueError("Director transcript must start with a user task message")
     payload = {
@@ -121,6 +422,9 @@ class DirectorClient(Protocol):
         prompt: str,
         *,
         seed: Optional[int] = None,
+        action_json_schema: Optional[str] = None,
+        action_json_schema_version: Optional[str] = None,
+        action_schema_branch: Optional[str] = None,
     ) -> DirectorResponse:
         ...
 
@@ -168,7 +472,21 @@ class OpenAIDirectorClient:
         prompt: str,
         *,
         seed: Optional[int] = None,
+        action_json_schema: Optional[str] = None,
+        action_json_schema_version: Optional[str] = None,
+        action_schema_branch: Optional[str] = None,
     ) -> DirectorResponse:
+        if any(
+            value is not None
+            for value in (
+                action_json_schema,
+                action_json_schema_version,
+                action_schema_branch,
+            )
+        ):
+            raise DirectorError(
+                "state-conditioned action schemas require the native SGLang client"
+            )
         if seed is not None and (
             isinstance(seed, bool) or not isinstance(seed, int) or seed < 0
         ):
@@ -293,6 +611,10 @@ class AgentGraphOrchestrator:
         sampling_base_seed: int | None = None,
         sampling_coordinate: ScientificSamplingCoordinate | None = None,
         tool_registry: Optional[ToolRegistry] = None,
+        sampling_action_profile: Optional[str] = None,
+        sampling_action_schema_version: str = (
+            DIRECTOR_STATE_CONDITIONED_ACTION_SCHEMA_VERSION
+        ),
     ) -> None:
         if max_rounds < 1:
             raise ValueError("max_rounds must be positive")
@@ -318,6 +640,45 @@ class AgentGraphOrchestrator:
         self.catalog_order_seed = seed if catalog_order_seed is None else catalog_order_seed
         self.history_window = history_window
         self.tool_registry = tool_registry
+        if sampling_action_profile not in {
+            None,
+            DIRECTOR_PROGRESSIVE_ACTION_MASK_PROFILE,
+        }:
+            raise ValueError("unsupported Director sampling action profile")
+        if (
+            not isinstance(sampling_action_schema_version, str)
+            or not sampling_action_schema_version.strip()
+        ):
+            raise ValueError("sampling_action_schema_version must be non-empty")
+        self.sampling_action_profile = sampling_action_profile
+        self.sampling_action_schema_version = (
+            sampling_action_schema_version.strip()
+        )
+
+    def action_schema_request(
+        self,
+        env: AgentWorkflowEnv,
+    ) -> Mapping[str, str]:
+        """Return the evaluation-only constrained action branch for this state.
+
+        FlowSteer's progressive Canvas executes every accepted structural ADD
+        before asking the policy for the next edit.  This optional sampling
+        profile preserves that boundary while avoiding SGLang 0.5.15's
+        unreliable multi-branch ``oneOf`` handling.  The strict parser remains
+        authoritative and no sampled action is repaired.
+        """
+
+        if self.sampling_action_profile is None:
+            return {}
+        finish_admissible = env.finish_admissibility().get("admissible") is True
+        action_branch = "finish" if finish_admissible else "add_subgraph"
+        return {
+            "action_json_schema": director_state_conditioned_sampling_json_schema_text(
+                action_branch
+            ),
+            "action_json_schema_version": self.sampling_action_schema_version,
+            "action_schema_branch": action_branch,
+        }
 
     def generation_seed(self, round_index: int) -> int:
         """Return the exact Director action seed for one zero-based Canvas round."""
@@ -413,6 +774,15 @@ class AgentGraphOrchestrator:
             "current_graph": env.graph.to_dict(),
             "topology_statistics": env.graph.topology_statistics(),
             "canvas_feedback": snapshot.last_feedback,
+            # These are existing admission constraints enforced by
+            # AgentWorkflowEnv, not a role or topology template.  Surfacing
+            # them lets the minimal policy observe its terminal boundary.
+            "terminal_constraints": {
+                "explicit_finish_required": True,
+                "require_exact_answer_tag": env.require_exact_answer_tag,
+                "require_format_agent": env.require_format_agent,
+                "required_tool_id": env.required_tool_id,
+            },
         }
         if directed_edges:
             # The two-bit relation remains the canonical mutation receipt.  A
@@ -562,9 +932,11 @@ class AgentGraphOrchestrator:
         turns: list[DirectorTurn] = []
         prompt = self.build_prompt(env, 0, skills)
         for index in range(self.max_rounds):
+            schema_request = self.action_schema_request(env)
             response = await self.client.propose(
                 prompt,
                 seed=self.generation_seed(index),
+                **schema_request,
             )
             canvas = await env.step(response.text)
             turns.append(DirectorTurn(index, prompt, response, canvas))
@@ -593,7 +965,15 @@ class AgentGraphOrchestrator:
 
 __all__ = [
     "AgentGraphOrchestrator",
+    "DIRECTOR_ACTION_JSON_SCHEMA",
+    "DIRECTOR_ACTION_JSON_SCHEMA_TEXT",
+    "DIRECTOR_ACTION_SCHEMA_VERSION",
+    "DIRECTOR_PROGRESSIVE_ACTION_MASK_PROFILE",
+    "DIRECTOR_SGLANG_SAMPLING_SCHEMA_VERSION",
+    "DIRECTOR_STATE_CONDITIONED_ACTION_SCHEMA_VERSION",
     "DIRECTOR_SYSTEM_PROMPT",
+    "DIRECTOR_PROMPT_VERSION",
+    "LEGACY_DIRECTOR_SYSTEM_PROMPT_V8",
     "DIRECTOR_TRANSCRIPT_SCHEMA",
     "DirectorClient",
     "DirectorError",
@@ -602,5 +982,8 @@ __all__ = [
     "OpenAIDirectorClient",
     "OrchestrationResult",
     "decode_director_transcript",
+    "director_action_json_schema_text",
+    "director_sglang_sampling_json_schema_text",
+    "director_state_conditioned_sampling_json_schema_text",
     "encode_director_transcript",
 ]

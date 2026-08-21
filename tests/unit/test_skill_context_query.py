@@ -13,7 +13,7 @@ _MODULE = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(_MODULE)
 
 
-def test_skill_query_tags_cover_decision_time_context_product_only() -> None:
+def test_hotpot_skill_query_tags_exclude_non_public_native_annotations() -> None:
     task = TaskRecord(
         task_id="hotpotqa:context-test",
         question="Which entity supplies the bridge fact?",
@@ -68,9 +68,10 @@ def test_skill_query_tags_cover_decision_time_context_product_only() -> None:
     )
 
     assert 'task_context.dataset_key="hotpotqa"' in tags
-    assert 'task_context.task_type="multi_hop_qa"' in tags
-    assert 'task_context.task_subtype="bridge"' in tags
-    assert 'task_context.difficulty="hard"' in tags
+    assert 'task_context.task_family="hotpotqa"' in tags
+    assert not any(tag.startswith("task_context.task_type=") for tag in tags)
+    assert not any(tag.startswith("task_context.task_subtype=") for tag in tags)
+    assert not any(tag.startswith("task_context.difficulty=") for tag in tags)
     assert 'graph_prefix.topology_family="serial_3_plus"' in tags
     assert "graph_prefix.structural_depth=3" in tags
     assert 'graph_prefix.output_state="set"' in tags
@@ -89,6 +90,35 @@ def test_skill_query_tags_cover_decision_time_context_product_only() -> None:
     assert task.task_id not in serialized
     assert "hidden-gold-answer" not in serialized
     assert "find first-hop evidence" not in serialized
+
+
+def test_non_hotpot_skill_query_retains_existing_task_metadata_tags() -> None:
+    task = TaskRecord(
+        task_id="triviaqa:context-test",
+        question="Question",
+        ground_truth="answer",
+        split="train",
+        metadata={
+            "dataset_key": "triviaqa",
+            "task_family": "triviaqa",
+            "task_type": "factual_qa",
+            "skillflow": {"extra": {"type": "alias", "level": "hard"}},
+        },
+    )
+
+    tags = set(
+        _MODULE._skill_query_tags(
+            task,
+            AgentGraph(),
+            task_family="triviaqa",
+            graph_stage="empty_graph",
+            validation_issue_codes=(),
+        )
+    )
+
+    assert 'task_context.task_type="factual_qa"' in tags
+    assert 'task_context.task_subtype="alias"' in tags
+    assert 'task_context.difficulty="hard"' in tags
 
 
 def test_skill_query_tags_use_current_prefix_not_a_future_topology() -> None:

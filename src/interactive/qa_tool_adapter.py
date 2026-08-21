@@ -11,17 +11,22 @@ from __future__ import annotations
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 import inspect
 from pathlib import Path
-from typing import Mapping, Protocol, Sequence
+import re
+from tempfile import TemporaryDirectory
+from typing import Callable, Mapping, Protocol, Sequence
 
+from .agent_runtime import AgentGateway, AgentRequest, GatewayResponse
 from .react_execution import ToolReactExecutionAdapter
 from .qa_retrieval import (
     DEFAULT_QA_RETRIEVAL_INDEX,
     DEFAULT_SKILLFLOW_SOURCE,
     SkillFlowRetrievalError,
     _load_retrieval_index_class,
+    _load_retrieval_module,
 )
 from .tool_runtime import (
     ActionKind,
@@ -40,6 +45,21 @@ from .tool_runtime import (
 # search action that produces its opaque passage_id.
 QA_RETRIEVAL_TOOL_ID = "qa-retrieval"
 DEFAULT_QA_DATASET_SCOPE = ("hotpotqa", "triviaqa")
+_PROVIDED_PASSAGE = re.compile(
+    r"^\[(?P<title>[^\]]+)\]\s*(?P<text>.+)$",
+    flags=re.DOTALL,
+)
+
+SKILLFLOW_MULTI_HOP_QA_GUIDANCE = (
+    "Chain evidence across passages to answer multi-hop questions. "
+    "Search for specific entity names (not the full question). "
+    "If a search has no match or repeats prior evidence, pivot with synonyms. "
+    "Complete with a brief name, date, number, or short phrase."
+)
+SKILLFLOW_FACTUAL_QA_GUIDANCE = (
+    "Extract the answer from retrieved passages and do not guess from memory. "
+    "Complete with a concise name, place, number, or short phrase."
+)
 
 
 class _RetrievalIndex(Protocol):
@@ -247,6 +267,111 @@ class QARetrievalToolBackend:
 class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
     """Bounded QA retrieval with canonical search-to-read admission."""
 
+    def __init__(
+        self,
+        *,
+        gateway: AgentGateway,
+        tool_registry: ToolRegistry,
+        max_turns: int,
+        max_tool_calls: int,
+        max_action_tokens: int = 512,
+        task_type: str | None = None,
+    ) -> None:
+        if task_type not in {None, "multi_hop_qa", "factual_qa"}:
+            raise ValueError("QA task_type must be multi_hop_qa, factual_qa, or None")
+        super().__init__(
+            gateway=gateway,
+            tool_registry=tool_registry,
+            max_turns=max_turns,
+            max_tool_calls=max_tool_calls,
+            max_action_tokens=max_action_tokens,
+        )
+        self._task_type = task_type
+        self._retrieval_completion_required: ContextVar[bool] = ContextVar(
+            f"qa_retrieval_completion_required_{id(self)}",
+            default=False,
+        )
+
+    async def execute(self, request: AgentRequest) -> GatewayResponse:
+        # NECESSARY_ADAPTATION: the generic AgentGraph completion hook receives
+        # Tool receipts but not the current AgentRequest.  Bind only the QA
+        # request-scoped admission bit here so concurrent executions cannot
+        # leak allowed-tool state across Agents.  A zero Tool budget preserves
+        # the generic direct-completion boundary because no dispatch is legal.
+        requires_retrieval = (
+            self._max_tool_calls > 0
+            and QA_RETRIEVAL_TOOL_ID in request.agent.allowed_tools
+        )
+        token = self._retrieval_completion_required.set(requires_retrieval)
+        try:
+            return await super().execute(request)
+        finally:
+            self._retrieval_completion_required.reset(token)
+
+    def _contract(
+        self,
+        request: AgentRequest,
+        observations: list[Mapping[str, object]],
+    ) -> str:
+        contract = super()._contract(request, observations)
+        if self._task_type == "multi_hop_qa":
+            guidance = SKILLFLOW_MULTI_HOP_QA_GUIDANCE
+        elif self._task_type == "factual_qa":
+            guidance = SKILLFLOW_FACTUAL_QA_GUIDANCE
+        else:
+            return contract
+        # DIRECT_REUSE: SkillFlow training/task_prompts.py::{MULTI_HOP_QA,
+        # FACTUAL_QA}.  Only the terminal wire is adapted from answer(response=)
+        # to this runtime's already-declared StructuredAction completion.
+        terminal_wire = (
+            " On completion, arguments.value is the completed QA artifact, "
+            "not a schema label or placeholder."
+        )
+        if request.is_format_predecessor:
+            terminal_wire += (
+                " As the direct predecessor of the Format Agent, put the brief "
+                "answer span after `Candidate answer:` and the supporting "
+                "retrieved passage span after `Evidence:` in arguments.value."
+            )
+        return (
+            contract
+            + "\nSkillFlow QA execution guidance: "
+            + guidance
+            + terminal_wire
+        )
+
+    def _completion_error(
+        self,
+        *,
+        action: StructuredAction,
+        artifact: str,
+        tool_receipts: list[dict[str, object]],
+    ) -> str | None:
+        del action, artifact
+        if not self._retrieval_completion_required.get():
+            return None
+
+        # DIRECT_REUSE: SkillFlow training/environment.py::step rejects the
+        # terminal ``answer`` action until action history contains a real
+        # non-answer Tool turn (lines 389-416).  AgentGraph's equivalent public
+        # evidence is a measured ToolReceipt appended only after dispatch.
+        for receipt in tool_receipts:
+            if receipt.get("tool_id") != QA_RETRIEVAL_TOOL_ID:
+                continue
+            request = receipt.get("request")
+            if not isinstance(request, Mapping) or request.get("action") not in {
+                "search",
+                "read",
+            }:
+                continue
+            result = receipt.get("result")
+            error_type = receipt.get("error_type")
+            successful = isinstance(result, Mapping) and error_type is None
+            failed = result is None and isinstance(error_type, str) and bool(error_type)
+            if successful or failed:
+                return None
+        return "qa_completion_requires_retrieval_dispatch"
+
     def _tool_action_error(
         self,
         *,
@@ -433,12 +558,17 @@ class OpenQAToolRegistry:
     registry: ToolRegistry
     retrieval_index_identity: Mapping[str, object]
     _index: _RetrievalIndex = field(repr=False)
+    _cleanup: Callable[[], None] | None = field(default=None, repr=False)
     _closed: bool = field(default=False, init=False, repr=False)
 
     def close(self) -> None:
         if not self._closed:
-            self._index.close()
-            self._closed = True
+            try:
+                self._index.close()
+            finally:
+                self._closed = True
+                if self._cleanup is not None:
+                    self._cleanup()
 
     def __enter__(self) -> "OpenQAToolRegistry":
         if self._closed:
@@ -487,6 +617,95 @@ def open_qa_tool_registry(
     return OpenQAToolRegistry(registry, identity, index)
 
 
+def _provided_context_passages(
+    values: Sequence[str],
+    *,
+    document_passage_class: object,
+) -> tuple[object, ...]:
+    if isinstance(values, (str, bytes)) or not values:
+        raise ValueError("provided QA context must be a non-empty passage sequence")
+    passages: list[object] = []
+    for index, value in enumerate(values):
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("provided QA context contains an empty passage")
+        normalized = value.strip()
+        matched = _PROVIDED_PASSAGE.fullmatch(normalized)
+        title = (
+            matched.group("title").strip()
+            if matched is not None
+            else f"Provided passage {index + 1}"
+        )
+        text = matched.group("text").strip() if matched is not None else normalized
+        passages.append(
+            document_passage_class(
+                passage_id=f"provided-context-{index + 1:02d}",
+                document_id=f"provided-document-{index + 1:02d}",
+                title=title,
+                text=text,
+            )
+        )
+    return tuple(passages)
+
+
+def open_provided_context_qa_tool_registry(
+    passages: Sequence[str],
+    *,
+    skillflow_source: str | Path = DEFAULT_SKILLFLOW_SOURCE,
+    dataset_scope: Sequence[str] = ("hotpotqa",),
+    timeout_seconds: float = 10.0,
+) -> OpenQAToolRegistry:
+    """Build and open SkillFlow's FTS index over one task's supplied context.
+
+    SkillFlow ``GenericTaskEnvironment._search_passages`` searches ``context``
+    before its external corpus.  The free-AgentGraph runtime uses SkillFlow's
+    newer public ``DocumentPassage -> build_retrieval_index -> RetrievalIndex``
+    boundary to preserve that behavior without implementing another ranker.
+    """
+
+    module = _load_retrieval_module(Path(skillflow_source))
+    try:
+        document_passage_class = module.DocumentPassage
+        build_retrieval_index = module.build_retrieval_index
+        retrieval_index_class = module.RetrievalIndex
+    except AttributeError as exc:
+        raise SkillFlowRetrievalError(
+            "SkillFlow task-context retrieval components are unavailable"
+        ) from exc
+
+    normalized_passages = _provided_context_passages(
+        passages,
+        document_passage_class=document_passage_class,
+    )
+    temporary = TemporaryDirectory(prefix="flowsteer-provided-qa-context-")
+    index_path = Path(temporary.name) / "retrieval.sqlite3"
+    try:
+        build_retrieval_index(
+            index_path,
+            normalized_passages,
+            corpus_name="benchmark-provided-context",
+            corpus_version="task-scoped-v1",
+        )
+        index = _ThreadAffineRetrievalWorker(
+            retrieval_index_class,
+            index_path,
+        )
+        registry = build_qa_tool_registry(
+            index,
+            dataset_scope=dataset_scope,
+            timeout_seconds=timeout_seconds,
+        )
+        identity = _index_identity(index)
+    except BaseException:
+        temporary.cleanup()
+        raise
+    return OpenQAToolRegistry(
+        registry,
+        identity,
+        index,
+        _cleanup=temporary.cleanup,
+    )
+
+
 __all__ = [
     "DEFAULT_QA_DATASET_SCOPE",
     "OpenQAToolRegistry",
@@ -497,4 +716,5 @@ __all__ = [
     "QASearchToolBackend",
     "build_qa_tool_registry",
     "open_qa_tool_registry",
+    "open_provided_context_qa_tool_registry",
 ]

@@ -149,11 +149,9 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
         protocol = (
             "You are the direct semantic predecessor of the terminal Format Agent. "
             "Follow your assigned contract and compute the answer from the task and routed "
-            "evidence. Return exactly one `Candidate answer: ...` line containing only the "
-            "answer value—not a sentence, explanation, or question restatement—followed by "
-            "one `Evidence: ...` field. Preserve the evidence-aligned full proper name, date, "
-            "number, unit, and qualifier when the question asks for it. For a yes/no question, "
-            "the Candidate answer value must be only yes or no. Do not use <answer> tags."
+            "evidence. Return exactly two fields: one `Candidate answer: ...` line containing "
+            "only the answer value, followed by one `Evidence: ...` field. Do not use "
+            "<answer> tags."
         )
     elif request.is_output_agent:
         protocol = (

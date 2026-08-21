@@ -36,6 +36,7 @@ except ModuleNotFoundError:  # Direct script execution.
 
 
 SCHEMA_VERSION = "flowsteer.joint-qa.additional-confirmation.v1"
+SUPPORTED_DATASETS = frozenset({"hotpotqa", "triviaqa"})
 
 
 def _load_yaml(path: Path) -> Mapping[str, Any]:
@@ -74,8 +75,20 @@ def materialize(config_path: Path) -> Path:
     config = _load_yaml(config_path)
     if config.get("schema_version") != SCHEMA_VERSION:
         raise ValueError("unsupported additional-confirmation schema")
-    if config.get("datasets") != ["hotpotqa", "triviaqa"]:
-        raise ValueError("additional confirmation requires HotpotQA then TriviaQA")
+    raw_datasets = config.get("datasets")
+    if not isinstance(raw_datasets, list) or not raw_datasets:
+        raise ValueError("additional confirmation datasets must be a non-empty list")
+    if not all(isinstance(dataset, str) for dataset in raw_datasets):
+        raise ValueError("additional confirmation dataset keys must be strings")
+    if len(raw_datasets) != len(set(raw_datasets)):
+        raise ValueError("additional confirmation datasets must be unique")
+    unsupported = set(raw_datasets) - SUPPORTED_DATASETS
+    if unsupported:
+        raise ValueError(
+            "unsupported additional-confirmation datasets: "
+            + ", ".join(sorted(unsupported))
+        )
+    dataset_keys = tuple(raw_datasets)
     if config.get("task_split") != "validation":
         raise ValueError("additional confirmation must remain validation-only")
     partition = str(config.get("partition", ""))
@@ -110,7 +123,7 @@ def materialize(config_path: Path) -> Path:
 
     records: list[dict[str, Any]] = []
     ordered_ids: dict[str, list[str]] = {}
-    for dataset_key in config["datasets"]:
+    for dataset_key in dataset_keys:
         source = sources.get(dataset_key)
         converter = CONVERTERS.get(dataset_key)
         if not isinstance(source, Mapping) or converter is None:
@@ -198,4 +211,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

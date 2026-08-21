@@ -138,12 +138,28 @@ class ToolReactExecutionAdapter:
             for capability in capabilities
             for action_name, argument_schema in capability.action_schemas.items()
         ]
+        # DIRECT_REUSE: SkillFlow rollout/context.py::_ACTION_GUIDANCE uses
+        # ``arguments={"value": ...}`` for completion.  Do not place a
+        # concrete placeholder such as ``"final artifact"`` in the public
+        # action example: generation models can copy it verbatim and thereby
+        # sever the semantic artifact routed to the next AgentGraph node.
         completion_schema = {
-            "kind": "complete",
-            "name": "complete",
-            "arguments": {"value": "final artifact"},
-            "resource_id": None,
-            "skill_id": None,
+            "kind": {"const": "complete"},
+            "name": {"const": "complete"},
+            "arguments": {
+                "type": "object",
+                "required": ["value"],
+                "properties": {
+                    "value": {
+                        "description": (
+                            "The completed artifact required by the Agent contract"
+                        )
+                    }
+                },
+                "additionalProperties": False,
+            },
+            "resource_id": {"const": None},
+            "skill_id": {"const": None},
         }
         # DIRECT_REUSE: SkillFlow's ReAct prompt carries action_history and
         # the latest public observation into the next turn.  State explicitly

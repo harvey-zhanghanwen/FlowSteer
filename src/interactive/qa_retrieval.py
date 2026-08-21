@@ -190,7 +190,7 @@ class QARetrievalReceipt:
         return "\n\n".join(blocks)
 
 
-def _load_retrieval_index_class(skillflow_source: Path) -> Any:
+def _load_retrieval_module(skillflow_source: Path) -> Any:
     source = skillflow_source.expanduser().resolve()
     if not source.is_dir():
         raise SkillFlowRetrievalError(
@@ -202,9 +202,18 @@ def _load_retrieval_index_class(skillflow_source: Path) -> Any:
         # Adding its package root is the only compatibility shim here.
         sys.path.insert(0, source_text)
     try:
-        module = importlib.import_module("skillev.benchmarks")
+        return importlib.import_module("skillev.benchmarks.retrieval")
+    except ImportError as exc:
+        raise SkillFlowRetrievalError(
+            "SkillFlow retrieval module could not be imported"
+        ) from exc
+
+
+def _load_retrieval_index_class(skillflow_source: Path) -> Any:
+    module = _load_retrieval_module(skillflow_source)
+    try:
         return module.RetrievalIndex
-    except (ImportError, AttributeError) as exc:
+    except AttributeError as exc:
         raise SkillFlowRetrievalError(
             "SkillFlow RetrievalIndex could not be imported"
         ) from exc

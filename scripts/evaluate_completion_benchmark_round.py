@@ -883,6 +883,194 @@ async def _evaluate_prediction(
     return await evaluate_task(task, prediction)
 
 
+def _synthetic_evaluator_preflight_fixture(
+    dataset_key: str,
+) -> tuple[TaskRecord, str]:
+    """Return a fixed evaluator-only fixture that is outside benchmark data.
+
+    Completion benchmark answers are evaluator-only data, but a final-test
+    preflight must not read even one selected answer.  Static evaluators and
+    callback-only evaluators can exercise their existing public boundary with
+    these synthetic records.  Stateful environment evaluators use a fixed
+    non-test aligned record instead (see
+    :func:`_non_test_environment_preflight_task`).
+    """
+
+    common = {
+        "task_id": f"evaluator-preflight:{dataset_key}:synthetic-v1",
+        "split": "train",
+    }
+    if dataset_key == "hotpotqa":
+        return (
+            TaskRecord(
+                **common,
+                question="Synthetic evaluator preflight question.",
+                ground_truth="Alpha River",
+                metadata={
+                    "dataset_key": dataset_key,
+                    "evaluator_payload": {"accepted_answers": ["Alpha River"]},
+                },
+            ),
+            "<answer>Alpha River</answer>",
+        )
+    if dataset_key == "triviaqa":
+        return (
+            TaskRecord(
+                **common,
+                question="Synthetic evaluator preflight question.",
+                ground_truth="Beta City",
+                metadata={
+                    "dataset_key": dataset_key,
+                    "evaluator_payload": {"accepted_answers": ["Beta City"]},
+                },
+            ),
+            "<answer>Beta City</answer>",
+        )
+    if dataset_key == "aime_2026":
+        return (
+            TaskRecord(
+                **common,
+                question="Synthetic integer evaluator preflight question.",
+                ground_truth="42",
+                metadata={
+                    "dataset_key": dataset_key,
+                    "evaluator_payload": {"accepted_answers": ["42"]},
+                },
+            ),
+            "<answer>42</answer>",
+        )
+    if dataset_key == "healthbench_professional":
+        return (
+            TaskRecord(
+                **common,
+                question="Conversation:\n\n[user] Return the word preflight.\n\n[assistant]",
+                ground_truth=None,
+                metadata={
+                    "dataset_key": dataset_key,
+                    "evaluator_payload": {
+                        "rubric_items": [
+                            {
+                                "criterion_text": (
+                                    "The assistant response contains the word preflight."
+                                ),
+                                "points": 1,
+                            }
+                        ]
+                    },
+                },
+            ),
+            "preflight",
+        )
+    if dataset_key == "swe_bench":
+        return (
+            TaskRecord(
+                **common,
+                question="Synthetic SWE-bench evaluator callback preflight.",
+                ground_truth=None,
+                metadata={"dataset_key": dataset_key},
+            ),
+            "",
+        )
+    raise CompletionBenchmarkRoundError(
+        f"{dataset_key} requires a non-test aligned environment fixture"
+    )
+
+
+def _non_test_environment_preflight_task(
+    config: Mapping[str, Any], root: Path, dataset_key: str
+) -> TaskRecord:
+    """Load the first fixed training record for an environment preflight."""
+
+    if dataset_key not in _INTERACTIVE_BENCHMARKS:
+        raise CompletionBenchmarkRoundError(
+            "a non-test environment fixture is valid only for interactive benchmarks"
+        )
+    data = _mapping(config["data"], "data")
+    train_path = _resolve(root, str(data["train_path"]))
+    try:
+        task = next(iter_task_records(train_path, expected_split="train"))
+    except StopIteration as exc:
+        raise CompletionBenchmarkRoundError(
+            f"{dataset_key} has no fixed training evaluator fixture"
+        ) from exc
+    if _dataset_key(task) != dataset_key:
+        raise CompletionBenchmarkRoundError(
+            f"{dataset_key} training evaluator fixture has the wrong dataset"
+        )
+    return task
+
+
+def _evaluator_preflight_receipt(
+    outcome: Any, dataset_key: str
+) -> Mapping[str, Any]:
+    """Validate one fixture outcome and retain no answer-bearing fields."""
+
+    metric_name = str(_BENCHMARKS[dataset_key]["primary_metric"])
+    metric_names = tuple(_BENCHMARKS[dataset_key]["metric_names"])
+    values = {name: outcome.metrics.get(name) for name in metric_names}
+    passed = outcome.valid and all(
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+        for value in values.values()
+    )
+    if passed and dataset_key == "aime_2026":
+        passed = passed and float(values[metric_name]) == 1.0
+    elif passed and dataset_key in {"hotpotqa", "triviaqa"}:
+        passed = passed and all(float(value) == 1.0 for value in values.values())
+    if not passed:
+        raise CompletionBenchmarkRoundError(
+            f"fixed-fixture {dataset_key} evaluator preflight failed"
+        )
+    return {
+        "passed": True,
+        "evaluator_version": str(outcome.evaluator_version),
+    }
+
+
+async def _run_evaluator_preflight(
+    backend: LiveSmokeBackend,
+    config: Mapping[str, Any],
+    root: Path,
+    dataset_key: str,
+) -> Mapping[str, Any]:
+    """Exercise the evaluator without consulting the selected benchmark set."""
+
+    if dataset_key in _INTERACTIVE_BENCHMARKS:
+        task = _non_test_environment_preflight_task(config, root, dataset_key)
+
+        async def invalid_environment_action(_prompt: str) -> str:
+            return "<INVALID>"
+
+        outcome = await _evaluate_prediction(
+            backend,
+            task,
+            "",
+            run_graph=invalid_environment_action,
+        )
+    elif dataset_key == "swe_bench":
+        # The official harness performs its own runtime preflight before this
+        # callback check.  Use a synthetic unresolved result here so neither a
+        # selected instance nor its trusted result enters this generic
+        # evaluator receipt.
+        task, prediction = _synthetic_evaluator_preflight_fixture(dataset_key)
+
+        async def synthetic_unresolved_harness(
+            _task: TaskRecord | Mapping[str, Any], _prediction: str
+        ) -> Mapping[str, bool]:
+            return {"resolved": False}
+
+        outcome = await evaluate_task(
+            task,
+            prediction,
+            swe_harness=synthetic_unresolved_harness,
+        )
+    else:
+        task, prediction = _synthetic_evaluator_preflight_fixture(dataset_key)
+        outcome = await _evaluate_prediction(backend, task, prediction)
+    return _evaluator_preflight_receipt(outcome, dataset_key)
+
+
 async def _direct_one(
     backend: LiveSmokeBackend,
     task: TaskRecord,
@@ -1891,74 +2079,15 @@ async def run_completion_benchmark_round(
             ),
             adapter_name=str(director["behavior_adapter_name"]),
         )
-        if dataset_key in _INTERACTIVE_BENCHMARKS:
-            async def invalid_environment_action(_prompt: str) -> str:
-                return "<INVALID>"
-
-            known_answer = await _evaluate_prediction(
-                backend,
-                selected[0],
-                "",
-                run_graph=invalid_environment_action,
-            )
-        elif dataset_key == "swe_bench":
-            # SkillFlow classifies an empty patch as unresolved before Docker
-            # execution.  This proves the exact evaluator callback contract;
-            # Docker availability and all selected Verified IDs were already
-            # required by the official-harness preflight above.
-            known_prediction = ""
-            known_answer = await _evaluate_prediction(
-                backend, selected[0], known_prediction
-            )
-        else:
-            if dataset_key == "aime_2026":
-                known_prediction = f"<answer>{selected[0].ground_truth}</answer>"
-            elif dataset_key in {"hotpotqa", "triviaqa"}:
-                evaluator_payload = selected[0].metadata.get(
-                    "evaluator_payload", {}
-                )
-                accepted_answers = (
-                    evaluator_payload.get("accepted_answers", ())
-                    if isinstance(evaluator_payload, Mapping)
-                    else ()
-                )
-                known_prediction = (
-                    str(accepted_answers[0])
-                    if isinstance(accepted_answers, Sequence)
-                    and not isinstance(accepted_answers, (str, bytes))
-                    and accepted_answers
-                    else selected[0].ground_truth
-                )
-            else:
-                known_prediction = selected[0].ground_truth
-            known_answer = await _evaluate_prediction(
-                backend, selected[0], known_prediction
-            )
-        metric_name = str(_BENCHMARKS[dataset_key]["primary_metric"])
-        known_metrics = tuple(_BENCHMARKS[dataset_key]["metric_names"])
-        known_values = {
-            name: known_answer.metrics.get(name) for name in known_metrics
-        }
-        known_value = known_values[metric_name]
-        known_valid = known_answer.valid and all(
-            isinstance(value, (int, float))
-            and not isinstance(value, bool)
-            and math.isfinite(float(value))
-            for value in known_values.values()
+        evaluator_preflight = await _run_evaluator_preflight(
+            backend,
+            config,
+            root,
+            dataset_key,
         )
-        if dataset_key == "aime_2026":
-            known_valid = known_valid and float(known_value) == 1.0
-        elif dataset_key in {"hotpotqa", "triviaqa"}:
-            known_valid = known_valid and all(
-                float(value) == 1.0 for value in known_values.values()
-            )
-        if not known_valid:
-            raise CompletionBenchmarkRoundError(
-                f"known-answer {dataset_key} evaluator preflight failed"
-            )
         preflight = {
             **dict(adapter_preflight),
-            "evaluator_known_answer": asdict(known_answer),
+            "evaluator_preflight": evaluator_preflight,
             "healthbench_judge_model": (
                 backend.judge_model
                 if dataset_key == "healthbench_professional"
