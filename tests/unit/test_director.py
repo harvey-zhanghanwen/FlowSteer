@@ -193,6 +193,24 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
             "qa-retrieval",
             state["terminal_constraints"]["required_evidence_tool_id"],
         )
+        self.assertEqual(
+            {
+                "semantic_answer_owner_role_family": "reasoner",
+                "required_evidence_tool_id": "qa-retrieval",
+                "required_evidence_tool_owner_role_family": "reasoner",
+                "required_evidence_execution_mode": "react",
+                "required_direct_role_edges": [
+                    ["reasoner", "verifier"],
+                    ["verifier", "format"],
+                ],
+                "output_role_family": "format",
+                "formatter_original_question_visible": False,
+                "formatter_answer_reselection_allowed": False,
+                "max_agents_per_add_subgraph": 3,
+                "output_agent_id_optional_until_lineage_complete": True,
+            },
+            state["semantic_lineage_constraints"],
+        )
         self.assertIn("answer slot actually requested", messages[0]["content"])
         self.assertIn("Reasoner alone determines", messages[0]["content"])
         self.assertIn("must not select, replace", messages[0]["content"])
@@ -208,6 +226,7 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
             transcript_messages(default.build_prompt(env, 0, ()))[-1]
         )
         self.assertNotIn("semantic_protocol", default_state)
+        self.assertNotIn("semantic_lineage_constraints", default_state)
         self.assertNotIn("recovery_policy", default_state)
 
     async def test_orchestrator_rejects_prompt_and_version_mismatch(self) -> None:

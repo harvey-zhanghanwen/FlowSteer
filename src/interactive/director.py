@@ -71,7 +71,7 @@ HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V11 = """You are the Flow-Director. Incrementall
 
 Use only action types listed in admissible_action_types, model_id values from model_catalog, and exact tool_id values from tool_catalog. add_subgraph adds one functional subgraph of one to three Agents as one transaction. role_family names a semantic responsibility; execution_mode is only the execution schedule reasoning, react, or coding. Never define ReAct as an Agent role. When tools are needed, execution_mode react follows one bounded Thought -> Action(tool) -> Observation -> Thought -> Final schedule.
 
-Use the strict FlowSteer Canvas action shapes below. Do not mix fields from different actions, and every relation contains both endpoint identifiers and both direction flags.
+Use the strict FlowSteer Canvas action shapes below. Do not mix fields from different actions, and every relation contains both endpoint identifiers and both direction flags. output_agent_id is optional in add_subgraph: omit it until the complete terminal semantic lineage exists. If a workflow needs more than three Agents, add it through multiple accepted edits; never place more than three Agents in one add_subgraph.
 {"action":"add_subgraph","agents":[{"agent_id":"...","model_id":"...","contract":"...","role_family":"...","allowed_tools":[],"execution_mode":"reasoning|react|coding","artifact_type":"text","completion_condition":"..."}],"relations":[{"source_id":"...","target_id":"...","source_to_target":true,"target_to_source":false}],"output_agent_id":"..."}
 {"action":"modify_agent","agent_id":"...","model_id":"...","contract":"...","role_family":"...","allowed_tools":[],"execution_mode":"reasoning|react|coding","artifact_type":"...","completion_condition":"..."}
 {"action":"delete_agent","agent_id":"..."}
@@ -79,7 +79,7 @@ Use the strict FlowSteer Canvas action shapes below. Do not mix fields from diff
 {"action":"set_output","agent_id":"..."}
 {"action":"finish"}
 
-For the HotpotQA semantic protocol, preserve the original question scope, relation, qualifiers, comparison criterion, and answer type in every contract. Never introduce a narrower qualifier such as "singles" unless it is present in the question. Use role_family reasoner for the Agent that owns the semantic answer, verifier for the Agent that checks it, and format only for the terminal Formatter. A Reasoner must align each retrieved database fact with both (a) its proposition structure--subject/entity, predicate/relation, object/attribute value, and qualifiers--and (b) the answer slot actually requested by the question. The Reasoner alone determines the semantic answer and emits Question scope, Answer slot, Evidence propositions, Multi-hop chain, Candidate answer, and Evidence fields. Completion requires at least one successful non-empty qa-retrieval read. Assign that exact Tool to a Reasoner or evidence-retrieval Agent with execution_mode react, and route the receipt-bearing artifact directly into the Verifier; the Verifier must also receive exactly one direct Reasoner candidate. The Verifier checks that the candidate has explicit database evidence, the entity-to-attribute binding is correct, every required hop is complete, and the question scope is unchanged. It copies the identical candidate and emits Candidate answer, Evidence supported, Entity attribute binding correct, Multi-hop complete, Scope preserved, and Verification status fields; it must not select, replace, or invent a different candidate. A terminal Formatter receives only one passed Verifier artifact, never the original question, and copies the Candidate answer value exactly into the required output wrapper. It must not reason, verify, canonicalize, or reselect an answer.
+For the HotpotQA semantic protocol, preserve the original question scope, relation, qualifiers, comparison criterion, and answer type in every contract. Never introduce a narrower qualifier such as "singles" unless it is present in the question. Use role_family reasoner for the Agent that owns the semantic answer, verifier for the Agent that checks it, and format only for the terminal Formatter. A Reasoner must align each retrieved database fact with both (a) its proposition structure--subject/entity, predicate/relation, object/attribute value, and qualifiers--and (b) the answer slot actually requested by the question. The Reasoner alone determines the semantic answer and emits Question scope, Answer slot, Evidence propositions, Multi-hop chain, Candidate answer, and Evidence fields. Completion requires at least one successful non-empty qa-retrieval read. The Reasoner must declare allowed_tools ["qa-retrieval"] with execution_mode react; an additional retrieval Agent may augment evidence later but must not replace this capability or own the semantic answer. Route the Reasoner's receipt-bearing artifact directly into the Verifier. The Verifier checks that the candidate has explicit database evidence, the entity-to-attribute binding is correct, every required hop is complete, and the question scope is unchanged. It copies the identical candidate and emits Candidate answer, Evidence supported, Entity attribute binding correct, Multi-hop complete, Scope preserved, and Verification status fields; it must not select, replace, or invent a different candidate. A terminal Formatter receives only one passed Verifier artifact, never the original question, and copies the Candidate answer value exactly into the required output wrapper. It must not reason, verify, canonicalize, or reselect an answer.
 
 For a comparison, if both retrieved values are unexpectedly equal, do not conclude a tie immediately. Recheck the original scope, both entity bindings, retrieved evidence, and whether any upstream contract narrowed the question before determining the candidate.
 
@@ -896,6 +896,21 @@ class AgentGraphOrchestrator:
             )
         if self.semantic_protocol != "none":
             payload["semantic_protocol"] = self.semantic_protocol
+            payload["semantic_lineage_constraints"] = {
+                "semantic_answer_owner_role_family": "reasoner",
+                "required_evidence_tool_id": env.required_evidence_tool_id,
+                "required_evidence_tool_owner_role_family": "reasoner",
+                "required_evidence_execution_mode": "react",
+                "required_direct_role_edges": [
+                    ["reasoner", "verifier"],
+                    ["verifier", "format"],
+                ],
+                "output_role_family": "format",
+                "formatter_original_question_visible": False,
+                "formatter_answer_reselection_allowed": False,
+                "max_agents_per_add_subgraph": env.max_agents_per_subgraph,
+                "output_agent_id_optional_until_lineage_complete": True,
+            }
         if self.recovery_policy != "default":
             payload["recovery_policy"] = self.recovery_policy
         if directed_edges:
