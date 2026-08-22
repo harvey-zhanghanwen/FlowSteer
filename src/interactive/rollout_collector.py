@@ -40,7 +40,6 @@ from .director import (
     DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V1,
     DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3,
     DIRECTOR_SYSTEM_PROMPT,
-    HOTPOTQA_SEMANTIC_PROTOCOL,
     DirectorError,
     DirectorResponse,
     decode_director_transcript,
@@ -61,6 +60,7 @@ from .director import (
     director_modify_agent_field_sampling_json_schema_text,
     director_modify_agent_field_selector_json_schema_text,
     director_state_conditioned_sampling_json_schema_text,
+    verified_qa_semantic_protocol,
 )
 from .openai_gateway import build_agent_messages
 from .persistence import EvidenceStore, GraphSnapshotEvent, stable_id
@@ -1733,10 +1733,10 @@ def _validate_v3_hierarchical_action_receipt(
                     "v3 add_subgraph relation endpoint is outside the live domain"
                 )
         add_domain = domains["add_subgraph"]
-        if add_domain.get("semantic_protocol") == HOTPOTQA_SEMANTIC_PROTOCOL:
+        if verified_qa_semantic_protocol(add_domain.get("semantic_protocol")):
             if len(action_value.get("relations", ())) > 1:
                 raise ReceiptValidationError(
-                    "v3 HotpotQA add_subgraph exceeds its one-relation edit boundary"
+                    "v3 verified-QA add_subgraph exceeds its one-relation edit boundary"
                 )
             allowed_relations = {
                 json.dumps(
@@ -1760,14 +1760,14 @@ def _validate_v3_hierarchical_action_receipt(
                 )
                 if relation_identity not in allowed_relations:
                     raise ReceiptValidationError(
-                        "v3 HotpotQA add_subgraph relation violates the live semantic domain"
+                        "v3 verified-QA add_subgraph relation violates the live semantic domain"
                     )
                 relation_pair = frozenset(
                     (relation["source_id"], relation["target_id"])
                 )
                 if relation_pair in relation_pairs:
                     raise ReceiptValidationError(
-                        "v3 HotpotQA add_subgraph repeats an unordered relation pair"
+                        "v3 verified-QA add_subgraph repeats an unordered relation pair"
                     )
                 relation_pairs.add(relation_pair)
         output_agent_id = action_value.get("output_agent_id")
@@ -1777,8 +1777,9 @@ def _validate_v3_hierarchical_action_receipt(
             )
         if (
             output_agent_id is not None
-            and add_domain.get("semantic_protocol")
-            == HOTPOTQA_SEMANTIC_PROTOCOL
+            and verified_qa_semantic_protocol(
+                add_domain.get("semantic_protocol")
+            )
         ):
             existing_roles = {
                 item["agent_id"]: item["role_family"]
@@ -1792,12 +1793,12 @@ def _validate_v3_hierarchical_action_receipt(
             )
             if existing_roles.get(output_agent_id) != "format":
                 raise ReceiptValidationError(
-                    "v3 HotpotQA add_subgraph Output Agent is not a Formatter"
+                    "v3 verified-QA add_subgraph Output Agent is not a Formatter"
                 )
             current_output_agent_id = add_domain.get("current_output_agent_id")
             if current_output_agent_id is not None:
                 raise ReceiptValidationError(
-                    "v3 HotpotQA add_subgraph cannot replace the current Output Agent"
+                    "v3 verified-QA add_subgraph cannot replace the current Output Agent"
                 )
         if metadata.get("selected_modify_agent_id") is not None:
             raise ReceiptValidationError(
@@ -2360,6 +2361,102 @@ def _runtime_summary(runtime: Optional[AgentRuntimeResult]) -> Mapping[str, Any]
     }
 
 
+def _lineage_field(lineage: object, field_name: str) -> object:
+    """Read one public field from the Env's immutable lineage getter."""
+
+    if isinstance(lineage, Mapping):
+        return lineage.get(field_name)
+    return getattr(lineage, field_name, None)
+
+
+def _lineage_graph(lineage: object) -> Optional[Mapping[str, Any]]:
+    """Normalize the graph attached to a valid-lineage Env receipt."""
+
+    raw_graph = _lineage_field(lineage, "graph")
+    if raw_graph is None:
+        raw_graph = _lineage_field(lineage, "graph_snapshot")
+    if raw_graph is None:
+        snapshot = _lineage_field(lineage, "snapshot")
+        if snapshot is not None:
+            raw_graph = (
+                snapshot.get("graph")
+                if isinstance(snapshot, Mapping)
+                else getattr(snapshot, "graph", snapshot)
+            )
+    if raw_graph is None:
+        return None
+    if not isinstance(raw_graph, Mapping):
+        to_dict = getattr(raw_graph, "to_dict", None)
+        if not callable(to_dict):
+            return None
+        raw_graph = to_dict()
+    if not isinstance(raw_graph, Mapping):
+        return None
+    graph = dict(raw_graph)
+    nested = graph.get("graph")
+    if isinstance(nested, Mapping):
+        graph = dict(nested)
+    return graph
+
+
+def _last_valid_evidence_lineage_fallback(
+    environment: AgentWorkflowEnv,
+) -> Optional[
+    tuple[str, AgentRuntimeResult, Mapping[str, Any], Mapping[str, Any]]
+]:
+    """Return a structurally complete Env-validated lineage, if one exists.
+
+    The environment owns semantic-lineage admission.  This collector only
+    checks that its read-only receipt can be passed to the evaluator without
+    mixing an answer, Runtime result, or graph from different revisions.
+    Supporting both a property and a zero-argument method keeps this boundary
+    compatible with the Env implementation while it is introduced.
+    """
+
+    lineage = getattr(environment, "last_valid_evidence_lineage", None)
+    if callable(lineage):
+        lineage = lineage()
+    if lineage is None:
+        return None
+
+    final_answer = _lineage_field(lineage, "answer")
+    if final_answer is None:
+        # Mapping-based compatibility adapters may retain ``final_answer``.
+        final_answer = _lineage_field(lineage, "final_answer")
+    runtime = _lineage_field(lineage, "runtime")
+    graph_revision = _lineage_field(lineage, "graph_revision")
+    graph = _lineage_graph(lineage)
+    if (
+        not isinstance(final_answer, str)
+        or not final_answer.strip()
+        or not isinstance(runtime, AgentRuntimeResult)
+        or isinstance(graph_revision, bool)
+        or not isinstance(graph_revision, int)
+        or graph_revision < 0
+        or graph is None
+    ):
+        return None
+    if (
+        runtime.graph_revision != graph_revision
+        or runtime.final_answer != final_answer
+    ):
+        return None
+    snapshot_revision = graph.get("revision")
+    if snapshot_revision is not None and snapshot_revision != graph_revision:
+        return None
+
+    receipt: dict[str, Any] = {
+        "source": "AgentWorkflowEnv.last_valid_evidence_lineage",
+        "final_answer": final_answer,
+        "graph_revision": graph_revision,
+        "graph_snapshot": dict(graph),
+        "runtime_run_id": runtime.run_id,
+        "runtime_graph_revision": runtime.graph_revision,
+        "runtime_output_agent_id": runtime.output_agent_id,
+    }
+    return final_answer, runtime, graph, receipt
+
+
 class AgentGraphRolloutCollector:
     """Collect one exact-receipt natural-policy AgentGraph trajectory."""
 
@@ -2430,9 +2527,11 @@ class AgentGraphRolloutCollector:
         """Collect, evaluate, and optionally persist one rollout.
 
         A policy that reaches ``max_rounds`` without a valid ``finish`` action
-        still returns an explicit terminal-failure trajectory with an empty
-        final answer.  The evaluator remains the only authority over whether
-        that terminal failure has a valid zero reward.
+        remains an explicit terminal-failure trajectory.  Only an immutable
+        Env receipt for the last complete evidence lineage may supply the
+        evaluator answer, Runtime result, and matching graph at that boundary;
+        otherwise the answer remains empty.  Such fallback trajectories are
+        never admitted to GRPO.
         """
 
         if task.split != self.expected_task_split:
@@ -2480,6 +2579,9 @@ class AgentGraphRolloutCollector:
         previous_snapshot_id: Optional[str] = None
         final_answer: Optional[str] = None
         final_runtime: Optional[AgentRuntimeResult] = None
+        final_graph: Optional[Mapping[str, Any]] = None
+        valid_lineage_fallback_used = False
+        valid_lineage_fallback_receipt: Mapping[str, Any] = {}
         explicit_finish = False
 
         group_id = f"{task.task_id}:{self.condition_id}:{self.versions.policy}"
@@ -2872,6 +2974,7 @@ class AgentGraphRolloutCollector:
                 explicit_finish = True
                 final_answer = canvas.final_answer
                 final_runtime = canvas.execution
+                final_graph = env.graph.to_dict()
                 break
             current_skills = visible_skills()
             current_retrieved_skill_ids = _retrieved_skill_ids(current_skills)
@@ -2892,13 +2995,25 @@ class AgentGraphRolloutCollector:
 
         termination_reason = "finish" if explicit_finish else "max_rounds"
         if termination_reason == "max_rounds":
-            # A progressive execute-on-edit result is Canvas feedback, not an
-            # implicit finish.  Preserve the natural truncation as a terminal
-            # task failure and let the real evaluator judge the empty answer.
-            final_answer = None
-            final_runtime = None
+            # Progressive execution remains Canvas feedback, never an implicit
+            # FINISH.  The Env is the sole semantic-lineage admission authority;
+            # reuse only its last complete, revision-consistent receipt.
+            fallback = _last_valid_evidence_lineage_fallback(env)
+            if fallback is None:
+                final_answer = None
+                final_runtime = None
+                final_graph = env.graph.to_dict()
+            else:
+                (
+                    final_answer,
+                    final_runtime,
+                    final_graph,
+                    valid_lineage_fallback_receipt,
+                ) = fallback
+                valid_lineage_fallback_used = True
 
-        final_graph = env.graph.to_dict()
+        if final_graph is None:
+            final_graph = env.graph.to_dict()
         raw_evaluation = evaluator_callback(
             task,
             final_answer,
@@ -2925,6 +3040,8 @@ class AgentGraphRolloutCollector:
             forced_probe=self.forced_probe,
             api_fallback_used=self.api_fallback_used,
             manual_repair_used=self.manual_repair_used,
+            valid_lineage_fallback_used=valid_lineage_fallback_used,
+            valid_lineage_fallback_receipt=valid_lineage_fallback_receipt,
             active_skill_ids=active_skill_ids,
             # SkillFlow's trajectory-level retrieved IDs are the ranked H0
             # retrieval. Later stage-conditioned retrievals remain on turns.

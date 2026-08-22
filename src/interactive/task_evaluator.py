@@ -504,6 +504,29 @@ def _evaluate_static(
     else:
         score = max(_exact_match(scored_prediction, answer) for answer in answers)
         metrics = {"exact_match": score}
+    answer_mismatch_type = "none"
+    if dataset == "triviaqa" and metrics.get("exact_match") != 1.0:
+        normalized_prediction = _normalize_triviaqa_answer(scored_prediction)
+        prediction_tokens = set(normalized_prediction.split())
+        normalized_answers = tuple(
+            _normalize_triviaqa_answer(answer) for answer in answers
+        )
+        accepted_token_sets = tuple(
+            set(answer.split()) for answer in normalized_answers if answer
+        )
+        if normalized_prediction and any(
+            prediction_tokens < accepted_tokens
+            or accepted_tokens < prediction_tokens
+            for accepted_tokens in accepted_token_sets
+        ):
+            # Evaluation-only diagnosis: accepted answers never enter the
+            # Director, Agent, retrieval query, or Tool observation.  Official
+            # EM/F1 above remain unchanged.
+            answer_mismatch_type = "accepted_answer_canonicalization_mismatch"
+        elif token_f1 > 0.0:
+            answer_mismatch_type = "partial_answer_overlap"
+        else:
+            answer_mismatch_type = "no_accepted_answer_overlap"
     return EvaluationOutcome(
         valid=True,
         reward=score,
@@ -518,6 +541,14 @@ def _evaluate_static(
                 "answer_only"
                 if dataset in {"hotpotqa", "triviaqa"}
                 else "task_answer"
+            ),
+            **(
+                {
+                    "answer_mismatch_type": answer_mismatch_type,
+                    "answer_mismatch_diagnostic_scope": "evaluator_only",
+                }
+                if dataset == "triviaqa"
+                else {}
             ),
         },
         evaluator_version=evaluator_version,

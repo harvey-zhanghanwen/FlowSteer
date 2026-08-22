@@ -1521,6 +1521,73 @@ def _failure_type(
         return "direct_operational_or_evaluator_failure"
     if graph_value is None or not graph_valid:
         return "agentgraph_operational_or_evaluator_failure"
+    if dataset_key == "triviaqa" and graph_score < 1.0:
+        evaluation = graph_value.get("evaluation")
+        details = (
+            evaluation.get("details", {})
+            if isinstance(evaluation, Mapping)
+            else {}
+        )
+        if (
+            isinstance(details, Mapping)
+            and details.get("answer_mismatch_type")
+            == "accepted_answer_canonicalization_mismatch"
+        ):
+            return "accepted_answer_canonicalization_mismatch"
+        diagnostic_payload = {
+            "turns": [
+                {
+                    "canvas_feedback": turn.get("canvas_feedback"),
+                    "runtime_summary": turn.get("runtime_summary"),
+                }
+                for turn in graph_value.get("turns", ())
+                if isinstance(turn, Mapping)
+            ],
+            "fallback": graph_value.get("valid_lineage_fallback_receipt"),
+        }
+        diagnostic_text = json.dumps(
+            diagnostic_payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        ).casefold()
+        if "knowledge_base_coverage_failure" in diagnostic_text:
+            return "knowledge_base_coverage_failure"
+        if any(
+            marker in diagnostic_text
+            for marker in (
+                "semantic_evidence_provenance_invalid",
+                "qa_completion_requires_successful_read_evidence",
+                "qa_read_requires_successful_search",
+                "retrieval_recall_failure",
+                "tool_error",
+            )
+        ):
+            return "retrieval_recall_failure"
+        if any(
+            marker in diagnostic_text
+            for marker in (
+                "answer_slot",
+                "entity_attribute_binding",
+                "alias_binding",
+                "scope_preserved",
+                "target_relation",
+            )
+        ):
+            return "relation_or_answer_slot_binding_failure"
+        if any(
+            marker in diagnostic_text
+            for marker in (
+                "parse_error",
+                "completion_schema",
+                "structured_action",
+                "terminal_protocol",
+            )
+        ):
+            return "structured_output_or_format_failure"
+        if graph_value.get("explicit_finish") is not True:
+            return "agentgraph_terminal_failure"
+        return "reasoning_failure"
     if graph_value.get("explicit_finish") is not True:
         return "agentgraph_terminal_failure"
     if dataset_key == "aime_2026":
@@ -1535,6 +1602,64 @@ def _failure_type(
     if graph_score < direct_score:
         return f"direct_higher_{metric_name}"
     return f"equal_{metric_name}"
+
+
+def _terminal_canvas_graph(
+    graph_value: Optional[Mapping[str, Any]],
+) -> Optional[Mapping[str, Any]]:
+    """Return the graph from the final Canvas turn, if it was recorded."""
+
+    if graph_value is None:
+        return None
+    turns = graph_value.get("turns")
+    if not isinstance(turns, Sequence) or isinstance(turns, (str, bytes)):
+        return None
+    for turn in reversed(turns):
+        if not isinstance(turn, Mapping):
+            continue
+        snapshot = turn.get("graph_snapshot")
+        if isinstance(snapshot, Mapping):
+            return dict(snapshot)
+    return None
+
+
+def _evaluated_graph(
+    graph_value: Optional[Mapping[str, Any]],
+) -> Optional[Mapping[str, Any]]:
+    """Return the exact graph whose answer/Runtime tuple was evaluated."""
+
+    if graph_value is None:
+        return None
+    if graph_value.get("valid_lineage_fallback_used") is True:
+        receipt = graph_value.get("valid_lineage_fallback_receipt")
+        if isinstance(receipt, Mapping):
+            snapshot = receipt.get("graph_snapshot")
+            if isinstance(snapshot, Mapping):
+                return dict(snapshot)
+    return _terminal_canvas_graph(graph_value)
+
+
+def _evaluated_graph_diagnostic_view(
+    graph_value: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    """Project the evaluator graph into the existing read-only diagnostic."""
+
+    evaluated = _evaluated_graph(graph_value)
+    terminal = _terminal_canvas_graph(graph_value)
+    if evaluated is None or evaluated == terminal:
+        return graph_value
+    turns = graph_value.get("turns")
+    if not isinstance(turns, Sequence) or isinstance(turns, (str, bytes)):
+        return graph_value
+    projected_turns = [
+        dict(turn) for turn in turns if isinstance(turn, Mapping)
+    ]
+    if not projected_turns:
+        return graph_value
+    projected_turns[-1]["graph_snapshot"] = dict(evaluated)
+    projected = dict(graph_value)
+    projected["turns"] = projected_turns
+    return projected
 
 
 def _paired_rows(
@@ -1596,15 +1721,14 @@ def _paired_rows(
                     "trajectory_id": (
                         graph_value.get("trajectory_id") if graph_value else None
                     ),
-                    "final_graph": (
-                        graph_value.get("turns", [{}])[-1].get("graph_snapshot")
-                        if graph_value and graph_value.get("turns")
-                        else None
-                    ),
+                    "final_graph": _evaluated_graph(graph_value),
+                    "terminal_canvas_graph": _terminal_canvas_graph(graph_value),
                     "output_agent_inbox": _output_inbox(graph_value),
                     "telemetry": _graph_telemetry(graph_value),
                     "graph_diagnostic": (
-                        diagnose_trajectory(graph_value).to_dict()
+                        diagnose_trajectory(
+                            _evaluated_graph_diagnostic_view(graph_value)
+                        ).to_dict()
                         if graph_value is not None
                         else None
                     ),
@@ -1729,7 +1853,9 @@ def _report(
             - float(direct[f"strict_{name}"])
             for name in metric_names
         },
-        "graph_search_diagnostics": aggregate_trajectory_diagnostics(trajectories),
+        "graph_search_diagnostics": aggregate_trajectory_diagnostics(
+            _evaluated_graph_diagnostic_view(value) for value in trajectories
+        ),
         "failure_types": dict(sorted(failure_counts.items())),
         "below_full_score_demo_count": len(below_full),
         "typical_below_full_score_task_ids": [

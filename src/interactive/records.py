@@ -479,6 +479,8 @@ class TrajectoryRecord:
     forced_probe: bool = False
     api_fallback_used: bool = False
     manual_repair_used: bool = False
+    valid_lineage_fallback_used: bool = False
+    valid_lineage_fallback_receipt: Mapping[str, Any] = field(default_factory=dict)
     created_at: str = field(default_factory=utc_now)
     schema_version: str = SCHEMA_VERSION
     active_skill_ids: Sequence[str] = field(default_factory=tuple)
@@ -488,6 +490,32 @@ class TrajectoryRecord:
     def __post_init__(self) -> None:
         if not isinstance(self.director_sampling, Mapping):
             raise ValueError("director_sampling must be a mapping")
+        if type(self.valid_lineage_fallback_used) is not bool:
+            raise ValueError("valid_lineage_fallback_used must be bool")
+        if not isinstance(self.valid_lineage_fallback_receipt, Mapping):
+            raise ValueError("valid_lineage_fallback_receipt must be a mapping")
+        fallback_receipt = dict(self.valid_lineage_fallback_receipt)
+        if self.valid_lineage_fallback_used:
+            if (
+                self.explicit_finish
+                or self.termination_reason != "max_rounds"
+                or not isinstance(self.final_answer, str)
+                or not self.final_answer.strip()
+                or not fallback_receipt
+            ):
+                raise ValueError(
+                    "valid lineage fallback requires a non-empty max_rounds "
+                    "answer without explicit finish and a fallback receipt"
+                )
+        elif fallback_receipt:
+            raise ValueError(
+                "valid_lineage_fallback_receipt requires fallback_used=true"
+            )
+        object.__setattr__(
+            self,
+            "valid_lineage_fallback_receipt",
+            fallback_receipt,
+        )
         initial_retrieved = (
             tuple(self.turns[0].retrieved_skill_ids) if self.turns else ()
         )
@@ -563,7 +591,10 @@ class TrajectoryRecord:
         return bool(
             not self.explicit_finish
             and self.termination_reason == "max_rounds"
-            and self.final_answer in (None, "")
+            and (
+                self.final_answer in (None, "")
+                or self.valid_lineage_fallback_used
+            )
         )
 
     @property
@@ -634,6 +665,7 @@ class TrajectoryRecord:
             and not self.forced_probe
             and not self.api_fallback_used
             and not self.manual_repair_used
+            and not self.valid_lineage_fallback_used
             and self.turns
             and self._snapshot_chain_valid()
             and all(
@@ -666,6 +698,10 @@ class TrajectoryRecord:
             "forced_probe": self.forced_probe,
             "api_fallback_used": self.api_fallback_used,
             "manual_repair_used": self.manual_repair_used,
+            "valid_lineage_fallback_used": self.valid_lineage_fallback_used,
+            "valid_lineage_fallback_receipt": dict(
+                self.valid_lineage_fallback_receipt
+            ),
             "active_skill_ids": list(self.active_skill_ids),
             "retrieved_skill_ids": list(self.retrieved_skill_ids),
             "invoked_skill_ids": list(self.invoked_skill_ids),
@@ -693,6 +729,11 @@ class TrajectoryRecord:
         director_sampling = value.get("director_sampling", {})
         if not isinstance(director_sampling, Mapping):
             raise ValueError("serialized Director sampling receipt must be a mapping")
+        fallback_receipt = value.get("valid_lineage_fallback_receipt", {})
+        if not isinstance(fallback_receipt, Mapping):
+            raise ValueError(
+                "serialized valid lineage fallback receipt must be a mapping"
+            )
         record = cls(
             trajectory_id=value["trajectory_id"],
             task=TaskRecord.from_dict(value["task"]),
@@ -710,6 +751,11 @@ class TrajectoryRecord:
             forced_probe=value.get("forced_probe", False),
             api_fallback_used=value.get("api_fallback_used", False),
             manual_repair_used=value.get("manual_repair_used", False),
+            valid_lineage_fallback_used=value.get(
+                "valid_lineage_fallback_used",
+                False,
+            ),
+            valid_lineage_fallback_receipt=dict(fallback_receipt),
             created_at=value.get("created_at", utc_now()),
             schema_version=value["schema_version"],
             active_skill_ids=tuple(value.get("active_skill_ids", ())),

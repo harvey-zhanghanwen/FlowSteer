@@ -44,6 +44,7 @@ from src.interactive.director import (
     DIRECTOR_SGLANG_SAMPLING_SCHEMA_VERSION,
     DIRECTOR_STATE_CONDITIONED_ACTION_SCHEMA_VERSION,
     HOTPOTQA_DIRECTOR_PROMPT_VERSION,
+    QA_DIRECTOR_PROMPT_VERSION,
     decode_director_transcript,
     director_system_prompt_for_version,
     director_sglang_sampling_json_schema_text,
@@ -3055,6 +3056,7 @@ class LiveSmokeBackend:
         if semantic_protocol not in {
             "none",
             "hotpotqa_verified_answer_slot_v1",
+            "qa_verified_answer_lineage_v2",
         }:
             raise ConfigurationError("unsupported AgentGraph semantic protocol")
         recovery_policy = str(
@@ -3083,6 +3085,14 @@ class LiveSmokeBackend:
             raise ConfigurationError(
                 "hotpotqa_verified_answer_slot_v1 requires the exact "
                 f"Director prompt {HOTPOTQA_DIRECTOR_PROMPT_VERSION}"
+            )
+        if (
+            semantic_protocol == "qa_verified_answer_lineage_v2"
+            and prompt_version != QA_DIRECTOR_PROMPT_VERSION
+        ):
+            raise ConfigurationError(
+                "qa_verified_answer_lineage_v2 requires the exact "
+                f"Director prompt {QA_DIRECTOR_PROMPT_VERSION}"
             )
         try:
             director_system_prompt = director_system_prompt_for_version(

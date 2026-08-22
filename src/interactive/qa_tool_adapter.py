@@ -20,13 +20,17 @@ from pathlib import Path
 import re
 from tempfile import TemporaryDirectory
 from typing import Callable, Mapping, Protocol, Sequence
+import unicodedata
 
 from .agent_runtime import AgentGateway, AgentRequest, GatewayResponse
-from .react_execution import ToolReactExecutionAdapter
+from .react_execution import ReactExecutionError, ToolReactExecutionAdapter
 from .task_dataset import (
     hotpotqa_answer_cardinality_constraint,
     hotpotqa_answer_type_constraint,
     hotpotqa_question_scope,
+    qa_answer_cardinality_constraint,
+    qa_answer_type_constraint,
+    qa_question_scope,
 )
 from .qa_retrieval import (
     DEFAULT_QA_RETRIEVAL_INDEX,
@@ -51,6 +55,7 @@ from .tool_runtime import (
 # under one capability prevents the Canvas from assigning ``read`` without the
 # search action that produces its opaque passage_id.
 QA_RETRIEVAL_TOOL_ID = "qa-retrieval"
+QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL = "qa_verified_answer_lineage_v2"
 DEFAULT_QA_DATASET_SCOPE = ("hotpotqa", "triviaqa")
 _PROVIDED_PASSAGE = re.compile(
     r"^\[(?P<title>[^\]]+)\]\s*(?P<text>.+)$",
@@ -94,6 +99,16 @@ HOTPOTQA_VERIFIED_ANSWER_SLOT_GUIDANCE = (
     "are unexpectedly equal, recheck scope, "
     "both bindings, retrieved passages, and contract narrowing before calling a tie."
 )
+QA_VERIFIED_ANSWER_LINEAGE_GUIDANCE = (
+    "Treat ReAct only as the execution schedule Thought -> Action(tool) -> "
+    "Observation -> Thought -> Final, never as an Agent role. Preserve the "
+    "question's exact semantic scope and answer slot. Bind the target entity, "
+    "requested relation, and every answer-bearing proposition to successful "
+    "qa-retrieval read receipts. Keep spelling variants, aliases, and canonical "
+    "names explicit in the propositions; do not guess an entity identity or "
+    "relation that is absent from retrieved evidence. Return a concise semantic "
+    "answer and leave surface-only output formatting to the Format Agent."
+)
 
 _HOTPOTQA_SEMANTIC_STRUCTURE_ERROR_PREFIX = (
     "hotpotqa_semantic_artifact_invalid:"
@@ -101,7 +116,33 @@ _HOTPOTQA_SEMANTIC_STRUCTURE_ERROR_PREFIX = (
 _HOTPOTQA_SEMANTIC_EVIDENCE_ERROR_PREFIX = (
     "hotpotqa_semantic_evidence_provenance_invalid:"
 )
+_QA_SEMANTIC_STRUCTURE_ERROR_PREFIX = "qa_semantic_artifact_invalid:"
+_QA_SEMANTIC_EVIDENCE_ERROR_PREFIX = (
+    "qa_semantic_evidence_provenance_invalid:"
+)
 _QA_MISSING_EVIDENCE_ERROR = "qa_completion_requires_successful_read_evidence"
+_KNOWLEDGE_BASE_COVERAGE_FAILURE = "knowledge_base_coverage_failure"
+
+# PROJECT_NECESSARY_ADAPTATION: SkillFlow supplies the public search/read
+# actions and bounded continuation, while unified_architecture_v2 requires a
+# bounded factual-QA recovery policy.  The initial top-k is the existing
+# TriviaQA search limit; each public retry broadens it without changing the
+# upstream retrieval backend.
+_FACTUAL_QA_RETRIEVAL_STRATEGIES = (
+    "initial_retrieval",
+    "spelling_normalization",
+    "alias_expansion",
+    "entity_disambiguation",
+    "query_rewriting",
+)
+_FACTUAL_QA_SEARCH_LIMITS = (5, 10, 15, 20, 25)
+
+
+def _normalized_retrieval_query(query: str) -> str:
+    """Canonicalize only for duplicate-request admission, not retrieval."""
+
+    normalized = unicodedata.normalize("NFKC", query).casefold()
+    return " ".join(re.findall(r"\w+", normalized, flags=re.UNICODE))
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,6 +150,10 @@ class _RequiredEvidenceState:
     """Public SkillFlow search/read state used by the QA action mask."""
 
     required: bool
+    search_queries: tuple[str, ...]
+    normalized_search_queries: tuple[str, ...]
+    search_top_ks: tuple[int, ...]
+    search_attempt_count: int
     searched_passage_ids: tuple[str, ...]
     latest_search_passage_ids: tuple[str, ...]
     read_passage_ids: tuple[str, ...]
@@ -384,6 +429,98 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             f"qa_semantic_reasoner_question_{id(self)}",
             default=None,
         )
+        self._semantic_reasoner_protocol: ContextVar[str | None] = ContextVar(
+            f"qa_semantic_reasoner_protocol_{id(self)}",
+            default=None,
+        )
+        self._semantic_upstream_tool_receipts: ContextVar[
+            tuple[Mapping[str, object], ...]
+        ] = ContextVar(
+            f"qa_semantic_upstream_tool_receipts_{id(self)}",
+            default=(),
+        )
+
+    def _unified_factual_protocol(self, request: AgentRequest) -> bool:
+        return (
+            self._task_type == "factual_qa"
+            and request.semantic_protocol == QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL
+        )
+
+    @staticmethod
+    def _direct_upstream_tool_receipts(
+        request: AgentRequest,
+    ) -> tuple[Mapping[str, object], ...]:
+        """Return direct predecessor receipts without changing own Tool budget."""
+
+        return tuple(
+            receipt
+            for message in request.upstream
+            for receipt in message.tool_receipts
+            if isinstance(receipt, Mapping)
+        )
+
+    @staticmethod
+    def _successful_read_receipt(receipt: Mapping[str, object]) -> bool:
+        if receipt.get("tool_id") != QA_RETRIEVAL_TOOL_ID:
+            return False
+        request = receipt.get("request")
+        result = receipt.get("result")
+        if (
+            not isinstance(request, Mapping)
+            or request.get("action") != "read"
+            or not isinstance(result, Mapping)
+            or receipt.get("error_type") is not None
+        ):
+            return False
+        value = result.get("value")
+        return (
+            isinstance(value, Mapping)
+            and value.get("operation") == "read"
+            and isinstance(value.get("passage"), Mapping)
+            and isinstance(value["passage"].get("text"), str)
+            and bool(value["passage"]["text"].strip())
+        )
+
+    def _hotpot_tool_plan_exhausted(
+        self,
+        request: AgentRequest,
+        state: _RequiredEvidenceState,
+    ) -> bool:
+        """Return a typed bounded-retrieval diagnosis, never a task oracle."""
+
+        if (
+            request.semantic_protocol != "hotpotqa_verified_answer_slot_v1"
+            or (request.agent.role_family or "").casefold() != "reasoner"
+            or state.semantic_repair_kind != "evidence"
+        ):
+            return False
+        remaining_tool_calls = max(
+            0,
+            self._max_tool_calls - state.dispatched_tool_calls,
+        )
+        if (
+            state.latest_successful_operation == "search"
+            and state.latest_unread_passage_ids
+            and remaining_tool_calls >= 1
+        ):
+            return False
+        return remaining_tool_calls < 2
+
+    @staticmethod
+    def _factual_retrieval_strategy(search_attempt_count: int) -> str:
+        index = min(
+            max(search_attempt_count, 0),
+            len(_FACTUAL_QA_RETRIEVAL_STRATEGIES) - 1,
+        )
+        return _FACTUAL_QA_RETRIEVAL_STRATEGIES[index]
+
+    @staticmethod
+    def _factual_search_limit(search_attempt_count: int) -> int:
+        index = min(
+            max(search_attempt_count, 0),
+            len(_FACTUAL_QA_SEARCH_LIMITS) - 1,
+        )
+        return _FACTUAL_QA_SEARCH_LIMITS[index]
 
     @staticmethod
     def _semantic_rejection_kind(public_error_code: object) -> str | None:
@@ -396,12 +533,17 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             or public_error_code.startswith(
                 _HOTPOTQA_SEMANTIC_EVIDENCE_ERROR_PREFIX
             )
+            or public_error_code.startswith(
+                _QA_SEMANTIC_EVIDENCE_ERROR_PREFIX
+            )
         ):
             return "evidence"
         if public_error_code.startswith(
             _HOTPOTQA_SEMANTIC_STRUCTURE_ERROR_PREFIX
-        ):
+        ) or public_error_code.startswith(_QA_SEMANTIC_STRUCTURE_ERROR_PREFIX):
             return "structure"
+        if public_error_code == _KNOWLEDGE_BASE_COVERAGE_FAILURE:
+            return "coverage"
         return None
 
     @classmethod
@@ -437,6 +579,12 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     "qa-retrieval search/read continuation to obtain the "
                     "missing evidence or provenance before completing again."
                 )
+            elif repair_kind == "coverage":
+                observation["repair_instruction"] = (
+                    "The bounded retrieval strategies and Tool budget did not "
+                    "produce evidence that binds the target entity and relation. "
+                    "Do not guess or fabricate an answer or evidence."
+                )
         return visible
 
     def _required_evidence_state(
@@ -449,6 +597,9 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             and self._max_tool_calls > 0
             and QA_RETRIEVAL_TOOL_ID in request.agent.allowed_tools
         )
+        search_queries: list[str] = []
+        normalized_search_queries: list[str] = []
+        search_top_ks: list[int] = []
         searched_passage_ids: list[str] = []
         latest_search_passage_ids: list[str] = []
         read_passage_ids: list[str] = []
@@ -478,6 +629,19 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     and executed_action.get("resource_id") == QA_RETRIEVAL_TOOL_ID
                 ):
                     dispatched_tool_calls += 1
+                    if executed_action.get("name") == "search":
+                        arguments = executed_action.get("arguments")
+                        if isinstance(arguments, Mapping):
+                            query = arguments.get("query")
+                            top_k = arguments.get("limit")
+                            if isinstance(query, str) and query.strip():
+                                query = query.strip()
+                                search_queries.append(query)
+                                normalized_search_queries.append(
+                                    _normalized_retrieval_query(query)
+                                )
+                                if type(top_k) is int and top_k > 0:
+                                    search_top_ks.append(top_k)
             elif status == "success":
                 # Unit fixtures and restored legacy public observations may
                 # omit executed_action.  A successful retrieval result still
@@ -491,6 +655,20 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             if result.get("operation") == "search":
                 latest_successful_operation = "search"
                 latest_search_passage_ids = []
+                # Legacy fixtures may omit executed_action but retain the
+                # public SkillFlow query/top-k result.  Rehydrate the bounded
+                # attempt state from those public fields only.
+                if not isinstance(executed_action, Mapping):
+                    query = result.get("query")
+                    top_k = result.get("top_k")
+                    if isinstance(query, str) and query.strip():
+                        query = query.strip()
+                        search_queries.append(query)
+                        normalized_search_queries.append(
+                            _normalized_retrieval_query(query)
+                        )
+                        if type(top_k) is int and top_k > 0:
+                            search_top_ks.append(top_k)
                 raw_ids = result.get("passage_ids")
                 if isinstance(raw_ids, list):
                     for value in raw_ids:
@@ -524,6 +702,10 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                         read_passage_ids.append(passage_id)
         return _RequiredEvidenceState(
             required=required,
+            search_queries=tuple(search_queries),
+            normalized_search_queries=tuple(normalized_search_queries),
+            search_top_ks=tuple(search_top_ks),
+            search_attempt_count=len(search_queries),
             searched_passage_ids=tuple(searched_passage_ids),
             latest_search_passage_ids=tuple(latest_search_passage_ids),
             read_passage_ids=tuple(read_passage_ids),
@@ -541,6 +723,46 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             ),
         )
 
+    def _unified_factual_action_domain(
+        self,
+        state: _RequiredEvidenceState,
+    ) -> tuple[frozenset[tuple[str, str]], bool]:
+        """Apply bounded factual-QA retrieval recovery to public state."""
+
+        remaining_tool_calls = max(
+            0,
+            self._max_tool_calls - state.dispatched_tool_calls,
+        )
+        strategies_exhausted = (
+            state.search_attempt_count >= len(_FACTUAL_QA_RETRIEVAL_STRATEGIES)
+        )
+
+        # A structured semantic error is repaired on preserved evidence.  A
+        # provenance/entity/relation mismatch instead advances the public
+        # search strategy; it never admits a guessed completion.
+        if state.semantic_repair_kind == "structure":
+            return frozenset(), state.successful_read_count > 0
+        if state.semantic_repair_kind == "coverage":
+            return frozenset(), False
+        if state.semantic_repair_kind == "evidence":
+            if (
+                state.latest_successful_operation == "search"
+                and state.latest_unread_passage_ids
+                and remaining_tool_calls >= 1
+            ):
+                return frozenset({(QA_RETRIEVAL_TOOL_ID, "read")}), False
+            if strategies_exhausted or remaining_tool_calls < 2:
+                return frozenset(), False
+            return frozenset({(QA_RETRIEVAL_TOOL_ID, "search")}), False
+
+        if state.successful_read_count > 0:
+            return frozenset(), True
+        if state.latest_unread_passage_ids and remaining_tool_calls >= 1:
+            return frozenset({(QA_RETRIEVAL_TOOL_ID, "read")}), False
+        if strategies_exhausted or remaining_tool_calls < 2:
+            return frozenset(), False
+        return frozenset({(QA_RETRIEVAL_TOOL_ID, "search")}), False
+
     def _state_conditioned_action_domain(
         self,
         request: AgentRequest,
@@ -551,6 +773,23 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         state = self._required_evidence_state(request, observations)
         if not state.required:
             return super()._state_conditioned_action_domain(request, observations)
+        upstream_completion_admitted = any(
+            self._successful_read_receipt(receipt)
+            for receipt in self._direct_upstream_tool_receipts(request)
+        )
+
+        def admitted(
+            tool_actions: Optional[frozenset[tuple[str, str]]],
+            completion: bool,
+        ) -> tuple[Optional[frozenset[tuple[str, str]]], bool]:
+            # A direct Retriever predecessor may satisfy semantic provenance,
+            # but its receipts remain outside this Reasoner's own Tool budget.
+            # Completion validation below still checks every cited span.
+            return tool_actions, completion or upstream_completion_admitted
+
+        if self._unified_factual_protocol(request):
+            tool_actions, completion = self._unified_factual_action_domain(state)
+            return admitted(tool_actions, completion)
 
         remaining_tool_calls = max(
             0,
@@ -572,24 +811,28 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         # diagnosis.  The latter must repair on the already-read evidence;
         # blindly retrieving again cannot fix answer-slot or schema binding.
         if state.semantic_repair_kind == "structure":
-            return frozenset(), state.successful_read_count > 0
+            return admitted(frozenset(), state.successful_read_count > 0)
         if state.semantic_repair_kind == "evidence":
             if (
                 state.latest_successful_operation == "search"
                 and state.latest_unread_passage_ids
                 and remaining_tool_calls >= 1
             ):
-                return frozenset({(QA_RETRIEVAL_TOOL_ID, "read")}), False
+                return admitted(
+                    frozenset({(QA_RETRIEVAL_TOOL_ID, "read")}), False
+                )
             if remaining_tool_calls >= 2:
-                return frozenset({(QA_RETRIEVAL_TOOL_ID, "search")}), False
-            return frozenset(), state.successful_read_count > 0
+                return admitted(
+                    frozenset({(QA_RETRIEVAL_TOOL_ID, "search")}), False
+                )
+            return admitted(frozenset(), state.successful_read_count > 0)
 
         if (
             state.successful_read_count >= minimum_reads
             or remaining_tool_calls == 0
             and state.successful_read_count > 0
         ):
-            return frozenset(), True
+            return admitted(frozenset(), True)
 
         # HotpotQA multi-hop retrieval uses the newest read Observation to
         # formulate the next missing-hop search.  This preserves SkillFlow's
@@ -600,10 +843,14 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 state.latest_successful_operation == "search"
                 and state.latest_unread_passage_ids
             ):
-                return frozenset({(QA_RETRIEVAL_TOOL_ID, "read")}), False
+                return admitted(
+                    frozenset({(QA_RETRIEVAL_TOOL_ID, "read")}), False
+                )
             if remaining_tool_calls >= 2:
-                return frozenset({(QA_RETRIEVAL_TOOL_ID, "search")}), False
-            return frozenset(), True
+                return admitted(
+                    frozenset({(QA_RETRIEVAL_TOOL_ID, "search")}), False
+                )
+            return admitted(frozenset(), True)
 
         if state.latest_unread_passage_ids:
             action_name = "read"
@@ -612,18 +859,26 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         else:
             # One Tool call cannot complete a new search->read transition.
             # Preserve the successfully read evidence and admit completion.
-            return frozenset(), state.successful_read_count > 0
-        return frozenset({(QA_RETRIEVAL_TOOL_ID, action_name)}), False
+            return admitted(frozenset(), state.successful_read_count > 0)
+        return admitted(
+            frozenset({(QA_RETRIEVAL_TOOL_ID, action_name)}), False
+        )
 
     def _completion_arguments_schema(
         self,
         request: AgentRequest,
     ) -> Mapping[str, object]:
-        if (
-            request.semantic_protocol != "hotpotqa_verified_answer_slot_v1"
-            or (request.agent.role_family or "").casefold() != "reasoner"
+        semantic_protocol = request.semantic_protocol
+        if (request.agent.role_family or "").casefold() != "reasoner" or (
+            semantic_protocol
+            not in {
+                "hotpotqa_verified_answer_slot_v1",
+                QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            }
         ):
             return super()._completion_arguments_schema(request)
+        unified_factual = self._unified_factual_protocol(request)
+        minimum_reasoning_items = 1 if unified_factual else 2
         non_empty_text = {"type": "string", "minLength": 1}
         non_empty_text_list = {
             "type": "array",
@@ -634,14 +889,22 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             "type": "array",
             "items": dict(non_empty_text),
         }
-        entity_surface_description = (
-            "When this field supplies an entity answer, copy one minimal but "
-            "complete evidence-aligned referential surface. Do not truncate a "
-            "title, honorific, or name suffix that belongs to the source entity "
-            "mention. For a possessive construction, retain the complete possessor "
-            "mention before the possessive marker and exclude the marker plus the "
-            "possessed attribute."
-        )
+        if semantic_protocol == "hotpotqa_verified_answer_slot_v1":
+            entity_surface_description = (
+                "When this field supplies an entity answer, copy one minimal but "
+                "complete evidence-aligned referential surface. Do not truncate a "
+                "title, honorific, or name suffix that belongs to the source entity "
+                "mention. For a possessive construction, retain the complete possessor "
+                "mention before the possessive marker and exclude the marker plus the "
+                "possessed attribute."
+            )
+        else:
+            entity_surface_description = (
+                "When this field supplies an entity answer, use one concise "
+                "evidence-grounded entity surface. Any spelling variant, alias, or "
+                "canonical-name choice must be supported by an explicit identity "
+                "binding in the evidence propositions."
+            )
         answer_slot_schema = {
             "type": "object",
             "required": [
@@ -653,11 +916,21 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             ],
             "properties": {
                 "answer_type": {
-                    "const": hotpotqa_answer_type_constraint(request.problem),
+                    "const": (
+                        hotpotqa_answer_type_constraint(request.problem)
+                        if semantic_protocol
+                        == "hotpotqa_verified_answer_slot_v1"
+                        else qa_answer_type_constraint(request.problem)
+                    ),
                     "description": "The answer type requested by the original question.",
                 },
                 "answer_cardinality": {
-                    "const": hotpotqa_answer_cardinality_constraint(request.problem),
+                    "const": (
+                        hotpotqa_answer_cardinality_constraint(request.problem)
+                        if semantic_protocol
+                        == "hotpotqa_verified_answer_slot_v1"
+                        else qa_answer_cardinality_constraint(request.problem)
+                    ),
                     "description": (
                         "Whether the original question requests one answer value or "
                         "multiple answer values."
@@ -724,8 +997,8 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             "additionalProperties": False,
         }
         # NECESSARY_ADAPTATION: SkillFlow constrains every StructuredAction at
-        # its provider boundary.  HotpotQA additionally gives the semantic
-        # Reasoner ownership of one exact six-field artifact.  Nest that
+        # its provider boundary.  The shared QA protocol additionally gives
+        # the semantic Reasoner ownership of one exact six-field artifact. Nest that
         # artifact under completion arguments.value so structured serving
         # cannot confuse semantic fields with action-envelope fields.
         return {
@@ -744,7 +1017,12 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     ],
                     "properties": {
                         "question_scope": {
-                            "const": hotpotqa_question_scope(request.problem),
+                            "const": (
+                                hotpotqa_question_scope(request.problem)
+                                if semantic_protocol
+                                == "hotpotqa_verified_answer_slot_v1"
+                                else qa_question_scope(request.problem)
+                            ),
                             "description": (
                                 "Copy the original question exactly; do not narrow "
                                 "or add qualifiers."
@@ -753,17 +1031,17 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                         "answer_slot": answer_slot_schema,
                         "evidence_propositions": {
                             "type": "array",
-                            "minItems": 2,
+                            "minItems": minimum_reasoning_items,
                             "description": (
-                                "Explicit answer-bearing and bridge/supporting "
-                                "propositions. answer_slot.proposition_index selects "
-                                "the answer-bearing proposition."
+                                "Explicit answer-bearing and supporting propositions. "
+                                "answer_slot.proposition_index selects the "
+                                "answer-bearing proposition."
                             ),
                             "items": proposition_schema,
                         },
                         "multi_hop_chain": {
                             "type": "array",
-                            "minItems": 2,
+                            "minItems": minimum_reasoning_items,
                             "items": dict(non_empty_text),
                         },
                         "candidate_answer": {
@@ -817,6 +1095,26 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         ):
             argument_properties["limit"] = {"const": 10}
             return schema
+        if action_name == "search" and self._unified_factual_protocol(request):
+            state = self._required_evidence_state(request, observations)
+            strategy = self._factual_retrieval_strategy(
+                state.search_attempt_count
+            )
+            argument_properties["query"] = {
+                "type": "string",
+                "minLength": 1,
+                "description": (
+                    "A new focused entity-and-relation query for retrieval "
+                    f"strategy {strategy}; it must not repeat any prior query "
+                    "after Unicode normalization and case folding."
+                ),
+            }
+            argument_properties["limit"] = {
+                "const": self._factual_search_limit(
+                    state.search_attempt_count
+                )
+            }
+            return schema
         if action_name != "read":
             return schema
         state = self._required_evidence_state(request, observations)
@@ -839,19 +1137,124 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             and self._max_tool_calls > 0
             and QA_RETRIEVAL_TOOL_ID in request.agent.allowed_tools
         )
-        semantic_reasoner_question = (
-            hotpotqa_question_scope(request.problem)
-            if request.semantic_protocol == "hotpotqa_verified_answer_slot_v1"
+        semantic_reasoner_protocol = (
+            request.semantic_protocol
+            if request.semantic_protocol
+            in {
+                "hotpotqa_verified_answer_slot_v1",
+                QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            }
             and (request.agent.role_family or "").casefold() == "reasoner"
             else None
+        )
+        semantic_reasoner_question = (
+            (
+                hotpotqa_question_scope(request.problem)
+                if semantic_reasoner_protocol
+                == "hotpotqa_verified_answer_slot_v1"
+                else qa_question_scope(request.problem)
+            )
+            if semantic_reasoner_protocol is not None
+            else None
+        )
+        semantic_upstream_tool_receipts = (
+            self._direct_upstream_tool_receipts(request)
+            if semantic_reasoner_protocol is not None
+            else ()
         )
         retrieval_token = self._retrieval_completion_required.set(requires_retrieval)
         semantic_token = self._semantic_reasoner_question.set(
             semantic_reasoner_question
         )
+        semantic_protocol_token = self._semantic_reasoner_protocol.set(
+            semantic_reasoner_protocol
+        )
+        upstream_receipts_token = self._semantic_upstream_tool_receipts.set(
+            semantic_upstream_tool_receipts
+        )
         try:
-            return await super().execute(request)
+            try:
+                return await super().execute(request)
+            except ReactExecutionError as exc:
+                public_observations = self._continuation_observations(
+                    exc.react_trace
+                )
+                state = self._required_evidence_state(
+                    request,
+                    public_observations,
+                )
+                if self._hotpot_tool_plan_exhausted(request, state):
+                    remaining_tool_calls = max(
+                        0,
+                        self._max_tool_calls - state.dispatched_tool_calls,
+                    )
+                    trace = [dict(item) for item in exc.react_trace]
+                    terminal_diagnosis = {
+                        "observation_status": "budget_exhausted",
+                        "public_error_code": "qa_retrieval_tool_plan_exhausted",
+                        "tool_plan_exhausted": True,
+                        "remaining_tool_calls": remaining_tool_calls,
+                        "successful_tool_receipt_count": (
+                            state.dispatched_tool_calls
+                        ),
+                        "successful_evidence_read_count": (
+                            state.successful_read_count
+                        ),
+                    }
+                    if trace:
+                        trace[-1]["terminal_failure_diagnosis"] = (
+                            terminal_diagnosis
+                        )
+                    else:  # pragma: no cover - bounded execution samples a turn
+                        trace.append(terminal_diagnosis)
+                    raise ReactExecutionError(
+                        str(exc),
+                        react_trace=tuple(trace),
+                        tool_receipts=exc.tool_receipts,
+                        model_calls=exc.model_calls,
+                        tool_plan_exhausted=True,
+                    ) from exc
+                if not self._unified_factual_protocol(request):
+                    raise
+                exhausted = (
+                    state.search_attempt_count
+                    >= len(_FACTUAL_QA_RETRIEVAL_STRATEGIES)
+                    or state.dispatched_tool_calls >= self._max_tool_calls
+                )
+                evidence_unresolved = (
+                    state.successful_read_count == 0
+                    or state.semantic_repair_kind in {"evidence", "coverage"}
+                )
+                if not exhausted or not evidence_unresolved:
+                    raise
+                trace = [dict(item) for item in exc.react_trace]
+                terminal_diagnosis = {
+                    "observation_status": "budget_exhausted",
+                    "public_error_code": _KNOWLEDGE_BASE_COVERAGE_FAILURE,
+                    "retrieval_attempt_count": state.search_attempt_count,
+                    "retrieval_strategies_attempted": list(
+                        _FACTUAL_QA_RETRIEVAL_STRATEGIES[
+                            : state.search_attempt_count
+                        ]
+                    ),
+                    "search_queries": list(state.search_queries),
+                    "search_top_ks": list(state.search_top_ks),
+                }
+                if trace:
+                    trace[-1]["terminal_failure_diagnosis"] = terminal_diagnosis
+                else:  # pragma: no cover - bounded execution always samples a turn
+                    trace.append(terminal_diagnosis)
+                raise ReactExecutionError(
+                    str(exc),
+                    react_trace=tuple(trace),
+                    tool_receipts=exc.tool_receipts,
+                    model_calls=exc.model_calls,
+                ) from exc
         finally:
+            self._semantic_upstream_tool_receipts.reset(
+                upstream_receipts_token
+            )
+            self._semantic_reasoner_protocol.reset(semantic_protocol_token)
             self._semantic_reasoner_question.reset(semantic_token)
             self._retrieval_completion_required.reset(retrieval_token)
 
@@ -872,8 +1275,12 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             guidance = SKILLFLOW_MULTI_HOP_QA_GUIDANCE
             if request.semantic_protocol == "hotpotqa_verified_answer_slot_v1":
                 guidance += " " + HOTPOTQA_VERIFIED_ANSWER_SLOT_GUIDANCE
+            elif request.semantic_protocol == QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL:
+                guidance += " " + QA_VERIFIED_ANSWER_LINEAGE_GUIDANCE
         elif self._task_type == "factual_qa":
             guidance = SKILLFLOW_FACTUAL_QA_GUIDANCE
+            if request.semantic_protocol == QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL:
+                guidance += " " + QA_VERIFIED_ANSWER_LINEAGE_GUIDANCE
         else:
             guidance = ""
         # DIRECT_REUSE: SkillFlow training/task_prompts.py::{MULTI_HOP_QA,
@@ -890,10 +1297,10 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             )
         )
         semantic_role = (request.agent.role_family or "").casefold()
-        if (
-            request.semantic_protocol == "hotpotqa_verified_answer_slot_v1"
-            and semantic_role == "reasoner"
-        ):
+        if request.semantic_protocol in {
+            "hotpotqa_verified_answer_slot_v1",
+            QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+        } and semantic_role == "reasoner":
             if completion_admitted:
                 terminal_wire += (
                     " As the Reasoner, arguments.value must contain exactly the six "
@@ -918,10 +1325,10 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     "evidence is read, but no semantic-answer field belongs in the "
                     "current Tool arguments."
                 )
-        elif (
-            request.semantic_protocol == "hotpotqa_verified_answer_slot_v1"
-            and semantic_role == "verifier"
-        ):
+        elif request.semantic_protocol in {
+            "hotpotqa_verified_answer_slot_v1",
+            QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+        } and semantic_role == "verifier":
             terminal_wire += (
                 " As the Verifier, check explicit retrieved evidence, entity-to-"
                 "attribute binding, multi-hop completeness, and unchanged question "
@@ -997,20 +1404,53 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     + ". Do not call complete before that read succeeds."
                 )
             else:
-                evidence_continuation += (
-                    "The next action must be qa-retrieval search with a concise "
-                    "entity-and-relation query for a missing hop. Then read an exact returned "
-                    "passage_id. Search arguments contain exactly query and limit; "
-                    "never copy JSON-Schema properties/additionalProperties or the "
-                    "eventual semantic artifact into those arguments. Set query to "
-                    "one non-empty focused entity-and-relation string selected from "
-                    "the original question or newest read evidence. For HotpotQA, "
-                    "set limit to exactly 10 so the bounded continuation can inspect "
-                    "two distinct ranked passages from the same search result. Keep "
-                    "the outer constants kind=tool, name=search, "
-                    "resource_id=qa-retrieval, and skill_id=null. Do not call "
-                    "complete before a non-empty read succeeds."
-                )
+                if self._unified_factual_protocol(request):
+                    strategy = self._factual_retrieval_strategy(
+                        evidence_state.search_attempt_count
+                    )
+                    expected_top_k = self._factual_search_limit(
+                        evidence_state.search_attempt_count
+                    )
+                    evidence_continuation += (
+                        "The next action must be qa-retrieval search using the "
+                        f"bounded retrieval strategy `{strategy}` at attempt "
+                        f"{evidence_state.search_attempt_count + 1}, with limit "
+                        f"exactly {expected_top_k}. Preserve the target relation "
+                        "and answer slot while changing the entity query according "
+                        "to this strategy. For spelling_normalization, normalize "
+                        "only the entity spelling; for alias_expansion, search an "
+                        "evidence-supported alias; for entity_disambiguation, add "
+                        "a relation or identifying qualifier; for query_rewriting, "
+                        "rewrite the entity-and-relation query without narrowing "
+                        "the question scope. The normalized query must differ from "
+                        "all prior search queries: "
+                        + json.dumps(
+                            list(evidence_state.normalized_search_queries),
+                            ensure_ascii=False,
+                        )
+                        + ". Then read one exact returned passage_id. Search "
+                        "arguments contain exactly query and limit; do not put the "
+                        "eventual semantic artifact in Tool arguments. If all "
+                        "bounded strategies fail to bind entity identity and target "
+                        "relation to a successful Tool receipt, report "
+                        "knowledge_base_coverage_failure and never guess or fabricate "
+                        "evidence."
+                    )
+                else:
+                    evidence_continuation += (
+                        "The next action must be qa-retrieval search with a concise "
+                        "entity-and-relation query for a missing hop. Then read an exact returned "
+                        "passage_id. Search arguments contain exactly query and limit; "
+                        "never copy JSON-Schema properties/additionalProperties or the "
+                        "eventual semantic artifact into those arguments. Set query to "
+                        "one non-empty focused entity-and-relation string selected from "
+                        "the original question or newest read evidence. For HotpotQA, "
+                        "set limit to exactly 10 so the bounded continuation can inspect "
+                        "two distinct ranked passages from the same search result. Keep "
+                        "the outer constants kind=tool, name=search, "
+                        "resource_id=qa-retrieval, and skill_id=null. Do not call "
+                        "complete before a non-empty read succeeds."
+                    )
         qa_guidance = (
             "\nSkillFlow QA execution guidance: " + guidance + terminal_wire
             if guidance
@@ -1027,6 +1467,30 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
     ) -> str | None:
         del action
 
+        semantic_protocol = self._semantic_reasoner_protocol.get()
+        unified_factual = (
+            semantic_protocol == QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL
+            and self._task_type == "factual_qa"
+        )
+        search_attempt_count = sum(
+            1
+            for receipt in tool_receipts
+            if receipt.get("tool_id") == QA_RETRIEVAL_TOOL_ID
+            and isinstance(receipt.get("request"), Mapping)
+            and receipt["request"].get("action") == "search"
+        )
+        retrieval_budget_exhausted = (
+            len(tool_receipts) >= self._max_tool_calls
+            or search_attempt_count >= len(_FACTUAL_QA_RETRIEVAL_STRATEGIES)
+        )
+        upstream_tool_receipts = list(
+            self._semantic_upstream_tool_receipts.get()
+        )
+        evidence_tool_receipts = [
+            *tool_receipts,
+            *upstream_tool_receipts,
+        ]
+
         # DIRECT_REUSE: SkillFlow training/environment.py::step admits the
         # terminal answer after at least one non-answer Tool turn.  Preserve
         # that historical ``required_tool_call`` boundary, including a failed
@@ -1035,7 +1499,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         # only a successful read receipt carrying non-empty public text counts.
         if self._retrieval_completion_required.get():
             retrieval_admitted = False
-            for receipt in tool_receipts:
+            for receipt in evidence_tool_receipts:
                 if receipt.get("tool_id") != QA_RETRIEVAL_TOOL_ID:
                     continue
                 receipt_request = receipt.get("request")
@@ -1067,6 +1531,8 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             if not retrieval_admitted:
                 if self._completion_policy == "required_tool_call":
                     return "qa_completion_requires_retrieval_dispatch"
+                if unified_factual and retrieval_budget_exhausted:
+                    return _KNOWLEDGE_BASE_COVERAGE_FAILURE
                 return "qa_completion_requires_successful_read_evidence"
 
         original_question = self._semantic_reasoner_question.get()
@@ -1079,16 +1545,39 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         # the same ReAct loop instead of breaking the outer semantic lineage.
         from .agent_workflow_env import AgentWorkflowEnv
 
+        reasoner_kwargs: dict[str, object] = {
+            "original_question": original_question,
+        }
+        if unified_factual:
+            reasoner_kwargs.update(
+                minimum_evidence_propositions=1,
+                minimum_reasoning_steps=1,
+            )
         candidate, issue = AgentWorkflowEnv._reasoner_candidate(
             artifact,
-            original_question=original_question,
+            **reasoner_kwargs,
         )
         if issue is not None or candidate is None:
             detail = issue or "Reasoner candidate_answer is missing"
-            return _HOTPOTQA_SEMANTIC_STRUCTURE_ERROR_PREFIX + " " + detail
+            evidence_binding_issue = (
+                "must occur verbatim in the selected evidence_span" in detail
+            )
+            if semantic_protocol == QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL:
+                prefix = (
+                    _QA_SEMANTIC_EVIDENCE_ERROR_PREFIX
+                    if evidence_binding_issue
+                    else _QA_SEMANTIC_STRUCTURE_ERROR_PREFIX
+                )
+            else:
+                prefix = (
+                    _HOTPOTQA_SEMANTIC_EVIDENCE_ERROR_PREFIX
+                    if evidence_binding_issue
+                    else _HOTPOTQA_SEMANTIC_STRUCTURE_ERROR_PREFIX
+                )
+            return prefix + " " + detail
         read_evidence_texts = tuple(
             text
-            for receipt in tool_receipts
+            for receipt in evidence_tool_receipts
             if isinstance(receipt, Mapping)
             for text in (
                 AgentWorkflowEnv._successful_read_text(
@@ -1101,9 +1590,19 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         provenance_issue = AgentWorkflowEnv._reasoner_evidence_provenance_issue(
             artifact,
             read_evidence_texts,
+            require_answer_binding=(
+                semantic_protocol == QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL
+            ),
         )
         if provenance_issue is not None:
-            return _HOTPOTQA_SEMANTIC_EVIDENCE_ERROR_PREFIX + " " + provenance_issue
+            if unified_factual and retrieval_budget_exhausted:
+                return _KNOWLEDGE_BASE_COVERAGE_FAILURE
+            prefix = (
+                _QA_SEMANTIC_EVIDENCE_ERROR_PREFIX
+                if semantic_protocol == QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL
+                else _HOTPOTQA_SEMANTIC_EVIDENCE_ERROR_PREFIX
+            )
+            return prefix + " " + provenance_issue
         return None
 
     def _tool_action_error(
@@ -1114,6 +1613,35 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         observations: list[Mapping[str, object]],
     ) -> str | None:
         state = self._required_evidence_state(request, observations)
+        if (
+            self._unified_factual_protocol(request)
+            and action.kind is ActionKind.TOOL
+            and action.resource_id == QA_RETRIEVAL_TOOL_ID
+            and action.name == "search"
+        ):
+            if (
+                state.search_attempt_count
+                >= len(_FACTUAL_QA_RETRIEVAL_STRATEGIES)
+                or state.dispatched_tool_calls >= self._max_tool_calls
+            ):
+                return _KNOWLEDGE_BASE_COVERAGE_FAILURE
+            arguments = action.arguments
+            if isinstance(arguments, dict):
+                query = arguments.get("query")
+                limit = arguments.get("limit")
+                if isinstance(query, str) and query.strip():
+                    normalized_query = _normalized_retrieval_query(query)
+                    if normalized_query in state.normalized_search_queries:
+                        return "qa_retrieval_duplicate_normalized_query"
+                expected_limit = self._factual_search_limit(
+                    state.search_attempt_count
+                )
+                if type(limit) is int and limit != expected_limit:
+                    return (
+                        "qa_retrieval_top_k_mismatch: expected "
+                        f"{expected_limit} for attempt "
+                        f"{state.search_attempt_count + 1}"
+                    )
         admitted_actions, completion_admitted = self._state_conditioned_action_domain(
             request,
             observations,
@@ -1125,6 +1653,11 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             ) not in admitted_actions:
                 if completion_admitted:
                     return "qa_required_evidence_next_action_complete"
+                if (
+                    self._unified_factual_protocol(request)
+                    and not admitted_actions
+                ):
+                    return _KNOWLEDGE_BASE_COVERAGE_FAILURE
                 expected_action = (
                     next(iter(admitted_actions))[1] if admitted_actions else "complete"
                 )
@@ -1446,6 +1979,7 @@ __all__ = [
     "QARetrievalToolBackend",
     "QAReadToolBackend",
     "QA_RETRIEVAL_TOOL_ID",
+    "QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL",
     "QASearchToolBackend",
     "build_qa_tool_registry",
     "open_qa_tool_registry",

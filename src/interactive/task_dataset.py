@@ -35,27 +35,39 @@ def build_hotpotqa_question(question: str, passages: List[str]) -> str:
     return "\n\n".join(parts)
 
 
-def hotpotqa_question_scope(rendered_question: str) -> str:
-    """Recover the exact question span from ``build_hotpotqa_question`` output."""
+def qa_question_scope(rendered_question: str) -> str:
+    """Return the exact QA question span without narrowing its semantics.
+
+    HotpotQA may use :func:`build_hotpotqa_question`, while TriviaQA supplies
+    the factual question directly.  Both protocols therefore share one
+    question-only boundary; no context, answer alias, or evaluator field is
+    consulted here.
+    """
 
     if not isinstance(rendered_question, str) or not rendered_question.strip():
-        raise ValueError("HotpotQA rendered question must be non-empty")
+        raise ValueError("QA question must be non-empty")
     if _HOTPOTQA_QUESTION_MARKER not in rendered_question:
         return rendered_question.strip()
     scope = rendered_question.rsplit(_HOTPOTQA_QUESTION_MARKER, 1)[1].strip()
     if not scope:
-        raise ValueError("HotpotQA rendered question has an empty Question field")
+        raise ValueError("rendered QA input has an empty Question field")
     return scope
 
 
-def hotpotqa_answer_type_constraint(rendered_question: str) -> str:
+def hotpotqa_question_scope(rendered_question: str) -> str:
+    """Backward-compatible HotpotQA wrapper for :func:`qa_question_scope`."""
+
+    return qa_question_scope(rendered_question)
+
+
+def qa_answer_type_constraint(rendered_question: str) -> str:
     """Return the question's surface-syntax answer-type constraint.
 
     This is an answer-independent wh-word/auxiliary classification.  It does
     not inspect passages, candidate answers, Ground Truth, or evaluator state.
     """
 
-    question = hotpotqa_question_scope(rendered_question)
+    question = qa_question_scope(rendered_question)
     normalized = " ".join(question.casefold().split())
     if re.search(r"\bwhat nationality\b", normalized):
         return "nationality"
@@ -107,10 +119,16 @@ def hotpotqa_answer_type_constraint(rendered_question: str) -> str:
     return "short_answer"
 
 
-def hotpotqa_answer_cardinality_constraint(rendered_question: str) -> str:
+def hotpotqa_answer_type_constraint(rendered_question: str) -> str:
+    """Backward-compatible HotpotQA wrapper for the shared QA classifier."""
+
+    return qa_answer_type_constraint(rendered_question)
+
+
+def qa_answer_cardinality_constraint(rendered_question: str) -> str:
     """Return a question-only single-value or multiple-value answer constraint."""
 
-    question = hotpotqa_question_scope(rendered_question)
+    question = qa_question_scope(rendered_question)
     normalized = " ".join(question.casefold().split())
     if re.search(
         r"^(?:what (?:are|were) the names?\b|who (?:are|were)\b|"
@@ -119,6 +137,12 @@ def hotpotqa_answer_cardinality_constraint(rendered_question: str) -> str:
     ):
         return "multiple"
     return "single"
+
+
+def hotpotqa_answer_cardinality_constraint(rendered_question: str) -> str:
+    """Backward-compatible HotpotQA wrapper for shared QA cardinality."""
+
+    return qa_answer_cardinality_constraint(rendered_question)
 
 
 def task_record_from_mapping(
@@ -238,8 +262,12 @@ __all__ = [
     "TASK_SCHEMA_VERSION",
     "build_hotpotqa_question",
     "hotpotqa_answer_type_constraint",
+    "hotpotqa_answer_cardinality_constraint",
     "hotpotqa_question_scope",
     "iter_task_records",
     "load_task_records",
+    "qa_answer_cardinality_constraint",
+    "qa_answer_type_constraint",
+    "qa_question_scope",
     "task_record_from_mapping",
 ]

@@ -686,6 +686,133 @@ def test_qa_paired_rows_preserve_exact_match_and_token_f1():
     assert row["delta_token_f1"] == 1.0
 
 
+def test_trivia_failure_taxonomy_uses_evaluator_and_public_runtime_receipts():
+    common = {
+        "explicit_finish": True,
+        "evaluation": {
+            "valid": True,
+            "metrics": {"exact_match": 0.0, "token_f1": 0.6},
+            "details": {},
+        },
+        "turns": [],
+    }
+    canonicalization = {
+        **common,
+        "evaluation": {
+            **common["evaluation"],
+            "details": {
+                "answer_mismatch_type": (
+                    "accepted_answer_canonicalization_mismatch"
+                )
+            },
+        },
+    }
+    coverage = {
+        **common,
+        "turns": [
+            {
+                "canvas_feedback": "knowledge_base_coverage_failure",
+                "runtime_summary": {},
+            }
+        ],
+    }
+
+    assert _MODULE._failure_type(
+        {"evaluation": {"valid": True}},
+        canonicalization,
+        direct_valid=True,
+        graph_valid=True,
+        direct_score=0.0,
+        graph_score=0.6,
+        dataset_key="triviaqa",
+    ) == "accepted_answer_canonicalization_mismatch"
+    assert _MODULE._failure_type(
+        {"evaluation": {"valid": True}},
+        coverage,
+        direct_valid=True,
+        graph_valid=True,
+        direct_score=0.0,
+        graph_score=0.6,
+        dataset_key="triviaqa",
+    ) == "knowledge_base_coverage_failure"
+
+    coverage_without_finish = {
+        **coverage,
+        "explicit_finish": False,
+        "termination_reason": "max_rounds",
+    }
+    assert _MODULE._failure_type(
+        {"evaluation": {"valid": True}},
+        coverage_without_finish,
+        direct_valid=True,
+        graph_valid=True,
+        direct_score=0.0,
+        graph_score=0.0,
+        dataset_key="triviaqa",
+    ) == "knowledge_base_coverage_failure"
+
+
+def test_paired_row_uses_the_evaluated_lineage_graph_for_fallback():
+    task = _MODULE.TaskRecord(
+        task_id="triviaqa:fallback",
+        question="Who wrote Main Street?",
+        ground_truth="Sinclair Lewis",
+        split="validation",
+        metadata={"dataset_key": "triviaqa"},
+    )
+    evaluated_graph = {
+        "revision": 1,
+        "nodes": [],
+        "relations": [],
+        "output_agent_id": None,
+    }
+    terminal_graph = {
+        "revision": 2,
+        "nodes": [],
+        "relations": [],
+        "output_agent_id": None,
+    }
+    direct = {
+        task.task_id: {
+            "final_answer": "Sinclair Lewis",
+            "evaluation": {
+                "valid": True,
+                "metrics": {"exact_match": 1.0, "token_f1": 1.0},
+            },
+        }
+    }
+    trajectory = {
+        "task": task.to_dict(),
+        "trajectory_id": "trajectory:fallback",
+        "final_answer": "Sinclair Lewis",
+        "explicit_finish": False,
+        "termination_reason": "max_rounds",
+        "valid_lineage_fallback_used": True,
+        "valid_lineage_fallback_receipt": {
+            "graph_snapshot": evaluated_graph,
+        },
+        "evaluation": {
+            "valid": True,
+            "metrics": {"exact_match": 1.0, "token_f1": 1.0},
+        },
+        "turns": [
+            {
+                "action": {"action": "modify_agent"},
+                "canvas_feedback": "accepted modify_agent at revision 2",
+                "graph_snapshot": terminal_graph,
+            }
+        ],
+    }
+
+    row = _MODULE._paired_rows(
+        (task,), direct, {task.task_id: trajectory}, "triviaqa"
+    )[0]
+
+    assert row["agentgraph"]["final_graph"] == evaluated_graph
+    assert row["agentgraph"]["terminal_canvas_graph"] == terminal_graph
+    assert row["agentgraph"]["graph_diagnostic"]["graph_revision"] == 1
+
+
 def test_interactive_direct_condition_records_every_environment_policy_call():
     registry = load_model_registry(
         _ROOT / "config" / "model_catalog_hotpotqa_deep_v6.yaml"

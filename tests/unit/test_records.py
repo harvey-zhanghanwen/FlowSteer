@@ -219,6 +219,51 @@ class RecordTests(unittest.TestCase):
         self.assertFalse(replace(failure, manual_repair_used=True).grpo_eligible)
         self.assertFalse(replace(failure, forced_probe=True).grpo_eligible)
 
+    def test_valid_lineage_fallback_round_trips_and_is_never_grpo_eligible(self) -> None:
+        fallback = trajectory(
+            explicit_finish=False,
+            termination_reason="max_rounds",
+            final_answer="answer",
+            evaluation=EvaluationReceipt("eval-v1", True, 0.0),
+            valid_lineage_fallback_used=True,
+            valid_lineage_fallback_receipt={
+                "source": "AgentWorkflowEnv.last_valid_evidence_lineage",
+                "graph_revision": 1,
+                "runtime_run_id": "runtime-1",
+            },
+        )
+
+        self.assertTrue(fallback.terminal_failure)
+        self.assertTrue(fallback.natural_policy_terminal)
+        self.assertFalse(fallback.grpo_eligible)
+        restored = TrajectoryRecord.from_dict(fallback.to_dict())
+        self.assertTrue(restored.valid_lineage_fallback_used)
+        self.assertEqual(
+            restored.valid_lineage_fallback_receipt["runtime_run_id"],
+            "runtime-1",
+        )
+
+    def test_old_trajectory_without_lineage_fallback_fields_remains_readable(self) -> None:
+        serialized = trajectory().to_dict()
+        serialized.pop("valid_lineage_fallback_used")
+        serialized.pop("valid_lineage_fallback_receipt")
+
+        restored = TrajectoryRecord.from_dict(serialized)
+
+        self.assertFalse(restored.valid_lineage_fallback_used)
+        self.assertEqual(restored.valid_lineage_fallback_receipt, {})
+
+        old_max_rounds = trajectory(
+            explicit_finish=False,
+            termination_reason="max_rounds",
+            final_answer="legacy intermediate answer",
+        ).to_dict()
+        old_max_rounds.pop("valid_lineage_fallback_used")
+        old_max_rounds.pop("valid_lineage_fallback_receipt")
+        self.assertFalse(
+            TrajectoryRecord.from_dict(old_max_rounds).terminal_failure
+        )
+
     def test_nonfinite_evaluator_reward_is_rejected(self) -> None:
         with self.assertRaises(ValueError):
             EvaluationReceipt("eval", True, math.nan)

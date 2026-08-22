@@ -4,7 +4,7 @@ import json
 import unittest
 
 from src.interactive.agent_graph import AgentGraph, AgentNode
-from src.interactive.agent_runtime import AgentResponse
+from src.interactive.agent_runtime import AgentResponse, AgentRuntime
 from src.interactive.agent_workflow_env import AgentWorkflowEnv
 from src.interactive.director import (
     AgentGraphOrchestrator,
@@ -30,6 +30,9 @@ from src.interactive.director import (
     HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V21,
     HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V22,
     HOTPOTQA_SEMANTIC_PROTOCOL,
+    QA_DIRECTOR_PROMPT_VERSION,
+    QA_DIRECTOR_SYSTEM_PROMPT_V1,
+    QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
     LEGACY_DIRECTOR_SYSTEM_PROMPT_V8,
     LEGACY_DIRECTOR_SYSTEM_PROMPT_V9,
     PRESERVE_DIAGNOSE_REPAIR_AUGMENT_POLICY,
@@ -196,6 +199,10 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
             director_system_prompt_for_version(HOTPOTQA_DIRECTOR_PROMPT_VERSION),
         )
         self.assertIs(
+            QA_DIRECTOR_SYSTEM_PROMPT_V1,
+            director_system_prompt_for_version(QA_DIRECTOR_PROMPT_VERSION),
+        )
+        self.assertIs(
             HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V21,
             director_system_prompt_for_version(
                 "agentgraph.director.hotpotqa-semantic-recovery.v21"
@@ -292,6 +299,43 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             PRESERVE_DIAGNOSE_REPAIR_AUGMENT_POLICY,
             state["recovery_policy"],
+        )
+        self.assertEqual(
+            "qa-retrieval",
+            state["terminal_constraints"]["required_evidence_tool_id"],
+        )
+
+    async def test_shared_qa_prompt_uses_same_canvas_policy_without_hotpot_name(self) -> None:
+        model_registry = registry()
+        runtime = AgentRuntime(
+            model_registry,
+            FakeGateway(),
+            dataset_id="triviaqa",
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+        )
+        env = AgentWorkflowEnv(
+            model_registry,
+            runtime=runtime,
+            problem="Who wrote Lord of the Flies?",
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            recovery_policy=PRESERVE_DIAGNOSE_REPAIR_AUGMENT_POLICY,
+            required_evidence_tool_id="qa-retrieval",
+        )
+        orchestrator = AgentGraphOrchestrator(
+            model_registry,
+            ScriptedDirector([]),
+            prompt_version=QA_DIRECTOR_PROMPT_VERSION,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            recovery_policy=PRESERVE_DIAGNOSE_REPAIR_AUGMENT_POLICY,
+        )
+
+        messages = transcript_messages(orchestrator.build_prompt(env, 0, ()))
+        state = observation_payload(messages[-1])
+        self.assertEqual(QA_DIRECTOR_SYSTEM_PROMPT_V1, messages[0]["content"])
+        self.assertNotIn("For HotpotQA,", messages[0]["content"])
+        self.assertEqual(
+            QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            state["semantic_protocol"],
         )
         self.assertEqual(
             "qa-retrieval",

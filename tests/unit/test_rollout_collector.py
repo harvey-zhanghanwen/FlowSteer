@@ -10,7 +10,10 @@ from jsonschema import Draft202012Validator
 
 from src.interactive.agent_action_parser import AgentActionParseError, AgentActionParser
 from src.interactive.agent_runtime import AgentResponse
-from src.interactive.agent_workflow_env import AgentWorkflowEnv
+from src.interactive.agent_workflow_env import (
+    AgentWorkflowEnv,
+    AgentWorkflowEvidenceLineageSnapshot,
+)
 from src.interactive.director import (
     AgentGraphOrchestrator,
     DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION,
@@ -1819,6 +1822,83 @@ def test_collector_returns_complete_max_rounds_trajectory():
     assert len(trajectory.turns) == 1
     assert observed["runtime"] is None
     assert observed["final_graph"]["nodes"][0]["id"] == "solver"
+
+
+def test_collector_uses_only_env_valid_lineage_at_max_rounds():
+    registry = _registry()
+    client = ScriptedSGLangClient(
+        [
+            (
+                '{"action":"add_subgraph","agents":['
+                '{"agent_id":"solver","model_id":"cheap-model",'
+                '"contract":"solve"}],"relations":[],'
+                '"output_agent_id":"solver"}'
+            )
+        ],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+    )
+
+    class LineageRecordingEnv(AgentWorkflowEnv):
+        def __init__(self):
+            super().__init__(
+                registry,
+                gateway=FakeGateway(),
+                execute_on_edit=True,
+            )
+            self._lineage = None
+
+        @property
+        def last_valid_evidence_lineage(self):
+            return self._lineage
+
+        async def step(self, action_or_response):
+            result = await super().step(action_or_response)
+            if result.execution is not None:
+                self._lineage = AgentWorkflowEvidenceLineageSnapshot(
+                    answer=result.execution.final_answer,
+                    runtime=result.execution,
+                    graph_revision=result.revision,
+                    graph_snapshot=result.snapshot.graph,
+                )
+            return result
+
+    collector = AgentGraphRolloutCollector(
+        _orchestrator(registry, client, max_rounds=1),
+        LineageRecordingEnv(),
+        _versions(),
+    )
+    observed = {}
+
+    def evaluator(task, final_answer, final_graph, runtime):
+        observed.update(
+            final_answer=final_answer,
+            final_graph=final_graph,
+            runtime=runtime,
+        )
+        return {
+            "evaluator_version": EVALUATOR_VERSION,
+            "valid": True,
+            "reward": 1.0,
+            "metrics": {"f1": 1.0},
+        }
+
+    trajectory = asyncio.run(collector.collect(_task(), 0, evaluator))
+
+    assert trajectory.explicit_finish is False
+    assert trajectory.termination_reason == "max_rounds"
+    assert trajectory.terminal_failure is True
+    assert trajectory.final_answer == "final answer"
+    assert trajectory.valid_lineage_fallback_used is True
+    assert trajectory.valid_lineage_fallback_receipt["graph_revision"] == (
+        observed["final_graph"]["revision"]
+    )
+    assert trajectory.valid_lineage_fallback_receipt["runtime_run_id"] == (
+        observed["runtime"].run_id
+    )
+    assert observed["final_graph"]["revision"] > 0
+    assert observed["final_answer"] == "final answer"
+    assert trajectory.grpo_eligible is False
 
 
 def test_collector_allows_explicit_heldout_split_without_grpo_admission():

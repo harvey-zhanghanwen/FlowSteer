@@ -60,6 +60,7 @@ LEGACY_DIRECTOR_PROMPT_VERSION_V8 = "agentgraph.director.minimal-neutral.v8"
 HOTPOTQA_DIRECTOR_PROMPT_VERSION = (
     "agentgraph.director.hotpotqa-semantic-recovery.v22"
 )
+QA_DIRECTOR_PROMPT_VERSION = "agentgraph.director.qa-semantic-recovery.v1"
 LEGACY_HOTPOTQA_DIRECTOR_PROMPT_VERSION_V21 = (
     "agentgraph.director.hotpotqa-semantic-recovery.v21"
 )
@@ -94,6 +95,10 @@ LEGACY_HOTPOTQA_DIRECTOR_PROMPT_VERSION_V11 = (
     "agentgraph.director.hotpotqa-semantic-recovery.v11"
 )
 HOTPOTQA_SEMANTIC_PROTOCOL = "hotpotqa_verified_answer_slot_v1"
+QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL = "qa_verified_answer_lineage_v2"
+_VERIFIED_QA_SEMANTIC_PROTOCOLS = frozenset(
+    {HOTPOTQA_SEMANTIC_PROTOCOL, QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL}
+)
 PRESERVE_DIAGNOSE_REPAIR_AUGMENT_POLICY = (
     "preserve_diagnose_repair_augment"
 )
@@ -286,6 +291,24 @@ HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V22 = HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V21.replac
     1,
 )
 
+# NECESSARY_ADAPTATION: TriviaQA uses the same FlowSteer Canvas and the same
+# HotpotQA-tested semantic/recovery policy.  Only the benchmark name is
+# generalized here; spelling/alias/query retry mechanics remain in the
+# SkillFlow-compatible retrieval Action--Observation contract rather than in
+# the Director prompt.  This keeps the Director instruction short and avoids
+# prescribing a fixed graph topology.
+QA_DIRECTOR_SYSTEM_PROMPT_V1 = HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V22.replace(
+    "For HotpotQA,",
+    "For evidence-grounded question answering,",
+    1,
+)
+
+
+def verified_qa_semantic_protocol(value: object) -> bool:
+    """Return whether the shared evidence-lineage Canvas policy is active."""
+
+    return value in _VERIFIED_QA_SEMANTIC_PROTOCOLS
+
 
 def director_system_prompt_for_version(prompt_version: str) -> str:
     """Resolve one explicitly versioned Director policy without changing v10."""
@@ -307,6 +330,7 @@ def director_system_prompt_for_version(prompt_version: str) -> str:
             LEGACY_DIRECTOR_SYSTEM_PROMPT_V8
         ),
         HOTPOTQA_DIRECTOR_PROMPT_VERSION: HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V22,
+        QA_DIRECTOR_PROMPT_VERSION: QA_DIRECTOR_SYSTEM_PROMPT_V1,
         LEGACY_HOTPOTQA_DIRECTOR_PROMPT_VERSION_V21: (
             HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V21
         ),
@@ -363,6 +387,7 @@ _SUPPORTED_DIRECTOR_SYSTEM_PROMPTS = frozenset(
         HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V20,
         HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V21,
         HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V22,
+        QA_DIRECTOR_SYSTEM_PROMPT_V1,
         LEGACY_DIRECTOR_SYSTEM_PROMPT_V9,
         LEGACY_DIRECTOR_SYSTEM_PROMPT_V8,
     }
@@ -958,7 +983,7 @@ def _live_admitted_new_role_families(
 
     raw_roles = domain.get("admitted_new_role_families")
     if (
-        domain.get("semantic_protocol") != HOTPOTQA_SEMANTIC_PROTOCOL
+        not verified_qa_semantic_protocol(domain.get("semantic_protocol"))
         and raw_roles is None
     ):
         return tuple(role_constraints)
@@ -1088,7 +1113,7 @@ def director_live_add_subgraph_agent_declarations_json_schema_text(
         domain,
         role_constraints,
     )
-    if domain.get("semantic_protocol") == HOTPOTQA_SEMANTIC_PROTOCOL:
+    if verified_qa_semantic_protocol(domain.get("semantic_protocol")):
         existing_roles = _live_existing_agent_roles(domain, role_constraints)
         _live_hotpotqa_output_domain(domain, existing_roles)
     new_agent_ids = _live_new_agent_ids(existing_agent_ids, max_agents)
@@ -1469,7 +1494,7 @@ def director_live_add_subgraph_relation_candidates(
         agents,
     )
     domain = action_target_domains["add_subgraph"]
-    if domain.get("semantic_protocol") != HOTPOTQA_SEMANTIC_PROTOCOL:
+    if not verified_qa_semantic_protocol(domain.get("semantic_protocol")):
         return ()
     role_constraints = domain["role_constraints"]
     roles = _live_existing_agent_roles(domain, role_constraints)
@@ -1764,7 +1789,7 @@ def director_live_action_parameter_json_schema_text(
             director_state_conditioned_sampling_json_schema_text("add_subgraph")
         )
         schema["properties"]["agents"] = {"const": list(normalized_agents)}
-        if domain.get("semantic_protocol") == HOTPOTQA_SEMANTIC_PROTOCOL:
+        if verified_qa_semantic_protocol(domain.get("semantic_protocol")):
             relation_candidates = director_live_add_subgraph_relation_candidates(
                 action_target_domains,
                 normalized_agents,
@@ -2354,6 +2379,10 @@ class OrchestrationResult:
     final_graph: Mapping[str, Any]
     termination_reason: str
     explicit_finish: bool
+    valid_lineage_fallback_used: bool = False
+    valid_lineage_fallback_receipt: Mapping[str, Any] = field(
+        default_factory=dict
+    )
 
 
 class AgentGraphOrchestrator:
@@ -2418,7 +2447,9 @@ class AgentGraphOrchestrator:
             )
         else:
             self.system_prompt = system_prompt
-        if semantic_protocol not in {"none", HOTPOTQA_SEMANTIC_PROTOCOL}:
+        if semantic_protocol != "none" and not verified_qa_semantic_protocol(
+            semantic_protocol
+        ):
             raise ValueError("unsupported Director semantic_protocol")
         if recovery_policy not in {
             "default",
@@ -2582,7 +2613,7 @@ class AgentGraphOrchestrator:
             }
             for model_id in catalog_model_ids
         ]
-        if self.semantic_protocol == HOTPOTQA_SEMANTIC_PROTOCOL:
+        if verified_qa_semantic_protocol(self.semantic_protocol):
             for item in catalog:
                 item["provider_id"] = self.registry.provider_for(
                     str(item["model_id"])
@@ -2628,7 +2659,7 @@ class AgentGraphOrchestrator:
             "canvas_feedback": snapshot.last_feedback,
             "admissible_action_types": list(
                 env.model_admissible_action_types()
-                if self.semantic_protocol == HOTPOTQA_SEMANTIC_PROTOCOL
+                if verified_qa_semantic_protocol(self.semantic_protocol)
                 else env.allowed_action_types
             ),
             # These are existing admission constraints enforced by
@@ -2641,7 +2672,7 @@ class AgentGraphOrchestrator:
                 "required_tool_id": env.required_tool_id,
             },
         }
-        if self.semantic_protocol == HOTPOTQA_SEMANTIC_PROTOCOL:
+        if verified_qa_semantic_protocol(self.semantic_protocol):
             payload["action_target_domains"] = (
                 env.model_admissible_action_targets()
             )
@@ -2728,7 +2759,7 @@ class AgentGraphOrchestrator:
         # revision-local gate and its first measured failure stage so the
         # Director repairs the responsible semantic node instead of probing
         # FINISH or repeatedly modifying the Formatter.
-        if self.semantic_protocol == HOTPOTQA_SEMANTIC_PROTOCOL:
+        if verified_qa_semantic_protocol(self.semantic_protocol):
             payload["finish_admissibility"] = env.finish_admissibility()
         else:
             finish_admissibility = env.finish_admissibility()
@@ -2880,6 +2911,27 @@ class AgentGraphOrchestrator:
                 env,
                 skills,
             )
+        # DIRECT_REUSE + NECESSARY_ADAPTATION: upstream FlowSteer retains the
+        # last executed solver result when its edit budget is exhausted.  The
+        # shared QA environment tightens that boundary: only an atomic graph
+        # revision that already passed the complete evidence/semantic/format
+        # FINISH gate is eligible.  It remains a max-rounds policy failure and
+        # is never represented as an explicit FINISH.
+        lineage = env.last_valid_evidence_lineage
+        if lineage is not None:
+            return OrchestrationResult(
+                final_answer=lineage.answer,
+                turns=tuple(turns),
+                final_graph=lineage.graph_snapshot.to_dict(),
+                termination_reason="max_rounds",
+                explicit_finish=False,
+                valid_lineage_fallback_used=True,
+                valid_lineage_fallback_receipt={
+                    "graph_revision": lineage.graph_revision,
+                    "graph_snapshot_id": lineage.graph_snapshot.snapshot_id,
+                    "admission": "complete_finish_gate",
+                },
+            )
         return OrchestrationResult(
             final_answer=None,
             turns=tuple(turns),
@@ -2918,6 +2970,9 @@ __all__ = [
     "HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V11",
     "HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V13",
     "HOTPOTQA_SEMANTIC_PROTOCOL",
+    "QA_DIRECTOR_PROMPT_VERSION",
+    "QA_DIRECTOR_SYSTEM_PROMPT_V1",
+    "QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL",
     "PRESERVE_DIAGNOSE_REPAIR_AUGMENT_POLICY",
     "LEGACY_DIRECTOR_SYSTEM_PROMPT_V8",
     "LEGACY_DIRECTOR_SYSTEM_PROMPT_V9",
@@ -2954,5 +3009,6 @@ __all__ = [
     "director_system_prompt_for_version",
     "director_sglang_sampling_json_schema_text",
     "director_state_conditioned_sampling_json_schema_text",
+    "verified_qa_semantic_protocol",
     "encode_director_transcript",
 ]

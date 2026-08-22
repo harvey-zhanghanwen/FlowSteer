@@ -178,12 +178,18 @@ def validate_agent_graph_config(value: Mapping[str, Any]) -> None:
     invalid_semantic_protocols = {
         str(source): protocol
         for source, protocol in semantic_protocols.items()
-        if protocol not in {"none", "hotpotqa_verified_answer_slot_v1"}
+        if protocol
+        not in {
+            "none",
+            "hotpotqa_verified_answer_slot_v1",
+            "qa_verified_answer_lineage_v2",
+        }
     }
     if invalid_semantic_protocols:
         raise ConfigurationError(
-            "semantic protocols must be none or "
-            "hotpotqa_verified_answer_slot_v1"
+            "semantic protocols must be none, "
+            "hotpotqa_verified_answer_slot_v1, or "
+            "qa_verified_answer_lineage_v2"
         )
     recovery_policy = graph.get("recovery_policy", "default")
     if recovery_policy not in {
@@ -211,6 +217,16 @@ def validate_agent_graph_config(value: Mapping[str, Any]) -> None:
         raise ConfigurationError(
             "hotpotqa_verified_answer_slot_v1 is scoped only to hotpotqa"
         )
+    invalid_shared_qa_sources = {
+        str(source): protocol
+        for source, protocol in semantic_protocols.items()
+        if protocol == "qa_verified_answer_lineage_v2"
+        and source not in {"hotpotqa", "triviaqa"}
+    }
+    if invalid_shared_qa_sources:
+        raise ConfigurationError(
+            "qa_verified_answer_lineage_v2 is scoped to hotpotqa and triviaqa"
+        )
     if hotpot_semantic_protocol == "hotpotqa_verified_answer_slot_v1":
         if (
             value["experiment"].get("prompt_version")
@@ -218,7 +234,7 @@ def validate_agent_graph_config(value: Mapping[str, Any]) -> None:
         ):
             raise ConfigurationError(
                 "HotpotQA verified answer-slot protocol requires the exact "
-                "HotpotQA Director v21 observation contract"
+                "HotpotQA Director v22 observation contract"
             )
         if recovery_policy != "preserve_diagnose_repair_augment":
             raise ConfigurationError(
@@ -245,6 +261,55 @@ def validate_agent_graph_config(value: Mapping[str, Any]) -> None:
             raise ConfigurationError(
                 "HotpotQA verified answer-slot protocol requires the enabled "
                 "qa_tool_runtime with required_evidence completion"
+            )
+    shared_qa_sources = tuple(
+        str(source)
+        for source, protocol in semantic_protocols.items()
+        if protocol == "qa_verified_answer_lineage_v2"
+    )
+    if shared_qa_sources:
+        if (
+            value["experiment"].get("prompt_version")
+            != "agentgraph.director.qa-semantic-recovery.v1"
+        ):
+            raise ConfigurationError(
+                "qa_verified_answer_lineage_v2 requires the exact shared QA "
+                "Director prompt"
+            )
+        if recovery_policy != "preserve_diagnose_repair_augment":
+            raise ConfigurationError(
+                "qa_verified_answer_lineage_v2 requires "
+                "preserve_diagnose_repair_augment recovery"
+            )
+        if required_evidence_tool_id != "qa-retrieval":
+            raise ConfigurationError(
+                "qa_verified_answer_lineage_v2 requires the qa-retrieval "
+                "evidence tool"
+            )
+        if any(
+            terminal_protocols.get(source) != "exact_single_answer_tag"
+            for source in shared_qa_sources
+        ):
+            raise ConfigurationError(
+                "qa_verified_answer_lineage_v2 requires the exact "
+                "single-answer terminal protocol"
+            )
+        qa_runtime = value.get("qa_tool_runtime")
+        runtime_scope = (
+            ()
+            if not isinstance(qa_runtime, Mapping)
+            else qa_runtime.get("dataset_scope", ())
+        )
+        if (
+            not isinstance(qa_runtime, Mapping)
+            or qa_runtime.get("enabled") is not True
+            or qa_runtime.get("completion_policy") != "required_evidence"
+            or any(source not in runtime_scope for source in shared_qa_sources)
+        ):
+            raise ConfigurationError(
+                "qa_verified_answer_lineage_v2 requires an enabled "
+                "qa_tool_runtime with required_evidence completion for every "
+                "configured QA source"
             )
     if graph.get("max_bidirectional_block_size") != 2:
         raise ConfigurationError("AgentGraph v1 supports bidirectional blocks of size two")

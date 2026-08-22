@@ -38,8 +38,11 @@ class ReactExecutionError(RuntimeError):
         react_trace: tuple[Mapping[str, object], ...] = (),
         tool_receipts: tuple[Mapping[str, object], ...] = (),
         model_calls: tuple[Mapping[str, object], ...] = (),
+        tool_plan_exhausted: bool = False,
     ) -> None:
         super().__init__(message)
+        if type(tool_plan_exhausted) is not bool:
+            raise TypeError("tool_plan_exhausted must be bool")
         # DIRECT_REUSE: SkillFlow persists every bounded-agent action and
         # observation even when the turn budget is exhausted.  Carry the same
         # public failure receipt through AgentRuntime's exception chain so a
@@ -47,6 +50,7 @@ class ReactExecutionError(RuntimeError):
         self.react_trace = tuple(dict(item) for item in react_trace)
         self.tool_receipts = tuple(dict(item) for item in tool_receipts)
         self.model_calls = tuple(dict(item) for item in model_calls)
+        self.tool_plan_exhausted = tool_plan_exhausted
 
 
 def _parse_structured_action(text: str) -> StructuredAction:

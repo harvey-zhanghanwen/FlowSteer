@@ -267,6 +267,58 @@ class ConfigLoaderTests(unittest.TestCase):
         with self.assertRaises(ConfigurationError):
             validate_agent_graph_config(wrong_dataset)
 
+    def test_trivia_unified_v2_uses_shared_semantic_recovery_contract(self) -> None:
+        config = load_yaml("config/evaluation_triviaqa_unified_architecture_v2.yaml")
+        validate_agent_graph_config(config)
+
+        self.assertEqual(
+            config["experiment"]["prompt_version"],
+            "agentgraph.director.qa-semantic-recovery.v1",
+        )
+        self.assertEqual(
+            config["agent_graph"]["semantic_protocol_by_source"],
+            {"triviaqa": "qa_verified_answer_lineage_v2"},
+        )
+        self.assertEqual(
+            config["agent_graph"]["recovery_policy"],
+            "preserve_diagnose_repair_augment",
+        )
+        self.assertEqual(
+            config["director"]["sampling_schema_version"],
+            "agentgraph.model-admissible-action-mask.v3",
+        )
+        self.assertEqual(config["triviaqa_evaluation"]["sample_count"], 128)
+        self.assertEqual(config["gpu"]["rollout_physical"], 0)
+        self.assertFalse(config["experiment"]["training_enabled"])
+        self.assertFalse(config["grpo"]["enabled"])
+        self.assertFalse(config["skills"]["enabled"])
+
+    def test_shared_qa_semantic_protocol_combination_is_fail_closed(self) -> None:
+        mutations = (
+            ("prompt_version", "agentgraph.director.minimal-neutral.v10"),
+            ("recovery_policy", "default"),
+            ("required_evidence_tool_id", "other-tool"),
+            ("terminal_protocol", "none"),
+            ("qa_completion_policy", "optional"),
+        )
+        for field, value in mutations:
+            with self.subTest(field=field):
+                config = load_yaml(
+                    "config/evaluation_triviaqa_unified_architecture_v2.yaml"
+                )
+                if field == "prompt_version":
+                    config["experiment"][field] = value
+                elif field == "terminal_protocol":
+                    config["agent_graph"]["terminal_protocol_by_source"][
+                        "triviaqa"
+                    ] = value
+                elif field == "qa_completion_policy":
+                    config["qa_tool_runtime"]["completion_policy"] = value
+                else:
+                    config["agent_graph"][field] = value
+                with self.assertRaises(ConfigurationError):
+                    validate_agent_graph_config(config)
+
 
 if __name__ == "__main__":
     unittest.main()

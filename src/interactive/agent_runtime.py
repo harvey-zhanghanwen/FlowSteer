@@ -179,6 +179,7 @@ class AgentRequest:
         if self.semantic_protocol not in {
             "none",
             "hotpotqa_verified_answer_slot_v1",
+            "qa_verified_answer_lineage_v2",
         }:
             raise ValueError("unsupported AgentRequest semantic_protocol")
         if any(not isinstance(item, Mapping) for item in self.action_history):
@@ -384,6 +385,7 @@ def _public_failure_metadata(exc: BaseException) -> Mapping[str, object]:
         "environment_revision",
         "environment_terminal",
         "cause_error_type",
+        "tool_plan_exhausted",
     ):
         value = getattr(exc, field_name, None)
         if value is not None:
@@ -456,6 +458,7 @@ class AgentRuntime:
         if semantic_protocol not in {
             "none",
             "hotpotqa_verified_answer_slot_v1",
+            "qa_verified_answer_lineage_v2",
         }:
             raise ValueError("unsupported AgentRuntime semantic_protocol")
         self.model_registry = model_registry
@@ -808,14 +811,18 @@ class AgentRuntime:
 
         FlowSteer's incomplete Canvas is executable after every accepted edit,
         while SkillFlow invokes a bounded Agent only with its current public
-        input.  For HotpotQA, a disconnected Verifier has no Reasoner candidate
-        to check and a disconnected/unselected Formatter has no verified answer
-        to serialize.  Defer those components and their descendants without
-        deleting nodes or artifacts; the next relation/Output edit makes them
-        schedulable under the same Canvas revision semantics.
+        input.  For an evidence-grounded QA semantic protocol, a disconnected
+        Verifier has no Reasoner candidate to check and a disconnected or
+        unselected Formatter has no verified answer to serialize.  Defer those
+        components and their descendants without deleting nodes or artifacts;
+        the next relation or Output edit makes them schedulable under the same
+        Canvas revision semantics.
         """
 
-        if self.semantic_protocol != "hotpotqa_verified_answer_slot_v1":
+        if self.semantic_protocol not in {
+            "hotpotqa_verified_answer_slot_v1",
+            "qa_verified_answer_lineage_v2",
+        }:
             return set()
         seeds: Set[Tuple[str, ...]] = set()
         output_agent_id = graph.output_agent_id

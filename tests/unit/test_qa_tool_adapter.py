@@ -8,17 +8,23 @@ import unittest
 from unittest.mock import patch
 
 from src.interactive.agent_graph import AgentNode
-from src.interactive.agent_runtime import AgentRequest, AgentResponse, ExecutionPhase
+from src.interactive.agent_runtime import (
+    AgentRequest,
+    AgentResponse,
+    ExecutionPhase,
+    UpstreamMessage,
+)
 from src.interactive.model_registry import ModelSpec, ProviderSpec
 from src.interactive.react_execution import ReactExecutionError
 from src.interactive.qa_tool_adapter import (
     QARetrievalReactExecutionAdapter,
     QA_RETRIEVAL_TOOL_ID,
+    QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
     build_qa_tool_registry,
     open_qa_tool_registry,
     open_provided_context_qa_tool_registry,
 )
-from src.interactive.tool_runtime import ToolRequest
+from src.interactive.tool_runtime import ActionKind, StructuredAction, ToolRequest
 
 
 @dataclass(frozen=True)
@@ -443,6 +449,522 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('"arguments":{"type":"object"', read_contract)
         self.assertIn("Completion is not admitted in this Tool-only state", search_contract)
         self.assertIn("Completion is not admitted in this Tool-only state", read_contract)
+
+    def test_unified_factual_schema_uses_one_grounded_proposition(self) -> None:
+        adapter = QARetrievalReactExecutionAdapter(
+            gateway=SimpleNamespace(generate=lambda request: None),
+            tool_registry=build_qa_tool_registry(FakeIndex()),
+            max_turns=6,
+            max_tool_calls=10,
+            task_type="factual_qa",
+            completion_policy="required_evidence",
+        )
+        request = AgentRequest(
+            request_id="trivia:semantic-schema",
+            run_id="trivia",
+            graph_revision=1,
+            problem="Where was the historical figure born?",
+            agent=AgentNode(
+                "reasoner",
+                "model",
+                "retrieve evidence and bind the requested relation",
+                role_family="reasoner",
+                allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                execution_mode="react",
+            ),
+            model=ModelSpec("model", "provider"),
+            provider=ProviderSpec("provider", kind="test"),
+            phase=ExecutionPhase.SINGLE,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+        )
+
+        schema = adapter._completion_arguments_schema(request)
+        fields = schema["properties"]["value"]["properties"]
+        self.assertEqual(
+            "Where was the historical figure born?",
+            fields["question_scope"]["const"],
+        )
+        self.assertEqual(
+            "location",
+            fields["answer_slot"]["properties"]["answer_type"]["const"],
+        )
+        self.assertEqual(1, fields["evidence_propositions"]["minItems"])
+        self.assertEqual(1, fields["multi_hop_chain"]["minItems"])
+        self.assertIn(
+            "explicit identity binding",
+            fields["evidence_propositions"]["items"]["properties"]
+            ["subject"]["description"],
+        )
+
+        initial_schema = adapter._state_conditioned_response_schema(request, [])
+        assert initial_schema is not None
+        self.assertEqual(
+            5,
+            initial_schema["properties"]["arguments"]["properties"]
+            ["limit"]["const"],
+        )
+        initial_contract = adapter._contract(request, [])
+        self.assertIn("`initial_retrieval`", initial_contract)
+        self.assertIn("entity identity and target relation", initial_contract)
+
+    async def test_unified_factual_completion_accepts_one_grounded_proposition(
+        self,
+    ) -> None:
+        class FactualIndex(FakeIndex):
+            def read(self, passage_id: str) -> FakePassage:
+                self.read_calls.append(passage_id)
+                return FakePassage(
+                    passage_id,
+                    "d1",
+                    "France",
+                    "Paris is the capital of France.",
+                )
+
+        artifact = {
+            "question_scope": "What is the capital of France?",
+            "answer_slot": {
+                "answer_type": "short_answer",
+                "answer_cardinality": "single",
+                "qualifiers": [],
+                "proposition_index": 0,
+                "answer_field": "object_or_attribute_value",
+            },
+            "evidence_propositions": [
+                {
+                    "subject": "France",
+                    "relation": "capital",
+                    "object_or_attribute_value": "Paris",
+                    "qualifiers": [],
+                    "evidence_span": "Paris is the capital of France.",
+                }
+            ],
+            "multi_hop_chain": ["France --capital--> Paris"],
+            "candidate_answer": "Paris",
+            "evidence": ["Paris is the capital of France."],
+        }
+
+        def action(name: str, arguments: object) -> str:
+            return json.dumps(
+                {
+                    "arguments": arguments,
+                    "kind": "complete" if name == "complete" else "tool",
+                    "name": name,
+                    "resource_id": (
+                        None if name == "complete" else QA_RETRIEVAL_TOOL_ID
+                    ),
+                    "skill_id": None,
+                }
+            )
+
+        class SequenceGateway:
+            def __init__(self) -> None:
+                self.outputs = [
+                    action("search", {"query": "France capital", "limit": 5}),
+                    action("read", {"passage_id": "p1"}),
+                    action("complete", {"value": artifact}),
+                ]
+
+            async def generate(self, request: AgentRequest) -> AgentResponse:
+                del request
+                return AgentResponse(self.outputs.pop(0))
+
+        index = FactualIndex()
+        request = AgentRequest(
+            request_id="trivia:one-proposition",
+            run_id="trivia",
+            graph_revision=1,
+            problem="What is the capital of France?",
+            agent=AgentNode(
+                "reasoner",
+                "model",
+                "retrieve and bind the factual answer",
+                role_family="reasoner",
+                allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                execution_mode="react",
+            ),
+            model=ModelSpec("model", "provider"),
+            provider=ProviderSpec("provider", kind="test"),
+            phase=ExecutionPhase.SINGLE,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+        )
+
+        response = await QARetrievalReactExecutionAdapter(
+            gateway=SequenceGateway(),
+            tool_registry=build_qa_tool_registry(index),
+            max_turns=3,
+            max_tool_calls=2,
+            task_type="factual_qa",
+            completion_policy="required_evidence",
+        ).execute(request)
+
+        self.assertEqual(
+            json.dumps(
+                artifact,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            response.text,
+        )
+        self.assertEqual([("France capital", 5)], index.search_calls)
+        self.assertEqual(["p1"], index.read_calls)
+
+    def test_unified_factual_evidence_rejection_advances_retrieval_strategy(
+        self,
+    ) -> None:
+        adapter = QARetrievalReactExecutionAdapter(
+            gateway=SimpleNamespace(generate=lambda request: None),
+            tool_registry=build_qa_tool_registry(FakeIndex()),
+            max_turns=8,
+            max_tool_calls=10,
+            task_type="factual_qa",
+            completion_policy="required_evidence",
+        )
+        request = AgentRequest(
+            request_id="trivia:retry",
+            run_id="trivia",
+            graph_revision=1,
+            problem="Who wrote the novel?",
+            agent=AgentNode(
+                "reasoner",
+                "model",
+                "retrieve evidence and bind the requested relation",
+                role_family="reasoner",
+                allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                execution_mode="react",
+            ),
+            model=ModelSpec("model", "provider"),
+            provider=ProviderSpec("provider", kind="test"),
+            phase=ExecutionPhase.SINGLE,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+        )
+        search = {
+            "observation_status": "success",
+            "executed_action": {
+                "kind": "tool",
+                "name": "search",
+                "resource_id": QA_RETRIEVAL_TOOL_ID,
+                "skill_id": None,
+                "arguments": {"query": "Novel author", "limit": 5},
+            },
+            "result": {
+                "operation": "search",
+                "query": "Novel author",
+                "top_k": 5,
+                "passage_ids": ["p1"],
+            },
+        }
+        read = {
+            "observation_status": "success",
+            "executed_action": {
+                "kind": "tool",
+                "name": "read",
+                "resource_id": QA_RETRIEVAL_TOOL_ID,
+                "skill_id": None,
+                "arguments": {"passage_id": "p1"},
+            },
+            "result": {
+                "operation": "read",
+                "passage_id": "p1",
+                "passage": {"text": "A different entity is discussed here."},
+            },
+        }
+        rejection = {
+            "observation_status": "schema_invalid",
+            "public_error_code": (
+                "qa_semantic_evidence_provenance_invalid: target relation absent"
+            ),
+        }
+        observations = [search, read, rejection]
+
+        admitted, completion = adapter._state_conditioned_action_domain(
+            request,
+            observations,
+        )
+        self.assertEqual(
+            frozenset({(QA_RETRIEVAL_TOOL_ID, "search")}), admitted
+        )
+        self.assertFalse(completion)
+        retry_schema = adapter._state_conditioned_response_schema(
+            request,
+            observations,
+        )
+        assert retry_schema is not None
+        self.assertEqual(
+            10,
+            retry_schema["properties"]["arguments"]["properties"]
+            ["limit"]["const"],
+        )
+        retry_contract = adapter._contract(request, observations)
+        self.assertIn("`spelling_normalization`", retry_contract)
+        self.assertIn('"novel author"', retry_contract)
+
+        repeated = StructuredAction(
+            ActionKind.TOOL,
+            "search",
+            {"query": "  NOVEL   AUTHOR ", "limit": 10},
+            resource_id=QA_RETRIEVAL_TOOL_ID,
+        )
+        self.assertEqual(
+            "qa_retrieval_duplicate_normalized_query",
+            adapter._tool_action_error(
+                request=request,
+                action=repeated,
+                observations=observations,
+            ),
+        )
+
+        retry_search = {
+            "observation_status": "success",
+            "executed_action": {
+                "kind": "tool",
+                "name": "search",
+                "resource_id": QA_RETRIEVAL_TOOL_ID,
+                "skill_id": None,
+                "arguments": {"query": "Novelist pen name", "limit": 10},
+            },
+            "result": {
+                "operation": "search",
+                "query": "Novelist pen name",
+                "top_k": 10,
+                "passage_ids": ["p2"],
+            },
+        }
+        admitted_after_retry, completion_after_retry = (
+            adapter._state_conditioned_action_domain(
+                request,
+                [*observations, retry_search],
+            )
+        )
+        self.assertEqual(
+            frozenset({(QA_RETRIEVAL_TOOL_ID, "read")}),
+            admitted_after_retry,
+        )
+        self.assertFalse(completion_after_retry)
+
+    async def test_unified_factual_exhaustion_reports_coverage_failure(
+        self,
+    ) -> None:
+        class EmptyIndex(FakeIndex):
+            def search(self, query: str, *, limit: int) -> tuple[FakeHit, ...]:
+                self.search_calls.append((query, limit))
+                return ()
+
+        def search_action(query: str, limit: int) -> str:
+            return json.dumps(
+                {
+                    "arguments": {"query": query, "limit": limit},
+                    "kind": "tool",
+                    "name": "search",
+                    "resource_id": QA_RETRIEVAL_TOOL_ID,
+                    "skill_id": None,
+                }
+            )
+
+        class SequenceGateway:
+            def __init__(self) -> None:
+                self.outputs = [
+                    search_action("Entity relation", 5),
+                    search_action("Entitiy relation", 10),
+                    search_action("Entity alias relation", 15),
+                    search_action("Entity qualifier relation", 20),
+                    search_action("Relation of entity", 25),
+                    json.dumps(
+                        {
+                            "arguments": {"value": "unsupported guess"},
+                            "kind": "complete",
+                            "name": "complete",
+                            "resource_id": None,
+                            "skill_id": None,
+                        }
+                    ),
+                ]
+
+            async def generate(self, request: AgentRequest) -> AgentResponse:
+                del request
+                return AgentResponse(self.outputs.pop(0))
+
+        request = AgentRequest(
+            request_id="trivia:coverage",
+            run_id="trivia",
+            graph_revision=1,
+            problem="Who held the office?",
+            agent=AgentNode(
+                "reasoner",
+                "model",
+                "retrieve evidence before answering",
+                role_family="reasoner",
+                allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                execution_mode="react",
+            ),
+            model=ModelSpec("model", "provider"),
+            provider=ProviderSpec("provider", kind="test"),
+            phase=ExecutionPhase.SINGLE,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+        )
+
+        with self.assertRaises(ReactExecutionError) as caught:
+            await QARetrievalReactExecutionAdapter(
+                gateway=SequenceGateway(),
+                tool_registry=build_qa_tool_registry(EmptyIndex()),
+                max_turns=6,
+                max_tool_calls=10,
+                task_type="factual_qa",
+                completion_policy="required_evidence",
+            ).execute(request)
+
+        error = caught.exception
+        self.assertEqual(5, len(error.tool_receipts))
+        self.assertEqual(
+            "knowledge_base_coverage_failure",
+            error.react_trace[-1]["public_error_code"],
+        )
+        terminal_diagnosis = error.react_trace[-1][
+            "terminal_failure_diagnosis"
+        ]
+        self.assertEqual(5, terminal_diagnosis["retrieval_attempt_count"])
+        self.assertEqual(
+            [5, 10, 15, 20, 25],
+            terminal_diagnosis["search_top_ks"],
+        )
+
+    async def test_unified_factual_exhaustion_after_reads_keeps_coverage_receipt(
+        self,
+    ) -> None:
+        class MismatchedIndex(FakeIndex):
+            def search(self, query: str, *, limit: int) -> tuple[FakeHit, ...]:
+                self.search_calls.append((query, limit))
+                passage_id = f"p{len(self.search_calls)}"
+                return (
+                    FakeHit(
+                        passage_id,
+                        f"d{len(self.search_calls)}",
+                        "Different entity",
+                        "Evidence for another relation.",
+                        1,
+                    ),
+                )
+
+            def read(self, passage_id: str) -> FakePassage:
+                self.read_calls.append(passage_id)
+                return FakePassage(
+                    passage_id,
+                    passage_id,
+                    "Different entity",
+                    f"Different entity {passage_id} held another position.",
+                )
+
+        artifact = {
+            "question_scope": "Who held the office?",
+            "answer_slot": {
+                "answer_type": "person",
+                "answer_cardinality": "single",
+                "qualifiers": [],
+                "proposition_index": 0,
+                "answer_field": "subject",
+            },
+            "evidence_propositions": [
+                {
+                    "subject": "Unsupported Person",
+                    "relation": "held",
+                    "object_or_attribute_value": "the office",
+                    "qualifiers": [],
+                    "evidence_span": "Unsupported Person held the office.",
+                }
+            ],
+            "multi_hop_chain": ["Unsupported Person --held--> the office"],
+            "candidate_answer": "Unsupported Person",
+            "evidence": ["Unsupported Person held the office."],
+        }
+
+        def action(name: str, arguments: object) -> str:
+            return json.dumps(
+                {
+                    "arguments": arguments,
+                    "kind": "complete" if name == "complete" else "tool",
+                    "name": name,
+                    "resource_id": (
+                        None if name == "complete" else QA_RETRIEVAL_TOOL_ID
+                    ),
+                    "skill_id": None,
+                }
+            )
+
+        queries = (
+            "Office holder",
+            "Offise holder",
+            "Office holder alias",
+            "Office holder disambiguation",
+            "Who held the office relation",
+        )
+        outputs: list[str] = []
+        for index, (query, limit) in enumerate(
+            zip(queries, (5, 10, 15, 20, 25)),
+            start=1,
+        ):
+            outputs.extend(
+                [
+                    action("search", {"query": query, "limit": limit}),
+                    action("read", {"passage_id": f"p{index}"}),
+                    action("complete", {"value": artifact}),
+                ]
+            )
+        # After the fifth provenance rejection the public action domain is
+        # empty.  This final sampled completion receives the operational
+        # coverage diagnosis rather than being admitted as a guess.
+        outputs.append(action("complete", {"value": artifact}))
+
+        class SequenceGateway:
+            def __init__(self) -> None:
+                self.outputs = list(outputs)
+
+            async def generate(self, request: AgentRequest) -> AgentResponse:
+                del request
+                return AgentResponse(self.outputs.pop(0))
+
+        request = AgentRequest(
+            request_id="trivia:coverage-after-reads",
+            run_id="trivia",
+            graph_revision=1,
+            problem="Who held the office?",
+            agent=AgentNode(
+                "reasoner",
+                "model",
+                "retrieve evidence and bind the requested entity and relation",
+                role_family="reasoner",
+                allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                execution_mode="react",
+            ),
+            model=ModelSpec("model", "provider"),
+            provider=ProviderSpec("provider", kind="test"),
+            phase=ExecutionPhase.SINGLE,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+        )
+
+        with self.assertRaises(ReactExecutionError) as caught:
+            await QARetrievalReactExecutionAdapter(
+                gateway=SequenceGateway(),
+                tool_registry=build_qa_tool_registry(MismatchedIndex()),
+                max_turns=16,
+                max_tool_calls=10,
+                task_type="factual_qa",
+                completion_policy="required_evidence",
+            ).execute(request)
+
+        error = caught.exception
+        self.assertEqual(10, len(error.tool_receipts))
+        terminal_diagnosis = error.react_trace[-1][
+            "terminal_failure_diagnosis"
+        ]
+        self.assertEqual(
+            "knowledge_base_coverage_failure",
+            terminal_diagnosis["public_error_code"],
+        )
+        self.assertEqual(5, terminal_diagnosis["retrieval_attempt_count"])
+        self.assertEqual(
+            [5, 10, 15, 20, 25],
+            terminal_diagnosis["search_top_ks"],
+        )
 
     async def test_react_read_requires_canonical_id_from_successful_search(self) -> None:
         index = FakeIndex()
@@ -957,6 +1479,381 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             },
             set(semantic_properties["answer_slot"]["required"]),
         )
+
+    async def test_hotpot_reasoner_accepts_direct_retriever_read_provenance_without_spending_own_tool_budget(
+        self,
+    ) -> None:
+        evidence_text = (
+            "Ada Lovelace was an English mathematician. "
+            "Ada Lovelace published the first algorithm."
+        )
+        upstream_read_receipt = {
+            "tool_id": QA_RETRIEVAL_TOOL_ID,
+            "tool_version": "frozen-index-v1",
+            "request": {
+                "action": "read",
+                "arguments": {"passage_id": "p1"},
+            },
+            "result": {
+                "value": {
+                    "operation": "read",
+                    "passage_id": "p1",
+                    "passage": {
+                        "passage_id": "p1",
+                        "text": evidence_text,
+                    },
+                },
+                "completed": True,
+            },
+            "error_type": None,
+        }
+        artifact = {
+            "question_scope": "Who published the first algorithm?",
+            "answer_slot": {
+                "answer_type": "person",
+                "answer_cardinality": "single",
+                "qualifiers": ["first algorithm"],
+                "proposition_index": 0,
+                "answer_field": "subject",
+            },
+            "evidence_propositions": [
+                {
+                    "subject": "Ada Lovelace",
+                    "relation": "published",
+                    "object_or_attribute_value": "the first algorithm",
+                    "qualifiers": [],
+                    "evidence_span": (
+                        "Ada Lovelace published the first algorithm."
+                    ),
+                },
+                {
+                    "subject": "Ada Lovelace",
+                    "relation": "occupation",
+                    "object_or_attribute_value": "English mathematician",
+                    "qualifiers": [],
+                    "evidence_span": (
+                        "Ada Lovelace was an English mathematician."
+                    ),
+                },
+            ],
+            "multi_hop_chain": [
+                "Ada Lovelace --occupation--> English mathematician",
+                "Ada Lovelace --published--> the first algorithm",
+            ],
+            "candidate_answer": "Ada Lovelace",
+            "evidence": [evidence_text],
+        }
+
+        class CompletionGateway:
+            async def generate(self, request: AgentRequest) -> AgentResponse:
+                del request
+                return AgentResponse(
+                    json.dumps(
+                        {
+                            "arguments": {"value": artifact},
+                            "kind": "complete",
+                            "name": "complete",
+                            "resource_id": None,
+                            "skill_id": None,
+                        }
+                    )
+                )
+
+        request = AgentRequest(
+            request_id="qa:upstream-retrieval-provenance",
+            run_id="qa",
+            graph_revision=1,
+            problem="Who published the first algorithm?",
+            agent=AgentNode(
+                "reasoner",
+                "model",
+                "bind direct predecessor evidence to the answer slot",
+                role_family="reasoner",
+                allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                execution_mode="react",
+            ),
+            model=ModelSpec("model", "provider"),
+            provider=ProviderSpec("provider", kind="test"),
+            phase=ExecutionPhase.SINGLE,
+            semantic_protocol="hotpotqa_verified_answer_slot_v1",
+            upstream=(
+                UpstreamMessage(
+                    "evidence_retriever",
+                    "reasoner",
+                    "retrieved passage p1",
+                    graph_revision=1,
+                    artifact_type="retrieval_evidence",
+                    tool_receipts=(upstream_read_receipt,),
+                ),
+            ),
+        )
+
+        response = await QARetrievalReactExecutionAdapter(
+            gateway=CompletionGateway(),
+            tool_registry=build_qa_tool_registry(FakeIndex()),
+            max_turns=1,
+            max_tool_calls=2,
+            task_type="multi_hop_qa",
+            completion_policy="required_evidence",
+        ).execute(request)
+
+        self.assertEqual(
+            json.dumps(
+                artifact,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            response.text,
+        )
+        self.assertEqual(0, response.metadata["tool_calls"])
+        self.assertEqual(0, response.metadata["continued_tool_receipt_count"])
+        self.assertEqual([], response.metadata["tool_receipts"])
+
+    async def test_hotpot_reasoner_rejects_forged_span_despite_upstream_read_receipt(
+        self,
+    ) -> None:
+        upstream_read_receipt = {
+            "tool_id": QA_RETRIEVAL_TOOL_ID,
+            "tool_version": "frozen-index-v1",
+            "request": {
+                "action": "read",
+                "arguments": {"passage_id": "p1"},
+            },
+            "result": {
+                "value": {
+                    "operation": "read",
+                    "passage_id": "p1",
+                    "passage": {
+                        "passage_id": "p1",
+                        "text": (
+                            "Ada Lovelace was an English mathematician. "
+                            "Ada Lovelace published the first algorithm."
+                        ),
+                    },
+                },
+                "completed": True,
+            },
+            "error_type": None,
+        }
+        artifact = {
+            "question_scope": "Who published the first algorithm?",
+            "answer_slot": {
+                "answer_type": "person",
+                "answer_cardinality": "single",
+                "qualifiers": ["first algorithm"],
+                "proposition_index": 0,
+                "answer_field": "subject",
+            },
+            "evidence_propositions": [
+                {
+                    "subject": "Ada Lovelace",
+                    "relation": "published",
+                    "object_or_attribute_value": "the first algorithm",
+                    "qualifiers": [],
+                    "evidence_span": "A forged passage states the answer.",
+                },
+                {
+                    "subject": "Ada Lovelace",
+                    "relation": "occupation",
+                    "object_or_attribute_value": "English mathematician",
+                    "qualifiers": [],
+                    "evidence_span": (
+                        "Ada Lovelace was an English mathematician."
+                    ),
+                },
+            ],
+            "multi_hop_chain": [
+                "Ada Lovelace --occupation--> English mathematician",
+                "Ada Lovelace --published--> the first algorithm",
+            ],
+            "candidate_answer": "Ada Lovelace",
+            "evidence": ["A forged passage states the answer."],
+        }
+
+        class CompletionGateway:
+            async def generate(self, request: AgentRequest) -> AgentResponse:
+                del request
+                return AgentResponse(
+                    json.dumps(
+                        {
+                            "arguments": {"value": artifact},
+                            "kind": "complete",
+                            "name": "complete",
+                            "resource_id": None,
+                            "skill_id": None,
+                        }
+                    )
+                )
+
+        request = AgentRequest(
+            request_id="qa:forged-upstream-retrieval-provenance",
+            run_id="qa",
+            graph_revision=1,
+            problem="Who published the first algorithm?",
+            agent=AgentNode(
+                "reasoner",
+                "model",
+                "bind direct predecessor evidence to the answer slot",
+                role_family="reasoner",
+                allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                execution_mode="react",
+            ),
+            model=ModelSpec("model", "provider"),
+            provider=ProviderSpec("provider", kind="test"),
+            phase=ExecutionPhase.SINGLE,
+            semantic_protocol="hotpotqa_verified_answer_slot_v1",
+            upstream=(
+                UpstreamMessage(
+                    "evidence_retriever",
+                    "reasoner",
+                    "retrieved passage p1",
+                    graph_revision=1,
+                    artifact_type="retrieval_evidence",
+                    tool_receipts=(upstream_read_receipt,),
+                ),
+            ),
+        )
+
+        with self.assertRaises(ReactExecutionError) as caught:
+            await QARetrievalReactExecutionAdapter(
+                gateway=CompletionGateway(),
+                tool_registry=build_qa_tool_registry(FakeIndex()),
+                max_turns=1,
+                max_tool_calls=2,
+                task_type="multi_hop_qa",
+                completion_policy="required_evidence",
+            ).execute(request)
+
+        self.assertTrue(
+            caught.exception.react_trace[-1]["public_error_code"].startswith(
+                "hotpotqa_semantic_evidence_provenance_invalid:"
+            )
+        )
+        self.assertEqual(0, len(caught.exception.tool_receipts))
+
+    async def test_hotpot_provenance_rejection_marks_tool_plan_exhausted_when_pair_cannot_fit(
+        self,
+    ) -> None:
+        upstream_read_receipt = {
+            "tool_id": QA_RETRIEVAL_TOOL_ID,
+            "tool_version": "frozen-index-v1",
+            "request": {
+                "action": "read",
+                "arguments": {"passage_id": "p1"},
+            },
+            "result": {
+                "value": {
+                    "operation": "read",
+                    "passage_id": "p1",
+                    "passage": {
+                        "passage_id": "p1",
+                        "text": (
+                            "Ada Lovelace was an English mathematician. "
+                            "Ada Lovelace published the first algorithm."
+                        ),
+                    },
+                },
+                "completed": True,
+            },
+            "error_type": None,
+        }
+        artifact = {
+            "question_scope": "Who published the first algorithm?",
+            "answer_slot": {
+                "answer_type": "person",
+                "answer_cardinality": "single",
+                "qualifiers": ["first algorithm"],
+                "proposition_index": 0,
+                "answer_field": "subject",
+            },
+            "evidence_propositions": [
+                {
+                    "subject": "Ada Lovelace",
+                    "relation": "published",
+                    "object_or_attribute_value": "the first algorithm",
+                    "qualifiers": [],
+                    "evidence_span": "A forged passage states the answer.",
+                },
+                {
+                    "subject": "Ada Lovelace",
+                    "relation": "occupation",
+                    "object_or_attribute_value": "English mathematician",
+                    "qualifiers": [],
+                    "evidence_span": (
+                        "Ada Lovelace was an English mathematician."
+                    ),
+                },
+            ],
+            "multi_hop_chain": [
+                "Ada Lovelace --occupation--> English mathematician",
+                "Ada Lovelace --published--> the first algorithm",
+            ],
+            "candidate_answer": "Ada Lovelace",
+            "evidence": ["A forged passage states the answer."],
+        }
+
+        class CompletionGateway:
+            async def generate(self, request: AgentRequest) -> AgentResponse:
+                del request
+                return AgentResponse(
+                    json.dumps(
+                        {
+                            "arguments": {"value": artifact},
+                            "kind": "complete",
+                            "name": "complete",
+                            "resource_id": None,
+                            "skill_id": None,
+                        }
+                    )
+                )
+
+        request = AgentRequest(
+            request_id="qa:upstream-provenance-tool-plan-exhausted",
+            run_id="qa",
+            graph_revision=1,
+            problem="Who published the first algorithm?",
+            agent=AgentNode(
+                "reasoner",
+                "model",
+                "bind direct predecessor evidence to the answer slot",
+                role_family="reasoner",
+                allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                execution_mode="react",
+            ),
+            model=ModelSpec("model", "provider"),
+            provider=ProviderSpec("provider", kind="test"),
+            phase=ExecutionPhase.SINGLE,
+            semantic_protocol="hotpotqa_verified_answer_slot_v1",
+            upstream=(
+                UpstreamMessage(
+                    "evidence_retriever",
+                    "reasoner",
+                    "retrieved passage p1",
+                    graph_revision=1,
+                    artifact_type="retrieval_evidence",
+                    tool_receipts=(upstream_read_receipt,),
+                ),
+            ),
+        )
+
+        with self.assertRaises(ReactExecutionError) as caught:
+            await QARetrievalReactExecutionAdapter(
+                gateway=CompletionGateway(),
+                tool_registry=build_qa_tool_registry(FakeIndex()),
+                max_turns=1,
+                max_tool_calls=1,
+                task_type="multi_hop_qa",
+                completion_policy="required_evidence",
+            ).execute(request)
+
+        self.assertIs(True, caught.exception.tool_plan_exhausted)
+        terminal_diagnosis = caught.exception.react_trace[-1][
+            "terminal_failure_diagnosis"
+        ]
+        self.assertIs(True, terminal_diagnosis["tool_plan_exhausted"])
+        self.assertEqual(1, terminal_diagnosis["remaining_tool_calls"])
+        self.assertEqual(0, len(caught.exception.tool_receipts))
 
     async def test_structural_semantic_rejection_repairs_with_existing_evidence(
         self,

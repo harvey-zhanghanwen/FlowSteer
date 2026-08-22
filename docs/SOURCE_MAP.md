@@ -788,3 +788,35 @@ The current configuration is evaluation-only: GRPO, backward, optimizer
 updates, LoRA publication, MACE/Bayesian exploration, and Skill retrieval are
 all disabled.  Any measured development score is therefore an inference
 architecture result, not a training or ACTIVE-Skill result.
+
+## Unified architecture v2: shared HotpotQA/TriviaQA semantic lineage
+
+`unified_architecture_v2` is an evolution of the same AgentGraph runtime used
+by HotpotQA.  It is not a separate TriviaQA workflow implementation.  The
+shared protocol identifier is `qa_verified_answer_lineage_v2`; the dataset
+condition changes the minimum evidence/reasoning cardinality but not the
+Canvas action space, Runtime, communication envelope, terminal authority, or
+trajectory schema.
+
+| Current module | Classification | Upstream source | Reused boundary | Minimal adaptation and exclusion |
+| --- | --- | --- | --- | --- |
+| `director.py::{QA_DIRECTOR_SYSTEM_PROMPT_V1,AgentGraphOrchestrator.run}`; `agent_workflow_env.py::step` | Direct FlowSteer reuse plus necessary QA adaptation | FlowSteer `src/interactive/workflow_builder.py` progressive Director loop and `src/interactive/workflow_env.py::{step,_step_internal,_check_finish_constraints}` | One legal Canvas edit or functional subgraph is committed, immediately executed, and returned as the next observation; `FINISH` remains an explicit action | The compact v2 prompt generalizes the existing HotpotQA semantic obligations to evidence-grounded QA without embedding answers, workflow templates, retrieval recipes, fixed Agent counts, or topology rewards. State-conditioned live action domains remain Canvas-authoritative. |
+| `qa_tool_adapter.py::QARetrievalReactExecutionAdapter`; `react_execution.py::ToolReactExecutionAdapter` | Direct SkillFlow reuse plus bounded factual-retrieval adaptation | SkillFlow `runtime/contracts.py::StructuredAction`, `runtime/bounded_agent.py::execute_turn`, and `benchmarks/retrieval.py` search/read environment | ReAct is the execution schedule `Thought -> Action -> Observation -> Thought`; one admitted structured Tool action produces one public observation and exact Tool receipt | TriviaQA uses one initial search/read opportunity followed, only after evidence rejection, by bounded spelling normalization, alias expansion, entity disambiguation and query rewriting with increasing top-k. Exhaustion records the operational diagnosis `knowledge_base_coverage_failure`; it is not a corpus-level oracle claim and never admits a guessed answer. |
+| `task_dataset.py::{qa_question_scope,qa_answer_type_constraint,qa_answer_cardinality_constraint}`; `openai_gateway.py::build_agent_messages`; `agent_workflow_env.py::{_semantic_protocol_issue,finish_admissibility}` | Necessary shared semantic adaptation | Existing answer-free task rendering, SkillFlow Tool receipts, and FlowSteer terminal Format separation | Reasoner consumes public evidence; Verifier gates the candidate; Formatter copies an already verified artifact into the terminal wrapper | The Reasoner owns `candidate_answer`, answer-slot and relation binding.  The Verifier checks entity identity, evidence provenance, question scope and candidate preservation.  The Formatter receives the verified artifact rather than solving the question.  Neither accepted answers nor evaluator state enter Director, Agent, query, Tool, or recovery input. |
+| `agent_workflow_env.py::{AgentWorkflowEvidenceLineageSnapshot,last_valid_evidence_lineage,recovery_state}`; `rollout_collector.py::_last_valid_evidence_lineage_fallback` | FlowSteer/SkillFlow feedback reuse plus project-design-required recovery adaptation | FlowSteer revision-local execution feedback and explicit terminal state; SkillFlow nonterminal public failure observations | Valid evidence, Agent artifacts and communication edges survive later repair attempts; measured failures return to the next Director turn | Recovery follows `preserve -> diagnose -> repair/augment`.  A frozen answer/Runtime/graph tuple is published only after the complete FINISH gate passes.  At `max_rounds` the collector may evaluate that last revision-consistent tuple, while retaining `explicit_finish=false`, `termination_reason=max_rounds`, a fallback receipt, and permanent GRPO ineligibility.  Without the Env-owned tuple the answer remains null. |
+| `task_evaluator.py`; `evaluate_completion_benchmark_round.py` | Direct official-metric reuse plus report-only diagnosis | Existing TriviaQA official-style normalized exact match and token F1 implementation | Accepted aliases are evaluator-only and the strict 128-task denominator is unchanged | Error reporting separates accepted-answer/canonicalization mismatch, retrieval recall failure, operational database coverage failure, relation/answer-slot binding failure, structured-output failure and reasoning failure.  These labels do not alter EM/F1 or feed back into inference. |
+
+The five retrieval strategies are an execution-policy implementation inside
+the Tool adapter, not five Director roles and not an injected Skill.  The
+Director still chooses Agent declarations, models, relations, Output identity,
+repair actions and termination from the existing bounded search space.  The
+v2 evaluation configuration keeps Skills, MACE/Bayesian exploration, GRPO,
+backward, optimizer updates and adapter publication disabled.
+
+Provider and bounded-ReAct failures stay typed.  A measured transient provider
+failure exposes only an exact `model_id` repair, preferring a different
+provider when the frozen catalog contains one and otherwise retaining a
+same-provider fallback.  A repaired ReAct node preserves its public Tool
+receipts; only a second Tool-plan-exhausted failure without receipt progress
+opens non-destructive augmentation.  These are state-conditioned recovery
+domains, not new Agent roles or topology templates.

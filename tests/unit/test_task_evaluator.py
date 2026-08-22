@@ -63,6 +63,14 @@ class StaticEvaluatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(0.0, trivia.metrics["exact_match"])
         self.assertEqual(TRIVIAQA_ANSWER_EVALUATOR_VERSION, trivia.evaluator_version)
         self.assertEqual("answer_only", trivia.details["metric_scope"])
+        self.assertEqual(
+            "accepted_answer_canonicalization_mismatch",
+            trivia.details["answer_mismatch_type"],
+        )
+        self.assertEqual(
+            "evaluator_only",
+            trivia.details["answer_mismatch_diagnostic_scope"],
+        )
 
     async def test_trivia_matches_skillflow_formal_protocol_normalization(self) -> None:
         punctuation = await evaluate_task(

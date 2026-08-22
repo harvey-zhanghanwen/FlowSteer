@@ -260,6 +260,67 @@ class MessageTests(unittest.TestCase):
         )
         self.assertIn("title, honorific, or name suffix", system)
 
+    def test_unified_qa_reasoner_uses_grounded_entity_relation_protocol(self) -> None:
+        messages = build_agent_messages(
+            request(
+                is_output_agent=False,
+                execution_mode="react",
+                role_family="reasoner",
+                semantic_protocol="qa_verified_answer_lineage_v2",
+                problem="Which city hosted the event?",
+            )
+        )
+        system = messages[0]["content"]
+
+        self.assertIn("semantic Reasoner", system)
+        self.assertIn("ReAct is only this node's execution schedule", system)
+        self.assertIn("entity identity", system)
+        self.assertIn("requested relation", system)
+        self.assertIn("Tool receipts", system)
+        self.assertIn("explicit identity binding", system)
+        self.assertNotIn("ReAct Agent", system)
+
+    def test_unified_qa_verifier_and_formatter_preserve_candidate(self) -> None:
+        verifier_messages = build_agent_messages(
+            request(
+                is_output_agent=False,
+                is_format_predecessor=True,
+                role_family="verifier",
+                semantic_protocol="qa_verified_answer_lineage_v2",
+            )
+        )
+        verifier_system = verifier_messages[0]["content"]
+        self.assertIn("semantic Verifier", verifier_system)
+        self.assertIn("entity-to-relation binding", verifier_system)
+        self.assertIn("must not select, replace, canonicalize", verifier_system)
+        self.assertIn("Verification status:", verifier_system)
+
+        original_question = "PRIVATE QUESTION SHOULD NOT REACH FORMATTER"
+        formatter_messages = build_agent_messages(
+            request(
+                is_format_agent=True,
+                role_family="format",
+                problem=original_question,
+                upstream_artifact=(
+                    "Candidate answer: Florence\n"
+                    "Evidence supported: true\n"
+                    "Entity attribute binding correct: true\n"
+                    "Multi-hop complete: true\nScope preserved: true\n"
+                    "Answer type cardinality correct: true\n"
+                    "Minimal answer surface: true\nAlias binding correct: true\n"
+                    "Verification status: supported"
+                ),
+                semantic_protocol="qa_verified_answer_lineage_v2",
+            )
+        )
+        formatter_system = formatter_messages[0]["content"]
+        formatter_user = formatter_messages[1]["content"]
+        self.assertIn("terminal FlowSteer Format Operator", formatter_system)
+        self.assertIn("Copy character-for-character", formatter_user)
+        self.assertIn("never change an alias, abbreviation", formatter_user)
+        self.assertNotIn(original_question, formatter_system)
+        self.assertNotIn(original_question, formatter_user)
+
     def test_format_agent_extracts_one_upstream_solution_without_resolving(self) -> None:
         original_question = "SECRET ORIGINAL QUESTION"
         messages = build_agent_messages(

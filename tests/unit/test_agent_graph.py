@@ -59,6 +59,23 @@ def make_registry() -> ModelRegistry:
     )
 
 
+def make_multi_provider_registry() -> ModelRegistry:
+    """Catalog fixture with both same-provider and cross-provider repair arms."""
+
+    return ModelRegistry(
+        [
+            ProviderSpec("provider-a", kind="test"),
+            ProviderSpec("provider-b", kind="test"),
+        ],
+        [
+            ModelSpec("balanced", "provider-a"),
+            ModelSpec("cheap", "provider-a"),
+            ModelSpec("fast", "provider-b"),
+            ModelSpec("alternate", "provider-b"),
+        ],
+    )
+
+
 def codes(graph: AgentGraph, registry: ModelRegistry, complete: bool = True) -> set[str]:
     return {
         issue.code
@@ -736,6 +753,56 @@ def _hotpot_semantic_runtime(
         tool_registry=build_qa_tool_registry(_HotpotNoopRetrievalIndex()),
         dataset_id="hotpotqa",
         semantic_protocol="hotpotqa_verified_answer_slot_v1",
+    )
+
+
+def _test_read_receipt(passage_id: str) -> dict[str, object]:
+    return {
+        "tool_id": QA_RETRIEVAL_TOOL_ID,
+        "tool_version": "test-v1",
+        "request": {
+            "action": "read",
+            "arguments": {"passage_id": passage_id},
+        },
+        "result": {
+            "value": {
+                "operation": "read",
+                "passage": {
+                    "id": passage_id,
+                    "text": "Paris is the capital of France.",
+                },
+            },
+            "completed": True,
+        },
+        "error_type": None,
+    }
+
+
+def _react_exhaustion_record(
+    graph: AgentGraph,
+    *,
+    request_id: str,
+    receipts: tuple[dict[str, object], ...] = (),
+    tool_plan_exhausted: bool = True,
+) -> AgentFailureRecord:
+    return AgentFailureRecord(
+        request_id=request_id,
+        agent_id="reasoner",
+        phase=ExecutionPhase.SINGLE,
+        graph_revision=graph.revision,
+        error_type="ReactExecutionError",
+        message="react agent 'reasoner' exhausted 8 turns",
+        metadata={
+            "react_trace": [
+                {
+                    "turn": 8,
+                    "observation_status": "schema_invalid",
+                    "public_error_code": "completion_schema_invalid",
+                }
+            ],
+            "tool_receipts": list(receipts),
+            "tool_plan_exhausted": tool_plan_exhausted,
+        },
     )
 
 
@@ -1781,6 +1848,132 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("modify_agent", attributed["preferred_repair"]["action"])
         self.assertEqual("fake", attributed["preferred_repair"]["avoid_provider_id"])
 
+    async def test_hotpot_transient_provider_repair_is_cross_provider_model_only(
+        self,
+    ) -> None:
+        registry = make_multi_provider_registry()
+        gateway = _HotpotSemanticGateway()
+        graph = _hotpot_semantic_graph()
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_hotpot_semantic_runtime(registry, gateway),
+            graph=graph,
+            problem="What is the capital of France?",
+            semantic_protocol="hotpotqa_verified_answer_slot_v1",
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+        )
+        env._record_failure_state(
+            (
+                AgentFailureRecord(
+                    request_id="request-429",
+                    agent_id="reasoner",
+                    phase=ExecutionPhase.SINGLE,
+                    graph_revision=graph.revision,
+                    error_type="OpenAICompatibleGatewayError",
+                    message="provider request failed with HTTP status 429",
+                ),
+            ),
+            current_agent_ids={node.id for node in graph.nodes},
+        )
+
+        candidate = env.model_admissible_action_targets()["modify_agent"][
+            "per_agent_candidates"
+        ][0]
+        self.assertEqual("reasoner", candidate["agent_id"])
+        self.assertEqual(["model_id"], candidate["mutable_fields"])
+        self.assertEqual(
+            ["alternate", "fast"],
+            candidate["discrete_value_domains"]["model_id"],
+        )
+
+        revision = env.revision
+        request_count = len(gateway.requests)
+        for action in (
+            {
+                "action": "modify_agent",
+                "agent_id": "reasoner",
+                "contract": "change the reasoning contract",
+            },
+            {
+                "action": "modify_agent",
+                "agent_id": "reasoner",
+                "model_id": "fast",
+                "contract": "change two fields",
+            },
+            {
+                "action": "modify_agent",
+                "agent_id": "reasoner",
+                "model_id": "cheap",
+            },
+        ):
+            rejected = await env.step(json.dumps(action))
+            self.assertFalse(rejected.accepted)
+            self.assertEqual(revision, env.revision)
+            self.assertEqual(request_count, len(gateway.requests))
+            self.assertEqual("balanced", env.graph.get_node("reasoner").model_id)
+
+        repaired = await env.step(
+            '{"action":"modify_agent","agent_id":"reasoner",'
+            '"model_id":"fast"}'
+        )
+        self.assertTrue(repaired.accepted)
+        self.assertNotIn("reasoner", env.recovery_state()["failed_agent_ids"])
+        self.assertNotEqual(("modify_agent",), env.model_admissible_action_types())
+
+    async def test_hotpot_transient_provider_repair_falls_back_within_provider(
+        self,
+    ) -> None:
+        registry = make_registry()
+
+        def make_env() -> AgentWorkflowEnv:
+            return AgentWorkflowEnv(
+                registry,
+                runtime=_hotpot_semantic_runtime(registry, _ImmediateGateway()),
+                graph=_hotpot_semantic_graph(),
+                problem="What is the capital of France?",
+                execute_on_edit=False,
+                semantic_protocol="hotpotqa_verified_answer_slot_v1",
+                recovery_policy="preserve_diagnose_repair_augment",
+                required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+            )
+
+        normal = make_env()
+        normal_candidate = next(
+            item
+            for item in normal.model_admissible_action_targets()["modify_agent"][
+                "per_agent_candidates"
+            ]
+            if item["agent_id"] == "reasoner"
+        )
+        self.assertEqual(
+            ["cheap", "fast"],
+            normal_candidate["discrete_value_domains"]["model_id"],
+        )
+
+        failed = make_env()
+        failed._record_failure_state(
+            (
+                AgentFailureRecord(
+                    request_id="request-429",
+                    agent_id="reasoner",
+                    phase=ExecutionPhase.SINGLE,
+                    graph_revision=failed.graph.revision,
+                    error_type="OpenAICompatibleGatewayError",
+                    message="provider request failed with HTTP status 429",
+                ),
+            ),
+            current_agent_ids={node.id for node in failed.graph.nodes},
+        )
+        fallback_candidate = failed.model_admissible_action_targets()[
+            "modify_agent"
+        ]["per_agent_candidates"][0]
+        self.assertEqual(["model_id"], fallback_candidate["mutable_fields"])
+        self.assertEqual(
+            ["cheap", "fast"],
+            fallback_candidate["discrete_value_domains"]["model_id"],
+        )
+
     async def test_react_exhaustion_feedback_preserves_compact_public_diagnosis(
         self,
     ) -> None:
@@ -2007,6 +2200,205 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("reasoner", env._failure_continuations)
         self.assertNotIn("reasoner", env.recovery_state()["failed_agent_ids"])
         self.assertIn("reader", env.recovery_state()["failed_agent_ids"])
+
+    async def test_hotpot_react_repair_exhaustion_opens_preserving_augmentation(
+        self,
+    ) -> None:
+        graph = _hotpot_semantic_graph()
+        registry = make_registry()
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_hotpot_semantic_runtime(registry, _ImmediateGateway()),
+            graph=graph,
+            problem="What is the capital of France?",
+            execute_on_edit=False,
+            semantic_protocol="hotpotqa_verified_answer_slot_v1",
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+        )
+        receipt = _test_read_receipt("p1")
+        env._record_failure_state(
+            (
+                _react_exhaustion_record(
+                    graph,
+                    request_id="react-before-repair",
+                    receipts=(receipt,),
+                ),
+            ),
+            current_agent_ids={node.id for node in graph.nodes},
+        )
+        self.assertEqual(("modify_agent",), env.model_admissible_action_types())
+
+        repaired_contract = (
+            "align evidence to the answer slot and terminate after a valid "
+            "semantic candidate"
+        )
+        repaired = await env.step(
+            json.dumps(
+                {
+                    "action": "modify_agent",
+                    "agent_id": "reasoner",
+                    "contract": repaired_contract,
+                }
+            )
+        )
+        self.assertTrue(repaired.accepted)
+        self.assertEqual(
+            repaired_contract,
+            env.graph.get_node("reasoner").contract,
+        )
+        env._record_failure_state(
+            (
+                _react_exhaustion_record(
+                    env.graph,
+                    request_id="react-after-repair",
+                    receipts=(receipt,),
+                ),
+            ),
+            current_agent_ids={node.id for node in env.graph.nodes},
+        )
+
+        recovery = env.recovery_state()
+        self.assertEqual(["reasoner"], recovery["repair_exhausted_agent_ids"])
+        self.assertEqual([], recovery["mandatory_repair_agent_ids"])
+        self.assertNotEqual(("modify_agent",), env.model_admissible_action_types())
+        add_domain = env.model_admissible_action_targets()["add_subgraph"]
+        self.assertIn(
+            "evidence_retriever",
+            add_domain["admitted_new_role_families"],
+        )
+        self.assertIn("repair", add_domain["admitted_new_role_families"])
+
+        deletion = await env.step(
+            '{"action":"delete_agent","agent_id":"reasoner"}'
+        )
+        self.assertFalse(deletion.accepted)
+        self.assertTrue(env.graph.has_node("reasoner"))
+        self.assertEqual(
+            (True, False),
+            (
+                env.graph.relation_bits("reasoner", "verifier").source_to_target,
+                env.graph.relation_bits("reasoner", "verifier").target_to_source,
+            ),
+        )
+        continuation = env._failure_continuations["reasoner"]
+        self.assertEqual("single", continuation["execution_phase"])
+        self.assertEqual(1, len(continuation["tool_receipts"]))
+
+    async def test_hotpot_react_repair_is_not_exhausted_when_receipts_grow(
+        self,
+    ) -> None:
+        graph = _hotpot_semantic_graph()
+        registry = make_registry()
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_hotpot_semantic_runtime(registry, _ImmediateGateway()),
+            graph=graph,
+            problem="What is the capital of France?",
+            execute_on_edit=False,
+            semantic_protocol="hotpotqa_verified_answer_slot_v1",
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+        )
+        first_receipt = _test_read_receipt("p1")
+        env._record_failure_state(
+            (
+                _react_exhaustion_record(
+                    graph,
+                    request_id="react-before-repair",
+                    receipts=(first_receipt,),
+                ),
+            ),
+            current_agent_ids={node.id for node in graph.nodes},
+        )
+        repaired = await env.step(
+            '{"action":"modify_agent","agent_id":"reasoner",'
+            '"completion_condition":"emit a valid semantic candidate"}'
+        )
+        self.assertTrue(repaired.accepted)
+        env._record_failure_state(
+            (
+                _react_exhaustion_record(
+                    env.graph,
+                    request_id="react-after-repair-with-progress",
+                    receipts=(first_receipt, _test_read_receipt("p2")),
+                ),
+            ),
+            current_agent_ids={node.id for node in env.graph.nodes},
+        )
+
+        recovery = env.recovery_state()
+        self.assertEqual([], recovery["repair_exhausted_agent_ids"])
+        self.assertEqual(["reasoner"], recovery["mandatory_repair_agent_ids"])
+        self.assertEqual(("modify_agent",), env.model_admissible_action_types())
+
+    async def test_hotpot_non_react_failures_do_not_exhaust_react_repair(
+        self,
+    ) -> None:
+        for error_type, message in (
+            (
+                "OpenAICompatibleGatewayError",
+                "provider request failed with HTTP status 429",
+            ),
+            (
+                "AgentRuntimeError",
+                "execution contract invalid after a structural edit",
+            ),
+        ):
+            with self.subTest(error_type=error_type):
+                graph = _hotpot_semantic_graph()
+                registry = make_registry()
+                env = AgentWorkflowEnv(
+                    registry,
+                    runtime=_hotpot_semantic_runtime(
+                        registry, _ImmediateGateway()
+                    ),
+                    graph=graph,
+                    problem="What is the capital of France?",
+                    execute_on_edit=False,
+                    semantic_protocol="hotpotqa_verified_answer_slot_v1",
+                    recovery_policy="preserve_diagnose_repair_augment",
+                    required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+                )
+                receipt = _test_read_receipt("p1")
+                env._record_failure_state(
+                    (
+                        _react_exhaustion_record(
+                            graph,
+                            request_id="react-before-repair",
+                            receipts=(receipt,),
+                        ),
+                    ),
+                    current_agent_ids={node.id for node in graph.nodes},
+                )
+                repaired = await env.step(
+                    '{"action":"modify_agent","agent_id":"reasoner",'
+                    '"contract":"repair the completion contract"}'
+                )
+                self.assertTrue(repaired.accepted)
+                env._record_failure_state(
+                    (
+                        AgentFailureRecord(
+                            request_id="non-react-after-repair",
+                            agent_id="reasoner",
+                            phase=ExecutionPhase.SINGLE,
+                            graph_revision=env.graph.revision,
+                            error_type=error_type,
+                            message=message,
+                            metadata={
+                                "tool_receipts": [receipt],
+                                "tool_plan_exhausted": True,
+                            },
+                        ),
+                    ),
+                    current_agent_ids={node.id for node in env.graph.nodes},
+                )
+
+                recovery = env.recovery_state()
+                self.assertEqual([], recovery["repair_exhausted_agent_ids"])
+                self.assertEqual(
+                    ["reasoner"], recovery["mandatory_repair_agent_ids"]
+                )
 
     async def test_hotpot_measured_failure_is_not_attributed_to_blocked_downstream(
         self,

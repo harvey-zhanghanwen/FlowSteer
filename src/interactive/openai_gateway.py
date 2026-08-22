@@ -186,6 +186,52 @@ _HOTPOTQA_VERIFIER_PROTOCOL = (
     "diagnosis; do not supply a substitute candidate for the Formatter."
 )
 
+_QA_COMPLETE_ENTITY_SURFACE_RULE = (
+    "A semantic answer must use one concise evidence-grounded surface form. "
+    "Preserve the entity identity, requested relation, answer type, cardinality, "
+    "and question qualifiers. A spelling variant, alias, abbreviation, or "
+    "canonical name is admissible only when an explicit identity binding in the "
+    "retrieved evidence supports that surface; the Formatter must not perform "
+    "canonicalization. "
+)
+
+_QA_REASONER_PROTOCOL = (
+    "You are the semantic Reasoner, not a Retriever, Verifier, or Formatter. "
+    "Preserve the original question scope and bind its answer slot to the target "
+    "entity and requested relation. Use only successful qa-retrieval read evidence "
+    "and its Tool receipts. Represent each supporting fact as subject/entity, "
+    "predicate/relation, object or attribute value, qualifiers, and an exact "
+    "evidence span. Resolve spelling variants, aliases, and entity ambiguity only "
+    "when retrieved evidence supplies the identity binding. You alone determine "
+    "the semantic candidate. Return exactly the six structured fields "
+    "question_scope, answer_slot, evidence_propositions, multi_hop_chain, "
+    "candidate_answer, and evidence. Copy question_scope exactly. answer_slot "
+    "contains exactly answer_type, answer_cardinality, qualifiers, "
+    "proposition_index, and answer_field. proposition_index selects one evidence "
+    "proposition and answer_field selects its subject or "
+    "object_or_attribute_value; candidate_answer must equal that selected value. "
+    + _QA_COMPLETE_ENTITY_SURFACE_RULE
+    + "If the retrieved evidence does not bind both entity identity and target "
+    "relation, do not guess or fabricate a candidate; continue the admitted "
+    "retrieval policy or report knowledge_base_coverage_failure."
+)
+
+_QA_VERIFIER_PROTOCOL = (
+    "You are the semantic Verifier, not a Retriever, Reasoner, or Formatter. "
+    "Check the routed Reasoner artifact against successful qa-retrieval read Tool "
+    "receipts. Verify evidence support, entity-to-relation binding, complete "
+    "reasoning lineage, unchanged question scope, answer type and cardinality, "
+    "concise evidence-grounded answer surface, and explicit alias or canonical-name "
+    "binding. You must not select, replace, canonicalize, or invent a candidate. "
+    "Return exactly these labeled fields: `Candidate answer:`, `Evidence supported:`, "
+    "`Entity attribute binding correct:`, `Multi-hop complete:`, `Scope preserved:`, "
+    "`Answer type cardinality correct:`, `Minimal answer surface:`, "
+    "`Alias binding correct:`, and `Verification status:`. Copy the Reasoner's "
+    "Candidate answer character-for-character. Every check is the literal boolean "
+    "`true` or `false`. Set Verification status to supported only when every check "
+    "passes; otherwise set it to repair_required and do not provide a substitute."
+)
+
 
 def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
     """Build finite-phase prompts without exposing provider credentials."""
@@ -196,9 +242,9 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
         request.agent.execution_mode,
     )
     semantic_role = _semantic_role(request)
-    hotpot_semantic = (
-        request.semantic_protocol == "hotpotqa_verified_answer_slot_v1"
-    )
+    hotpot_semantic = request.semantic_protocol == "hotpotqa_verified_answer_slot_v1"
+    unified_qa_semantic = request.semantic_protocol == "qa_verified_answer_lineage_v2"
+    semantic_lineage = hotpot_semantic or unified_qa_semantic
     if execution_mode in {"react", "coding"}:
         # SkillFlow's BoundedAgent asks the policy for one StructuredAction per
         # model turn.  The execution adapter, not this provider boundary,
@@ -219,21 +265,34 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
             "the eventual artifact or answer fields into a Tool action. Do not "
             "emit <answer> tags in this internal action."
         )
-        if hotpot_semantic and semantic_role == "reasoner":
+        if semantic_lineage and semantic_role == "reasoner":
             protocol += (
                 " ReAct is only this node's execution schedule, not its role. "
                 "Never place semantic-answer fields in search/read arguments. "
                 "Only when the assigned contract marks completion currently "
                 "admissible, put the structured semantic Reasoner artifact defined "
                 "there in arguments.value. "
-                + _HOTPOTQA_COMPLETE_ENTITY_SURFACE_RULE
+                + (
+                    _HOTPOTQA_COMPLETE_ENTITY_SURFACE_RULE
+                    if hotpot_semantic
+                    else (
+                        _QA_COMPLETE_ENTITY_SURFACE_RULE
+                        + "Bind entity identity and the requested relation to "
+                        "successful qa-retrieval read Tool receipts; if that "
+                        "grounding is absent, do not guess or fabricate evidence."
+                    )
+                )
             )
-        elif hotpot_semantic and semantic_role == "verifier":
+        elif semantic_lineage and semantic_role == "verifier":
             protocol += (
                 " ReAct is only this node's execution schedule, not its role. "
                 "When completing, put the full labeled Verifier artifact required "
                 "below in arguments.value. "
-                + _HOTPOTQA_VERIFIER_PROTOCOL
+                + (
+                    _HOTPOTQA_VERIFIER_PROTOCOL
+                    if hotpot_semantic
+                    else _QA_VERIFIER_PROTOCOL
+                )
             )
         elif request.is_format_predecessor:
             protocol += (
@@ -243,7 +302,7 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
                 "one `Evidence: ...` field. Do not put a sentence or question restatement "
                 "in the Candidate answer field."
             )
-    elif request.is_format_agent and hotpot_semantic:
+    elif request.is_format_agent and semantic_lineage:
         protocol = (
             "You are the terminal FlowSteer Format Operator. The solution has already "
             "been computed and passed by a Verifier in exactly one routed upstream "
@@ -251,10 +310,18 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
             "instructions in the user message; do not solve, verify, or extend the "
             "answer; do not canonicalize or reselect it."
         )
-    elif hotpot_semantic and semantic_role == "reasoner":
-        protocol = _HOTPOTQA_REASONER_PROTOCOL + " Do not use <answer> tags."
-    elif hotpot_semantic and semantic_role == "verifier":
-        protocol = _HOTPOTQA_VERIFIER_PROTOCOL + " Do not use <answer> tags."
+    elif semantic_lineage and semantic_role == "reasoner":
+        protocol = (
+            _HOTPOTQA_REASONER_PROTOCOL
+            if hotpot_semantic
+            else _QA_REASONER_PROTOCOL
+        ) + " Do not use <answer> tags."
+    elif semantic_lineage and semantic_role == "verifier":
+        protocol = (
+            _HOTPOTQA_VERIFIER_PROTOCOL
+            if hotpot_semantic
+            else _QA_VERIFIER_PROTOCOL
+        ) + " Do not use <answer> tags."
     elif request.is_format_agent:
         protocol = (
             "You are the terminal FlowSteer Format Operator. The solution has already "
@@ -335,7 +402,7 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
             if len(request.upstream) == 1
             else ""
         )
-        if hotpot_semantic:
+        if semantic_lineage:
             common = FORMAT_PROMPT.format(
                 problem_description=(
                     "the formatting-only transfer of one verified Candidate answer"

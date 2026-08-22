@@ -43,8 +43,14 @@ class AgentWorkflowStateError(RuntimeError):
 
 
 _HOTPOTQA_SEMANTIC_PROTOCOL = "hotpotqa_verified_answer_slot_v1"
+_QA_SEMANTIC_PROTOCOL = "qa_verified_answer_lineage_v2"
 _PRESERVE_REPAIR_RECOVERY_POLICY = "preserve_diagnose_repair_augment"
-_SUPPORTED_SEMANTIC_PROTOCOLS = frozenset({"none", _HOTPOTQA_SEMANTIC_PROTOCOL})
+_SEMANTIC_LINEAGE_PROTOCOLS = frozenset(
+    {_HOTPOTQA_SEMANTIC_PROTOCOL, _QA_SEMANTIC_PROTOCOL}
+)
+_SUPPORTED_SEMANTIC_PROTOCOLS = frozenset(
+    {"none", *_SEMANTIC_LINEAGE_PROTOCOLS}
+)
 _SUPPORTED_RECOVERY_POLICIES = frozenset(
     {"default", _PRESERVE_REPAIR_RECOVERY_POLICY}
 )
@@ -189,6 +195,32 @@ class AgentWorkflowStepResult:
         return None if self.execution is None else self.execution.final_answer
 
 
+@dataclass(frozen=True, slots=True)
+class AgentWorkflowEvidenceLineageSnapshot:
+    """Last execution that passed the complete evidence-lineage FINISH gate.
+
+    The Runtime result and AgentGraph snapshot are both immutable.  Publishing
+    one frozen value after every gate succeeds makes the update atomic for
+    readers such as the rollout collector; a later rejected or invalid Canvas
+    revision cannot partially overwrite the previously valid lineage.
+    """
+
+    answer: str
+    runtime: AgentRuntimeResult
+    graph_revision: int
+    graph_snapshot: AgentGraphSnapshot
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.answer, str) or not self.answer.strip():
+            raise ValueError("evidence-lineage answer must be non-empty")
+        if self.runtime.final_answer != self.answer:
+            raise ValueError("evidence-lineage answer must equal Runtime final_answer")
+        if self.graph_revision != self.runtime.graph_revision:
+            raise ValueError("evidence-lineage Runtime revision mismatch")
+        if self.graph_revision != self.graph_snapshot.revision:
+            raise ValueError("evidence-lineage graph snapshot revision mismatch")
+
+
 class AgentWorkflowEnv:
     """Apply one Canvas action per turn and execute the accepted graph revision."""
 
@@ -242,8 +274,8 @@ class AgentWorkflowEnv:
             or semantic_protocol not in _SUPPORTED_SEMANTIC_PROTOCOLS
         ):
             raise AgentWorkflowStateError(
-                "semantic_protocol must be none or "
-                f"{_HOTPOTQA_SEMANTIC_PROTOCOL}"
+                "semantic_protocol must be one of "
+                f"{sorted(_SUPPORTED_SEMANTIC_PROTOCOLS)!r}"
             )
         if (
             not isinstance(recovery_policy, str)
@@ -260,16 +292,26 @@ class AgentWorkflowEnv:
             raise AgentWorkflowStateError(
                 "required_evidence_tool_id must be non-empty text or None"
             )
-        if semantic_protocol == _HOTPOTQA_SEMANTIC_PROTOCOL:
+        if semantic_protocol in _SEMANTIC_LINEAGE_PROTOCOLS:
             if recovery_policy != _PRESERVE_REPAIR_RECOVERY_POLICY:
                 raise AgentWorkflowStateError(
-                    "hotpotqa_verified_answer_slot_v1 requires "
+                    f"{semantic_protocol} requires "
                     "recovery_policy=preserve_diagnose_repair_augment"
                 )
             if required_evidence_tool_id != "qa-retrieval":
                 raise AgentWorkflowStateError(
-                    "hotpotqa_verified_answer_slot_v1 requires "
+                    f"{semantic_protocol} requires "
                     "required_evidence_tool_id='qa-retrieval'"
+                )
+        if semantic_protocol == _QA_SEMANTIC_PROTOCOL:
+            dataset_id = None if runtime is None else runtime.dataset_id
+            if (
+                not isinstance(dataset_id, str)
+                or dataset_id.casefold() not in {"hotpotqa", "triviaqa"}
+            ):
+                raise AgentWorkflowStateError(
+                    "qa_verified_answer_lineage_v2 requires runtime.dataset_id "
+                    "to be 'hotpotqa' or 'triviaqa'"
                 )
         if runtime is not None and runtime.semantic_protocol != semantic_protocol:
             raise AgentWorkflowStateError(
@@ -340,12 +382,18 @@ class AgentWorkflowEnv:
         self._failed_agent_ids: set[str] = set()
         self._diagnosed_unusable_agent_ids: set[str] = set()
         self._react_exhausted_agent_ids: set[str] = set()
+        self._repair_exhausted_agent_ids: set[str] = set()
+        self._latest_failure_record_by_agent: dict[str, AgentFailureRecord] = {}
+        self._pending_repair_baseline_by_agent: dict[str, tuple[int, int]] = {}
         # Runtime-only SkillFlow continuation state.  Canvas snapshots do not
         # serialize Runtime results, but an in-process repair turn must retain
         # the failed Agent's public Action--Observation history and Tool
         # receipts so a contract edit does not repeat retrieval or discard
         # evidence already obtained on the current task.
         self._failure_continuations: dict[str, dict[str, object]] = {}
+        self._last_valid_evidence_lineage: Optional[
+            AgentWorkflowEvidenceLineageSnapshot
+        ] = None
         self._validate_agent_limit(self._graph)
         partial = self._graph.validate(self.model_registry, require_complete=False)
         if not partial.valid:
@@ -382,6 +430,35 @@ class AgentWorkflowEnv:
     def unresolved_dirty_agent_ids(self) -> Tuple[str, ...]:
         return tuple(sorted(self._unresolved_dirty_agents))
 
+    @property
+    def last_valid_evidence_lineage(
+        self,
+    ) -> Optional[AgentWorkflowEvidenceLineageSnapshot]:
+        """Return the immutable last complete evidence lineage, if observed."""
+
+        return self._last_valid_evidence_lineage
+
+    def _uses_semantic_lineage_protocol(self) -> bool:
+        return self.semantic_protocol in _SEMANTIC_LINEAGE_PROTOCOLS
+
+    def _semantic_protocol_label(self) -> str:
+        return (
+            "HotpotQA"
+            if self.semantic_protocol == _HOTPOTQA_SEMANTIC_PROTOCOL
+            else "Evidence-grounded QA"
+        )
+
+    def _semantic_minimums(self) -> tuple[int, int]:
+        """Return dataset-conditioned evidence and reasoning-chain minima."""
+
+        if (
+            self.semantic_protocol == _QA_SEMANTIC_PROTOCOL
+            and isinstance(self.runtime.dataset_id, str)
+            and self.runtime.dataset_id.casefold() == "triviaqa"
+        ):
+            return 1, 1
+        return 2, 2
+
     def model_admissible_action_types(self) -> Tuple[str, ...]:
         """Project state-conditioned Canvas actions for the Flow-Director.
 
@@ -393,7 +470,7 @@ class AgentWorkflowEnv:
 
         finish_admitted = self.finish_admissibility().get("admissible") is True
         if (
-            self.semantic_protocol == _HOTPOTQA_SEMANTIC_PROTOCOL
+            self._uses_semantic_lineage_protocol()
             and self.recovery_policy == _PRESERVE_REPAIR_RECOVERY_POLICY
             and finish_admitted
             and AgentActionType.FINISH.value in self._allowed_action_type_set
@@ -435,7 +512,7 @@ class AgentWorkflowEnv:
                 node.id
                 for node in self._graph.nodes
                 if (
-                    self.semantic_protocol != _HOTPOTQA_SEMANTIC_PROTOCOL
+                    not self._uses_semantic_lineage_protocol()
                     or (node.role_family or "").casefold() == "format"
                 )
                 and node.id != self._graph.output_agent_id
@@ -545,6 +622,51 @@ class AgentWorkflowEnv:
             if node_id not in protected or node_id in responsible
         )
 
+    def _provider_repair_admission_issue(
+        self,
+        action: AgentAction,
+    ) -> Optional[str]:
+        """Enforce the same provider repair boundary as constrained decoding."""
+
+        if (
+            action.action_type is not AgentActionType.MODIFY_AGENT
+            or action.agent_id is None
+        ):
+            return None
+        admitted_model_ids = self._provider_repair_model_ids(action.agent_id)
+        if not admitted_model_ids:
+            return None
+        mutable_fields = tuple(
+            field_name
+            for field_name in (
+                "model_id",
+                "contract",
+                "role_family",
+                "allowed_tools",
+                "execution_mode",
+                "artifact_type",
+                "completion_condition",
+            )
+            if getattr(action, field_name) is not None
+        )
+        if mutable_fields != ("model_id",):
+            return (
+                "a transient provider repair must modify only model_id while "
+                "preserving the Agent contract, role, tools, execution mode, "
+                "artifact type, completion condition, and relations"
+            )
+        if action.model_id not in admitted_model_ids:
+            failed_provider_id = self.model_registry.provider_for(
+                self._graph.get_node(action.agent_id).model_id
+            ).provider_id
+            return (
+                "provider repair model_id must come from the live admitted "
+                "different-provider domain when available; "
+                f"avoid_provider_id={failed_provider_id!r}, "
+                f"admitted_model_ids={list(admitted_model_ids)!r}"
+            )
+        return None
+
     def _semantic_artifact_repair_agent_ids(self) -> Tuple[str, ...]:
         """Return the existing Agent responsible for a terminal semantic fault.
 
@@ -555,7 +677,7 @@ class AgentWorkflowEnv:
         """
 
         if (
-            self.semantic_protocol != _HOTPOTQA_SEMANTIC_PROTOCOL
+            not self._uses_semantic_lineage_protocol()
             or self.recovery_policy != _PRESERVE_REPAIR_RECOVERY_POLICY
         ):
             return ()
@@ -587,6 +709,7 @@ class AgentWorkflowEnv:
         node_ids = tuple(node.id for node in self._graph.nodes)
         repairable_failed = (
             self._failed_agent_ids - self._diagnosed_unusable_agent_ids
+            - self._repair_exhausted_agent_ids
         ).intersection(node_ids)
         if repairable_failed:
             return tuple(
@@ -595,7 +718,7 @@ class AgentWorkflowEnv:
         return self._semantic_artifact_repair_agent_ids()
 
     def _admissible_augmentation_role_families(self) -> Tuple[str, ...]:
-        """Return HotpotQA roles that may be added at this recovery boundary."""
+        """Return semantic QA roles that may be added at this recovery boundary."""
 
         role_families = (
             "reasoner",
@@ -604,7 +727,7 @@ class AgentWorkflowEnv:
             "evidence_retriever",
             "repair",
         )
-        if self.semantic_protocol != _HOTPOTQA_SEMANTIC_PROTOCOL:
+        if not self._uses_semantic_lineage_protocol():
             return role_families
         admitted: list[str] = []
         for role_family in role_families:
@@ -622,6 +745,42 @@ class AgentWorkflowEnv:
             ):
                 admitted.append(role_family)
         return tuple(admitted)
+
+    def _provider_repair_model_ids(self, agent_id: str) -> Tuple[str, ...]:
+        """Return the typed provider-failure model repair domain.
+
+        SkillFlow keeps provider identity separate from model identity.  A
+        measured provider failure therefore changes only the model field and,
+        when the catalog offers one, prefers a different provider.  Falling
+        back to another exact model on the same provider keeps recovery live
+        for single-provider catalogs.
+        """
+
+        record = self._latest_failure_record_by_agent.get(agent_id)
+        if record is None or not self._graph.has_node(agent_id):
+            return ()
+        category, retryability, _ = self._execution_failure_diagnosis(record)
+        if (
+            category != "provider_request_failure"
+            or retryability != "transient_provider"
+        ):
+            return ()
+        current_model_id = self._graph.get_node(agent_id).model_id
+        current_provider_id = self.model_registry.provider_for(
+            current_model_id
+        ).provider_id
+        alternatives = tuple(
+            model_id
+            for model_id in self.model_registry.model_ids
+            if model_id != current_model_id
+        )
+        cross_provider = tuple(
+            model_id
+            for model_id in alternatives
+            if self.model_registry.provider_for(model_id).provider_id
+            != current_provider_id
+        )
+        return cross_provider or alternatives
 
     def model_admissible_action_targets(self) -> dict[str, object]:
         """Project exact current Canvas target domains for constrained sampling.
@@ -708,7 +867,7 @@ class AgentWorkflowEnv:
                             ],
                         },
                     }
-                    if self.semantic_protocol == _HOTPOTQA_SEMANTIC_PROTOCOL
+                    if self._uses_semantic_lineage_protocol()
                     else {}
                 ),
             }
@@ -720,20 +879,25 @@ class AgentWorkflowEnv:
                 "artifact_type",
                 "completion_condition",
             ]
-            if self.semantic_protocol != _HOTPOTQA_SEMANTIC_PROTOCOL:
+            if not self._uses_semantic_lineage_protocol():
                 base_mutable_fields[2:2] = [
                     "role_family",
                     "allowed_tools",
                     "execution_mode",
                 ]
             measured_failed_ids = self._failed_agent_ids.intersection(node_ids)
+            provider_failure_agent_ids = {
+                agent_id
+                for agent_id in modifiable_node_ids
+                if self._provider_repair_model_ids(agent_id)
+            }
             responsible_ids = set(measured_failed_ids)
             if not measured_failed_ids:
                 responsible_ids.update(self._unresolved_dirty_agents)
                 responsible_ids.update(self._terminal_unreachable_agent_ids())
             if (
                 not measured_failed_ids
-                and self.semantic_protocol == _HOTPOTQA_SEMANTIC_PROTOCOL
+                and self._uses_semantic_lineage_protocol()
             ):
                 execution = self._cached_progressive_execution()
                 if execution is not None:
@@ -750,16 +914,17 @@ class AgentWorkflowEnv:
                 agent_id: [
                     field
                     for field in (
-                        ["contract", "completion_condition"]
+                        ["model_id"]
+                        if agent_id in provider_failure_agent_ids
+                        else ["contract", "completion_condition"]
                         if (
-                            self.semantic_protocol
-                            == _HOTPOTQA_SEMANTIC_PROTOCOL
+                            self._uses_semantic_lineage_protocol()
                             and agent_id in self._react_exhausted_agent_ids
                         )
                         else base_mutable_fields
                     )
                     if not (
-                        self.semantic_protocol == _HOTPOTQA_SEMANTIC_PROTOCOL
+                        self._uses_semantic_lineage_protocol()
                         and (
                             self._graph.get_node(agent_id).role_family or ""
                         ).casefold()
@@ -791,13 +956,28 @@ class AgentWorkflowEnv:
                         "discrete_value_domains": (
                             {
                                 "model_id": [
-                                    model_id
-                                    for model_id in self.model_registry.model_ids
-                                    if model_id
-                                    != self._graph.get_node(agent_id).model_id
+                                    *(
+                                        self._provider_repair_model_ids(agent_id)
+                                        if agent_id in provider_failure_agent_ids
+                                        else tuple(
+                                            model_id
+                                            for model_id in self.model_registry.model_ids
+                                            if model_id
+                                            != self._graph.get_node(agent_id).model_id
+                                        )
+                                    )
                                 ]
                             }
                             if "model_id" in per_agent_mutable_fields[agent_id]
+                            else {}
+                        ),
+                        **(
+                            {
+                                "avoid_provider_id": self.model_registry.provider_for(
+                                    self._graph.get_node(agent_id).model_id
+                                ).provider_id
+                            }
+                            if agent_id in provider_failure_agent_ids
                             else {}
                         ),
                     }
@@ -829,8 +1009,7 @@ class AgentWorkflowEnv:
                         node.id
                         for node in self._graph.nodes
                         if (
-                            self.semantic_protocol
-                            != _HOTPOTQA_SEMANTIC_PROTOCOL
+                            not self._uses_semantic_lineage_protocol()
                             or (node.role_family or "").casefold() == "format"
                         )
                         and node.id != self._graph.output_agent_id
@@ -862,6 +1041,7 @@ class AgentWorkflowEnv:
         self._finished = False
         self._last_feedback = ""
         self._history.clear()
+        self._last_valid_evidence_lineage = None
         self._clear_progressive_execution()
         return self.snapshot()
 
@@ -890,6 +1070,7 @@ class AgentWorkflowEnv:
         self._finished = snapshot.finished
         self._last_feedback = snapshot.last_feedback
         self._history = list(snapshot.history)
+        self._last_valid_evidence_lineage = None
         # Runtime results are deliberately not serialized in Canvas snapshots.
         # A restored environment must therefore execute its current graph once
         # before it can establish a revision-local progressive result again.
@@ -1143,6 +1324,25 @@ class AgentWorkflowEnv:
         self._graph = candidate
         current_agent_ids = {node.id for node in self._graph.nodes}
         self._retain_current_failure_state(current_agent_ids)
+        if (
+            action.action_type is AgentActionType.MODIFY_AGENT
+            and action.agent_id is not None
+        ):
+            # The typed failure belongs to the pre-edit Agent declaration.
+            # Clear that diagnosis once its admitted repair is committed, but
+            # retain SkillFlow's public Action--Observation continuation until
+            # the repaired Agent executes so successful reads are not repeated.
+            if action.agent_id in self._failed_agent_ids:
+                continuation = self._failure_continuations.get(action.agent_id)
+                if continuation is not None:
+                    self._pending_repair_baseline_by_agent[action.agent_id] = (
+                        self._failure_continuation_weight(continuation)
+                    )
+            self._failed_agent_ids.discard(action.agent_id)
+            self._diagnosed_unusable_agent_ids.discard(action.agent_id)
+            self._react_exhausted_agent_ids.discard(action.agent_id)
+            self._repair_exhausted_agent_ids.discard(action.agent_id)
+            self._latest_failure_record_by_agent.pop(action.agent_id, None)
         self._unresolved_dirty_agents = (
             self._unresolved_dirty_agents & current_agent_ids
         ) | (set(dirty_agents) & current_agent_ids)
@@ -1219,7 +1419,7 @@ class AgentWorkflowEnv:
                     }
                     self._progressive_execution = execution
                     self._progressive_execution_revision = self._graph.revision
-                    # A HotpotQA Verifier/Formatter can be structurally present
+                    # A semantic QA Verifier/Formatter can be structurally present
                     # while its semantic input is not yet routable.  Runtime
                     # deferral is successful progressive execution, not Agent
                     # failure; keep only those unmaterialized nodes unresolved.
@@ -1227,6 +1427,7 @@ class AgentWorkflowEnv:
                         current_agent_ids - set(execution.outputs)
                     )
                     self._clear_failure_state()
+                    self._capture_last_valid_evidence_lineage(execution)
             else:
                 self._clear_progressive_execution()
         self._last_feedback = self._accepted_feedback(
@@ -1440,7 +1641,7 @@ class AgentWorkflowEnv:
             execution = self._cached_progressive_execution()
             if (
                 execution is not None
-                and self.semantic_protocol == _HOTPOTQA_SEMANTIC_PROTOCOL
+                and self._uses_semantic_lineage_protocol()
             ):
                 semantic_issue = self._semantic_protocol_issue(execution)
                 if semantic_issue is not None:
@@ -1529,7 +1730,7 @@ class AgentWorkflowEnv:
     ) -> Optional[dict[str, object]]:
         """Project the responsible semantic stage for the next Canvas repair."""
 
-        if self.semantic_protocol != _HOTPOTQA_SEMANTIC_PROTOCOL:
+        if not self._uses_semantic_lineage_protocol():
             return None
         formatter_ids = tuple(
             node.id
@@ -1609,7 +1810,14 @@ class AgentWorkflowEnv:
             role_family = "format"
             responsible_constraint = "format_lineage"
             preferred_actions = ["set_relation", "set_output", "modify_agent"]
-        if reason.startswith("Reasoner"):
+        coverage_failure = (
+            "knowledge_base_coverage_failure" in reason.casefold()
+        )
+        if coverage_failure:
+            target_id, role_family = reasoner_id, "reasoner"
+            responsible_constraint = "retrieval_or_database_coverage"
+            preferred_actions = ["modify_agent", "add_subgraph", "set_relation"]
+        elif reason.startswith("Reasoner"):
             target_id, role_family = reasoner_id, "reasoner"
             responsible_constraint = "reasoner_semantic_artifact"
             preferred_actions = ["modify_agent", "set_relation", "add_subgraph"]
@@ -1645,6 +1853,9 @@ class AgentWorkflowEnv:
             "preferred_action_order": preferred_actions,
             "delete_allowed_before_replacement_takeover": False,
         }
+        if coverage_failure:
+            result["operational_diagnosis"] = "knowledge_base_coverage_failure"
+            result["corpus_level_oracle_claim"] = False
         if target_id is not None:
             result["responsible_agent_id"] = target_id
         return result
@@ -1657,6 +1868,41 @@ class AgentWorkflowEnv:
         if self._progressive_execution.final_answer is None:
             return None
         return self._progressive_execution
+
+    def _capture_last_valid_evidence_lineage(
+        self,
+        execution: AgentRuntimeResult,
+    ) -> None:
+        """Atomically publish a complete execute-on-edit semantic lineage.
+
+        ``finish_admissibility`` is the single gate authority: graph, Format
+        lineage, required Tool ownership, terminal environment receipt,
+        semantic provenance, and answer wrapper must all pass.  Invalid later
+        revisions leave the previous frozen snapshot untouched.
+        """
+
+        if not self.execute_on_edit or not self._uses_semantic_lineage_protocol():
+            return
+        if (
+            execution is not self._progressive_execution
+            or execution.graph_revision != self._graph.revision
+            or execution.final_answer is None
+        ):
+            return
+        admission = self.finish_admissibility()
+        if admission.get("admissible") is not True:
+            return
+        previous = self._last_valid_evidence_lineage
+        if previous is not None and previous.graph_revision >= self._graph.revision:
+            return
+        candidate = AgentWorkflowEvidenceLineageSnapshot(
+            answer=execution.final_answer,
+            runtime=execution,
+            graph_revision=self._graph.revision,
+            graph_snapshot=self._graph.snapshot(),
+        )
+        # One assignment publishes the fully validated immutable snapshot.
+        self._last_valid_evidence_lineage = candidate
 
     def _clear_progressive_execution(self) -> None:
         self._progressive_execution = None
@@ -1674,6 +1920,17 @@ class AgentWorkflowEnv:
         self._failed_agent_ids.intersection_update(current_agent_ids)
         self._diagnosed_unusable_agent_ids.intersection_update(current_agent_ids)
         self._react_exhausted_agent_ids.intersection_update(current_agent_ids)
+        self._repair_exhausted_agent_ids.intersection_update(current_agent_ids)
+        self._latest_failure_record_by_agent = {
+            agent_id: record
+            for agent_id, record in self._latest_failure_record_by_agent.items()
+            if agent_id in current_agent_ids
+        }
+        self._pending_repair_baseline_by_agent = {
+            agent_id: baseline
+            for agent_id, baseline in self._pending_repair_baseline_by_agent.items()
+            if agent_id in current_agent_ids
+        }
         self._failure_continuations = {
             agent_id: metadata
             for agent_id, metadata in self._failure_continuations.items()
@@ -1716,8 +1973,11 @@ class AgentWorkflowEnv:
         self._failed_agent_ids.difference_update(recovered)
         self._diagnosed_unusable_agent_ids.difference_update(recovered)
         self._react_exhausted_agent_ids.difference_update(recovered)
+        self._repair_exhausted_agent_ids.difference_update(recovered)
         for agent_id in recovered:
             self._failure_continuations.pop(agent_id, None)
+            self._latest_failure_record_by_agent.pop(agent_id, None)
+            self._pending_repair_baseline_by_agent.pop(agent_id, None)
 
     def _record_failure_state(
         self,
@@ -1742,6 +2002,7 @@ class AgentWorkflowEnv:
                 continue
             recorded_agent_ids.add(record.agent_id)
             self._failed_agent_ids.add(record.agent_id)
+            self._latest_failure_record_by_agent[record.agent_id] = record
             category, _, _ = self._execution_failure_diagnosis(record)
             if category == "react_turn_exhaustion":
                 react_exhausted_agent_ids.add(record.agent_id)
@@ -1750,6 +2011,20 @@ class AgentWorkflowEnv:
             else:
                 self._diagnosed_unusable_agent_ids.discard(record.agent_id)
             continuation = self._failure_continuation_candidate(record)
+            baseline = self._pending_repair_baseline_by_agent.pop(
+                record.agent_id,
+                None,
+            )
+            if (
+                category == "react_turn_exhaustion"
+                and baseline is not None
+                and record.metadata.get("tool_plan_exhausted") is True
+                and continuation is not None
+                and self._failure_continuation_weight(continuation) <= baseline
+            ):
+                self._repair_exhausted_agent_ids.add(record.agent_id)
+            else:
+                self._repair_exhausted_agent_ids.discard(record.agent_id)
             if continuation is not None:
                 current = self._failure_continuations.get(record.agent_id)
                 if current is None or self._failure_continuation_weight(
@@ -1763,7 +2038,10 @@ class AgentWorkflowEnv:
         self._failed_agent_ids.clear()
         self._diagnosed_unusable_agent_ids.clear()
         self._react_exhausted_agent_ids.clear()
+        self._repair_exhausted_agent_ids.clear()
         self._failure_continuations.clear()
+        self._latest_failure_record_by_agent.clear()
+        self._pending_repair_baseline_by_agent.clear()
 
     def _invalidate_progressive_outputs(
         self,
@@ -1916,12 +2194,13 @@ class AgentWorkflowEnv:
                 "semantic-answer Agent and one directed relation from that Agent "
                 "to the Format Agent before FINISH"
             )
-        if self.semantic_protocol == _HOTPOTQA_SEMANTIC_PROTOCOL:
+        if self._uses_semantic_lineage_protocol():
+            protocol_label = self._semantic_protocol_label()
             verifier_id = predecessors[0]
             verifier = graph.get_node(verifier_id)
             if (verifier.role_family or "").casefold() != "verifier":
                 return (
-                    "HotpotQA Format Agent's unique predecessor must have "
+                    f"{protocol_label} Format Agent's unique predecessor must have "
                     "role_family='verifier'; the Formatter only wraps an already "
                     "verified semantic answer and must never select or reason over "
                     "an answer"
@@ -1934,14 +2213,16 @@ class AgentWorkflowEnv:
             )
             if len(reasoner_predecessors) != 1:
                 return (
-                    "HotpotQA Verifier must consume exactly one direct Reasoner "
+                    f"{protocol_label} Verifier must consume exactly one direct "
+                    "Reasoner "
                     "semantic-candidate artifact; found "
                     f"{len(reasoner_predecessors)}. Preserve the original question "
                     "scope and use set_relation or modify_agent before FINISH"
                 )
             if tuple(graph.directed_predecessors(verifier_id)) != reasoner_predecessors:
                 return (
-                    "HotpotQA Verifier must receive its semantic artifact only from "
+                    f"{protocol_label} Verifier must receive its semantic artifact "
+                    "only from "
                     "the unique Reasoner. Route any retrieval or repair evidence "
                     "into the Reasoner first so it can align propositions to the "
                     "original answer slot before verification"
@@ -1951,11 +2232,11 @@ class AgentWorkflowEnv:
     def _uses_format_agent_protocol(self) -> bool:
         return (
             self.require_format_agent
-            or self.semantic_protocol == _HOTPOTQA_SEMANTIC_PROTOCOL
+            or self._uses_semantic_lineage_protocol()
         )
 
     def _semantic_edit_issue_for(self, graph: AgentGraph) -> Optional[str]:
-        """Enforce the HotpotQA semantic lineage after every Canvas edit.
+        """Enforce the evidence-grounded QA lineage after every Canvas edit.
 
         The checks are incremental: an unconnected node may exist while the
         Director is still assembling a functional subgraph, but an existing
@@ -1964,8 +2245,9 @@ class AgentWorkflowEnv:
         intact without imposing one fixed graph topology.
         """
 
-        if self.semantic_protocol != _HOTPOTQA_SEMANTIC_PROTOCOL:
+        if not self._uses_semantic_lineage_protocol():
             return None
+        protocol_label = self._semantic_protocol_label()
         missing_role_ids = tuple(
             node.id
             for node in graph.nodes
@@ -1973,7 +2255,8 @@ class AgentWorkflowEnv:
         )
         if missing_role_ids:
             return (
-                "HotpotQA semantic protocol requires a non-empty role_family "
+                f"{protocol_label} semantic protocol requires a non-empty "
+                "role_family "
                 "for every Agent; missing role_family for Agents "
                 f"{list(missing_role_ids)!r}"
             )
@@ -1984,7 +2267,8 @@ class AgentWorkflowEnv:
         )
         if invalid_role_ids:
             return (
-                "HotpotQA semantic protocol rejects role_family='react' for Agents "
+                f"{protocol_label} semantic protocol rejects role_family='react' "
+                "for Agents "
                 f"{list(invalid_role_ids)!r}; ReAct is an execution_mode "
                 "(Thought -> Action(tool) -> Observation -> Thought -> Final). "
                 "Use a semantic role such as reasoner, evidence_retriever, or verifier "
@@ -2004,7 +2288,8 @@ class AgentWorkflowEnv:
                 and normalized_contract == formatting_only_contract
             ):
                 return (
-                    f"HotpotQA {role.title()} Agent {node.id!r} has a formatting-only "
+                    f"{protocol_label} {role.title()} Agent {node.id!r} has a "
+                    "formatting-only "
                     "role contract. Preserve semantic responsibility: the Reasoner "
                     "determines the evidence-aligned semantic candidate, the Verifier "
                     "checks evidence/binding/hops/scope without changing it, and only "
@@ -2015,7 +2300,7 @@ class AgentWorkflowEnv:
                 or node.allowed_tools != (self.required_evidence_tool_id,)
             ):
                 return (
-                    f"HotpotQA Reasoner Agent {node.id!r} must use "
+                    f"{protocol_label} Reasoner Agent {node.id!r} must use "
                     "execution_mode='react' with exactly "
                     f"allowed_tools=['{self.required_evidence_tool_id}']; ReAct is "
                     "the Thought -> Action(tool) -> Observation -> Thought -> Final "
@@ -2025,12 +2310,13 @@ class AgentWorkflowEnv:
                 node.execution_mode.value != "reasoning" or node.allowed_tools
             ):
                 return (
-                    f"HotpotQA {role.title()} Agent {node.id!r} must use "
+                    f"{protocol_label} {role.title()} Agent {node.id!r} must use "
                     "execution_mode='reasoning' without Tools"
                 )
             if role == "format" and node.contract != _HOTPOTQA_FORMAT_CONTRACT:
                 return (
-                    f"HotpotQA Formatter Agent {node.id!r} must use the neutral "
+                    f"{protocol_label} Formatter Agent {node.id!r} must use the "
+                    "neutral "
                     "formatting-only contract and must not name, select, or imply "
                     "a task answer"
                 )
@@ -2047,7 +2333,8 @@ class AgentWorkflowEnv:
                 )
                 if invalid_predecessors:
                     return (
-                        f"HotpotQA Verifier {node.id!r} must receive its direct "
+                        f"{protocol_label} Verifier {node.id!r} must receive its "
+                        "direct "
                         "input only from Reasoners, not from Retriever/Formatter "
                         f"Agents {list(invalid_predecessors)!r}"
                     )
@@ -2062,14 +2349,16 @@ class AgentWorkflowEnv:
                 )
                 if invalid_predecessors:
                     return (
-                        f"HotpotQA Formatter {node.id!r} must receive its direct "
+                        f"{protocol_label} Formatter {node.id!r} must receive its "
+                        "direct "
                         "input only from Verifiers and must not participate in "
                         f"reasoning; invalid predecessors={list(invalid_predecessors)!r}"
                     )
                 successors = self._directed_successors(graph, node.id)
                 if successors:
                     return (
-                        f"HotpotQA Formatter {node.id!r} must be a terminal sink; "
+                        f"{protocol_label} Formatter {node.id!r} must be a "
+                        "terminal sink; "
                         f"remove outgoing directed edges to {list(successors)!r}"
                     )
         return None
@@ -2170,13 +2459,13 @@ class AgentWorkflowEnv:
         """Reject task-answer content in a newly authored Agent contract.
 
         FlowSteer's Canvas remains transactional and SkillFlow's public
-        observations remain available to the next turn.  This project-specific
-        HotpotQA admission prevents those observations from being copied into a
-        pre-execution contract as a concrete answer.  It never rewrites a
-        sampled action and never consults an answer key or evaluator.
+        observations remain available to the next turn.  This evidence-grounded
+        QA admission prevents those observations from being copied into a
+        pre-execution contract as a concrete answer.  It never rewrites a sampled
+        action and never consults an answer key or evaluator.
         """
 
-        if self.semantic_protocol != _HOTPOTQA_SEMANTIC_PROTOCOL:
+        if not self._uses_semantic_lineage_protocol():
             return None
         contracts: Tuple[str, ...]
         if action.action_type is AgentActionType.ADD_SUBGRAPH:
@@ -2258,7 +2547,8 @@ class AgentWorkflowEnv:
             return None
 
         return (
-            "HotpotQA Agent contracts are pre-execution obligations only: a new "
+            f"{self._semantic_protocol_label()} Agent contracts are pre-execution "
+            "obligations only: a new "
             "or modified contract must not embed a concrete candidate, alias, "
             "attribute value, number/date, or evidence span copied from task "
             "context or public Tool/Agent observations outside the original "
@@ -2402,7 +2692,21 @@ class AgentWorkflowEnv:
         artifact: str,
         *,
         original_question: Optional[str] = None,
+        minimum_evidence_propositions: int = 2,
+        minimum_reasoning_steps: int = 2,
     ) -> tuple[Optional[str], Optional[str]]:
+        if (
+            isinstance(minimum_evidence_propositions, bool)
+            or not isinstance(minimum_evidence_propositions, int)
+            or minimum_evidence_propositions < 1
+        ):
+            raise ValueError("minimum_evidence_propositions must be positive")
+        if (
+            isinstance(minimum_reasoning_steps, bool)
+            or not isinstance(minimum_reasoning_steps, int)
+            or minimum_reasoning_steps < 1
+        ):
+            raise ValueError("minimum_reasoning_steps must be positive")
         fields, issue = cls._structured_semantic_fields(
             artifact,
             _REASONER_SEMANTIC_FIELDS,
@@ -2497,23 +2801,37 @@ class AgentWorkflowEnv:
             proposition_index, int
         ):
             return None, "Reasoner answer_slot.proposition_index must be an integer"
-        if not isinstance(propositions, (list, tuple)) or len(propositions) < 2:
+        if (
+            not isinstance(propositions, (list, tuple))
+            or len(propositions) < minimum_evidence_propositions
+        ):
+            if minimum_evidence_propositions == 2:
+                return None, (
+                    "Reasoner field 'evidence_propositions' must contain at least two "
+                    "propositions for HotpotQA multi-hop alignment"
+                )
             return None, (
-                "Reasoner field 'evidence_propositions' must contain at least two "
-                "propositions for HotpotQA multi-hop alignment"
+                "Reasoner field 'evidence_propositions' must contain at least "
+                f"{minimum_evidence_propositions} proposition(s) for "
+                "evidence-grounded answer-slot alignment"
             )
         multi_hop_chain = fields["multi_hop_chain"]
         if (
             not isinstance(multi_hop_chain, (list, tuple))
-            or len(multi_hop_chain) < 2
+            or len(multi_hop_chain) < minimum_reasoning_steps
             or any(
                 not isinstance(item, str) or not item.strip()
                 for item in multi_hop_chain
             )
         ):
+            if minimum_reasoning_steps == 2:
+                return None, (
+                    "Reasoner field 'multi_hop_chain' must contain at least two "
+                    "non-empty hop descriptions"
+                )
             return None, (
-                "Reasoner field 'multi_hop_chain' must contain at least two "
-                "non-empty hop descriptions"
+                "Reasoner field 'multi_hop_chain' must contain at least "
+                f"{minimum_reasoning_steps} non-empty reasoning step(s)"
             )
         proposition_fields = {
             "subject",
@@ -2613,6 +2931,18 @@ class AgentWorkflowEnv:
                 return None, possessor_surface_issue
         return candidate, None
 
+    def _reasoner_candidate_for_current_dataset(
+        self,
+        artifact: str,
+    ) -> tuple[Optional[str], Optional[str]]:
+        minimum_evidence, minimum_steps = self._semantic_minimums()
+        return self._reasoner_candidate(
+            artifact,
+            original_question=hotpotqa_question_scope(self._problem),
+            minimum_evidence_propositions=minimum_evidence,
+            minimum_reasoning_steps=minimum_steps,
+        )
+
     @classmethod
     def _verifier_candidate(
         cls,
@@ -2702,6 +3032,8 @@ class AgentWorkflowEnv:
         cls,
         artifact: str,
         read_evidence_texts: Sequence[str],
+        *,
+        require_answer_binding: bool = False,
     ) -> Optional[str]:
         """Validate proposition spans against successful read provenance.
 
@@ -2733,22 +3065,134 @@ class AgentWorkflowEnv:
                     "has no typography-canonical lexical match in any successful "
                     "qa-retrieval read"
                 )
+        if not require_answer_binding:
+            return None
+
+        answer_slot = fields.get("answer_slot")
+        candidate = fields.get("candidate_answer")
+        if not isinstance(answer_slot, Mapping):
+            return "Reasoner field 'answer_slot' must be one structured object"
+        proposition_index = answer_slot.get("proposition_index")
+        answer_field = answer_slot.get("answer_field")
+        if (
+            isinstance(proposition_index, bool)
+            or not isinstance(proposition_index, int)
+            or proposition_index < 0
+            or proposition_index >= len(propositions)
+        ):
+            return (
+                "Reasoner answer_slot.proposition_index is outside "
+                "evidence_propositions"
+            )
+        selected = propositions[proposition_index]
+        if not isinstance(selected, Mapping):
+            return (
+                f"Reasoner evidence_propositions[{proposition_index}] must be "
+                "an object"
+            )
+        evidence_span = selected.get("evidence_span")
+        if not isinstance(evidence_span, str):
+            return (
+                f"Reasoner evidence_propositions[{proposition_index}]."
+                "evidence_span must be non-empty text"
+            )
+        if answer_field not in {"subject", "object_or_attribute_value"}:
+            return (
+                "Reasoner answer_slot.answer_field must be subject or "
+                "object_or_attribute_value"
+            )
+        if not isinstance(candidate, str) or selected.get(answer_field) != candidate:
+            return (
+                "Reasoner candidate_answer must copy the selected proposition "
+                "argument exactly"
+            )
+
+        canonical_span = _canonical_evidence_text(evidence_span)
+        for field_name in ("subject", "object_or_attribute_value"):
+            value = selected.get(field_name)
+            if not isinstance(value, str) or not value.strip():
+                return (
+                    f"Reasoner answer-bearing proposition {field_name!r} must "
+                    "be non-empty text"
+                )
+            # yes/no is inferred from a grounded relation rather than copied
+            # from a passage.  The proposition's remaining entity argument is
+            # still required to bind lexically to the successful read span.
+            if value.casefold() in {"yes", "no"}:
+                continue
+            if _canonical_evidence_text(value) not in canonical_span:
+                return (
+                    "Reasoner answer-bearing proposition has no deterministic "
+                    f"entity binding: field {field_name!r} value {value!r} does "
+                    "not occur in its evidence_span from a successful "
+                    "qa-retrieval read receipt"
+                )
         return None
+
+    @staticmethod
+    def _reports_knowledge_base_coverage_failure(value: object) -> bool:
+        """Recognize an explicit public coverage-failure artifact or receipt.
+
+        This is an operational diagnosis emitted by retrieval execution.  It
+        does not establish that the underlying corpus lacks the fact; it only
+        records that the bounded configured retrieval/database path did not
+        return admissible evidence.
+        """
+
+        if isinstance(value, str):
+            normalized = value.strip().casefold()
+            if "knowledge_base_coverage_failure" in normalized:
+                return True
+            if normalized.startswith(("{", "[")):
+                try:
+                    return AgentWorkflowEnv._reports_knowledge_base_coverage_failure(
+                        json.loads(value)
+                    )
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    return False
+            return False
+        if isinstance(value, Mapping):
+            for raw_key, item in value.items():
+                key = re.sub(r"[ -]+", "_", str(raw_key).strip().casefold())
+                if key == "knowledge_base_coverage_failure" and item is True:
+                    return True
+                if key in {
+                    "failure_category",
+                    "failure_type",
+                    "error_type",
+                    "public_error_code",
+                    "status",
+                } and isinstance(item, str):
+                    if item.strip().casefold() == "knowledge_base_coverage_failure":
+                        return True
+                if AgentWorkflowEnv._reports_knowledge_base_coverage_failure(item):
+                    return True
+            return False
+        if isinstance(value, (list, tuple)):
+            return any(
+                AgentWorkflowEnv._reports_knowledge_base_coverage_failure(item)
+                for item in value
+            )
+        return False
 
     def _semantic_protocol_issue(
         self,
         execution: AgentRuntimeResult,
     ) -> Optional[str]:
-        """Return the shared HotpotQA FINISH/read-only-admissibility gate."""
+        """Return the shared evidence-grounded QA FINISH admission gate."""
 
-        if self.semantic_protocol != _HOTPOTQA_SEMANTIC_PROTOCOL:
+        if not self._uses_semantic_lineage_protocol():
             return None
+        protocol_label = self._semantic_protocol_label()
         structure_issue = self._format_agent_issue_for(self._graph)
         if structure_issue is not None:
             return structure_issue
         formatter_id = self._graph.output_agent_id
         if formatter_id is None:
-            return "HotpotQA semantic protocol requires a selected Format Agent"
+            return (
+                f"{protocol_label} semantic protocol requires a selected "
+                "Format Agent"
+            )
         verifier_id = self._graph.directed_predecessors(formatter_id)[0]
         reasoner_ids = tuple(
             agent_id
@@ -2758,7 +3202,8 @@ class AgentWorkflowEnv:
         )
         if len(reasoner_ids) != 1:
             return (
-                "HotpotQA semantic protocol requires exactly one direct Reasoner "
+                f"{protocol_label} semantic protocol requires exactly one direct "
+                "Reasoner "
                 "semantic candidate for the Verifier"
             )
         reasoner_id = reasoner_ids[0]
@@ -2768,9 +3213,32 @@ class AgentWorkflowEnv:
             return f"Reasoner {reasoner_id!r} has no current semantic artifact"
         if verifier_artifact is None:
             return f"Verifier {verifier_id!r} has no current verification artifact"
-        reasoner_candidate, reasoner_issue = self._reasoner_candidate(
-            reasoner_artifact,
-            original_question=hotpotqa_question_scope(self._problem),
+        evidence_owner_ids = (
+            reasoner_id,
+            *self._graph.directed_predecessors(reasoner_id),
+        )
+        coverage_failure_agent_ids = tuple(
+            agent_id
+            for agent_id in evidence_owner_ids
+            if self._reports_knowledge_base_coverage_failure(
+                execution.outputs.get(agent_id)
+            )
+            or self._reports_knowledge_base_coverage_failure(
+                execution.output_metadata.get(agent_id)
+            )
+        )
+        if coverage_failure_agent_ids:
+            return (
+                "Reasoner lineage reported knowledge_base_coverage_failure from "
+                f"Agents {list(coverage_failure_agent_ids)!r}. This is an "
+                "operational retrieval/database coverage diagnosis for the "
+                "configured bounded Tool path, not a corpus-level oracle claim. "
+                "Preserve valid receipts and semantic artifacts, then repair or "
+                "augment retrieval before FINISH; do not guess an answer or "
+                "fabricate evidence"
+            )
+        reasoner_candidate, reasoner_issue = (
+            self._reasoner_candidate_for_current_dataset(reasoner_artifact)
         )
         if reasoner_issue is not None or reasoner_candidate is None:
             return (
@@ -2781,10 +3249,6 @@ class AgentWorkflowEnv:
         # Evidence may be read by the Reasoner itself or by a dedicated
         # Retriever routed into the Reasoner. It may not bypass semantic
         # alignment through a Retriever -> Verifier edge.
-        evidence_owner_ids = (
-            reasoner_id,
-            *self._graph.directed_predecessors(reasoner_id),
-        )
         read_evidence_texts: list[str] = []
         assert self.required_evidence_tool_id is not None
         for evidence_owner_id in evidence_owner_ids:
@@ -2813,6 +3277,9 @@ class AgentWorkflowEnv:
         provenance_issue = self._reasoner_evidence_provenance_issue(
             reasoner_artifact,
             read_evidence_texts,
+            require_answer_binding=(
+                self.semantic_protocol == _QA_SEMANTIC_PROTOCOL
+            ),
         )
         if provenance_issue is not None:
             return (
@@ -2919,6 +3386,10 @@ class AgentWorkflowEnv:
         react_exhausted = tuple(
             sorted(self._react_exhausted_agent_ids & current_ids)
         )
+        repair_exhausted = tuple(
+            sorted(self._repair_exhausted_agent_ids & current_ids)
+        )
+        mandatory_repair = self._mandatory_repair_agent_ids()
         diagnosed_unusable = tuple(
             sorted(self._diagnosed_unusable_agent_ids & current_ids)
         )
@@ -2973,6 +3444,8 @@ class AgentWorkflowEnv:
             ),
             "failed_agent_ids": list(failed),
             "react_turn_exhausted_agent_ids": list(react_exhausted),
+            "repair_exhausted_agent_ids": list(repair_exhausted),
+            "mandatory_repair_agent_ids": list(mandatory_repair),
             "diagnosed_unusable_agent_ids": list(diagnosed_unusable),
             "unresolved_dirty_agent_ids": list(self.unresolved_dirty_agent_ids),
             "terminal_unreachable_agent_ids": list(terminal_unreachable),
@@ -2992,7 +3465,7 @@ class AgentWorkflowEnv:
     def _active_semantic_lineage_ids(self) -> Tuple[str, ...]:
         """Return the current verified Reasoner→Verifier→Formatter lineage."""
 
-        if self.semantic_protocol != _HOTPOTQA_SEMANTIC_PROTOCOL:
+        if not self._uses_semantic_lineage_protocol():
             return ()
         formatter_id = self._graph.output_agent_id
         if formatter_id is None or not self._graph.has_node(formatter_id):
@@ -3035,23 +3508,16 @@ class AgentWorkflowEnv:
     ) -> bool:
         """Require a valid current semantic artifact before replacement takeover."""
 
-        if self.semantic_protocol != _HOTPOTQA_SEMANTIC_PROTOCOL:
+        if not self._uses_semantic_lineage_protocol():
             return True
         artifact = self._progressive_outputs.get(agent_id)
         if not isinstance(artifact, str) or not artifact.strip():
             return False
         if role_family == "reasoner":
-            candidate, issue = self._reasoner_candidate(
-                artifact,
-                original_question=hotpotqa_question_scope(self._problem),
+            candidate, issue = self._reasoner_candidate_for_current_dataset(
+                artifact
             )
             if issue is not None or candidate is None:
-                return False
-            fields, _ = self._structured_semantic_fields(
-                artifact,
-                _REASONER_SEMANTIC_FIELDS,
-            )
-            if fields is None:
                 return False
             evidence_texts: list[str] = []
             assert self.required_evidence_tool_id is not None
@@ -3074,21 +3540,13 @@ class AgentWorkflowEnv:
                     )
                     if evidence_text is not None:
                         evidence_texts.append(evidence_text)
-            propositions = fields.get("evidence_propositions")
-            return bool(evidence_texts) and isinstance(
-                propositions,
-                (list, tuple),
-            ) and all(
-                isinstance(proposition, Mapping)
-                and isinstance(proposition.get("evidence_span"), str)
-                and any(
-                    _evidence_span_matches_read(
-                        proposition["evidence_span"], evidence_text
-                    )
-                    for evidence_text in evidence_texts
-                )
-                for proposition in propositions
-            )
+            return bool(evidence_texts) and self._reasoner_evidence_provenance_issue(
+                artifact,
+                evidence_texts,
+                require_answer_binding=(
+                    self.semantic_protocol == _QA_SEMANTIC_PROTOCOL
+                ),
+            ) is None
         if role_family == "verifier":
             verifier_candidate, verifier_issue = self._verifier_candidate(artifact)
             if verifier_issue is not None or verifier_candidate is None:
@@ -3104,9 +3562,8 @@ class AgentWorkflowEnv:
             if len(reasoner_ids) != 1:
                 return False
             reasoner_artifact = self._progressive_outputs.get(reasoner_ids[0], "")
-            reasoner_candidate, reasoner_issue = self._reasoner_candidate(
-                reasoner_artifact,
-                original_question=hotpotqa_question_scope(self._problem),
+            reasoner_candidate, reasoner_issue = (
+                self._reasoner_candidate_for_current_dataset(reasoner_artifact)
             )
             return (
                 reasoner_issue is None
@@ -3202,7 +3659,7 @@ class AgentWorkflowEnv:
         """Protect a verified semantic lineage while recovery remains active."""
 
         if (
-            self.semantic_protocol != _HOTPOTQA_SEMANTIC_PROTOCOL
+            not self._uses_semantic_lineage_protocol()
             or self.recovery_policy != _PRESERVE_REPAIR_RECOVERY_POLICY
             or action.action_type is AgentActionType.FINISH
         ):
@@ -3217,6 +3674,9 @@ class AgentWorkflowEnv:
                 "other Canvas edits; mandatory_repair_agent_ids="
                 f"{list(mandatory_repair_ids)!r}"
             )
+        provider_repair_issue = self._provider_repair_admission_issue(action)
+        if provider_repair_issue is not None:
+            return provider_repair_issue
         if action.action_type is AgentActionType.ADD_SUBGRAPH:
             admitted_roles = set(self._admissible_augmentation_role_families())
             sampled_roles = [
@@ -3296,6 +3756,12 @@ class AgentWorkflowEnv:
             normalized,
         )
         status_code = None if status_match is None else int(status_match.group(1))
+        if "knowledge_base_coverage_failure" in normalized:
+            return (
+                "knowledge_base_coverage_failure",
+                "repair_retrieval_or_database_coverage",
+                status_code,
+            )
         if (
             "openaicompatiblegatewayerror" in normalized
             or "provider request failed" in normalized
@@ -3439,7 +3905,26 @@ class AgentWorkflowEnv:
             }
             if status_code is not None:
                 item["http_status"] = status_code
-            if category == "provider_request_failure" and model_id is not None:
+            if category == "knowledge_base_coverage_failure":
+                item["operational_diagnosis"] = {
+                    "domain": "retrieval_or_database_coverage",
+                    "corpus_level_oracle_claim": False,
+                }
+                item["preferred_repair"] = {
+                    "action_order": [
+                        "modify_agent",
+                        "add_subgraph",
+                        "set_relation",
+                    ],
+                    "agent_id": record.agent_id,
+                    "preserve_fields": [
+                        "existing_tool_receipts",
+                        "valid_evidence",
+                        "semantic_answer",
+                        "relations",
+                    ],
+                }
+            elif category == "provider_request_failure" and model_id is not None:
                 item["preferred_repair"] = {
                     "action": "modify_agent",
                     "agent_id": record.agent_id,
