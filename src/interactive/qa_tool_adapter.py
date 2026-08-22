@@ -144,6 +144,20 @@ _CALENDAR_MONTH_PATTERN = (
     r"oct|nov|dec)"
 )
 
+_QUESTION_ANCHOR_WH_WORDS = frozenset(
+    {
+        "what",
+        "which",
+        "who",
+        "whom",
+        "whose",
+        "where",
+        "when",
+        "why",
+        "how",
+    }
+)
+
 
 def _strong_answer_surface_type(surface: str) -> str | None:
     """Classify only unambiguous answer surfaces without external knowledge.
@@ -676,6 +690,18 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         )
         for observation in visible:
             public_error_code = observation.get("public_error_code")
+            if isinstance(public_error_code, str) and (
+                "Evidence Retriever evidence_span has no typography-canonical "
+                "lexical match"
+            ) in public_error_code:
+                observation["repair_instruction"] = (
+                    "Preserve the cited passage_id and all successful Tool receipts. "
+                    "Copy one contiguous exact evidence_span from that same public "
+                    "qa-retrieval read receipt, allowing only typography/whitespace "
+                    "canonicalization; do not paraphrase, concatenate spans, search, "
+                    "or read again."
+                )
+                continue
             if public_error_code == "qa_retrieval_duplicate_normalized_query":
                 observation["repair_instruction"] = (
                     "Preserve all successful Tool receipts and issue a "
@@ -1067,16 +1093,20 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                                     "question_surface": {
                                         **non_empty_text,
                                         "description": (
-                                            "A concise entity mention copied from "
-                                            "the original question, not the whole "
-                                            "question."
+                                            "The concise question-side entity or "
+                                            "event anchor copied from the original "
+                                            "question. It must not be a wh-word or "
+                                            "wh-phrase, the whole question, or a "
+                                            "candidate/final answer."
                                         ),
                                     },
                                     "evidence_surface": {
                                         **non_empty_text,
                                         "description": (
-                                            "A concise entity mention copied from "
-                                            "evidence_span, not the whole sentence."
+                                            "The coreferential surface of the same "
+                                            "question-side entity or event anchor, "
+                                            "copied from the receipt-grounded exact "
+                                            "evidence_span, not the whole span."
                                         ),
                                     },
                                 },
@@ -1094,9 +1124,11 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                                 "const": answer_type,
                                 "description": (
                                     "The question-only answer type returned by "
-                                    "qa_answer_type_constraint; this constrains "
-                                    "the open relation argument but is not an "
-                                    "answer selection."
+                                    "qa_answer_type_constraint. When the anchor "
+                                    "binds exactly one binary proposition argument, "
+                                    "it checks the other argument without selecting "
+                                    "an answer; answer-slot binding belongs to the "
+                                    "Reasoner."
                                 ),
                             },
                             "evidence_proposition": {
@@ -1670,11 +1702,22 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     " As the Evidence Retriever, arguments.value must contain "
                     "exactly question_scope, entity_identity, target_relation, "
                     "answer_type_constraint, evidence_proposition, evidence_span, "
-                    "and passage_id. entity_identity contains "
-                    "exactly question_surface and evidence_surface. Cite one "
-                    "successful qa-retrieval read receipt and copy an exact "
-                    "evidence span that binds the entity, exact predicate, and "
-                    "the open relation argument matching answer_type_constraint. "
+                    "and passage_id. entity_identity contains exactly "
+                    "question_surface and evidence_surface. question_surface is "
+                    "the question-side entity/event anchor copied from the original "
+                    "question, never a wh-word/wh-phrase, the whole question, or an "
+                    "answer. evidence_surface is the coreferential surface of that "
+                    "same anchor copied from the receipt-grounded exact evidence_span. "
+                    "Cite one successful qa-retrieval read receipt and copy one exact "
+                    "evidence span containing the anchor surface, exact predicate, and "
+                    "proposition surfaces. A different question/evidence surface may "
+                    "use the same read receipt's passage title for explicit alias "
+                    "binding, but both surfaces must be supported by that receipt's "
+                    "title/evidence_span. The anchor need not occupy a binary "
+                    "proposition argument; the Reasoner owns answer-slot binding. If "
+                    "the anchor occupies exactly one argument, the other argument must "
+                    "match the question-only answer_type_constraint; it must not occupy "
+                    "both arguments. "
                     "evidence_proposition records only receipt-grounded subject, "
                     "predicate, and object_or_attribute_value surfaces. Do not "
                     "select or emit candidate_answer, answer_slot, or final_answer."
@@ -1931,6 +1974,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         assert isinstance(proposition_object, str)
 
         cited_read_text: str | None = None
+        cited_read_title: str | None = None
         for receipt in tool_receipts:
             if not AgentWorkflowEnv._successful_read_receipt(
                 receipt,
@@ -1965,6 +2009,9 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 QA_RETRIEVAL_TOOL_ID,
             )
             if cited_read_text is not None:
+                raw_title = passage.get("title")
+                if isinstance(raw_title, str) and raw_title.strip():
+                    cited_read_title = raw_title.strip()
                 break
         if cited_read_text is None:
             return (
@@ -1979,6 +2026,11 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
 
         canonical_question = _canonical_evidence_text(original_question)
         canonical_span = _canonical_evidence_text(evidence_span)
+        canonical_title = (
+            _canonical_evidence_text(cited_read_title)
+            if cited_read_title is not None
+            else ""
+        )
         canonical_question_surface = _canonical_evidence_text(question_surface)
         canonical_evidence_surface = _canonical_evidence_text(evidence_surface)
         canonical_relation = _canonical_evidence_text(target_relation)
@@ -1999,6 +2051,19 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             return (
                 "Evidence Retriever entity_identity.question_surface must be a "
                 "concise entity mention, not the whole original question"
+            )
+        question_anchor_tokens = re.findall(
+            r"\w+",
+            question_surface.casefold(),
+            flags=re.UNICODE,
+        )
+        if (
+            question_anchor_tokens
+            and question_anchor_tokens[0] in _QUESTION_ANCHOR_WH_WORDS
+        ):
+            return (
+                "Evidence Retriever entity_identity.question_surface must be a "
+                "question-side entity/event anchor, not a wh-word or wh-phrase"
             )
         if canonical_evidence_surface == canonical_span:
             return (
@@ -2032,29 +2097,40 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
 
         entity_in_subject = canonical_evidence_surface in canonical_subject
         entity_in_object = canonical_evidence_surface in canonical_object
-        if entity_in_subject == entity_in_object:
+        if entity_in_subject and entity_in_object:
             return (
-                "Evidence Retriever evidence proposition must bind "
-                "entity_identity.evidence_surface to exactly one relation argument"
+                "Evidence Retriever evidence proposition must not bind "
+                "entity_identity.evidence_surface to both relation arguments"
             )
-        open_argument = (
-            proposition_object if entity_in_subject else proposition_subject
-        )
-        answer_type_issue = _answer_surface_type_issue(
-            expected_type=expected_answer_type,
-            surface=open_argument,
-        )
-        if answer_type_issue is not None:
-            return answer_type_issue
+        if entity_in_subject != entity_in_object:
+            open_argument = (
+                proposition_object if entity_in_subject else proposition_subject
+            )
+            answer_type_issue = _answer_surface_type_issue(
+                expected_type=expected_answer_type,
+                surface=open_argument,
+            )
+            if answer_type_issue is not None:
+                return answer_type_issue
 
         if (
             canonical_question_surface != canonical_evidence_surface
             and canonical_question_surface not in canonical_span
         ):
-            return (
-                "Evidence Retriever alias identity lacks an explicit binding "
-                "between question_surface and evidence_surface in the cited read"
+            canonical_receipt_identity_surface = " ".join(
+                part for part in (canonical_title, canonical_span) if part
             )
+            if (
+                canonical_question_surface
+                not in canonical_receipt_identity_surface
+                or canonical_evidence_surface
+                not in canonical_receipt_identity_surface
+            ):
+                return (
+                    "Evidence Retriever alias identity lacks an explicit binding "
+                    "between question_surface and evidence_surface in the cited "
+                    "read receipt title/evidence_span"
+                )
         return None
 
     def _completion_error(
@@ -2165,6 +2241,10 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     ),
                     "Evidence Retriever entity_identity must contain",
                     "Evidence Retriever entity surfaces",
+                    (
+                        "Evidence Retriever evidence_span has no "
+                        "typography-canonical lexical match"
+                    ),
                     "Evidence Retriever entity_identity.question_surface",
                     "Evidence Retriever entity_identity.evidence_surface",
                     "Evidence Retriever target_relation",
@@ -2174,7 +2254,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     "Evidence Retriever entity surface must not be",
                     "Evidence Retriever evidence_proposition.",
                     "Evidence Retriever evidence_proposition.predicate",
-                    "Evidence Retriever evidence proposition must bind",
+                    "Evidence Retriever evidence proposition must not bind",
                 )
             )
             if retriever_protocol == "hotpotqa_verified_answer_slot_v1":

@@ -400,8 +400,8 @@ evidence to the requested birthplace relation.  Those artifacts were therefore
 false-positive evidence, not a valid downstream takeover, and cannot authorize
 deletion of the failed responsibility or terminal admission.
 
-Recovery revision r12 is prepared as a minimal shared-Runtime correction, not
-as a new workflow.  It retains FlowSteer's execute-on-edit transaction and
+Recovery revision r12 is a minimal shared-Runtime correction, not a new
+workflow.  It retains FlowSteer's execute-on-edit transaction and
 permits replacement takeover only after a successful same-role downstream
 artifact has actually executed; deletion remains unavailable until that
 takeover exists.  SkillFlow's public Tool Action--Observation entries and
@@ -410,9 +410,53 @@ Retriever uses an answer-free `evidence_proposition` with the same proposition
 shape already required from the Reasoner, and constrains the proposition object
 with the question-only `qa_answer_type_constraint`; it does not own or receive
 an answer.  A sibling fail-fast `CancelledError` is treated as orchestration
-cancellation rather than attributed as an Agent execution failure.  These r12
-changes are statically configured under isolated condition, Tool-version and
-artifact paths; they are **not yet live-validated**.
+cancellation rather than attributed as an Agent execution failure.
+
+### r12 live evidence and r13 recovery preparation
+
+The r12 main Stable Zero canary passed `2/2` legal explicit-FINISH lineages.
+`triviaqa:tc_1` scored official EM/F1 `1.0/1.0` and `triviaqa:tc_3`
+scored `0.0/0.5`; the latter still finished explicitly with a receipt-grounded
+surface and remains an evaluator-only accepted-answer canonicalization or
+granularity mismatch.  These two development tasks are a gate result, not a
+fixed-128 accuracy estimate.
+
+The required isolated r12 `tc_9/tc_10` regression passed `0/2`.  Both tasks
+ended at `max_rounds` with `final_answer=null` and no Env-owned valid evidence
+lineage.  A Reasoner, Verifier or Formatter emitting a plausible answer string
+did not replace the required Tool-receipt-grounded
+`Evidence Retriever -> Reasoner -> Verifier -> Formatter` lineage.  The
+fixed-128 run was therefore not started.
+
+The lossless r12 trajectories expose three recovery-boundary defects.  First,
+successful reads could not be materialized as a valid Retriever artifact when
+the question entity was a contextual event mention rather than one argument
+of the answer-bearing proposition.  Second, relation edits oscillated around a
+failed auxiliary ingress instead of establishing one executable replacement
+path.  Third, a measured `repair_exhausted` Retriever remained in the live
+`modify_agent` target domain and consumed the remaining Canvas rounds.  These
+are structured-artifact and orchestration defects, not evidence that a correct
+string may bypass provenance or terminal validation.
+
+Recovery revision r13 is prepared as a minimal continuation of the same shared
+architecture.  It keeps FlowSteer's state-conditioned action mask,
+authoritative admission and execute-on-edit transaction; preserves SkillFlow's
+StructuredAction and public Tool continuation; and adds only the necessary
+contextual-entity adaptation required to represent an evidence proposition
+whose question entity provides scope rather than a proposition argument.  The
+main and isolated r13 conditions, artifact roots and report paths are distinct,
+and the Tool contract is versioned as
+`skillflow.qa-retrieval.factual-semantic-retry.v6`.  The ordered fixed-128
+selection, isolated `triviaqa:tc_9`/`triviaqa:tc_10` IDs and question-only
+Direct reuse source are unchanged.  Training, GRPO, backward, optimizer
+updates, policy synchronization, Skills and exploration remain disabled.
+Revision r13 is **prepared but not live-validated**.
+
+Static integration for r13 passed the complete unit suite (`800 passed`,
+`142 subtests passed`) and both prepare-only freezes.  The main freeze retains
+the ordered 128-task selection (`triviaqa:tc_1` through `triviaqa:tc_223`), and
+the isolated freeze retains exactly `triviaqa:tc_9` then `triviaqa:tc_10`;
+both use the unchanged 128-record question-only Direct prediction source.
 
 ### Stable Zero status
 
@@ -434,9 +478,13 @@ subtests and both frozen prepare-only checks, then failed its live main canary
 `1/2`: `tc_1` returned `Harry Sinclair Lewis` at EM/F1 `1.0/1.0`, while
 `tc_3` ended at `max_rounds` with a null answer.  Its isolated `tc_9/tc_10`
 regression and fixed-128 run were therefore not started.  Recovery revision
-r12 is a static, isolated preparation and has not yet run a live canary.
-Formal fixed-128 v2 EM/F1 remain pending.  No score is inferred from unit
-tests, a two-task canary, an incomplete run, or the previous architecture.
+r12 passed its live main Stable Zero canary `2/2` (`tc_1` EM/F1 `1.0/1.0`;
+`tc_3` EM/F1 `0.0/0.5`, explicit FINISH), then failed the isolated
+`tc_9/tc_10` regression `0/2` with both tasks at `max_rounds` and null answers.
+The r12 fixed-128 run was not started.  Recovery revision r13 is prepared under
+new condition, Tool, artifact and report versions but has not run a live
+canary.  Formal fixed-128 v2 EM/F1 remain pending.  No score is inferred from
+unit tests, a two-task canary, an incomplete run, or the previous architecture.
 
 ## Historical comparison condition
 

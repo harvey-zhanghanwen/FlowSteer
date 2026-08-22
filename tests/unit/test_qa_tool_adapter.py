@@ -2481,9 +2481,21 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         for answer_field in ("candidate_answer", "answer_slot", "final_answer"):
             self.assertNotIn(answer_field, artifact_schema["properties"])
         self.assertIn(
-            "not the whole question",
+            "question-side entity or event anchor",
             artifact_schema["properties"]["entity_identity"]["properties"][
                 "question_surface"
+            ]["description"],
+        )
+        self.assertIn(
+            "must not be a wh-word or wh-phrase",
+            artifact_schema["properties"]["entity_identity"]["properties"][
+                "question_surface"
+            ]["description"],
+        )
+        self.assertIn(
+            "coreferential surface of the same",
+            artifact_schema["properties"]["entity_identity"]["properties"][
+                "evidence_surface"
             ]["description"],
         )
         self.assertIn(
@@ -2525,7 +2537,152 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             "Do not select or emit candidate_answer, answer_slot, or final_answer",
             completion_contract,
         )
-        self.assertIn("open relation argument", completion_contract)
+        self.assertIn("question-side entity/event anchor", completion_contract)
+        self.assertIn("never a wh-word/wh-phrase", completion_contract)
+        self.assertIn("Reasoner owns answer-slot binding", completion_contract)
+        self.assertIn("passage title for explicit alias binding", completion_contract)
+
+    def test_evidence_retriever_accepts_david_soul_title_alias_binding(
+        self,
+    ) -> None:
+        question = "Which city does David Soul come from?"
+        evidence = "Soul was born in Chicago, Illinois."
+        artifact = {
+            "question_scope": question,
+            "entity_identity": {
+                "question_surface": "David Soul",
+                "evidence_surface": "Soul",
+            },
+            "target_relation": "was born in",
+            "answer_type_constraint": "entity",
+            "evidence_proposition": {
+                "subject": "Soul",
+                "predicate": "was born in",
+                "object_or_attribute_value": "Chicago, Illinois",
+            },
+            "evidence_span": evidence,
+            "passage_id": "david-soul",
+        }
+        receipt = {
+            "tool_id": QA_RETRIEVAL_TOOL_ID,
+            "tool_version": "frozen-index-v1",
+            "request": {
+                "action": "read",
+                "arguments": {"passage_id": "david-soul"},
+            },
+            "result": {
+                "value": {
+                    "operation": "read",
+                    "passage_id": "david-soul",
+                    "passage": {
+                        "passage_id": "david-soul",
+                        "title": "David Soul",
+                        "text": evidence,
+                    },
+                },
+                "completed": True,
+            },
+            "error_type": None,
+        }
+
+        issue = QARetrievalReactExecutionAdapter._evidence_retriever_completion_issue
+        self.assertIsNone(
+            issue(
+                original_question=question,
+                artifact=json.dumps(artifact),
+                tool_receipts=[receipt],
+            )
+        )
+
+        wh_anchor = json.loads(json.dumps(artifact))
+        wh_anchor["entity_identity"]["question_surface"] = "Which city"
+        detail = issue(
+            original_question=question,
+            artifact=json.dumps(wh_anchor),
+            tool_receipts=[receipt],
+        )
+        self.assertIsNotNone(detail)
+        assert detail is not None
+        self.assertIn("not a wh-word or wh-phrase", detail)
+
+    def test_evidence_retriever_allows_open_super_bowl_event_anchor(
+        self,
+    ) -> None:
+        question = "Who won Super Bowl XX?"
+        evidence = (
+            "Super Bowl XX matched the Chicago Bears and New England Patriots. "
+            "The Bears defeated the Patriots by 46-10."
+        )
+        artifact = {
+            "question_scope": question,
+            "entity_identity": {
+                "question_surface": "Super Bowl XX",
+                "evidence_surface": "Super Bowl XX",
+            },
+            "target_relation": "defeated",
+            "answer_type_constraint": "entity",
+            "evidence_proposition": {
+                "subject": "The Bears",
+                "predicate": "defeated",
+                "object_or_attribute_value": "the Patriots",
+            },
+            "evidence_span": evidence,
+            "passage_id": "super-bowl-xx",
+        }
+        receipt = {
+            "tool_id": QA_RETRIEVAL_TOOL_ID,
+            "tool_version": "frozen-index-v1",
+            "request": {
+                "action": "read",
+                "arguments": {"passage_id": "super-bowl-xx"},
+            },
+            "result": {
+                "value": {
+                    "operation": "read",
+                    "passage_id": "super-bowl-xx",
+                    "passage": {
+                        "passage_id": "super-bowl-xx",
+                        "title": "Super Bowl XX",
+                        "text": evidence,
+                    },
+                },
+                "completed": True,
+            },
+            "error_type": None,
+        }
+
+        issue = QARetrievalReactExecutionAdapter._evidence_retriever_completion_issue
+        self.assertIsNone(
+            issue(
+                original_question=question,
+                artifact=json.dumps(artifact),
+                tool_receipts=[receipt],
+            )
+        )
+        for answer_field in ("candidate_answer", "answer_slot", "final_answer"):
+            self.assertNotIn(answer_field, artifact)
+
+        both_arguments = json.loads(json.dumps(artifact))
+        both_arguments["target_relation"] = "featured"
+        both_arguments["evidence_proposition"] = {
+            "subject": "Super Bowl XX",
+            "predicate": "featured",
+            "object_or_attribute_value": "Super Bowl XX",
+        }
+        both_arguments["evidence_span"] = "Super Bowl XX featured Super Bowl XX."
+        both_receipt = json.loads(json.dumps(receipt))
+        both_receipt["result"]["value"]["passage"]["text"] = both_arguments[
+            "evidence_span"
+        ]
+        detail = issue(
+            original_question=question,
+            artifact=json.dumps(both_arguments),
+            tool_receipts=[both_receipt],
+        )
+        self.assertIsNotNone(detail)
+        assert detail is not None
+        self.assertIn("must not bind", detail)
+        self.assertIn("both relation arguments", detail)
 
     async def test_evidence_retriever_completes_one_grounded_read_artifact(
         self,
@@ -2620,6 +2777,116 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([("David Soul origin city", 5)], index.search_calls)
         self.assertEqual(["p1"], index.read_calls)
         self.assertEqual(2, response.metadata["tool_calls"])
+
+    async def test_evidence_span_lexical_mismatch_repairs_on_preserved_read(
+        self,
+    ) -> None:
+        question = "Who won Super Bowl XX?"
+        evidence = (
+            "Super Bowl XX matched the Chicago Bears and New England Patriots. "
+            "The Bears defeated the Patriots by 46-10."
+        )
+        valid_artifact = {
+            "question_scope": question,
+            "entity_identity": {
+                "question_surface": "Super Bowl XX",
+                "evidence_surface": "Super Bowl XX",
+            },
+            "target_relation": "defeated",
+            "answer_type_constraint": "entity",
+            "evidence_proposition": {
+                "subject": "The Bears",
+                "predicate": "defeated",
+                "object_or_attribute_value": "the Patriots",
+            },
+            "evidence_span": evidence,
+            "passage_id": "p1",
+        }
+        invalid_artifact = {
+            **valid_artifact,
+            "evidence_span": (
+                "Super Bowl XX was won when the Bears beat the Patriots 46-10."
+            ),
+        }
+
+        def action(name: str, arguments: object) -> str:
+            return json.dumps(
+                {
+                    "arguments": arguments,
+                    "kind": "complete" if name == "complete" else "tool",
+                    "name": name,
+                    "resource_id": (
+                        None if name == "complete" else QA_RETRIEVAL_TOOL_ID
+                    ),
+                    "skill_id": None,
+                }
+            )
+
+        class SuperBowlIndex(FakeIndex):
+            def read(self, passage_id: str) -> FakePassage:
+                self.read_calls.append(passage_id)
+                return FakePassage(passage_id, "d1", "Super Bowl XX", evidence)
+
+        class SequenceGateway:
+            def __init__(self) -> None:
+                self.requests: list[AgentRequest] = []
+                self.outputs = [
+                    action("search", {"query": "Super Bowl XX winner", "limit": 5}),
+                    action("read", {"passage_id": "p1"}),
+                    action("complete", {"value": invalid_artifact}),
+                    action("complete", {"value": valid_artifact}),
+                ]
+
+            async def generate(self, request: AgentRequest) -> AgentResponse:
+                self.requests.append(request)
+                return AgentResponse(self.outputs.pop(0))
+
+        index = SuperBowlIndex()
+        gateway = SequenceGateway()
+        response = await QARetrievalReactExecutionAdapter(
+            gateway=gateway,
+            tool_registry=build_qa_tool_registry(index),
+            max_turns=4,
+            max_tool_calls=10,
+            task_type="factual_qa",
+            completion_policy="required_evidence",
+        ).execute(
+            AgentRequest(
+                request_id="trivia:super-bowl-span-repair",
+                run_id="trivia",
+                graph_revision=1,
+                problem=question,
+                agent=AgentNode(
+                    "evidence_retriever",
+                    "model",
+                    "retrieve receipt-grounded entity and relation evidence",
+                    role_family="evidence_retriever",
+                    allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                    execution_mode="react",
+                ),
+                model=ModelSpec("model", "provider"),
+                provider=ProviderSpec("provider", kind="test"),
+                phase=ExecutionPhase.SINGLE,
+                semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            )
+        )
+
+        self.assertEqual([("Super Bowl XX winner", 5)], index.search_calls)
+        self.assertEqual(["p1"], index.read_calls)
+        self.assertEqual(2, response.metadata["tool_calls"])
+        lexical_feedback = response.metadata["react_trace"][2][
+            "public_error_code"
+        ]
+        self.assertTrue(lexical_feedback.startswith("qa_semantic_artifact_invalid:"))
+        self.assertIn("typography-canonical lexical match", lexical_feedback)
+        self.assertNotIn("knowledge_base_coverage_failure", lexical_feedback)
+        repair_contract = gateway.requests[3].agent.contract
+        self.assertIn("Preserve the cited passage_id", repair_contract)
+        self.assertIn("do not paraphrase", repair_contract)
+        self.assertIn(
+            "- none\nCurrently admissible completion schema",
+            repair_contract,
+        )
 
     async def test_evidence_retriever_repairs_relation_surface_on_preserved_read(
         self,

@@ -532,6 +532,21 @@ class AgentWorkflowEnv:
             ):
                 return (AgentActionType.SET_RELATION.value,)
 
+        terminal_reachability_candidates = (
+            self._terminal_reachability_relation_candidates()
+        )
+        if (
+            terminal_reachability_candidates
+            and self._model_admissible_relation_candidates()
+            and AgentActionType.SET_RELATION.value
+            in self._allowed_action_type_set
+        ):
+            # FlowSteer's live action mask must expose only an edit that makes
+            # progress on the current graph-validation diagnosis.  Falling
+            # through to the generic relation domain here permits unrelated
+            # rewrites while an orphan recovery branch remains unresolved.
+            return (AgentActionType.SET_RELATION.value,)
+
         required_relation_candidates = (
             self._required_semantic_relation_candidates()
         )
@@ -705,12 +720,21 @@ class AgentWorkflowEnv:
         )
         if routing_candidates:
             return routing_candidates
+        terminal_reachability_candidates = (
+            self._terminal_reachability_relation_candidates(all_candidates)
+        )
+        if terminal_reachability_candidates:
+            return terminal_reachability_candidates
         required_candidates = self._required_semantic_relation_candidates(
             all_candidates
         )
         if required_candidates:
             return required_candidates
-        return all_candidates
+        return [
+            item
+            for item in all_candidates
+            if not self._relation_reintroduces_failed_auxiliary_ingress(item)
+        ]
 
     @staticmethod
     def _relation_action_matches_candidate(
@@ -823,7 +847,22 @@ class AgentWorkflowEnv:
         """Route one auxiliary artifact into a Tool-plan-exhausted Reasoner."""
 
         exhausted_reasoner_ids = self._repair_exhausted_reasoner_ids()
-        auxiliary_ids = self._recovery_auxiliary_agent_ids()
+        auxiliary_ids = tuple(
+            auxiliary_id
+            for auxiliary_id in self._recovery_auxiliary_agent_ids()
+            if auxiliary_id not in self._failed_agent_ids
+            and auxiliary_id not in self._repair_exhausted_agent_ids
+            and auxiliary_id not in self._unresolved_dirty_agents
+            and (
+                not self._has_successful_artifact(auxiliary_id)
+                or self._semantic_replacement_has_valid_artifact(
+                    auxiliary_id,
+                    (
+                        self._graph.get_node(auxiliary_id).role_family or ""
+                    ).casefold(),
+                )
+            )
+        )
         unrouted_auxiliary_ids = tuple(
             auxiliary_id
             for auxiliary_id in auxiliary_ids
@@ -861,6 +900,45 @@ class AgentWorkflowEnv:
                 for auxiliary_id in unrouted_auxiliary_ids
                 for reasoner_id in exhausted_reasoner_ids
             ):
+                result.append(dict(item))
+        return result
+
+    def _terminal_reachability_relation_candidates(
+        self,
+        candidates: Optional[Sequence[Mapping[str, object]]] = None,
+    ) -> list[dict[str, object]]:
+        """Return only relation edits that strictly reduce unreachable Agents."""
+
+        current_unreachable = set(self._terminal_unreachable_agent_ids())
+        if not current_unreachable:
+            return []
+        source_candidates = (
+            self._all_model_admissible_relation_candidates()
+            if candidates is None
+            else [dict(item) for item in candidates]
+        )
+        result: list[dict[str, object]] = []
+        for item in source_candidates:
+            if self._relation_reintroduces_failed_auxiliary_ingress(item):
+                continue
+            candidate = self._graph.fork()
+            candidate.set_relation(
+                str(item["source_id"]),
+                str(item["target_id"]),
+                bool(item["source_to_target"]),
+                bool(item["target_to_source"]),
+            )
+            candidate_validation = candidate.validate(
+                self.model_registry,
+                require_complete=True,
+            )
+            candidate_unreachable = {
+                agent_id
+                for issue in candidate_validation.issues
+                if issue.code == "cannot_reach_output"
+                for agent_id in issue.agent_ids
+            }
+            if candidate_unreachable < current_unreachable:
                 result.append(dict(item))
         return result
 
@@ -945,6 +1023,41 @@ class AgentWorkflowEnv:
                 result.append(dict(item))
         return result
 
+    def _relation_reintroduces_failed_auxiliary_ingress(
+        self,
+        item: Mapping[str, object],
+    ) -> bool:
+        """Reject reattaching an unavailable helper to an exhausted Reasoner."""
+
+        exhausted_reasoner_ids = self._repair_exhausted_reasoner_ids()
+        if not exhausted_reasoner_ids:
+            return False
+        unavailable_auxiliary_ids = {
+            auxiliary_id
+            for auxiliary_id in self._recovery_auxiliary_agent_ids()
+            if auxiliary_id in self._failed_agent_ids
+            or auxiliary_id in self._repair_exhausted_agent_ids
+            or auxiliary_id in self._unresolved_dirty_agents
+            or not self._has_successful_artifact(auxiliary_id)
+        }
+        if not unavailable_auxiliary_ids:
+            return False
+        candidate = self._graph.fork()
+        candidate.set_relation(
+            str(item["source_id"]),
+            str(item["target_id"]),
+            bool(item["source_to_target"]),
+            bool(item["target_to_source"]),
+        )
+        return any(
+            reasoner_id
+            not in self._directed_successors(self._graph, auxiliary_id)
+            and reasoner_id
+            in self._directed_successors(candidate, auxiliary_id)
+            for auxiliary_id in unavailable_auxiliary_ids
+            for reasoner_id in exhausted_reasoner_ids
+        )
+
     def _model_admissible_output_agent_ids(self) -> Tuple[str, ...]:
         """Return Output targets accepted by the same prospective Canvas gate."""
 
@@ -989,7 +1102,9 @@ class AgentWorkflowEnv:
         mandatory_repair_ids = self._mandatory_repair_agent_ids()
         if mandatory_repair_ids:
             return mandatory_repair_ids
-        measured_failed = self._failed_agent_ids.intersection(node_ids)
+        measured_failed = (
+            self._failed_agent_ids - self._repair_exhausted_agent_ids
+        ).intersection(node_ids)
         if measured_failed:
             # AgentRuntime distinguishes the Agent that raised a typed failure
             # from blocked/pending descendants.  FlowSteer's next Canvas edit
@@ -999,12 +1114,16 @@ class AgentWorkflowEnv:
                 node_id for node_id in node_ids if node_id in measured_failed
             )
         protected = set(self._active_semantic_lineage_ids())
-        responsible = set(self._unresolved_dirty_agents)
+        responsible = (
+            set(self._unresolved_dirty_agents)
+            - self._repair_exhausted_agent_ids
+        )
         responsible.update(self._terminal_unreachable_agent_ids())
         return tuple(
             node_id
             for node_id in node_ids
-            if node_id not in protected or node_id in responsible
+            if node_id not in self._repair_exhausted_agent_ids
+            and (node_id not in protected or node_id in responsible)
         )
 
     def _provider_repair_admission_issue(
@@ -1205,6 +1324,13 @@ class AgentWorkflowEnv:
         """Project the exact live ADD role domain used by Canvas admission."""
 
         admitted = self._admissible_augmentation_role_families()
+        replacement_domains = (
+            self._repair_exhausted_auxiliary_replacement_domains()
+        )
+        if replacement_domains:
+            return tuple(
+                role for role in admitted if role in replacement_domains
+            )
         missing = self._missing_semantic_role_families()
         if (
             self._repair_exhausted_reasoner_ids()
@@ -1219,6 +1345,30 @@ class AgentWorkflowEnv:
                 if role in {"evidence_retriever", "repair"}
             )
         return admitted
+
+    def _repair_exhausted_auxiliary_replacement_domains(
+        self,
+    ) -> dict[str, Tuple[str, ...]]:
+        """Return same-role/artifact domains still awaiting valid takeover."""
+
+        domains: dict[str, list[str]] = {}
+        for node in self._graph.nodes:
+            role_family = (node.role_family or "").casefold()
+            if (
+                role_family not in {"evidence_retriever", "repair"}
+                or node.id not in self._failed_agent_ids
+                or node.id not in self._repair_exhausted_agent_ids
+                or self._delete_admission_issue(node.id) is None
+            ):
+                continue
+            artifact_types = domains.setdefault(role_family, [])
+            artifact_type = node.artifact_type.casefold()
+            if artifact_type not in artifact_types:
+                artifact_types.append(artifact_type)
+        return {
+            role_family: tuple(artifact_types)
+            for role_family, artifact_types in domains.items()
+        }
 
     def _provider_repair_catalog_domain(
         self,
@@ -1295,6 +1445,9 @@ class AgentWorkflowEnv:
 
         admitted = set(self.model_admissible_action_types())
         node_ids = [node.id for node in self._graph.nodes]
+        replacement_domains = (
+            self._repair_exhausted_auxiliary_replacement_domains()
+        )
         targets: dict[str, object] = {}
         if AgentActionType.ADD_SUBGRAPH.value in admitted:
             remaining = (
@@ -1339,6 +1492,11 @@ class AgentWorkflowEnv:
                             "role_family",
                             "allowed_tools",
                             "execution_mode",
+                            *(
+                                ["artifact_type"]
+                                if replacement_domains
+                                else []
+                            ),
                         ],
                         "model_ids": list(self.model_registry.model_ids),
                         "role_constraints": {
@@ -1362,10 +1520,31 @@ class AgentWorkflowEnv:
                                 "allowed_tools": [
                                     [self.required_evidence_tool_id]
                                 ],
+                                **(
+                                    {
+                                        "artifact_types": list(
+                                            replacement_domains[
+                                                "evidence_retriever"
+                                            ]
+                                        )
+                                    }
+                                    if "evidence_retriever"
+                                    in replacement_domains
+                                    else {}
+                                ),
                             },
                             "repair": {
                                 "execution_modes": ["reasoning"],
                                 "allowed_tools": [[]],
+                                **(
+                                    {
+                                        "artifact_types": list(
+                                            replacement_domains["repair"]
+                                        )
+                                    }
+                                    if "repair" in replacement_domains
+                                    else {}
+                                ),
                             },
                         },
                         "admitted_new_role_families": list(
@@ -2538,13 +2717,14 @@ class AgentWorkflowEnv:
         self,
         action: AgentAction,
     ) -> dict[str, dict[str, object]]:
-        """Project one failed Reasoner's public continuation to a new Retriever.
+        """Project one failed Agent's public Tool state to a new Retriever.
 
-        Normal repair remains same-Agent and phase-scoped.  This narrowly
-        admitted augmentation is a public recovery handoff at FlowSteer's
-        edit--execute boundary; it does not create an AgentGraph message edge or
-        transfer a semantic artifact, model transcript, Ground Truth, or
-        evaluator state.
+        The source is either a same-role/same-artifact Retriever replacement or
+        the existing bounded Reasoner-to-Retriever recovery handoff.  Normal
+        repair remains same-Agent and phase-scoped.  This narrowly admitted
+        augmentation is public recovery state at FlowSteer's edit--execute
+        boundary; it does not create an AgentGraph message edge or transfer a
+        semantic artifact, model transcript, Ground Truth, or evaluator state.
         """
 
         if (
@@ -2563,7 +2743,18 @@ class AgentWorkflowEnv:
             or self.required_evidence_tool_id not in target.allowed_tools
         ):
             return {}
-        source_ids = tuple(
+        target_artifact_type = (target.artifact_type or "text").casefold()
+        replacement_source_ids = tuple(
+            node.id
+            for node in self._graph.nodes
+            if node.id in self._failed_agent_ids
+            and node.id in self._repair_exhausted_agent_ids
+            and node.id in self._failure_continuations
+            and (node.role_family or "").casefold()
+            == "evidence_retriever"
+            and node.artifact_type.casefold() == target_artifact_type
+        )
+        source_ids = replacement_source_ids or tuple(
             source_id
             for source_id in self._repair_exhausted_reasoner_ids()
             if source_id in self._failure_continuations
@@ -4324,6 +4515,9 @@ class AgentWorkflowEnv:
         failed_ingress_relation_candidates = (
             self._failed_auxiliary_ingress_relation_candidates()
         )
+        terminal_reachability_relation_candidates = (
+            self._terminal_reachability_relation_candidates()
+        )
         takeover_delete_ids = (
             self._repair_exhausted_auxiliary_takeover_delete_ids()
         )
@@ -4392,6 +4586,8 @@ class AgentWorkflowEnv:
                 if failed_ingress_relation_candidates
                 else ["set_relation"]
                 if repair_routing_candidates
+                else ["set_relation"]
+                if terminal_reachability_relation_candidates
                 else ["set_relation"]
                 if required_relation_candidates
                 else ["add_subgraph"]
@@ -4704,6 +4900,29 @@ class AgentWorkflowEnv:
                     "edits; use an exact admitted set_relation candidate"
                 )
 
+        terminal_reachability_candidates = (
+            self._terminal_reachability_relation_candidates()
+        )
+        if terminal_reachability_candidates:
+            all_relation_candidates = (
+                self._all_model_admissible_relation_candidates()
+            )
+            action_is_otherwise_admissible = any(
+                self._relation_action_matches_candidate(action, candidate)
+                for candidate in all_relation_candidates
+            )
+            if any(
+                self._relation_action_matches_candidate(action, candidate)
+                for candidate in terminal_reachability_candidates
+            ):
+                return None
+            if action_is_otherwise_admissible:
+                return (
+                    "repair terminal reachability with an exact admitted relation "
+                    "that strictly reduces terminal_unreachable_agent_ids before "
+                    "other Canvas edits"
+                )
+
         required_relation_candidates = (
             self._required_semantic_relation_candidates()
         )
@@ -4717,6 +4936,22 @@ class AgentWorkflowEnv:
                 "close the declared Reasoner -> Verifier -> Formatter semantic "
                 "dataflow before other Canvas edits; use an exact admitted "
                 "set_relation candidate"
+            )
+
+        if (
+            action.action_type is AgentActionType.SET_RELATION
+            and self._relation_reintroduces_failed_auxiliary_ingress(
+                {
+                    "source_id": action.source_id,
+                    "target_id": action.target_id,
+                    "source_to_target": bool(action.source_to_target),
+                    "target_to_source": bool(action.target_to_source),
+                }
+            )
+        ):
+            return (
+                "do not reintroduce a failed, repair-exhausted, unresolved, or "
+                "artifact-free auxiliary ingress after it has been detached"
             )
 
         missing_role_families = self._missing_semantic_role_families()
@@ -4765,14 +5000,36 @@ class AgentWorkflowEnv:
             sampled_role_families = tuple(
                 (spec.role_family or "").casefold() for spec in action.agents
             )
+            replacement_domains = (
+                self._repair_exhausted_auxiliary_replacement_domains()
+            )
+            sampled_artifact_type = (
+                (action.agents[0].artifact_type or "text").casefold()
+                if len(action.agents) == 1
+                else None
+            )
             if (
                 action.action_type is AgentActionType.ADD_SUBGRAPH
                 and len(action.agents) == 1
                 and sampled_role_families
                 and sampled_role_families[0]
                 in self._model_admissible_add_role_families()
+                and (
+                    not replacement_domains
+                    or sampled_artifact_type
+                    in replacement_domains.get(
+                        sampled_role_families[0],
+                        (),
+                    )
+                )
             ):
                 return None
+            if replacement_domains:
+                return (
+                    "bounded auxiliary recovery requires exactly one same-role/"
+                    "same-artifact replacement before another recovery role; "
+                    f"replacement_domains={replacement_domains!r}"
+                )
             return (
                 "ReAct-repair-exhausted augmentation admits exactly one new "
                 "Evidence Retriever or Repair Agent so the staged relation can "
