@@ -412,7 +412,7 @@ with the question-only `qa_answer_type_constraint`; it does not own or receive
 an answer.  A sibling fail-fast `CancelledError` is treated as orchestration
 cancellation rather than attributed as an Agent execution failure.
 
-### r12 live evidence and r13 recovery preparation
+### r12/r13 live evidence and r14 recovery preparation
 
 The r12 main Stable Zero canary passed `2/2` legal explicit-FINISH lineages.
 `triviaqa:tc_1` scored official EM/F1 `1.0/1.0` and `triviaqa:tc_3`
@@ -438,25 +438,39 @@ path.  Third, a measured `repair_exhausted` Retriever remained in the live
 are structured-artifact and orchestration defects, not evidence that a correct
 string may bypass provenance or terminal validation.
 
-Recovery revision r13 is prepared as a minimal continuation of the same shared
-architecture.  It keeps FlowSteer's state-conditioned action mask,
-authoritative admission and execute-on-edit transaction; preserves SkillFlow's
-StructuredAction and public Tool continuation; and adds only the necessary
-contextual-entity adaptation required to represent an evidence proposition
-whose question entity provides scope rather than a proposition argument.  The
-main and isolated r13 conditions, artifact roots and report paths are distinct,
-and the Tool contract is versioned as
-`skillflow.qa-retrieval.factual-semantic-retry.v6`.  The ordered fixed-128
-selection, isolated `triviaqa:tc_9`/`triviaqa:tc_10` IDs and question-only
-Direct reuse source are unchanged.  Training, GRPO, backward, optimizer
-updates, policy synchronization, Skills and exploration remain disabled.
-Revision r13 is **prepared but not live-validated**.
+Recovery revision r13 is a minimal continuation of the same shared architecture.
+It keeps FlowSteer's state-conditioned action mask, authoritative admission and
+execute-on-edit transaction; preserves SkillFlow's StructuredAction and public
+Tool continuation; and adds only the necessary contextual-entity adaptation
+required to represent an evidence proposition whose question entity provides
+scope rather than a proposition argument.  Its Tool contract remains
+`skillflow.qa-retrieval.factual-semantic-retry.v6`.
 
-Static integration for r13 passed the complete unit suite (`800 passed`,
+The r13 main Stable Zero canary produced `2/2` legal explicit-FINISH lineages.
+The mandatory isolated r13 `tc_9/tc_10` regression produced one valid result out
+of two: `triviaqa:tc_10` explicitly finished at official EM/F1 `1.0/1.0`, while
+`triviaqa:tc_9` was recorded as `collection_failed` because the declaration
+phase sampled text was not complete JSON.  The old collection-failure path did
+not persist the raw sampled text or its phase receipt, so that artifact cannot
+support a more specific decoding-failure diagnosis.  The fixed-128 run was not
+started.
+
+Recovery revision r14 is prepared under new main and isolated condition IDs,
+artifact roots and report paths.  It reuses the existing strict malformed
+final-parameter boundary: an exact receipt is retained, the rejected sample is
+represented as `action={}`, zero action prefix is executed, and public parse
+feedback is returned to the next Director turn.  The JSON parser is not
+loosened and a partial `ADD` is never executed.  Tool version v6, the ordered
+fixed-128 selection, isolated `triviaqa:tc_9`/`triviaqa:tc_10` IDs and the
+question-only Direct reuse source remain unchanged.  Training, GRPO, backward,
+optimizer updates, policy synchronization, Skills and exploration remain
+disabled.  Revision r14 is **prepared but not live-validated**.
+
+Static integration for r14 passed the complete unit suite (`803 passed`,
 `142 subtests passed`) and both prepare-only freezes.  The main freeze retains
-the ordered 128-task selection (`triviaqa:tc_1` through `triviaqa:tc_223`), and
-the isolated freeze retains exactly `triviaqa:tc_9` then `triviaqa:tc_10`;
-both use the unchanged 128-record question-only Direct prediction source.
+the same ordered 128 tasks, while the isolated freeze retains exactly
+`triviaqa:tc_9` then `triviaqa:tc_10`; both continue to use the frozen
+question-only Direct prediction source.
 
 ### Stable Zero status
 
@@ -481,9 +495,13 @@ regression and fixed-128 run were therefore not started.  Recovery revision
 r12 passed its live main Stable Zero canary `2/2` (`tc_1` EM/F1 `1.0/1.0`;
 `tc_3` EM/F1 `0.0/0.5`, explicit FINISH), then failed the isolated
 `tc_9/tc_10` regression `0/2` with both tasks at `max_rounds` and null answers.
-The r12 fixed-128 run was not started.  Recovery revision r13 is prepared under
-new condition, Tool, artifact and report versions but has not run a live
-canary.  Formal fixed-128 v2 EM/F1 remain pending.  No score is inferred from
+The r12 fixed-128 run was not started.  Recovery revision r13 passed its live
+main canary `2/2`; its isolated regression produced `1/2`, with `tc_10`
+explicitly finishing at EM/F1 `1.0/1.0` and `tc_9` recorded as
+`collection_failed` after incomplete declaration JSON.  The r13 fixed-128 run
+was not started.  Recovery revision r14 is prepared under new condition,
+artifact and report paths but has no live result.  Formal fixed-128 v2 EM/F1
+remain pending.  No score is inferred from
 unit tests, a two-task canary, an incomplete run, or the previous architecture.
 
 ## Historical comparison condition

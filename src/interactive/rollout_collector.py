@@ -30,7 +30,7 @@ from typing import Any, Awaitable, Callable, Iterable, Mapping, Optional, Sequen
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from .agent_action_parser import AgentAction
+from .agent_action_parser import AgentAction, AgentActionParseError
 from .agent_runtime import AgentCallRecord, AgentRuntimeResult
 from .agent_workflow_env import AgentWorkflowEnv
 from .director import (
@@ -93,6 +93,7 @@ HIERARCHICAL_JSON_SCHEMA_STRATEGY = "hierarchical_json_schema"
 ROLE_FIRST_ADD_DECODING_STRATEGY = (
     "hierarchical_json_schema_role_first_add_v1"
 )
+_ADD_DECLARATION_PARSE_FAILURE_PHASE = "add_agent_declarations"
 
 _ADD_DECLARATION_CONTINUATION = (
     "Complete the Agent declarations for the selected positions and "
@@ -1111,6 +1112,9 @@ class SGLangReceiptDirectorClient:
                 latency_ms=latency_ms,
                 attempt_count=attempt_count,
             )
+            phase_receipts["add_agent_declarations"] = (
+                self._hierarchical_phase_receipt(declaration_response)
+            )
             try:
                 selected_add_agents = (
                     director_live_add_subgraph_agent_declarations_from_text(
@@ -1119,14 +1123,40 @@ class SGLangReceiptDirectorClient:
                         selected_agent_roles=selected_add_agent_roles,
                     )
                 )
-            except ValueError as exc:
-                raise ReceiptValidationError(
-                    "v3 add_subgraph Agent declaration phase is invalid: "
-                    f"{exc}"
-                ) from exc
-            phase_receipts["add_agent_declarations"] = (
-                self._hierarchical_phase_receipt(declaration_response)
-            )
+            except ValueError:
+                # Match the existing malformed final-parameter boundary: keep
+                # the exact sampled text/token/log-prob receipt and let the
+                # Canvas publish its parse rejection on the next continuation.
+                # No declaration is repaired into an AgentAction and no final
+                # ADD parameter request is issued.
+                metadata = dict(declaration_response.metadata)
+                metadata.update(
+                    {
+                        "base_prompt_text": prompt,
+                        "action_decoding_strategy": (
+                            ROLE_FIRST_ADD_DECODING_STRATEGY
+                        ),
+                        "selected_action": selected_action,
+                        "selected_modify_field": None,
+                        "selected_modify_agent_id": None,
+                        "selected_add_agent_ids": None,
+                        "selected_add_agent_roles": [
+                            dict(value) for value in selected_add_agent_roles
+                        ],
+                        "parameter_schema_branch": None,
+                        "parse_failure_phase": (
+                            _ADD_DECLARATION_PARSE_FAILURE_PHASE
+                        ),
+                        "hierarchical_phase_receipts": phase_receipts,
+                        "request_count": len(phase_receipts),
+                        "latency_ms": total_latency_ms,
+                        "attempt_count": total_attempt_count,
+                    }
+                )
+                return DirectorResponse(
+                    text=declaration_response.text,
+                    metadata=metadata,
+                )
             selected_declarations_json = json.dumps(
                 {
                     "action": "add_subgraph",
@@ -1552,11 +1582,11 @@ def _validate_v3_hierarchical_action_receipt(
 ) -> set[str]:
     """Validate the exact v3 phase/action/domain correspondence.
 
-    A malformed final parameter sample has no parsed ``AgentAction``.  It is
-    still an exact behavior receipt and FlowSteer's Canvas returns it as an
-    invalid-action observation for the next Director turn.  In that case the
-    hierarchical selections and phase receipts remain fully validated, while
-    no sampled text is repaired or represented as an executed action.
+    A malformed final parameter or role-first ADD declaration sample has no
+    parsed ``AgentAction``.  It remains an exact behavior receipt and
+    FlowSteer's Canvas returns it as an invalid-action observation for the next
+    Director turn.  Hierarchical selections and completed phase receipts stay
+    authoritative; sampled text is never repaired into an executed action.
     """
 
     branch = schema_request.get("action_schema_branch")
@@ -1571,6 +1601,7 @@ def _validate_v3_hierarchical_action_receipt(
         raise ReceiptValidationError("v3 Director target-domain receipt is invalid") from exc
     selected_action = metadata.get("selected_action")
     decoding_strategy = metadata.get("action_decoding_strategy")
+    parse_failure_phase = metadata.get("parse_failure_phase")
     action_value = None if action is None else action.to_dict()
     if selected_action not in actions or (
         action_value is not None
@@ -1585,6 +1616,23 @@ def _validate_v3_hierarchical_action_receipt(
     ):
         raise ReceiptValidationError(
             "role-first ADD decoding strategy is attached to a non-ADD action"
+        )
+    if parse_failure_phase is not None and parse_failure_phase != (
+        _ADD_DECLARATION_PARSE_FAILURE_PHASE
+    ):
+        raise ReceiptValidationError(
+            "v3 hierarchical receipt has an unsupported parse-failure phase"
+        )
+    if parse_failure_phase is not None and (
+        decoding_strategy != ROLE_FIRST_ADD_DECODING_STRATEGY
+        or selected_action != "add_subgraph"
+    ):
+        raise ReceiptValidationError(
+            "v3 declaration parse failure requires role-first ADD decoding"
+        )
+    if parse_failure_phase is not None and action is not None:
+        raise ReceiptValidationError(
+            "v3 declaration parse failure requires action is None"
         )
 
     expected_phases: set[str] = set()
@@ -1636,6 +1684,76 @@ def _validate_v3_hierarchical_action_receipt(
             raise ReceiptValidationError(
                 "v3 add_subgraph receipt has no Agent declaration phase"
             )
+        if parse_failure_phase == _ADD_DECLARATION_PARSE_FAILURE_PHASE:
+            assert role_first_add
+            assert isinstance(role_phase, Mapping)
+            try:
+                selected_roles = (
+                    director_live_add_subgraph_role_selection_from_text(
+                        role_phase["text"],
+                        domains,
+                    )
+                )
+            except ValueError as exc:
+                raise ReceiptValidationError(
+                    "v3 declaration parse failure has an invalid prior role receipt"
+                ) from exc
+            role_prompt = role_phase.get("prompt_text")
+            declaration_prompt = declaration_phase.get("prompt_text")
+            if not isinstance(role_prompt, str) or not isinstance(
+                declaration_prompt,
+                str,
+            ):
+                raise ReceiptValidationError(
+                    "v3 declaration parse-failure phase has no prompt binding"
+                )
+            selected_roles_json = json.dumps(
+                {
+                    "action": "add_subgraph",
+                    "agents": [dict(value) for value in selected_roles],
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            expected_declaration_prompt = _hierarchical_continuation_prompt(
+                role_prompt,
+                committed_json=selected_roles_json,
+                instruction=_ADD_DECLARATION_CONTINUATION,
+            )
+            if declaration_prompt != expected_declaration_prompt:
+                raise ReceiptValidationError(
+                    "v3 role-first ADD declaration prompt is not conditioned on "
+                    "its selected roles"
+                )
+            if metadata.get("prompt_text") != declaration_prompt:
+                raise ReceiptValidationError(
+                    "v3 declaration parse-failure receipt is not bound to its "
+                    "continuation prompt"
+                )
+            selected_role_values = [dict(value) for value in selected_roles]
+            if metadata.get("selected_add_agent_roles") != selected_role_values:
+                raise ReceiptValidationError(
+                    "v3 declaration parse-failure role receipt changed"
+                )
+            if metadata.get("selected_add_agent_ids") is not None:
+                raise ReceiptValidationError(
+                    "v3 declaration parse failure fabricated Agent declarations"
+                )
+            if metadata.get("selected_modify_agent_id") is not None:
+                raise ReceiptValidationError(
+                    "v3 declaration parse failure carries a MODIFY target"
+                )
+            if metadata.get("parameter_schema_branch") is not None:
+                raise ReceiptValidationError(
+                    "v3 declaration parse failure carries a parameter branch"
+                )
+            if metadata.get("request_count") != len(expected_phases):
+                raise ReceiptValidationError(
+                    "v3 declaration parse-failure request count differs from "
+                    "its completed phases"
+                )
+            return expected_phases
         try:
             if role_first_add:
                 assert isinstance(role_phase, Mapping)
@@ -2672,8 +2790,29 @@ class AgentGraphRolloutCollector:
                 seed=generation_seed,
                 **schema_request,
             )
-            canvas = await env.step(response.text)
             metadata = response.metadata
+            parse_failure_phase = metadata.get("parse_failure_phase")
+            if parse_failure_phase is not None and parse_failure_phase != (
+                _ADD_DECLARATION_PARSE_FAILURE_PHASE
+            ):
+                raise ReceiptValidationError(
+                    "Director receipt has an unsupported parse-failure phase"
+                )
+            if parse_failure_phase == _ADD_DECLARATION_PARSE_FAILURE_PHASE:
+                # A declaration is not a Canvas edit.  Fail closed before
+                # calling Env.step if its raw sample happens to parse as a
+                # complete AgentAction; this prevents a partial ADD from being
+                # executed under declaration-phase metadata.
+                try:
+                    env.parser.parse(response.text)
+                except AgentActionParseError:
+                    pass
+                else:
+                    raise ReceiptValidationError(
+                        "v3 declaration parse-failure sample decoded as a Canvas "
+                        "action"
+                    )
+            canvas = await env.step(response.text)
 
             if metadata.get("receipt_verified") is not True:
                 raise ReceiptValidationError("Director turn lacks an exact behavior receipt")
@@ -2956,6 +3095,10 @@ class AgentGraphRolloutCollector:
                 if "selected_modify_agent_id" in metadata:
                     action_decoding["selected_modify_agent_id"] = metadata.get(
                         "selected_modify_agent_id"
+                    )
+                if metadata.get("parse_failure_phase") is not None:
+                    action_decoding["parse_failure_phase"] = metadata.get(
+                        "parse_failure_phase"
                     )
                 runtime_summary["director_action_decoding"] = action_decoding
             turn = TurnRecord(

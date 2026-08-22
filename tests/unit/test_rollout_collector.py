@@ -757,44 +757,80 @@ def test_native_sglang_v3_samples_add_declarations_then_complete_exact_action():
         "content": _ADD_ACTION_CONTINUATION,
     }
 
+    invalid_declaration = json.dumps(
+        {
+            **declarations,
+            "agents": [
+                {**declarations["agents"][0], "agent_id": "incumbent"}
+            ],
+        },
+        separators=(",", ":"),
+    )
     conflict_client = ScriptedSGLangClient(
         [
             json.dumps(role_selection, separators=(",", ":")),
-            json.dumps(
-                {
-                    **declarations,
-                    "agents": [
-                        {**declarations["agents"][0], "agent_id": "incumbent"}
-                    ],
-                },
-                separators=(",", ":"),
-            )
+            invalid_declaration,
         ],
         policy_version=POLICY_VERSION,
         expected_server_weight_version="default",
     )
+    rejected_declaration = asyncio.run(
+        conflict_client.propose(
+            "current Canvas",
+            action_json_schema=(
+                director_model_admissible_sampling_json_schema_text_v3(actions)
+            ),
+            action_json_schema_version=(
+                DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3
+            ),
+            action_schema_branch=director_model_admissible_schema_branch_v3(
+                actions
+            ),
+            action_target_domains_json=domains_json,
+            action_target_domain_version=(
+                DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION
+            ),
+        )
+    )
+    assert rejected_declaration.text == invalid_declaration
+    assert len(conflict_client.payloads) == 2
+    assert rejected_declaration.metadata["base_prompt_text"] == "current Canvas"
+    assert rejected_declaration.metadata["parse_failure_phase"] == (
+        "add_agent_declarations"
+    )
+    assert rejected_declaration.metadata["parameter_schema_branch"] is None
+    assert rejected_declaration.metadata["selected_add_agent_ids"] is None
+    assert rejected_declaration.metadata["selected_add_agent_roles"] == (
+        role_selection["agents"]
+    )
+    assert rejected_declaration.metadata["request_count"] == 2
+    assert set(rejected_declaration.metadata["hierarchical_phase_receipts"]) == {
+        "add_agent_role_selection",
+        "add_agent_declarations",
+    }
+    rejected_messages = decode_director_transcript(
+        rejected_declaration.metadata["prompt_text"]
+    )
+    assert rejected_messages is not None
+    assert json.loads(rejected_messages[-2]["content"]) == role_selection
+    assert rejected_messages[-1] == {
+        "role": "user",
+        "content": _ADD_DECLARATION_CONTINUATION,
+    }
+
+
+def test_native_sglang_empty_text_cannot_form_an_exact_behavior_receipt():
+    client = ScriptedSGLangClient(
+        [""],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+    )
+
     with pytest.raises(
         ReceiptValidationError,
-        match="Agent declaration phase is invalid",
+        match="no output_token_logprobs receipt",
     ):
-        asyncio.run(
-            conflict_client.propose(
-                "current Canvas",
-                action_json_schema=(
-                    director_model_admissible_sampling_json_schema_text_v3(actions)
-                ),
-                action_json_schema_version=(
-                    DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3
-                ),
-                action_schema_branch=director_model_admissible_schema_branch_v3(
-                    actions
-                ),
-                action_target_domains_json=domains_json,
-                action_target_domain_version=(
-                    DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION
-                ),
-            )
-        )
+        asyncio.run(client.propose("current Canvas"))
 
 
 def test_native_sglang_v3_binds_modify_agent_and_discrete_value():
@@ -999,6 +1035,52 @@ def test_v3_receipt_validation_fails_closed_on_phase_and_final_action_mismatch()
         metadata,
         schema_request,
     ) == {"add_agent_role_selection", "add_agent_declarations"}
+
+    declaration_parse_failure_metadata = {
+        **metadata,
+        "prompt_text": declaration_prompt,
+        "selected_add_agent_ids": None,
+        "parameter_schema_branch": None,
+        "parse_failure_phase": "add_agent_declarations",
+        "request_count": 2,
+        "hierarchical_phase_receipts": {
+            "add_agent_role_selection": metadata[
+                "hierarchical_phase_receipts"
+            ]["add_agent_role_selection"],
+            "add_agent_declarations": {
+                "text": "not-json declaration",
+                "prompt_text": declaration_prompt,
+            },
+        },
+    }
+    assert _validate_v3_hierarchical_action_receipt(
+        None,
+        declaration_parse_failure_metadata,
+        schema_request,
+    ) == {"add_agent_role_selection", "add_agent_declarations"}
+    with pytest.raises(ReceiptValidationError, match="requires action is None"):
+        _validate_v3_hierarchical_action_receipt(
+            action,
+            declaration_parse_failure_metadata,
+            schema_request,
+        )
+    with pytest.raises(ReceiptValidationError, match="not conditioned"):
+        _validate_v3_hierarchical_action_receipt(
+            None,
+            {
+                **declaration_parse_failure_metadata,
+                "hierarchical_phase_receipts": {
+                    **declaration_parse_failure_metadata[
+                        "hierarchical_phase_receipts"
+                    ],
+                    "add_agent_declarations": {
+                        "text": "not-json declaration",
+                        "prompt_text": role_prompt,
+                    },
+                },
+            },
+            schema_request,
+        )
     with pytest.raises(ReceiptValidationError, match="request count"):
         _validate_v3_hierarchical_action_receipt(
             action,
@@ -1690,6 +1772,178 @@ def test_collector_preserves_v3_malformed_parameter_sample_as_rejected_turn():
     assert decoding["parameter_schema_branch"] == "finish"
     assert decoding["request_count"] == 1
     assert decoding["phase_receipts"] == {}
+
+
+@pytest.mark.parametrize(
+    "malformed_declaration",
+    ["not-json declaration", "<|endoftext|>"],
+)
+def test_collector_preserves_malformed_add_declaration_and_continues(
+    malformed_declaration,
+):
+    registry = _registry()
+    actions = ("add_subgraph",)
+    domains = {
+        "add_subgraph": {
+            "min_new_agents": 1,
+            "max_new_agents": 1,
+            "existing_agent_ids": [],
+            "required_agent_fields": [
+                "agent_id",
+                "model_id",
+                "contract",
+                "role_family",
+                "allowed_tools",
+                "execution_mode",
+            ],
+            "model_ids": ["cheap-model"],
+            "role_constraints": {
+                "reasoner": {
+                    "execution_modes": ["reasoning"],
+                    "allowed_tools": [[]],
+                }
+            },
+            "endpoint_scope": {
+                "relation_endpoint_sources": [
+                    "existing_agent_ids",
+                    "same_action_agent_ids",
+                ],
+                "output_agent_id_sources": [
+                    "existing_agent_ids",
+                    "same_action_agent_ids",
+                ],
+            },
+        }
+    }
+    role_selection = {
+        "action": "add_subgraph",
+        "agents": [{"agent_id": "node_1", "role_family": "reasoner"}],
+    }
+    declaration = {
+        "action": "add_subgraph",
+        "agents": [
+            {
+                "agent_id": "node_1",
+                "model_id": "cheap-model",
+                "contract": "answer the question",
+                "role_family": "reasoner",
+                "allowed_tools": [],
+                "execution_mode": "reasoning",
+            }
+        ],
+    }
+    final_action = {
+        **declaration,
+        "relations": [],
+        "output_agent_id": "node_1",
+    }
+    client = ScriptedSGLangClient(
+        [
+            json.dumps(role_selection, separators=(",", ":")),
+            malformed_declaration,
+            json.dumps(role_selection, separators=(",", ":")),
+            json.dumps(declaration, separators=(",", ":")),
+            json.dumps(final_action, separators=(",", ":")),
+        ],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+    )
+    orchestrator = _orchestrator(registry, client, max_rounds=2)
+    schema_request = {
+        "action_json_schema": (
+            director_model_admissible_sampling_json_schema_text_v3(actions)
+        ),
+        "action_json_schema_version": (
+            DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3
+        ),
+        "action_schema_branch": director_model_admissible_schema_branch_v3(actions),
+        "action_target_domains_json": director_live_action_target_domains_json(
+            actions,
+            domains,
+        ),
+        "action_target_domain_version": (
+            DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION
+        ),
+    }
+    orchestrator.action_schema_request = lambda _env: dict(schema_request)
+    collector = AgentGraphRolloutCollector(
+        orchestrator,
+        AgentWorkflowEnv(
+            registry,
+            gateway=FakeGateway(),
+            execute_on_edit=False,
+        ),
+        _versions(),
+    )
+
+    def evaluator(task, final_answer, final_graph, runtime):
+        assert final_answer is None
+        assert runtime is None
+        return {
+            "evaluator_version": EVALUATOR_VERSION,
+            "valid": True,
+            "reward": 0.0,
+            "metrics": {"f1": 0.0},
+        }
+
+    trajectory = asyncio.run(collector.collect(_task(), 0, evaluator))
+
+    assert trajectory.explicit_finish is False
+    assert trajectory.termination_reason == "max_rounds"
+    assert trajectory.grpo_eligible is False
+    assert len(trajectory.turns) == 2
+    rejected_turn, continued_turn = trajectory.turns
+    assert rejected_turn.policy_response == malformed_declaration
+    assert rejected_turn.action == {}
+    assert rejected_turn.executed_prefix_tokens == 0
+    assert "invalid action" in rejected_turn.canvas_feedback
+    assert rejected_turn.graph_revision == 0
+    assert rejected_turn.graph_snapshot["nodes"] == []
+    assert rejected_turn.executions == ()
+    rejected_decoding = rejected_turn.runtime_summary[
+        "director_action_decoding"
+    ]
+    assert rejected_decoding["strategy"] == ROLE_FIRST_ADD_DECODING_STRATEGY
+    assert rejected_decoding["selected_action"] == "add_subgraph"
+    assert rejected_decoding["parameter_schema_branch"] is None
+    assert rejected_decoding["parse_failure_phase"] == "add_agent_declarations"
+    assert rejected_decoding["request_count"] == 2
+    assert set(rejected_decoding["phase_receipts"]) == {
+        "add_agent_role_selection",
+        "add_agent_declarations",
+    }
+    role_receipt = rejected_decoding["phase_receipts"][
+        "add_agent_role_selection"
+    ]
+    declaration_receipt = rejected_decoding["phase_receipts"][
+        "add_agent_declarations"
+    ]
+    assert role_receipt["receipt_verified"] is True
+    assert declaration_receipt["receipt_verified"] is True
+    assert declaration_receipt["text"] == malformed_declaration
+    assert len(declaration_receipt["output_token_ids"]) == len(
+        declaration_receipt["behavior_log_probs"]
+    )
+    assert declaration_receipt["generation_seed"] == (
+        rejected_turn.director_generation_seed
+    )
+    assert declaration_receipt["server_weight_version"] == "default"
+    assert continued_turn.action["action"] == "add_subgraph"
+    assert continued_turn.executed_prefix_tokens > 0
+    assert len(client.payloads) == 5
+
+    # ``propose`` renders the top-level selector payload before entering the
+    # single-action role-first path, even though that payload is not posted.
+    # The second round's role-selection prompt is therefore chat-template call
+    # four (zero-based), after the first round's selector/role/declaration and
+    # the second round's unused selector render.
+    continuation_messages = client.tokenizer.chat_calls[4][0]
+    assert continuation_messages[-2] == {
+        "role": "assistant",
+        "content": malformed_declaration,
+    }
+    assert continuation_messages[-1]["role"] == "user"
+    assert "invalid action" in continuation_messages[-1]["content"]
 
 
 def test_collector_does_not_duplicate_reused_progressive_execution():

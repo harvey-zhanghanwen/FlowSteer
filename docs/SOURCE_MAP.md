@@ -830,15 +830,28 @@ the successful-read receipt, exact evidence span, passage ID and predicate
 gates remain unchanged, and the Retriever still cannot own
 `candidate_answer`, `answer_slot` or `final_answer`.
 
+Recovery r14 keeps that shared Runtime and Tool v6 contract unchanged.  It is
+prepared to reuse the existing strict malformed final-parameter boundary: an
+exact receipt is retained, the rejected sample is represented as `action={}`
+with zero executed prefix, and public parse feedback is returned for the next
+Director turn.  The parser is not loosened, and no partial `ADD` is executed.
+
 The r12 main Stable Zero evidence is `2/2` explicit-FINISH lineages:
 `triviaqa:tc_1` EM/F1 `1.0/1.0` and `triviaqa:tc_3` EM/F1 `0.0/0.5`.
 The isolated r12 `triviaqa:tc_9`/`triviaqa:tc_10` regression is `0/2`, with
-both tasks ending at `max_rounds` and `final_answer=null`; the fixed-128 run was
-not started.  Recovery r13 is only prepared under distinct main/isolated
-condition IDs, Tool version v6, artifact roots and report paths.  It has no
-live result.  The ordered fixed-128 selection, isolated task IDs and reused
-question-only Direct predictions are unchanged.  Training, GRPO, policy
-synchronization, Skills and exploration remain disabled.
+both tasks ending at `max_rounds` and `final_answer=null`; its fixed-128 run was
+not started.  Recovery r13 then passed the main canary `2/2`.  Its isolated
+regression produced `1/2`: `triviaqa:tc_10` explicitly finished at official
+EM/F1 `1.0/1.0`, while `triviaqa:tc_9` was `collection_failed` because the
+declaration sampled text was not complete JSON.  The old failure path did not
+persist the raw receipt, so no narrower decoding-failure classification is
+supported.  The r13 fixed-128 run was not started.
+
+Recovery r14 is prepared under distinct main/isolated condition IDs, artifact
+roots and report paths; it has no live result.  Tool version v6, the ordered
+fixed-128 selection, isolated task IDs and reused question-only Direct
+predictions are unchanged.  Training, GRPO, policy synchronization, Skills and
+exploration remain disabled.
 
 The five retrieval strategies are an execution-policy implementation inside
 the Tool adapter, not five Director roles and not an injected Skill.  The
