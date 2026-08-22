@@ -1395,6 +1395,9 @@ class AgentWorkflowEnv:
                 reasons.append("downstream_responsibility")
             if self._graph.output_agent_id == node.id:
                 reasons.append("output_identity")
+            if node.id not in self._unresolved_dirty_agents:
+                reasons.append("not_diagnosed_unusable")
+            reasons.append("replacement_takeover_required")
             if reasons:
                 protected[node.id] = reasons
         return {
@@ -1425,8 +1428,9 @@ class AgentWorkflowEnv:
             protected_reasons.append("downstream responsibility")
         if self._graph.output_agent_id == agent_id:
             protected_reasons.append("Output Agent identity")
-        if not protected_reasons:
-            return None
+        if agent_id not in self._unresolved_dirty_agents:
+            protected_reasons.append("node has not been diagnosed unusable")
+        protected_reasons.append("replacement artifact takeover is required")
 
         role = (node.role_family or "").casefold()
         artifact_type = node.artifact_type.casefold()
@@ -1450,7 +1454,7 @@ class AgentWorkflowEnv:
             if self._graph.output_agent_id == agent_id:
                 continue
             replacements.append(candidate.id)
-        if replacements:
+        if agent_id in self._unresolved_dirty_agents and replacements:
             return None
         return (
             f"recovery_policy={_PRESERVE_REPAIR_RECOVERY_POLICY} protects Agent "

@@ -480,6 +480,19 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             "qa_completion_requires_successful_read_evidence",
             gateway.requests[1].agent.contract,
         )
+        self.assertIn(
+            "next action must be qa-retrieval search",
+            gateway.requests[1].agent.contract,
+        )
+        self.assertIn(
+            "next action must be qa-retrieval read",
+            gateway.requests[2].agent.contract,
+        )
+        self.assertIn('"p1"', gateway.requests[2].agent.contract)
+        self.assertIn(
+            "next action may complete",
+            gateway.requests[3].agent.contract,
+        )
         self.assertEqual([("Ada Lovelace", 1)], index.search_calls)
         self.assertEqual(["p1"], index.read_calls)
 

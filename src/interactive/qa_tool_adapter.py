@@ -14,6 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 import inspect
+import json
 from pathlib import Path
 import re
 from tempfile import TemporaryDirectory
@@ -342,7 +343,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         elif self._task_type == "factual_qa":
             guidance = SKILLFLOW_FACTUAL_QA_GUIDANCE
         else:
-            return contract
+            guidance = ""
         # DIRECT_REUSE: SkillFlow training/task_prompts.py::{MULTI_HOP_QA,
         # FACTUAL_QA}.  Only the terminal wire is adapted from answer(response=)
         # to this runtime's already-declared StructuredAction completion.
@@ -380,12 +381,63 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 "answer span after `Candidate answer:` and the supporting "
                 "retrieved passage span after `Evidence:` in arguments.value."
             )
-        return (
-            contract
-            + "\nSkillFlow QA execution guidance: "
-            + guidance
-            + terminal_wire
+        evidence_continuation = ""
+        if (
+            self._completion_policy == "required_evidence"
+            and QA_RETRIEVAL_TOOL_ID in request.agent.allowed_tools
+        ):
+            searched_passage_ids: list[str] = []
+            has_successful_read = False
+            for observation in observations:
+                result = observation.get("result")
+                if not isinstance(result, Mapping):
+                    continue
+                if result.get("operation") == "search":
+                    raw_ids = result.get("passage_ids")
+                    if isinstance(raw_ids, list):
+                        searched_passage_ids = [
+                            value.strip()
+                            for value in raw_ids
+                            if isinstance(value, str) and value.strip()
+                        ]
+                elif (
+                    result.get("operation") == "read"
+                    and isinstance(result.get("passage"), Mapping)
+                    and isinstance(result["passage"].get("text"), str)
+                    and bool(result["passage"]["text"].strip())
+                ):
+                    has_successful_read = True
+            evidence_continuation = (
+                "\nRequired-evidence ReAct continuation: preserve any semantic "
+                "candidate already present in the public action history; do not "
+                "discard or replace it merely because completion was rejected. "
+            )
+            if has_successful_read:
+                evidence_continuation += (
+                    "A successful non-empty qa-retrieval read is present, so the "
+                    "next action may complete after aligning that evidence to the "
+                    "original answer slot."
+                )
+            elif searched_passage_ids:
+                evidence_continuation += (
+                    "The next action must be qa-retrieval read using one exact "
+                    "passage_id returned by the successful search observation: "
+                    + json.dumps(searched_passage_ids, ensure_ascii=False)
+                    + ". Do not call complete before that read succeeds."
+                )
+            else:
+                evidence_continuation += (
+                    "The next action must be qa-retrieval search with a concise "
+                    "entity-and-relation query. Then read an exact returned "
+                    "passage_id. Do not call complete before a non-empty read "
+                    "succeeds."
+                )
+        qa_guidance = (
+            "\nSkillFlow QA execution guidance: " + guidance + terminal_wire
+            if guidance
+            else ""
         )
+        return contract + qa_guidance + evidence_continuation
 
     def _completion_error(
         self,

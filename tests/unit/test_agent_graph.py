@@ -590,6 +590,18 @@ class _FailOnceGateway(_ImmediateGateway):
         return f"answer:{request.agent.id}"
 
 
+class _FailAgentGateway(_ImmediateGateway):
+    def __init__(self, failed_agent_id: str) -> None:
+        super().__init__()
+        self.failed_agent_id = failed_agent_id
+
+    async def generate(self, request: AgentRequest) -> str:
+        self.requests.append(request)
+        if request.agent.id == self.failed_agent_id:
+            raise RuntimeError("unusable executor node")
+        return f"answer:{request.agent.id}"
+
+
 class _SequenceGateway(_ImmediateGateway):
     def __init__(self, responses: list[str]) -> None:
         super().__init__()
@@ -1820,7 +1832,7 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_preserve_repair_policy_blocks_delete_until_takeover(self) -> None:
         registry = make_registry()
-        gateway = _ImmediateGateway()
+        gateway = _FailAgentGateway("source")
         graph = AgentGraph(
             [
                 AgentNode(
@@ -1848,6 +1860,7 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             '"contract":"evidence-v2"}'
         )
         self.assertTrue(executed.accepted)
+        self.assertIn("execution_error", executed.feedback)
         self.assertIn('"recovery_state"', executed.feedback)
 
         protected = await env.step('{"action":"delete_agent","agent_id":"source"}')
