@@ -26,6 +26,7 @@ from src.interactive.agent_runtime import (
     AgentResponse,
     AgentRuntime,
     AgentRuntimeError,
+    AgentRuntimeResult,
     ExecutionPhase,
     ReasoningExecutionAdapter,
 )
@@ -2161,6 +2162,10 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             targets["modify_agent"]["responsible_agent_ids"],
         )
         self.assertEqual(("modify_agent",), env.model_admissible_action_types())
+        self.assertEqual(
+            ["modify_agent"],
+            env.recovery_state()["preferred_actions"],
+        )
 
         revision = env.revision
         for invalid_repair in (
@@ -2296,7 +2301,7 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(["reasoner"], recovery["repair_exhausted_agent_ids"])
         self.assertEqual([], recovery["mandatory_repair_agent_ids"])
         self.assertEqual("augment", recovery["phase"])
-        self.assertEqual("add_subgraph", recovery["preferred_actions"][0])
+        self.assertIn("add_subgraph", recovery["preferred_actions"])
         self.assertNotEqual(("modify_agent",), env.model_admissible_action_types())
         add_domain = env.model_admissible_action_targets()["add_subgraph"]
         self.assertIn(
@@ -2749,15 +2754,11 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual("graph_validation", output_missing["stage"])
         self.assertEqual(
-            "format_output_assignment",
+            "semantic_lineage_construction",
             output_missing["failure_attribution"]["responsible_constraint"],
         )
         self.assertEqual(
-            "formatter",
-            output_missing["failure_attribution"]["responsible_agent_id"],
-        )
-        self.assertEqual(
-            "set_output",
+            "add_subgraph",
             output_missing["failure_attribution"]["preferred_action_order"][0],
         )
 
@@ -2785,6 +2786,157 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(["orphan"], attribution["responsible_agent_ids"])
         self.assertEqual("set_relation", attribution["preferred_action_order"][0])
         self.assertFalse(attribution["delete_allowed_before_replacement_takeover"])
+
+    async def test_hotpot_live_domain_closes_semantic_spine_before_output(
+        self,
+    ) -> None:
+        complete = _hotpot_semantic_graph()
+        graph = AgentGraph(
+            complete.nodes,
+            [
+                relation
+                for relation in complete.relations
+                if {relation.source_id, relation.target_id}
+                != {"verifier", "formatter"}
+            ],
+        )
+        registry = make_registry()
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_hotpot_semantic_runtime(registry, _ImmediateGateway()),
+            graph=graph,
+            problem="What is the capital of France?",
+            execute_on_edit=False,
+            semantic_protocol="hotpotqa_verified_answer_slot_v1",
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+        )
+
+        self.assertEqual(("set_relation",), env.model_admissible_action_types())
+        relation_candidates = env.model_admissible_action_targets()[
+            "set_relation"
+        ]["candidates"]
+        self.assertEqual(
+            [
+                {
+                    "source_id": "verifier",
+                    "target_id": "formatter",
+                    "source_to_target": True,
+                    "target_to_source": False,
+                }
+            ],
+            relation_candidates,
+        )
+        premature_output = await env.step(
+            '{"action":"set_output","agent_id":"formatter"}'
+        )
+        self.assertFalse(premature_output.accepted)
+        self.assertIn("close the declared", premature_output.feedback)
+
+        closed = await env.step(
+            '{"action":"set_relation","source_id":"verifier",'
+            '"target_id":"formatter","source_to_target":true,'
+            '"target_to_source":false}'
+        )
+        self.assertTrue(closed.accepted)
+        self.assertEqual(("set_output",), env.model_admissible_action_types())
+        self.assertEqual(
+            ["formatter"],
+            env.model_admissible_action_targets()["set_output"]["agent_ids"],
+        )
+        selected = await env.step(
+            '{"action":"set_output","agent_id":"formatter"}'
+        )
+        self.assertTrue(selected.accepted)
+
+        removed_spine = await env.step(
+            '{"action":"set_relation","source_id":"reasoner",'
+            '"target_id":"verifier","source_to_target":false,'
+            '"target_to_source":false}'
+        )
+        self.assertFalse(removed_spine.accepted)
+        self.assertIn("semantic-lineage relation", removed_spine.feedback)
+
+    async def test_hotpot_partial_auxiliary_success_preserves_reasoner_recovery(
+        self,
+    ) -> None:
+        complete = _hotpot_semantic_graph()
+        graph = AgentGraph(
+            [node for node in complete.nodes if node.id != "reader"],
+            [
+                relation
+                for relation in complete.relations
+                if "reader" not in {relation.source_id, relation.target_id}
+            ],
+            output_agent_id="formatter",
+        )
+        graph.add_agent(
+            AgentNode(
+                "repair_evidence",
+                "cheap",
+                "retrieve additional evidence for the failed Reasoner",
+                role_family="evidence_retriever",
+                allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                execution_mode="react",
+            )
+        )
+        registry = make_registry()
+        runtime = _hotpot_semantic_runtime(registry, _ImmediateGateway())
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=runtime,
+            graph=graph,
+            problem="What is the capital of France?",
+            execute_on_edit=True,
+            semantic_protocol="hotpotqa_verified_answer_slot_v1",
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+        )
+        env._failed_agent_ids.add("reasoner")
+        env._react_exhausted_agent_ids.add("reasoner")
+        env._repair_exhausted_agent_ids.add("reasoner")
+        env._failure_continuations["reasoner"] = {
+            "execution_phase": "single",
+            "tool_receipts": [_test_read_receipt("p1")],
+        }
+
+        self.assertEqual(("set_relation",), env.model_admissible_action_types())
+        candidate = env.model_admissible_action_targets()["set_relation"][
+            "candidates"
+        ][0]
+        self.assertEqual("repair_evidence", candidate["source_id"])
+        self.assertEqual("reasoner", candidate["target_id"])
+        self.assertTrue(candidate["source_to_target"])
+        self.assertFalse(candidate["target_to_source"])
+
+        async def partial_success(
+            candidate_graph: AgentGraph,
+            *args: object,
+            **kwargs: object,
+        ) -> AgentRuntimeResult:
+            del args, kwargs
+            return AgentRuntimeResult(
+                run_id="partial-success",
+                graph_revision=candidate_graph.revision,
+                output_agent_id=candidate_graph.output_agent_id,
+                final_answer=None,
+                outputs={"repair_evidence": "retrieved evidence"},
+                output_metadata={"repair_evidence": {}},
+                calls=(),
+                block_completion_order=(("repair_evidence",),),
+                executed_agent_ids=("repair_evidence",),
+                deferred_agent_ids=("reasoner", "verifier", "formatter"),
+            )
+
+        with patch.object(runtime, "execute", side_effect=partial_success):
+            result = await env.step(json.dumps({"action": "set_relation", **candidate}))
+
+        self.assertTrue(result.accepted)
+        recovery = env.recovery_state()
+        self.assertIn("reasoner", recovery["failed_agent_ids"])
+        self.assertIn("reasoner", recovery["repair_exhausted_agent_ids"])
+        self.assertIn("reasoner", env._failure_continuations)
+        self.assertIn("reasoner", env.unresolved_dirty_agent_ids)
 
     async def test_hotpot_cached_semantic_diagnostic_cannot_replace_structure_target(
         self,
@@ -3090,6 +3242,19 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("Paris", candidate)
         self.assertIsNone(issue)
 
+        forged_candidate = json.loads(json.dumps(artifact))
+        forged_candidate["answer_slot"]["answer_field"] = "subject"
+        forged_candidate["candidate_answer"] = "Chester"
+        candidate, issue = env._reasoner_candidate(
+            json.dumps(forged_candidate),
+            original_question="What is the capital of France?",
+        )
+        self.assertIsNone(candidate)
+        self.assertIn(
+            "must occur verbatim in the selected evidence_span",
+            str(issue),
+        )
+
         comparison = json.loads(json.dumps(artifact))
         comparison["question_scope"] = "Which magazine was started first, A or B?"
         comparison["answer_slot"]["answer_type"] = "entity"
@@ -3192,7 +3357,7 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             original_question="What is the capital of France?",
         )
         self.assertIsNone(candidate)
-        self.assertIn("proposition argument", str(issue))
+        self.assertIn("must occur verbatim in the selected evidence_span", str(issue))
 
         coreferential = json.loads(json.dumps(artifact))
         coreferential["evidence_propositions"][0]["evidence_span"] = (
@@ -3530,6 +3695,27 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         self.assertTrue(schema_repair.accepted)
+
+        for answer_precommit in (
+            {
+                "action": "modify_agent",
+                "agent_id": "reasoner",
+                "contract": "Output ONLY the word 'Shirley'.",
+            },
+            {
+                "action": "modify_agent",
+                "agent_id": "reasoner",
+                "completion_condition": "Return ONLY the word 'Shirley'.",
+            },
+        ):
+            revision = env.revision
+            rejected_precommit = await env.step(json.dumps(answer_precommit))
+            self.assertFalse(rejected_precommit.accepted)
+            self.assertIn(
+                "pre-execution obligations only",
+                rejected_precommit.feedback,
+            )
+            self.assertEqual(revision, env.revision)
 
         env._failure_continuations["reasoner"] = {
             "execution_phase": "single",

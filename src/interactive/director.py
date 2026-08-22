@@ -2850,6 +2850,22 @@ class AgentGraphOrchestrator:
             include_task_context=False,
             skills=skills,
         )
+        if (
+            verified_qa_semantic_protocol(self.semantic_protocol)
+            and env.history
+            and env.history[-1].accepted is False
+        ):
+            # SkillFlow keeps the sampled invalid Action in the trajectory but
+            # presents only its canonical failure Observation to the next
+            # policy turn. Replace the pre-action Canvas observation in place
+            # so a rejected answer-bearing contract cannot become an imitation
+            # target or semantic anchor in the persistent Director transcript.
+            redacted = list(messages)
+            redacted[-1] = {
+                "role": "user",
+                "content": self._observation_message(observation),
+            }
+            return encode_director_transcript(tuple(redacted))
         continuation = list(messages[2:])
         continuation.extend(
             (

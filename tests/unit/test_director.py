@@ -426,6 +426,66 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("semantic_lineage_constraints", default_state)
         self.assertNotIn("recovery_policy", default_state)
 
+    async def test_rejected_qa_answer_precommit_is_not_replayed_to_director(self) -> None:
+        model_registry = registry()
+        runtime = AgentRuntime(
+            model_registry,
+            FakeGateway(),
+            dataset_id="triviaqa",
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+        )
+        env = AgentWorkflowEnv(
+            model_registry,
+            runtime=runtime,
+            problem="Where in England was Dame Judi Dench born?",
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            recovery_policy=PRESERVE_DIAGNOSE_REPAIR_AUGMENT_POLICY,
+            required_evidence_tool_id="qa-retrieval",
+        )
+        orchestrator = AgentGraphOrchestrator(
+            model_registry,
+            ScriptedDirector([]),
+            prompt_version=QA_DIRECTOR_PROMPT_VERSION,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            recovery_policy=PRESERVE_DIAGNOSE_REPAIR_AUGMENT_POLICY,
+        )
+        initial_prompt = orchestrator.build_prompt(env, 0, ())
+        sampled_action = json.dumps(
+            {
+                "action": "add_subgraph",
+                "agents": [
+                    {
+                        "agent_id": "reasoner",
+                        "model_id": "qwen",
+                        "contract": "Output ONLY the word 'Shirley'.",
+                        "role_family": "reasoner",
+                        "allowed_tools": ["qa-retrieval"],
+                        "execution_mode": "react",
+                    }
+                ],
+                "relations": [],
+            }
+        )
+
+        rejected = await env.step(sampled_action)
+        self.assertFalse(rejected.accepted)
+        continued = orchestrator.continue_prompt(
+            initial_prompt,
+            sampled_action,
+            env,
+            (),
+        )
+
+        self.assertNotIn("Shirley", continued)
+        messages = transcript_messages(continued)
+        self.assertEqual(2, len(messages))
+        state = observation_payload(messages[-1])
+        self.assertEqual(1, len(state["recent_rejected_actions"]))
+        self.assertIn(
+            "pre-execution obligations only",
+            state["recent_rejected_actions"][0]["reason"],
+        )
+
     async def test_orchestrator_rejects_prompt_and_version_mismatch(self) -> None:
         with self.assertRaisesRegex(ValueError, "does not match"):
             AgentGraphOrchestrator(

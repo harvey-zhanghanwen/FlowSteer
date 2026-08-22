@@ -546,6 +546,31 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             return "coverage"
         return None
 
+    @staticmethod
+    def _semantic_repair_instruction(repair_kind: str) -> str:
+        """Return the public SkillFlow continuation instruction for one fault."""
+
+        if repair_kind == "structure":
+            return (
+                "Preserve all successful qa-retrieval read evidence and every "
+                "semantic field not implicated by this public_error_code. Repair "
+                "only the diagnosed structured semantic artifact fields, then "
+                "emit a complete action; do not add a search or read."
+            )
+        if repair_kind == "evidence":
+            return (
+                "Preserve the current semantic work and use the admitted "
+                "qa-retrieval search/read continuation to obtain the missing "
+                "evidence or provenance before completing again."
+            )
+        if repair_kind == "coverage":
+            return (
+                "The bounded retrieval strategies and Tool budget did not produce "
+                "evidence that binds the target entity and relation. Do not guess "
+                "or fabricate an answer or evidence."
+            )
+        raise ValueError(f"unsupported semantic repair kind {repair_kind!r}")
+
     @classmethod
     def _model_visible_observations(
         cls,
@@ -565,27 +590,33 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         for observation in visible:
             public_error_code = observation.get("public_error_code")
             repair_kind = cls._semantic_rejection_kind(public_error_code)
-            if repair_kind == "structure":
+            if repair_kind is not None:
                 observation["repair_instruction"] = (
-                    "Preserve all successful qa-retrieval read evidence and "
-                    "every semantic field not implicated by this "
-                    "public_error_code. Repair only the diagnosed structured "
-                    "semantic artifact fields, then emit a complete action; "
-                    "do not add a search or read."
+                    cls._semantic_repair_instruction(repair_kind)
                 )
-            elif repair_kind == "evidence":
-                observation["repair_instruction"] = (
-                    "Preserve the current semantic work and use the admitted "
-                    "qa-retrieval search/read continuation to obtain the "
-                    "missing evidence or provenance before completing again."
-                )
-            elif repair_kind == "coverage":
-                observation["repair_instruction"] = (
-                    "The bounded retrieval strategies and Tool budget did not "
-                    "produce evidence that binds the target entity and relation. "
-                    "Do not guess or fabricate an answer or evidence."
-                )
-        return visible
+
+        # SkillFlow persists every sampled Action--Observation turn in the
+        # trajectory, but the next model input need not replay an unbounded run
+        # of identical invalid-action observations. Preserve every Tool result
+        # and every change of diagnosis while collapsing only consecutive
+        # duplicate public errors.
+        compacted: list[dict[str, object]] = []
+        last_invalid_key: tuple[str, str] | None = None
+        for observation in visible:
+            status = observation.get("observation_status")
+            public_error_code = observation.get("public_error_code")
+            if (
+                status in {"parse_error", "schema_invalid"}
+                and isinstance(public_error_code, str)
+            ):
+                invalid_key = (str(status), public_error_code)
+                if invalid_key == last_invalid_key:
+                    continue
+                last_invalid_key = invalid_key
+            else:
+                last_invalid_key = None
+            compacted.append(observation)
+        return compacted
 
     def _required_evidence_state(
         self,
@@ -1226,11 +1257,27 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     or state.semantic_repair_kind in {"evidence", "coverage"}
                 )
                 if not exhausted or not evidence_unresolved:
-                    raise
+                    if state.semantic_repair_kind is None:
+                        raise
+                    trace = [dict(item) for item in exc.react_trace]
+                    if trace:
+                        trace[-1]["repair_instruction"] = (
+                            self._semantic_repair_instruction(
+                                state.semantic_repair_kind
+                            )
+                        )
+                    raise ReactExecutionError(
+                        str(exc),
+                        react_trace=tuple(trace),
+                        tool_receipts=exc.tool_receipts,
+                        model_calls=exc.model_calls,
+                        tool_plan_exhausted=exc.tool_plan_exhausted,
+                    ) from exc
                 trace = [dict(item) for item in exc.react_trace]
                 terminal_diagnosis = {
                     "observation_status": "budget_exhausted",
                     "public_error_code": _KNOWLEDGE_BASE_COVERAGE_FAILURE,
+                    "tool_plan_exhausted": True,
                     "retrieval_attempt_count": state.search_attempt_count,
                     "retrieval_strategies_attempted": list(
                         _FACTUAL_QA_RETRIEVAL_STRATEGIES[
@@ -1241,6 +1288,9 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     "search_top_ks": list(state.search_top_ks),
                 }
                 if trace:
+                    trace[-1]["repair_instruction"] = (
+                        self._semantic_repair_instruction("coverage")
+                    )
                     trace[-1]["terminal_failure_diagnosis"] = terminal_diagnosis
                 else:  # pragma: no cover - bounded execution always samples a turn
                     trace.append(terminal_diagnosis)
@@ -1249,6 +1299,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     react_trace=tuple(trace),
                     tool_receipts=exc.tool_receipts,
                     model_calls=exc.model_calls,
+                    tool_plan_exhausted=True,
                 ) from exc
         finally:
             self._semantic_upstream_tool_receipts.reset(
@@ -1595,6 +1646,16 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             ),
         )
         if provenance_issue is not None:
+            entity_binding_repair = (
+                "no deterministic entity binding" in provenance_issue
+            )
+            if entity_binding_repair:
+                prefix = (
+                    _QA_SEMANTIC_STRUCTURE_ERROR_PREFIX
+                    if semantic_protocol == QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL
+                    else _HOTPOTQA_SEMANTIC_STRUCTURE_ERROR_PREFIX
+                )
+                return prefix + " " + provenance_issue
             if unified_factual and retrieval_budget_exhausted:
                 return _KNOWLEDGE_BASE_COVERAGE_FAILURE
             prefix = (

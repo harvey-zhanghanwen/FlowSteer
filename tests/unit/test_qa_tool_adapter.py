@@ -76,6 +76,29 @@ class FakeIndex:
 
 
 class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
+    async def test_model_visible_continuation_collapses_only_duplicate_errors(
+        self,
+    ) -> None:
+        error = {
+            "observation_status": "schema_invalid",
+            "public_error_code": (
+                "qa_semantic_artifact_invalid: repair answer binding"
+            ),
+        }
+        success = {
+            "observation_status": "success",
+            "result": {"operation": "read", "passage_id": "p1"},
+        }
+
+        visible = QARetrievalReactExecutionAdapter._model_visible_observations(
+            [error, dict(error), success, error, dict(error)]
+        )
+
+        self.assertEqual(3, len(visible))
+        self.assertEqual("success", visible[1]["observation_status"])
+        self.assertIn("repair_instruction", visible[0])
+        self.assertIn("repair_instruction", visible[2])
+
     async def test_search_receipt_preserves_frozen_identity_query_top_k_and_ids(self) -> None:
         index = FakeIndex()
         registry = build_qa_tool_registry(index)
@@ -815,6 +838,7 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
 
         error = caught.exception
         self.assertEqual(5, len(error.tool_receipts))
+        self.assertIs(True, error.tool_plan_exhausted)
         self.assertEqual(
             "knowledge_base_coverage_failure",
             error.react_trace[-1]["public_error_code"],
@@ -822,6 +846,7 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         terminal_diagnosis = error.react_trace[-1][
             "terminal_failure_diagnosis"
         ]
+        self.assertIs(True, terminal_diagnosis["tool_plan_exhausted"])
         self.assertEqual(5, terminal_diagnosis["retrieval_attempt_count"])
         self.assertEqual(
             [5, 10, 15, 20, 25],
@@ -953,9 +978,11 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
 
         error = caught.exception
         self.assertEqual(10, len(error.tool_receipts))
+        self.assertIs(True, error.tool_plan_exhausted)
         terminal_diagnosis = error.react_trace[-1][
             "terminal_failure_diagnosis"
         ]
+        self.assertIs(True, terminal_diagnosis["tool_plan_exhausted"])
         self.assertEqual(
             "knowledge_base_coverage_failure",
             terminal_diagnosis["public_error_code"],
@@ -2006,6 +2033,133 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         )[1].split("\nCurrently admissible completion", 1)[0]
         self.assertTrue(repair_domain.endswith("- none"))
         self.assertIn("Currently admissible completion schema", repair_contract)
+
+    async def test_unified_entity_binding_repairs_on_preserved_read_evidence(
+        self,
+    ) -> None:
+        class DenchIndex(FakeIndex):
+            def search(self, query: str, *, limit: int) -> tuple[FakeHit, ...]:
+                self.search_calls.append((query, limit))
+                return (
+                    FakeHit(
+                        "p1",
+                        "d1",
+                        "Judi Dench",
+                        "Dench was born in Heworth.",
+                        1,
+                    ),
+                )
+
+            def read(self, passage_id: str) -> FakePassage:
+                self.read_calls.append(passage_id)
+                return FakePassage(
+                    passage_id,
+                    "d1",
+                    "Judi Dench",
+                    "Dench was born in Heworth, North Riding of Yorkshire.",
+                )
+
+        question = "Where in England was Dame Judi Dench born?"
+        valid_artifact = {
+            "question_scope": question,
+            "answer_slot": {
+                "answer_type": "location",
+                "answer_cardinality": "single",
+                "qualifiers": ["in England"],
+                "proposition_index": 0,
+                "answer_field": "object_or_attribute_value",
+            },
+            "evidence_propositions": [
+                {
+                    "subject": "Dench",
+                    "relation": "was born in",
+                    "object_or_attribute_value": (
+                        "Heworth, North Riding of Yorkshire"
+                    ),
+                    "qualifiers": ["in England"],
+                    "evidence_span": (
+                        "Dench was born in Heworth, North Riding of Yorkshire."
+                    ),
+                }
+            ],
+            "multi_hop_chain": [
+                "Dench --was born in--> Heworth, North Riding of Yorkshire"
+            ],
+            "candidate_answer": "Heworth, North Riding of Yorkshire",
+            "evidence": ["p1"],
+        }
+        ungrounded_entity_surface = json.loads(json.dumps(valid_artifact))
+        ungrounded_entity_surface["evidence_propositions"][0]["subject"] = (
+            "Dame Judi Dench"
+        )
+
+        def action(name: str, arguments: object) -> str:
+            return json.dumps(
+                {
+                    "arguments": arguments,
+                    "kind": "complete" if name == "complete" else "tool",
+                    "name": name,
+                    "resource_id": (
+                        None if name == "complete" else QA_RETRIEVAL_TOOL_ID
+                    ),
+                    "skill_id": None,
+                }
+            )
+
+        class SequenceGateway:
+            def __init__(self) -> None:
+                self.outputs = [
+                    action(
+                        "search",
+                        {"query": "Dame Judi Dench birthplace", "limit": 5},
+                    ),
+                    action("read", {"passage_id": "p1"}),
+                    action("complete", {"value": ungrounded_entity_surface}),
+                    action("complete", {"value": valid_artifact}),
+                ]
+                self.requests: list[AgentRequest] = []
+
+            async def generate(self, request: AgentRequest) -> AgentResponse:
+                self.requests.append(request)
+                return AgentResponse(self.outputs.pop(0))
+
+        index = DenchIndex()
+        gateway = SequenceGateway()
+        request = AgentRequest(
+            request_id="trivia:entity-binding-repair",
+            run_id="trivia",
+            graph_revision=1,
+            problem=question,
+            agent=AgentNode(
+                "reasoner",
+                "model",
+                "retrieve evidence and preserve the requested relation",
+                role_family="reasoner",
+                allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                execution_mode="react",
+            ),
+            model=ModelSpec("model", "provider"),
+            provider=ProviderSpec("provider", kind="test"),
+            phase=ExecutionPhase.SINGLE,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+        )
+
+        response = await QARetrievalReactExecutionAdapter(
+            gateway=gateway,
+            tool_registry=build_qa_tool_registry(index),
+            max_turns=4,
+            max_tool_calls=10,
+            task_type="factual_qa",
+            completion_policy="required_evidence",
+        ).execute(request)
+
+        self.assertEqual([("Dame Judi Dench birthplace", 5)], index.search_calls)
+        self.assertEqual(["p1"], index.read_calls)
+        public_error = response.metadata["react_trace"][2]["public_error_code"]
+        self.assertTrue(public_error.startswith("qa_semantic_artifact_invalid:"))
+        self.assertIn("no deterministic entity binding", public_error)
+        repair_contract = gateway.requests[3].agent.contract
+        self.assertIn("do not add a search or read", repair_contract)
 
     async def test_react_failed_retrieval_receipt_admits_explicit_completion(self) -> None:
         class FailingIndex(FakeIndex):
