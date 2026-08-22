@@ -37,6 +37,7 @@ from src.interactive.director import (
     AgentGraphOrchestrator,
     DIRECTOR_MODEL_ADMISSIBLE_ACTION_MASK_PROFILE,
     DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION,
+    DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V1,
     DIRECTOR_PROGRESSIVE_ACTION_MASK_PROFILE,
     DIRECTOR_PROMPT_VERSION,
     DIRECTOR_SGLANG_SAMPLING_SCHEMA_VERSION,
@@ -2381,12 +2382,14 @@ class LiveSmokeBackend:
             sampling_action_profile
             == DIRECTOR_MODEL_ADMISSIBLE_ACTION_MASK_PROFILE
             and sampling_schema_version
-            != DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION
+            not in {
+                DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V1,
+                DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION,
+            }
         ):
             raise ConfigurationError(
                 "model-admissible Director sampling requires "
-                "director.sampling_schema_version="
-                f"{DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION!r}"
+                "a supported director.sampling_schema_version"
             )
         director_client = SGLangReceiptDirectorClient(
             tokenizer,

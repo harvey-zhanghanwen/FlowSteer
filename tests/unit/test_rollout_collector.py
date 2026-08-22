@@ -17,6 +17,7 @@ from src.interactive.director import (
     DIRECTOR_ACTION_JSON_SCHEMA_TEXT,
     DIRECTOR_MODEL_ADMISSIBLE_ACTION_MASK_PROFILE,
     DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION,
+    DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V1,
     DIRECTOR_PROGRESSIVE_ACTION_MASK_PROFILE,
     DIRECTOR_SGLANG_SAMPLING_SCHEMA_VERSION,
     DIRECTOR_STATE_CONDITIONED_ACTION_SCHEMA_VERSION,
@@ -24,7 +25,11 @@ from src.interactive.director import (
     director_actions_from_admissible_schema_branch,
     director_action_json_schema_text,
     director_model_admissible_sampling_json_schema_text,
+    director_model_admissible_sampling_json_schema_text_v1,
     director_model_admissible_schema_branch,
+    director_model_admissible_schema_branch_v1,
+    director_modify_agent_field_sampling_json_schema_text,
+    director_modify_agent_field_selector_json_schema_text,
     director_sglang_sampling_json_schema_text,
     director_state_conditioned_sampling_json_schema_text,
     encode_director_transcript,
@@ -397,7 +402,11 @@ def test_native_sglang_per_request_schema_does_not_mutate_client_default():
 
 def test_native_sglang_validates_model_admissible_schema_receipt():
     client = ScriptedSGLangClient(
-        ['{"action":"modify_agent","agent_id":"solver","contract":"repair"}'],
+        [
+            '{"action":"modify_agent"}',
+            '{"action":"modify_agent","field":"contract"}',
+            '{"action":"modify_agent","agent_id":"solver","contract":"repair"}',
+        ],
         policy_version=POLICY_VERSION,
         expected_server_weight_version="default",
     )
@@ -417,13 +426,25 @@ def test_native_sglang_validates_model_admissible_schema_receipt():
     )
 
     assert client.payloads[0]["sampling_params"]["json_schema"] == schema
+    assert client.payloads[1]["sampling_params"]["json_schema"] == (
+        director_modify_agent_field_selector_json_schema_text()
+    )
+    assert client.payloads[2]["sampling_params"]["json_schema"] == (
+        director_modify_agent_field_sampling_json_schema_text("contract")
+    )
     assert response.metadata["action_json_schema_version"] == (
         DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION
     )
     assert response.metadata["action_schema_branch"] == branch
+    assert response.metadata["action_decoding_strategy"] == (
+        "hierarchical_json_schema"
+    )
+    assert response.metadata["selected_action"] == "modify_agent"
+    assert response.metadata["selected_modify_field"] == "contract"
+    assert response.metadata["request_count"] == 3
     assert director_actions_from_admissible_schema_branch(branch) == actions
 
-    with pytest.raises(ValueError, match="does not match its declared branch"):
+    with pytest.raises(ValueError, match="strict schema for its branch"):
         client.request_payload(
             "mismatched admissible receipt",
             action_json_schema=schema,
@@ -440,6 +461,40 @@ def test_native_sglang_validates_model_admissible_schema_receipt():
                 DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION
             ),
             action_schema_branch="admissible:finish|unknown",
+        )
+
+
+def test_native_sglang_replays_legacy_v1_model_admissible_receipt():
+    client = ScriptedSGLangClient(
+        ['{"action":"finish"}'],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+    )
+    actions = ("modify_agent", "finish")
+    schema = director_model_admissible_sampling_json_schema_text_v1(actions)
+    branch = director_model_admissible_schema_branch_v1(actions)
+
+    response = asyncio.run(
+        client.propose(
+            "legacy Canvas",
+            action_json_schema=schema,
+            action_json_schema_version=(
+                DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V1
+            ),
+            action_schema_branch=branch,
+        )
+    )
+
+    assert response.metadata["action_schema_branch"] == branch
+    assert client.payloads[0]["sampling_params"]["json_schema"] == schema
+    with pytest.raises(ValueError, match="strict schema for its branch"):
+        client.request_payload(
+            "cross-version mismatch",
+            action_json_schema=schema,
+            action_json_schema_version=(
+                DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION
+            ),
+            action_schema_branch=branch,
         )
 
 
@@ -853,6 +908,7 @@ def test_collector_records_model_admissible_schema_on_every_canvas_turn():
                 '"output_agent_id":"solver"}'
             ),
             '{"action":"finish"}',
+            '{"action":"finish"}',
         ],
         policy_version=POLICY_VERSION,
         expected_server_weight_version="default",
@@ -886,21 +942,44 @@ def test_collector_records_model_admissible_schema_on_every_canvas_turn():
     trajectory = asyncio.run(collector.collect(_task(), 0, evaluator))
 
     assert trajectory.explicit_finish is True
-    for turn, payload in zip(trajectory.turns, client.payloads, strict=True):
+    for turn in trajectory.turns:
         branch = turn.runtime_summary["director_action_schema_branch"]
         actions = director_actions_from_admissible_schema_branch(branch)
         assert turn.runtime_summary["director_action_schema_version"] == (
             DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION
         )
-        assert payload["sampling_params"]["json_schema"] == (
-            director_model_admissible_sampling_json_schema_text(actions)
-        )
+    assert client.payloads[0]["sampling_params"]["json_schema"] == (
+        director_state_conditioned_sampling_json_schema_text("add_subgraph")
+    )
+    second_actions = director_actions_from_admissible_schema_branch(
+        trajectory.turns[1].runtime_summary["director_action_schema_branch"]
+    )
+    assert client.payloads[1]["sampling_params"]["json_schema"] == (
+        director_model_admissible_sampling_json_schema_text(second_actions)
+    )
+    assert client.payloads[2]["sampling_params"]["json_schema"] == (
+        director_state_conditioned_sampling_json_schema_text("finish")
+    )
     assert director_actions_from_admissible_schema_branch(
         trajectory.turns[0].runtime_summary["director_action_schema_branch"]
     ) == ("add_subgraph",)
     assert "finish" in director_actions_from_admissible_schema_branch(
         trajectory.turns[1].runtime_summary["director_action_schema_branch"]
     )
+    assert trajectory.turns[0].runtime_summary["director_action_decoding"] == {
+        "strategy": "hierarchical_json_schema",
+        "selected_action": "add_subgraph",
+        "selected_modify_field": None,
+        "parameter_schema_branch": "add_subgraph",
+        "request_count": 1,
+        "phase_receipts": {},
+    }
+    finish_decoding = trajectory.turns[1].runtime_summary[
+        "director_action_decoding"
+    ]
+    assert finish_decoding["selected_action"] == "finish"
+    assert finish_decoding["request_count"] == 2
+    assert set(finish_decoding["phase_receipts"]) == {"action_selection"}
 
 
 def test_collector_does_not_duplicate_reused_progressive_execution():

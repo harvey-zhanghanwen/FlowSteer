@@ -151,7 +151,7 @@ def test_live_backend_rejects_invalid_model_admissible_sampling_contract():
                 "action_decoding": "unconstrained",
                 "sampling_action_profile": "model_admissible_canvas_actions",
                 "sampling_schema_version": (
-                    "agentgraph.model-admissible-action-mask.v1"
+                    "agentgraph.model-admissible-action-mask.v2"
                 ),
             },
             "requires evaluation-only json_schema",

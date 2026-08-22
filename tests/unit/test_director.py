@@ -10,6 +10,7 @@ from src.interactive.director import (
     AgentGraphOrchestrator,
     DIRECTOR_MODEL_ADMISSIBLE_ACTION_MASK_PROFILE,
     DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION,
+    DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V1,
     DIRECTOR_PROGRESSIVE_ACTION_MASK_PROFILE,
     DIRECTOR_PROMPT_VERSION,
     DIRECTOR_STATE_CONDITIONED_ACTION_SCHEMA_VERSION,
@@ -21,6 +22,7 @@ from src.interactive.director import (
     HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V15,
     HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V16,
     HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V17,
+    HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V18,
     HOTPOTQA_SEMANTIC_PROTOCOL,
     LEGACY_DIRECTOR_SYSTEM_PROMPT_V8,
     LEGACY_DIRECTOR_SYSTEM_PROMPT_V9,
@@ -31,7 +33,11 @@ from src.interactive.director import (
     director_actions_from_admissible_schema_branch,
     director_action_json_schema_text,
     director_model_admissible_sampling_json_schema_text,
+    director_model_admissible_sampling_json_schema_text_v1,
     director_model_admissible_schema_branch,
+    director_model_admissible_schema_branch_v1,
+    director_modify_agent_field_sampling_json_schema_text,
+    director_modify_agent_field_selector_json_schema_text,
     director_system_prompt_for_version,
     director_state_conditioned_sampling_json_schema_text,
     encode_director_transcript,
@@ -165,8 +171,14 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
             director_system_prompt_for_version("prompt-v1"),
         )
         self.assertIs(
-            HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V17,
+            HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V18,
             director_system_prompt_for_version(HOTPOTQA_DIRECTOR_PROMPT_VERSION),
+        )
+        self.assertIs(
+            HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V17,
+            director_system_prompt_for_version(
+                "agentgraph.director.hotpotqa-semantic-recovery.v17"
+            ),
         )
         self.assertIs(
             HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V16,
@@ -201,7 +213,7 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             director_system_prompt_for_version(" ")
 
-    async def test_hotpot_v17_prompt_encodes_semantic_and_recovery_policy(self) -> None:
+    async def test_hotpot_v18_prompt_encodes_semantic_and_recovery_policy(self) -> None:
         model_registry = registry()
         env = AgentWorkflowEnv(
             model_registry,
@@ -214,7 +226,7 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         orchestrator = AgentGraphOrchestrator(
             model_registry,
             ScriptedDirector([]),
-            system_prompt=HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V17,
+            system_prompt=HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V18,
             prompt_version=HOTPOTQA_DIRECTOR_PROMPT_VERSION,
             semantic_protocol=HOTPOTQA_SEMANTIC_PROTOCOL,
             recovery_policy=PRESERVE_DIAGNOSE_REPAIR_AUGMENT_POLICY,
@@ -223,7 +235,7 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         messages = transcript_messages(orchestrator.build_prompt(env, 0, ()))
         state = observation_payload(messages[-1])
 
-        self.assertEqual(HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V17, messages[0]["content"])
+        self.assertEqual(HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V18, messages[0]["content"])
         self.assertEqual(HOTPOTQA_SEMANTIC_PROTOCOL, state["semantic_protocol"])
         self.assertEqual(
             PRESERVE_DIAGNOSE_REPAIR_AUGMENT_POLICY,
@@ -271,6 +283,7 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
             "different provider",
             messages[0]["content"],
         )
+        self.assertIn("never reference a future Agent", messages[0]["content"])
         self.assertEqual(
             {
                 "add_subgraph": {
@@ -945,23 +958,111 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         branch = director_model_admissible_schema_branch(actions)
 
         self.assertEqual(
-            "admissible:add_subgraph|modify_agent|set_relation|finish",
+            "admissible-v2:add_subgraph|modify_agent|set_relation|finish",
             branch,
         )
         self.assertEqual(
             actions,
             director_actions_from_admissible_schema_branch(branch),
         )
-        self.assertEqual(
-            director_state_conditioned_sampling_json_schema_text("finish"),
-            director_model_admissible_sampling_json_schema_text(("finish",)),
+        singleton_selector = json.loads(
+            director_model_admissible_sampling_json_schema_text(("finish",))
         )
+        self.assertEqual(["finish"], singleton_selector["properties"]["action"]["enum"])
         with self.assertRaises(ValueError):
             director_actions_from_admissible_schema_branch("finish")
         with self.assertRaises(ValueError):
             director_actions_from_admissible_schema_branch("admissible:")
         with self.assertRaises(ValueError):
             director_model_admissible_schema_branch(("finish", "finish"))
+
+        legacy_branch = director_model_admissible_schema_branch_v1(actions)
+        self.assertEqual(
+            "admissible:add_subgraph|modify_agent|set_relation|finish",
+            legacy_branch,
+        )
+        self.assertEqual(
+            actions,
+            director_actions_from_admissible_schema_branch(legacy_branch),
+        )
+
+    def test_model_admissible_v2_factorizes_action_and_exact_parameters(self) -> None:
+        actions = ("modify_agent", "set_relation", "finish")
+        strict_schema = json.loads(
+            director_model_admissible_sampling_json_schema_text(actions)
+        )
+        legacy_schema = json.loads(
+            director_model_admissible_sampling_json_schema_text_v1(actions)
+        )
+
+        self.assertEqual(["action"], strict_schema["required"])
+        self.assertEqual(
+            list(actions),
+            strict_schema["properties"]["action"]["enum"],
+        )
+        self.assertEqual(["action"], legacy_schema["required"])
+        self.assertNotIn("agent_id", strict_schema["properties"])
+        self.assertIn("agent_id", legacy_schema["properties"])
+
+        field_selector = json.loads(
+            director_modify_agent_field_selector_json_schema_text()
+        )
+        self.assertEqual(
+            ["action", "field"],
+            field_selector["required"],
+        )
+        contract_branch = json.loads(
+            director_modify_agent_field_sampling_json_schema_text("contract")
+        )
+        self.assertEqual(
+            {"action", "agent_id", "contract"},
+            set(contract_branch["required"]),
+        )
+        self.assertEqual(
+            {"action", "agent_id", "contract"},
+            set(contract_branch["properties"]),
+        )
+
+    async def test_model_admissible_v1_receipts_remain_replayable(self) -> None:
+        model_registry = registry()
+        client = ScriptedDirector(
+            [
+                (
+                    '{"action":"add_subgraph","agents":['
+                    '{"agent_id":"solver","model_id":"qwen",'
+                    '"contract":"solve"}],"relations":[],'
+                    '"output_agent_id":"solver"}'
+                ),
+                '{"action":"finish"}',
+            ]
+        )
+        env = AgentWorkflowEnv(
+            model_registry,
+            gateway=FakeGateway(),
+            execute_on_edit=True,
+        )
+        orchestrator = AgentGraphOrchestrator(
+            model_registry,
+            client,
+            max_rounds=2,
+            sampling_action_profile=DIRECTOR_MODEL_ADMISSIBLE_ACTION_MASK_PROFILE,
+            sampling_action_schema_version=(
+                DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V1
+            ),
+        )
+
+        result = await orchestrator.run(env, "task")
+
+        self.assertTrue(result.explicit_finish)
+        for request in client.schema_requests:
+            actions = director_actions_from_admissible_schema_branch(
+                request["action_schema_branch"]
+            )
+            self.assertTrue(request["action_schema_branch"].startswith("admissible:"))
+            self.assertEqual(
+                director_model_admissible_sampling_json_schema_text_v1(actions),
+                request["action_json_schema"],
+            )
 
     def test_state_conditioned_relation_schema_repeats_full_object_contract(self) -> None:
         schema = json.loads(

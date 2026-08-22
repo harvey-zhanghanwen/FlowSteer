@@ -13,7 +13,7 @@ experiment:
   condition_id: "hotpotqa_unified_architecture_v1"
   sampling_schedule_purpose: "hotpotqa_fixed_development_unified_architecture"
   catalog_order_namespace: "hotpotqa_unified_architecture_v1"
-  prompt_version: "agentgraph.director.hotpotqa-semantic-recovery.v17"
+  prompt_version: "agentgraph.director.hotpotqa-semantic-recovery.v18"
   tool_version: "skillflow.qa-retrieval.top10-semantic-slot-verifier.v11"
   output_dir: "artifacts/unified_architecture_v1/hotpotqa"
 
@@ -97,11 +97,11 @@ director:
   max_context_tokens: 32768
   max_action_tokens: 1024
   # The latest FlowSteer Canvas projects the request-scoped admissible action
-  # domain. SGLang constrains generation to that domain and the unchanged
-  # AgentActionParser remains the authoritative action-specific validator.
+  # domain. The native client samples the action discriminator and then its
+  # exact singleton parameters; AgentActionParser remains authoritative.
   action_decoding: "json_schema"
   action_schema_version: "agentgraph.canvas-action-json-schema.v1"
-  sampling_schema_version: "agentgraph.model-admissible-action-mask.v1"
+  sampling_schema_version: "agentgraph.model-admissible-action-mask.v2"
   sampling_action_profile: "model_admissible_canvas_actions"
   temperature: 1.0
   top_p: 1.0

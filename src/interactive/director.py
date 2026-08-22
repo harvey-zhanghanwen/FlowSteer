@@ -58,6 +58,9 @@ DIRECTOR_PROMPT_VERSION = "agentgraph.director.minimal-neutral.v10"
 LEGACY_DIRECTOR_PROMPT_VERSION_V9 = "agentgraph.director.minimal-neutral.v9"
 LEGACY_DIRECTOR_PROMPT_VERSION_V8 = "agentgraph.director.minimal-neutral.v8"
 HOTPOTQA_DIRECTOR_PROMPT_VERSION = (
+    "agentgraph.director.hotpotqa-semantic-recovery.v18"
+)
+LEGACY_HOTPOTQA_DIRECTOR_PROMPT_VERSION_V17 = (
     "agentgraph.director.hotpotqa-semantic-recovery.v17"
 )
 LEGACY_HOTPOTQA_DIRECTOR_PROMPT_VERSION_V16 = (
@@ -183,6 +186,19 @@ The Verifier consumes only the Reasoner's semantic artifact. It checks explicit 
 Recover in this order: preserve -> diagnose -> repair -> augment. Preserve valid evidence, semantic answers, working relations, and Output identity. Repair the failure_attribution responsible Agent or relation before adding another Agent. For a transient provider failure, keep the failed Agent's role, contract, tools, and relations and modify only its model_id to a catalog model on a different provider when available. Delete only an Agent listed as deletable after a replacement artifact has taken over its downstream responsibility. Never hard-code a sample, answer, evidence span, Ground Truth, or evaluator result, and never assume an unlisted Skill."""
 
 
+# v18 adds only one Canvas-legality condition exposed by the real progressive
+# edit boundary.  It does not prescribe a graph template or task solution.
+HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V18 = HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V17.replace(
+    "add_subgraph adds one functional subgraph of one to three Agents and then "
+    "executes it once.",
+    "add_subgraph adds one functional subgraph of one to three Agents and then "
+    "executes it once. Every relation endpoint and non-null output_agent_id in "
+    "add_subgraph must name an Agent already on the Canvas or declared in that "
+    "same action; never reference a future Agent.",
+    1,
+)
+
+
 def director_system_prompt_for_version(prompt_version: str) -> str:
     """Resolve one explicitly versioned Director policy without changing v10."""
 
@@ -202,7 +218,10 @@ def director_system_prompt_for_version(prompt_version: str) -> str:
         "agentgraph.director.skillflow_continuation_v8": (
             LEGACY_DIRECTOR_SYSTEM_PROMPT_V8
         ),
-        HOTPOTQA_DIRECTOR_PROMPT_VERSION: HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V17,
+        HOTPOTQA_DIRECTOR_PROMPT_VERSION: HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V18,
+        LEGACY_HOTPOTQA_DIRECTOR_PROMPT_VERSION_V17: (
+            HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V17
+        ),
         LEGACY_HOTPOTQA_DIRECTOR_PROMPT_VERSION_V16: (
             HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V16
         ),
@@ -239,6 +258,7 @@ _SUPPORTED_DIRECTOR_SYSTEM_PROMPTS = frozenset(
         HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V15,
         HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V16,
         HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V17,
+        HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V18,
         LEGACY_DIRECTOR_SYSTEM_PROMPT_V9,
         LEGACY_DIRECTOR_SYSTEM_PROMPT_V8,
     }
@@ -399,8 +419,11 @@ DIRECTOR_MODEL_ADMISSIBLE_ACTION_MASK_PROFILE = (
 DIRECTOR_STATE_CONDITIONED_ACTION_SCHEMA_VERSION = (
     "agentgraph.state-conditioned-action-mask.v2"
 )
-DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION = (
+DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V1 = (
     "agentgraph.model-admissible-action-mask.v1"
+)
+DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION = (
+    "agentgraph.model-admissible-action-mask.v2"
 )
 DIRECTOR_ACTION_JSON_SCHEMA_TEXT = json.dumps(
     DIRECTOR_ACTION_JSON_SCHEMA,
@@ -533,15 +556,14 @@ def director_state_conditioned_sampling_json_schema_text(action: str) -> str:
     )
 
 
-def director_model_admissible_sampling_json_schema_text(
+def director_model_admissible_sampling_json_schema_text_v1(
     actions: Sequence[str],
 ) -> str:
-    """Render the exact current Canvas action domain for inference sampling.
+    """Render the legacy v1 current-Canvas sampling schema.
 
     A singleton domain can retain the strict action-specific schema.  Multiple
-    actions use the existing SGLang-compatible flat schema because deployed
-    xgrammar does not preserve the top-level ``oneOf`` discriminator.  The
-    unchanged ``AgentActionParser`` remains authoritative after generation.
+    actions use the historical flat SGLang compatibility schema.  This function
+    is retained only so persisted v1 receipts remain exactly replayable.
     """
 
     normalized = tuple(actions)
@@ -552,25 +574,110 @@ def director_model_admissible_sampling_json_schema_text(
     return director_sglang_sampling_json_schema_text(normalized)
 
 
-def director_model_admissible_schema_branch(actions: Sequence[str]) -> str:
-    """Encode the ordered legal action domain in one receipt-safe label."""
+def director_model_admissible_sampling_json_schema_text(
+    actions: Sequence[str],
+) -> str:
+    """Render the v2 first-stage action-discriminator schema.
+
+    SGLang 0.5.15 does not preserve branch-local fields in a multi-action JSON
+    Schema union.  V2 therefore samples only the legal action discriminator in
+    stage one; the native receipt client then samples the complete action under
+    that action's exact singleton schema.  No sampled field is rewritten.
+    """
 
     normalized = tuple(actions)
-    # Reuse the schema renderer for complete action-name validation.
-    director_model_admissible_sampling_json_schema_text(normalized)
+    # Reuse the strict renderer for unknown/empty/duplicate validation.
+    director_action_json_schema_text(normalized)
+    return json.dumps(
+        {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["action"],
+            "properties": {"action": {"enum": list(normalized)}},
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+DIRECTOR_MODIFY_AGENT_FIELDS = tuple(_MUTABLE_AGENT_PROPERTIES)
+
+
+def director_modify_agent_field_selector_json_schema_text() -> str:
+    """Render the v2 atomic MODIFY-field selector."""
+
+    return json.dumps(
+        {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["action", "field"],
+            "properties": {
+                "action": {"const": "modify_agent"},
+                "field": {"enum": list(DIRECTOR_MODIFY_AGENT_FIELDS)},
+            },
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def director_modify_agent_field_sampling_json_schema_text(field_name: str) -> str:
+    """Render one exact atomic ``modify_agent`` field branch."""
+
+    if field_name not in _MUTABLE_AGENT_PROPERTIES:
+        raise ValueError("modify_agent field selector returned an unknown field")
+    return json.dumps(
+        {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["action", "agent_id", field_name],
+            "properties": {
+                "action": {"const": "modify_agent"},
+                "agent_id": _NON_EMPTY_STRING_SCHEMA,
+                field_name: _MUTABLE_AGENT_PROPERTIES[field_name],
+            },
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def director_model_admissible_schema_branch_v1(actions: Sequence[str]) -> str:
+    """Encode one legacy v1 model-admissible receipt label."""
+
+    normalized = tuple(actions)
+    director_model_admissible_sampling_json_schema_text_v1(normalized)
     return "admissible:" + "|".join(normalized)
+
+
+def director_model_admissible_schema_branch(actions: Sequence[str]) -> str:
+    """Encode one v2 branch-exact model-admissible receipt label."""
+
+    normalized = tuple(actions)
+    director_model_admissible_sampling_json_schema_text(normalized)
+    return "admissible-v2:" + "|".join(normalized)
 
 
 def director_actions_from_admissible_schema_branch(
     branch: str,
 ) -> Tuple[str, ...]:
-    """Decode and validate one model-admissible action-domain receipt label."""
+    """Decode and validate one v1 or v2 action-domain receipt label."""
 
-    prefix = "admissible:"
-    if not isinstance(branch, str) or not branch.startswith(prefix):
+    if not isinstance(branch, str):
+        raise ValueError("model-admissible schema branch has an invalid prefix")
+    if branch.startswith("admissible-v2:"):
+        prefix = "admissible-v2:"
+        renderer = director_model_admissible_sampling_json_schema_text
+    elif branch.startswith("admissible:"):
+        prefix = "admissible:"
+        renderer = director_model_admissible_sampling_json_schema_text_v1
+    else:
         raise ValueError("model-admissible schema branch has an invalid prefix")
     actions = tuple(branch[len(prefix) :].split("|"))
-    director_model_admissible_sampling_json_schema_text(actions)
+    renderer(actions)
     return actions
 
 
@@ -922,6 +1029,16 @@ class AgentGraphOrchestrator:
         self.sampling_action_schema_version = (
             sampling_action_schema_version.strip()
         )
+        if (
+            self.sampling_action_profile
+            == DIRECTOR_MODEL_ADMISSIBLE_ACTION_MASK_PROFILE
+            and self.sampling_action_schema_version
+            not in {
+                DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V1,
+                DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION,
+            }
+        ):
+            raise ValueError("unsupported model-admissible action schema version")
 
     def action_schema_request(
         self,
@@ -930,10 +1047,11 @@ class AgentGraphOrchestrator:
         """Return the evaluation-only constrained action branch for this state.
 
         FlowSteer's progressive Canvas executes every accepted structural ADD
-        before asking the policy for the next edit.  This optional sampling
-        profile preserves that boundary while avoiding SGLang 0.5.15's
-        unreliable multi-branch ``oneOf`` handling.  The strict parser remains
-        authoritative and no sampled action is repaired.
+        before asking the policy for the next edit.  The v2 model-admissible
+        profile exposes the legal action discriminator; the native SGLang
+        client then samples the selected action under its exact singleton
+        schema.  The strict parser remains authoritative and no sampled action
+        is repaired.
         """
 
         if self.sampling_action_profile is None:
@@ -943,13 +1061,21 @@ class AgentGraphOrchestrator:
             == DIRECTOR_MODEL_ADMISSIBLE_ACTION_MASK_PROFILE
         ):
             actions = env.model_admissible_action_types()
+            legacy_v1 = (
+                self.sampling_action_schema_version
+                == DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V1
+            )
             return {
                 "action_json_schema": (
-                    director_model_admissible_sampling_json_schema_text(actions)
+                    director_model_admissible_sampling_json_schema_text_v1(actions)
+                    if legacy_v1
+                    else director_model_admissible_sampling_json_schema_text(actions)
                 ),
                 "action_json_schema_version": self.sampling_action_schema_version,
                 "action_schema_branch": (
-                    director_model_admissible_schema_branch(actions)
+                    director_model_admissible_schema_branch_v1(actions)
+                    if legacy_v1
+                    else director_model_admissible_schema_branch(actions)
                 ),
             }
         finish_admissible = env.finish_admissibility().get("admissible") is True
@@ -1332,6 +1458,8 @@ __all__ = [
     "DIRECTOR_ACTION_SCHEMA_VERSION",
     "DIRECTOR_MODEL_ADMISSIBLE_ACTION_MASK_PROFILE",
     "DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION",
+    "DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V1",
+    "DIRECTOR_MODIFY_AGENT_FIELDS",
     "DIRECTOR_PROGRESSIVE_ACTION_MASK_PROFILE",
     "DIRECTOR_SGLANG_SAMPLING_SCHEMA_VERSION",
     "DIRECTOR_STATE_CONDITIONED_ACTION_SCHEMA_VERSION",
@@ -1342,6 +1470,7 @@ __all__ = [
     "HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V15",
     "HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V16",
     "HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V17",
+    "HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V18",
     "HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V11",
     "HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V13",
     "HOTPOTQA_SEMANTIC_PROTOCOL",
@@ -1361,7 +1490,11 @@ __all__ = [
     "director_action_json_schema_text",
     "director_actions_from_admissible_schema_branch",
     "director_model_admissible_sampling_json_schema_text",
+    "director_model_admissible_sampling_json_schema_text_v1",
     "director_model_admissible_schema_branch",
+    "director_model_admissible_schema_branch_v1",
+    "director_modify_agent_field_sampling_json_schema_text",
+    "director_modify_agent_field_selector_json_schema_text",
     "director_system_prompt_for_version",
     "director_sglang_sampling_json_schema_text",
     "director_state_conditioned_sampling_json_schema_text",
