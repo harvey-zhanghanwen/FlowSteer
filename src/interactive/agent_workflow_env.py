@@ -2387,7 +2387,6 @@ class AgentWorkflowEnv:
             )
             if (
                 category == "react_turn_exhaustion"
-                and record.metadata.get("tool_plan_exhausted") is True
                 and (
                     (
                         baseline_receipt_count is not None

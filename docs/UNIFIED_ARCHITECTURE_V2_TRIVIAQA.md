@@ -95,7 +95,7 @@ not overwritten.
 
 The same state-conditioned Canvas domain also closes the declared
 Reasoner -> Verifier -> Formatter relations before Output selection.  After a
-Tool-plan-exhausted repair makes no new Tool-receipt progress, it adds one
+bounded ReAct repair makes no new Tool-receipt progress, it adds one
 Evidence Retriever or Repair execution unit when necessary and then exposes
 only the exact admissible ingress relation.  Successful revision-live Agent
 artifacts keep their predecessor identity during this recovery sequence.
@@ -119,22 +119,38 @@ authoritative before topology closure, matching the already-exposed action
 mask.  Once the repair executes, normal semantic-spine relation closure
 resumes.  r2 artifacts remain immutable under their own condition path.
 
-### Known issues before r3 live validation
+The isolated r3 canary again failed Stable Zero, with the earlier provider
+admission bug fixed.  `triviaqa:tc_1` recovered from HTTP 429, repaired one
+ReAct exhaustion, completed in six Canvas turns and achieved EM/F1 `1/1`.
+`triviaqa:tc_3` retained four successful Tool receipts and two read passages,
+but later bounded calls added no receipt and repeatedly emitted a duplicate
+normalized query.  Because unused theoretical Tool budget left
+`tool_plan_exhausted=false`, the recovery state incorrectly admitted repeated
+Reasoner repairs through `max_rounds` instead of augmentation.
+
+Recovery revision r4 uses the existing receipt-progress invariant directly:
+after one accepted repair, a complete ReAct call that fails without increasing
+the successful Tool-receipt count opens non-destructive augmentation.  A call
+that adds a receipt remains in repair so new evidence can be bound.  This does
+not convert the failure to database coverage, consume accepted answers, or
+change the evaluator.
+
+### Known issues before r4 live validation
 
 - The external Wikipedia index has only been exercised by the two-task failed
   canary; its operational coverage on the fixed 128 tasks is not yet measured.
 - Live SGLang constrained decoding and exact receipts must pass the isolated
-  r3 GPU0 Stable Zero canary before the 128-task run is allowed.
+  r4 GPU0 Stable Zero canary before the 128-task run is allowed.
 - The last-valid-lineage fallback intentionally remains a terminal failure and
   is excluded from training, even when its evaluator answer is correct.
 
 ### Stable Zero status
 
 Static architecture, recovery tests and data-selection preconditions are
-complete.  The initial canary and isolated r2 canary both **failed Stable
-Zero** for the documented, non-overlapping causes; recovery revision r3 is
-**pending live Stable Zero**.  Formal v2 EM/F1 remain pending.  No score is
-inferred from unit tests, either two-task canary, or the previous architecture.
+complete.  The initial, r2 and r3 canaries **failed Stable Zero** for the
+documented causes; recovery revision r4 is **pending live Stable Zero**.
+Formal v2 EM/F1 remain pending.  No score is inferred from unit tests, a
+two-task canary, or the previous architecture.
 
 ## Historical comparison condition
 

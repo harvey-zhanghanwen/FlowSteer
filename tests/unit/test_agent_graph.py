@@ -2350,8 +2350,10 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
                     env.graph,
                     request_id="react-after-repair",
                     receipts=(receipt,),
+                    tool_plan_exhausted=False,
                     # Repeated model turns without a new Tool receipt are not
-                    # retrieval progress and must open augmentation.
+                    # retrieval progress and must open augmentation even when
+                    # unused Tool-call budget remains.
                     trace_length=3,
                 ),
             ),
