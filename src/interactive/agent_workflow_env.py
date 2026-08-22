@@ -405,6 +405,19 @@ class AgentWorkflowEnv:
             # automatically.
             return (AgentActionType.FINISH.value,)
 
+        mandatory_repair_ids = self._mandatory_repair_agent_ids()
+        if (
+            mandatory_repair_ids
+            and AgentActionType.MODIFY_AGENT.value
+            in self._allowed_action_type_set
+        ):
+            # A typed Runtime failure or a revision-local semantic-artifact
+            # failure identifies an existing Agent that can still be repaired.
+            # Keep FlowSteer's action mask on that measured repair boundary;
+            # augmentation becomes available only after repair succeeds or an
+            # explicit ``node_unusable`` receipt admits replacement takeover.
+            return (AgentActionType.MODIFY_AGENT.value,)
+
         node_count = len(self._graph.nodes)
         node_ids = tuple(node.id for node in self._graph.nodes)
         can_add = self.max_agents is None or node_count < self.max_agents
@@ -483,6 +496,12 @@ class AgentWorkflowEnv:
                         continue
                     if self._semantic_edit_issue_for(candidate) is not None:
                         continue
+                    if (
+                        candidate.output_agent_id is not None
+                        and self._uses_format_agent_protocol()
+                        and self._format_agent_issue_for(candidate) is not None
+                    ):
+                        continue
                     if any(
                         target_id
                         not in self._directed_successors(candidate, source_id)
@@ -505,6 +524,9 @@ class AgentWorkflowEnv:
         node_ids = tuple(node.id for node in self._graph.nodes)
         if self.recovery_policy != _PRESERVE_REPAIR_RECOVERY_POLICY:
             return node_ids
+        mandatory_repair_ids = self._mandatory_repair_agent_ids()
+        if mandatory_repair_ids:
+            return mandatory_repair_ids
         measured_failed = self._failed_agent_ids.intersection(node_ids)
         if measured_failed:
             # AgentRuntime distinguishes the Agent that raised a typed failure
@@ -522,6 +544,84 @@ class AgentWorkflowEnv:
             for node_id in node_ids
             if node_id not in protected or node_id in responsible
         )
+
+    def _semantic_artifact_repair_agent_ids(self) -> Tuple[str, ...]:
+        """Return the existing Agent responsible for a terminal semantic fault.
+
+        This uses only the current Canvas and progressive Runtime artifacts.  It
+        never reads Ground Truth or evaluator state.  Structural and format
+        lineage faults remain relation/output repairs; only a complete executed
+        terminal lineage with an invalid semantic artifact enters this domain.
+        """
+
+        if (
+            self.semantic_protocol != _HOTPOTQA_SEMANTIC_PROTOCOL
+            or self.recovery_policy != _PRESERVE_REPAIR_RECOVERY_POLICY
+        ):
+            return ()
+        validation = self._graph.validate(
+            self.model_registry,
+            require_complete=True,
+        )
+        if not validation.valid or self._format_agent_issue_for(self._graph) is not None:
+            return ()
+        execution = self._cached_progressive_execution()
+        if execution is None or execution.final_answer is None:
+            return ()
+        semantic_issue = self._semantic_protocol_issue(execution)
+        if semantic_issue is None:
+            return ()
+        attribution = self._semantic_repair_attribution(semantic_issue)
+        if attribution is None:
+            return ()
+        agent_id = attribution.get("responsible_agent_id")
+        if not isinstance(agent_id, str) or not self._graph.has_node(agent_id):
+            return ()
+        return (agent_id,)
+
+    def _mandatory_repair_agent_ids(self) -> Tuple[str, ...]:
+        """Project the repair-first Agent domain for the current Canvas state."""
+
+        if self.recovery_policy != _PRESERVE_REPAIR_RECOVERY_POLICY:
+            return ()
+        node_ids = tuple(node.id for node in self._graph.nodes)
+        repairable_failed = (
+            self._failed_agent_ids - self._diagnosed_unusable_agent_ids
+        ).intersection(node_ids)
+        if repairable_failed:
+            return tuple(
+                node_id for node_id in node_ids if node_id in repairable_failed
+            )
+        return self._semantic_artifact_repair_agent_ids()
+
+    def _admissible_augmentation_role_families(self) -> Tuple[str, ...]:
+        """Return HotpotQA roles that may be added at this recovery boundary."""
+
+        role_families = (
+            "reasoner",
+            "verifier",
+            "format",
+            "evidence_retriever",
+            "repair",
+        )
+        if self.semantic_protocol != _HOTPOTQA_SEMANTIC_PROTOCOL:
+            return role_families
+        admitted: list[str] = []
+        for role_family in role_families:
+            if role_family not in {"reasoner", "verifier", "format"}:
+                admitted.append(role_family)
+                continue
+            existing_ids = tuple(
+                node.id
+                for node in self._graph.nodes
+                if (node.role_family or "").casefold() == role_family
+            )
+            if not existing_ids or all(
+                agent_id in self._diagnosed_unusable_agent_ids
+                for agent_id in existing_ids
+            ):
+                admitted.append(role_family)
+        return tuple(admitted)
 
     def model_admissible_action_targets(self) -> dict[str, object]:
         """Project exact current Canvas target domains for constrained sampling.
@@ -594,6 +694,9 @@ class AgentWorkflowEnv:
                                 "allowed_tools": [[]],
                             },
                         },
+                        "admitted_new_role_families": list(
+                            self._admissible_augmentation_role_families()
+                        ),
                         "endpoint_scope": {
                             "relation_endpoint_sources": [
                                 "existing_agent_ids",
@@ -1025,6 +1128,7 @@ class AgentWorkflowEnv:
             action.action_type in {
                 AgentActionType.SET_OUTPUT,
                 AgentActionType.ADD_SUBGRAPH,
+                AgentActionType.SET_RELATION,
             }
             and candidate.output_agent_id is not None
             and self._uses_format_agent_protocol()
@@ -1889,6 +1993,23 @@ class AgentWorkflowEnv:
 
         for node in graph.nodes:
             role = (node.role_family or "").casefold()
+            normalized_contract = " ".join(node.contract.casefold().split()).rstrip(
+                "."
+            )
+            formatting_only_contract = " ".join(
+                _HOTPOTQA_FORMAT_CONTRACT.casefold().split()
+            ).rstrip(".")
+            if (
+                role in {"reasoner", "verifier"}
+                and normalized_contract == formatting_only_contract
+            ):
+                return (
+                    f"HotpotQA {role.title()} Agent {node.id!r} has a formatting-only "
+                    "role contract. Preserve semantic responsibility: the Reasoner "
+                    "determines the evidence-aligned semantic candidate, the Verifier "
+                    "checks evidence/binding/hops/scope without changing it, and only "
+                    "role_family='format' copies it into the answer wrapper"
+                )
             if role == "reasoner" and (
                 node.execution_mode.value != "react"
                 or node.allowed_tools != (self.required_evidence_tool_id,)
@@ -3086,6 +3207,36 @@ class AgentWorkflowEnv:
             or action.action_type is AgentActionType.FINISH
         ):
             return None
+        mandatory_repair_ids = self._mandatory_repair_agent_ids()
+        if mandatory_repair_ids and (
+            action.action_type is not AgentActionType.MODIFY_AGENT
+            or action.agent_id not in mandatory_repair_ids
+        ):
+            return (
+                "repair the measured responsible Agent before augmentation or "
+                "other Canvas edits; mandatory_repair_agent_ids="
+                f"{list(mandatory_repair_ids)!r}"
+            )
+        if action.action_type is AgentActionType.ADD_SUBGRAPH:
+            admitted_roles = set(self._admissible_augmentation_role_families())
+            sampled_roles = [
+                (spec.role_family or "").casefold() for spec in action.agents
+            ]
+            for role_family in ("reasoner", "verifier", "format"):
+                sampled_count = sampled_roles.count(role_family)
+                if sampled_count > 1:
+                    return (
+                        "one add_subgraph transaction cannot add multiple Agents "
+                        f"with semantic responsibility {role_family!r}"
+                    )
+                if sampled_count == 1 and role_family not in admitted_roles:
+                    return (
+                        f"a healthy {role_family!r} Agent already owns that semantic "
+                        "responsibility; modify the existing Agent first. A same-role "
+                        "replacement is admitted only after an explicit node_unusable "
+                        "receipt, while evidence_retriever and repair branches remain "
+                        "available for non-linear augmentation"
+                    )
         finish_admissible = self.finish_admissibility().get("admissible") is True
         if finish_admissible:
             return (

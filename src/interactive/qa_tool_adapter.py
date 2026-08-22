@@ -77,6 +77,10 @@ HOTPOTQA_VERIFIED_ANSWER_SLOT_GUIDANCE = (
     "value; a who-question returns the person/possessor, not a possessive attribute "
     "phrase. Represent retrieved facts as "
     "subject/entity, predicate/relation, object or attribute value, and qualifiers. "
+    "Preserve the sentence's asserted semantic roles instead of placing the desired "
+    "candidate into an unrelated proposition field. In a comparison proposition, "
+    "the compared entity is normally the subject and its compared date, number, or "
+    "attribute is object_or_attribute_value. "
     "Bind candidate_answer to exactly one evidence_propositions item through "
     "answer_slot.proposition_index and answer_field; keep the entity-to-attribute "
     "binding explicit and show every bridge in the multi-hop chain. Return one "
@@ -672,7 +676,10 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     "type": "string",
                     "enum": ["subject", "object_or_attribute_value"],
                     "description": (
-                        "The selected proposition field copied as candidate_answer."
+                        "The selected proposition field copied as candidate_answer. "
+                        "For an entity comparison, select the winning entity from "
+                        "the subject field while its compared date, number, or "
+                        "attribute remains object_or_attribute_value."
                     ),
                 },
             },
@@ -693,10 +700,20 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     **non_empty_text,
                     "description": entity_surface_description,
                 },
-                "relation": dict(non_empty_text),
+                "relation": {
+                    **non_empty_text,
+                    "description": (
+                        "The predicate asserted by the evidence sentence between "
+                        "subject and object_or_attribute_value."
+                    ),
+                },
                 "object_or_attribute_value": {
                     **non_empty_text,
-                    "description": entity_surface_description,
+                    "description": (
+                        entity_surface_description
+                        + " Preserve the value attributed to the subject; do not "
+                        "repeat the subject merely to make it candidate_answer."
+                    ),
                 },
                 "qualifiers": dict(qualifier_list),
                 "evidence_span": {
@@ -915,7 +932,9 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 "marker, including a source title, honorific, or name suffix. Do not "
                 "replace the Reasoner's candidate. Return "
                 "Candidate answer, the seven explicit boolean check fields, and "
-                "Verification status. Set supported only when all checks pass; "
+                "Verification status. Every check field must be the literal boolean "
+                "true or false, never the candidate text or an explanation. Set "
+                "supported only when all checks pass; "
                 "otherwise request repair without a substitute candidate."
             )
         elif request.is_format_predecessor:

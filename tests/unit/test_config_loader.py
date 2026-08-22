@@ -198,7 +198,7 @@ class ConfigLoaderTests(unittest.TestCase):
 
         self.assertEqual(
             config["experiment"]["prompt_version"],
-            "agentgraph.director.hotpotqa-semantic-recovery.v21",
+            "agentgraph.director.hotpotqa-semantic-recovery.v22",
         )
         self.assertEqual(config["director"]["action_decoding"], "json_schema")
         self.assertEqual(

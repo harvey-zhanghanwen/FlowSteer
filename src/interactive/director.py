@@ -58,6 +58,9 @@ DIRECTOR_PROMPT_VERSION = "agentgraph.director.minimal-neutral.v10"
 LEGACY_DIRECTOR_PROMPT_VERSION_V9 = "agentgraph.director.minimal-neutral.v9"
 LEGACY_DIRECTOR_PROMPT_VERSION_V8 = "agentgraph.director.minimal-neutral.v8"
 HOTPOTQA_DIRECTOR_PROMPT_VERSION = (
+    "agentgraph.director.hotpotqa-semantic-recovery.v22"
+)
+LEGACY_HOTPOTQA_DIRECTOR_PROMPT_VERSION_V21 = (
     "agentgraph.director.hotpotqa-semantic-recovery.v21"
 )
 LEGACY_HOTPOTQA_DIRECTOR_PROMPT_VERSION_V20 = (
@@ -269,6 +272,20 @@ HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V21 = HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V20.replac
     1,
 )
 
+# v22 exposes only the newly authoritative state-conditioned recovery domains.
+# It does not prescribe a graph template: retrieval/repair fan-in and reciprocal
+# Reasoner--Verifier communication remain sampled when Canvas admits them.
+HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V22 = HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V21.replace(
+    "Delete only an Agent listed as deletable after a replacement artifact has "
+    "taken over its downstream responsibility.",
+    "The current action mask is authoritative: when it exposes only modify_agent, "
+    "repair that responsible Agent before augmentation; when add_subgraph is "
+    "available, sample new semantic roles only from admitted_new_role_families. "
+    "Delete only an Agent listed as deletable after a replacement artifact has "
+    "taken over its downstream responsibility.",
+    1,
+)
+
 
 def director_system_prompt_for_version(prompt_version: str) -> str:
     """Resolve one explicitly versioned Director policy without changing v10."""
@@ -289,7 +306,10 @@ def director_system_prompt_for_version(prompt_version: str) -> str:
         "agentgraph.director.skillflow_continuation_v8": (
             LEGACY_DIRECTOR_SYSTEM_PROMPT_V8
         ),
-        HOTPOTQA_DIRECTOR_PROMPT_VERSION: HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V21,
+        HOTPOTQA_DIRECTOR_PROMPT_VERSION: HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V22,
+        LEGACY_HOTPOTQA_DIRECTOR_PROMPT_VERSION_V21: (
+            HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V21
+        ),
         LEGACY_HOTPOTQA_DIRECTOR_PROMPT_VERSION_V20: (
             HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V20
         ),
@@ -342,6 +362,7 @@ _SUPPORTED_DIRECTOR_SYSTEM_PROMPTS = frozenset(
         HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V19,
         HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V20,
         HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V21,
+        HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V22,
         LEGACY_DIRECTOR_SYSTEM_PROMPT_V9,
         LEGACY_DIRECTOR_SYSTEM_PROMPT_V8,
     }
@@ -929,6 +950,37 @@ def _live_existing_agent_roles(
     return roles
 
 
+def _live_admitted_new_role_families(
+    domain: Mapping[str, Any],
+    role_constraints: Mapping[str, Any],
+) -> tuple[str, ...]:
+    """Validate the state-conditioned HotpotQA augmentation-role domain."""
+
+    raw_roles = domain.get("admitted_new_role_families")
+    if (
+        domain.get("semantic_protocol") != HOTPOTQA_SEMANTIC_PROTOCOL
+        and raw_roles is None
+    ):
+        return tuple(role_constraints)
+    if not isinstance(raw_roles, (list, tuple)) or not raw_roles:
+        raise ValueError(
+            "add_subgraph admitted new-Agent role domain is missing"
+        )
+    roles = tuple(raw_roles)
+    if (
+        len(roles) != len(set(roles))
+        or any(
+            not isinstance(role_family, str)
+            or role_family not in role_constraints
+            for role_family in roles
+        )
+    ):
+        raise ValueError(
+            "add_subgraph admitted new-Agent role domain is invalid"
+        )
+    return roles
+
+
 def _live_hotpotqa_output_domain(
     domain: Mapping[str, Any],
     roles: Mapping[str, str],
@@ -1032,6 +1084,10 @@ def director_live_add_subgraph_agent_declarations_json_schema_text(
     role_constraints = domain.get("role_constraints")
     if not isinstance(role_constraints, Mapping) or not role_constraints:
         raise ValueError("add_subgraph role constraints are missing")
+    admitted_new_roles = _live_admitted_new_role_families(
+        domain,
+        role_constraints,
+    )
     if domain.get("semantic_protocol") == HOTPOTQA_SEMANTIC_PROTOCOL:
         existing_roles = _live_existing_agent_roles(domain, role_constraints)
         _live_hotpotqa_output_domain(domain, existing_roles)
@@ -1055,7 +1111,10 @@ def director_live_add_subgraph_agent_declarations_json_schema_text(
                     "add_subgraph selected Agent role changed its Canvas node ID"
                 )
             role_family = value.get("role_family")
-            if not isinstance(role_family, str) or role_family not in role_constraints:
+            if (
+                not isinstance(role_family, str)
+                or role_family not in admitted_new_roles
+            ):
                 raise ValueError(
                     "add_subgraph selected Agent role is outside the live domain"
                 )
@@ -1069,7 +1128,10 @@ def director_live_add_subgraph_agent_declarations_json_schema_text(
         admitted_roles = (
             ((selected_roles[position], role_constraints[selected_roles[position]]),)
             if selected_roles is not None
-            else tuple(role_constraints.items())
+            else tuple(
+                (role_family, role_constraints[role_family])
+                for role_family in admitted_new_roles
+            )
         )
         role_branches = [
             _live_role_agent_schema(
@@ -1141,8 +1203,12 @@ def director_live_add_subgraph_role_selection_json_schema_text(
     max_agents = domain["max_new_agents"]
     existing_agent_ids = domain["existing_agent_ids"]
     role_constraints = domain["role_constraints"]
+    admitted_new_roles = _live_admitted_new_role_families(
+        domain,
+        role_constraints,
+    )
     new_agent_ids = _live_new_agent_ids(existing_agent_ids, max_agents)
-    role_families = tuple(role_constraints)
+    role_families = admitted_new_roles
     if not role_families:
         raise ValueError("add_subgraph role domain is empty")
     positional_roles = [
@@ -1231,6 +1297,10 @@ def director_live_add_subgraph_role_selection_from_text(
     )
     expected_ids = _live_new_agent_ids(domain["existing_agent_ids"], max_agents)
     role_constraints = domain["role_constraints"]
+    admitted_new_roles = _live_admitted_new_role_families(
+        domain,
+        role_constraints,
+    )
     normalized: list[dict[str, str]] = []
     for position, value in enumerate(agents):
         if not isinstance(value, Mapping) or set(value) != {
@@ -1244,7 +1314,10 @@ def director_live_add_subgraph_role_selection_from_text(
             raise ValueError(
                 "add_subgraph selected Agent role changed its Canvas node ID"
             )
-        if not isinstance(role_family, str) or role_family not in role_constraints:
+        if (
+            not isinstance(role_family, str)
+            or role_family not in admitted_new_roles
+        ):
             raise ValueError(
                 "add_subgraph selected Agent role is outside the live domain"
             )
@@ -1282,6 +1355,10 @@ def _live_add_subgraph_agents(
         max_agents,
     )
     role_constraints = domain["role_constraints"]
+    admitted_new_roles = _live_admitted_new_role_families(
+        domain,
+        role_constraints,
+    )
     model_ids = set(domain["model_ids"])
     required_fields = set(domain["required_agent_fields"])
     known_fields = set(_AGENT_SPEC_JSON_SCHEMA["properties"])
@@ -1322,7 +1399,10 @@ def _live_add_subgraph_agents(
         ):
             raise ValueError("add_subgraph Agent role is outside the live domain")
         constraint = role_constraints.get(role_family)
-        if not isinstance(constraint, Mapping):
+        if (
+            role_family not in admitted_new_roles
+            or not isinstance(constraint, Mapping)
+        ):
             raise ValueError("add_subgraph Agent role is outside the live domain")
         contract_domain = constraint.get("contracts")
         if contract_domain is not None and contract not in _live_string_domain(
@@ -2834,6 +2914,7 @@ __all__ = [
     "HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V19",
     "HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V20",
     "HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V21",
+    "HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V22",
     "HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V11",
     "HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V13",
     "HOTPOTQA_SEMANTIC_PROTOCOL",

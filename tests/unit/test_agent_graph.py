@@ -1892,7 +1892,7 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, summary["successful_evidence_read_count"])
         self.assertNotIn(passage, feedback_text)
 
-    async def test_hotpot_recovery_fields_are_agent_specific_without_shrinking_add(
+    async def test_hotpot_recovery_requires_modify_before_augment(
         self,
     ) -> None:
         graph = _hotpot_semantic_graph()
@@ -1959,12 +1959,8 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             ["reader", "reasoner"],
             targets["modify_agent"]["responsible_agent_ids"],
         )
-        self.assertEqual(3, targets["add_subgraph"]["max_new_agents"])
-        self.assertTrue(
-            {"evidence_retriever", "repair", "verifier"}.issubset(
-                targets["add_subgraph"]["role_constraints"]
-            )
-        )
+        self.assertEqual(("modify_agent",), env.model_admissible_action_types())
+        self.assertNotIn("add_subgraph", targets)
         self.assertEqual(
             ["reasoner"],
             env.recovery_state()["react_turn_exhausted_agent_ids"],
@@ -1980,7 +1976,10 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
-        repair = await env.step(
+        revision = env.revision
+        node_ids = tuple(node.id for node in env.graph.nodes)
+        request_count = len(env.runtime.gateway.requests)
+        augmentation = await env.step(
             json.dumps(
                 {
                     "action": "add_subgraph",
@@ -1998,7 +1997,11 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
                 }
             )
         )
-        self.assertTrue(repair.accepted)
+        self.assertFalse(augmentation.accepted)
+        self.assertIn("mandatory_repair_agent_ids", augmentation.feedback)
+        self.assertEqual(revision, env.revision)
+        self.assertEqual(node_ids, tuple(node.id for node in env.graph.nodes))
+        self.assertEqual(request_count, len(env.runtime.gateway.requests))
 
         env._mark_agents_recovered({"reasoner"})
         self.assertNotIn("reasoner", env._failure_continuations)
@@ -2047,6 +2050,206 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             ["contract", "completion_condition"],
             modify_domain["per_agent_candidates"][0]["mutable_fields"],
         )
+
+    async def test_hotpot_augmentation_excludes_healthy_semantic_role_duplicates(
+        self,
+    ) -> None:
+        graph = _hotpot_semantic_graph()
+        registry = make_registry()
+        gateway = _ImmediateGateway()
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_hotpot_semantic_runtime(registry, gateway),
+            graph=graph,
+            problem="What is the capital of France?",
+            execute_on_edit=False,
+            semantic_protocol="hotpotqa_verified_answer_slot_v1",
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id="qa-retrieval",
+        )
+
+        add_domain = env.model_admissible_action_targets()["add_subgraph"]
+        self.assertEqual(
+            ["evidence_retriever", "repair"],
+            add_domain["admitted_new_role_families"],
+        )
+        revision = env.revision
+        for agent_id, role_family, contract in (
+            ("second_verifier", "verifier", "verify the semantic candidate"),
+            ("second_formatter", "format", _HOTPOTQA_FORMAT_CONTRACT),
+        ):
+            rejected = await env.step(
+                json.dumps(
+                    {
+                        "action": "add_subgraph",
+                        "agents": [
+                            {
+                                "agent_id": agent_id,
+                                "model_id": "balanced",
+                                "contract": contract,
+                                "role_family": role_family,
+                                "allowed_tools": [],
+                                "execution_mode": "reasoning",
+                            }
+                        ],
+                        "relations": [],
+                    }
+                )
+            )
+            self.assertFalse(rejected.accepted)
+            self.assertIn("already owns that semantic responsibility", rejected.feedback)
+            self.assertEqual(revision, env.revision)
+            self.assertFalse(env.graph.has_node(agent_id))
+        self.assertEqual([], gateway.requests)
+
+    async def test_hotpot_verifier_cannot_take_formatter_role_contract(self) -> None:
+        graph = _hotpot_semantic_graph()
+        registry = make_registry()
+        gateway = _ImmediateGateway()
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_hotpot_semantic_runtime(registry, gateway),
+            graph=graph,
+            problem="What is the capital of France?",
+            execute_on_edit=False,
+            semantic_protocol="hotpotqa_verified_answer_slot_v1",
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id="qa-retrieval",
+        )
+        revision = env.revision
+        original_contract = env.graph.get_node("verifier").contract
+
+        rejected = await env.step(
+            json.dumps(
+                {
+                    "action": "modify_agent",
+                    "agent_id": "verifier",
+                    "contract": _HOTPOTQA_FORMAT_CONTRACT.capitalize() + ".",
+                }
+            )
+        )
+
+        self.assertFalse(rejected.accepted)
+        self.assertIn("formatting-only role contract", rejected.feedback)
+        self.assertEqual(revision, env.revision)
+        self.assertEqual(
+            original_contract,
+            env.graph.get_node("verifier").contract,
+        )
+        self.assertEqual([], gateway.requests)
+
+    async def test_hotpot_relation_domain_preserves_unique_formatter_predecessor(
+        self,
+    ) -> None:
+        graph = _hotpot_semantic_graph()
+        graph.add_agent(
+            AgentNode(
+                "reviewer",
+                "balanced",
+                "verify evidence binding hops and scope without changing candidate",
+                role_family="verifier",
+            )
+        )
+        registry = make_registry()
+        gateway = _ImmediateGateway()
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_hotpot_semantic_runtime(registry, gateway),
+            graph=graph,
+            problem="What is the capital of France?",
+            execute_on_edit=False,
+            semantic_protocol="hotpotqa_verified_answer_slot_v1",
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id="qa-retrieval",
+        )
+
+        targets = env.model_admissible_action_targets()
+        self.assertFalse(
+            any(
+                candidate["source_id"] == "reviewer"
+                and candidate["target_id"] == "formatter"
+                and candidate["source_to_target"] is True
+                for candidate in targets["set_relation"]["candidates"]
+            )
+        )
+        revision = env.revision
+        rejected = await env.step(
+            '{"action":"set_relation","source_id":"reviewer",'
+            '"target_id":"formatter","source_to_target":true,'
+            '"target_to_source":false}'
+        )
+        self.assertFalse(rejected.accepted)
+        self.assertIn("exactly one upstream semantic-answer artifact", rejected.feedback)
+        self.assertEqual(revision, env.revision)
+        self.assertEqual([], gateway.requests)
+
+    async def test_hotpot_repair_then_allows_fan_in_and_reciprocal_topology(
+        self,
+    ) -> None:
+        graph = _hotpot_semantic_graph()
+        registry = make_registry()
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_hotpot_semantic_runtime(registry, _ImmediateGateway()),
+            graph=graph,
+            problem="What is the capital of France?",
+            execute_on_edit=False,
+            semantic_protocol="hotpotqa_verified_answer_slot_v1",
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id="qa-retrieval",
+        )
+        env._record_failure_state(
+            (
+                AgentFailureRecord(
+                    request_id="request-reasoner",
+                    agent_id="reasoner",
+                    phase=ExecutionPhase.SINGLE,
+                    graph_revision=graph.revision,
+                    error_type="OpenAICompatibleGatewayError",
+                    message="provider request failed with HTTP status 429",
+                ),
+            ),
+            current_agent_ids={node.id for node in graph.nodes},
+        )
+        self.assertEqual(("modify_agent",), env.model_admissible_action_types())
+
+        env._mark_agents_recovered({"reasoner"})
+        added = await env.step(
+            json.dumps(
+                {
+                    "action": "add_subgraph",
+                    "agents": [
+                        {
+                            "agent_id": "reader_2",
+                            "model_id": "cheap",
+                            "contract": "retrieve additional evidence for the Reasoner",
+                            "role_family": "evidence_retriever",
+                            "allowed_tools": ["qa-retrieval"],
+                            "execution_mode": "react",
+                        }
+                    ],
+                    "relations": [
+                        {
+                            "source_id": "reader_2",
+                            "target_id": "reasoner",
+                            "source_to_target": True,
+                            "target_to_source": False,
+                        }
+                    ],
+                }
+            )
+        )
+        self.assertTrue(added.accepted)
+        reciprocal = await env.step(
+            '{"action":"set_relation","source_id":"reasoner",'
+            '"target_id":"verifier","source_to_target":true,'
+            '"target_to_source":true}'
+        )
+        self.assertTrue(reciprocal.accepted)
+        topology = env.graph.topology_statistics()
+        self.assertIn("fan_in", topology["topology_motifs"])
+        self.assertIn("reciprocal", topology["topology_motifs"])
+        self.assertIsNone(env._semantic_edit_issue_for(env.graph))
 
     async def test_finish_admissibility_keeps_structured_graph_diagnosis(self) -> None:
         graph = AgentGraph(

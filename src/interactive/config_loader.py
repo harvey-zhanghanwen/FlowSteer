@@ -214,7 +214,7 @@ def validate_agent_graph_config(value: Mapping[str, Any]) -> None:
     if hotpot_semantic_protocol == "hotpotqa_verified_answer_slot_v1":
         if (
             value["experiment"].get("prompt_version")
-            != "agentgraph.director.hotpotqa-semantic-recovery.v21"
+            != "agentgraph.director.hotpotqa-semantic-recovery.v22"
         ):
             raise ConfigurationError(
                 "HotpotQA verified answer-slot protocol requires the exact "

@@ -28,6 +28,7 @@ from src.interactive.director import (
     HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V19,
     HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V20,
     HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V21,
+    HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V22,
     HOTPOTQA_SEMANTIC_PROTOCOL,
     LEGACY_DIRECTOR_SYSTEM_PROMPT_V8,
     LEGACY_DIRECTOR_SYSTEM_PROMPT_V9,
@@ -191,8 +192,14 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
             director_system_prompt_for_version("prompt-v1"),
         )
         self.assertIs(
-            HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V21,
+            HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V22,
             director_system_prompt_for_version(HOTPOTQA_DIRECTOR_PROMPT_VERSION),
+        )
+        self.assertIs(
+            HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V21,
+            director_system_prompt_for_version(
+                "agentgraph.director.hotpotqa-semantic-recovery.v21"
+            ),
         )
         self.assertIs(
             HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V20,
@@ -245,7 +252,7 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             director_system_prompt_for_version(" ")
 
-    async def test_hotpot_v21_prompt_encodes_semantic_and_recovery_policy(self) -> None:
+    async def test_hotpot_v22_prompt_encodes_semantic_and_recovery_policy(self) -> None:
         model_registry = registry()
         env = AgentWorkflowEnv(
             model_registry,
@@ -258,7 +265,7 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         orchestrator = AgentGraphOrchestrator(
             model_registry,
             ScriptedDirector([]),
-            system_prompt=HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V21,
+            system_prompt=HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V22,
             prompt_version=HOTPOTQA_DIRECTOR_PROMPT_VERSION,
             semantic_protocol=HOTPOTQA_SEMANTIC_PROTOCOL,
             recovery_policy=PRESERVE_DIAGNOSE_REPAIR_AUGMENT_POLICY,
@@ -267,7 +274,7 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         messages = transcript_messages(orchestrator.build_prompt(env, 0, ()))
         state = observation_payload(messages[-1])
 
-        self.assertEqual(HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V21, messages[0]["content"])
+        self.assertEqual(HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V22, messages[0]["content"])
         self.assertIn(
             "must not predict or embed a concrete candidate answer",
             messages[0]["content"],
@@ -1128,6 +1135,11 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
                         ],
                     },
                 },
+                "admitted_new_role_families": [
+                    "reasoner",
+                    "verifier",
+                    "format",
+                ],
                 "endpoint_scope": {
                     "relation_endpoint_sources": [
                         "existing_agent_ids",
@@ -1469,6 +1481,11 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
                         "allowed_tools": [[]],
                     },
                 },
+                "admitted_new_role_families": [
+                    "reasoner",
+                    "verifier",
+                    "format",
+                ],
                 "endpoint_scope": {
                     "relation_endpoint_sources": [
                         "existing_agent_ids",
