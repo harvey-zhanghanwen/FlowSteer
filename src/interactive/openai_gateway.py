@@ -169,7 +169,12 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
             "resources in the assigned contract, with no Markdown or text "
             "outside that object. A tool action requests one public "
             "observation; a complete action supplies the declared node "
-            "artifact. Do not emit <answer> tags in this internal action."
+            "artifact. The current state-conditioned action domain in the "
+            "assigned contract is authoritative: choose only an action shown "
+            "as currently admissible, and put only its declared keys in "
+            "arguments. If completion is not currently admissible, do not put "
+            "the eventual artifact or answer fields into a Tool action. Do not "
+            "emit <answer> tags in this internal action."
         )
         if hotpot_semantic and semantic_role == "reasoner":
             protocol += (

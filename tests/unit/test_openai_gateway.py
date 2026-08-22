@@ -165,6 +165,8 @@ class MessageTests(unittest.TestCase):
 
         self.assertIn("StructuredAction JSON object", system)
         self.assertIn("complete action", system)
+        self.assertIn("state-conditioned action domain", system)
+        self.assertIn("only its declared keys in arguments", system)
         self.assertIn("Do not emit <answer> tags", system)
         self.assertNotIn("unique Output Agent", system)
 

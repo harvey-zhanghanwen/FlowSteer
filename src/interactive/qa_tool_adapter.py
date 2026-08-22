@@ -367,6 +367,17 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         action_name = "read" if passage_ids else "search"
         return frozenset({(QA_RETRIEVAL_TOOL_ID, action_name)}), False
 
+    @staticmethod
+    def _question_scope_query(problem: str) -> str:
+        """Return the original QA question as a valid scope-preserving query."""
+
+        marker = "\n\nQuestion:"
+        if marker in problem:
+            question = problem.rsplit(marker, 1)[1].strip()
+            if question:
+                return question
+        return problem.strip()
+
     async def execute(self, request: AgentRequest) -> GatewayResponse:
         # NECESSARY_ADAPTATION: the generic AgentGraph completion hook receives
         # Tool receipts but not the current AgentRequest.  Bind only the QA
@@ -452,21 +463,64 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 evidence_continuation += (
                     "A successful non-empty qa-retrieval read is present, so the "
                     "next action may complete after aligning that evidence to the "
-                    "original answer slot."
+                    "original answer slot. This turn use kind=complete, "
+                    "name=complete, resource_id=null, and skill_id=null; arguments "
+                    "must contain exactly one key, value, whose value is the full "
+                    "labeled semantic artifact. Do not use kind=completion, "
+                    "name=answer, or resource_id=qa-retrieval."
                 )
             elif searched_passage_ids:
+                read_wire = {
+                    "arguments": {"passage_id": searched_passage_ids[0]},
+                    "kind": "tool",
+                    "name": "read",
+                    "resource_id": QA_RETRIEVAL_TOOL_ID,
+                    "skill_id": None,
+                }
                 evidence_continuation += (
                     "The next action must be qa-retrieval read using one exact "
                     "passage_id returned by the successful search observation: "
                     + json.dumps(searched_passage_ids, ensure_ascii=False)
+                    + ". Its arguments object contains only passage_id; never put "
+                    "Question scope, Answer slot, Evidence propositions, Multi-hop "
+                    "chain, Candidate answer, Evidence, JSON-Schema properties, or "
+                    "additionalProperties into read arguments. One valid exact wire "
+                    "using the first ranked returned passage is: "
+                    + json.dumps(
+                        read_wire,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
                     + ". Do not call complete before that read succeeds."
                 )
             else:
+                search_wire = {
+                    "arguments": {
+                        "query": self._question_scope_query(request.problem),
+                        "limit": 3,
+                    },
+                    "kind": "tool",
+                    "name": "search",
+                    "resource_id": QA_RETRIEVAL_TOOL_ID,
+                    "skill_id": None,
+                }
                 evidence_continuation += (
                     "The next action must be qa-retrieval search with a concise "
                     "entity-and-relation query. Then read an exact returned "
-                    "passage_id. Do not call complete before a non-empty read "
-                    "succeeds."
+                    "passage_id. Search arguments contain exactly query and limit; "
+                    "never copy JSON-Schema properties/additionalProperties or the "
+                    "eventual semantic artifact into those arguments. This valid "
+                    "scope-preserving wire uses the original question as the query; "
+                    "the model may replace only the query string with a more concise "
+                    "entity-and-relation query: "
+                    + json.dumps(
+                        search_wire,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    + ". Do not call complete before a non-empty read succeeds."
                 )
         qa_guidance = (
             "\nSkillFlow QA execution guidance: " + guidance + terminal_wire

@@ -485,14 +485,23 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             gateway.requests[1].agent.contract,
         )
         self.assertIn(
+            '"arguments":{"limit":3,"query":"Who wrote the first published algorithm?"}',
+            gateway.requests[1].agent.contract,
+        )
+        self.assertIn(
             "next action must be qa-retrieval read",
             gateway.requests[2].agent.contract,
         )
         self.assertIn('"p1"', gateway.requests[2].agent.contract)
         self.assertIn(
+            '"arguments":{"passage_id":"p1"}',
+            gateway.requests[2].agent.contract,
+        )
+        self.assertIn(
             "next action may complete",
             gateway.requests[3].agent.contract,
         )
+        self.assertIn("Do not use kind=completion", gateway.requests[3].agent.contract)
         search_domain = gateway.requests[1].agent.contract.split(
             "Currently admissible Tool action schemas", 1
         )[1].split("\nCompletion", 1)[0]
