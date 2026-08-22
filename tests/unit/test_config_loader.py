@@ -198,7 +198,16 @@ class ConfigLoaderTests(unittest.TestCase):
 
         self.assertEqual(
             config["experiment"]["prompt_version"],
-            "agentgraph.director.hotpotqa-semantic-recovery.v16",
+            "agentgraph.director.hotpotqa-semantic-recovery.v17",
+        )
+        self.assertEqual(config["director"]["action_decoding"], "json_schema")
+        self.assertEqual(
+            config["director"]["sampling_action_profile"],
+            "model_admissible_canvas_actions",
+        )
+        self.assertEqual(
+            config["director"]["sampling_schema_version"],
+            "agentgraph.model-admissible-action-mask.v1",
         )
         self.assertEqual(
             config["agent_graph"]["semantic_protocol_by_source"],

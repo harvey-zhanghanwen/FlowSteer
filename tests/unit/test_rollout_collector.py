@@ -15,11 +15,16 @@ from src.interactive.director import (
     AgentGraphOrchestrator,
     DIRECTOR_ACTION_JSON_SCHEMA,
     DIRECTOR_ACTION_JSON_SCHEMA_TEXT,
+    DIRECTOR_MODEL_ADMISSIBLE_ACTION_MASK_PROFILE,
+    DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION,
     DIRECTOR_PROGRESSIVE_ACTION_MASK_PROFILE,
     DIRECTOR_SGLANG_SAMPLING_SCHEMA_VERSION,
     DIRECTOR_STATE_CONDITIONED_ACTION_SCHEMA_VERSION,
     DIRECTOR_SYSTEM_PROMPT,
+    director_actions_from_admissible_schema_branch,
     director_action_json_schema_text,
+    director_model_admissible_sampling_json_schema_text,
+    director_model_admissible_schema_branch,
     director_sglang_sampling_json_schema_text,
     director_state_conditioned_sampling_json_schema_text,
     encode_director_transcript,
@@ -266,6 +271,9 @@ def _orchestrator(
     base_seed: int = 7,
     rollout_ordinal: int = 0,
     sampling_action_profile: str | None = None,
+    sampling_action_schema_version: str = (
+        DIRECTOR_STATE_CONDITIONED_ACTION_SCHEMA_VERSION
+    ),
 ) -> AgentGraphOrchestrator:
     coordinate = ScientificSamplingCoordinate(
         sampling_schedule_hash=scientific_sampling_schedule_hash(base_seed=base_seed),
@@ -283,6 +291,7 @@ def _orchestrator(
         sampling_base_seed=base_seed,
         sampling_coordinate=coordinate,
         sampling_action_profile=sampling_action_profile,
+        sampling_action_schema_version=sampling_action_schema_version,
     )
 
 
@@ -383,6 +392,54 @@ def test_native_sglang_per_request_schema_does_not_mutate_client_default():
                 DIRECTOR_STATE_CONDITIONED_ACTION_SCHEMA_VERSION
             ),
             action_schema_branch="finish",
+        )
+
+
+def test_native_sglang_validates_model_admissible_schema_receipt():
+    client = ScriptedSGLangClient(
+        ['{"action":"modify_agent","agent_id":"solver","contract":"repair"}'],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+    )
+    actions = ("add_subgraph", "modify_agent", "finish")
+    schema = director_model_admissible_sampling_json_schema_text(actions)
+    branch = director_model_admissible_schema_branch(actions)
+
+    response = asyncio.run(
+        client.propose(
+            "current Canvas",
+            action_json_schema=schema,
+            action_json_schema_version=(
+                DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION
+            ),
+            action_schema_branch=branch,
+        )
+    )
+
+    assert client.payloads[0]["sampling_params"]["json_schema"] == schema
+    assert response.metadata["action_json_schema_version"] == (
+        DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION
+    )
+    assert response.metadata["action_schema_branch"] == branch
+    assert director_actions_from_admissible_schema_branch(branch) == actions
+
+    with pytest.raises(ValueError, match="does not match its declared branch"):
+        client.request_payload(
+            "mismatched admissible receipt",
+            action_json_schema=schema,
+            action_json_schema_version=(
+                DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION
+            ),
+            action_schema_branch="admissible:finish",
+        )
+    with pytest.raises(ValueError, match="strict schema for its branch"):
+        client.request_payload(
+            "malformed admissible receipt",
+            action_json_schema=schema,
+            action_json_schema_version=(
+                DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION
+            ),
+            action_schema_branch="admissible:finish|unknown",
         )
 
 
@@ -782,6 +839,67 @@ def test_collector_uses_state_conditioned_schema_on_every_progressive_turn():
     )
     assert client.payloads[1]["sampling_params"]["json_schema"] == (
         director_state_conditioned_sampling_json_schema_text("finish")
+    )
+
+
+def test_collector_records_model_admissible_schema_on_every_canvas_turn():
+    registry = _registry()
+    client = ScriptedSGLangClient(
+        [
+            (
+                '{"action":"add_subgraph","agents":['
+                '{"agent_id":"solver","model_id":"cheap-model",'
+                '"contract":"solve directly"}],"relations":[],'
+                '"output_agent_id":"solver"}'
+            ),
+            '{"action":"finish"}',
+        ],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+    )
+    collector = AgentGraphRolloutCollector(
+        _orchestrator(
+            registry,
+            client,
+            max_rounds=2,
+            sampling_action_profile=DIRECTOR_MODEL_ADMISSIBLE_ACTION_MASK_PROFILE,
+            sampling_action_schema_version=(
+                DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION
+            ),
+        ),
+        AgentWorkflowEnv(
+            registry,
+            gateway=FakeGateway(),
+            execute_on_edit=True,
+        ),
+        _versions(),
+    )
+
+    def evaluator(task, final_answer, final_graph, runtime):
+        return {
+            "evaluator_version": EVALUATOR_VERSION,
+            "valid": True,
+            "reward": 1.0,
+            "metrics": {"f1": 1.0},
+        }
+
+    trajectory = asyncio.run(collector.collect(_task(), 0, evaluator))
+
+    assert trajectory.explicit_finish is True
+    for turn, payload in zip(trajectory.turns, client.payloads, strict=True):
+        branch = turn.runtime_summary["director_action_schema_branch"]
+        actions = director_actions_from_admissible_schema_branch(branch)
+        assert turn.runtime_summary["director_action_schema_version"] == (
+            DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION
+        )
+        assert payload["sampling_params"]["json_schema"] == (
+            director_model_admissible_sampling_json_schema_text(actions)
+        )
+    assert director_actions_from_admissible_schema_branch(
+        trajectory.turns[0].runtime_summary["director_action_schema_branch"]
+    ) == ("add_subgraph",)
+    assert "finish" in director_actions_from_admissible_schema_branch(
+        trajectory.turns[1].runtime_summary["director_action_schema_branch"]
     )
 
 

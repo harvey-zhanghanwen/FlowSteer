@@ -4,6 +4,7 @@ import pytest
 
 from src.interactive.task_dataset import (
     TASK_SCHEMA_VERSION,
+    hotpotqa_answer_cardinality_constraint,
     hotpotqa_answer_type_constraint,
     hotpotqa_question_scope,
     iter_task_records,
@@ -75,6 +76,8 @@ def test_hotpot_question_scope_preserves_plain_question():
         ("What nationality was the singer's wife?", "nationality"),
         ("How many albums were released?", "number"),
         ("Was the film released first?", "yes_no"),
+        ('"Human Error" belongs to a show that aired on what network?', "entity"),
+        ("The documentary was narrated by which actor?", "entity"),
     ],
 )
 def test_hotpot_answer_type_constraint_uses_question_surface_only(
@@ -82,6 +85,23 @@ def test_hotpot_answer_type_constraint_uses_question_surface_only(
     answer_type: str,
 ) -> None:
     assert hotpotqa_answer_type_constraint(question) == answer_type
+
+
+@pytest.mark.parametrize(
+    ("question", "cardinality"),
+    [
+        ("Who are Metallica's current members?", "multiple"),
+        ("What are the names of the two founders?", "multiple"),
+        ("Name all members of the group.", "multiple"),
+        ("Which magazine was started first, A or B?", "single"),
+        ("Who narrated the documentary?", "single"),
+    ],
+)
+def test_hotpot_answer_cardinality_constraint_uses_question_surface_only(
+    question: str,
+    cardinality: str,
+) -> None:
+    assert hotpotqa_answer_cardinality_constraint(question) == cardinality
 
 
 def test_iter_task_records_reports_jsonl_line(tmp_path):

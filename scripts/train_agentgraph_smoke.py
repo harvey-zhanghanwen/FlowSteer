@@ -35,6 +35,8 @@ from src.interactive.coding_execution import CodingExecutionAdapter
 from src.interactive.coding_tools import create_swebench_repository_registry
 from src.interactive.director import (
     AgentGraphOrchestrator,
+    DIRECTOR_MODEL_ADMISSIBLE_ACTION_MASK_PROFILE,
+    DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION,
     DIRECTOR_PROGRESSIVE_ACTION_MASK_PROFILE,
     DIRECTOR_PROMPT_VERSION,
     DIRECTOR_SGLANG_SAMPLING_SCHEMA_VERSION,
@@ -2335,10 +2337,11 @@ class LiveSmokeBackend:
         if sampling_action_profile not in {
             None,
             DIRECTOR_PROGRESSIVE_ACTION_MASK_PROFILE,
+            DIRECTOR_MODEL_ADMISSIBLE_ACTION_MASK_PROFILE,
         }:
             raise ConfigurationError(
-                "director.sampling_action_profile must be "
-                f"{DIRECTOR_PROGRESSIVE_ACTION_MASK_PROFILE!r} or omitted"
+                "director.sampling_action_profile must be one of the supported "
+                "evaluation-only Canvas action masks or omitted"
             )
         if sampling_action_profile is not None and action_decoding != "json_schema":
             raise ConfigurationError(
@@ -2349,8 +2352,12 @@ class LiveSmokeBackend:
             director.get(
                 "sampling_schema_version",
                 (
-                    DIRECTOR_STATE_CONDITIONED_ACTION_SCHEMA_VERSION
-                    if sampling_action_profile is not None
+                    DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION
+                    if sampling_action_profile
+                    == DIRECTOR_MODEL_ADMISSIBLE_ACTION_MASK_PROFILE
+                    else DIRECTOR_STATE_CONDITIONED_ACTION_SCHEMA_VERSION
+                    if sampling_action_profile
+                    == DIRECTOR_PROGRESSIVE_ACTION_MASK_PROFILE
                     else DIRECTOR_SGLANG_SAMPLING_SCHEMA_VERSION
                 ),
             )
@@ -2360,7 +2367,8 @@ class LiveSmokeBackend:
                 "director.sampling_schema_version must be non-empty"
             )
         if (
-            sampling_action_profile is not None
+            sampling_action_profile
+            == DIRECTOR_PROGRESSIVE_ACTION_MASK_PROFILE
             and sampling_schema_version
             != DIRECTOR_STATE_CONDITIONED_ACTION_SCHEMA_VERSION
         ):
@@ -2368,6 +2376,17 @@ class LiveSmokeBackend:
                 "state-conditioned Director sampling requires "
                 "director.sampling_schema_version="
                 f"{DIRECTOR_STATE_CONDITIONED_ACTION_SCHEMA_VERSION!r}"
+            )
+        if (
+            sampling_action_profile
+            == DIRECTOR_MODEL_ADMISSIBLE_ACTION_MASK_PROFILE
+            and sampling_schema_version
+            != DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION
+        ):
+            raise ConfigurationError(
+                "model-admissible Director sampling requires "
+                "director.sampling_schema_version="
+                f"{DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION!r}"
             )
         director_client = SGLangReceiptDirectorClient(
             tokenizer,

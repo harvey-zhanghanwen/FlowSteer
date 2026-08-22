@@ -32,6 +32,7 @@ from .agent_runtime import (
 )
 from .model_registry import ModelRegistry
 from .task_dataset import (
+    hotpotqa_answer_cardinality_constraint,
     hotpotqa_answer_type_constraint,
     hotpotqa_question_scope,
 )
@@ -60,7 +61,10 @@ _VERIFIER_SEMANTIC_FIELDS = (
     "candidate_answer",
     "evidence_supported",
     "entity_attribute_binding_correct",
+    "alias_binding_correct",
+    "answer_type_cardinality_correct",
     "multi_hop_complete",
+    "minimal_answer_surface",
     "scope_preserved",
     "verification_status",
 )
@@ -363,11 +367,24 @@ class AgentWorkflowEnv:
         """
 
         node_count = len(self._graph.nodes)
+        node_ids = tuple(node.id for node in self._graph.nodes)
         can_add = self.max_agents is None or node_count < self.max_agents
-        can_delete = node_count > 0 and any(
-            self._delete_admission_issue(node.id) is None
-            for node in self._graph.nodes
+        deletable_ids = tuple(
+            node_id
+            for node_id in node_ids
+            if self._delete_admission_issue(node_id) is None
         )
+        can_delete = bool(deletable_ids)
+        output_target_ids = tuple(
+            node.id
+            for node in self._graph.nodes
+            if (
+                self.semantic_protocol != _HOTPOTQA_SEMANTIC_PROTOCOL
+                or (node.role_family or "").casefold() == "format"
+            )
+            and node.id != self._graph.output_agent_id
+        )
+        can_set_output = bool(output_target_ids)
         finish_admitted = self.finish_admissibility().get("admissible") is True
         admitted: list[str] = []
         for action_type in self.allowed_action_types:
@@ -379,11 +396,74 @@ class AgentWorkflowEnv:
                 admitted.append(action_type)
             elif action_type == AgentActionType.SET_RELATION.value and node_count > 1:
                 admitted.append(action_type)
-            elif action_type == AgentActionType.SET_OUTPUT.value and node_count > 0:
+            elif action_type == AgentActionType.SET_OUTPUT.value and can_set_output:
                 admitted.append(action_type)
             elif action_type == AgentActionType.FINISH.value and finish_admitted:
                 admitted.append(action_type)
         return tuple(admitted)
+
+    def model_admissible_action_targets(self) -> dict[str, object]:
+        """Project exact current Canvas target domains for constrained sampling.
+
+        This is a read-only FlowSteer legality projection.  It does not select
+        the next action, repair an invalid sample, or prescribe a topology.
+        """
+
+        admitted = set(self.model_admissible_action_types())
+        node_ids = [node.id for node in self._graph.nodes]
+        targets: dict[str, object] = {}
+        if AgentActionType.ADD_SUBGRAPH.value in admitted:
+            remaining = (
+                self.max_agents_per_subgraph
+                if self.max_agents is None
+                else min(
+                    self.max_agents_per_subgraph,
+                    max(self.max_agents - len(node_ids), 0),
+                )
+            )
+            targets[AgentActionType.ADD_SUBGRAPH.value] = {
+                "min_new_agents": 1,
+                "max_new_agents": remaining,
+                "existing_agent_ids": node_ids,
+            }
+        if AgentActionType.MODIFY_AGENT.value in admitted:
+            targets[AgentActionType.MODIFY_AGENT.value] = {
+                "agent_ids": node_ids,
+                "failed_agent_ids": sorted(self._failed_agent_ids),
+            }
+        if AgentActionType.DELETE_AGENT.value in admitted:
+            targets[AgentActionType.DELETE_AGENT.value] = {
+                "agent_ids": [
+                    node_id
+                    for node_id in node_ids
+                    if self._delete_admission_issue(node_id) is None
+                ]
+            }
+        if AgentActionType.SET_RELATION.value in admitted:
+            targets[AgentActionType.SET_RELATION.value] = {
+                "source_agent_ids": node_ids,
+                "target_agent_ids": node_ids,
+                "endpoints_must_differ": True,
+            }
+        if AgentActionType.SET_OUTPUT.value in admitted:
+            targets[AgentActionType.SET_OUTPUT.value] = {
+                "agent_ids": [
+                    node.id
+                    for node in self._graph.nodes
+                    if (
+                        self.semantic_protocol != _HOTPOTQA_SEMANTIC_PROTOCOL
+                        or (node.role_family or "").casefold() == "format"
+                    )
+                    and node.id != self._graph.output_agent_id
+                ],
+                "current_output_agent_id": self._graph.output_agent_id,
+            }
+        if AgentActionType.FINISH.value in admitted:
+            targets[AgentActionType.FINISH.value] = {
+                "admissible": True,
+                "submission_semantics": "explicit_finish",
+            }
+        return targets
 
     def reset(self, problem: str, graph: Optional[AgentGraph] = None) -> AgentWorkflowSnapshot:
         if not isinstance(problem, str) or not problem.strip():
@@ -925,11 +1005,33 @@ class AgentWorkflowEnv:
             require_complete=True,
         )
         if not validation.valid:
-            return {
+            result: dict[str, object] = {
                 "admissible": False,
                 "stage": "graph_validation",
                 "reason": self._format_issues(validation),
+                "issues": [
+                    {
+                        "code": issue.code,
+                        "message": issue.message,
+                        "agent_ids": list(issue.agent_ids),
+                    }
+                    for issue in validation.issues
+                ],
             }
+            if self.recovery_policy == _PRESERVE_REPAIR_RECOVERY_POLICY:
+                result["recovery_state"] = self.recovery_state()
+            execution = self._cached_progressive_execution()
+            if (
+                execution is not None
+                and self.semantic_protocol == _HOTPOTQA_SEMANTIC_PROTOCOL
+            ):
+                semantic_issue = self._semantic_protocol_issue(execution)
+                if semantic_issue is not None:
+                    result["semantic_lineage_diagnostic"] = semantic_issue
+                    attribution = self._semantic_repair_attribution(semantic_issue)
+                    if attribution is not None:
+                        result["failure_attribution"] = attribution
+            return result
         format_issue = self.format_agent_issue()
         if format_issue is not None:
             return {
@@ -1243,7 +1345,14 @@ class AgentWorkflowEnv:
         )
 
     def _semantic_edit_issue_for(self, graph: AgentGraph) -> Optional[str]:
-        """Reject ReAct as a role while retaining it as execution semantics."""
+        """Enforce the HotpotQA semantic lineage after every Canvas edit.
+
+        The checks are incremental: an unconnected node may exist while the
+        Director is still assembling a functional subgraph, but an existing
+        edge may not bypass the Reasoner/Verifier/Formatter responsibility
+        boundary.  This keeps FlowSteer's edit--execute--feedback transaction
+        intact without imposing one fixed graph topology.
+        """
 
         if self.semantic_protocol != _HOTPOTQA_SEMANTIC_PROTOCOL:
             return None
@@ -1260,6 +1369,54 @@ class AgentWorkflowEnv:
                 "Use a semantic role such as reasoner, evidence_retriever, or verifier "
                 "and set execution_mode='react' only when Tool orchestration is needed"
             )
+
+        for node in graph.nodes:
+            role = (node.role_family or "").casefold()
+            if role in {"verifier", "format"} and (
+                node.execution_mode.value != "reasoning" or node.allowed_tools
+            ):
+                return (
+                    f"HotpotQA {role.title()} Agent {node.id!r} must use "
+                    "execution_mode='reasoning' without Tools"
+                )
+
+            predecessors = graph.directed_predecessors(node.id)
+            if role == "verifier":
+                invalid_predecessors = tuple(
+                    predecessor_id
+                    for predecessor_id in predecessors
+                    if (
+                        graph.get_node(predecessor_id).role_family or ""
+                    ).casefold()
+                    != "reasoner"
+                )
+                if invalid_predecessors:
+                    return (
+                        f"HotpotQA Verifier {node.id!r} must receive its direct "
+                        "input only from Reasoners, not from Retriever/Formatter "
+                        f"Agents {list(invalid_predecessors)!r}"
+                    )
+            if role == "format":
+                invalid_predecessors = tuple(
+                    predecessor_id
+                    for predecessor_id in predecessors
+                    if (
+                        graph.get_node(predecessor_id).role_family or ""
+                    ).casefold()
+                    != "verifier"
+                )
+                if invalid_predecessors:
+                    return (
+                        f"HotpotQA Formatter {node.id!r} must receive its direct "
+                        "input only from Verifiers and must not participate in "
+                        f"reasoning; invalid predecessors={list(invalid_predecessors)!r}"
+                    )
+                successors = self._directed_successors(graph, node.id)
+                if successors:
+                    return (
+                        f"HotpotQA Formatter {node.id!r} must be a terminal sink; "
+                        f"remove outgoing directed edges to {list(successors)!r}"
+                    )
         return None
 
     @staticmethod
@@ -1404,9 +1561,8 @@ class AgentWorkflowEnv:
         if not isinstance(answer_slot, Mapping):
             return None, "Reasoner field 'answer_slot' must be one structured object"
         slot_fields = {
-            "entity",
-            "relation",
             "answer_type",
+            "answer_cardinality",
             "qualifiers",
             "proposition_index",
             "answer_field",
@@ -1416,7 +1572,11 @@ class AgentWorkflowEnv:
                 "Reasoner field 'answer_slot' must contain exactly "
                 f"{sorted(slot_fields)!r}"
             )
-        for field in ("entity", "relation", "answer_type", "answer_field"):
+        for field in (
+            "answer_type",
+            "answer_cardinality",
+            "answer_field",
+        ):
             value = answer_slot[field]
             if not isinstance(value, str) or not value.strip():
                 return None, f"Reasoner answer_slot.{field} must be non-empty text"
@@ -1432,6 +1592,21 @@ class AgentWorkflowEnv:
             return None, (
                 "Reasoner answer_slot.answer_type must equal the original "
                 f"question's answer-type constraint {expected_answer_type!r}"
+            )
+        expected_answer_cardinality = (
+            None
+            if original_question is None
+            else hotpotqa_answer_cardinality_constraint(original_question)
+        )
+        if (
+            expected_answer_cardinality is not None
+            and answer_slot["answer_cardinality"]
+            != expected_answer_cardinality
+        ):
+            return None, (
+                "Reasoner answer_slot.answer_cardinality must equal the original "
+                "question's answer-cardinality constraint "
+                f"{expected_answer_cardinality!r}"
             )
         qualifiers = answer_slot["qualifiers"]
         if not isinstance(qualifiers, (list, tuple)) or any(
@@ -1506,16 +1681,6 @@ class AgentWorkflowEnv:
             )
         selected = propositions[proposition_index]
         assert isinstance(selected, Mapping)
-        if answer_slot["entity"] != selected["subject"]:
-            return None, (
-                "Reasoner answer_slot.entity must equal the selected evidence "
-                "proposition subject"
-            )
-        if answer_slot["relation"] != selected["relation"]:
-            return None, (
-                "Reasoner answer_slot.relation must equal the selected evidence "
-                "proposition relation"
-            )
         answer_field = answer_slot["answer_field"]
         if answer_field not in {"subject", "object_or_attribute_value"}:
             return None, (
@@ -1524,8 +1689,8 @@ class AgentWorkflowEnv:
             )
         if candidate != selected[answer_field]:
             return None, (
-                "Reasoner candidate_answer must copy answer_slot.answer_field "
-                "from the selected evidence proposition exactly"
+                "Reasoner candidate_answer must copy the proposition argument "
+                "identified by answer_slot.proposition_index and answer_field exactly"
             )
         if expected_answer_type in {"entity", "person", "location"} and re.fullmatch(
             r"[\d\s.,:/-]+",
@@ -1587,7 +1752,10 @@ class AgentWorkflowEnv:
         for field in (
             "evidence_supported",
             "entity_attribute_binding_correct",
+            "alias_binding_correct",
+            "answer_type_cardinality_correct",
             "multi_hop_complete",
+            "minimal_answer_surface",
             "scope_preserved",
         ):
             if fields[field] is not True:
@@ -1846,8 +2014,16 @@ class AgentWorkflowEnv:
             if agent_id not in active_semantic_lineage_set
             and bool(active_semantic_lineage)
         )
+        deletable = tuple(
+            node.id
+            for node in self._graph.nodes
+            if self._delete_admission_issue(node.id) is None
+        )
+        deletable_set = set(deletable)
         protected: dict[str, list[str]] = {}
         for node in self._graph.nodes:
+            if node.id in deletable_set:
+                continue
             reasons: list[str] = []
             if node.id in preserved:
                 reasons.append("successful_artifact")
@@ -1881,6 +2057,7 @@ class AgentWorkflowEnv:
             "redundant_after_replacement_takeover_agent_ids": list(
                 redundant_after_takeover
             ),
+            "deletable_agent_ids": list(deletable),
             "deletion_protected": protected,
             "preferred_actions": (
                 ["delete_agent", "set_relation", "modify_agent"]
@@ -2111,18 +2288,82 @@ class AgentWorkflowEnv:
         message = " ".join(str(exc).split())
         if len(message) > 240:
             message = message[:237] + "..."
+        failed_agents: list[dict[str, object]] = []
+        for record in exc.failure_records[:4]:
+            node = (
+                self._graph.get_node(record.agent_id)
+                if self._graph.has_node(record.agent_id)
+                else None
+            )
+            model_id = None if node is None else node.model_id
+            provider_id = (
+                None
+                if model_id is None
+                else self.model_registry.provider_for(model_id).provider_id
+            )
+            failure_text = " ".join(record.message.split())
+            normalized = f"{record.error_type} {failure_text}".casefold()
+            status_match = re.search(r"(?:http(?: error)?|status)[ :=]*(\d{3})", normalized)
+            status_code = (
+                None if status_match is None else int(status_match.group(1))
+            )
+            if (
+                "openaicompatiblegatewayerror" in normalized
+                or "provider request failed" in normalized
+                or status_code is not None
+            ):
+                category = "provider_request_failure"
+                retryability = (
+                    "permanent_configuration"
+                    if status_code in {400, 401, 403, 404}
+                    else "transient_provider"
+                )
+            elif (
+                "reactexecutionerror" in normalized
+                or "react" in normalized
+                and ("turn" in normalized or "exhaust" in normalized)
+            ):
+                category = "react_turn_exhaustion"
+                retryability = "repair_execution_contract_or_tool_plan"
+            elif "tool" in normalized:
+                category = "tool_capability_failure"
+                retryability = "repair_tool_capability_or_arguments"
+            else:
+                category = "execution_contract_or_runtime_failure"
+                retryability = "diagnose_existing_agent"
+            item: dict[str, object] = {
+                "agent_id": record.agent_id,
+                "model_id": model_id,
+                "provider_id": provider_id,
+                "phase": record.phase.value,
+                "error_type": record.error_type,
+                "failure_category": category,
+                "retryability": retryability,
+            }
+            if status_code is not None:
+                item["http_status"] = status_code
+            if category == "provider_request_failure" and model_id is not None:
+                item["preferred_repair"] = {
+                    "action": "modify_agent",
+                    "agent_id": record.agent_id,
+                    "field": "model_id",
+                    "avoid_provider_id": provider_id,
+                    "preserve_fields": [
+                        "contract",
+                        "role_family",
+                        "allowed_tools",
+                        "execution_mode",
+                        "artifact_type",
+                        "completion_condition",
+                        "relations",
+                    ],
+                }
+            failed_agents.append(item)
         payload = json.dumps(
             {
                 "type": type(exc).__name__,
                 "message": message,
-                "failed_agents": [
-                    {
-                        "agent_id": record.agent_id,
-                        "phase": record.phase.value,
-                        "error_type": record.error_type,
-                    }
-                    for record in exc.failure_records[:4]
-                ],
+                "failed_agents": failed_agents,
                 "blocked_agent_ids": list(exc.blocked_agent_ids),
                 "pending_agent_ids": list(exc.pending_agent_ids),
                 "preserved_agent_ids": (

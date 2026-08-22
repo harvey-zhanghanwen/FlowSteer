@@ -58,6 +58,9 @@ DIRECTOR_PROMPT_VERSION = "agentgraph.director.minimal-neutral.v10"
 LEGACY_DIRECTOR_PROMPT_VERSION_V9 = "agentgraph.director.minimal-neutral.v9"
 LEGACY_DIRECTOR_PROMPT_VERSION_V8 = "agentgraph.director.minimal-neutral.v8"
 HOTPOTQA_DIRECTOR_PROMPT_VERSION = (
+    "agentgraph.director.hotpotqa-semantic-recovery.v17"
+)
+LEGACY_HOTPOTQA_DIRECTOR_PROMPT_VERSION_V16 = (
     "agentgraph.director.hotpotqa-semantic-recovery.v16"
 )
 LEGACY_HOTPOTQA_DIRECTOR_PROMPT_VERSION_V15 = (
@@ -164,6 +167,21 @@ HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V16 = HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V15.replac
     1,
 )
 
+# v17 keeps SkillFlow's Supervisor instruction compact and moves legality into
+# the request-scoped constrained-decoding schema projected by the latest
+# FlowSteer Canvas.  The semantic responsibilities below are task invariants,
+# not a fixed workflow template: the Director still chooses the graph size,
+# model assignment, evidence branches, and directed/reciprocal relations.
+HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V17 = """You are the Flow-Director. Incrementally edit the executable AgentGraph from the latest Canvas observation. Return exactly one JSON action and no other text.
+
+Use only the current admissible_action_types, action_target_domains, model_catalog model_id values, and exact tool_catalog tool_id values. add_subgraph adds one functional subgraph of one to three Agents and then executes it once. modify_agent repairs one existing Agent; set_relation changes one directed or reciprocal communication edge; set_output selects the terminal Agent; finish submits the current executed result. role_family is a semantic responsibility. execution_mode is only reasoning, react, or coding. ReAct is never a role; with a Tool it is the bounded Thought -> Action(tool) -> Observation -> Thought -> Final schedule.
+
+For HotpotQA, preserve the original question scope, relation, qualifiers, comparison criterion, answer type, and answer cardinality. Exactly one Reasoner owns the semantic answer. It may retrieve with qa-retrieval in execution_mode react or consume explicit read evidence from a direct Retriever predecessor; in either case it resolves aliases and coreference, represents each retrieved fact as a subject--predicate--object/attribute proposition with qualifiers, aligns the requested answer slot to one proposition argument, completes every required hop, and selects one minimal evidence-supported answer surface. For a single-value slot it must not return an alias list, appositive gloss, or a redundant answer-type noun. When an identity bridge links an alias or stage name to a canonical person/entity name, select the surface that fills the question's semantic type; keep the alias as bridge evidence. A Which-comparison returns the compared entity, not its value. A who-question returns the person, not a possessive attribute. If compared values are unexpectedly equal, recheck the unchanged question scope, both entity bindings, retrieved evidence, and contract qualifiers before deciding.
+
+The Verifier consumes only the Reasoner's semantic artifact. It checks explicit database evidence, entity--attribute and alias binding, answer-slot type/cardinality, complete multi-hop support, minimal answer surface, and unchanged scope. It copies the identical candidate and never selects or invents another answer. The terminal Formatter consumes only one supported Verifier artifact and copies that candidate into the required wrapper; it never reasons, verifies, canonicalizes, or reselects.
+
+Recover in this order: preserve -> diagnose -> repair -> augment. Preserve valid evidence, semantic answers, working relations, and Output identity. Repair the failure_attribution responsible Agent or relation before adding another Agent. For a transient provider failure, keep the failed Agent's role, contract, tools, and relations and modify only its model_id to a catalog model on a different provider when available. Delete only an Agent listed as deletable after a replacement artifact has taken over its downstream responsibility. Never hard-code a sample, answer, evidence span, Ground Truth, or evaluator result, and never assume an unlisted Skill."""
+
 
 def director_system_prompt_for_version(prompt_version: str) -> str:
     """Resolve one explicitly versioned Director policy without changing v10."""
@@ -184,7 +202,10 @@ def director_system_prompt_for_version(prompt_version: str) -> str:
         "agentgraph.director.skillflow_continuation_v8": (
             LEGACY_DIRECTOR_SYSTEM_PROMPT_V8
         ),
-        HOTPOTQA_DIRECTOR_PROMPT_VERSION: HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V16,
+        HOTPOTQA_DIRECTOR_PROMPT_VERSION: HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V17,
+        LEGACY_HOTPOTQA_DIRECTOR_PROMPT_VERSION_V16: (
+            HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V16
+        ),
         LEGACY_HOTPOTQA_DIRECTOR_PROMPT_VERSION_V15: (
             HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V15
         ),
@@ -217,6 +238,7 @@ _SUPPORTED_DIRECTOR_SYSTEM_PROMPTS = frozenset(
         HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V14,
         HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V15,
         HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V16,
+        HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V17,
         LEGACY_DIRECTOR_SYSTEM_PROMPT_V9,
         LEGACY_DIRECTOR_SYSTEM_PROMPT_V8,
     }
@@ -371,8 +393,14 @@ DIRECTOR_SGLANG_SAMPLING_SCHEMA_VERSION = (
 DIRECTOR_PROGRESSIVE_ACTION_MASK_PROFILE = (
     "progressive_add_subgraph_then_finish"
 )
+DIRECTOR_MODEL_ADMISSIBLE_ACTION_MASK_PROFILE = (
+    "model_admissible_canvas_actions"
+)
 DIRECTOR_STATE_CONDITIONED_ACTION_SCHEMA_VERSION = (
     "agentgraph.state-conditioned-action-mask.v2"
+)
+DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION = (
+    "agentgraph.model-admissible-action-mask.v1"
 )
 DIRECTOR_ACTION_JSON_SCHEMA_TEXT = json.dumps(
     DIRECTOR_ACTION_JSON_SCHEMA,
@@ -459,12 +487,12 @@ def director_state_conditioned_sampling_json_schema_text(action: str) -> str:
     authoritative post-generation validator.
     """
 
-    if action not in {"add_subgraph", "finish"}:
-        raise ValueError("state-conditioned sampling supports add_subgraph or finish")
     by_name = {
         branch["properties"]["action"]["const"]: branch
         for branch in DIRECTOR_ACTION_JSON_SCHEMA["oneOf"]
     }
+    if action not in by_name:
+        raise ValueError("state-conditioned sampling received an unknown action")
     # A JSON round trip makes a request-local copy without changing the strict
     # parser schema shared by the rest of the runtime.
     branch = json.loads(json.dumps(by_name[action]))
@@ -503,6 +531,47 @@ def director_state_conditioned_sampling_json_schema_text(action: str) -> str:
         sort_keys=True,
         separators=(",", ":"),
     )
+
+
+def director_model_admissible_sampling_json_schema_text(
+    actions: Sequence[str],
+) -> str:
+    """Render the exact current Canvas action domain for inference sampling.
+
+    A singleton domain can retain the strict action-specific schema.  Multiple
+    actions use the existing SGLang-compatible flat schema because deployed
+    xgrammar does not preserve the top-level ``oneOf`` discriminator.  The
+    unchanged ``AgentActionParser`` remains authoritative after generation.
+    """
+
+    normalized = tuple(actions)
+    if not normalized:
+        raise ValueError("model-admissible Canvas actions must be non-empty")
+    if len(normalized) == 1:
+        return director_state_conditioned_sampling_json_schema_text(normalized[0])
+    return director_sglang_sampling_json_schema_text(normalized)
+
+
+def director_model_admissible_schema_branch(actions: Sequence[str]) -> str:
+    """Encode the ordered legal action domain in one receipt-safe label."""
+
+    normalized = tuple(actions)
+    # Reuse the schema renderer for complete action-name validation.
+    director_model_admissible_sampling_json_schema_text(normalized)
+    return "admissible:" + "|".join(normalized)
+
+
+def director_actions_from_admissible_schema_branch(
+    branch: str,
+) -> Tuple[str, ...]:
+    """Decode and validate one model-admissible action-domain receipt label."""
+
+    prefix = "admissible:"
+    if not isinstance(branch, str) or not branch.startswith(prefix):
+        raise ValueError("model-admissible schema branch has an invalid prefix")
+    actions = tuple(branch[len(prefix) :].split("|"))
+    director_model_admissible_sampling_json_schema_text(actions)
+    return actions
 
 
 DIRECTOR_TRANSCRIPT_SCHEMA = "flowsteer.director.transcript.v1"
@@ -841,6 +910,7 @@ class AgentGraphOrchestrator:
         if sampling_action_profile not in {
             None,
             DIRECTOR_PROGRESSIVE_ACTION_MASK_PROFILE,
+            DIRECTOR_MODEL_ADMISSIBLE_ACTION_MASK_PROFILE,
         }:
             raise ValueError("unsupported Director sampling action profile")
         if (
@@ -868,6 +938,20 @@ class AgentGraphOrchestrator:
 
         if self.sampling_action_profile is None:
             return {}
+        if (
+            self.sampling_action_profile
+            == DIRECTOR_MODEL_ADMISSIBLE_ACTION_MASK_PROFILE
+        ):
+            actions = env.model_admissible_action_types()
+            return {
+                "action_json_schema": (
+                    director_model_admissible_sampling_json_schema_text(actions)
+                ),
+                "action_json_schema_version": self.sampling_action_schema_version,
+                "action_schema_branch": (
+                    director_model_admissible_schema_branch(actions)
+                ),
+            }
         finish_admissible = env.finish_admissibility().get("admissible") is True
         action_branch = "finish" if finish_admissible else "add_subgraph"
         return {
@@ -914,7 +998,7 @@ class AgentGraphOrchestrator:
         # not select a model; every action still names the Director's choice.
         catalog_model_ids = list(self.registry.model_ids)
         random.Random(self.catalog_order_seed).shuffle(catalog_model_ids)
-        return [
+        catalog = [
             {
                 "model_id": model_id,
                 "selection_weight": self.registry.require_model(model_id).selection_weight,
@@ -934,6 +1018,12 @@ class AgentGraphOrchestrator:
             }
             for model_id in catalog_model_ids
         ]
+        if self.semantic_protocol == HOTPOTQA_SEMANTIC_PROTOCOL:
+            for item in catalog:
+                item["provider_id"] = self.registry.provider_for(
+                    str(item["model_id"])
+                ).provider_id
+        return catalog
 
     def _tool_catalog(self, env: AgentWorkflowEnv) -> list[dict[str, object]]:
         if self.tool_registry is None:
@@ -974,7 +1064,7 @@ class AgentGraphOrchestrator:
             "canvas_feedback": snapshot.last_feedback,
             "admissible_action_types": list(
                 env.model_admissible_action_types()
-                if self.prompt_version == HOTPOTQA_DIRECTOR_PROMPT_VERSION
+                if self.semantic_protocol == HOTPOTQA_SEMANTIC_PROTOCOL
                 else env.allowed_action_types
             ),
             # These are existing admission constraints enforced by
@@ -987,6 +1077,38 @@ class AgentGraphOrchestrator:
                 "required_tool_id": env.required_tool_id,
             },
         }
+        if self.semantic_protocol == HOTPOTQA_SEMANTIC_PROTOCOL:
+            payload["action_target_domains"] = (
+                env.model_admissible_action_targets()
+            )
+            recent_rejections: list[dict[str, Any]] = []
+            for entry in reversed(env.history):
+                if entry.accepted:
+                    continue
+                action_value = (
+                    {} if entry.action is None else entry.action.to_dict()
+                )
+                target = action_value.get("agent_id")
+                if target is None and action_value.get("source_id") is not None:
+                    target = {
+                        "source_id": action_value.get("source_id"),
+                        "target_id": action_value.get("target_id"),
+                    }
+                reason = " ".join(entry.feedback.split())
+                recent_rejections.append(
+                    {
+                        "revision": entry.revision,
+                        "action": action_value.get("action"),
+                        "target": target,
+                        "reason": reason[:360],
+                    }
+                )
+                if len(recent_rejections) >= 3:
+                    break
+            if recent_rejections:
+                payload["recent_rejected_actions"] = list(
+                    reversed(recent_rejections)
+                )
         if env.required_evidence_tool_id is not None:
             # The HotpotQA semantic gate distinguishes an evidence-bearing
             # read receipt from environment-native action Tools.  Expose that
@@ -1001,8 +1123,12 @@ class AgentGraphOrchestrator:
             payload["semantic_lineage_constraints"] = {
                 "semantic_answer_owner_role_family": "reasoner",
                 "required_evidence_tool_id": env.required_evidence_tool_id,
-                "required_evidence_tool_owner_role_family": "reasoner",
+                "required_evidence_tool_owner": (
+                    "reasoner_or_direct_reasoner_predecessor"
+                ),
                 "required_evidence_execution_mode": "react",
+                "verifier_execution_mode": "reasoning",
+                "formatter_execution_mode": "reasoning",
                 "required_direct_role_edges": [
                     ["reasoner", "verifier"],
                     ["verifier", "format"],
@@ -1038,7 +1164,7 @@ class AgentGraphOrchestrator:
         # revision-local gate and its first measured failure stage so the
         # Director repairs the responsible semantic node instead of probing
         # FINISH or repeatedly modifying the Formatter.
-        if self.prompt_version == HOTPOTQA_DIRECTOR_PROMPT_VERSION:
+        if self.semantic_protocol == HOTPOTQA_SEMANTIC_PROTOCOL:
             payload["finish_admissibility"] = env.finish_admissibility()
         else:
             finish_admissibility = env.finish_admissibility()
@@ -1204,6 +1330,8 @@ __all__ = [
     "DIRECTOR_ACTION_JSON_SCHEMA",
     "DIRECTOR_ACTION_JSON_SCHEMA_TEXT",
     "DIRECTOR_ACTION_SCHEMA_VERSION",
+    "DIRECTOR_MODEL_ADMISSIBLE_ACTION_MASK_PROFILE",
+    "DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION",
     "DIRECTOR_PROGRESSIVE_ACTION_MASK_PROFILE",
     "DIRECTOR_SGLANG_SAMPLING_SCHEMA_VERSION",
     "DIRECTOR_STATE_CONDITIONED_ACTION_SCHEMA_VERSION",
@@ -1213,6 +1341,7 @@ __all__ = [
     "HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V14",
     "HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V15",
     "HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V16",
+    "HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V17",
     "HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V11",
     "HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V13",
     "HOTPOTQA_SEMANTIC_PROTOCOL",
@@ -1230,6 +1359,9 @@ __all__ = [
     "OrchestrationResult",
     "decode_director_transcript",
     "director_action_json_schema_text",
+    "director_actions_from_admissible_schema_branch",
+    "director_model_admissible_sampling_json_schema_text",
+    "director_model_admissible_schema_branch",
     "director_system_prompt_for_version",
     "director_sglang_sampling_json_schema_text",
     "director_state_conditioned_sampling_json_schema_text",

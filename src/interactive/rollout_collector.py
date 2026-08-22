@@ -39,6 +39,8 @@ from .director import (
     DirectorError,
     DirectorResponse,
     decode_director_transcript,
+    director_actions_from_admissible_schema_branch,
+    director_model_admissible_sampling_json_schema_text,
     director_state_conditioned_sampling_json_schema_text,
 )
 from .openai_gateway import build_agent_messages
@@ -526,11 +528,22 @@ class SGLangReceiptDirectorClient:
         assert action_schema_branch is not None
         try:
             supplied_schema = json.loads(action_json_schema)
-            expected_schema = json.loads(
-                director_state_conditioned_sampling_json_schema_text(
-                    action_schema_branch.strip()
+            normalized_branch = action_schema_branch.strip()
+            if normalized_branch.startswith("admissible:"):
+                expected_schema_text = (
+                    director_model_admissible_sampling_json_schema_text(
+                        director_actions_from_admissible_schema_branch(
+                            normalized_branch
+                        )
+                    )
                 )
-            )
+            else:
+                expected_schema_text = (
+                    director_state_conditioned_sampling_json_schema_text(
+                        normalized_branch
+                    )
+                )
+            expected_schema = json.loads(expected_schema_text)
         except (TypeError, ValueError) as exc:
             raise ValueError(
                 "per-request action schema must be the strict schema for its branch"

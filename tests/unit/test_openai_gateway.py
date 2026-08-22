@@ -187,6 +187,9 @@ class MessageTests(unittest.TestCase):
         self.assertIn("answer slot actually requested", system)
         self.assertIn("evidence_propositions", system)
         self.assertIn("answer_slot", system)
+        self.assertIn("answer_cardinality", system)
+        self.assertIn("proposition_index selects one item", system)
+        self.assertIn("minimal canonical answer surface", system)
         self.assertIn("multi_hop_chain", system)
         self.assertIn("candidate_answer", system)
         self.assertIn("unexpectedly equal values", system)
@@ -207,7 +210,13 @@ class MessageTests(unittest.TestCase):
         self.assertIn("entity is bound to the correct attribute/value", system)
         self.assertIn("multi-hop bridge is complete", system)
         self.assertIn("scope was not narrowed", system)
+        self.assertIn("answer type and cardinality", system)
+        self.assertIn("answer surface is minimal", system)
+        self.assertIn("explicit identity binding", system)
         self.assertIn("must not select, replace, canonicalize", system)
+        self.assertIn("Answer type cardinality correct:", system)
+        self.assertIn("Minimal answer surface:", system)
+        self.assertIn("Alias binding correct:", system)
         self.assertIn("Verification status:", system)
         self.assertIn("repair_required", system)
         self.assertNotIn("direct semantic predecessor", system)
@@ -238,7 +247,10 @@ class MessageTests(unittest.TestCase):
                     "Candidate answer: The Joshua Tree\n"
                     "Evidence supported: true\n"
                     "Entity attribute binding correct: true\nMulti-hop complete: true\n"
-                    "Scope preserved: true\nVerification status: supported"
+                    "Scope preserved: true\n"
+                    "Answer type cardinality correct: true\n"
+                    "Minimal answer surface: true\n"
+                    "Alias binding correct: true\nVerification status: supported"
                 ),
                 semantic_protocol="hotpotqa_verified_answer_slot_v1",
             )

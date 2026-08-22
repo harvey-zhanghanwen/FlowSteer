@@ -336,7 +336,7 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("evidence_propositions", reasoner)
         self.assertIn("bind the candidate", reasoner)
         self.assertIn("Do not replace the Reasoner's candidate", verifier)
-        self.assertIn("four explicit boolean check fields", verifier)
+        self.assertIn("seven explicit boolean check fields", verifier)
         self.assertIn("Set supported only when all checks pass", verifier)
         self.assertNotIn("bind the candidate", verifier)
 
@@ -490,13 +490,43 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
                 }
             )
 
+        semantic_artifact = {
+            "question_scope": "Who wrote the first published algorithm?",
+            "answer_slot": {
+                "answer_type": "person",
+                "answer_cardinality": "single",
+                "qualifiers": ["first published algorithm"],
+                "proposition_index": 0,
+                "answer_field": "subject",
+            },
+            "evidence_propositions": [
+                {
+                    "subject": "Ada Lovelace",
+                    "relation": "wrote",
+                    "object_or_attribute_value": "the first published algorithm",
+                    "qualifiers": [],
+                    "evidence_span": "Ada Lovelace wrote the algorithm.",
+                },
+                {
+                    "subject": "Ada Lovelace",
+                    "relation": "identity",
+                    "object_or_attribute_value": "English mathematician",
+                    "qualifiers": [],
+                    "evidence_span": "Ada Lovelace was an English mathematician.",
+                },
+            ],
+            "multi_hop_chain": ["first published algorithm", "Ada Lovelace"],
+            "candidate_answer": "Ada Lovelace",
+            "evidence": ["Full public text."],
+        }
+
         class SequenceGateway:
             def __init__(self) -> None:
                 self.outputs = [
                     action("complete", {"value": "unsupported answer"}),
                     action("search", {"query": "Ada Lovelace", "limit": 1}),
                     action("read", {"passage_id": "p1"}),
-                    action("complete", {"value": "Ada Lovelace"}),
+                    action("complete", {"value": semantic_artifact}),
                 ]
                 self.requests: list[AgentRequest] = []
 
@@ -532,7 +562,15 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             completion_policy="required_evidence",
         ).execute(request)
 
-        self.assertEqual("Ada Lovelace", response.text)
+        self.assertEqual(
+            json.dumps(
+                semantic_artifact,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            response.text,
+        )
         self.assertEqual(2, response.metadata["tool_calls"])
         self.assertEqual(
             "qa_completion_requires_successful_read_evidence",
@@ -712,9 +750,8 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         semantic_artifact = {
             "question_scope": "Who published the first algorithm?",
             "answer_slot": {
-                "entity": "Ada Lovelace",
-                "relation": "published",
                 "answer_type": "person",
+                "answer_cardinality": "single",
                 "qualifiers": ["first algorithm"],
                 "proposition_index": 0,
                 "answer_field": "subject",
@@ -749,6 +786,15 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
                     action("search", {"query": "Ada Lovelace algorithm", "limit": 10}),
                     action("read", {"passage_id": "p1"}),
                     action("read", {"passage_id": "p2"}),
+                    action(
+                        "complete",
+                        {
+                            "value": {
+                                **semantic_artifact,
+                                "candidate_answer": "Charles Babbage",
+                            }
+                        },
+                    ),
                     action("complete", {"value": semantic_artifact}),
                 ]
                 self.requests: list[AgentRequest] = []
@@ -781,7 +827,7 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         response = await QARetrievalReactExecutionAdapter(
             gateway=gateway,
             tool_registry=build_qa_tool_registry(index),
-            max_turns=5,
+            max_turns=6,
             max_tool_calls=4,
             task_type="multi_hop_qa",
             completion_policy="required_evidence",
@@ -790,6 +836,11 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(json.dumps(semantic_artifact, ensure_ascii=False, sort_keys=True, separators=(",", ":")), response.text)
         self.assertEqual(3, response.metadata["tool_calls"])
         self.assertEqual(["p1", "p2"], index.read_calls)
+        self.assertTrue(
+            response.metadata["react_trace"][3]["public_error_code"].startswith(
+                "hotpotqa_semantic_artifact_invalid:"
+            )
+        )
         search_schema = json.loads(
             gateway.requests[0].model.metadata["response_json_schema"]
         )
@@ -823,7 +874,23 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             0,
             semantic_properties["answer_slot"]["properties"][
                 "proposition_index"
+            ]["minimum"],
+        )
+        self.assertEqual(
+            "single",
+            semantic_properties["answer_slot"]["properties"][
+                "answer_cardinality"
             ]["const"],
+        )
+        self.assertEqual(
+            {
+                "answer_type",
+                "answer_cardinality",
+                "qualifiers",
+                "proposition_index",
+                "answer_field",
+            },
+            set(semantic_properties["answer_slot"]["required"]),
         )
 
     async def test_react_failed_retrieval_receipt_admits_explicit_completion(self) -> None:

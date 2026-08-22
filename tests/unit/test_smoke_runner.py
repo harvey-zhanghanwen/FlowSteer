@@ -133,6 +133,57 @@ def aligned_row(task: TaskRecord) -> dict:
     }
 
 
+def test_live_backend_rejects_invalid_model_admissible_sampling_contract():
+    root = Path(__file__).resolve().parents[2]
+    source = yaml.safe_load(
+        (root / "config/evaluation_hotpotqa_unified_architecture_v1.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    fake_transformers = SimpleNamespace(
+        AutoTokenizer=SimpleNamespace(
+            from_pretrained=lambda *args, **kwargs: object()
+        )
+    )
+    invalid_cases = (
+        (
+            {
+                "action_decoding": "unconstrained",
+                "sampling_action_profile": "model_admissible_canvas_actions",
+                "sampling_schema_version": (
+                    "agentgraph.model-admissible-action-mask.v1"
+                ),
+            },
+            "requires evaluation-only json_schema",
+        ),
+        (
+            {
+                "action_decoding": "json_schema",
+                "sampling_action_profile": "model_admissible_canvas_actions",
+                "sampling_schema_version": "wrong-schema",
+            },
+            "model-admissible Director sampling requires",
+        ),
+    )
+    for director_values, expected_message in invalid_cases:
+        config = copy.deepcopy(source)
+        config["director"].update(director_values)
+        with patch.dict(
+            os.environ,
+            {"VECTOR_ENGINE_API_KEY": "unit-test-placeholder"},
+            clear=False,
+        ), patch.dict(sys.modules, {"transformers": fake_transformers}):
+            with unittest.TestCase().assertRaisesRegex(
+                ConfigurationError,
+                expected_message,
+            ):
+                _MODULE.LiveSmokeBackend.from_config(
+                    config,
+                    root,
+                    evaluation_only=True,
+                )
+
+
 def test_interactive_workflow_problem_exposes_only_the_execution_contract():
     task = make_task("webshop", 0)
     config = {

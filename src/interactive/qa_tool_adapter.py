@@ -24,6 +24,7 @@ from typing import Callable, Mapping, Protocol, Sequence
 from .agent_runtime import AgentGateway, AgentRequest, GatewayResponse
 from .react_execution import ToolReactExecutionAdapter
 from .task_dataset import (
+    hotpotqa_answer_cardinality_constraint,
     hotpotqa_answer_type_constraint,
     hotpotqa_question_scope,
 )
@@ -75,9 +76,13 @@ HOTPOTQA_VERIFIED_ANSWER_SLOT_GUIDANCE = (
     "a Which-comparison returns the compared entity, not the numeric/date comparison "
     "value; a who-question returns the person/possessor, not a possessive attribute "
     "phrase. Represent retrieved facts as "
-    "subject/entity, predicate/relation, object or attribute value, and qualifiers; "
-    "keep the entity-to-attribute binding explicit and show every bridge in the "
-    "multi-hop chain. If compared values are unexpectedly equal, recheck scope, "
+    "subject/entity, predicate/relation, object or attribute value, and qualifiers. "
+    "Bind candidate_answer to exactly one evidence_propositions item through "
+    "answer_slot.proposition_index and answer_field; keep the entity-to-attribute "
+    "binding explicit and show every bridge in the multi-hop chain. Return one "
+    "minimal canonical answer surface when answer_cardinality is single; do not "
+    "return an alias list or repeat the question's head noun. If compared values "
+    "are unexpectedly equal, recheck scope, "
     "both bindings, retrieved passages, and contract narrowing before calling a tie."
 )
 
@@ -355,6 +360,10 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             f"qa_retrieval_completion_required_{id(self)}",
             default=False,
         )
+        self._semantic_reasoner_question: ContextVar[str | None] = ContextVar(
+            f"qa_semantic_reasoner_question_{id(self)}",
+            default=None,
+        )
 
     def _required_evidence_state(
         self,
@@ -490,35 +499,31 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         answer_slot_schema = {
             "type": "object",
             "required": [
-                "entity",
-                "relation",
                 "answer_type",
+                "answer_cardinality",
                 "qualifiers",
                 "proposition_index",
                 "answer_field",
             ],
             "properties": {
-                "entity": {
-                    **non_empty_text,
-                    "description": (
-                        "The entity whose selected proposition fills or determines "
-                        "the answer slot."
-                    ),
-                },
-                "relation": {
-                    **non_empty_text,
-                    "description": "The relation requested by the original question.",
-                },
                 "answer_type": {
                     "const": hotpotqa_answer_type_constraint(request.problem),
                     "description": "The answer type requested by the original question.",
                 },
+                "answer_cardinality": {
+                    "const": hotpotqa_answer_cardinality_constraint(request.problem),
+                    "description": (
+                        "Whether the original question requests one answer value or "
+                        "multiple answer values."
+                    ),
+                },
                 "qualifiers": dict(qualifier_list),
                 "proposition_index": {
-                    "const": 0,
+                    "type": "integer",
+                    "minimum": 0,
                     "description": (
-                        "The answer-bearing proposition is always serialized first; "
-                        "candidate_answer must be supplied by evidence_propositions[0]."
+                        "Zero-based index of the evidence proposition whose selected "
+                        "field supplies candidate_answer."
                     ),
                 },
                 "answer_field": {
@@ -591,8 +596,9 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                             "type": "array",
                             "minItems": 2,
                             "description": (
-                                "Serialize the answer-bearing proposition first, "
-                                "followed by the bridge/supporting propositions."
+                                "Explicit answer-bearing and bridge/supporting "
+                                "propositions. answer_slot.proposition_index selects "
+                                "the answer-bearing proposition."
                             ),
                             "items": proposition_schema,
                         },
@@ -665,11 +671,21 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             and self._max_tool_calls > 0
             and QA_RETRIEVAL_TOOL_ID in request.agent.allowed_tools
         )
-        token = self._retrieval_completion_required.set(requires_retrieval)
+        semantic_reasoner_question = (
+            hotpotqa_question_scope(request.problem)
+            if request.semantic_protocol == "hotpotqa_verified_answer_slot_v1"
+            and (request.agent.role_family or "").casefold() == "reasoner"
+            else None
+        )
+        retrieval_token = self._retrieval_completion_required.set(requires_retrieval)
+        semantic_token = self._semantic_reasoner_question.set(
+            semantic_reasoner_question
+        )
         try:
             return await super().execute(request)
         finally:
-            self._retrieval_completion_required.reset(token)
+            self._semantic_reasoner_question.reset(semantic_token)
+            self._retrieval_completion_required.reset(retrieval_token)
 
     def _contract(
         self,
@@ -717,11 +733,12 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     "evidence_propositions, multi_hop_chain, candidate_answer, and "
                     "evidence. Copy question_scope exactly from the original question. "
                     "Use answer_slot.proposition_index and answer_field to bind the "
-                    "candidate to one explicit evidence proposition: answer_slot.entity "
-                    "and relation must equal that proposition's subject and relation, "
-                    "and candidate_answer must equal its selected answer_field. Copy the full "
-                    "evidence-aligned answer span, including a title or qualifier when "
-                    "present; do not shorten a proper-name phrase."
+                    "candidate to one explicit evidence proposition; candidate_answer "
+                    "must equal that proposition's selected field. Set answer_type and "
+                    "answer_cardinality from the original question and preserve its "
+                    "qualifiers. For single-answer questions, return one minimal canonical "
+                    "answer surface rather than an alias list or a phrase that repeats the "
+                    "question's head noun."
                 )
             else:
                 terminal_wire += (
@@ -736,9 +753,10 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             terminal_wire += (
                 " As the Verifier, check explicit retrieved evidence, entity-to-"
                 "attribute binding, multi-hop completeness, and unchanged question "
-                "scope. Do not replace the Reasoner's candidate. Return Candidate "
-                "answer, the four explicit boolean check fields, and Verification "
-                "status. Set supported only when all checks pass; "
+                "scope; also check answer type/cardinality, minimal answer surface, "
+                "and alias binding. Do not replace the Reasoner's candidate. Return "
+                "Candidate answer, the seven explicit boolean check fields, and "
+                "Verification status. Set supported only when all checks pass; "
                 "otherwise request repair without a substitute candidate."
             )
         elif request.is_format_predecessor:
@@ -803,7 +821,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     "eventual semantic artifact into those arguments. Set query to "
                     "one non-empty focused entity-and-relation string selected from "
                     "the original question or newest read evidence. For HotpotQA, "
-                    "set limit to exactly 5 so the bounded continuation can inspect "
+                    "set limit to exactly 10 so the bounded continuation can inspect "
                     "two distinct ranked passages from the same search result. Keep "
                     "the outer constants kind=tool, name=search, "
                     "resource_id=qa-retrieval, and skill_id=null. Do not call "
@@ -823,9 +841,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         artifact: str,
         tool_receipts: list[dict[str, object]],
     ) -> str | None:
-        del action, artifact
-        if not self._retrieval_completion_required.get():
-            return None
+        del action
 
         # DIRECT_REUSE: SkillFlow training/environment.py::step admits the
         # terminal answer after at least one non-answer Tool turn.  Preserve
@@ -833,34 +849,60 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         # receipt, so a Tool outage cannot discard a usable upstream answer.
         # ``required_evidence`` is an explicit stricter experiment condition:
         # only a successful read receipt carrying non-empty public text counts.
-        for receipt in tool_receipts:
-            if receipt.get("tool_id") != QA_RETRIEVAL_TOOL_ID:
-                continue
-            request = receipt.get("request")
-            if not isinstance(request, Mapping) or request.get("action") not in {
-                "search",
-                "read",
-            }:
-                continue
-            if self._completion_policy == "required_tool_call":
-                return None
-            result = receipt.get("result")
-            if not isinstance(result, Mapping) or receipt.get("error_type") is not None:
-                continue
-            value = result.get("value")
-            if not isinstance(value, Mapping):
-                continue
-            has_evidence = (
-                value.get("operation") == "read"
-                and isinstance(value.get("passage"), Mapping)
-                and isinstance(value["passage"].get("text"), str)
-                and bool(value["passage"]["text"].strip())
-            )
-            if has_evidence:
-                return None
-        if self._completion_policy == "required_tool_call":
-            return "qa_completion_requires_retrieval_dispatch"
-        return "qa_completion_requires_successful_read_evidence"
+        if self._retrieval_completion_required.get():
+            retrieval_admitted = False
+            for receipt in tool_receipts:
+                if receipt.get("tool_id") != QA_RETRIEVAL_TOOL_ID:
+                    continue
+                receipt_request = receipt.get("request")
+                if not isinstance(receipt_request, Mapping) or receipt_request.get(
+                    "action"
+                ) not in {"search", "read"}:
+                    continue
+                if self._completion_policy == "required_tool_call":
+                    retrieval_admitted = True
+                    break
+                result = receipt.get("result")
+                if (
+                    not isinstance(result, Mapping)
+                    or receipt.get("error_type") is not None
+                ):
+                    continue
+                value = result.get("value")
+                if not isinstance(value, Mapping):
+                    continue
+                has_evidence = (
+                    value.get("operation") == "read"
+                    and isinstance(value.get("passage"), Mapping)
+                    and isinstance(value["passage"].get("text"), str)
+                    and bool(value["passage"]["text"].strip())
+                )
+                if has_evidence:
+                    retrieval_admitted = True
+                    break
+            if not retrieval_admitted:
+                if self._completion_policy == "required_tool_call":
+                    return "qa_completion_requires_retrieval_dispatch"
+                return "qa_completion_requires_successful_read_evidence"
+
+        original_question = self._semantic_reasoner_question.get()
+        if original_question is None:
+            return None
+        # NECESSARY_ADAPTATION: completion admission in the generic bounded
+        # executor has no AgentRequest parameter.  Reuse AgentWorkflowEnv's
+        # semantic artifact parser/validator under a request-scoped ContextVar
+        # so an invalid Reasoner completion becomes public repair feedback in
+        # the same ReAct loop instead of breaking the outer semantic lineage.
+        from .agent_workflow_env import AgentWorkflowEnv
+
+        candidate, issue = AgentWorkflowEnv._reasoner_candidate(
+            artifact,
+            original_question=original_question,
+        )
+        if issue is not None or candidate is None:
+            detail = issue or "Reasoner candidate_answer is missing"
+            return "hotpotqa_semantic_artifact_invalid: " + detail
+        return None
 
     def _tool_action_error(
         self,

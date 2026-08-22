@@ -57,18 +57,36 @@ def hotpotqa_answer_type_constraint(rendered_question: str) -> str:
 
     question = hotpotqa_question_scope(rendered_question)
     normalized = " ".join(question.casefold().split())
-    if normalized.startswith("what nationality"):
+    if re.search(r"\bwhat nationality\b", normalized):
         return "nationality"
-    if normalized.startswith(("how many ", "how much ")):
+    if re.search(r"\bhow (?:many|much)\b", normalized):
         return "number"
-    if normalized.startswith(("when ", "what year ", "what date ")):
+    if normalized.startswith("when ") or re.search(
+        r"\bwhat (?:year|date)\b", normalized
+    ):
         return "date"
-    if normalized.startswith("where "):
+    if normalized.startswith("where ") or re.search(
+        r"\bwhere\s*\?\s*$", normalized
+    ):
         return "location"
-    if normalized.startswith("which "):
-        return "entity"
     if normalized.startswith("who ") or re.search(r"\bwho\s*\?\s*$", normalized):
         return "person"
+    if re.search(
+        r"\bwhat (?:country|city|place|location)\b", normalized
+    ):
+        return "location"
+    # HotpotQA frequently places the interrogative constituent after a named
+    # subject (for example, "X includes which ...?").  Classify that actual
+    # answer slot rather than only the first token of the sentence.
+    if normalized.startswith("which ") or re.search(
+        r"\bwhich\s+[^?]+\?\s*$", normalized
+    ):
+        return "entity"
+    if re.search(
+        r"\bwhat (?:network|organization|company|band|team|school|university)\b",
+        normalized,
+    ):
+        return "entity"
     if normalized.startswith(
         (
             "are ",
@@ -87,6 +105,20 @@ def hotpotqa_answer_type_constraint(rendered_question: str) -> str:
     ):
         return "yes_no"
     return "short_answer"
+
+
+def hotpotqa_answer_cardinality_constraint(rendered_question: str) -> str:
+    """Return a question-only single-value or multiple-value answer constraint."""
+
+    question = hotpotqa_question_scope(rendered_question)
+    normalized = " ".join(question.casefold().split())
+    if re.search(
+        r"^(?:what (?:are|were) the names?\b|who (?:are|were)\b|"
+        r"name (?:all|the)\b)",
+        normalized,
+    ):
+        return "multiple"
+    return "single"
 
 
 def task_record_from_mapping(

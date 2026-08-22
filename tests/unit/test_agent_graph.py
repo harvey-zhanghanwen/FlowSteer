@@ -20,9 +20,12 @@ from src.interactive.agent_graph import (
     GraphMutationError,
 )
 from src.interactive.agent_runtime import (
+    AgentFailureRecord,
     AgentRequest,
     AgentResponse,
     AgentRuntime,
+    AgentRuntimeError,
+    ExecutionPhase,
     ReasoningExecutionAdapter,
 )
 from src.interactive.agent_workflow_env import (
@@ -743,9 +746,8 @@ class _HotpotSemanticGateway(_ImmediateGateway):
                 {
                     "question_scope": request.problem,
                     "answer_slot": {
-                        "entity": "France",
-                        "relation": "capital",
                         "answer_type": "short_answer",
+                        "answer_cardinality": "single",
                         "qualifiers": [],
                         "proposition_index": 0,
                         "answer_field": "object_or_attribute_value",
@@ -777,7 +779,10 @@ class _HotpotSemanticGateway(_ImmediateGateway):
                     "candidate_answer": self.verifier_candidate,
                     "evidence_supported": self.verifier_supported,
                     "entity_attribute_binding_correct": True,
+                    "alias_binding_correct": True,
+                    "answer_type_cardinality_correct": True,
                     "multi_hop_complete": True,
+                    "minimal_answer_surface": True,
                     "scope_preserved": True,
                     "verification_status": (
                         "supported" if self.verifier_supported else "unsupported"
@@ -1694,6 +1699,71 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(finished.accepted)
         self.assertEqual("answer:a", finished.final_answer)
 
+    async def test_execution_failure_feedback_attributes_provider_and_repair(self) -> None:
+        graph = AgentGraph(
+            [AgentNode("source", "balanced", "produce evidence")],
+            output_agent_id="source",
+        )
+        env = AgentWorkflowEnv(
+            make_registry(),
+            _ImmediateGateway(),
+            graph=graph,
+            problem="question",
+            recovery_policy="preserve_diagnose_repair_augment",
+        )
+        failure = AgentRuntimeError(
+            "gateway failed",
+            failure_records=(
+                AgentFailureRecord(
+                    request_id="request-1",
+                    agent_id="source",
+                    phase=ExecutionPhase.SINGLE,
+                    graph_revision=graph.revision,
+                    error_type="OpenAICompatibleGatewayError",
+                    message="provider request failed for fake: HTTP Error 429",
+                ),
+            ),
+        )
+
+        feedback = json.loads(env._execution_error_feedback(failure).split("=", 1)[1])
+
+        attributed = feedback["failed_agents"][0]
+        self.assertEqual("balanced", attributed["model_id"])
+        self.assertEqual("fake", attributed["provider_id"])
+        self.assertEqual("provider_request_failure", attributed["failure_category"])
+        self.assertEqual("modify_agent", attributed["preferred_repair"]["action"])
+        self.assertEqual("fake", attributed["preferred_repair"]["avoid_provider_id"])
+
+    async def test_finish_admissibility_keeps_structured_graph_diagnosis(self) -> None:
+        graph = AgentGraph(
+            [
+                AgentNode("orphan", "cheap", "unused branch"),
+                AgentNode("output", "fast", "answer"),
+            ],
+            output_agent_id="output",
+        )
+        env = AgentWorkflowEnv(
+            make_registry(),
+            _ImmediateGateway(),
+            graph=graph,
+            problem="question",
+            recovery_policy="preserve_diagnose_repair_augment",
+        )
+
+        admission = env.finish_admissibility()
+
+        self.assertFalse(admission["admissible"])
+        self.assertEqual("graph_validation", admission["stage"])
+        issues = admission["issues"]
+        self.assertTrue(any(item["code"] == "cannot_reach_output" for item in issues))
+        self.assertTrue(
+            any("orphan" in item["agent_ids"] for item in issues)
+        )
+        self.assertEqual(
+            "preserve -> diagnose -> repair -> augment",
+            admission["recovery_state"]["strategy"],
+        )
+
     async def test_hotpot_semantic_protocol_accepts_only_verified_answer_lineage(self) -> None:
         registry = make_registry()
         gateway = _HotpotSemanticGateway()
@@ -1770,22 +1840,21 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         graph = _hotpot_semantic_graph()
         graph.set_relation("reader", "reasoner", False, False)
         graph.set_relation("reader", "verifier", True, False)
-        env = AgentWorkflowEnv(
-            make_registry(),
-            _HotpotSemanticGateway(),
-            graph=graph,
-            problem="What is the capital of France?",
-            require_exact_answer_tag=True,
-            require_format_agent=True,
-            semantic_protocol="hotpotqa_verified_answer_slot_v1",
-            recovery_policy="preserve_diagnose_repair_augment",
-            required_evidence_tool_id="qa-retrieval",
-        )
-
-        rejected = await env.step('{"action":"finish"}')
-
-        self.assertFalse(rejected.accepted)
-        self.assertIn("Route any retrieval or repair evidence into the Reasoner", rejected.feedback)
+        with self.assertRaisesRegex(
+            AgentWorkflowStateError,
+            "input only from Reasoners",
+        ):
+            AgentWorkflowEnv(
+                make_registry(),
+                _HotpotSemanticGateway(),
+                graph=graph,
+                problem="What is the capital of France?",
+                require_exact_answer_tag=True,
+                require_format_agent=True,
+                semantic_protocol="hotpotqa_verified_answer_slot_v1",
+                recovery_policy="preserve_diagnose_repair_augment",
+                required_evidence_tool_id="qa-retrieval",
+            )
 
     async def test_hotpot_formatter_must_wrap_exact_unchanged_candidate(self) -> None:
         registry = make_registry()
@@ -1831,7 +1900,10 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             "Candidate answer: Paris\n"
             "Evidence supported: true\n"
             "Entity attribute binding correct: true\n"
+            "Alias binding correct: true\n"
+            "Answer type cardinality correct: true\n"
             "Multi-hop complete: true\n"
+            "Minimal answer surface: true\n"
             "Scope preserved: true\n"
             "Verification status: supported"
         )
@@ -1844,7 +1916,10 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             "Candidate answer: 1844  \n"
             "Evidence supported: true\n"
             "Entity attribute binding correct: true\n"
+            "Alias binding correct: true\n"
+            "Answer type cardinality correct: true\n"
             "Multi-hop complete: true\n"
+            "Minimal answer surface: true\n"
             "Scope preserved: true\n"
             "Verification status: supported"
         )
@@ -1865,9 +1940,8 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         artifact = {
             "question_scope": "What is the capital of France?",
             "answer_slot": {
-                "entity": "France",
-                "relation": "capital",
                 "answer_type": "short_answer",
+                "answer_cardinality": "single",
                 "qualifiers": [],
                 "proposition_index": 0,
                 "answer_field": "object_or_attribute_value",
@@ -1903,8 +1977,6 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         comparison = json.loads(json.dumps(artifact))
         comparison["question_scope"] = "Which magazine was started first, A or B?"
         comparison["answer_slot"]["answer_type"] = "entity"
-        comparison["answer_slot"]["entity"] = "A"
-        comparison["answer_slot"]["relation"] = "publication date"
         comparison["answer_slot"]["answer_field"] = "object_or_attribute_value"
         comparison["evidence_propositions"][0].update(
             {
@@ -1925,8 +1997,6 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         possessive = json.loads(json.dumps(artifact))
         possessive["question_scope"] = "The character was named after who?"
         possessive["answer_slot"]["answer_type"] = "person"
-        possessive["answer_slot"]["entity"] = "Milhouse"
-        possessive["answer_slot"]["relation"] = "named after"
         possessive["evidence_propositions"][0].update(
             {
                 "subject": "Milhouse",
@@ -1961,7 +2031,7 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             original_question="What is the capital of France?",
         )
         self.assertIsNone(candidate)
-        self.assertIn("copy answer_slot.answer_field", str(issue))
+        self.assertIn("proposition argument", str(issue))
 
         coreferential = json.loads(json.dumps(artifact))
         coreferential["evidence_propositions"][0]["evidence_span"] = (
@@ -2011,22 +2081,21 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             ],
             output_agent_id="formatter",
         )
-        env = AgentWorkflowEnv(
-            registry,
-            gateway,
-            graph=graph,
-            problem="question",
-            require_exact_answer_tag=True,
-            require_format_agent=True,
-            semantic_protocol="hotpotqa_verified_answer_slot_v1",
-            recovery_policy="preserve_diagnose_repair_augment",
-            required_evidence_tool_id="qa-retrieval",
-        )
-
-        rejected = await env.step('{"action":"finish"}')
-
-        self.assertFalse(rejected.accepted)
-        self.assertIn("unique predecessor must have role_family='verifier'", rejected.feedback)
+        with self.assertRaisesRegex(
+            AgentWorkflowStateError,
+            "input only from Verifiers",
+        ):
+            AgentWorkflowEnv(
+                registry,
+                gateway,
+                graph=graph,
+                problem="question",
+                require_exact_answer_tag=True,
+                require_format_agent=True,
+                semantic_protocol="hotpotqa_verified_answer_slot_v1",
+                recovery_policy="preserve_diagnose_repair_augment",
+                required_evidence_tool_id="qa-retrieval",
+            )
         self.assertEqual([], gateway.requests)
 
     async def test_hotpot_format_execution_contract_is_rejected_before_commit(
@@ -2069,7 +2138,8 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertFalse(rejected.accepted)
-        self.assertIn("Format Agent must use reasoning execution", rejected.feedback)
+        self.assertIn("HotpotQA Format Agent", rejected.feedback)
+        self.assertIn("execution_mode='reasoning'", rejected.feedback)
         self.assertEqual((), env.graph.nodes)
 
     async def test_preserve_repair_policy_blocks_delete_until_takeover(self) -> None:
@@ -2167,9 +2237,8 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         artifact = {
             "question_scope": "What is the capital of France?",
             "answer_slot": {
-                "entity": "France",
-                "relation": "capital",
                 "answer_type": "short_answer",
+                "answer_cardinality": "single",
                 "qualifiers": [],
                 "proposition_index": 0,
                 "answer_field": "object_or_attribute_value",
@@ -2366,9 +2435,8 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             {
                 "question_scope": "What is the capital of France?",
                 "answer_slot": {
-                    "entity": "France",
-                    "relation": "capital",
                     "answer_type": "short_answer",
+                    "answer_cardinality": "single",
                     "qualifiers": [],
                     "proposition_index": 0,
                     "answer_field": "object_or_attribute_value",
@@ -2398,7 +2466,10 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             "Candidate answer: Paris\n"
             "Evidence supported: true\n"
             "Entity attribute binding correct: true\n"
+            "Alias binding correct: true\n"
+            "Answer type cardinality correct: true\n"
             "Multi-hop complete: true\n"
+            "Minimal answer surface: true\n"
             "Scope preserved: true\n"
             "Verification status: supported"
         )
