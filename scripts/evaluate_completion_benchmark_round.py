@@ -1528,12 +1528,23 @@ def _failure_type(
             if isinstance(evaluation, Mapping)
             else {}
         )
-        if (
-            isinstance(details, Mapping)
-            and details.get("answer_mismatch_type")
-            == "accepted_answer_canonicalization_mismatch"
-        ):
+        mismatch_type = (
+            details.get("answer_mismatch_type")
+            if isinstance(details, Mapping)
+            else None
+        )
+        if mismatch_type == "accepted_answer_canonicalization_mismatch":
             return "accepted_answer_canonicalization_mismatch"
+        if (
+            mismatch_type == "partial_answer_overlap"
+            and graph_value.get("explicit_finish") is True
+        ):
+            # Earlier rejected retrieval/completion attempts remain in the
+            # lossless trajectory.  They must not relabel a later complete,
+            # explicitly finished evidence lineage as retrieval failure when
+            # the official evaluator's final-answer diagnosis is partial
+            # accepted-answer overlap.
+            return "partial_answer_overlap"
         diagnostic_payload = {
             "turns": [
                 {

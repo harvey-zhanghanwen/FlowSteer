@@ -1983,6 +1983,67 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("avoid_provider_id", fallback_candidate)
 
+    async def test_provider_repair_precedes_incomplete_semantic_spine(self) -> None:
+        registry = make_multi_provider_registry()
+        graph = AgentGraph(
+            [
+                AgentNode(
+                    "reasoner",
+                    "balanced",
+                    "retrieve and bind the answer",
+                    role_family="reasoner",
+                    allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                    execution_mode="react",
+                ),
+                AgentNode(
+                    "verifier",
+                    "balanced",
+                    "verify the candidate",
+                    role_family="verifier",
+                ),
+                AgentNode(
+                    "formatter",
+                    "fast",
+                    _HOTPOTQA_FORMAT_CONTRACT,
+                    role_family="format",
+                ),
+            ],
+            [AgentRelation("reasoner", "verifier", True, False)],
+        )
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_hotpot_semantic_runtime(registry, _ImmediateGateway()),
+            graph=graph,
+            problem="What is the capital of France?",
+            execute_on_edit=False,
+            semantic_protocol="hotpotqa_verified_answer_slot_v1",
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+        )
+        env._record_failure_state(
+            (
+                AgentFailureRecord(
+                    request_id="request-429-before-spine",
+                    agent_id="reasoner",
+                    phase=ExecutionPhase.SINGLE,
+                    graph_revision=graph.revision,
+                    error_type="OpenAICompatibleGatewayError",
+                    message="provider request failed with HTTP status 429",
+                ),
+            ),
+            current_agent_ids={node.id for node in graph.nodes},
+        )
+
+        self.assertEqual(("modify_agent",), env.model_admissible_action_types())
+        repaired = await env.step(
+            '{"action":"modify_agent","agent_id":"reasoner",'
+            '"model_id":"fast"}'
+        )
+
+        self.assertTrue(repaired.accepted)
+        self.assertEqual("fast", env.graph.get_node("reasoner").model_id)
+        self.assertEqual(("set_relation",), env.model_admissible_action_types())
+
     async def test_react_exhaustion_feedback_preserves_compact_public_diagnosis(
         self,
     ) -> None:

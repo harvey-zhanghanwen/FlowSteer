@@ -4164,6 +4164,13 @@ class AgentWorkflowEnv:
         react_repair_issue = self._react_repair_admission_issue(action)
         if react_repair_issue is not None:
             return react_repair_issue
+        if mandatory_repair_ids:
+            # The live action mask has already reduced this turn to the exact
+            # measured repair target, and the provider/ReAct field contract
+            # above is authoritative.  A still-incomplete semantic spine must
+            # not reject that same repair after constrained decoding selected
+            # it; topology closure resumes after the repaired Agent executes.
+            return None
 
         exhausted_reasoner_ids = self._repair_exhausted_reasoner_ids()
         if exhausted_reasoner_ids:

@@ -39,7 +39,7 @@ with HTTP 403; no existing branch was overwritten.
 
 ### Verified without a live model
 
-- The complete unit suite passes: 765 tests passed across AgentGraph, Runtime,
+- The complete unit suite passes: 766 tests passed across AgentGraph, Runtime,
   Tool adapter, gateway prompts, Director action domains, configuration,
   records, collector, evaluator and reporting.  The only warning is the
   existing Pydantic class-config deprecation in `scripts/formatter.py`.
@@ -100,21 +100,41 @@ Evidence Retriever or Repair execution unit when necessary and then exposes
 only the exact admissible ingress relation.  Successful revision-live Agent
 artifacts keep their predecessor identity during this recovery sequence.
 
-### Known issues before r2 live validation
+The isolated r2 canary also failed Stable Zero, but exposed a separate
+transactional defect.  On `triviaqa:tc_1`, the initial Reasoner provider
+returned HTTP 429.  The live action mask correctly admitted only a cross-
+provider `model_id` repair, while authoritative Canvas admission incorrectly
+required the still-missing Verifier -> Formatter relation first.  The same
+typed repair was therefore rejected for the remaining 27 turns.  On
+`triviaqa:tc_3`, r2 completed the full lineage and explicit FINISH in four
+turns with `Heworth, North Riding of Yorkshire`; the official evaluator
+reported EM `0` and F1 `0.5` against accepted-answer canonicalization centered
+on `York`.  That metric mismatch is retained as an evaluator result and is not
+used to rewrite inference.  The report-only taxonomy uses the evaluator's
+existing `partial_answer_overlap` diagnosis for this completed lineage, rather
+than relabeling an earlier rejected completion as final retrieval failure.
+
+Recovery revision r3 makes a typed mandatory Agent repair transactionally
+authoritative before topology closure, matching the already-exposed action
+mask.  Once the repair executes, normal semantic-spine relation closure
+resumes.  r2 artifacts remain immutable under their own condition path.
+
+### Known issues before r3 live validation
 
 - The external Wikipedia index has only been exercised by the two-task failed
   canary; its operational coverage on the fixed 128 tasks is not yet measured.
 - Live SGLang constrained decoding and exact receipts must pass the isolated
-  r2 GPU0 Stable Zero canary before the 128-task run is allowed.
+  r3 GPU0 Stable Zero canary before the 128-task run is allowed.
 - The last-valid-lineage fallback intentionally remains a terminal failure and
   is excluded from training, even when its evaluator answer is correct.
 
 ### Stable Zero status
 
 Static architecture, recovery tests and data-selection preconditions are
-complete.  The initial live canary **failed** at 1/2; recovery revision r2 is
+complete.  The initial canary and isolated r2 canary both **failed Stable
+Zero** for the documented, non-overlapping causes; recovery revision r3 is
 **pending live Stable Zero**.  Formal v2 EM/F1 remain pending.  No score is
-inferred from unit tests, the two-task canary, or the previous architecture.
+inferred from unit tests, either two-task canary, or the previous architecture.
 
 ## Historical comparison condition
 

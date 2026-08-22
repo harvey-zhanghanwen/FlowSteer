@@ -736,6 +736,29 @@ def test_trivia_failure_taxonomy_uses_evaluator_and_public_runtime_receipts():
         dataset_key="triviaqa",
     ) == "knowledge_base_coverage_failure"
 
+    partial_overlap_after_recovery = {
+        **common,
+        "evaluation": {
+            **common["evaluation"],
+            "details": {"answer_mismatch_type": "partial_answer_overlap"},
+        },
+        "turns": [
+            {
+                "canvas_feedback": "semantic_evidence_provenance_invalid",
+                "runtime_summary": {},
+            }
+        ],
+    }
+    assert _MODULE._failure_type(
+        {"evaluation": {"valid": True}},
+        partial_overlap_after_recovery,
+        direct_valid=True,
+        graph_valid=True,
+        direct_score=0.0,
+        graph_score=0.5,
+        dataset_key="triviaqa",
+    ) == "partial_answer_overlap"
+
     coverage_without_finish = {
         **coverage,
         "explicit_finish": False,
