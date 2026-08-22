@@ -72,7 +72,8 @@ def test_hotpot_question_scope_preserves_plain_question():
     ("question", "answer_type"),
     [
         ("Which magazine was started first, A or B?", "entity"),
-        ("The character was named after who?", "person"),
+        ("The character was named after who?", "entity"),
+        ("Who won Super Bowl XX?", "entity"),
         ("What nationality was the singer's wife?", "nationality"),
         ("How many albums were released?", "number"),
         ("Was the film released first?", "yes_no"),

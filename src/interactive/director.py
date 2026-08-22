@@ -297,10 +297,17 @@ HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V22 = HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V21.replac
 # SkillFlow-compatible retrieval Action--Observation contract rather than in
 # the Director prompt.  This keeps the Director instruction short and avoids
 # prescribing a fixed graph topology.
-QA_DIRECTOR_SYSTEM_PROMPT_V1 = HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V22.replace(
-    "For HotpotQA,",
-    "For evidence-grounded question answering,",
-    1,
+QA_DIRECTOR_SYSTEM_PROMPT_V1 = (
+    HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V22.replace(
+        "For HotpotQA,",
+        "For evidence-grounded question answering,",
+        1,
+    ).replace(
+        "A who-question returns the person, not a possessive attribute.",
+        "A who-question returns the evidence-supported answer-bearing entity, "
+        "which may be a person or organization, not a possessive attribute.",
+        1,
+    )
 )
 
 

@@ -882,7 +882,7 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         artifact = {
             "question_scope": "Who held the office?",
             "answer_slot": {
-                "answer_type": "person",
+                "answer_type": "entity",
                 "answer_cardinality": "single",
                 "qualifiers": [],
                 "proposition_index": 0,
@@ -1091,7 +1091,7 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         semantic_artifact = {
             "question_scope": "Who wrote the first published algorithm?",
             "answer_slot": {
-                "answer_type": "person",
+                "answer_type": "entity",
                 "answer_cardinality": "single",
                 "qualifiers": ["first published algorithm"],
                 "proposition_index": 0,
@@ -1350,7 +1350,7 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         semantic_artifact = {
             "question_scope": "Who published the first algorithm?",
             "answer_slot": {
-                "answer_type": "person",
+                "answer_type": "entity",
                 "answer_cardinality": "single",
                 "qualifiers": ["first algorithm"],
                 "proposition_index": 0,
@@ -1479,7 +1479,7 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             "properties"
         ]["value"]["properties"]
         self.assertEqual(
-            "person",
+            "entity",
             semantic_properties["answer_slot"]["properties"]["answer_type"][
                 "const"
             ],
@@ -1537,7 +1537,7 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         artifact = {
             "question_scope": "Who published the first algorithm?",
             "answer_slot": {
-                "answer_type": "person",
+                "answer_type": "entity",
                 "answer_cardinality": "single",
                 "qualifiers": ["first algorithm"],
                 "proposition_index": 0,
@@ -1666,7 +1666,7 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         artifact = {
             "question_scope": "Who published the first algorithm?",
             "answer_slot": {
-                "answer_type": "person",
+                "answer_type": "entity",
                 "answer_cardinality": "single",
                 "qualifiers": ["first algorithm"],
                 "proposition_index": 0,
@@ -1788,7 +1788,7 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         artifact = {
             "question_scope": "Who published the first algorithm?",
             "answer_slot": {
-                "answer_type": "person",
+                "answer_type": "entity",
                 "answer_cardinality": "single",
                 "qualifiers": ["first algorithm"],
                 "proposition_index": 0,
@@ -1917,7 +1917,7 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         valid_artifact = {
             "question_scope": "Who published the first algorithm?",
             "answer_slot": {
-                "answer_type": "person",
+                "answer_type": "entity",
                 "answer_cardinality": "single",
                 "qualifiers": ["first algorithm"],
                 "proposition_index": 0,
@@ -2013,7 +2013,11 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(
             structural_error.startswith("hotpotqa_semantic_artifact_invalid:")
         )
-        self.assertIn("answer_slot.proposition_index", structural_error)
+        self.assertIn("answer_slot.answer_field selects", structural_error)
+        self.assertIn(
+            "object_or_attribute_value",
+            structural_error,
+        )
 
         repair_contract = gateway.requests[5].agent.contract
         self.assertIn(structural_error, repair_contract)

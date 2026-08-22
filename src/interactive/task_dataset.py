@@ -82,7 +82,10 @@ def qa_answer_type_constraint(rendered_question: str) -> str:
     ):
         return "location"
     if normalized.startswith("who ") or re.search(r"\bwho\s*\?\s*$", normalized):
-        return "person"
+        # "Who" can denote a person, team, band, company, government, or
+        # another organization.  A question-only constraint must not narrow
+        # that open entity class before evidence is available.
+        return "entity"
     if re.search(
         r"\bwhat (?:country|city|place|location)\b", normalized
     ):

@@ -1983,6 +1983,114 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("avoid_provider_id", fallback_candidate)
 
+    async def test_hotpot_permanent_provider_failure_repair_is_model_only(
+        self,
+    ) -> None:
+        registry = make_multi_provider_registry()
+        graph = _hotpot_semantic_graph()
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_hotpot_semantic_runtime(
+                registry,
+                _HotpotSemanticGateway(),
+            ),
+            graph=graph,
+            problem="What is the capital of France?",
+            execute_on_edit=False,
+            semantic_protocol="hotpotqa_verified_answer_slot_v1",
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+        )
+        record = AgentFailureRecord(
+            request_id="request-403",
+            agent_id="reasoner",
+            phase=ExecutionPhase.SINGLE,
+            graph_revision=graph.revision,
+            error_type="OpenAICompatibleGatewayError",
+            message="provider request failed with HTTP status 403",
+        )
+        env._record_failure_state(
+            (record,),
+            current_agent_ids={node.id for node in graph.nodes},
+        )
+
+        failure = AgentRuntimeError(
+            "gateway failed",
+            failure_records=(record,),
+        )
+        feedback = json.loads(
+            env._execution_error_feedback(failure).split("=", 1)[1]
+        )
+        attributed = feedback["failed_agents"][0]
+        self.assertEqual(403, attributed["http_status"])
+        self.assertEqual(
+            "permanent_configuration",
+            attributed["retryability"],
+        )
+        self.assertEqual(
+            ["alternate", "fast"],
+            attributed["preferred_repair"]["admitted_model_ids"],
+        )
+        self.assertEqual(
+            "provider-a",
+            attributed["preferred_repair"]["avoid_provider_id"],
+        )
+
+        candidate = env.model_admissible_action_targets()["modify_agent"][
+            "per_agent_candidates"
+        ][0]
+        self.assertEqual("reasoner", candidate["agent_id"])
+        self.assertEqual(["model_id"], candidate["mutable_fields"])
+        self.assertEqual(
+            ["alternate", "fast"],
+            candidate["discrete_value_domains"]["model_id"],
+        )
+        self.assertEqual("provider-a", candidate["avoid_provider_id"])
+
+        revision = env.revision
+        rejection_feedback: list[str] = []
+        for action in (
+            {
+                "action": "modify_agent",
+                "agent_id": "reasoner",
+                "contract": "change the reasoning contract",
+            },
+            {
+                "action": "modify_agent",
+                "agent_id": "reasoner",
+                "model_id": "fast",
+                "contract": "change two fields",
+            },
+            {
+                "action": "modify_agent",
+                "agent_id": "reasoner",
+                "model_id": "cheap",
+            },
+        ):
+            rejected = await env.step(json.dumps(action))
+            self.assertFalse(rejected.accepted)
+            rejection_feedback.append(rejected.feedback)
+            self.assertEqual(revision, env.revision)
+            self.assertEqual(
+                "balanced",
+                env.graph.get_node("reasoner").model_id,
+            )
+        self.assertIn(
+            "provider failure repair",
+            " ".join(rejection_feedback),
+        )
+        self.assertIn(
+            "provider repair model_id must come from the live admitted domain",
+            " ".join(rejection_feedback),
+        )
+
+        repaired = await env.step(
+            '{"action":"modify_agent","agent_id":"reasoner",'
+            '"model_id":"fast"}'
+        )
+        self.assertTrue(repaired.accepted)
+        self.assertEqual("fast", env.graph.get_node("reasoner").model_id)
+
     async def test_provider_repair_precedes_incomplete_semantic_spine(self) -> None:
         registry = make_multi_provider_registry()
         graph = AgentGraph(
@@ -2856,6 +2964,38 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("set_relation", attribution["preferred_action_order"][0])
         self.assertFalse(attribution["delete_allowed_before_replacement_takeover"])
 
+        semantic_env = AgentWorkflowEnv(
+            registry,
+            _ImmediateGateway(),
+            graph=_hotpot_semantic_graph(),
+            problem="Who won Super Bowl XX?",
+            semantic_protocol="hotpotqa_verified_answer_slot_v1",
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+        )
+        answer_slot_attribution = semantic_env._semantic_repair_attribution(
+            "Verifier field 'answer_type_cardinality_correct' must be true"
+        )
+        self.assertIsNotNone(answer_slot_attribution)
+        assert answer_slot_attribution is not None
+        self.assertEqual(
+            "reasoner",
+            answer_slot_attribution["responsible_role_family"],
+        )
+        self.assertEqual(
+            "reasoner",
+            answer_slot_attribution["responsible_agent_id"],
+        )
+        verifier_schema_attribution = semantic_env._semantic_repair_attribution(
+            "Verifier field 'candidate_answer' must be one bare answer span"
+        )
+        self.assertIsNotNone(verifier_schema_attribution)
+        assert verifier_schema_attribution is not None
+        self.assertEqual(
+            "verifier",
+            verifier_schema_attribution["responsible_role_family"],
+        )
+
     async def test_hotpot_live_domain_closes_semantic_spine_before_output(
         self,
     ) -> None:
@@ -3399,6 +3539,20 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             str(issue),
         )
 
+        misbound_slot = json.loads(json.dumps(artifact))
+        misbound_slot["answer_slot"]["answer_field"] = "subject"
+        candidate, issue = env._reasoner_candidate(
+            json.dumps(misbound_slot),
+            original_question="What is the capital of France?",
+        )
+        self.assertIsNone(candidate)
+        self.assertIn("answer_field selects 'subject'", str(issue))
+        self.assertIn(
+            "matches the selected proposition field "
+            "'object_or_attribute_value'",
+            str(issue),
+        )
+
         comparison = json.loads(json.dumps(artifact))
         comparison["question_scope"] = "Which magazine was started first, A or B?"
         comparison["answer_slot"]["answer_type"] = "entity"
@@ -3421,7 +3575,7 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
 
         possessive = json.loads(json.dumps(artifact))
         possessive["question_scope"] = "The character was named after who?"
-        possessive["answer_slot"]["answer_type"] = "person"
+        possessive["answer_slot"]["answer_type"] = "entity"
         possessive["evidence_propositions"][0].update(
             {
                 "subject": "Milhouse",
@@ -3442,7 +3596,7 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
 
         incomplete_surface = json.loads(json.dumps(artifact))
         incomplete_surface["question_scope"] = "The role was named after who?"
-        incomplete_surface["answer_slot"]["answer_type"] = "person"
+        incomplete_surface["answer_slot"]["answer_type"] = "entity"
         incomplete_surface["evidence_propositions"][0].update(
             {
                 "subject": "The role",

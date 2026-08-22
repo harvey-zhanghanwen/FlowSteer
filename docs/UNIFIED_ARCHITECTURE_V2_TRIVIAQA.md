@@ -39,7 +39,7 @@ with HTTP 403; no existing branch was overwritten.
 
 ### Verified without a live model
 
-- The complete unit suite passes: 767 tests passed across AgentGraph, Runtime,
+- The complete unit suite passes: 769 tests passed across AgentGraph, Runtime,
   Tool adapter, gateway prompts, Director action domains, configuration,
   records, collector, evaluator and reporting.  The only warning is the
   existing Pydantic class-config deprecation in `scripts/formatter.py`.
@@ -157,22 +157,67 @@ Evidence Retriever or Repair Agent, and partial semantic construction exposes
 only its missing role family.  This is an inference-wire repair of the existing
 FlowSteer Canvas boundary, not a topology template or training change.
 
-### Known issues before r5 live validation
+The isolated r5 Stable Zero canary then passed `2/2` legal terminal chains with
+zero collection, parsing or rejected-action failures.  `triviaqa:tc_1`
+finished with `Harry Sinclair Lewis` and EM/F1 `1/1`; `triviaqa:tc_3`
+finished with the evidence-supported surface `Heworth, North Riding of
+Yorkshire` and official-style EM/F1 `0/0.5` against the accepted surface
+`York`.  Both trajectories explicitly FINISHed after five Canvas turns.  The
+two-task AgentGraph aggregate was EM `0.5`, F1 `0.75`; it is a chain canary,
+not the fixed-128 accuracy estimate.
 
-- The external Wikipedia index has only been exercised by the two-task failed
-  canary; its operational coverage on the fixed 128 tasks is not yet measured.
-- Live SGLang constrained decoding and exact receipts must pass the isolated
-  r5 GPU0 Stable Zero canary before the 128-task run is allowed.
+The r5 fixed-128 run was stopped after five persisted trajectories exposed two
+systematic recovery loops.  It was not scored or reported as a completed
+benchmark.  A provider HTTP 403 was correctly typed as
+`provider_request_failure/permanent_configuration` in public Runtime feedback,
+but the Canvas domain reserved model-only cross-provider recovery for HTTP 429
+style transient failures.  The Director consequently repeated unrelated
+Verifier modifications instead of switching the failed provider.  A second
+case repeatedly bound `candidate_answer` to one proposition field while
+`answer_slot.answer_field` selected the other; the public completion error did
+not name the exact field correction.
+
+The same partial run also exposed an answer-type narrowing defect.  The
+question-only classifier mapped every `Who` question to `person`, although
+the grammatical answer slot may be occupied by a team or organization (for
+example, “Who won Super Bowl XX?”).  The evidence-supported answer
+`Chicago Bears` reached the Formatter, but the Verifier correctly kept the
+lineage inadmissible under the contradictory `person` constraint.  Because no
+valid lineage existed, `max_rounds` returning `final_answer=null` was correct;
+the fallback gate was not relaxed.
+
+Recovery revision r6 keeps the same shared Runtime and changes only these
+measured boundaries.  Both transient and permanent-configuration provider
+failures now admit only a catalog-backed `model_id` repair, preferring another
+provider and preserving every other Agent field.  Answer-field mismatch
+feedback identifies which proposition field contains the candidate.  A `Who`
+question now uses the non-narrowing `entity` answer-type constraint while
+retaining the possessive-entity surface rule.  When a Verifier boolean rejects
+evidence, entity/relation/alias binding, answer-slot type/cardinality, scope or
+candidate surface, failure attribution targets the Reasoner that owns those
+fields rather than repeatedly editing the Verifier.  An isolated
+`tc_9/tc_10` regression configuration preserves the fixed-128 selection and
+reuses existing Direct records.
+
+### Known issues before r6 live validation
+
+- Live SGLang constrained decoding and exact receipts must pass both the
+  original two-task Stable Zero canary and the isolated `tc_9/tc_10`
+  regression before the r6 fixed-128 run is allowed.
+- The external Wikipedia index's operational coverage over all fixed 128 tasks
+  remains to be measured by the completed run.
 - The last-valid-lineage fallback intentionally remains a terminal failure and
   is excluded from training, even when its evaluator answer is correct.
 
 ### Stable Zero status
 
-Static architecture, recovery tests and data-selection preconditions are
-complete.  The initial, r2, r3 and r4 canaries **failed Stable Zero** for the
-documented causes; recovery revision r5 is **pending live Stable Zero**.
-Formal v2 EM/F1 remain pending.  No score is inferred from unit tests, a
-two-task canary, or the previous architecture.
+Static architecture, 769 unit tests and both frozen data-selection
+preconditions are complete.  The initial, r2, r3 and r4 canaries failed for
+the documented causes; r5 **passed Stable Zero** but its incomplete fixed-128
+run was stopped after measured recovery defects appeared.  Recovery revision
+r6 is **pending live Stable Zero and targeted regression**.  Formal fixed-128
+v2 EM/F1 remain pending.  No score is inferred from unit tests, a two-task
+canary, an incomplete run, or the previous architecture.
 
 ## Historical comparison condition
 

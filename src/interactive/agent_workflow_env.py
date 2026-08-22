@@ -926,7 +926,7 @@ class AgentWorkflowEnv:
         )
         if mutable_fields != ("model_id",):
             return (
-                "a transient provider repair must modify only model_id while "
+                "a provider failure repair must modify only model_id while "
                 "preserving the Agent contract, role, tools, execution mode, "
                 "artifact type, completion condition, and relations"
             )
@@ -1127,7 +1127,8 @@ class AgentWorkflowEnv:
         category, retryability, _ = self._execution_failure_diagnosis(record)
         if (
             category != "provider_request_failure"
-            or retryability != "transient_provider"
+            or retryability
+            not in {"transient_provider", "permanent_configuration"}
         ):
             return ()
         current_model_id = self._graph.get_node(agent_id).model_id
@@ -2224,6 +2225,25 @@ class AgentWorkflowEnv:
             target_id, role_family = reasoner_id, "reasoner"
             responsible_constraint = "reasoner_semantic_artifact"
             preferred_actions = ["modify_agent", "set_relation", "add_subgraph"]
+        elif reason.startswith("Verifier field ") and any(
+            f"{field_name!r} must be true" in reason
+            for field_name in (
+                "evidence_supported",
+                "entity_attribute_binding_correct",
+                "alias_binding_correct",
+                "answer_type_cardinality_correct",
+                "multi_hop_complete",
+                "minimal_answer_surface",
+                "scope_preserved",
+            )
+        ):
+            # These Verifier booleans are verdicts over the upstream semantic
+            # artifact.  The Reasoner owns evidence, relation/alias binding,
+            # answer-slot type/cardinality, scope and the candidate surface;
+            # repeatedly editing the Verifier cannot repair those fields.
+            target_id, role_family = reasoner_id, "reasoner"
+            responsible_constraint = "reasoner_semantic_artifact"
+            preferred_actions = ["modify_agent", "set_relation", "add_subgraph"]
         elif reason.startswith("Verifier"):
             target_id, role_family = verifier_id, "verifier"
             responsible_constraint = "verifier_semantic_artifact"
@@ -3248,6 +3268,17 @@ class AgentWorkflowEnv:
             if original_question is None
             else hotpotqa_answer_type_constraint(original_question)
         )
+        normalized_question = (
+            ""
+            if original_question is None
+            else " ".join(
+                hotpotqa_question_scope(original_question).casefold().split()
+            )
+        )
+        who_question = bool(
+            normalized_question.startswith("who ")
+            or re.search(r"\bwho\s*\?\s*$", normalized_question)
+        )
         if (
             expected_answer_type is not None
             and answer_slot["answer_type"] != expected_answer_type
@@ -3372,7 +3403,7 @@ class AgentWorkflowEnv:
                 f"Reasoner candidate_answer is numeric/date-like but the original "
                 f"question requires answer type {expected_answer_type!r}"
             )
-        if expected_answer_type == "person" and re.search(
+        if who_question and re.search(
             r"(?:'s|’s)\s+\S",
             candidate,
         ):
@@ -3398,11 +3429,24 @@ class AgentWorkflowEnv:
                 "evidence_span"
             )
         if candidate != selected[answer_field]:
+            matching_fields = tuple(
+                field_name
+                for field_name in ("subject", "object_or_attribute_value")
+                if selected.get(field_name) == candidate
+            )
+            if len(matching_fields) == 1:
+                return None, (
+                    "Reasoner answer_slot.answer_field selects "
+                    f"{answer_field!r}, but candidate_answer exactly matches the "
+                    f"selected proposition field {matching_fields[0]!r}; set "
+                    "answer_field to the proposition field containing "
+                    "candidate_answer"
+                )
             return None, (
                 "Reasoner candidate_answer must copy the proposition argument "
                 "identified by answer_slot.proposition_index and answer_field exactly"
             )
-        if expected_answer_type == "person":
+        if who_question:
             possessor_surface_issue = cls._possessor_surface_issue(
                 candidate,
                 evidence_span,
