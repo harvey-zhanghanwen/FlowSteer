@@ -123,6 +123,83 @@ class ToolReactExecutionAdapter:
         del request, observations
         return None, True
 
+    def _completion_arguments_schema(
+        self,
+        request: AgentRequest,
+    ) -> Mapping[str, object]:
+        """Return the JSON Schema for an admitted completion's arguments."""
+
+        del request
+        return {
+            "type": "object",
+            "required": ["value"],
+            "properties": {
+                "value": {
+                    "description": (
+                        "The completed artifact required by the Agent contract"
+                    )
+                }
+            },
+            "additionalProperties": False,
+        }
+
+    def _state_conditioned_response_schema(
+        self,
+        request: AgentRequest,
+        observations: list[Mapping[str, object]],
+    ) -> Optional[dict[str, object]]:
+        """Build SkillFlow's strict schema when exactly one action is legal.
+
+        SkillFlow's OpenAI provider sends ``ModelRequest.response_schema`` as
+        ``response_format.json_schema``.  Generic Tool domains may contain
+        several mutually exclusive actions, so this thin adapter constrains
+        only a measured state with exactly one legal Tool action or completion.
+        The strict parser remains authoritative after generation.
+        """
+
+        admitted_tool_actions, completion_admitted = (
+            self._state_conditioned_action_domain(request, observations)
+        )
+        arguments_schema: Optional[Mapping[str, object]] = None
+        kind: Optional[str] = None
+        name: Optional[str] = None
+        resource_id: Optional[str] = None
+        if admitted_tool_actions is not None and len(admitted_tool_actions) == 1:
+            if completion_admitted:
+                return None
+            resource_id, name = next(iter(admitted_tool_actions))
+            capability = self._tool_registry.require_capability(resource_id)
+            arguments_schema = capability.action_schemas.get(name)
+            kind = "tool"
+        elif (
+            admitted_tool_actions is not None
+            and not admitted_tool_actions
+            and completion_admitted
+        ):
+            arguments_schema = self._completion_arguments_schema(request)
+            kind = "complete"
+            name = "complete"
+        if arguments_schema is None or kind is None or name is None:
+            return None
+        return {
+            "type": "object",
+            "required": [
+                "arguments",
+                "kind",
+                "name",
+                "resource_id",
+                "skill_id",
+            ],
+            "properties": {
+                "arguments": dict(arguments_schema),
+                "kind": {"const": kind},
+                "name": {"const": name},
+                "resource_id": {"const": resource_id},
+                "skill_id": {"const": None},
+            },
+            "additionalProperties": False,
+        }
+
     @staticmethod
     def _model_visible_observations(
         observations: list[Mapping[str, object]],
@@ -143,6 +220,9 @@ class ToolReactExecutionAdapter:
             "action_name",
             "argument_validation",
             "allowed_action_names",
+            "expected_top_level_fields",
+            "forbidden_wrapper_fields",
+            "repair_instruction",
         )
         for observation in observations:
             if observation.get("observation_status") in {
@@ -184,20 +264,30 @@ class ToolReactExecutionAdapter:
             self._state_conditioned_action_domain(request, observations)
         )
         action_contracts = [
-            {
-                "action_envelope": {
-                    "kind": "tool",
-                    "name": action_name,
-                    "resource_id": capability.tool_id,
-                    "skill_id": None,
-                },
-                "argument_json_schema": dict(argument_schema),
-            }
+            (
+                capability.tool_id,
+                action_name,
+                dict(argument_schema),
+            )
             for capability in capabilities
             for action_name, argument_schema in capability.action_schemas.items()
             if admitted_tool_actions is None
             or (capability.tool_id, action_name) in admitted_tool_actions
         ]
+        action_contract_text = "\n".join(
+            "- kind is \"tool\"; name is "
+            + json.dumps(action_name, ensure_ascii=False)
+            + "; resource_id is "
+            + json.dumps(tool_id, ensure_ascii=False)
+            + "; skill_id is null; Arguments JSON Schema is "
+            + json.dumps(
+                argument_schema,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            for tool_id, action_name, argument_schema in action_contracts
+        )
         # DIRECT_REUSE: SkillFlow rollout/context.py::_ACTION_GUIDANCE uses
         # ``arguments={"value": ...}`` for completion.  Do not place a
         # concrete placeholder such as ``"final artifact"`` in the public
@@ -206,18 +296,7 @@ class ToolReactExecutionAdapter:
         completion_schema = {
             "kind": {"const": "complete"},
             "name": {"const": "complete"},
-            "arguments": {
-                "type": "object",
-                "required": ["value"],
-                "properties": {
-                    "value": {
-                        "description": (
-                            "The completed artifact required by the Agent contract"
-                        )
-                    }
-                },
-                "additionalProperties": False,
-            },
+            "arguments": dict(self._completion_arguments_schema(request)),
             "resource_id": {"const": None},
             "skill_id": {"const": None},
         }
@@ -257,15 +336,13 @@ class ToolReactExecutionAdapter:
                 if completion_admitted
                 else "A completion action is not currently admissible.\n"
             )
-            + "Currently admissible Tool action contracts. action_envelope gives "
-            "the exact outer constants; argument_json_schema validates only the "
-            "instance placed in the StructuredAction arguments field: "
-            + json.dumps(
-                action_contracts,
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            )
+            + "Currently admissible Tool action contracts follow. These are field "
+            "constraints, not wrapper fields and not response objects. Put "
+            "arguments, kind, name, resource_id, and skill_id directly in the "
+            "single top-level JSON object. The arguments value must be an "
+            "instance of the stated JSON Schema; never return the schema itself. "
+            "Never emit action_envelope or argument_json_schema fields.\n"
+            + (action_contract_text or "- none")
             + (
                 "\nCurrently admissible completion schema: "
                 + json.dumps(
@@ -309,6 +386,21 @@ class ToolReactExecutionAdapter:
         last_dispatched_tool_action_key: Optional[str] = None
 
         for turn in range(1, self._max_turns + 1):
+            response_schema = self._state_conditioned_response_schema(
+                request,
+                observations,
+            )
+            model_metadata = {
+                **dict(request.model.metadata),
+                "max_tokens": str(self._max_action_tokens),
+            }
+            if response_schema is not None:
+                model_metadata["response_json_schema"] = json.dumps(
+                    response_schema,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
             agent = replace(
                 request.agent,
                 contract=self._contract(request, observations),
@@ -319,10 +411,7 @@ class ToolReactExecutionAdapter:
                 agent=agent,
                 model=replace(
                     request.model,
-                    metadata={
-                        **dict(request.model.metadata),
-                        "max_tokens": str(self._max_action_tokens),
-                    },
+                    metadata=model_metadata,
                 ),
             )
             generated = await self._gateway.generate(turn_request)
@@ -347,11 +436,26 @@ class ToolReactExecutionAdapter:
                     {
                         "observation_status": "parse_error",
                         "public_error_code": type(exc).__name__,
-                        # SkillFlow renders the exact prior Action beside its
-                        # public Observation in the next bounded turn.  Keep
-                        # the sampled text visible after a local parse failure
-                        # as well; it is public policy output, not hidden
-                        # reasoning.
+                        "expected_top_level_fields": [
+                            "arguments",
+                            "kind",
+                            "name",
+                            "resource_id",
+                            "skill_id",
+                        ],
+                        "forbidden_wrapper_fields": [
+                            "action_envelope",
+                            "argument_json_schema",
+                        ],
+                        "repair_instruction": (
+                            "Return exactly one StructuredAction JSON object and "
+                            "place the five expected fields directly at its top "
+                            "level; do not wrap them in action_envelope."
+                        ),
+                        # Persist the sampled public Action in the trajectory.
+                        # ``_model_visible_observations`` sends only canonical
+                        # error feedback into the next turn, so malformed JSON
+                        # is not replayed as an imitation target.
                         "action_text": response.text,
                     }
                 )

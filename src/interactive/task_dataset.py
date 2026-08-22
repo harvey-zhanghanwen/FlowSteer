@@ -18,6 +18,7 @@ TASK_SCHEMA_VERSION = "flowsteer.agentgraph.task.v1"
 REQUIRED_FIELDS = frozenset(
     {"schema_version", "task_id", "question", "ground_truth", "split", "metadata"}
 )
+_HOTPOTQA_QUESTION_MARKER = "\n\nQuestion:"
 
 
 def build_hotpotqa_question(question: str, passages: List[str]) -> str:
@@ -31,6 +32,19 @@ def build_hotpotqa_question(question: str, passages: List[str]) -> str:
     parts.extend(f"[{passage}]" for passage in passages[:10])
     parts.append(f"Question: {question.strip()}")
     return "\n\n".join(parts)
+
+
+def hotpotqa_question_scope(rendered_question: str) -> str:
+    """Recover the exact question span from ``build_hotpotqa_question`` output."""
+
+    if not isinstance(rendered_question, str) or not rendered_question.strip():
+        raise ValueError("HotpotQA rendered question must be non-empty")
+    if _HOTPOTQA_QUESTION_MARKER not in rendered_question:
+        return rendered_question.strip()
+    scope = rendered_question.rsplit(_HOTPOTQA_QUESTION_MARKER, 1)[1].strip()
+    if not scope:
+        raise ValueError("HotpotQA rendered question has an empty Question field")
+    return scope
 
 
 def task_record_from_mapping(
@@ -81,7 +95,7 @@ def task_record_from_mapping(
     question = str(item["question"])
     if metadata.get("dataset_key") == "hotpotqa":
         raw_context = skillflow_fields.get("context")
-        marker = "\n\nQuestion:"
+        marker = _HOTPOTQA_QUESTION_MARKER
         if (
             isinstance(raw_context, list)
             and raw_context

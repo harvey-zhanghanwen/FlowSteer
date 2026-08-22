@@ -4,6 +4,7 @@ import pytest
 
 from src.interactive.task_dataset import (
     TASK_SCHEMA_VERSION,
+    hotpotqa_question_scope,
     iter_task_records,
     task_record_from_mapping,
 )
@@ -58,6 +59,11 @@ def test_hotpot_loader_rehydrates_full_context_without_evaluator_payload():
     assert tail in record.question
     assert "supporting_facts" not in record.question
     assert record.metadata["hotpot_context_mode"] == "full_passages_v1"
+    assert hotpotqa_question_scope(record.question) == "Who wrote the book?"
+
+
+def test_hotpot_question_scope_preserves_plain_question():
+    assert hotpotqa_question_scope("Who wrote the book?") == "Who wrote the book?"
 
 
 def test_iter_task_records_reports_jsonl_line(tmp_path):

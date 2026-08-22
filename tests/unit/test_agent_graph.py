@@ -662,7 +662,7 @@ def _hotpot_semantic_graph(*, format_predecessor: str = "verifier") -> AgentGrap
             ),
         ],
         [
-            AgentRelation("reader", "verifier", True, False),
+            AgentRelation("reader", "reasoner", True, False),
             AgentRelation("reasoner", "verifier", True, False),
             AgentRelation(format_predecessor, "formatter", True, False),
         ],
@@ -706,7 +706,10 @@ class _HotpotSemanticGateway(_ImmediateGateway):
                                     "operation": "read",
                                     "passage": {
                                         "id": "p1",
-                                        "text": "Paris is the capital of France.",
+                                        "text": (
+                                            "Paris is the capital of France. "
+                                            "France is a country in Europe."
+                                        ),
                                     },
                                 },
                                 "completed": True,
@@ -719,13 +722,31 @@ class _HotpotSemanticGateway(_ImmediateGateway):
         if request.agent.id == "reasoner":
             return json.dumps(
                 {
-                    "question_scope": "the capital relation exactly as asked",
+                    "question_scope": request.problem,
                     "answer_slot": {
-                        "subject": "France",
+                        "entity": "France",
                         "relation": "capital",
-                        "requested_value": "city",
+                        "answer_type": "city",
+                        "qualifiers": [],
+                        "proposition_index": 0,
+                        "answer_field": "object_or_attribute_value",
                     },
-                    "evidence_propositions": ["capital(France, Paris)"],
+                    "evidence_propositions": [
+                        {
+                            "subject": "France",
+                            "relation": "capital",
+                            "object_or_attribute_value": self.reasoner_candidate,
+                            "qualifiers": [],
+                            "evidence_span": "Paris is the capital of France.",
+                        },
+                        {
+                            "subject": "France",
+                            "relation": "located in",
+                            "object_or_attribute_value": "Europe",
+                            "qualifiers": [],
+                            "evidence_span": "France is a country in Europe.",
+                        },
+                    ],
                     "multi_hop_chain": ["France", "capital", "Paris"],
                     "candidate_answer": self.reasoner_candidate,
                     "evidence": ["Paris is the capital of France."],
@@ -1726,6 +1747,27 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("successful 'qa-retrieval' read receipt", rejected.feedback)
         self.assertFalse(env.finish_admissibility()["admissible"])
 
+    async def test_hotpot_retrieval_evidence_must_route_through_reasoner(self) -> None:
+        graph = _hotpot_semantic_graph()
+        graph.set_relation("reader", "reasoner", False, False)
+        graph.set_relation("reader", "verifier", True, False)
+        env = AgentWorkflowEnv(
+            make_registry(),
+            _HotpotSemanticGateway(),
+            graph=graph,
+            problem="What is the capital of France?",
+            require_exact_answer_tag=True,
+            require_format_agent=True,
+            semantic_protocol="hotpotqa_verified_answer_slot_v1",
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id="qa-retrieval",
+        )
+
+        rejected = await env.step('{"action":"finish"}')
+
+        self.assertFalse(rejected.accepted)
+        self.assertIn("Route any retrieval or repair evidence into the Reasoner", rejected.feedback)
+
     async def test_hotpot_formatter_must_wrap_exact_unchanged_candidate(self) -> None:
         registry = make_registry()
         gateway = _HotpotSemanticGateway(formatter_value="Paris, France")
@@ -1748,7 +1790,7 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("wrapper_content='Paris, France'", rejected.feedback)
         self.assertFalse(env.finish_admissibility()["admissible"])
 
-    async def test_hotpot_structured_gate_accepts_strict_label_fields(self) -> None:
+    async def test_hotpot_structured_gate_rejects_legacy_untyped_answer_slot(self) -> None:
         registry = make_registry()
         env = AgentWorkflowEnv(
             registry,
@@ -1775,10 +1817,88 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             "Verification status: supported"
         )
 
-        self.assertIsNone(reasoner_issue)
-        self.assertEqual("Paris", reasoner_candidate)
+        self.assertIsNone(reasoner_candidate)
+        self.assertIn("answer_slot", reasoner_issue or "")
         self.assertIsNone(verifier_issue)
         self.assertEqual("Paris", verifier_candidate)
+
+    async def test_hotpot_structured_answer_slot_binds_candidate_and_exact_scope(
+        self,
+    ) -> None:
+        env = AgentWorkflowEnv(
+            make_registry(),
+            _ImmediateGateway(),
+            problem="What is the capital of France?",
+            semantic_protocol="hotpotqa_verified_answer_slot_v1",
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id="qa-retrieval",
+        )
+        artifact = {
+            "question_scope": "What is the capital of France?",
+            "answer_slot": {
+                "entity": "France",
+                "relation": "capital",
+                "answer_type": "city",
+                "qualifiers": [],
+                "proposition_index": 0,
+                "answer_field": "object_or_attribute_value",
+            },
+            "evidence_propositions": [
+                {
+                    "subject": "France",
+                    "relation": "capital",
+                    "object_or_attribute_value": "Paris",
+                    "qualifiers": [],
+                    "evidence_span": "Paris is the capital of France.",
+                },
+                {
+                    "subject": "France",
+                    "relation": "located in",
+                    "object_or_attribute_value": "Europe",
+                    "qualifiers": [],
+                    "evidence_span": "France is a country in Europe.",
+                },
+            ],
+            "multi_hop_chain": ["France", "capital", "Paris"],
+            "candidate_answer": "Paris",
+            "evidence": ["Paris is the capital of France."],
+        }
+
+        candidate, issue = env._reasoner_candidate(
+            json.dumps(artifact),
+            original_question="What is the capital of France?",
+        )
+        self.assertEqual("Paris", candidate)
+        self.assertIsNone(issue)
+
+        narrowed = dict(artifact)
+        narrowed["question_scope"] = "What is the singles capital of France?"
+        candidate, issue = env._reasoner_candidate(
+            json.dumps(narrowed),
+            original_question="What is the capital of France?",
+        )
+        self.assertIsNone(candidate)
+        self.assertIn("copy the original question exactly", str(issue))
+
+        rebound = dict(artifact)
+        rebound["candidate_answer"] = "Lyon"
+        candidate, issue = env._reasoner_candidate(
+            json.dumps(rebound),
+            original_question="What is the capital of France?",
+        )
+        self.assertIsNone(candidate)
+        self.assertIn("copy answer_slot.answer_field", str(issue))
+
+        coreferential = json.loads(json.dumps(artifact))
+        coreferential["evidence_propositions"][0]["evidence_span"] = (
+            "It has Paris as its capital."
+        )
+        candidate, issue = env._reasoner_candidate(
+            json.dumps(coreferential),
+            original_question="What is the capital of France?",
+        )
+        self.assertEqual("Paris", candidate)
+        self.assertIsNone(issue)
 
     async def test_hotpot_rejects_react_role_but_not_react_execution_semantics(self) -> None:
         registry = make_registry()
@@ -1910,6 +2030,12 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(executed.accepted)
         self.assertIn("execution_error", executed.feedback)
         self.assertIn('"recovery_state"', executed.feedback)
+        recovery_state = env.recovery_state()
+        self.assertEqual(["source"], recovery_state["failed_agent_ids"])
+        self.assertIn(
+            "not_diagnosed_unusable",
+            recovery_state["deletion_protected"]["out"],
+        )
 
         protected = await env.step('{"action":"delete_agent","agent_id":"source"}')
         self.assertFalse(protected.accepted)
@@ -1934,6 +2060,121 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(deleted.accepted)
         self.assertFalse(env.graph.has_node("source"))
         self.assertTrue(env.graph.has_node("replacement"))
+
+    async def test_hotpot_reasoner_takeover_requires_valid_semantic_artifact(self) -> None:
+        graph = _hotpot_semantic_graph()
+        graph.add_agent(
+            AgentNode(
+                "replacement_reasoner",
+                "cheap",
+                "replacement semantic alignment",
+                role_family="reasoner",
+                artifact_type="semantic_candidate",
+            )
+        )
+        graph.set_relation("replacement_reasoner", "verifier", True, False)
+        env = AgentWorkflowEnv(
+            make_registry(),
+            _ImmediateGateway(),
+            graph=graph,
+            problem="What is the capital of France?",
+            semantic_protocol="hotpotqa_verified_answer_slot_v1",
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id="qa-retrieval",
+        )
+        env._failed_agent_ids.add("reasoner")
+        env._unresolved_dirty_agents.add("reasoner")
+        env._progressive_outputs["replacement_reasoner"] = "Paris"
+        env._progressive_output_metadata["replacement_reasoner"] = {}
+
+        invalid_issue = env._delete_admission_issue("reasoner")
+
+        self.assertIsNotNone(invalid_issue)
+        artifact = {
+            "question_scope": "What is the capital of France?",
+            "answer_slot": {
+                "entity": "France",
+                "relation": "capital",
+                "answer_type": "city",
+                "qualifiers": [],
+                "proposition_index": 0,
+                "answer_field": "object_or_attribute_value",
+            },
+            "evidence_propositions": [
+                {
+                    "subject": "France",
+                    "relation": "capital",
+                    "object_or_attribute_value": "Paris",
+                    "qualifiers": [],
+                    "evidence_span": "Paris is the capital of France.",
+                },
+                {
+                    "subject": "France",
+                    "relation": "located in",
+                    "object_or_attribute_value": "Europe",
+                    "qualifiers": [],
+                    "evidence_span": "France is a country in Europe.",
+                },
+            ],
+            "multi_hop_chain": ["France", "capital", "Paris"],
+            "candidate_answer": "Paris",
+            "evidence": [
+                "Paris is the capital of France.",
+                "France is a country in Europe.",
+            ],
+        }
+        env._progressive_outputs["replacement_reasoner"] = json.dumps(artifact)
+        env._progressive_output_metadata["replacement_reasoner"] = {
+            "tool_receipts": [
+                {
+                    "tool_id": "qa-retrieval",
+                    "request": {"action": "read"},
+                    "result": {
+                        "value": {
+                            "operation": "read",
+                            "passage": {
+                                "text": (
+                                    "Paris is the capital of France. "
+                                    "France is a country in Europe."
+                                )
+                            },
+                        }
+                    },
+                    "error_type": None,
+                }
+            ]
+        }
+
+        self.assertIsNone(env._delete_admission_issue("reasoner"))
+
+    async def test_repair_invalidation_preserves_previous_revision_artifact(self) -> None:
+        graph = AgentGraph(
+            [AgentNode("source", "balanced", "produce evidence")]
+        )
+        env = AgentWorkflowEnv(
+            make_registry(),
+            _ImmediateGateway(),
+            graph=graph,
+            problem="question",
+            recovery_policy="preserve_diagnose_repair_augment",
+        )
+        env._progressive_outputs["source"] = "validated evidence"
+        env._progressive_output_metadata["source"] = {"receipt": "revision-1"}
+
+        env._invalidate_progressive_outputs(
+            {"source"},
+            current_agent_ids={"source"},
+        )
+
+        self.assertNotIn("source", env._progressive_outputs)
+        self.assertEqual(
+            "validated evidence",
+            env._previous_revision_outputs["source"],
+        )
+        self.assertEqual(
+            ["source"],
+            env.recovery_state()["previous_revision_preserved_agent_ids"],
+        )
 
     async def test_recovery_policy_requires_output_handoff_before_delete(self) -> None:
         registry = make_registry()

@@ -58,6 +58,12 @@ DIRECTOR_PROMPT_VERSION = "agentgraph.director.minimal-neutral.v10"
 LEGACY_DIRECTOR_PROMPT_VERSION_V9 = "agentgraph.director.minimal-neutral.v9"
 LEGACY_DIRECTOR_PROMPT_VERSION_V8 = "agentgraph.director.minimal-neutral.v8"
 HOTPOTQA_DIRECTOR_PROMPT_VERSION = (
+    "agentgraph.director.hotpotqa-semantic-recovery.v13"
+)
+LEGACY_HOTPOTQA_DIRECTOR_PROMPT_VERSION_V12 = (
+    "agentgraph.director.hotpotqa-semantic-recovery.v12"
+)
+LEGACY_HOTPOTQA_DIRECTOR_PROMPT_VERSION_V11 = (
     "agentgraph.director.hotpotqa-semantic-recovery.v11"
 )
 HOTPOTQA_SEMANTIC_PROTOCOL = "hotpotqa_verified_answer_slot_v1"
@@ -85,6 +91,23 @@ For a comparison, if both retrieved values are unexpectedly equal, do not conclu
 
 Recover from failures in this order: preserve -> diagnose -> repair -> augment. Preserve valid evidence, semantic answers, and working relations. Diagnose execution_mode, Tool capability, relation, and contract faults; repair the existing node or edge first, then augment with a repair, retrieval, or Verifier Agent if needed. Do not delete an Agent merely because it failed. Delete only when the node itself is unusable, a replacement has already taken over its artifact, and deletion cannot break semantic lineage. Inspect Canvas validation and execution feedback before every edit, and use finish only when finish_admissibility is present and admissible. Do not hard-code a benchmark sample, accepted answer, fixed evidence, or Ground Truth, and do not assume an unlisted Skill."""
 
+HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V13 = HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V11.replace(
+    '{"action":"set_output","agent_id":"..."}',
+    "For set_relation only, setting both direction flags to false removes the "
+    "existing relation between those endpoints; add_subgraph relations must keep "
+    "at least one direction true. Remove only the faulty edge and preserve every "
+    "working relation.\n"
+    '{"action":"set_output","agent_id":"..."}',
+    1,
+).replace(
+    "an additional retrieval Agent may augment evidence later but must not replace "
+    "this capability or own the semantic answer. Route the Reasoner's receipt-bearing",
+    "an additional retrieval Agent may augment evidence later but must not replace "
+    "this capability or own the semantic answer; route that evidence into the "
+    "Reasoner, never directly into the Verifier. Route the Reasoner's receipt-bearing",
+    1,
+)
+
 
 def director_system_prompt_for_version(prompt_version: str) -> str:
     """Resolve one explicitly versioned Director policy without changing v10."""
@@ -105,7 +128,13 @@ def director_system_prompt_for_version(prompt_version: str) -> str:
         "agentgraph.director.skillflow_continuation_v8": (
             LEGACY_DIRECTOR_SYSTEM_PROMPT_V8
         ),
-        HOTPOTQA_DIRECTOR_PROMPT_VERSION: HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V11,
+        HOTPOTQA_DIRECTOR_PROMPT_VERSION: HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V13,
+        LEGACY_HOTPOTQA_DIRECTOR_PROMPT_VERSION_V12: (
+            HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V11
+        ),
+        LEGACY_HOTPOTQA_DIRECTOR_PROMPT_VERSION_V11: (
+            HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V11
+        ),
     }
     # Older experiment and unit-test receipts used arbitrary version labels
     # (for example ``prompt-v1``) while executing the then-current default
@@ -119,6 +148,7 @@ _SUPPORTED_DIRECTOR_SYSTEM_PROMPTS = frozenset(
     {
         DIRECTOR_SYSTEM_PROMPT,
         HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V11,
+        HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V13,
         LEGACY_DIRECTOR_SYSTEM_PROMPT_V9,
         LEGACY_DIRECTOR_SYSTEM_PROMPT_V8,
     }
@@ -874,7 +904,11 @@ class AgentGraphOrchestrator:
             "current_graph": env.graph.to_dict(),
             "topology_statistics": env.graph.topology_statistics(),
             "canvas_feedback": snapshot.last_feedback,
-            "admissible_action_types": list(env.allowed_action_types),
+            "admissible_action_types": list(
+                env.model_admissible_action_types()
+                if self.prompt_version == HOTPOTQA_DIRECTOR_PROMPT_VERSION
+                else env.allowed_action_types
+            ),
             # These are existing admission constraints enforced by
             # AgentWorkflowEnv, not a role or topology template.  Surfacing
             # them lets the minimal policy observe its terminal boundary.
@@ -930,13 +964,17 @@ class AgentGraphOrchestrator:
             format_issue = env.format_agent_issue()
             if format_issue is not None:
                 payload["terminal_format_issue"] = format_issue
-        finish_admissibility = env.finish_admissibility()
-        if finish_admissibility.get("admissible") is True:
-            # FlowSteer returns terminal-constraint state to the policy, while
-            # SkillFlow accepts completion only after validation.  Expose only
-            # the positive revision-local state: no round counter, shortest-
-            # path hint, automatic FINISH, or topology preference is added.
-            payload["finish_admissibility"] = finish_admissibility
+        # FlowSteer returns terminal-constraint state to the policy, while
+        # SkillFlow accepts completion only after validation.  Expose the
+        # revision-local gate and its first measured failure stage so the
+        # Director repairs the responsible semantic node instead of probing
+        # FINISH or repeatedly modifying the Formatter.
+        if self.prompt_version == HOTPOTQA_DIRECTOR_PROMPT_VERSION:
+            payload["finish_admissibility"] = env.finish_admissibility()
+        else:
+            finish_admissibility = env.finish_admissibility()
+            if finish_admissibility.get("admissible") is True:
+                payload["finish_admissibility"] = finish_admissibility
         if include_task_context:
             payload.update(
                 {
@@ -1104,6 +1142,7 @@ __all__ = [
     "DIRECTOR_PROMPT_VERSION",
     "HOTPOTQA_DIRECTOR_PROMPT_VERSION",
     "HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V11",
+    "HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V13",
     "HOTPOTQA_SEMANTIC_PROTOCOL",
     "PRESERVE_DIAGNOSE_REPAIR_AUGMENT_POLICY",
     "LEGACY_DIRECTOR_SYSTEM_PROMPT_V8",

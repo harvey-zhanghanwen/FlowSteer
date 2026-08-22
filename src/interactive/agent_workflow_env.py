@@ -30,6 +30,7 @@ from .agent_runtime import (
     AgentRuntimeResult,
 )
 from .model_registry import ModelRegistry
+from .task_dataset import hotpotqa_question_scope
 
 
 class AgentWorkflowStateError(RuntimeError):
@@ -285,7 +286,12 @@ class AgentWorkflowEnv:
         self._progressive_output_metadata: dict[
             str, dict[str, object]
         ] = {}
+        self._previous_revision_outputs: dict[str, str] = {}
+        self._previous_revision_output_metadata: dict[
+            str, dict[str, object]
+        ] = {}
         self._unresolved_dirty_agents: set[str] = set()
+        self._failed_agent_ids: set[str] = set()
         self._validate_agent_limit(self._graph)
         partial = self._graph.validate(self.model_registry, require_complete=False)
         if not partial.valid:
@@ -321,6 +327,38 @@ class AgentWorkflowEnv:
     @property
     def unresolved_dirty_agent_ids(self) -> Tuple[str, ...]:
         return tuple(sorted(self._unresolved_dirty_agents))
+
+    def model_admissible_action_types(self) -> Tuple[str, ...]:
+        """Project state-conditioned Canvas actions for the Flow-Director.
+
+        FlowSteer's progressive Canvas exposes the next legal editing boundary
+        after each execute-and-feedback step.  Keep the configured action set
+        authoritative in ``step`` while removing actions that cannot change or
+        terminate the current public state from the next model observation.
+        """
+
+        node_count = len(self._graph.nodes)
+        can_add = self.max_agents is None or node_count < self.max_agents
+        can_delete = node_count > 0 and any(
+            self._delete_admission_issue(node.id) is None
+            for node in self._graph.nodes
+        )
+        finish_admitted = self.finish_admissibility().get("admissible") is True
+        admitted: list[str] = []
+        for action_type in self.allowed_action_types:
+            if action_type == AgentActionType.ADD_SUBGRAPH.value and can_add:
+                admitted.append(action_type)
+            elif action_type == AgentActionType.MODIFY_AGENT.value and node_count > 0:
+                admitted.append(action_type)
+            elif action_type == AgentActionType.DELETE_AGENT.value and can_delete:
+                admitted.append(action_type)
+            elif action_type == AgentActionType.SET_RELATION.value and node_count > 1:
+                admitted.append(action_type)
+            elif action_type == AgentActionType.SET_OUTPUT.value and node_count > 0:
+                admitted.append(action_type)
+            elif action_type == AgentActionType.FINISH.value and finish_admitted:
+                admitted.append(action_type)
+        return tuple(admitted)
 
     def reset(self, problem: str, graph: Optional[AgentGraph] = None) -> AgentWorkflowSnapshot:
         if not isinstance(problem, str) or not problem.strip():
@@ -480,6 +518,12 @@ class AgentWorkflowEnv:
                     self._unresolved_dirty_agents = (
                         current_agent_ids - completed_agent_ids
                     )
+                    self._failed_agent_ids.intersection_update(current_agent_ids)
+                    self._failed_agent_ids.update(
+                        record.agent_id
+                        for record in exc.failure_records
+                        if record.agent_id in current_agent_ids
+                    )
                     return self._reject_after_count(
                         action,
                         "cannot finish: " + self._execution_error_feedback(exc),
@@ -494,6 +538,7 @@ class AgentWorkflowEnv:
                 self._progressive_execution = execution
                 self._progressive_execution_revision = self._graph.revision
                 self._unresolved_dirty_agents.clear()
+                self._failed_agent_ids.clear()
             environment_terminal_issue = self._environment_terminal_issue(execution)
             if environment_terminal_issue is not None:
                 return self._reject_after_count(
@@ -507,12 +552,6 @@ class AgentWorkflowEnv:
                     action,
                     "cannot finish: Format Agent produced no terminal artifact",
                 )
-            terminal_issue = self._terminal_validation_error(execution.final_answer)
-            if terminal_issue is not None:
-                return self._reject_after_count(
-                    action,
-                    "cannot finish: " + terminal_issue,
-                )
             semantic_issue = self._semantic_protocol_issue(execution)
             if semantic_issue is not None:
                 return self._reject_after_count(
@@ -521,8 +560,17 @@ class AgentWorkflowEnv:
                     execution=execution,
                     execution_reused=execution_reused,
                 )
+            terminal_issue = self._terminal_validation_error(execution.final_answer)
+            if terminal_issue is not None:
+                return self._reject_after_count(
+                    action,
+                    "cannot finish: " + terminal_issue,
+                )
             self._finished = True
             self._unresolved_dirty_agents.clear()
+            self._failed_agent_ids.clear()
+            self._previous_revision_outputs.clear()
+            self._previous_revision_output_metadata.clear()
             self._last_feedback = "workflow finished"
             self._record_history(
                 accepted=True,
@@ -596,6 +644,7 @@ class AgentWorkflowEnv:
 
         self._graph = candidate
         current_agent_ids = {node.id for node in self._graph.nodes}
+        self._failed_agent_ids.intersection_update(current_agent_ids)
         self._unresolved_dirty_agents = (
             self._unresolved_dirty_agents & current_agent_ids
         ) | (set(dirty_agents) & current_agent_ids)
@@ -644,6 +693,16 @@ class AgentWorkflowEnv:
                         for agent_id in exc.pending_agent_ids
                         if agent_id in current_agent_ids
                     )
+                    self._failed_agent_ids.difference_update(
+                        ()
+                        if partial_execution is None
+                        else partial_execution.outputs
+                    )
+                    self._failed_agent_ids.update(
+                        record.agent_id
+                        for record in exc.failure_records
+                        if record.agent_id in current_agent_ids
+                    )
                 else:
                     self._progressive_outputs = dict(execution.outputs)
                     self._progressive_output_metadata = {
@@ -653,6 +712,7 @@ class AgentWorkflowEnv:
                     self._progressive_execution = execution
                     self._progressive_execution_revision = self._graph.revision
                     self._unresolved_dirty_agents.clear()
+                    self._failed_agent_ids.clear()
             else:
                 self._clear_progressive_execution()
         self._last_feedback = self._accepted_feedback(
@@ -840,20 +900,53 @@ class AgentWorkflowEnv:
             require_complete=True,
         )
         if not validation.valid:
-            return {"admissible": False}
-        if self.format_agent_issue() is not None:
-            return {"admissible": False}
-        if self.required_tool_issue() is not None:
-            return {"admissible": False}
+            return {
+                "admissible": False,
+                "stage": "graph_validation",
+                "reason": self._format_issues(validation),
+            }
+        format_issue = self.format_agent_issue()
+        if format_issue is not None:
+            return {
+                "admissible": False,
+                "stage": "format_lineage",
+                "reason": format_issue,
+            }
+        required_tool_issue = self.required_tool_issue()
+        if required_tool_issue is not None:
+            return {
+                "admissible": False,
+                "stage": "required_tool",
+                "reason": required_tool_issue,
+            }
         execution = self._cached_progressive_execution()
         if execution is None or execution.final_answer is None:
-            return {"admissible": False}
-        if self._environment_terminal_issue(execution) is not None:
-            return {"admissible": False}
-        if self._terminal_validation_error(execution.final_answer) is not None:
-            return {"admissible": False}
-        if self._semantic_protocol_issue(execution) is not None:
-            return {"admissible": False}
+            return {
+                "admissible": False,
+                "stage": "execution",
+                "reason": "current graph revision has no successful Output artifact",
+            }
+        environment_issue = self._environment_terminal_issue(execution)
+        if environment_issue is not None:
+            return {
+                "admissible": False,
+                "stage": "environment_terminal",
+                "reason": environment_issue,
+            }
+        semantic_issue = self._semantic_protocol_issue(execution)
+        if semantic_issue is not None:
+            return {
+                "admissible": False,
+                "stage": "semantic_protocol",
+                "reason": semantic_issue,
+            }
+        terminal_issue = self._terminal_validation_error(execution.final_answer)
+        if terminal_issue is not None:
+            return {
+                "admissible": False,
+                "stage": "terminal_protocol",
+                "reason": terminal_issue,
+            }
         return {
             "admissible": True,
             "graph_revision": self._graph.revision,
@@ -874,7 +967,10 @@ class AgentWorkflowEnv:
         self._progressive_execution_revision = None
         self._progressive_outputs.clear()
         self._progressive_output_metadata.clear()
+        self._previous_revision_outputs.clear()
+        self._previous_revision_output_metadata.clear()
         self._unresolved_dirty_agents.clear()
+        self._failed_agent_ids.clear()
 
     def _invalidate_progressive_outputs(
         self,
@@ -888,6 +984,14 @@ class AgentWorkflowEnv:
         self._progressive_execution_revision = None
         for agent_id in tuple(self._progressive_outputs):
             if agent_id in dirty_agent_ids or agent_id not in current_agent_ids:
+                artifact = self._progressive_outputs.get(agent_id)
+                if isinstance(artifact, str) and artifact.strip():
+                    self._previous_revision_outputs[agent_id] = artifact
+                    metadata = self._progressive_output_metadata.get(agent_id)
+                    if isinstance(metadata, Mapping):
+                        self._previous_revision_output_metadata[agent_id] = dict(
+                            metadata
+                        )
                 self._progressive_outputs.pop(agent_id, None)
                 self._progressive_output_metadata.pop(agent_id, None)
 
@@ -1042,6 +1146,13 @@ class AgentWorkflowEnv:
                     f"{len(reasoner_predecessors)}. Preserve the original question "
                     "scope and use set_relation or modify_agent before FINISH"
                 )
+            if tuple(graph.directed_predecessors(verifier_id)) != reasoner_predecessors:
+                return (
+                    "HotpotQA Verifier must receive its semantic artifact only from "
+                    "the unique Reasoner. Route any retrieval or repair evidence "
+                    "into the Reasoner first so it can align propositions to the "
+                    "original answer slot before verification"
+                )
         return None
 
     def _uses_format_agent_protocol(self) -> bool:
@@ -1166,6 +1277,8 @@ class AgentWorkflowEnv:
     def _reasoner_candidate(
         cls,
         artifact: str,
+        *,
+        original_question: Optional[str] = None,
     ) -> tuple[Optional[str], Optional[str]]:
         fields, issue = cls._structured_semantic_fields(
             artifact,
@@ -1192,6 +1305,135 @@ class AgentWorkflowEnv:
             return None, (
                 "Reasoner field 'candidate_answer' must be one non-empty bare "
                 "answer span without surrounding whitespace"
+            )
+
+        answer_slot = fields["answer_slot"]
+        propositions = fields["evidence_propositions"]
+        if original_question is not None and fields["question_scope"] != original_question:
+            return None, (
+                "Reasoner field 'question_scope' must copy the original question "
+                "exactly without adding or removing scope"
+            )
+        if not isinstance(answer_slot, Mapping):
+            return None, "Reasoner field 'answer_slot' must be one structured object"
+        slot_fields = {
+            "entity",
+            "relation",
+            "answer_type",
+            "qualifiers",
+            "proposition_index",
+            "answer_field",
+        }
+        if set(answer_slot) != slot_fields:
+            return None, (
+                "Reasoner field 'answer_slot' must contain exactly "
+                f"{sorted(slot_fields)!r}"
+            )
+        for field in ("entity", "relation", "answer_type", "answer_field"):
+            value = answer_slot[field]
+            if not isinstance(value, str) or not value.strip():
+                return None, f"Reasoner answer_slot.{field} must be non-empty text"
+        qualifiers = answer_slot["qualifiers"]
+        if not isinstance(qualifiers, (list, tuple)) or any(
+            not isinstance(item, str) or not item.strip() for item in qualifiers
+        ):
+            return None, "Reasoner answer_slot.qualifiers must be a string array"
+        proposition_index = answer_slot["proposition_index"]
+        if isinstance(proposition_index, bool) or not isinstance(
+            proposition_index, int
+        ):
+            return None, "Reasoner answer_slot.proposition_index must be an integer"
+        if not isinstance(propositions, (list, tuple)) or len(propositions) < 2:
+            return None, (
+                "Reasoner field 'evidence_propositions' must contain at least two "
+                "propositions for HotpotQA multi-hop alignment"
+            )
+        multi_hop_chain = fields["multi_hop_chain"]
+        if (
+            not isinstance(multi_hop_chain, (list, tuple))
+            or len(multi_hop_chain) < 2
+            or any(
+                not isinstance(item, str) or not item.strip()
+                for item in multi_hop_chain
+            )
+        ):
+            return None, (
+                "Reasoner field 'multi_hop_chain' must contain at least two "
+                "non-empty hop descriptions"
+            )
+        proposition_fields = {
+            "subject",
+            "relation",
+            "object_or_attribute_value",
+            "qualifiers",
+            "evidence_span",
+        }
+        for index, proposition in enumerate(propositions):
+            if not isinstance(proposition, Mapping):
+                return None, (
+                    f"Reasoner evidence_propositions[{index}] must be an object"
+                )
+            if set(proposition) != proposition_fields:
+                return None, (
+                    f"Reasoner evidence_propositions[{index}] must contain exactly "
+                    f"{sorted(proposition_fields)!r}"
+                )
+            for field in (
+                "subject",
+                "relation",
+                "object_or_attribute_value",
+                "evidence_span",
+            ):
+                value = proposition[field]
+                if not isinstance(value, str) or not value.strip():
+                    return None, (
+                        f"Reasoner evidence_propositions[{index}].{field} "
+                        "must be non-empty text"
+                    )
+            proposition_qualifiers = proposition["qualifiers"]
+            if not isinstance(proposition_qualifiers, (list, tuple)) or any(
+                not isinstance(item, str) or not item.strip()
+                for item in proposition_qualifiers
+            ):
+                return None, (
+                    f"Reasoner evidence_propositions[{index}].qualifiers must be "
+                    "a string array"
+                )
+        if proposition_index < 0 or proposition_index >= len(propositions):
+            return None, (
+                "Reasoner answer_slot.proposition_index is outside "
+                "evidence_propositions"
+            )
+        selected = propositions[proposition_index]
+        assert isinstance(selected, Mapping)
+        if answer_slot["entity"] != selected["subject"]:
+            return None, (
+                "Reasoner answer_slot.entity must equal the selected evidence "
+                "proposition subject"
+            )
+        if answer_slot["relation"] != selected["relation"]:
+            return None, (
+                "Reasoner answer_slot.relation must equal the selected evidence "
+                "proposition relation"
+            )
+        answer_field = answer_slot["answer_field"]
+        if answer_field not in {"subject", "object_or_attribute_value"}:
+            return None, (
+                "Reasoner answer_slot.answer_field must be subject or "
+                "object_or_attribute_value"
+            )
+        if candidate != selected[answer_field]:
+            return None, (
+                "Reasoner candidate_answer must copy answer_slot.answer_field "
+                "from the selected evidence proposition exactly"
+            )
+        evidence_span = selected["evidence_span"]
+        assert isinstance(evidence_span, str)
+        boolean_answer = candidate.casefold() in {"yes", "no"}
+        if not boolean_answer and candidate not in evidence_span:
+            return None, (
+                "Reasoner candidate_answer must occur verbatim in the selected "
+                "evidence_span"
             )
         return candidate, None
 
@@ -1256,6 +1498,26 @@ class AgentWorkflowEnv:
             and bool(passage["text"].strip())
         )
 
+    @staticmethod
+    def _successful_read_text(
+        receipt: Mapping[str, object],
+        required_tool_id: str,
+    ) -> Optional[str]:
+        if not AgentWorkflowEnv._successful_read_receipt(
+            receipt,
+            required_tool_id,
+        ):
+            return None
+        result = receipt["result"]
+        assert isinstance(result, Mapping)
+        value = result.get("value", result)
+        assert isinstance(value, Mapping)
+        passage = value["passage"]
+        assert isinstance(passage, Mapping)
+        text = passage["text"]
+        assert isinstance(text, str)
+        return text
+
     def _semantic_protocol_issue(
         self,
         execution: AgentRuntimeResult,
@@ -1290,7 +1552,8 @@ class AgentWorkflowEnv:
         if verifier_artifact is None:
             return f"Verifier {verifier_id!r} has no current verification artifact"
         reasoner_candidate, reasoner_issue = self._reasoner_candidate(
-            reasoner_artifact
+            reasoner_artifact,
+            original_question=hotpotqa_question_scope(self._problem),
         )
         if reasoner_issue is not None or reasoner_candidate is None:
             return (
@@ -1298,49 +1561,78 @@ class AgentWorkflowEnv:
                 f"{reasoner_issue}. Required fields are "
                 f"{list(_REASONER_SEMANTIC_FIELDS)!r}"
             )
+        # Evidence may be read by the Reasoner itself or by a dedicated
+        # Retriever routed into the Reasoner. It may not bypass semantic
+        # alignment through a Retriever -> Verifier edge.
+        evidence_owner_ids = (
+            reasoner_id,
+            *self._graph.directed_predecessors(reasoner_id),
+        )
+        read_evidence_texts: list[str] = []
+        assert self.required_evidence_tool_id is not None
+        for evidence_owner_id in evidence_owner_ids:
+            metadata = execution.output_metadata.get(evidence_owner_id)
+            if not isinstance(metadata, Mapping):
+                continue
+            receipts = metadata.get("tool_receipts", ())
+            if not isinstance(receipts, (list, tuple)):
+                continue
+            for receipt in receipts:
+                if not isinstance(receipt, Mapping):
+                    continue
+                evidence_text = self._successful_read_text(
+                    receipt,
+                    self.required_evidence_tool_id,
+                )
+                if evidence_text is not None:
+                    read_evidence_texts.append(evidence_text)
+        if not read_evidence_texts:
+            return (
+                "Reasoner lineage has no successful "
+                f"{self.required_evidence_tool_id!r} read receipt containing a "
+                "non-empty passage. Preserve existing artifacts and add or repair "
+                "retrieval into the Reasoner before FINISH"
+            )
+        reasoner_fields, _ = self._structured_semantic_fields(
+            reasoner_artifact,
+            _REASONER_SEMANTIC_FIELDS,
+        )
+        if reasoner_fields is not None:
+            propositions = reasoner_fields.get("evidence_propositions")
+            if isinstance(propositions, (list, tuple)) and propositions and all(
+                isinstance(proposition, Mapping) for proposition in propositions
+            ):
+                for index, proposition in enumerate(propositions):
+                    assert isinstance(proposition, Mapping)
+                    evidence_span = proposition.get("evidence_span")
+                    if not isinstance(evidence_span, str) or not any(
+                        evidence_span in text for text in read_evidence_texts
+                    ):
+                        return (
+                            f"Reasoner evidence_propositions[{index}].evidence_span "
+                            "is not an exact span in any successful qa-retrieval read. "
+                            "Preserve the existing candidate and valid evidence; repair "
+                            "or augment retrieval before FINISH"
+                        )
         verifier_candidate, verifier_issue = self._verifier_candidate(
             verifier_artifact
         )
         if verifier_issue is not None or verifier_candidate is None:
             return (
                 f"Verifier {verifier_id!r} semantic artifact is invalid: "
-                f"{verifier_issue}. Diagnose evidence, entity--attribute binding, "
-                "multi-hop completeness, and original-question scope; repair the "
-                "existing Agent or augment retrieval before FINISH"
+                f"{verifier_issue}. The Reasoner candidate {reasoner_candidate!r} "
+                "already passed answer-slot binding and retrieved-evidence alignment; "
+                "preserve that candidate and evidence, diagnose the failed Verifier "
+                "check, then repair the existing Verifier or augment retrieval before "
+                "FINISH"
             )
         if verifier_candidate != reasoner_candidate:
             return (
                 "Verifier changed the Reasoner's candidate_answer: "
                 f"reasoner={reasoner_candidate!r}, verifier={verifier_candidate!r}. "
-                "The Verifier may reject an unsupported candidate but must not select "
-                "a replacement answer; repair the Reasoner and preserve semantic lineage"
-            )
-        direct_predecessors = self._graph.directed_predecessors(verifier_id)
-        has_read_evidence = False
-        assert self.required_evidence_tool_id is not None
-        for predecessor_id in direct_predecessors:
-            metadata = execution.output_metadata.get(predecessor_id)
-            if not isinstance(metadata, Mapping):
-                continue
-            receipts = metadata.get("tool_receipts", ())
-            if not isinstance(receipts, (list, tuple)):
-                continue
-            if any(
-                isinstance(receipt, Mapping)
-                and self._successful_read_receipt(
-                    receipt,
-                    self.required_evidence_tool_id,
-                )
-                for receipt in receipts
-            ):
-                has_read_evidence = True
-                break
-        if not has_read_evidence:
-            return (
-                "Verifier has no direct predecessor with a successful "
-                f"{self.required_evidence_tool_id!r} read receipt containing a "
-                "non-empty passage. Preserve existing artifacts and add or repair a "
-                "retrieval relation before FINISH"
+                "The Reasoner candidate already passed answer-slot binding and "
+                "retrieved-evidence alignment. Preserve it and repair the Verifier; "
+                "the Verifier must not select a replacement answer"
             )
         answer = execution.final_answer
         if answer is None:
@@ -1417,6 +1709,8 @@ class AgentWorkflowEnv:
         )
         terminal_unreachable = self._terminal_unreachable_agent_ids()
         terminal_unreachable_set = set(terminal_unreachable)
+        failed = tuple(sorted(self._failed_agent_ids & current_ids))
+        failed_set = set(failed)
         protected: dict[str, list[str]] = {}
         for node in self._graph.nodes:
             reasons: list[str] = []
@@ -1428,7 +1722,7 @@ class AgentWorkflowEnv:
                 reasons.append("output_identity")
             if node.id in terminal_unreachable_set:
                 reasons.append("terminal_unreachable")
-            elif node.id not in self._unresolved_dirty_agents:
+            elif node.id not in failed_set:
                 reasons.append("not_diagnosed_unusable")
             reasons.append("replacement_takeover_required")
             if reasons:
@@ -1438,15 +1732,123 @@ class AgentWorkflowEnv:
             "strategy": "preserve -> diagnose -> repair -> augment",
             "phase": (
                 "diagnose_repair"
-                if self._unresolved_dirty_agents
+                if self._unresolved_dirty_agents or self._failed_agent_ids
                 else "preserve"
             ),
             "preserved_agent_ids": list(preserved),
+            "previous_revision_preserved_agent_ids": sorted(
+                self._previous_revision_outputs
+            ),
+            "failed_agent_ids": list(failed),
             "unresolved_dirty_agent_ids": list(self.unresolved_dirty_agent_ids),
             "terminal_unreachable_agent_ids": list(terminal_unreachable),
             "deletion_protected": protected,
             "preferred_actions": ["modify_agent", "set_relation", "add_subgraph"],
         }
+
+    def _semantic_replacement_has_valid_artifact(
+        self,
+        agent_id: str,
+        role_family: str,
+    ) -> bool:
+        """Require a valid current semantic artifact before replacement takeover."""
+
+        if self.semantic_protocol != _HOTPOTQA_SEMANTIC_PROTOCOL:
+            return True
+        artifact = self._progressive_outputs.get(agent_id)
+        if not isinstance(artifact, str) or not artifact.strip():
+            return False
+        if role_family == "reasoner":
+            candidate, issue = self._reasoner_candidate(
+                artifact,
+                original_question=hotpotqa_question_scope(self._problem),
+            )
+            if issue is not None or candidate is None:
+                return False
+            fields, _ = self._structured_semantic_fields(
+                artifact,
+                _REASONER_SEMANTIC_FIELDS,
+            )
+            if fields is None:
+                return False
+            evidence_texts: list[str] = []
+            assert self.required_evidence_tool_id is not None
+            for owner_id in (
+                agent_id,
+                *self._graph.directed_predecessors(agent_id),
+            ):
+                metadata = self._progressive_output_metadata.get(owner_id)
+                if not isinstance(metadata, Mapping):
+                    continue
+                receipts = metadata.get("tool_receipts", ())
+                if not isinstance(receipts, (list, tuple)):
+                    continue
+                for receipt in receipts:
+                    if not isinstance(receipt, Mapping):
+                        continue
+                    evidence_text = self._successful_read_text(
+                        receipt,
+                        self.required_evidence_tool_id,
+                    )
+                    if evidence_text is not None:
+                        evidence_texts.append(evidence_text)
+            propositions = fields.get("evidence_propositions")
+            return bool(evidence_texts) and isinstance(
+                propositions,
+                (list, tuple),
+            ) and all(
+                isinstance(proposition, Mapping)
+                and isinstance(proposition.get("evidence_span"), str)
+                and any(
+                    proposition["evidence_span"] in evidence_text
+                    for evidence_text in evidence_texts
+                )
+                for proposition in propositions
+            )
+        if role_family == "verifier":
+            verifier_candidate, verifier_issue = self._verifier_candidate(artifact)
+            if verifier_issue is not None or verifier_candidate is None:
+                return False
+            reasoner_ids = tuple(
+                predecessor_id
+                for predecessor_id in self._graph.directed_predecessors(agent_id)
+                if (
+                    self._graph.get_node(predecessor_id).role_family or ""
+                ).casefold()
+                == "reasoner"
+            )
+            if len(reasoner_ids) != 1:
+                return False
+            reasoner_artifact = self._progressive_outputs.get(reasoner_ids[0], "")
+            reasoner_candidate, reasoner_issue = self._reasoner_candidate(
+                reasoner_artifact,
+                original_question=hotpotqa_question_scope(self._problem),
+            )
+            return (
+                reasoner_issue is None
+                and reasoner_candidate is not None
+                and verifier_candidate == reasoner_candidate
+            )
+        if role_family == "format":
+            predecessors = self._graph.directed_predecessors(agent_id)
+            if len(predecessors) != 1:
+                return False
+            verifier_artifact = self._progressive_outputs.get(predecessors[0], "")
+            verifier_candidate, verifier_issue = self._verifier_candidate(
+                verifier_artifact
+            )
+            wrapper = re.fullmatch(
+                r"\s*<answer>(.*?)</answer>\s*",
+                artifact,
+                flags=re.DOTALL,
+            )
+            return (
+                verifier_issue is None
+                and verifier_candidate is not None
+                and wrapper is not None
+                and wrapper.group(1) == verifier_candidate
+            )
+        return True
 
     def _delete_admission_issue(self, agent_id: Optional[str]) -> Optional[str]:
         if self.recovery_policy != _PRESERVE_REPAIR_RECOVERY_POLICY:
@@ -1456,7 +1858,7 @@ class AgentWorkflowEnv:
         node = self._graph.get_node(agent_id)
         terminal_unreachable_ids = set(self._terminal_unreachable_agent_ids())
         diagnosed_unusable = (
-            agent_id in self._unresolved_dirty_agents
+            agent_id in self._failed_agent_ids
             or agent_id in terminal_unreachable_ids
         )
         downstream_ids = set(self._directed_successors(self._graph, agent_id))
@@ -1482,6 +1884,10 @@ class AgentWorkflowEnv:
                 or candidate.artifact_type.casefold() != artifact_type
                 or not self._has_successful_artifact(candidate.id)
                 or candidate.id in terminal_unreachable_ids
+                or not self._semantic_replacement_has_valid_artifact(
+                    candidate.id,
+                    role,
+                )
             ):
                 continue
             candidate_downstream = set(

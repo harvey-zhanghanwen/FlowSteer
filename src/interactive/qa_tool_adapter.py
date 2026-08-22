@@ -10,6 +10,7 @@ not accepted by either tool schema.
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -22,6 +23,7 @@ from typing import Callable, Mapping, Protocol, Sequence
 
 from .agent_runtime import AgentGateway, AgentRequest, GatewayResponse
 from .react_execution import ToolReactExecutionAdapter
+from .task_dataset import hotpotqa_question_scope
 from .qa_retrieval import (
     DEFAULT_QA_RETRIEVAL_INDEX,
     DEFAULT_SKILLFLOW_SOURCE,
@@ -70,6 +72,39 @@ HOTPOTQA_VERIFIED_ANSWER_SLOT_GUIDANCE = (
     "multi-hop chain. If compared values are unexpectedly equal, recheck scope, "
     "both bindings, retrieved passages, and contract narrowing before calling a tie."
 )
+
+
+@dataclass(frozen=True, slots=True)
+class _RequiredEvidenceState:
+    """Public SkillFlow search/read state used by the QA action mask."""
+
+    required: bool
+    searched_passage_ids: tuple[str, ...]
+    latest_search_passage_ids: tuple[str, ...]
+    read_passage_ids: tuple[str, ...]
+    dispatched_tool_calls: int
+
+    @property
+    def unread_passage_ids(self) -> tuple[str, ...]:
+        read = frozenset(self.read_passage_ids)
+        return tuple(
+            passage_id
+            for passage_id in self.searched_passage_ids
+            if passage_id not in read
+        )
+
+    @property
+    def latest_unread_passage_ids(self) -> tuple[str, ...]:
+        read = frozenset(self.read_passage_ids)
+        return tuple(
+            passage_id
+            for passage_id in self.latest_search_passage_ids
+            if passage_id not in read
+        )
+
+    @property
+    def successful_read_count(self) -> int:
+        return len(self.read_passage_ids)
 
 
 class _RetrievalIndex(Protocol):
@@ -317,55 +352,296 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         self,
         request: AgentRequest,
         observations: list[Mapping[str, object]],
-    ) -> tuple[bool, tuple[str, ...], bool]:
+    ) -> _RequiredEvidenceState:
         required = (
             self._completion_policy == "required_evidence"
             and self._max_tool_calls > 0
             and QA_RETRIEVAL_TOOL_ID in request.agent.allowed_tools
         )
         searched_passage_ids: list[str] = []
-        has_successful_read = False
-        if required:
-            for observation in observations:
-                if observation.get("observation_status") != "success":
-                    continue
-                result = observation.get("result")
-                if not isinstance(result, Mapping):
-                    continue
-                if result.get("operation") == "search":
-                    raw_ids = result.get("passage_ids")
-                    if isinstance(raw_ids, list):
-                        searched_passage_ids = [
-                            value.strip()
-                            for value in raw_ids
-                            if isinstance(value, str) and value.strip()
-                        ]
-                elif (
-                    result.get("operation") == "read"
-                    and isinstance(result.get("passage"), Mapping)
-                    and isinstance(result["passage"].get("text"), str)
-                    and bool(result["passage"]["text"].strip())
+        latest_search_passage_ids: list[str] = []
+        read_passage_ids: list[str] = []
+        dispatched_tool_calls = 0
+        for observation in observations:
+            status = observation.get("observation_status")
+            if status not in {"success", "tool_error"}:
+                continue
+            executed_action = observation.get("executed_action")
+            if isinstance(executed_action, Mapping):
+                if (
+                    executed_action.get("kind") == "tool"
+                    and executed_action.get("resource_id") == QA_RETRIEVAL_TOOL_ID
                 ):
-                    has_successful_read = True
-        return required, tuple(searched_passage_ids), has_successful_read
+                    dispatched_tool_calls += 1
+            elif status == "success":
+                # Unit fixtures and restored legacy public observations may
+                # omit executed_action.  A successful retrieval result still
+                # represents exactly one dispatched SkillFlow Tool action.
+                dispatched_tool_calls += 1
+            if status != "success":
+                continue
+            result = observation.get("result")
+            if not isinstance(result, Mapping):
+                continue
+            if result.get("operation") == "search":
+                latest_search_passage_ids = []
+                raw_ids = result.get("passage_ids")
+                if isinstance(raw_ids, list):
+                    for value in raw_ids:
+                        if not isinstance(value, str) or not value.strip():
+                            continue
+                        passage_id = value.strip()
+                        if passage_id not in searched_passage_ids:
+                            searched_passage_ids.append(passage_id)
+                        if passage_id not in latest_search_passage_ids:
+                            latest_search_passage_ids.append(passage_id)
+            elif (
+                result.get("operation") == "read"
+                and isinstance(result.get("passage"), Mapping)
+                and isinstance(result["passage"].get("text"), str)
+                and bool(result["passage"]["text"].strip())
+            ):
+                raw_passage_id = result.get("passage_id")
+                if not isinstance(raw_passage_id, str):
+                    raw_passage_id = result["passage"].get("passage_id")
+                if not isinstance(raw_passage_id, str) and isinstance(
+                    executed_action, Mapping
+                ):
+                    arguments = executed_action.get("arguments")
+                    if isinstance(arguments, Mapping):
+                        raw_passage_id = arguments.get("passage_id")
+                if isinstance(raw_passage_id, str) and raw_passage_id.strip():
+                    passage_id = raw_passage_id.strip()
+                    if passage_id not in read_passage_ids:
+                        read_passage_ids.append(passage_id)
+        return _RequiredEvidenceState(
+            required=required,
+            searched_passage_ids=tuple(searched_passage_ids),
+            latest_search_passage_ids=tuple(latest_search_passage_ids),
+            read_passage_ids=tuple(read_passage_ids),
+            dispatched_tool_calls=dispatched_tool_calls,
+        )
 
     def _state_conditioned_action_domain(
         self,
         request: AgentRequest,
         observations: list[Mapping[str, object]],
     ) -> tuple[Optional[frozenset[tuple[str, str]]], bool]:
-        """Expose the canonical search -> read -> complete action domain."""
+        """Expose a bounded multi-hop search/read continuation domain."""
 
-        required, passage_ids, has_successful_read = self._required_evidence_state(
-            request,
-            observations,
-        )
-        if not required:
+        state = self._required_evidence_state(request, observations)
+        if not state.required:
             return super()._state_conditioned_action_domain(request, observations)
-        if has_successful_read:
+
+        remaining_tool_calls = max(
+            0,
+            self._max_tool_calls - state.dispatched_tool_calls,
+        )
+        minimum_reads = (
+            2
+            if self._task_type == "multi_hop_qa"
+            and request.semantic_protocol == "hotpotqa_verified_answer_slot_v1"
+            else 1
+        )
+        if (
+            state.successful_read_count >= minimum_reads
+            or remaining_tool_calls == 0
+            and state.successful_read_count > 0
+        ):
             return frozenset(), True
-        action_name = "read" if passage_ids else "search"
+
+        if state.latest_unread_passage_ids:
+            action_name = "read"
+        elif remaining_tool_calls >= 2 or state.successful_read_count == 0:
+            action_name = "search"
+        else:
+            # One Tool call cannot complete a new search->read transition.
+            # Preserve the successfully read evidence and admit completion.
+            return frozenset(), state.successful_read_count > 0
         return frozenset({(QA_RETRIEVAL_TOOL_ID, action_name)}), False
+
+    def _completion_arguments_schema(
+        self,
+        request: AgentRequest,
+    ) -> Mapping[str, object]:
+        if (
+            request.semantic_protocol != "hotpotqa_verified_answer_slot_v1"
+            or (request.agent.role_family or "").casefold() != "reasoner"
+        ):
+            return super()._completion_arguments_schema(request)
+        non_empty_text = {"type": "string", "minLength": 1}
+        non_empty_text_list = {
+            "type": "array",
+            "minItems": 1,
+            "items": dict(non_empty_text),
+        }
+        qualifier_list = {
+            "type": "array",
+            "items": dict(non_empty_text),
+        }
+        answer_slot_schema = {
+            "type": "object",
+            "required": [
+                "entity",
+                "relation",
+                "answer_type",
+                "qualifiers",
+                "proposition_index",
+                "answer_field",
+            ],
+            "properties": {
+                "entity": {
+                    **non_empty_text,
+                    "description": (
+                        "The entity whose selected proposition fills or determines "
+                        "the answer slot."
+                    ),
+                },
+                "relation": {
+                    **non_empty_text,
+                    "description": "The relation requested by the original question.",
+                },
+                "answer_type": {
+                    **non_empty_text,
+                    "description": "The answer type requested by the original question.",
+                },
+                "qualifiers": dict(qualifier_list),
+                "proposition_index": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": (
+                        "Zero-based index of the evidence proposition that supplies "
+                        "the candidate answer."
+                    ),
+                },
+                "answer_field": {
+                    "type": "string",
+                    "enum": ["subject", "object_or_attribute_value"],
+                    "description": (
+                        "The selected proposition field copied as candidate_answer."
+                    ),
+                },
+            },
+            "additionalProperties": False,
+        }
+
+        proposition_schema = {
+            "type": "object",
+            "required": [
+                "subject",
+                "relation",
+                "object_or_attribute_value",
+                "qualifiers",
+                "evidence_span",
+            ],
+            "properties": {
+                "subject": dict(non_empty_text),
+                "relation": dict(non_empty_text),
+                "object_or_attribute_value": {
+                    **non_empty_text,
+                    "description": (
+                        "Copy the full evidence-aligned referential span, including "
+                        "a title or qualifier when the source uses it."
+                    ),
+                },
+                "qualifiers": dict(qualifier_list),
+                "evidence_span": {
+                    **non_empty_text,
+                    "description": "An exact supporting span from a read passage.",
+                },
+            },
+            "additionalProperties": False,
+        }
+        # NECESSARY_ADAPTATION: SkillFlow constrains every StructuredAction at
+        # its provider boundary.  HotpotQA additionally gives the semantic
+        # Reasoner ownership of one exact six-field artifact.  Nest that
+        # artifact under completion arguments.value so structured serving
+        # cannot confuse semantic fields with action-envelope fields.
+        return {
+            "type": "object",
+            "required": ["value"],
+            "properties": {
+                "value": {
+                    "type": "object",
+                    "required": [
+                        "question_scope",
+                        "answer_slot",
+                        "evidence_propositions",
+                        "multi_hop_chain",
+                        "candidate_answer",
+                        "evidence",
+                    ],
+                    "properties": {
+                        "question_scope": {
+                            "const": hotpotqa_question_scope(request.problem),
+                            "description": (
+                                "Copy the original question exactly; do not narrow "
+                                "or add qualifiers."
+                            ),
+                        },
+                        "answer_slot": answer_slot_schema,
+                        "evidence_propositions": {
+                            "type": "array",
+                            "minItems": 2,
+                            "items": proposition_schema,
+                        },
+                        "multi_hop_chain": {
+                            "type": "array",
+                            "minItems": 2,
+                            "items": dict(non_empty_text),
+                        },
+                        "candidate_answer": dict(non_empty_text),
+                        "evidence": dict(non_empty_text_list),
+                    },
+                    "additionalProperties": False,
+                }
+            },
+            "additionalProperties": False,
+        }
+
+    def _state_conditioned_response_schema(
+        self,
+        request: AgentRequest,
+        observations: list[Mapping[str, object]],
+    ) -> dict[str, object] | None:
+        """Constrain read to unread opaque IDs returned by public search."""
+
+        schema = super()._state_conditioned_response_schema(request, observations)
+        if schema is None:
+            return None
+        # The generic builder shallow-copies a normalized Tool schema. Copy
+        # this request-scoped schema before narrowing it so later Agents retain
+        # the published SkillFlow capability unchanged.
+        schema = deepcopy(schema)
+        properties = schema.get("properties")
+        if not isinstance(properties, dict):
+            return schema
+        name = properties.get("name")
+        if not isinstance(name, Mapping):
+            return schema
+        action_name = name.get("const")
+        arguments = properties.get("arguments")
+        if not isinstance(arguments, dict):
+            return schema
+        argument_properties = arguments.get("properties")
+        if not isinstance(argument_properties, dict):
+            return schema
+        if (
+            action_name == "search"
+            and request.semantic_protocol == "hotpotqa_verified_answer_slot_v1"
+        ):
+            argument_properties["limit"] = {"const": 5}
+            return schema
+        if action_name != "read":
+            return schema
+        state = self._required_evidence_state(request, observations)
+        if not state.latest_unread_passage_ids:
+            return schema
+        argument_properties["passage_id"] = {
+            "type": "string",
+            "enum": list(state.latest_unread_passage_ids),
+        }
+        return schema
 
     async def execute(self, request: AgentRequest) -> GatewayResponse:
         # NECESSARY_ADAPTATION: the generic AgentGraph completion hook receives
@@ -390,10 +666,13 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         observations: list[Mapping[str, object]],
     ) -> str:
         contract = super()._contract(request, observations)
-        required_evidence, searched_passage_ids, has_successful_read = (
-            self._required_evidence_state(request, observations)
+        evidence_state = self._required_evidence_state(request, observations)
+        admitted_actions, completion_admitted = self._state_conditioned_action_domain(
+            request,
+            observations,
         )
-        completion_admitted = not required_evidence or has_successful_read
+        required_evidence = evidence_state.required
+        searched_passage_ids = evidence_state.latest_unread_passage_ids
         if self._task_type == "multi_hop_qa":
             guidance = SKILLFLOW_MULTI_HOP_QA_GUIDANCE
             if request.semantic_protocol == "hotpotqa_verified_answer_slot_v1":
@@ -422,11 +701,16 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         ):
             if completion_admitted:
                 terminal_wire += (
-                    " As the Reasoner, arguments.value must contain the labeled "
-                    "Question scope, Answer slot, Evidence propositions, Multi-hop "
-                    "chain, Candidate answer, and Evidence fields. Determine the one "
-                    "semantic candidate only after aligning the evidence proposition "
-                    "to the requested answer slot."
+                    " As the Reasoner, arguments.value must contain exactly the six "
+                    "structured fields question_scope, answer_slot, "
+                    "evidence_propositions, multi_hop_chain, candidate_answer, and "
+                    "evidence. Copy question_scope exactly from the original question. "
+                    "Use answer_slot.proposition_index and answer_field to bind the "
+                    "candidate to one explicit evidence proposition: answer_slot.entity "
+                    "and relation must equal that proposition's subject and relation, "
+                    "and candidate_answer must equal its selected answer_field. Copy the full "
+                    "evidence-aligned answer span, including a title or qualifier when "
+                    "present; do not shorten a proper-name phrase."
                 )
             else:
                 terminal_wire += (
@@ -462,17 +746,19 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 "candidate already present in the public action history; do not "
                 "discard or replace it merely because completion was rejected. "
             )
-            if has_successful_read:
+            if completion_admitted:
                 evidence_continuation += (
-                    "A successful non-empty qa-retrieval read is present, so the "
-                    "next action may complete after aligning that evidence to the "
-                    "original answer slot. This turn use kind=complete, "
+                    "The required successful non-empty qa-retrieval reads are present, "
+                    "so the next action must complete after aligning every required "
+                    "hop to the original answer slot. This turn use kind=complete, "
                     "name=complete, resource_id=null, and skill_id=null; arguments "
                     "must contain exactly one key, value, whose value is the full "
-                    "labeled semantic artifact. Do not use kind=completion, "
+                    "structured semantic artifact. Do not use kind=completion, "
                     "name=answer, or resource_id=qa-retrieval."
                 )
-            elif searched_passage_ids:
+            elif searched_passage_ids and admitted_actions == frozenset(
+                {(QA_RETRIEVAL_TOOL_ID, "read")}
+            ):
                 read_wire = {
                     "arguments": {"passage_id": searched_passage_ids[0]},
                     "kind": "tool",
@@ -500,12 +786,14 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             else:
                 evidence_continuation += (
                     "The next action must be qa-retrieval search with a concise "
-                    "entity-and-relation query. Then read an exact returned "
+                    "entity-and-relation query for a missing hop. Then read an exact returned "
                     "passage_id. Search arguments contain exactly query and limit; "
                     "never copy JSON-Schema properties/additionalProperties or the "
                     "eventual semantic artifact into those arguments. Set query to "
                     "one non-empty focused entity-and-relation string selected from "
-                    "the original question and limit to one positive integer. Keep "
+                    "the original question or newest read evidence. For HotpotQA, "
+                    "set limit to exactly 5 so the bounded continuation can inspect "
+                    "two distinct ranked passages from the same search result. Keep "
                     "the outer constants kind=tool, name=search, "
                     "resource_id=qa-retrieval, and skill_id=null. Do not call "
                     "complete before a non-empty read succeeds."
@@ -570,18 +858,21 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         action: StructuredAction,
         observations: list[Mapping[str, object]],
     ) -> str | None:
-        required, passage_ids, has_successful_read = self._required_evidence_state(
+        state = self._required_evidence_state(request, observations)
+        admitted_actions, completion_admitted = self._state_conditioned_action_domain(
             request,
             observations,
         )
-        if required and action.kind is ActionKind.TOOL:
-            if has_successful_read:
-                return "qa_required_evidence_next_action_complete"
-            expected_action = "read" if passage_ids else "search"
-            if (
-                action.resource_id != QA_RETRIEVAL_TOOL_ID
-                or action.name != expected_action
-            ):
+        if state.required and action.kind is ActionKind.TOOL:
+            if admitted_actions is not None and (
+                action.resource_id,
+                action.name,
+            ) not in admitted_actions:
+                if completion_admitted:
+                    return "qa_required_evidence_next_action_complete"
+                expected_action = (
+                    next(iter(admitted_actions))[1] if admitted_actions else "complete"
+                )
                 return f"qa_required_evidence_next_action_{expected_action}"
         if (
             action.kind is not ActionKind.TOOL
@@ -596,25 +887,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         if not isinstance(passage_id, str) or not passage_id.strip():
             return None
 
-        admitted_passage_ids: set[str] = set()
-        for observation in observations:
-            if observation.get("observation_status") != "success":
-                continue
-            result = observation.get("result")
-            if not isinstance(result, Mapping) or result.get("operation") != "search":
-                continue
-            raw_ids = result.get("passage_ids")
-            if isinstance(raw_ids, list):
-                admitted_passage_ids.update(
-                    value for value in raw_ids if isinstance(value, str) and value
-                )
-            raw_hits = result.get("hits")
-            if isinstance(raw_hits, list):
-                for hit in raw_hits:
-                    if isinstance(hit, Mapping) and isinstance(
-                        hit.get("passage_id"), str
-                    ):
-                        admitted_passage_ids.add(str(hit["passage_id"]))
+        admitted_passage_ids = set(state.latest_unread_passage_ids)
         if not admitted_passage_ids:
             return "qa_read_requires_successful_search"
         if passage_id not in admitted_passage_ids:

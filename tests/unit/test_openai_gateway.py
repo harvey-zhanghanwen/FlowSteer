@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import unittest
 from unittest.mock import patch
@@ -184,9 +185,10 @@ class MessageTests(unittest.TestCase):
         self.assertIn("subject/entity", system)
         self.assertIn("predicate/relation", system)
         self.assertIn("answer slot actually requested", system)
-        self.assertIn("Evidence propositions:", system)
-        self.assertIn("Multi-hop chain:", system)
-        self.assertIn("Candidate answer:", system)
+        self.assertIn("evidence_propositions", system)
+        self.assertIn("answer_slot", system)
+        self.assertIn("multi_hop_chain", system)
+        self.assertIn("candidate_answer", system)
         self.assertIn("unexpectedly equal values", system)
 
     def test_verifier_checks_candidate_without_replacing_it(self) -> None:
@@ -347,6 +349,33 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             payload["chat_template_kwargs"],
             {"enable_thinking": False},
+        )
+
+    def test_skillflow_response_schema_is_forwarded(self) -> None:
+        item = request()
+        schema = {
+            "type": "object",
+            "required": ["kind"],
+            "properties": {"kind": {"const": "complete"}},
+            "additionalProperties": False,
+        }
+        object.__setattr__(
+            item,
+            "model",
+            ModelSpec(
+                "model",
+                "provider",
+                model_name="supervisor_theta",
+                metadata={"response_json_schema": json.dumps(schema)},
+            ),
+        )
+
+        payload = OpenAICompatibleGateway().request_payload(item)
+
+        self.assertEqual(payload["response_format"]["type"], "json_schema")
+        self.assertEqual(
+            payload["response_format"]["json_schema"],
+            {"name": "skillev_action", "schema": schema, "strict": True},
         )
 
 

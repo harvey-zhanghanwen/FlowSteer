@@ -333,19 +333,19 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         reasoner = adapter._contract(role_request("reasoner"), [])
         verifier = adapter._contract(role_request("verifier"), [])
 
-        self.assertIn("Evidence propositions", reasoner)
-        self.assertIn("Determine the one semantic candidate", reasoner)
+        self.assertIn("evidence_propositions", reasoner)
+        self.assertIn("bind the candidate", reasoner)
         self.assertIn("Do not replace the Reasoner's candidate", verifier)
         self.assertIn("four explicit boolean check fields", verifier)
         self.assertIn("Set supported only when all checks pass", verifier)
-        self.assertNotIn("Determine the one semantic candidate", verifier)
+        self.assertNotIn("bind the candidate", verifier)
 
         default_reasoner = replace(
             role_request("reasoner"),
             semantic_protocol="none",
         )
         default_contract = adapter._contract(default_reasoner, [])
-        self.assertNotIn("Evidence propositions", default_contract)
+        self.assertNotIn("evidence_propositions", default_contract)
         self.assertNotIn("unexpectedly equal", default_contract)
 
     def test_required_evidence_shows_reasoner_artifact_only_at_completion_state(
@@ -388,6 +388,7 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             "observation_status": "success",
             "result": {
                 "operation": "read",
+                "passage_id": "p1",
                 "passage": {"text": "Paris is the capital of France."},
             },
         }
@@ -399,9 +400,9 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             [search_observation, read_observation],
         )
 
-        self.assertNotIn("arguments.value must contain the labeled", search_contract)
-        self.assertNotIn("arguments.value must contain the labeled", read_contract)
-        self.assertIn("arguments.value must contain the labeled", completion_contract)
+        self.assertNotIn("six structured fields", search_contract)
+        self.assertNotIn("six structured fields", read_contract)
+        self.assertIn("six structured fields", completion_contract)
         self.assertNotIn('"arguments":{"type":"object"', search_contract)
         self.assertNotIn('"arguments":{"type":"object"', read_contract)
         self.assertIn("Completion is not admitted in this Tool-only state", search_contract)
@@ -515,10 +516,12 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
                 "retrieve evidence and answer",
                 allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
                 execution_mode="react",
+                role_family="reasoner",
             ),
             model=ModelSpec("model", "provider"),
             provider=ProviderSpec("provider", kind="test"),
             phase=ExecutionPhase.SINGLE,
+            semantic_protocol="hotpotqa_verified_answer_slot_v1",
         )
 
         response = await QARetrievalReactExecutionAdapter(
@@ -557,7 +560,7 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             gateway.requests[2].agent.contract,
         )
         self.assertIn(
-            "next action may complete",
+            "next action must complete",
             gateway.requests[3].agent.contract,
         )
         self.assertIn("Do not use kind=completion", gateway.requests[3].agent.contract)
@@ -570,19 +573,42 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         completion_domain = gateway.requests[3].agent.contract.split(
             "Currently admissible Tool action contracts", 1
         )[1].split("\nCurrently admissible completion", 1)[0]
-        self.assertIn('"name":"search"', search_domain)
-        self.assertNotIn('"name":"read"', search_domain)
+        self.assertIn('name is "search"', search_domain)
+        self.assertNotIn('name is "read"', search_domain)
         self.assertIn("Completion is not admissible", gateway.requests[1].agent.contract)
-        self.assertIn('"name":"read"', read_domain)
-        self.assertNotIn('"name":"search"', read_domain)
-        self.assertIn("argument_json_schema", search_domain)
-        self.assertIn("argument_json_schema", read_domain)
-        self.assertIn("action_envelope", search_domain)
-        self.assertIn("action_envelope", read_domain)
-        self.assertTrue(completion_domain.endswith(": []"))
+        self.assertIn('name is "read"', read_domain)
+        self.assertNotIn('name is "search"', read_domain)
+        self.assertIn("Arguments JSON Schema", search_domain)
+        self.assertIn("Arguments JSON Schema", read_domain)
+        self.assertNotIn('"argument_json_schema"', search_domain)
+        self.assertNotIn('"argument_json_schema"', read_domain)
+        self.assertNotIn('"action_envelope"', search_domain)
+        self.assertNotIn('"action_envelope"', read_domain)
+        self.assertTrue(completion_domain.endswith("- none"))
         self.assertIn(
             "Currently admissible completion schema",
             gateway.requests[3].agent.contract,
+        )
+        completion_response_schema = json.loads(
+            gateway.requests[3].model.metadata["response_json_schema"]
+        )
+        self.assertEqual(
+            ["value"],
+            completion_response_schema["properties"]["arguments"]["required"],
+        )
+        self.assertEqual(
+            {
+                "question_scope",
+                "answer_slot",
+                "evidence_propositions",
+                "multi_hop_chain",
+                "candidate_answer",
+                "evidence",
+            },
+            set(
+                completion_response_schema["properties"]["arguments"]
+                ["properties"]["value"]["required"]
+            ),
         )
         self.assertEqual([("Ada Lovelace", 1)], index.search_calls)
         self.assertEqual(["p1"], index.read_calls)
@@ -650,6 +676,137 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual([("Ada Lovelace", 1)], index.search_calls)
         self.assertEqual(["p1"], index.read_calls)
+
+    async def test_hotpot_multi_hop_reads_two_distinct_search_results_before_complete(
+        self,
+    ) -> None:
+        class TwoPassageIndex(FakeIndex):
+            def search(self, query: str, *, limit: int) -> tuple[FakeHit, ...]:
+                self.search_calls.append((query, limit))
+                return (
+                    FakeHit("p1", "d1", "Ada Lovelace", "Ada was a mathematician.", 1),
+                    FakeHit("p2", "d2", "Algorithm", "The algorithm was published.", 2),
+                )
+
+            def read(self, passage_id: str) -> FakePassage:
+                self.read_calls.append(passage_id)
+                text = {
+                    "p1": "Ada Lovelace was an English mathematician.",
+                    "p2": "Ada Lovelace published the first algorithm.",
+                }[passage_id]
+                return FakePassage(passage_id, passage_id, passage_id, text)
+
+        def action(name: str, arguments: object) -> str:
+            return json.dumps(
+                {
+                    "arguments": arguments,
+                    "kind": "complete" if name == "complete" else "tool",
+                    "name": name,
+                    "resource_id": (
+                        None if name == "complete" else QA_RETRIEVAL_TOOL_ID
+                    ),
+                    "skill_id": None,
+                }
+            )
+
+        semantic_artifact = {
+            "question_scope": "Who published the first algorithm?",
+            "answer_slot": {
+                "entity": "Ada Lovelace",
+                "relation": "published",
+                "answer_type": "person",
+                "qualifiers": ["first algorithm"],
+                "proposition_index": 1,
+                "answer_field": "subject",
+            },
+            "evidence_propositions": [
+                {
+                    "subject": "Ada Lovelace",
+                    "relation": "occupation",
+                    "object_or_attribute_value": "English mathematician",
+                    "qualifiers": [],
+                    "evidence_span": "Ada Lovelace was an English mathematician.",
+                },
+                {
+                    "subject": "Ada Lovelace",
+                    "relation": "published",
+                    "object_or_attribute_value": "the first algorithm",
+                    "qualifiers": [],
+                    "evidence_span": "Ada Lovelace published the first algorithm.",
+                },
+            ],
+            "multi_hop_chain": ["Ada Lovelace", "published", "first algorithm"],
+            "candidate_answer": "Ada Lovelace",
+            "evidence": [
+                "Ada Lovelace was an English mathematician.",
+                "Ada Lovelace published the first algorithm.",
+            ],
+        }
+
+        class SequenceGateway:
+            def __init__(self) -> None:
+                self.outputs = [
+                    action("search", {"query": "Ada Lovelace algorithm", "limit": 5}),
+                    action("read", {"passage_id": "p1"}),
+                    action("read", {"passage_id": "p2"}),
+                    action("complete", {"value": semantic_artifact}),
+                ]
+                self.requests: list[AgentRequest] = []
+
+            async def generate(self, request: AgentRequest) -> AgentResponse:
+                self.requests.append(request)
+                return AgentResponse(self.outputs.pop(0))
+
+        index = TwoPassageIndex()
+        gateway = SequenceGateway()
+        request = AgentRequest(
+            request_id="qa:two-hop",
+            run_id="qa",
+            graph_revision=1,
+            problem="Who published the first algorithm?",
+            agent=AgentNode(
+                "reasoner",
+                "model",
+                "retrieve both supporting passages and determine the answer",
+                role_family="reasoner",
+                allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                execution_mode="react",
+            ),
+            model=ModelSpec("model", "provider"),
+            provider=ProviderSpec("provider", kind="test"),
+            phase=ExecutionPhase.SINGLE,
+            semantic_protocol="hotpotqa_verified_answer_slot_v1",
+        )
+
+        response = await QARetrievalReactExecutionAdapter(
+            gateway=gateway,
+            tool_registry=build_qa_tool_registry(index),
+            max_turns=5,
+            max_tool_calls=4,
+            task_type="multi_hop_qa",
+            completion_policy="required_evidence",
+        ).execute(request)
+
+        self.assertEqual(json.dumps(semantic_artifact, ensure_ascii=False, sort_keys=True, separators=(",", ":")), response.text)
+        self.assertEqual(3, response.metadata["tool_calls"])
+        self.assertEqual(["p1", "p2"], index.read_calls)
+        search_schema = json.loads(
+            gateway.requests[0].model.metadata["response_json_schema"]
+        )
+        self.assertEqual(
+            5,
+            search_schema["properties"]["arguments"]["properties"]["limit"]["const"],
+        )
+        second_read_schema = json.loads(
+            gateway.requests[2].model.metadata["response_json_schema"]
+        )
+        self.assertEqual(
+            ["p2"],
+            second_read_schema["properties"]["arguments"]["properties"]
+            ["passage_id"]["enum"],
+        )
+        self.assertIn("next action must be qa-retrieval read", gateway.requests[2].agent.contract)
+        self.assertIn("next action must complete", gateway.requests[3].agent.contract)
 
     async def test_react_failed_retrieval_receipt_admits_explicit_completion(self) -> None:
         class FailingIndex(FakeIndex):

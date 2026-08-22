@@ -14,6 +14,7 @@ from src.interactive.director import (
     DIRECTOR_SYSTEM_PROMPT,
     HOTPOTQA_DIRECTOR_PROMPT_VERSION,
     HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V11,
+    HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V13,
     HOTPOTQA_SEMANTIC_PROTOCOL,
     LEGACY_DIRECTOR_SYSTEM_PROMPT_V8,
     LEGACY_DIRECTOR_SYSTEM_PROMPT_V9,
@@ -155,13 +156,19 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
             director_system_prompt_for_version("prompt-v1"),
         )
         self.assertIs(
-            HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V11,
+            HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V13,
             director_system_prompt_for_version(HOTPOTQA_DIRECTOR_PROMPT_VERSION),
+        )
+        self.assertIs(
+            HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V11,
+            director_system_prompt_for_version(
+                "agentgraph.director.hotpotqa-semantic-recovery.v12"
+            ),
         )
         with self.assertRaises(ValueError):
             director_system_prompt_for_version(" ")
 
-    async def test_hotpot_v11_prompt_encodes_semantic_and_recovery_policy(self) -> None:
+    async def test_hotpot_v13_prompt_encodes_semantic_and_recovery_policy(self) -> None:
         model_registry = registry()
         env = AgentWorkflowEnv(
             model_registry,
@@ -174,7 +181,7 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         orchestrator = AgentGraphOrchestrator(
             model_registry,
             ScriptedDirector([]),
-            system_prompt=HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V11,
+            system_prompt=HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V13,
             prompt_version=HOTPOTQA_DIRECTOR_PROMPT_VERSION,
             semantic_protocol=HOTPOTQA_SEMANTIC_PROTOCOL,
             recovery_policy=PRESERVE_DIAGNOSE_REPAIR_AUGMENT_POLICY,
@@ -183,7 +190,7 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         messages = transcript_messages(orchestrator.build_prompt(env, 0, ()))
         state = observation_payload(messages[-1])
 
-        self.assertEqual(HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V11, messages[0]["content"])
+        self.assertEqual(HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V13, messages[0]["content"])
         self.assertEqual(HOTPOTQA_SEMANTIC_PROTOCOL, state["semantic_protocol"])
         self.assertEqual(
             PRESERVE_DIAGNOSE_REPAIR_AUGMENT_POLICY,
@@ -217,6 +224,8 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("never the original question", messages[0]["content"])
         self.assertIn("unexpectedly equal", messages[0]["content"])
         self.assertIn("preserve -> diagnose -> repair -> augment", messages[0]["content"])
+        self.assertIn("both direction flags to false removes", messages[0]["content"])
+        self.assertIn("never directly into the Verifier", messages[0]["content"])
 
         default = AgentGraphOrchestrator(
             model_registry,
@@ -526,11 +535,14 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         orchestrator = AgentGraphOrchestrator(
             model_registry,
             ScriptedDirector([]),
+            prompt_version=HOTPOTQA_DIRECTOR_PROMPT_VERSION,
         )
         initial = observation_payload(
             transcript_messages(orchestrator.build_prompt(env, 0, ()))[-1]
         )
-        self.assertNotIn("finish_admissibility", initial)
+        self.assertFalse(initial["finish_admissibility"]["admissible"])
+        self.assertEqual("graph_validation", initial["finish_admissibility"]["stage"])
+        self.assertEqual(["add_subgraph"], initial["admissible_action_types"])
 
         action = (
             '{"action":"add_subgraph","agents":['
@@ -561,10 +573,7 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
             state["finish_admissibility"],
         )
         self.assertNotIn("remaining_rounds", state)
-        self.assertEqual(
-            list(env.allowed_action_types),
-            state["admissible_action_types"],
-        )
+        self.assertIn("finish", state["admissible_action_types"])
 
     async def test_director_terminal_policy_is_issue_driven_without_role_template(
         self,

@@ -172,10 +172,18 @@ class ToolReactExecutionTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("not JSON", gateway.requests[1].agent.contract)
         self.assertIn('"observation_status":"parse_error"', gateway.requests[1].agent.contract)
+        self.assertIn(
+            '"expected_top_level_fields":["arguments","kind","name","resource_id","skill_id"]',
+            gateway.requests[1].agent.contract,
+        )
+        self.assertIn(
+            '"forbidden_wrapper_fields":["action_envelope","argument_json_schema"]',
+            gateway.requests[1].agent.contract,
+        )
         self.assertEqual(
             "wiki.search", response.metadata["tool_receipts"][0]["tool_id"]
         )
-        self.assertIn('"name":"search"', gateway.requests[0].agent.contract)
+        self.assertIn('name is "search"', gateway.requests[0].agent.contract)
         self.assertIn('"required":["query"]', gateway.requests[0].agent.contract)
         self.assertNotIn('"name":"tool action"', gateway.requests[0].agent.contract)
         self.assertIn("passage_ids", gateway.requests[2].agent.contract)

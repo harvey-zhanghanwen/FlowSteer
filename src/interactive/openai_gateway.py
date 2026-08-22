@@ -119,10 +119,14 @@ _HOTPOTQA_REASONER_PROTOCOL = (
     "answer type. Align every database or retrieved fact to a proposition with "
     "subject/entity, predicate/relation, object or attribute value, and qualifiers; "
     "then align that proposition to the answer slot actually requested. You alone "
-    "determine the semantic candidate. Return exactly these labeled fields: "
-    "`Question scope:`, `Answer slot:`, `Evidence propositions:`, `Multi-hop chain:`, "
-    "`Candidate answer:`, and `Evidence:`. Candidate answer contains only the final "
-    "answer value. If a comparison produces unexpectedly equal values, recheck the "
+    "determine the semantic candidate. Return exactly the six structured fields "
+    "question_scope, answer_slot, evidence_propositions, multi_hop_chain, "
+    "candidate_answer, and evidence. Copy question_scope exactly from the original "
+    "question. answer_slot identifies the selected proposition and whether its subject "
+    "or object_or_attribute_value supplies candidate_answer. Candidate answer contains "
+    "only that exact evidence-aligned value; retain a source title or qualifier in a "
+    "proper-name span rather than shortening it. If a comparison produces unexpectedly "
+    "equal values, recheck the "
     "original scope, both entity-attribute bindings, retrieved evidence, and any "
     "upstream contract narrowing before concluding a tie."
 )
@@ -181,8 +185,8 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
                 " ReAct is only this node's execution schedule, not its role. "
                 "Never place semantic-answer fields in search/read arguments. "
                 "Only when the assigned contract marks completion currently "
-                "admissible, put the semantic Reasoner artifact defined there in "
-                "arguments.value."
+                "admissible, put the structured semantic Reasoner artifact defined "
+                "there in arguments.value."
             )
         elif hotpot_semantic and semantic_role == "verifier":
             protocol += (
@@ -446,6 +450,33 @@ class OpenAICompatibleGateway:
             # accompanied only by reasoning_content.
             payload["chat_template_kwargs"] = {
                 "enable_thinking": normalized == "true"
+            }
+        response_schema_text = metadata.get("response_json_schema")
+        if response_schema_text is not None:
+            if not isinstance(response_schema_text, str) or not response_schema_text.strip():
+                raise OpenAICompatibleGatewayError(
+                    "model metadata response_json_schema must be non-empty JSON text"
+                )
+            try:
+                response_schema = json.loads(response_schema_text)
+            except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise OpenAICompatibleGatewayError(
+                    "model metadata response_json_schema is not valid JSON"
+                ) from exc
+            if not isinstance(response_schema, dict):
+                raise OpenAICompatibleGatewayError(
+                    "model metadata response_json_schema must decode to an object"
+                )
+            # DIRECT_REUSE: SkillFlow runtime/openai_provider.py sends the
+            # request-scoped ModelRequest.response_schema through the standard
+            # OpenAI structured-output boundary.
+            payload["response_format"] = {
+                "json_schema": {
+                    "name": "skillev_action",
+                    "schema": response_schema,
+                    "strict": True,
+                },
+                "type": "json_schema",
             }
         return payload
 
