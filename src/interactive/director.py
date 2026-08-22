@@ -298,6 +298,11 @@ _SUPPORTED_DIRECTOR_SYSTEM_PROMPTS = frozenset(
 
 
 _NON_EMPTY_STRING_SCHEMA = {"type": "string", "minLength": 1}
+# Qwen3.5/SGLang returns the sampled EOS token in ``text`` even when the
+# JSON-Schema grammar has already closed the object.  Keep that token in the
+# exact generation receipt, but admit it as the sole transport-level suffix
+# when a hierarchical phase parses its JSON payload.
+_QWEN_JSON_EOS_TEXT = "<|endoftext|>"
 _AGENT_SPEC_JSON_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
@@ -461,7 +466,7 @@ DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3 = (
     "agentgraph.model-admissible-action-mask.v3"
 )
 DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION = (
-    "agentgraph.live-action-target-domains.v1"
+    "agentgraph.live-action-target-domains.v5"
 )
 DIRECTOR_ACTION_JSON_SCHEMA_TEXT = json.dumps(
     DIRECTOR_ACTION_JSON_SCHEMA,
@@ -742,6 +747,8 @@ def _live_role_agent_schema(
     role_family: str,
     constraint: Mapping[str, Any],
     model_ids: Sequence[str],
+    *,
+    agent_id: Optional[str] = None,
 ) -> Mapping[str, Any]:
     execution_modes = _live_string_domain(
         constraint.get("execution_modes"),
@@ -766,10 +773,24 @@ def _live_role_agent_schema(
     ):
         raise ValueError(f"{role_family}.allowed_tools must not contain duplicates")
     properties = json.loads(json.dumps(_AGENT_SPEC_JSON_SCHEMA["properties"]))
+    if agent_id is not None:
+        if not isinstance(agent_id, str) or not agent_id:
+            raise ValueError("live Agent ID must be non-empty text")
+        properties["agent_id"] = {"const": agent_id}
     properties["model_id"] = {"enum": list(model_ids)}
     properties["role_family"] = {"const": role_family}
     properties["execution_mode"] = {"enum": list(execution_modes)}
     properties["allowed_tools"] = {"enum": normalized_tool_sets}
+    raw_contracts = constraint.get("contracts")
+    if raw_contracts is not None:
+        properties["contract"] = {
+            "enum": list(
+                _live_string_domain(
+                    raw_contracts,
+                    label=f"{role_family}.contracts",
+                )
+            )
+        }
     return {
         "type": "object",
         "additionalProperties": False,
@@ -778,8 +799,126 @@ def _live_role_agent_schema(
     }
 
 
+def _live_new_agent_ids(
+    existing_agent_ids: Sequence[str],
+    max_agents: int,
+) -> tuple[str, ...]:
+    """Derive unique neutral node IDs from the current Canvas.
+
+    FlowSteer's ``WorkflowGraph`` assigns ``node_N`` identifiers when an
+    Operator is added.  AgentGraph keeps the sampled declaration in the exact
+    action receipt, so the constrained schema supplies those same neutral IDs
+    as positional constants instead of asking the Director to invent graph
+    identifiers.  Roles, contracts, models, Tools, count, and topology remain
+    sampled choices.
+    """
+
+    if (
+        isinstance(existing_agent_ids, (str, bytes))
+        or any(not isinstance(agent_id, str) or not agent_id for agent_id in existing_agent_ids)
+    ):
+        raise ValueError("existing Agent IDs are invalid")
+    if type(max_agents) is not int or max_agents < 1:
+        raise ValueError("new Agent ID count must be positive")
+    used = set(existing_agent_ids)
+    result: list[str] = []
+    index = 1
+    while len(result) < max_agents:
+        candidate = f"node_{index}"
+        index += 1
+        if candidate in used:
+            continue
+        used.add(candidate)
+        result.append(candidate)
+    return tuple(result)
+
+
+def _live_existing_agent_roles(
+    domain: Mapping[str, Any],
+    role_constraints: Mapping[str, Any],
+) -> dict[str, str]:
+    """Validate the HotpotQA Canvas endpoint-to-role receipt."""
+
+    existing_ids = tuple(domain.get("existing_agent_ids", ()))
+    raw_agents = domain.get("existing_agents")
+    if not isinstance(raw_agents, (list, tuple)) or len(raw_agents) != len(
+        existing_ids
+    ):
+        raise ValueError(
+            "add_subgraph HotpotQA existing-Agent role domain is incomplete"
+        )
+    roles: dict[str, str] = {}
+    ordered_ids: list[str] = []
+    for raw_agent in raw_agents:
+        if not isinstance(raw_agent, Mapping) or set(raw_agent) != {
+            "agent_id",
+            "role_family",
+        }:
+            raise ValueError(
+                "add_subgraph HotpotQA existing-Agent role entry is malformed"
+            )
+        agent_id = raw_agent.get("agent_id")
+        role_family = raw_agent.get("role_family")
+        if (
+            not isinstance(agent_id, str)
+            or not agent_id
+            or not isinstance(role_family, str)
+            or role_family not in role_constraints
+            or agent_id in roles
+        ):
+            raise ValueError(
+                "add_subgraph HotpotQA existing-Agent role entry is invalid"
+            )
+        ordered_ids.append(agent_id)
+        roles[agent_id] = role_family
+    if tuple(ordered_ids) != existing_ids:
+        raise ValueError(
+            "add_subgraph HotpotQA existing-Agent roles changed Canvas order"
+        )
+    return roles
+
+
+def _live_hotpotqa_output_domain(
+    domain: Mapping[str, Any],
+    roles: Mapping[str, str],
+) -> Optional[str]:
+    """Validate the revision-local HotpotQA Output ownership receipt."""
+
+    if domain.get("output_role_family") != "format":
+        raise ValueError("add_subgraph HotpotQA Output role domain is invalid")
+    if "current_output_agent_id" not in domain:
+        raise ValueError("add_subgraph HotpotQA current Output receipt is missing")
+    current_output = domain.get("current_output_agent_id")
+    if current_output is None:
+        return None
+    if (
+        not isinstance(current_output, str)
+        or current_output not in roles
+        or roles[current_output] != "format"
+    ):
+        raise ValueError("add_subgraph HotpotQA current Output receipt is invalid")
+    return current_output
+
+
+def _hotpotqa_directed_role_relation_allowed(
+    source_role: str,
+    target_role: str,
+) -> bool:
+    """Mirror the incremental HotpotQA semantic-edge validator."""
+
+    if source_role == "format":
+        return False
+    if target_role == "verifier":
+        return source_role == "reasoner"
+    if target_role == "format":
+        return source_role == "verifier"
+    return True
+
+
 def director_live_add_subgraph_agent_declarations_json_schema_text(
     action_target_domains: Mapping[str, Any],
+    *,
+    selected_agent_roles: Optional[Sequence[Mapping[str, Any]]] = None,
 ) -> str:
     """Render the first v3 ADD phase for exact Agent declarations.
 
@@ -842,20 +981,76 @@ def director_live_add_subgraph_agent_declarations_json_schema_text(
     role_constraints = domain.get("role_constraints")
     if not isinstance(role_constraints, Mapping) or not role_constraints:
         raise ValueError("add_subgraph role constraints are missing")
-    role_branches = [
-        _live_role_agent_schema(
-            required_fields,
-            role_family,
-            constraint,
-            model_ids,
+    if domain.get("semantic_protocol") == HOTPOTQA_SEMANTIC_PROTOCOL:
+        existing_roles = _live_existing_agent_roles(domain, role_constraints)
+        _live_hotpotqa_output_domain(domain, existing_roles)
+    new_agent_ids = _live_new_agent_ids(existing_agent_ids, max_agents)
+    selected_roles: Optional[tuple[str, ...]] = None
+    if selected_agent_roles is not None:
+        if (
+            not isinstance(selected_agent_roles, (list, tuple))
+            or not min_agents <= len(selected_agent_roles) <= max_agents
+        ):
+            raise ValueError("add_subgraph selected Agent roles have invalid count")
+        normalized_roles: list[str] = []
+        for position, value in enumerate(selected_agent_roles):
+            if not isinstance(value, Mapping) or set(value) != {
+                "agent_id",
+                "role_family",
+            }:
+                raise ValueError("add_subgraph selected Agent role is malformed")
+            if value.get("agent_id") != new_agent_ids[position]:
+                raise ValueError(
+                    "add_subgraph selected Agent role changed its Canvas node ID"
+                )
+            role_family = value.get("role_family")
+            if not isinstance(role_family, str) or role_family not in role_constraints:
+                raise ValueError(
+                    "add_subgraph selected Agent role is outside the live domain"
+                )
+            normalized_roles.append(role_family)
+        selected_roles = tuple(normalized_roles)
+    positional_agent_schemas: list[Mapping[str, Any]] = []
+    positional_count = (
+        len(selected_roles) if selected_roles is not None else max_agents
+    )
+    for position, agent_id in enumerate(new_agent_ids[:positional_count]):
+        admitted_roles = (
+            ((selected_roles[position], role_constraints[selected_roles[position]]),)
+            if selected_roles is not None
+            else tuple(role_constraints.items())
         )
-        for role_family, constraint in role_constraints.items()
-        if isinstance(role_family, str)
-        and role_family
-        and isinstance(constraint, Mapping)
+        role_branches = [
+            _live_role_agent_schema(
+                required_fields,
+                role_family,
+                constraint,
+                model_ids,
+                agent_id=agent_id,
+            )
+            for role_family, constraint in admitted_roles
+            if isinstance(role_family, str)
+            and role_family
+            and isinstance(constraint, Mapping)
+        ]
+        if len(role_branches) != len(admitted_roles):
+            raise ValueError("add_subgraph role constraints are malformed")
+        positional_agent_schemas.append({"anyOf": role_branches})
+    admitted_counts = (
+        (len(selected_roles),)
+        if selected_roles is not None
+        else tuple(range(min_agents, max_agents + 1))
+    )
+    agent_count_branches = [
+        {
+            "type": "array",
+            "minItems": count,
+            "maxItems": count,
+            "prefixItems": positional_agent_schemas[:count],
+            "items": False,
+        }
+        for count in admitted_counts
     ]
-    if len(role_branches) != len(role_constraints):
-        raise ValueError("add_subgraph role constraints are malformed")
     return json.dumps(
         {
             "type": "object",
@@ -864,10 +1059,7 @@ def director_live_add_subgraph_agent_declarations_json_schema_text(
             "properties": {
                 "action": {"const": "add_subgraph"},
                 "agents": {
-                    "type": "array",
-                    "minItems": min_agents,
-                    "maxItems": max_agents,
-                    "items": {"anyOf": role_branches},
+                    "oneOf": agent_count_branches,
                 },
             },
         },
@@ -877,32 +1069,174 @@ def director_live_add_subgraph_agent_declarations_json_schema_text(
     )
 
 
-def _live_add_subgraph_agents(
+def director_live_add_subgraph_role_selection_json_schema_text(
     action_target_domains: Mapping[str, Any],
-    agents: Sequence[Mapping[str, Any]],
-) -> tuple[dict[str, Any], ...]:
-    """Validate sampled declarations against the exact first-phase schema."""
+) -> str:
+    """Select ADD Agent count and semantic roles before free contracts.
+
+    This is the same inference-only hierarchical factorization used for the
+    action discriminator and MODIFY target.  The role choice remains sampled;
+    it is merely committed before a role-conditioned declaration schema lets
+    the Director write each free contract.
+    """
 
     declaration_schema = json.loads(
         director_live_add_subgraph_agent_declarations_json_schema_text(
             action_target_domains
         )
     )
-    agent_schema = declaration_schema["properties"]["agents"]
+    domain = action_target_domains["add_subgraph"]
+    min_agents = domain["min_new_agents"]
+    max_agents = domain["max_new_agents"]
+    existing_agent_ids = domain["existing_agent_ids"]
+    role_constraints = domain["role_constraints"]
+    new_agent_ids = _live_new_agent_ids(existing_agent_ids, max_agents)
+    role_families = tuple(role_constraints)
+    if not role_families:
+        raise ValueError("add_subgraph role domain is empty")
+    positional_roles = [
+        {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["agent_id", "role_family"],
+            "properties": {
+                "agent_id": {"const": agent_id},
+                "role_family": {"enum": list(role_families)},
+            },
+        }
+        for agent_id in new_agent_ids
+    ]
+    count_branches = [
+        {
+            "type": "array",
+            "minItems": count,
+            "maxItems": count,
+            "prefixItems": positional_roles[:count],
+            "items": False,
+        }
+        for count in range(min_agents, max_agents + 1)
+    ]
+    # The declaration render above is intentionally evaluated first so this
+    # smaller selector cannot accept a malformed live domain that the complete
+    # role-conditioned phase would later reject.
+    if not declaration_schema:
+        raise ValueError("add_subgraph declaration schema is empty")
+    return json.dumps(
+        {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["action", "agents"],
+            "properties": {
+                "action": {"const": "add_subgraph"},
+                "agents": {"oneOf": count_branches},
+            },
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def director_live_add_subgraph_role_selection_from_text(
+    text: str,
+    action_target_domains: Mapping[str, Any],
+) -> tuple[dict[str, str], ...]:
+    """Parse one exact ADD count/role phase without repairing sampled text."""
+
+    if not isinstance(text, str):
+        raise ValueError("add_subgraph Agent role selection must be text")
+    stripped = text.strip()
+    try:
+        payload, end = json.JSONDecoder().raw_decode(stripped)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("add_subgraph Agent role selection is not JSON") from exc
+    trailing = stripped[end:].strip()
+    if trailing and trailing != _QWEN_JSON_EOS_TEXT:
+        raise ValueError(
+            "add_subgraph Agent role selection contains trailing text: "
+            f"{trailing[:80]!r}"
+        )
+    if not isinstance(payload, Mapping) or set(payload) != {"action", "agents"}:
+        raise ValueError("add_subgraph Agent role selection fields are invalid")
+    if payload.get("action") != "add_subgraph":
+        raise ValueError("add_subgraph Agent role selection changed its action")
+    agents = payload.get("agents")
+    domain = action_target_domains.get("add_subgraph")
+    if not isinstance(domain, Mapping):
+        raise ValueError("add_subgraph live target domain is missing")
+    min_agents = domain.get("min_new_agents")
+    max_agents = domain.get("max_new_agents")
+    if (
+        not isinstance(agents, list)
+        or type(min_agents) is not int
+        or type(max_agents) is not int
+        or not min_agents <= len(agents) <= max_agents
+    ):
+        raise ValueError("add_subgraph selected Agent roles have invalid count")
+    # Render once to apply the complete domain validation before accepting the
+    # smaller selector receipt.
+    director_live_add_subgraph_role_selection_json_schema_text(
+        action_target_domains
+    )
+    expected_ids = _live_new_agent_ids(domain["existing_agent_ids"], max_agents)
+    role_constraints = domain["role_constraints"]
+    normalized: list[dict[str, str]] = []
+    for position, value in enumerate(agents):
+        if not isinstance(value, Mapping) or set(value) != {
+            "agent_id",
+            "role_family",
+        }:
+            raise ValueError("add_subgraph selected Agent role is malformed")
+        agent_id = value.get("agent_id")
+        role_family = value.get("role_family")
+        if agent_id != expected_ids[position]:
+            raise ValueError(
+                "add_subgraph selected Agent role changed its Canvas node ID"
+            )
+        if not isinstance(role_family, str) or role_family not in role_constraints:
+            raise ValueError(
+                "add_subgraph selected Agent role is outside the live domain"
+            )
+        normalized.append(
+            {"agent_id": agent_id, "role_family": role_family}
+        )
+    return tuple(normalized)
+
+
+def _live_add_subgraph_agents(
+    action_target_domains: Mapping[str, Any],
+    agents: Sequence[Mapping[str, Any]],
+    *,
+    selected_agent_roles: Optional[Sequence[Mapping[str, Any]]] = None,
+) -> tuple[dict[str, Any], ...]:
+    """Validate sampled declarations against the exact first-phase schema."""
+
+    declaration_schema = json.loads(
+        director_live_add_subgraph_agent_declarations_json_schema_text(
+            action_target_domains,
+            selected_agent_roles=selected_agent_roles,
+        )
+    )
+    domain = action_target_domains["add_subgraph"]
+    min_agents = domain["min_new_agents"]
+    max_agents = domain["max_new_agents"]
     if (
         not isinstance(agents, (list, tuple))
-        or not agent_schema["minItems"] <= len(agents) <= agent_schema["maxItems"]
+        or not min_agents <= len(agents) <= max_agents
     ):
         raise ValueError("add_subgraph sampled Agent declarations have invalid count")
-    domain = action_target_domains["add_subgraph"]
     existing_ids = set(domain["existing_agent_ids"])
+    expected_new_ids = _live_new_agent_ids(
+        domain["existing_agent_ids"],
+        max_agents,
+    )
     role_constraints = domain["role_constraints"]
     model_ids = set(domain["model_ids"])
     required_fields = set(domain["required_agent_fields"])
     known_fields = set(_AGENT_SPEC_JSON_SCHEMA["properties"])
     normalized: list[dict[str, Any]] = []
     new_ids: set[str] = set()
-    for raw_agent in agents:
+    for position, raw_agent in enumerate(agents):
         if not isinstance(raw_agent, Mapping):
             raise ValueError("add_subgraph Agent declaration must be an object")
         agent = dict(raw_agent)
@@ -918,11 +1252,13 @@ def _live_add_subgraph_agents(
             not isinstance(agent_id, str)
             or not agent_id
             or agent_id != agent_id.strip()
+            or agent_id != expected_new_ids[position]
             or agent_id in existing_ids
             or agent_id in new_ids
         ):
             raise ValueError(
-                "add_subgraph new Agent IDs must be unique and absent from the Canvas"
+                "add_subgraph new Agent IDs must match the unique neutral IDs "
+                "assigned by the current Canvas"
             )
         if not isinstance(model_id, str) or model_id != model_id.strip() or model_id not in model_ids:
             raise ValueError("add_subgraph Agent model_id is outside the live catalog")
@@ -937,6 +1273,12 @@ def _live_add_subgraph_agents(
         constraint = role_constraints.get(role_family)
         if not isinstance(constraint, Mapping):
             raise ValueError("add_subgraph Agent role is outside the live domain")
+        contract_domain = constraint.get("contracts")
+        if contract_domain is not None and contract not in _live_string_domain(
+            contract_domain,
+            label=f"{role_family}.contracts",
+        ):
+            raise ValueError("add_subgraph Agent contract violates its role")
         if (
             execution_mode not in constraint.get("execution_modes", ())
         ):
@@ -959,12 +1301,137 @@ def _live_add_subgraph_agents(
                 )
         new_ids.add(agent_id)
         normalized.append(agent)
+    if selected_agent_roles is not None:
+        expected_roles = tuple(
+            (value["agent_id"], value["role_family"])
+            for value in selected_agent_roles
+        )
+        actual_roles = tuple(
+            (value["agent_id"], value["role_family"])
+            for value in normalized
+        )
+        if actual_roles != expected_roles:
+            raise ValueError(
+                "add_subgraph Agent declarations changed their selected roles"
+            )
     return tuple(normalized)
+
+
+def director_live_add_subgraph_relation_candidates(
+    action_target_domains: Mapping[str, Any],
+    agents: Sequence[Mapping[str, Any]],
+) -> tuple[dict[str, Any], ...]:
+    """Project exact role-valid relation encodings for one sampled subgraph.
+
+    The HotpotQA Canvas remains authoritative.  This projection applies its
+    incremental role-edge validator and the user-required semantic dataflow
+    order (Retriever/Repair -> Reasoner -> Verifier -> Formatter).  A reverse
+    feedback edge remains available through a reciprocal relation when both
+    directed edges are legal.  A one-way relation is always encoded as its
+    actual sender ``source_id`` to receiver ``target_id`` with ``(true,false)``
+    instead of the directionally equivalent but ambiguous ``(false,true)``.
+    No relation is required, so the Director still selects the graph topology.
+    """
+
+    normalized_agents = _live_add_subgraph_agents(
+        action_target_domains,
+        agents,
+    )
+    domain = action_target_domains["add_subgraph"]
+    if domain.get("semantic_protocol") != HOTPOTQA_SEMANTIC_PROTOCOL:
+        return ()
+    role_constraints = domain["role_constraints"]
+    roles = _live_existing_agent_roles(domain, role_constraints)
+    for agent in normalized_agents:
+        roles[agent["agent_id"]] = agent["role_family"]
+    endpoint_ids = [*domain["existing_agent_ids"]]
+    endpoint_ids.extend(agent["agent_id"] for agent in normalized_agents)
+    candidates: list[dict[str, Any]] = []
+    semantic_dataflow_pairs = {
+        ("evidence_retriever", "reasoner"),
+        ("repair", "reasoner"),
+        ("reasoner", "verifier"),
+        ("verifier", "format"),
+    }
+    for source_index, source_id in enumerate(endpoint_ids):
+        for target_id in endpoint_ids[source_index + 1 :]:
+            source_role = roles[source_id]
+            target_role = roles[target_id]
+            source_to_target = _hotpotqa_directed_role_relation_allowed(
+                source_role,
+                target_role,
+            )
+            target_to_source = _hotpotqa_directed_role_relation_allowed(
+                target_role,
+                source_role,
+            )
+            forward_is_source_to_target = (source_role, target_role) in (
+                semantic_dataflow_pairs
+            )
+            forward_is_target_to_source = (target_role, source_role) in (
+                semantic_dataflow_pairs
+            )
+            if forward_is_source_to_target or forward_is_target_to_source:
+                if forward_is_source_to_target and source_to_target:
+                    sender_id, receiver_id = source_id, target_id
+                elif forward_is_target_to_source and target_to_source:
+                    sender_id, receiver_id = target_id, source_id
+                else:
+                    sender_id = receiver_id = None
+                if sender_id is not None and receiver_id is not None:
+                    candidates.append(
+                        {
+                            "source_id": sender_id,
+                            "target_id": receiver_id,
+                            "source_to_target": True,
+                            "target_to_source": False,
+                        }
+                    )
+                if source_to_target and target_to_source:
+                    candidates.append(
+                        {
+                            "source_id": source_id,
+                            "target_id": target_id,
+                            "source_to_target": True,
+                            "target_to_source": True,
+                        }
+                    )
+                continue
+            if source_to_target:
+                candidates.append(
+                    {
+                        "source_id": source_id,
+                        "target_id": target_id,
+                        "source_to_target": True,
+                        "target_to_source": False,
+                    }
+                )
+            if target_to_source:
+                candidates.append(
+                    {
+                        "source_id": target_id,
+                        "target_id": source_id,
+                        "source_to_target": True,
+                        "target_to_source": False,
+                    }
+                )
+            if source_to_target and target_to_source:
+                candidates.append(
+                    {
+                        "source_id": source_id,
+                        "target_id": target_id,
+                        "source_to_target": True,
+                        "target_to_source": True,
+                    }
+                )
+    return tuple(candidates)
 
 
 def director_live_add_subgraph_agent_declarations_from_text(
     text: str,
     action_target_domains: Mapping[str, Any],
+    *,
+    selected_agent_roles: Optional[Sequence[Mapping[str, Any]]] = None,
 ) -> tuple[dict[str, Any], ...]:
     """Parse one exact declaration-phase object without repairing its text."""
 
@@ -975,8 +1442,12 @@ def director_live_add_subgraph_agent_declarations_from_text(
         payload, end = json.JSONDecoder().raw_decode(stripped)
     except (TypeError, ValueError) as exc:
         raise ValueError("add_subgraph Agent declarations are not JSON") from exc
-    if stripped[end:].strip():
-        raise ValueError("add_subgraph Agent declarations contain trailing text")
+    trailing = stripped[end:].strip()
+    if trailing and trailing != _QWEN_JSON_EOS_TEXT:
+        raise ValueError(
+            "add_subgraph Agent declarations contain trailing text: "
+            f"{trailing[:80]!r}"
+        )
     if not isinstance(payload, Mapping) or set(payload) != {"action", "agents"}:
         raise ValueError("add_subgraph Agent declaration fields are invalid")
     if payload.get("action") != "add_subgraph":
@@ -984,6 +1455,7 @@ def director_live_add_subgraph_agent_declarations_from_text(
     return _live_add_subgraph_agents(
         action_target_domains,
         payload.get("agents"),
+        selected_agent_roles=selected_agent_roles,
     )
 
 
@@ -1161,13 +1633,86 @@ def director_live_action_parameter_json_schema_text(
             director_state_conditioned_sampling_json_schema_text("add_subgraph")
         )
         schema["properties"]["agents"] = {"const": list(normalized_agents)}
-        relation_items = schema["properties"]["relations"]["items"]
-        for branch in relation_items["anyOf"]:
-            branch["properties"]["source_id"] = {"enum": endpoint_ids}
-            branch["properties"]["target_id"] = {"enum": endpoint_ids}
-        schema["properties"]["output_agent_id"] = {
-            "anyOf": [{"enum": endpoint_ids}, {"type": "null"}]
-        }
+        if domain.get("semantic_protocol") == HOTPOTQA_SEMANTIC_PROTOCOL:
+            relation_candidates = director_live_add_subgraph_relation_candidates(
+                action_target_domains,
+                normalized_agents,
+            )
+            if relation_candidates:
+                schema["properties"]["relations"] = {
+                    "type": "array",
+                    # xgrammar supports exact candidate branches but JSON
+                    # Schema has no portable unique-by-unordered-endpoint-pair
+                    # constraint.  Keep ADD as one executable relation edit;
+                    # FlowSteer's subsequent set_relation turns grow or make
+                    # that relation reciprocal after execution feedback.
+                    "maxItems": 1,
+                    "uniqueItems": True,
+                    "items": {
+                        "anyOf": [
+                            {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "required": [
+                                    "source_id",
+                                    "target_id",
+                                    "source_to_target",
+                                    "target_to_source",
+                                ],
+                                "properties": {
+                                    key: {"const": value}
+                                    for key, value in candidate.items()
+                                },
+                            }
+                            for candidate in relation_candidates
+                        ]
+                    },
+                }
+            else:
+                schema["properties"]["relations"] = {
+                    "type": "array",
+                    "maxItems": 0,
+                }
+            roles = _live_existing_agent_roles(
+                domain,
+                domain["role_constraints"],
+            )
+            current_output_agent_id = _live_hotpotqa_output_domain(
+                domain,
+                roles,
+            )
+            roles.update(
+                {
+                    agent["agent_id"]: agent["role_family"]
+                    for agent in normalized_agents
+                }
+            )
+            format_ids = [
+                agent_id
+                for agent_id in endpoint_ids
+                if roles[agent_id] == "format"
+            ]
+            schema["properties"]["output_agent_id"] = (
+                {"type": "null"}
+                if current_output_agent_id is not None
+                else
+                {
+                    "anyOf": [
+                        {"enum": format_ids},
+                        {"type": "null"},
+                    ]
+                }
+                if format_ids
+                else {"type": "null"}
+            )
+        else:
+            relation_items = schema["properties"]["relations"]["items"]
+            for branch in relation_items["anyOf"]:
+                branch["properties"]["source_id"] = {"enum": endpoint_ids}
+                branch["properties"]["target_id"] = {"enum": endpoint_ids}
+            schema["properties"]["output_agent_id"] = {
+                "anyOf": [{"enum": endpoint_ids}, {"type": "null"}]
+            }
     elif action == "modify_agent":
         if modify_field not in DIRECTOR_MODIFY_AGENT_FIELDS:
             raise ValueError("modify_agent v3 parameter phase requires a live field")
@@ -2262,6 +2807,9 @@ __all__ = [
     "director_model_admissible_schema_branch_v3",
     "director_live_add_subgraph_agent_declarations_from_text",
     "director_live_add_subgraph_agent_declarations_json_schema_text",
+    "director_live_add_subgraph_role_selection_from_text",
+    "director_live_add_subgraph_role_selection_json_schema_text",
+    "director_live_add_subgraph_relation_candidates",
     "director_live_action_parameter_json_schema_text",
     "director_live_action_target_domains_json",
     "director_live_modify_agent_selector_json_schema_text",

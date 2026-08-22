@@ -48,6 +48,10 @@ _SUPPORTED_SEMANTIC_PROTOCOLS = frozenset({"none", _HOTPOTQA_SEMANTIC_PROTOCOL})
 _SUPPORTED_RECOVERY_POLICIES = frozenset(
     {"default", _PRESERVE_REPAIR_RECOVERY_POLICY}
 )
+_HOTPOTQA_FORMAT_CONTRACT = (
+    "copy the supported Verifier candidate character-for-character into the "
+    "required answer wrapper"
+)
 
 _REASONER_SEMANTIC_FIELDS = (
     "question_scope",
@@ -321,6 +325,7 @@ class AgentWorkflowEnv:
         ] = {}
         self._unresolved_dirty_agents: set[str] = set()
         self._failed_agent_ids: set[str] = set()
+        self._diagnosed_unusable_agent_ids: set[str] = set()
         self._validate_agent_limit(self._graph)
         partial = self._graph.validate(self.model_registry, require_complete=False)
         if not partial.valid:
@@ -366,6 +371,20 @@ class AgentWorkflowEnv:
         terminate the current public state from the next model observation.
         """
 
+        finish_admitted = self.finish_admissibility().get("admissible") is True
+        if (
+            self.semantic_protocol == _HOTPOTQA_SEMANTIC_PROTOCOL
+            and self.recovery_policy == _PRESERVE_REPAIR_RECOVERY_POLICY
+            and finish_admitted
+            and AgentActionType.FINISH.value in self._allowed_action_type_set
+        ):
+            # Once the current revision has a verified semantic lineage and a
+            # valid terminal artifact, further edits can only endanger the
+            # already completed answer.  FlowSteer's action mask still asks the
+            # Director to emit the explicit terminal action; it does not finish
+            # automatically.
+            return (AgentActionType.FINISH.value,)
+
         node_count = len(self._graph.nodes)
         node_ids = tuple(node.id for node in self._graph.nodes)
         can_add = self.max_agents is None or node_count < self.max_agents
@@ -375,23 +394,28 @@ class AgentWorkflowEnv:
             if self._delete_admission_issue(node_id) is None
         )
         can_delete = bool(deletable_ids)
-        output_target_ids = tuple(
-            node.id
-            for node in self._graph.nodes
-            if (
-                self.semantic_protocol != _HOTPOTQA_SEMANTIC_PROTOCOL
-                or (node.role_family or "").casefold() == "format"
+        active_semantic_lineage = set(self._active_semantic_lineage_ids())
+        output_target_ids = (
+            ()
+            if self._graph.output_agent_id in active_semantic_lineage
+            else tuple(
+                node.id
+                for node in self._graph.nodes
+                if (
+                    self.semantic_protocol != _HOTPOTQA_SEMANTIC_PROTOCOL
+                    or (node.role_family or "").casefold() == "format"
+                )
+                and node.id != self._graph.output_agent_id
             )
-            and node.id != self._graph.output_agent_id
         )
+        modifiable_ids = self._model_admissible_modify_agent_ids()
         can_set_output = bool(output_target_ids)
         can_set_relation = bool(self._model_admissible_relation_candidates())
-        finish_admitted = self.finish_admissibility().get("admissible") is True
         admitted: list[str] = []
         for action_type in self.allowed_action_types:
             if action_type == AgentActionType.ADD_SUBGRAPH.value and can_add:
                 admitted.append(action_type)
-            elif action_type == AgentActionType.MODIFY_AGENT.value and node_count > 0:
+            elif action_type == AgentActionType.MODIFY_AGENT.value and modifiable_ids:
                 admitted.append(action_type)
             elif action_type == AgentActionType.DELETE_AGENT.value and can_delete:
                 admitted.append(action_type)
@@ -407,6 +431,8 @@ class AgentWorkflowEnv:
         """Return exact non-self, non-no-op relation edits accepted by Canvas."""
 
         node_ids = [node.id for node in self._graph.nodes]
+        active_lineage = self._active_semantic_lineage_ids()
+        protected_edges = tuple(zip(active_lineage, active_lineage[1:]))
         candidates: list[dict[str, object]] = []
         for source_index, source_id in enumerate(node_ids):
             for target_id in node_ids[source_index + 1 :]:
@@ -437,6 +463,12 @@ class AgentWorkflowEnv:
                         continue
                     if self._semantic_edit_issue_for(candidate) is not None:
                         continue
+                    if any(
+                        target_id
+                        not in self._directed_successors(candidate, source_id)
+                        for source_id, target_id in protected_edges
+                    ):
+                        continue
                     candidates.append(
                         {
                             "source_id": source_id,
@@ -446,6 +478,22 @@ class AgentWorkflowEnv:
                         }
                     )
         return candidates
+
+    def _model_admissible_modify_agent_ids(self) -> Tuple[str, ...]:
+        """Exclude an already verified semantic lineage from repair targets."""
+
+        node_ids = tuple(node.id for node in self._graph.nodes)
+        if self.recovery_policy != _PRESERVE_REPAIR_RECOVERY_POLICY:
+            return node_ids
+        protected = set(self._active_semantic_lineage_ids())
+        responsible = set(self._failed_agent_ids)
+        responsible.update(self._unresolved_dirty_agents)
+        responsible.update(self._terminal_unreachable_agent_ids())
+        return tuple(
+            node_id
+            for node_id in node_ids
+            if node_id not in protected or node_id in responsible
+        )
 
     def model_admissible_action_targets(self) -> dict[str, object]:
         """Project exact current Canvas target domains for constrained sampling.
@@ -473,6 +521,15 @@ class AgentWorkflowEnv:
                 **(
                     {
                         "semantic_protocol": self.semantic_protocol,
+                        "existing_agents": [
+                            {
+                                "agent_id": node.id,
+                                "role_family": node.role_family,
+                            }
+                            for node in self._graph.nodes
+                        ],
+                        "current_output_agent_id": self._graph.output_agent_id,
+                        "output_role_family": "format",
                         "required_agent_fields": [
                             "agent_id",
                             "model_id",
@@ -496,6 +553,7 @@ class AgentWorkflowEnv:
                             "format": {
                                 "execution_modes": ["reasoning"],
                                 "allowed_tools": [[]],
+                                "contracts": [_HOTPOTQA_FORMAT_CONTRACT],
                             },
                             "evidence_retriever": {
                                 "execution_modes": ["react"],
@@ -524,6 +582,7 @@ class AgentWorkflowEnv:
                 ),
             }
         if AgentActionType.MODIFY_AGENT.value in admitted:
+            modifiable_node_ids = list(self._model_admissible_modify_agent_ids())
             mutable_fields = [
                 "model_id",
                 "contract",
@@ -552,7 +611,7 @@ class AgentWorkflowEnv:
                             if isinstance(responsible, str):
                                 responsible_ids.add(responsible)
             targets[AgentActionType.MODIFY_AGENT.value] = {
-                "agent_ids": node_ids,
+                "agent_ids": modifiable_node_ids,
                 "failed_agent_ids": sorted(self._failed_agent_ids),
                 "responsible_agent_ids": sorted(
                     responsible_ids.intersection(node_ids)
@@ -561,7 +620,19 @@ class AgentWorkflowEnv:
                 "per_agent_candidates": [
                     {
                         "agent_id": agent_id,
-                        "mutable_fields": mutable_fields,
+                        "mutable_fields": [
+                            field
+                            for field in mutable_fields
+                            if not (
+                                self.semantic_protocol
+                                == _HOTPOTQA_SEMANTIC_PROTOCOL
+                                and (
+                                    self._graph.get_node(agent_id).role_family or ""
+                                ).casefold()
+                                == "format"
+                                and field == "contract"
+                            )
+                        ],
                         "discrete_value_domains": {
                             "model_id": [
                                 model_id
@@ -571,7 +642,7 @@ class AgentWorkflowEnv:
                             ]
                         },
                     }
-                    for agent_id in node_ids
+                    for agent_id in modifiable_node_ids
                 ],
             }
         if AgentActionType.DELETE_AGENT.value in admitted:
@@ -590,16 +661,22 @@ class AgentWorkflowEnv:
                 "candidates": self._model_admissible_relation_candidates(),
             }
         if AgentActionType.SET_OUTPUT.value in admitted:
+            active_semantic_lineage = set(self._active_semantic_lineage_ids())
             targets[AgentActionType.SET_OUTPUT.value] = {
-                "agent_ids": [
-                    node.id
-                    for node in self._graph.nodes
-                    if (
-                        self.semantic_protocol != _HOTPOTQA_SEMANTIC_PROTOCOL
-                        or (node.role_family or "").casefold() == "format"
-                    )
-                    and node.id != self._graph.output_agent_id
-                ],
+                "agent_ids": (
+                    []
+                    if self._graph.output_agent_id in active_semantic_lineage
+                    else [
+                        node.id
+                        for node in self._graph.nodes
+                        if (
+                            self.semantic_protocol
+                            != _HOTPOTQA_SEMANTIC_PROTOCOL
+                            or (node.role_family or "").casefold() == "format"
+                        )
+                        and node.id != self._graph.output_agent_id
+                    ]
+                ),
                 "current_output_agent_id": self._graph.output_agent_id,
             }
         if AgentActionType.FINISH.value in admitted:
@@ -706,6 +783,12 @@ class AgentWorkflowEnv:
                 "action rejected: action type is outside the configured Canvas "
                 f"action set {list(self.allowed_action_types)!r}",
             )
+        preservation_issue = self._preservation_admission_issue(action)
+        if preservation_issue is not None:
+            return self._reject_after_count(
+                action,
+                "edit rejected: " + preservation_issue,
+            )
         if action.action_type is AgentActionType.DELETE_AGENT:
             delete_issue = self._delete_admission_issue(action.agent_id)
             if delete_issue is not None:
@@ -767,11 +850,9 @@ class AgentWorkflowEnv:
                     self._unresolved_dirty_agents = (
                         current_agent_ids - completed_agent_ids
                     )
-                    self._failed_agent_ids.intersection_update(current_agent_ids)
-                    self._failed_agent_ids.update(
-                        record.agent_id
-                        for record in exc.failure_records
-                        if record.agent_id in current_agent_ids
+                    self._record_failure_state(
+                        exc.failure_records,
+                        current_agent_ids=current_agent_ids,
                     )
                     return self._reject_after_count(
                         action,
@@ -787,7 +868,7 @@ class AgentWorkflowEnv:
                 self._progressive_execution = execution
                 self._progressive_execution_revision = self._graph.revision
                 self._unresolved_dirty_agents.clear()
-                self._failed_agent_ids.clear()
+                self._clear_failure_state()
             environment_terminal_issue = self._environment_terminal_issue(execution)
             if environment_terminal_issue is not None:
                 return self._reject_after_count(
@@ -817,7 +898,7 @@ class AgentWorkflowEnv:
                 )
             self._finished = True
             self._unresolved_dirty_agents.clear()
-            self._failed_agent_ids.clear()
+            self._clear_failure_state()
             self._previous_revision_outputs.clear()
             self._previous_revision_output_metadata.clear()
             self._last_feedback = "workflow finished"
@@ -893,7 +974,7 @@ class AgentWorkflowEnv:
 
         self._graph = candidate
         current_agent_ids = {node.id for node in self._graph.nodes}
-        self._failed_agent_ids.intersection_update(current_agent_ids)
+        self._retain_current_failure_state(current_agent_ids)
         self._unresolved_dirty_agents = (
             self._unresolved_dirty_agents & current_agent_ids
         ) | (set(dirty_agents) & current_agent_ids)
@@ -947,10 +1028,14 @@ class AgentWorkflowEnv:
                         if partial_execution is None
                         else partial_execution.outputs
                     )
-                    self._failed_agent_ids.update(
-                        record.agent_id
-                        for record in exc.failure_records
-                        if record.agent_id in current_agent_ids
+                    self._diagnosed_unusable_agent_ids.difference_update(
+                        ()
+                        if partial_execution is None
+                        else partial_execution.outputs
+                    )
+                    self._record_failure_state(
+                        exc.failure_records,
+                        current_agent_ids=current_agent_ids,
                     )
                 else:
                     self._progressive_outputs = dict(execution.outputs)
@@ -960,8 +1045,14 @@ class AgentWorkflowEnv:
                     }
                     self._progressive_execution = execution
                     self._progressive_execution_revision = self._graph.revision
-                    self._unresolved_dirty_agents.clear()
-                    self._failed_agent_ids.clear()
+                    # A HotpotQA Verifier/Formatter can be structurally present
+                    # while its semantic input is not yet routable.  Runtime
+                    # deferral is successful progressive execution, not Agent
+                    # failure; keep only those unmaterialized nodes unresolved.
+                    self._unresolved_dirty_agents = (
+                        current_agent_ids - set(execution.outputs)
+                    )
+                    self._clear_failure_state()
             else:
                 self._clear_progressive_execution()
         self._last_feedback = self._accepted_feedback(
@@ -1098,6 +1189,7 @@ class AgentWorkflowEnv:
                 "output": answer,
                 "executed_agent_ids": list(execution.executed_agent_ids),
                 "reused_agent_ids": list(execution.reused_agent_ids),
+                "deferred_agent_ids": list(execution.deferred_agent_ids),
                 "topology": self._graph.topology_statistics(),
                 "output_inbox": output_inbox,
                 "agent_artifacts": agent_artifacts,
@@ -1400,7 +1492,42 @@ class AgentWorkflowEnv:
         self._previous_revision_outputs.clear()
         self._previous_revision_output_metadata.clear()
         self._unresolved_dirty_agents.clear()
+        self._clear_failure_state()
+
+    def _retain_current_failure_state(self, current_agent_ids: set[str]) -> None:
+        """Drop failure diagnoses for nodes no longer present on the Canvas."""
+
+        self._failed_agent_ids.intersection_update(current_agent_ids)
+        self._diagnosed_unusable_agent_ids.intersection_update(current_agent_ids)
+
+    def _record_failure_state(
+        self,
+        records: Sequence[AgentFailureRecord],
+        *,
+        current_agent_ids: set[str],
+    ) -> None:
+        """Record measured failures without inferring node unusability.
+
+        A provider request, ReAct exhaustion, Tool error, or contract error is a
+        repair diagnosis, not evidence that the Agent node itself is unusable.
+        Deletion eligibility requires the execution adapter's explicit typed
+        ``node_unusable=true`` receipt and remains separately gated on artifact
+        takeover.
+        """
+
+        self._retain_current_failure_state(current_agent_ids)
+        for record in records:
+            if record.agent_id not in current_agent_ids:
+                continue
+            self._failed_agent_ids.add(record.agent_id)
+            if record.metadata.get("node_unusable") is True:
+                self._diagnosed_unusable_agent_ids.add(record.agent_id)
+            else:
+                self._diagnosed_unusable_agent_ids.discard(record.agent_id)
+
+    def _clear_failure_state(self) -> None:
         self._failed_agent_ids.clear()
+        self._diagnosed_unusable_agent_ids.clear()
 
     def _invalidate_progressive_outputs(
         self,
@@ -1647,6 +1774,12 @@ class AgentWorkflowEnv:
                 return (
                     f"HotpotQA {role.title()} Agent {node.id!r} must use "
                     "execution_mode='reasoning' without Tools"
+                )
+            if role == "format" and node.contract != _HOTPOTQA_FORMAT_CONTRACT:
+                return (
+                    f"HotpotQA Formatter Agent {node.id!r} must use the neutral "
+                    "formatting-only contract and must not name, select, or imply "
+                    "a task answer"
                 )
 
             predecessors = graph.directed_predecessors(node.id)
@@ -2299,7 +2432,10 @@ class AgentWorkflowEnv:
         terminal_unreachable = self._terminal_unreachable_agent_ids()
         terminal_unreachable_set = set(terminal_unreachable)
         failed = tuple(sorted(self._failed_agent_ids & current_ids))
-        failed_set = set(failed)
+        diagnosed_unusable = tuple(
+            sorted(self._diagnosed_unusable_agent_ids & current_ids)
+        )
+        diagnosed_unusable_set = set(diagnosed_unusable)
         active_semantic_lineage = self._active_semantic_lineage_ids()
         active_semantic_lineage_set = set(active_semantic_lineage)
         redundant_after_takeover = tuple(
@@ -2327,7 +2463,7 @@ class AgentWorkflowEnv:
                 reasons.append("output_identity")
             if node.id in terminal_unreachable_set:
                 reasons.append("terminal_unreachable")
-            elif node.id not in failed_set:
+            if node.id not in diagnosed_unusable_set:
                 reasons.append("not_diagnosed_unusable")
             reasons.append("replacement_takeover_required")
             if reasons:
@@ -2349,6 +2485,7 @@ class AgentWorkflowEnv:
                 self._previous_revision_outputs
             ),
             "failed_agent_ids": list(failed),
+            "diagnosed_unusable_agent_ids": list(diagnosed_unusable),
             "unresolved_dirty_agent_ids": list(self.unresolved_dirty_agent_ids),
             "terminal_unreachable_agent_ids": list(terminal_unreachable),
             "active_semantic_lineage_agent_ids": list(active_semantic_lineage),
@@ -2359,7 +2496,7 @@ class AgentWorkflowEnv:
             "deletion_protected": protected,
             "preferred_actions": (
                 ["delete_agent", "set_relation", "modify_agent"]
-                if redundant_after_takeover
+                if deletable
                 else ["modify_agent", "set_relation", "add_subgraph"]
             ),
         }
@@ -2519,7 +2656,7 @@ class AgentWorkflowEnv:
         # Topological disconnection is a relation fault, not evidence that the
         # node itself is unusable.  Deletion therefore requires a measured
         # execution failure plus a same-responsibility replacement takeover.
-        diagnosed_unusable = agent_id in self._failed_agent_ids
+        diagnosed_unusable = agent_id in self._diagnosed_unusable_agent_ids
         downstream_ids = set(self._directed_successors(self._graph, agent_id))
         protected_reasons: list[str] = []
         if self._has_successful_artifact(agent_id):
@@ -2569,6 +2706,64 @@ class AgentWorkflowEnv:
             "same-role/same-artifact replacement has executed successfully, taken "
             "every downstream relation, and (when applicable) received Output identity"
         )
+
+    def _preservation_admission_issue(
+        self,
+        action: AgentAction,
+    ) -> Optional[str]:
+        """Protect a verified semantic lineage while recovery remains active."""
+
+        if (
+            self.semantic_protocol != _HOTPOTQA_SEMANTIC_PROTOCOL
+            or self.recovery_policy != _PRESERVE_REPAIR_RECOVERY_POLICY
+            or action.action_type is AgentActionType.FINISH
+        ):
+            return None
+        finish_admissible = self.finish_admissibility().get("admissible") is True
+        if finish_admissible:
+            return (
+                "the current revision already has a verified terminal artifact; "
+                "preserve its evidence, semantic answer, relations, and Output "
+                "identity and emit finish"
+            )
+        lineage = self._active_semantic_lineage_ids()
+        if not lineage:
+            return None
+        lineage_set = set(lineage)
+        if (
+            action.action_type is AgentActionType.MODIFY_AGENT
+            and action.agent_id in lineage_set
+            and action.agent_id not in self._failed_agent_ids
+            and action.agent_id not in self._unresolved_dirty_agents
+        ):
+            return (
+                f"Agent {action.agent_id!r} belongs to the verified semantic "
+                "lineage and has no measured failure"
+            )
+        if (
+            action.action_type is AgentActionType.SET_OUTPUT
+            and self._graph.output_agent_id in lineage_set
+            and action.agent_id != self._graph.output_agent_id
+        ):
+            return "the verified Formatter Output identity must be preserved"
+        if action.action_type is AgentActionType.SET_RELATION:
+            candidate = self._graph.fork()
+            try:
+                candidate.set_relation(
+                    action.source_id,
+                    action.target_id,
+                    bool(action.source_to_target),
+                    bool(action.target_to_source),
+                )
+            except GraphMutationError:
+                return None
+            protected_edges = tuple(zip(lineage, lineage[1:]))
+            if any(
+                target_id not in self._directed_successors(candidate, source_id)
+                for source_id, target_id in protected_edges
+            ):
+                return "a verified semantic-lineage relation must be preserved"
+        return None
 
     def _execution_error_feedback(self, exc: AgentRuntimeError) -> str:
         message = " ".join(str(exc).split())

@@ -122,6 +122,70 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
             {request.semantic_protocol for request in gateway.requests},
         )
 
+    async def test_hotpot_defers_verifier_and_formatter_until_inputs_are_routed(
+        self,
+    ) -> None:
+        catalog = registry()
+        gateway = RecordingGateway()
+        runtime = AgentRuntime(
+            catalog,
+            gateway,
+            semantic_protocol="hotpotqa_verified_answer_slot_v1",
+        )
+        graph = AgentGraph(
+            [
+                AgentNode("reasoner", "m1", "reason", role_family="reasoner"),
+                AgentNode("verifier", "m2", "verify", role_family="verifier"),
+                AgentNode("format", "m2", "format", role_family="format"),
+            ]
+        )
+
+        first = await runtime.execute(
+            graph,
+            "question",
+            require_complete=False,
+            format_output_agent=True,
+        )
+
+        self.assertEqual(("reasoner",), first.executed_agent_ids)
+        self.assertEqual(("format", "verifier"), first.deferred_agent_ids)
+        self.assertEqual(["reasoner"], [item.agent.id for item in gateway.requests])
+
+        graph.set_relation("reasoner", "verifier", True, False)
+        gateway.requests.clear()
+        second = await runtime.execute(
+            graph,
+            "question",
+            require_complete=False,
+            prior_outputs=first.outputs,
+            dirty_agents={"verifier", "format"},
+            format_output_agent=True,
+        )
+        self.assertEqual(("verifier",), second.executed_agent_ids)
+        self.assertEqual(("format",), second.deferred_agent_ids)
+        self.assertEqual(["verifier"], [item.agent.id for item in gateway.requests])
+
+        graph.set_relation("verifier", "format", True, False)
+        graph.set_output("format")
+        gateway.requests.clear()
+        third = await runtime.execute(
+            graph,
+            "question",
+            require_complete=False,
+            prior_outputs=second.outputs,
+            dirty_agents={"format"},
+            format_output_agent=True,
+        )
+        self.assertEqual(("format",), third.executed_agent_ids)
+        self.assertEqual((), third.deferred_agent_ids)
+        formatter_request = gateway.requests[0]
+        self.assertEqual("format", formatter_request.agent.id)
+        self.assertTrue(formatter_request.is_format_agent)
+        self.assertEqual(
+            ["verifier"],
+            [item.source_agent_id for item in formatter_request.upstream],
+        )
+
     async def test_masked_condition_keeps_canonical_upstream_and_marks_requests(self) -> None:
         catalog = registry()
         gateway = RecordingGateway()

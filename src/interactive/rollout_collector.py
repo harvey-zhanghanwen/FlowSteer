@@ -40,15 +40,20 @@ from .director import (
     DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V1,
     DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3,
     DIRECTOR_SYSTEM_PROMPT,
+    HOTPOTQA_SEMANTIC_PROTOCOL,
     DirectorError,
     DirectorResponse,
     decode_director_transcript,
+    encode_director_transcript,
     director_actions_from_admissible_schema_branch,
     director_model_admissible_sampling_json_schema_text,
     director_model_admissible_sampling_json_schema_text_v1,
     director_model_admissible_sampling_json_schema_text_v3,
     director_live_add_subgraph_agent_declarations_from_text,
     director_live_add_subgraph_agent_declarations_json_schema_text,
+    director_live_add_subgraph_role_selection_from_text,
+    director_live_add_subgraph_role_selection_json_schema_text,
+    director_live_add_subgraph_relation_candidates,
     director_live_action_parameter_json_schema_text,
     director_live_action_target_domains_json,
     director_live_modify_agent_selector_json_schema_text,
@@ -82,6 +87,65 @@ AGENTGRAPH_SMOKE_SOURCES: Tuple[str, ...] = (
     "ALFWorld",
     "SWE-bench",
 )
+
+
+HIERARCHICAL_JSON_SCHEMA_STRATEGY = "hierarchical_json_schema"
+ROLE_FIRST_ADD_DECODING_STRATEGY = (
+    "hierarchical_json_schema_role_first_add_v1"
+)
+
+_ADD_DECLARATION_CONTINUATION = (
+    "Complete the Agent declarations for the selected positions and "
+    "role_family values. Keep agent_id and role_family unchanged. Return only "
+    "the JSON object required by the current schema."
+)
+_ADD_ACTION_CONTINUATION = (
+    "Complete the add_subgraph action for these Agent declarations. Keep "
+    "agents unchanged. Select only relations and output_agent_id allowed by "
+    "the current schema. Return only the JSON object."
+)
+
+
+def _hierarchical_continuation_prompt(
+    prompt: str,
+    *,
+    committed_json: str,
+    instruction: str,
+) -> str:
+    """Append one sampled hierarchical decision as model-visible context.
+
+    FlowSteer's progressive Canvas exposes every committed edit before the next
+    decision.  Hierarchical constrained decoding needs the same conditional
+    boundary: JSON Schema constrains tokens, but a later ``const`` field is not
+    semantic context for a contract generated earlier in key order.  Preserve
+    the exact prior transcript, append the canonical sampled receipt as an
+    assistant turn, and request only the next schema-bound phase.
+    """
+
+    if not isinstance(committed_json, str) or not committed_json:
+        raise ReceiptValidationError(
+            "hierarchical continuation requires a non-empty committed receipt"
+        )
+    if not isinstance(instruction, str) or not instruction:
+        raise ReceiptValidationError(
+            "hierarchical continuation requires a non-empty instruction"
+        )
+    transcript = decode_director_transcript(prompt)
+    messages = (
+        list(transcript)
+        if transcript is not None
+        else [
+            {"role": "system", "content": DIRECTOR_SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
+        ]
+    )
+    messages.extend(
+        (
+            {"role": "assistant", "content": committed_json},
+            {"role": "user", "content": instruction},
+        )
+    )
+    return encode_director_transcript(messages)
 
 
 class ReceiptValidationError(DirectorError):
@@ -806,7 +870,8 @@ class SGLangReceiptDirectorClient:
             value, _ = json.JSONDecoder().raw_decode(text.lstrip())
         except (TypeError, ValueError) as exc:
             raise ReceiptValidationError(
-                "hierarchical Director discriminator is not JSON"
+                "hierarchical Director discriminator is not JSON: "
+                f"{text[:80]!r}"
             ) from exc
         expected_fields = {field_name}
         if required_action is not None:
@@ -839,7 +904,8 @@ class SGLangReceiptDirectorClient:
             value, _ = json.JSONDecoder().raw_decode(text.lstrip())
         except (TypeError, ValueError) as exc:
             raise ReceiptValidationError(
-                "hierarchical Director candidate selector is not JSON"
+                "hierarchical Director candidate selector is not JSON: "
+                f"{text[:80]!r}"
             ) from exc
         if not isinstance(value, Mapping) or set(value) != {
             "action",
@@ -864,6 +930,7 @@ class SGLangReceiptDirectorClient:
         metadata = response.metadata
         receipt = {
             "text": response.text,
+            "prompt_text": metadata.get("prompt_text"),
             "prompt_token_ids": metadata.get("prompt_token_ids"),
             "output_token_ids": metadata.get("output_token_ids"),
             "behavior_log_probs": metadata.get("behavior_log_probs"),
@@ -945,18 +1012,82 @@ class SGLangReceiptDirectorClient:
                 selector_response
             )
 
+        selected_add_agent_roles: tuple[dict[str, str], ...] | None = None
         selected_add_agents: tuple[dict[str, Any], ...] | None = None
         selected_modify_field: str | None = None
         selected_modify_agent_id: str | None = None
         selected_relation_candidate: int | None = None
+        parameter_prompt = prompt
         if selected_action == "add_subgraph" and action_target_domains is not None:
-            declaration_schema = (
-                director_live_add_subgraph_agent_declarations_json_schema_text(
+            role_selection_schema = (
+                director_live_add_subgraph_role_selection_json_schema_text(
                     action_target_domains
                 )
             )
-            declaration_payload = dict(
+            role_selection_payload = dict(
                 self._request_payload(prompt, adapter_name, seed)
+            )
+            role_selection_sampling = dict(
+                role_selection_payload["sampling_params"]
+            )
+            role_selection_sampling["json_schema"] = role_selection_schema
+            role_selection_payload["sampling_params"] = role_selection_sampling
+            value, latency_ms, attempt_count = await self._post_with_retries(
+                role_selection_payload
+            )
+            total_latency_ms += latency_ms
+            total_attempt_count += attempt_count
+            role_selection_response = self._parse_response(
+                prompt,
+                role_selection_payload,
+                value,
+                policy_version=policy_version,
+                adapter_name=adapter_name,
+                expected_server_weight_version=expected_server_weight_version,
+                action_json_schema_version=action_schema_version,
+                action_schema_branch=action_schema_branch,
+                action_target_domains_json=action_target_domains_json,
+                action_target_domain_version=action_target_domain_version,
+                latency_ms=latency_ms,
+                attempt_count=attempt_count,
+            )
+            try:
+                selected_add_agent_roles = (
+                    director_live_add_subgraph_role_selection_from_text(
+                        role_selection_response.text,
+                        action_target_domains,
+                    )
+                )
+            except ValueError as exc:
+                raise ReceiptValidationError(
+                    "v3 add_subgraph Agent role-selection phase is invalid: "
+                    f"{exc}"
+                ) from exc
+            phase_receipts["add_agent_role_selection"] = (
+                self._hierarchical_phase_receipt(role_selection_response)
+            )
+            selected_roles_json = json.dumps(
+                {
+                    "action": "add_subgraph",
+                    "agents": [dict(value) for value in selected_add_agent_roles],
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            declaration_prompt = _hierarchical_continuation_prompt(
+                prompt,
+                committed_json=selected_roles_json,
+                instruction=_ADD_DECLARATION_CONTINUATION,
+            )
+            declaration_schema = (
+                director_live_add_subgraph_agent_declarations_json_schema_text(
+                    action_target_domains,
+                    selected_agent_roles=selected_add_agent_roles,
+                )
+            )
+            declaration_payload = dict(
+                self._request_payload(declaration_prompt, adapter_name, seed)
             )
             declaration_sampling = dict(declaration_payload["sampling_params"])
             declaration_sampling["json_schema"] = declaration_schema
@@ -967,7 +1098,7 @@ class SGLangReceiptDirectorClient:
             total_latency_ms += latency_ms
             total_attempt_count += attempt_count
             declaration_response = self._parse_response(
-                prompt,
+                declaration_prompt,
                 declaration_payload,
                 value,
                 policy_version=policy_version,
@@ -985,14 +1116,30 @@ class SGLangReceiptDirectorClient:
                     director_live_add_subgraph_agent_declarations_from_text(
                         declaration_response.text,
                         action_target_domains,
+                        selected_agent_roles=selected_add_agent_roles,
                     )
                 )
             except ValueError as exc:
                 raise ReceiptValidationError(
-                    "v3 add_subgraph Agent declaration phase is invalid"
+                    "v3 add_subgraph Agent declaration phase is invalid: "
+                    f"{exc}"
                 ) from exc
             phase_receipts["add_agent_declarations"] = (
                 self._hierarchical_phase_receipt(declaration_response)
+            )
+            selected_declarations_json = json.dumps(
+                {
+                    "action": "add_subgraph",
+                    "agents": [dict(value) for value in selected_add_agents],
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            parameter_prompt = _hierarchical_continuation_prompt(
+                declaration_prompt,
+                committed_json=selected_declarations_json,
+                instruction=_ADD_ACTION_CONTINUATION,
             )
             parameter_schema = director_live_action_parameter_json_schema_text(
                 "add_subgraph",
@@ -1177,7 +1324,9 @@ class SGLangReceiptDirectorClient:
                 )
             )
 
-        parameter_payload = dict(self._request_payload(prompt, adapter_name, seed))
+        parameter_payload = dict(
+            self._request_payload(parameter_prompt, adapter_name, seed)
+        )
         parameter_sampling = dict(parameter_payload["sampling_params"])
         parameter_sampling["json_schema"] = parameter_schema
         parameter_payload["sampling_params"] = parameter_sampling
@@ -1187,7 +1336,7 @@ class SGLangReceiptDirectorClient:
         total_latency_ms += latency_ms
         total_attempt_count += attempt_count
         response = self._parse_response(
-            prompt,
+            parameter_prompt,
             parameter_payload,
             value,
             policy_version=policy_version,
@@ -1203,7 +1352,12 @@ class SGLangReceiptDirectorClient:
         metadata = dict(response.metadata)
         metadata.update(
             {
-                "action_decoding_strategy": "hierarchical_json_schema",
+                "base_prompt_text": prompt,
+                "action_decoding_strategy": (
+                    ROLE_FIRST_ADD_DECODING_STRATEGY
+                    if selected_add_agent_roles is not None
+                    else HIERARCHICAL_JSON_SCHEMA_STRATEGY
+                ),
                 "selected_action": selected_action,
                 "selected_modify_field": selected_modify_field,
                 "parameter_schema_branch": (
@@ -1227,6 +1381,11 @@ class SGLangReceiptDirectorClient:
                 None
                 if selected_add_agents is None
                 else [agent["agent_id"] for agent in selected_add_agents]
+            )
+            metadata["selected_add_agent_roles"] = (
+                None
+                if selected_add_agent_roles is None
+                else [dict(value) for value in selected_add_agent_roles]
             )
             metadata["selected_modify_agent_id"] = selected_modify_agent_id
         if selected_relation_candidate is not None:
@@ -1404,10 +1563,18 @@ def _validate_v3_hierarchical_action_receipt(
     except (TypeError, ValueError) as exc:
         raise ReceiptValidationError("v3 Director target-domain receipt is invalid") from exc
     selected_action = metadata.get("selected_action")
+    decoding_strategy = metadata.get("action_decoding_strategy")
     action_value = action.to_dict()
     if selected_action not in actions or action_value.get("action") != selected_action:
         raise ReceiptValidationError(
             "v3 selected action differs from its branch or parsed Canvas action"
+        )
+    if (
+        decoding_strategy == ROLE_FIRST_ADD_DECODING_STRATEGY
+        and selected_action != "add_subgraph"
+    ):
+        raise ReceiptValidationError(
+            "role-first ADD decoding strategy is attached to a non-ADD action"
         )
 
     expected_phases: set[str] = set()
@@ -1416,21 +1583,64 @@ def _validate_v3_hierarchical_action_receipt(
     expected_parameter_branch = selected_action
 
     if selected_action == "add_subgraph":
-        expected_phases.add("add_agent_declarations")
+        role_first_add = decoding_strategy == ROLE_FIRST_ADD_DECODING_STRATEGY
+        if (
+            schema_request.get("action_target_domain_version")
+            == DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION
+            and not role_first_add
+        ):
+            raise ReceiptValidationError(
+                "current live-domain ADD receipt did not use role-first decoding"
+            )
+        if role_first_add:
+            expected_phases.update(
+                {"add_agent_role_selection", "add_agent_declarations"}
+            )
+        elif decoding_strategy == HIERARCHICAL_JSON_SCHEMA_STRATEGY:
+            expected_phases.add("add_agent_declarations")
+        else:
+            raise ReceiptValidationError(
+                "v3 add_subgraph receipt has an unsupported decoding strategy"
+            )
         phase_receipts = metadata.get("hierarchical_phase_receipts")
-        phase = (
+        role_phase = (
+            phase_receipts.get("add_agent_role_selection")
+            if isinstance(phase_receipts, Mapping)
+            else None
+        )
+        declaration_phase = (
             phase_receipts.get("add_agent_declarations")
             if isinstance(phase_receipts, Mapping)
             else None
         )
-        if not isinstance(phase, Mapping) or not isinstance(phase.get("text"), str):
+        if role_first_add and (
+            not isinstance(role_phase, Mapping)
+            or not isinstance(role_phase.get("text"), str)
+        ):
+            raise ReceiptValidationError(
+                "v3 add_subgraph receipt has no Agent role-selection phase"
+            )
+        if not isinstance(declaration_phase, Mapping) or not isinstance(
+            declaration_phase.get("text"), str
+        ):
             raise ReceiptValidationError(
                 "v3 add_subgraph receipt has no Agent declaration phase"
             )
         try:
+            if role_first_add:
+                assert isinstance(role_phase, Mapping)
+                selected_roles = (
+                    director_live_add_subgraph_role_selection_from_text(
+                        role_phase["text"],
+                        domains,
+                    )
+                )
+            else:
+                selected_roles = None
             declarations = director_live_add_subgraph_agent_declarations_from_text(
-                phase["text"],
+                declaration_phase["text"],
                 domains,
+                selected_agent_roles=selected_roles,
             )
             director_live_action_parameter_json_schema_text(
                 "add_subgraph",
@@ -1441,6 +1651,55 @@ def _validate_v3_hierarchical_action_receipt(
             raise ReceiptValidationError(
                 "v3 add_subgraph declaration receipt violates its live domain"
             ) from exc
+        if role_first_add:
+            assert selected_roles is not None
+            assert isinstance(role_phase, Mapping)
+            role_prompt = role_phase.get("prompt_text")
+            declaration_prompt = declaration_phase.get("prompt_text")
+            if not isinstance(role_prompt, str) or not isinstance(
+                declaration_prompt, str
+            ):
+                raise ReceiptValidationError(
+                    "v3 role-first ADD phase has no prompt binding"
+                )
+            selected_roles_json = json.dumps(
+                {
+                    "action": "add_subgraph",
+                    "agents": [dict(value) for value in selected_roles],
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            expected_declaration_prompt = _hierarchical_continuation_prompt(
+                role_prompt,
+                committed_json=selected_roles_json,
+                instruction=_ADD_DECLARATION_CONTINUATION,
+            )
+            if declaration_prompt != expected_declaration_prompt:
+                raise ReceiptValidationError(
+                    "v3 role-first ADD declaration prompt is not conditioned on "
+                    "its selected roles"
+                )
+            selected_declarations_json = json.dumps(
+                {
+                    "action": "add_subgraph",
+                    "agents": [dict(value) for value in declarations],
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            expected_parameter_prompt = _hierarchical_continuation_prompt(
+                declaration_prompt,
+                committed_json=selected_declarations_json,
+                instruction=_ADD_ACTION_CONTINUATION,
+            )
+            if metadata.get("prompt_text") != expected_parameter_prompt:
+                raise ReceiptValidationError(
+                    "v3 role-first ADD parameter prompt is not conditioned on "
+                    "its Agent declarations"
+                )
         declaration_values = list(declarations)
         if action_value.get("agents") != declaration_values:
             raise ReceiptValidationError(
@@ -1450,6 +1709,17 @@ def _validate_v3_hierarchical_action_receipt(
         if metadata.get("selected_add_agent_ids") != declared_ids:
             raise ReceiptValidationError(
                 "v3 add_subgraph Agent-ID receipt differs from its declarations"
+            )
+        if role_first_add:
+            assert selected_roles is not None
+            selected_role_values = [dict(value) for value in selected_roles]
+            if metadata.get("selected_add_agent_roles") != selected_role_values:
+                raise ReceiptValidationError(
+                    "v3 add_subgraph Agent-role receipt differs from its declarations"
+                )
+        elif metadata.get("selected_add_agent_roles") is not None:
+            raise ReceiptValidationError(
+                "legacy v3 add_subgraph receipt unexpectedly carries selected roles"
             )
         endpoint_ids = set(domains["add_subgraph"]["existing_agent_ids"])
         endpoint_ids.update(declared_ids)
@@ -1462,11 +1732,73 @@ def _validate_v3_hierarchical_action_receipt(
                 raise ReceiptValidationError(
                     "v3 add_subgraph relation endpoint is outside the live domain"
                 )
+        add_domain = domains["add_subgraph"]
+        if add_domain.get("semantic_protocol") == HOTPOTQA_SEMANTIC_PROTOCOL:
+            if len(action_value.get("relations", ())) > 1:
+                raise ReceiptValidationError(
+                    "v3 HotpotQA add_subgraph exceeds its one-relation edit boundary"
+                )
+            allowed_relations = {
+                json.dumps(
+                    candidate,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                for candidate in director_live_add_subgraph_relation_candidates(
+                    domains,
+                    declarations,
+                )
+            }
+            relation_pairs: set[frozenset[str]] = set()
+            for relation in action_value.get("relations", ()):
+                relation_identity = json.dumps(
+                    dict(relation),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                if relation_identity not in allowed_relations:
+                    raise ReceiptValidationError(
+                        "v3 HotpotQA add_subgraph relation violates the live semantic domain"
+                    )
+                relation_pair = frozenset(
+                    (relation["source_id"], relation["target_id"])
+                )
+                if relation_pair in relation_pairs:
+                    raise ReceiptValidationError(
+                        "v3 HotpotQA add_subgraph repeats an unordered relation pair"
+                    )
+                relation_pairs.add(relation_pair)
         output_agent_id = action_value.get("output_agent_id")
         if output_agent_id is not None and output_agent_id not in endpoint_ids:
             raise ReceiptValidationError(
                 "v3 add_subgraph Output Agent is outside the live domain"
             )
+        if (
+            output_agent_id is not None
+            and add_domain.get("semantic_protocol")
+            == HOTPOTQA_SEMANTIC_PROTOCOL
+        ):
+            existing_roles = {
+                item["agent_id"]: item["role_family"]
+                for item in add_domain.get("existing_agents", ())
+                if isinstance(item, Mapping)
+                and isinstance(item.get("agent_id"), str)
+                and isinstance(item.get("role_family"), str)
+            }
+            existing_roles.update(
+                {agent["agent_id"]: agent["role_family"] for agent in declarations}
+            )
+            if existing_roles.get(output_agent_id) != "format":
+                raise ReceiptValidationError(
+                    "v3 HotpotQA add_subgraph Output Agent is not a Formatter"
+                )
+            current_output_agent_id = add_domain.get("current_output_agent_id")
+            if current_output_agent_id is not None:
+                raise ReceiptValidationError(
+                    "v3 HotpotQA add_subgraph cannot replace the current Output Agent"
+                )
         if metadata.get("selected_modify_agent_id") is not None:
             raise ReceiptValidationError(
                 "v3 add_subgraph receipt carries a MODIFY target"
@@ -1516,6 +1848,8 @@ def _validate_v3_hierarchical_action_receipt(
         expected_parameter_branch = f"modify_agent:{selected_field}"
         if metadata.get("selected_add_agent_ids") is not None:
             raise ReceiptValidationError("v3 MODIFY receipt carries ADD declarations")
+        if metadata.get("selected_add_agent_roles") is not None:
+            raise ReceiptValidationError("v3 MODIFY receipt carries ADD roles")
     elif selected_action == "set_relation":
         expected_phases.add("relation_candidate_selection")
         selected_index = metadata.get("selected_relation_candidate")
@@ -2021,6 +2355,7 @@ def _runtime_summary(runtime: Optional[AgentRuntimeResult]) -> Mapping[str, Any]
         ],
         "executed_agent_ids": list(runtime.executed_agent_ids),
         "reused_agent_ids": list(runtime.reused_agent_ids),
+        "deferred_agent_ids": list(runtime.deferred_agent_ids),
         "output_metadata": output_metadata,
     }
 
@@ -2227,8 +2562,32 @@ class AgentGraphRolloutCollector:
                     raise ReceiptValidationError(
                         "Director target domains differ from the request"
                     )
-            if metadata.get("prompt_text") != prompt:
+            strategy_hint = metadata.get("action_decoding_strategy")
+            receipt_base_prompt = (
+                metadata.get("base_prompt_text")
+                if strategy_hint is not None
+                else metadata.get("prompt_text")
+            )
+            if receipt_base_prompt != prompt:
                 raise ReceiptValidationError("Director receipt is bound to a different prompt")
+            if strategy_hint == ROLE_FIRST_ADD_DECODING_STRATEGY:
+                raw_phases = metadata.get("hierarchical_phase_receipts")
+                role_phase = (
+                    raw_phases.get("add_agent_role_selection")
+                    if isinstance(raw_phases, Mapping)
+                    else None
+                )
+                if (
+                    not isinstance(role_phase, Mapping)
+                    or role_phase.get("prompt_text") != prompt
+                ):
+                    raise ReceiptValidationError(
+                        "role-first ADD receipt is not rooted in the Canvas prompt"
+                    )
+            elif metadata.get("prompt_text") != prompt:
+                raise ReceiptValidationError(
+                    "Director final receipt is bound to a different prompt"
+                )
             if _optional_int(metadata.get("generation_seed")) != generation_seed:
                 raise ReceiptValidationError(
                     "Director receipt generation seed differs from the request"
@@ -2278,7 +2637,10 @@ class AgentGraphRolloutCollector:
             action = canvas.action
             action_decoding_strategy = metadata.get("action_decoding_strategy")
             if action_decoding_strategy is not None:
-                if action_decoding_strategy != "hierarchical_json_schema":
+                if action_decoding_strategy not in {
+                    HIERARCHICAL_JSON_SCHEMA_STRATEGY,
+                    ROLE_FIRST_ADD_DECODING_STRATEGY,
+                }:
                     raise ReceiptValidationError(
                         "Director receipt has an unsupported decoding strategy"
                     )
@@ -2291,9 +2653,17 @@ class AgentGraphRolloutCollector:
                     schema_request.get("action_json_schema_version")
                     == DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3
                 )
+                if action_decoding_strategy == ROLE_FIRST_ADD_DECODING_STRATEGY and (
+                    not live_v3_receipt or selected_action != "add_subgraph"
+                ):
+                    raise ReceiptValidationError(
+                        "role-first ADD decoding requires a live-v3 ADD action"
+                    )
                 if live_v3_receipt and action is None:
                     raise ReceiptValidationError(
-                        "v3 hierarchical Director response has no parsed Canvas action"
+                        "v3 hierarchical Director response has no parsed Canvas action: "
+                        f"response={response.text[:160]!r}; "
+                        f"feedback={canvas.feedback[:240]!r}"
                     )
                 if action is not None and selected_action != action.action_type.value:
                     raise ReceiptValidationError(
@@ -2446,6 +2816,10 @@ class AgentGraphRolloutCollector:
                     action_decoding["selected_add_agent_ids"] = metadata.get(
                         "selected_add_agent_ids"
                     )
+                if "selected_add_agent_roles" in metadata:
+                    action_decoding["selected_add_agent_roles"] = metadata.get(
+                        "selected_add_agent_roles"
+                    )
                 if "selected_modify_agent_id" in metadata:
                     action_decoding["selected_modify_agent_id"] = metadata.get(
                         "selected_modify_agent_id"
@@ -2460,7 +2834,7 @@ class AgentGraphRolloutCollector:
                     },
                 ),
                 round_index=round_index,
-                prompt=prompt,
+                prompt=str(metadata.get("prompt_text")),
                 policy_response=response.text,
                 prompt_token_ids=prompt_ids,
                 output_token_ids=output_ids,

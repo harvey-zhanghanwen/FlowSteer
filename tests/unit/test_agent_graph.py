@@ -32,6 +32,7 @@ from src.interactive.agent_runtime import (
 from src.interactive.agent_workflow_env import (
     AgentWorkflowEnv,
     AgentWorkflowStateError,
+    _HOTPOTQA_FORMAT_CONTRACT,
     _evidence_span_matches_read,
 )
 from src.interactive.model_registry import (
@@ -630,7 +631,9 @@ class _FailAgentGateway(_ImmediateGateway):
     async def generate(self, request: AgentRequest) -> str:
         self.requests.append(request)
         if request.agent.id == self.failed_agent_id:
-            raise RuntimeError("unusable executor node")
+            exc = RuntimeError("unusable executor node")
+            exc.node_unusable = True
+            raise exc
         return f"answer:{request.agent.id}"
 
 
@@ -685,7 +688,7 @@ def _hotpot_semantic_graph(*, format_predecessor: str = "verifier") -> AgentGrap
             AgentNode(
                 "formatter",
                 "fast",
-                "wrap the verified candidate without reasoning",
+                _HOTPOTQA_FORMAT_CONTRACT,
                 role_family="format",
                 artifact_type="answer_wrapper",
             ),
@@ -1818,7 +1821,7 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
                     AgentNode(
                         "formatter",
                         "fast",
-                        "format only",
+                        _HOTPOTQA_FORMAT_CONTRACT,
                         role_family="format",
                     )
                 ]
@@ -1944,6 +1947,7 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             problem="What is the capital of France?",
             require_exact_answer_tag=True,
             require_format_agent=True,
+            execute_on_edit=True,
             semantic_protocol="hotpotqa_verified_answer_slot_v1",
             recovery_policy="preserve_diagnose_repair_augment",
             required_evidence_tool_id="qa-retrieval",
@@ -1960,6 +1964,23 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             "formatter",
             before_execution["failure_attribution"]["responsible_agent_id"],
         )
+        executed = await env.step(
+            '{"action":"modify_agent","agent_id":"reader",'
+            '"contract":"read explicit database evidence"}'
+        )
+        self.assertTrue(executed.accepted)
+        self.assertTrue(env.finish_admissibility()["admissible"])
+        self.assertEqual(("finish",), env.model_admissible_action_types())
+        self.assertEqual(
+            {"finish": {"admissible": True, "submission_semantics": "explicit_finish"}},
+            env.model_admissible_action_targets(),
+        )
+        protected = await env.step(
+            '{"action":"modify_agent","agent_id":"verifier",'
+            '"contract":"reconsider the answer"}'
+        )
+        self.assertFalse(protected.accepted)
+        self.assertIn("verified terminal artifact", protected.feedback)
         finished = await env.step('{"action":"finish"}')
 
         self.assertTrue(finished.accepted)
@@ -2310,10 +2331,20 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             [["qa-retrieval"]],
             add_domain["role_constraints"]["reasoner"]["allowed_tools"],
         )
+        self.assertEqual(
+            [_HOTPOTQA_FORMAT_CONTRACT],
+            add_domain["role_constraints"]["format"]["contracts"],
+        )
         modify_domain = targets["modify_agent"]
         self.assertNotIn("allowed_tools", modify_domain["mutable_fields"])
         self.assertIn("model_id", modify_domain["mutable_fields"])
         self.assertEqual(4, len(modify_domain["per_agent_candidates"]))
+        formatter_candidates = next(
+            item
+            for item in modify_domain["per_agent_candidates"]
+            if item["agent_id"] == "formatter"
+        )
+        self.assertNotIn("contract", formatter_candidates["mutable_fields"])
         self.assertEqual(
             sorted(make_registry().model_ids),
             sorted(add_domain["model_ids"]),
@@ -2348,8 +2379,20 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             [
                 AgentNode("reader", "cheap", "evidence", role_family="evidence_retriever"),
                 AgentNode("verifier", "balanced", "verify", role_family="verifier"),
-                AgentNode("reasoner", "balanced", "answer", role_family="reasoner"),
-                AgentNode("formatter", "fast", "format", role_family="format"),
+                AgentNode(
+                    "reasoner",
+                    "balanced",
+                    "answer",
+                    role_family="reasoner",
+                    allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                    execution_mode="react",
+                ),
+                AgentNode(
+                    "formatter",
+                    "fast",
+                    _HOTPOTQA_FORMAT_CONTRACT,
+                    role_family="format",
+                ),
             ],
             [
                 AgentRelation("reader", "verifier", True, False),
@@ -2420,6 +2463,56 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("execution_mode='reasoning'", rejected.feedback)
         self.assertEqual((), env.graph.nodes)
 
+    async def test_hotpot_formatter_contract_cannot_preselect_answer(self) -> None:
+        registry = make_registry()
+        gateway = _ImmediateGateway()
+        env = AgentWorkflowEnv(
+            registry,
+            gateway,
+            problem="question",
+            semantic_protocol="hotpotqa_verified_answer_slot_v1",
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id="qa-retrieval",
+        )
+
+        rejected = await env.step(
+            '{"action":"add_subgraph","agents":['
+            '{"agent_id":"formatter","model_id":"fast",'
+            '"contract":"format the final answer as Paris",'
+            '"role_family":"format","allowed_tools":[],'
+            '"execution_mode":"reasoning"}],"relations":[]}'
+        )
+
+        self.assertFalse(rejected.accepted)
+        self.assertIn("neutral formatting-only contract", rejected.feedback)
+        self.assertEqual((), env.graph.nodes)
+
+    async def test_hotpot_formatter_contract_cannot_be_mutated_to_an_answer(self) -> None:
+        registry = make_registry()
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_hotpot_semantic_runtime(registry, _HotpotSemanticGateway()),
+            graph=_hotpot_semantic_graph(),
+            problem="What is the capital of France?",
+            semantic_protocol="hotpotqa_verified_answer_slot_v1",
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id="qa-retrieval",
+        )
+        revision = env.revision
+
+        rejected = await env.step(
+            '{"action":"modify_agent","agent_id":"formatter",'
+            '"contract":"format the final answer as Lyon"}'
+        )
+
+        self.assertFalse(rejected.accepted)
+        self.assertIn("neutral formatting-only contract", rejected.feedback)
+        self.assertEqual(revision, env.revision)
+        self.assertEqual(
+            _HOTPOTQA_FORMAT_CONTRACT,
+            env.graph.get_node("formatter").contract,
+        )
+
     async def test_preserve_repair_policy_blocks_delete_until_takeover(self) -> None:
         registry = make_registry()
         gateway = _FailAgentGateway("source")
@@ -2454,6 +2547,10 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('"recovery_state"', executed.feedback)
         recovery_state = env.recovery_state()
         self.assertEqual(["source"], recovery_state["failed_agent_ids"])
+        self.assertEqual(
+            ["source"],
+            recovery_state["diagnosed_unusable_agent_ids"],
+        )
         self.assertIn(
             "not_diagnosed_unusable",
             recovery_state["deletion_protected"]["out"],
@@ -2483,6 +2580,62 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(env.graph.has_node("source"))
         self.assertTrue(env.graph.has_node("replacement"))
 
+    async def test_transient_provider_failure_never_admits_delete_after_takeover(
+        self,
+    ) -> None:
+        registry = make_registry()
+        graph = AgentGraph(
+            [
+                AgentNode(
+                    "source",
+                    "balanced",
+                    "produce evidence",
+                    role_family="evidence",
+                    artifact_type="facts",
+                ),
+                AgentNode(
+                    "replacement",
+                    "cheap",
+                    "replacement evidence",
+                    role_family="evidence",
+                    artifact_type="facts",
+                ),
+                AgentNode("out", "fast", "answer", role_family="output"),
+            ],
+            [
+                AgentRelation("source", "out", True, False),
+                AgentRelation("replacement", "out", True, False),
+            ],
+            output_agent_id="out",
+        )
+        env = AgentWorkflowEnv(
+            registry,
+            _ImmediateGateway(),
+            graph=graph,
+            problem="question",
+            recovery_policy="preserve_diagnose_repair_augment",
+        )
+        env._progressive_outputs["replacement"] = "replacement evidence"
+        env._record_failure_state(
+            (
+                AgentFailureRecord(
+                    request_id="request-429",
+                    agent_id="source",
+                    phase=ExecutionPhase.SINGLE,
+                    graph_revision=graph.revision,
+                    error_type="OpenAICompatibleGatewayError",
+                    message="provider request failed: HTTP 429",
+                ),
+            ),
+            current_agent_ids={"source", "replacement", "out"},
+        )
+
+        issue = env._delete_admission_issue("source")
+
+        self.assertIsNotNone(issue)
+        self.assertEqual([], env.recovery_state()["diagnosed_unusable_agent_ids"])
+        self.assertIn("node has not been diagnosed unusable", issue)
+
     async def test_hotpot_reasoner_takeover_requires_valid_semantic_artifact(self) -> None:
         graph = _hotpot_semantic_graph()
         graph.add_agent(
@@ -2509,6 +2662,7 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             required_evidence_tool_id="qa-retrieval",
         )
         env._failed_agent_ids.add("reasoner")
+        env._diagnosed_unusable_agent_ids.add("reasoner")
         env._unresolved_dirty_agents.add("reasoner")
         env._progressive_outputs["replacement_reasoner"] = "Paris"
         env._progressive_output_metadata["replacement_reasoner"] = {}
@@ -2700,7 +2854,7 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             AgentNode(
                 "duplicate_formatter",
                 "fast",
-                "superseded wrapper",
+                _HOTPOTQA_FORMAT_CONTRACT,
                 role_family="format",
                 artifact_type="answer_wrapper",
             )
@@ -2807,6 +2961,46 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             state["redundant_after_replacement_takeover_agent_ids"],
         )
         self.assertNotIn("duplicate_reasoner", state["deletable_agent_ids"])
+        actions = env.model_admissible_action_types()
+        self.assertNotIn("set_output", actions)
+        targets = env.model_admissible_action_targets()
+        if "modify_agent" in targets:
+            self.assertTrue(
+                {"reasoner", "verifier", "formatter"}.isdisjoint(
+                    targets["modify_agent"]["agent_ids"]
+                )
+            )
+        if "set_relation" in targets:
+            for candidate in targets["set_relation"]["candidates"]:
+                if (
+                    candidate["source_id"] == "reasoner"
+                    and candidate["target_id"] == "verifier"
+                ):
+                    self.assertTrue(candidate["source_to_target"])
+                if (
+                    candidate["source_id"] == "verifier"
+                    and candidate["target_id"] == "formatter"
+                ):
+                    self.assertTrue(candidate["source_to_target"])
+
+        output_change = await env.step(
+            '{"action":"set_output","agent_id":"duplicate_formatter"}'
+        )
+        self.assertFalse(output_change.accepted)
+        self.assertIn("Output identity must be preserved", output_change.feedback)
+        edge_removal = await env.step(
+            '{"action":"set_relation","source_id":"reasoner",'
+            '"target_id":"verifier","source_to_target":false,'
+            '"target_to_source":false}'
+        )
+        self.assertFalse(edge_removal.accepted)
+        self.assertIn("semantic-lineage relation", edge_removal.feedback)
+        lineage_modify = await env.step(
+            '{"action":"modify_agent","agent_id":"reasoner",'
+            '"contract":"change the candidate"}'
+        )
+        self.assertFalse(lineage_modify.accepted)
+        self.assertIn("verified semantic lineage", lineage_modify.feedback)
 
         deleted = await env.step(
             '{"action":"delete_agent","agent_id":"duplicate_reasoner"}'

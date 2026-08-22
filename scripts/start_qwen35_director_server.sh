@@ -66,6 +66,7 @@ exec "$project_root/scripts/run_on_gpu_role.sh" rollout \
   --lora-target-modules q_proj k_proj v_proj o_proj \
   --reasoning-parser qwen3 \
   --tool-call-parser qwen3_coder \
+  --constrained-json-disable-any-whitespace \
   --schedule-policy lpm \
   --trust-remote-code \
   --enable-multimodal \

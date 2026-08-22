@@ -259,6 +259,7 @@ class AgentRuntimeResult:
     block_completion_order: Tuple[Tuple[str, ...], ...]
     executed_agent_ids: Tuple[str, ...] = ()
     reused_agent_ids: Tuple[str, ...] = ()
+    deferred_agent_ids: Tuple[str, ...] = ()
     communication_condition: CommunicationCondition = CommunicationCondition.NORMAL
     output_metadata: Mapping[str, Mapping[str, object]] = field(
         default_factory=dict,
@@ -363,6 +364,13 @@ def _public_failure_metadata(exc: BaseException) -> Mapping[str, object]:
         value = getattr(exc, field_name, None)
         if value is not None:
             result[field_name] = value
+    # Failure recovery may delete a node only when the execution boundary has
+    # explicitly diagnosed the node itself as unusable.  Provider, Tool, ReAct,
+    # timeout, and contract failures do not imply this flag.  Preserve the
+    # typed adapter receipt without inferring it from exception text.
+    node_unusable = getattr(exc, "node_unusable", None)
+    if type(node_unusable) is bool:
+        result["node_unusable"] = node_unusable
     return MappingProxyType(result)
 
 
@@ -551,13 +559,30 @@ class AgentRuntime:
             for agent_id in dirty
             if agent_id in plan.component_for
         }
+        deferred_components = self._semantic_input_deferred_components(
+            execution_graph,
+            nodes,
+            plan,
+            format_output_agent=format_output_agent,
+        )
+        deferred_agent_ids = tuple(
+            sorted(
+                agent_id
+                for component in deferred_components
+                for agent_id in component
+            )
+        )
         calls: List[AgentCallRecord] = []
         cancelled_failure_records: List[AgentFailureRecord] = []
         completion_order: List[Tuple[str, ...]] = []
         executed_agents: Set[str] = set()
         reused_agents: Set[str] = set()
         indegree = dict(plan.indegree)
-        ready = sorted(component for component, degree in indegree.items() if degree == 0)
+        ready = sorted(
+            component
+            for component, degree in indegree.items()
+            if degree == 0 and component not in deferred_components
+        )
         active: Dict[
             "asyncio.Task[Tuple[Dict[str, str], bool]]",
             Tuple[str, ...],
@@ -651,6 +676,7 @@ class AgentRuntime:
                         block_completion_order=tuple(completion_order),
                         executed_agent_ids=tuple(sorted(executed_agents)),
                         reused_agent_ids=tuple(sorted(reused_agents)),
+                        deferred_agent_ids=deferred_agent_ids,
                         communication_condition=resolved_condition,
                         output_metadata=output_metadata,
                     )
@@ -702,7 +728,10 @@ class AgentRuntime:
                 for component, _, _ in completed:
                     for successor in plan.successors[component]:
                         indegree[successor] -= 1
-                        if indegree[successor] == 0:
+                        if (
+                            indegree[successor] == 0
+                            and successor not in deferred_components
+                        ):
                             newly_ready.add(successor)
                 ready.extend(sorted(newly_ready))
                 ready.sort()
@@ -725,9 +754,66 @@ class AgentRuntime:
             block_completion_order=tuple(completion_order),
             executed_agent_ids=tuple(sorted(executed_agents)),
             reused_agent_ids=tuple(sorted(reused_agents)),
+            deferred_agent_ids=deferred_agent_ids,
             communication_condition=resolved_condition,
             output_metadata=output_metadata,
         )
+
+    def _semantic_input_deferred_components(
+        self,
+        graph: AgentGraph,
+        nodes: Mapping[str, AgentNode],
+        plan: _ExecutionPlan,
+        *,
+        format_output_agent: bool,
+    ) -> Set[Tuple[str, ...]]:
+        """Defer semantic consumers until their declared input is routable.
+
+        FlowSteer's incomplete Canvas is executable after every accepted edit,
+        while SkillFlow invokes a bounded Agent only with its current public
+        input.  For HotpotQA, a disconnected Verifier has no Reasoner candidate
+        to check and a disconnected/unselected Formatter has no verified answer
+        to serialize.  Defer those components and their descendants without
+        deleting nodes or artifacts; the next relation/Output edit makes them
+        schedulable under the same Canvas revision semantics.
+        """
+
+        if self.semantic_protocol != "hotpotqa_verified_answer_slot_v1":
+            return set()
+        seeds: Set[Tuple[str, ...]] = set()
+        output_agent_id = graph.output_agent_id
+        for agent_id, node in nodes.items():
+            role = (node.role_family or "").casefold()
+            predecessors = graph.directed_predecessors(agent_id)
+            if role == "verifier":
+                if (
+                    len(predecessors) != 1
+                    or (
+                        nodes[predecessors[0]].role_family or ""
+                    ).casefold()
+                    != "reasoner"
+                ):
+                    seeds.add(plan.component_for[agent_id])
+            elif role == "format":
+                if (
+                    not format_output_agent
+                    or agent_id != output_agent_id
+                    or len(predecessors) != 1
+                    or (
+                        nodes[predecessors[0]].role_family or ""
+                    ).casefold()
+                    != "verifier"
+                ):
+                    seeds.add(plan.component_for[agent_id])
+        deferred = set(seeds)
+        frontier = list(seeds)
+        while frontier:
+            component = frontier.pop()
+            for successor in plan.successors[component]:
+                if successor not in deferred:
+                    deferred.add(successor)
+                    frontier.append(successor)
+        return deferred
 
     def validate_execution_contracts(
         self,

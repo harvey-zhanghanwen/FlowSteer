@@ -43,6 +43,9 @@ from src.interactive.director import (
     director_model_admissible_schema_branch_v3,
     director_live_add_subgraph_agent_declarations_from_text,
     director_live_add_subgraph_agent_declarations_json_schema_text,
+    director_live_add_subgraph_role_selection_from_text,
+    director_live_add_subgraph_role_selection_json_schema_text,
+    director_live_add_subgraph_relation_candidates,
     director_live_action_parameter_json_schema_text,
     director_live_action_target_domains_json,
     director_live_modify_agent_selector_json_schema_text,
@@ -321,6 +324,9 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, add_domain["min_new_agents"])
         self.assertEqual(3, add_domain["max_new_agents"])
         self.assertEqual([], add_domain["existing_agent_ids"])
+        self.assertEqual([], add_domain["existing_agents"])
+        self.assertIsNone(add_domain["current_output_agent_id"])
+        self.assertEqual("format", add_domain["output_role_family"])
         self.assertEqual(
             [
                 "agent_id",
@@ -1095,6 +1101,10 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
                     "format": {
                         "execution_modes": ["reasoning"],
                         "allowed_tools": [[]],
+                        "contracts": [
+                            "copy the supported Verifier candidate "
+                            "character-for-character into the required answer wrapper"
+                        ],
                     },
                 },
                 "endpoint_scope": {
@@ -1160,9 +1170,16 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         declaration_schema = json.loads(
             director_live_add_subgraph_agent_declarations_json_schema_text(domains)
         )
-        reasoner_branch = declaration_schema["properties"]["agents"]["items"][
-            "anyOf"
-        ][0]
+        agent_declaration = declaration_schema["properties"]["agents"]
+        count_branches = agent_declaration["oneOf"]
+        self.assertEqual([1, 2, 3], [item["minItems"] for item in count_branches])
+        self.assertEqual([1, 2, 3], [item["maxItems"] for item in count_branches])
+        self.assertTrue(all(item["items"] is False for item in count_branches))
+        reasoner_branch = count_branches[0]["prefixItems"][0]["anyOf"][0]
+        self.assertEqual(
+            {"const": "node_1"},
+            reasoner_branch["properties"]["agent_id"],
+        )
         self.assertIn("role_family", reasoner_branch["required"])
         self.assertEqual(
             {"const": "reasoner"},
@@ -1176,13 +1193,110 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
             {"enum": ["qwen", "other"]},
             reasoner_branch["properties"]["model_id"],
         )
+        self.assertEqual(
+            {"const": "node_2"},
+            count_branches[1]["prefixItems"][1]["anyOf"][0]["properties"][
+                "agent_id"
+            ],
+        )
+        occupied_id_domains = json.loads(json.dumps(domains))
+        occupied_id_domains["add_subgraph"]["existing_agent_ids"] = [
+            "reasoner",
+            "node_1",
+        ]
+        occupied_schema = json.loads(
+            director_live_add_subgraph_agent_declarations_json_schema_text(
+                occupied_id_domains
+            )
+        )
+        self.assertEqual(
+            {"const": "node_2"},
+            occupied_schema["properties"]["agents"]["oneOf"][0][
+                "prefixItems"
+            ][0]["anyOf"][0]["properties"]["agent_id"],
+        )
+        role_selection_schema = json.loads(
+            director_live_add_subgraph_role_selection_json_schema_text(domains)
+        )
+        self.assertEqual(
+            [1, 2, 3],
+            [
+                item["minItems"]
+                for item in role_selection_schema["properties"]["agents"][
+                    "oneOf"
+                ]
+            ],
+        )
+        selected_roles = director_live_add_subgraph_role_selection_from_text(
+            '{"action":"add_subgraph","agents":['
+            '{"agent_id":"node_1","role_family":"reasoner"}]}',
+            domains,
+        )
+        conditioned_schema = json.loads(
+            director_live_add_subgraph_agent_declarations_json_schema_text(
+                domains,
+                selected_agent_roles=selected_roles,
+            )
+        )
+        conditioned_agents = conditioned_schema["properties"]["agents"]["oneOf"]
+        self.assertEqual(1, len(conditioned_agents))
+        conditioned_role_branches = conditioned_agents[0]["prefixItems"][0][
+            "anyOf"
+        ]
+        self.assertEqual(1, len(conditioned_role_branches))
+        self.assertEqual(
+            {"const": "reasoner"},
+            conditioned_role_branches[0]["properties"]["role_family"],
+        )
         sampled_agents = director_live_add_subgraph_agent_declarations_from_text(
             '{"action":"add_subgraph","agents":['
-            '{"agent_id":"reader","model_id":"qwen",'
+            '{"agent_id":"node_1","model_id":"qwen",'
             '"contract":"align evidence","role_family":"reasoner",'
             '"allowed_tools":["qa-retrieval"],"execution_mode":"react"}]}',
             domains,
+            selected_agent_roles=selected_roles,
         )
+        sampled_with_qwen_eos = (
+            director_live_add_subgraph_agent_declarations_from_text(
+                '{"action":"add_subgraph","agents":['
+                '{"agent_id":"node_1","model_id":"qwen",'
+                '"contract":"align evidence","role_family":"reasoner",'
+                '"allowed_tools":["qa-retrieval"],"execution_mode":"react"}]}'
+                '<|endoftext|>',
+                domains,
+                selected_agent_roles=selected_roles,
+            )
+        )
+        self.assertEqual(sampled_agents, sampled_with_qwen_eos)
+        with self.assertRaisesRegex(ValueError, "changed their selected roles"):
+            director_live_add_subgraph_agent_declarations_from_text(
+                '{"action":"add_subgraph","agents":['
+                '{"agent_id":"node_1","model_id":"qwen",'
+                '"contract":"verify","role_family":"verifier",'
+                '"allowed_tools":[],"execution_mode":"reasoning"}]}',
+                domains,
+                selected_agent_roles=selected_roles,
+            )
+        with self.assertRaisesRegex(ValueError, "unique neutral IDs"):
+            director_live_add_subgraph_agent_declarations_from_text(
+                '{"action":"add_subgraph","agents":['
+                '{"agent_id":"node_1","model_id":"qwen",'
+                '"contract":"align evidence","role_family":"reasoner",'
+                '"allowed_tools":["qa-retrieval"],"execution_mode":"react"},'
+                '{"agent_id":"node_1","model_id":"qwen",'
+                '"contract":"verify","role_family":"verifier",'
+                '"allowed_tools":[],"execution_mode":"reasoning"}]}',
+                domains,
+            )
+        with self.assertRaisesRegex(ValueError, "contain trailing text"):
+            director_live_add_subgraph_agent_declarations_from_text(
+                '{"action":"add_subgraph","agents":['
+                '{"agent_id":"node_1","model_id":"qwen",'
+                '"contract":"align evidence","role_family":"reasoner",'
+                '"allowed_tools":["qa-retrieval"],"execution_mode":"react"}]}'
+                'unconstrained suffix',
+                domains,
+            )
         add_schema = json.loads(
             director_live_action_parameter_json_schema_text(
                 "add_subgraph",
@@ -1196,11 +1310,11 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         )
         relation_branch = add_schema["properties"]["relations"]["items"]["anyOf"][0]
         self.assertEqual(
-            ["reasoner", "reader"],
+            ["reasoner", "node_1"],
             relation_branch["properties"]["source_id"]["enum"],
         )
         self.assertEqual(
-            ["reasoner", "reader"],
+            ["reasoner", "node_1"],
             add_schema["properties"]["output_agent_id"]["anyOf"][0]["enum"],
         )
         modify_schema = json.loads(
@@ -1298,6 +1412,198 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
             "admissible-v3:add_subgraph",
             request["action_schema_branch"],
         )
+
+    def test_hotpotqa_v3_binds_semantic_relation_directions_and_format_output(
+        self,
+    ) -> None:
+        domains = {
+            "add_subgraph": {
+                "min_new_agents": 1,
+                "max_new_agents": 3,
+                "existing_agent_ids": [],
+                "existing_agents": [],
+                "current_output_agent_id": None,
+                "output_role_family": "format",
+                "semantic_protocol": HOTPOTQA_SEMANTIC_PROTOCOL,
+                "required_agent_fields": [
+                    "agent_id",
+                    "model_id",
+                    "contract",
+                    "role_family",
+                    "allowed_tools",
+                    "execution_mode",
+                ],
+                "model_ids": ["qwen"],
+                "role_constraints": {
+                    "reasoner": {
+                        "execution_modes": ["react"],
+                        "allowed_tools": [["qa-retrieval"]],
+                    },
+                    "verifier": {
+                        "execution_modes": ["reasoning"],
+                        "allowed_tools": [[]],
+                    },
+                    "format": {
+                        "execution_modes": ["reasoning"],
+                        "allowed_tools": [[]],
+                    },
+                },
+                "endpoint_scope": {
+                    "relation_endpoint_sources": [
+                        "existing_agent_ids",
+                        "same_action_agent_ids",
+                    ],
+                    "output_agent_id_sources": [
+                        "existing_agent_ids",
+                        "same_action_agent_ids",
+                    ],
+                },
+            }
+        }
+        agents = [
+            {
+                "agent_id": "node_1",
+                "model_id": "qwen",
+                "contract": "align evidence to the answer slot",
+                "role_family": "reasoner",
+                "allowed_tools": ["qa-retrieval"],
+                "execution_mode": "react",
+            },
+            {
+                "agent_id": "node_2",
+                "model_id": "qwen",
+                "contract": "verify the semantic candidate",
+                "role_family": "verifier",
+                "allowed_tools": [],
+                "execution_mode": "reasoning",
+            },
+            {
+                "agent_id": "node_3",
+                "model_id": "qwen",
+                "contract": (
+                    "copy the supported Verifier candidate character-for-character "
+                    "into the required answer wrapper"
+                ),
+                "role_family": "format",
+                "allowed_tools": [],
+                "execution_mode": "reasoning",
+            },
+        ]
+        candidates = director_live_add_subgraph_relation_candidates(
+            domains,
+            agents,
+        )
+        self.assertEqual(
+            (
+                {
+                    "source_id": "node_1",
+                    "target_id": "node_2",
+                    "source_to_target": True,
+                    "target_to_source": False,
+                },
+                {
+                    "source_id": "node_1",
+                    "target_id": "node_2",
+                    "source_to_target": True,
+                    "target_to_source": True,
+                },
+                {
+                    "source_id": "node_2",
+                    "target_id": "node_3",
+                    "source_to_target": True,
+                    "target_to_source": False,
+                },
+            ),
+            candidates,
+        )
+        schema = json.loads(
+            director_live_action_parameter_json_schema_text(
+                "add_subgraph",
+                domains,
+                add_agents=agents,
+            )
+        )
+        relation_branches = schema["properties"]["relations"]["items"][
+            "anyOf"
+        ]
+        self.assertEqual(1, schema["properties"]["relations"]["maxItems"])
+        sampled_domains = tuple(
+            {
+                key: branch["properties"][key]["const"]
+                for key in (
+                    "source_id",
+                    "target_id",
+                    "source_to_target",
+                    "target_to_source",
+                )
+            }
+            for branch in relation_branches
+        )
+        self.assertEqual(candidates, sampled_domains)
+        self.assertEqual(
+            {"enum": ["node_3"]},
+            schema["properties"]["output_agent_id"]["anyOf"][0],
+        )
+        malformed = json.loads(json.dumps(domains))
+        malformed["add_subgraph"].pop("existing_agents")
+        with self.assertRaisesRegex(ValueError, "existing-Agent role domain"):
+            director_live_add_subgraph_agent_declarations_json_schema_text(
+                malformed
+            )
+
+        reordered_agents = [
+            {**agents[1], "agent_id": "node_1"},
+            {**agents[0], "agent_id": "node_2"},
+            agents[2],
+        ]
+        reordered_candidates = director_live_add_subgraph_relation_candidates(
+            domains,
+            reordered_agents,
+        )
+        self.assertIn(
+            {
+                "source_id": "node_2",
+                "target_id": "node_1",
+                "source_to_target": True,
+                "target_to_source": False,
+            },
+            reordered_candidates,
+        )
+        self.assertNotIn(
+            {
+                "source_id": "node_1",
+                "target_id": "node_2",
+                "source_to_target": False,
+                "target_to_source": True,
+            },
+            reordered_candidates,
+        )
+
+        existing_output_domains = json.loads(json.dumps(domains))
+        existing_output_domain = existing_output_domains["add_subgraph"]
+        existing_output_domain["existing_agent_ids"] = ["existing_format"]
+        existing_output_domain["existing_agents"] = [
+            {"agent_id": "existing_format", "role_family": "format"}
+        ]
+        existing_output_domain["current_output_agent_id"] = "existing_format"
+        existing_output_schema = json.loads(
+            director_live_action_parameter_json_schema_text(
+                "add_subgraph",
+                existing_output_domains,
+                add_agents=agents[:2],
+            )
+        )
+        self.assertEqual(
+            {"type": "null"},
+            existing_output_schema["properties"]["output_agent_id"],
+        )
+
+        missing_output_receipt = json.loads(json.dumps(domains))
+        missing_output_receipt["add_subgraph"].pop("current_output_agent_id")
+        with self.assertRaisesRegex(ValueError, "current Output receipt"):
+            director_live_add_subgraph_agent_declarations_json_schema_text(
+                missing_output_receipt
+            )
 
     async def test_model_admissible_v1_receipts_remain_replayable(self) -> None:
         model_registry = registry()

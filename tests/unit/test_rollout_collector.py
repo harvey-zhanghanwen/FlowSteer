@@ -33,6 +33,7 @@ from src.interactive.director import (
     director_model_admissible_schema_branch_v1,
     director_model_admissible_schema_branch_v3,
     director_live_add_subgraph_agent_declarations_json_schema_text,
+    director_live_add_subgraph_role_selection_json_schema_text,
     director_live_action_parameter_json_schema_text,
     director_live_action_target_domains_json,
     director_live_modify_agent_selector_json_schema_text,
@@ -41,6 +42,7 @@ from src.interactive.director import (
     director_modify_agent_field_selector_json_schema_text,
     director_sglang_sampling_json_schema_text,
     director_state_conditioned_sampling_json_schema_text,
+    decode_director_transcript,
     encode_director_transcript,
 )
 from src.interactive.model_registry import ModelRegistry, ModelSpec, ProviderSpec
@@ -50,9 +52,14 @@ from src.interactive.records import TaskRecord
 from src.interactive.rollout_collector import (
     AGENTGRAPH_SMOKE_SOURCES,
     AgentGraphRolloutCollector,
+    HIERARCHICAL_JSON_SCHEMA_STRATEGY,
     ReceiptValidationError,
+    ROLE_FIRST_ADD_DECODING_STRATEGY,
     RolloutGate,
     SGLangReceiptDirectorClient,
+    _ADD_ACTION_CONTINUATION,
+    _ADD_DECLARATION_CONTINUATION,
+    _hierarchical_continuation_prompt,
     _validate_v3_hierarchical_action_receipt,
     select_balanced_tasks,
 )
@@ -626,11 +633,20 @@ def test_native_sglang_v3_samples_add_declarations_then_complete_exact_action():
             },
         }
     }
+    role_selection = {
+        "action": "add_subgraph",
+        "agents": [
+            {
+                "agent_id": "node_1",
+                "role_family": "reasoner",
+            }
+        ],
+    }
     declarations = {
         "action": "add_subgraph",
         "agents": [
             {
-                "agent_id": "reasoner",
+                "agent_id": "node_1",
                 "model_id": "cheap-model",
                 "contract": "align evidence",
                 "role_family": "reasoner",
@@ -644,17 +660,18 @@ def test_native_sglang_v3_samples_add_declarations_then_complete_exact_action():
         "relations": [
             {
                 "source_id": "incumbent",
-                "target_id": "reasoner",
+                "target_id": "node_1",
                 "source_to_target": True,
                 "target_to_source": False,
             }
         ],
-        "output_agent_id": "reasoner",
+        "output_agent_id": "node_1",
     }
     actions = ("add_subgraph",)
     domains_json = director_live_action_target_domains_json(actions, domains)
     client = ScriptedSGLangClient(
         [
+            json.dumps(role_selection, separators=(",", ":")),
             json.dumps(declarations, separators=(",", ":")),
             json.dumps(final_action, separators=(",", ":")),
         ],
@@ -680,9 +697,15 @@ def test_native_sglang_v3_samples_add_declarations_then_complete_exact_action():
     )
 
     assert client.payloads[0]["sampling_params"]["json_schema"] == (
-        director_live_add_subgraph_agent_declarations_json_schema_text(domains)
+        director_live_add_subgraph_role_selection_json_schema_text(domains)
     )
     assert client.payloads[1]["sampling_params"]["json_schema"] == (
+        director_live_add_subgraph_agent_declarations_json_schema_text(
+            domains,
+            selected_agent_roles=role_selection["agents"],
+        )
+    )
+    assert client.payloads[2]["sampling_params"]["json_schema"] == (
         director_live_action_parameter_json_schema_text(
             "add_subgraph",
             domains,
@@ -690,14 +713,46 @@ def test_native_sglang_v3_samples_add_declarations_then_complete_exact_action():
         )
     )
     assert response.text == json.dumps(final_action, separators=(",", ":"))
-    assert response.metadata["selected_add_agent_ids"] == ["reasoner"]
-    assert response.metadata["request_count"] == 2
+    assert response.metadata["selected_add_agent_ids"] == ["node_1"]
+    assert response.metadata["selected_add_agent_roles"] == role_selection["agents"]
+    assert response.metadata["action_decoding_strategy"] == (
+        ROLE_FIRST_ADD_DECODING_STRATEGY
+    )
+    assert response.metadata["base_prompt_text"] == "current Canvas"
+    assert response.metadata["request_count"] == 3
     assert set(response.metadata["hierarchical_phase_receipts"]) == {
+        "add_agent_role_selection",
         "add_agent_declarations"
+    }
+    role_receipt = response.metadata["hierarchical_phase_receipts"][
+        "add_agent_role_selection"
+    ]
+    declaration_receipt = response.metadata["hierarchical_phase_receipts"][
+        "add_agent_declarations"
+    ]
+    assert role_receipt["prompt_text"] == "current Canvas"
+    declaration_messages = decode_director_transcript(
+        declaration_receipt["prompt_text"]
+    )
+    assert declaration_messages is not None
+    assert json.loads(declaration_messages[-2]["content"]) == role_selection
+    assert declaration_messages[-1] == {
+        "role": "user",
+        "content": _ADD_DECLARATION_CONTINUATION,
+    }
+    parameter_messages = decode_director_transcript(
+        response.metadata["prompt_text"]
+    )
+    assert parameter_messages is not None
+    assert json.loads(parameter_messages[-2]["content"]) == declarations
+    assert parameter_messages[-1] == {
+        "role": "user",
+        "content": _ADD_ACTION_CONTINUATION,
     }
 
     conflict_client = ScriptedSGLangClient(
         [
+            json.dumps(role_selection, separators=(",", ":")),
             json.dumps(
                 {
                     **declarations,
@@ -840,11 +895,20 @@ def test_v3_receipt_validation_fails_closed_on_phase_and_final_action_mismatch()
             },
         }
     }
+    role_selection = {
+        "action": "add_subgraph",
+        "agents": [
+            {
+                "agent_id": "node_1",
+                "role_family": "reasoner",
+            }
+        ],
+    }
     declaration = {
         "action": "add_subgraph",
         "agents": [
             {
-                "agent_id": "reasoner",
+                "agent_id": "node_1",
                 "model_id": "cheap-model",
                 "contract": "align evidence",
                 "role_family": "reasoner",
@@ -856,7 +920,7 @@ def test_v3_receipt_validation_fails_closed_on_phase_and_final_action_mismatch()
     final_action = {
         **declaration,
         "relations": [],
-        "output_agent_id": "reasoner",
+        "output_agent_id": "node_1",
     }
     action = AgentActionParser().parse(
         json.dumps(final_action, separators=(",", ":"))
@@ -875,15 +939,45 @@ def test_v3_receipt_validation_fails_closed_on_phase_and_final_action_mismatch()
             DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION
         ),
     }
+    role_prompt = "current Canvas"
+    role_selection_json = json.dumps(
+        role_selection,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    declaration_prompt = _hierarchical_continuation_prompt(
+        role_prompt,
+        committed_json=role_selection_json,
+        instruction=_ADD_DECLARATION_CONTINUATION,
+    )
+    declaration_json = json.dumps(
+        declaration,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    parameter_prompt = _hierarchical_continuation_prompt(
+        declaration_prompt,
+        committed_json=declaration_json,
+        instruction=_ADD_ACTION_CONTINUATION,
+    )
     metadata = {
+        "action_decoding_strategy": ROLE_FIRST_ADD_DECODING_STRATEGY,
+        "base_prompt_text": role_prompt,
+        "prompt_text": parameter_prompt,
         "selected_action": "add_subgraph",
-        "selected_add_agent_ids": ["reasoner"],
+        "selected_add_agent_ids": ["node_1"],
+        "selected_add_agent_roles": role_selection["agents"],
         "selected_modify_agent_id": None,
         "parameter_schema_branch": "add_subgraph",
-        "request_count": 2,
+        "request_count": 3,
         "hierarchical_phase_receipts": {
+            "add_agent_role_selection": {
+                "text": json.dumps(role_selection, separators=(",", ":")),
+                "prompt_text": role_prompt,
+            },
             "add_agent_declarations": {
-                "text": json.dumps(declaration, separators=(",", ":"))
+                "text": json.dumps(declaration, separators=(",", ":")),
+                "prompt_text": declaration_prompt,
             }
         },
     }
@@ -892,7 +986,7 @@ def test_v3_receipt_validation_fails_closed_on_phase_and_final_action_mismatch()
         action,
         metadata,
         schema_request,
-    ) == {"add_agent_declarations"}
+    ) == {"add_agent_role_selection", "add_agent_declarations"}
     with pytest.raises(ReceiptValidationError, match="request count"):
         _validate_v3_hierarchical_action_receipt(
             action,
@@ -916,6 +1010,81 @@ def test_v3_receipt_validation_fails_closed_on_phase_and_final_action_mismatch()
             mismatched_action,
             metadata,
             schema_request,
+        )
+
+    with pytest.raises(ReceiptValidationError, match="not conditioned"):
+        _validate_v3_hierarchical_action_receipt(
+            action,
+            {
+                **metadata,
+                "hierarchical_phase_receipts": {
+                    **metadata["hierarchical_phase_receipts"],
+                    "add_agent_declarations": {
+                        **metadata["hierarchical_phase_receipts"][
+                            "add_agent_declarations"
+                        ],
+                        "prompt_text": role_prompt,
+                    },
+                },
+            },
+            schema_request,
+        )
+
+    legacy_metadata = {
+        **metadata,
+        "action_decoding_strategy": HIERARCHICAL_JSON_SCHEMA_STRATEGY,
+        "prompt_text": role_prompt,
+        "selected_add_agent_roles": None,
+        "request_count": 2,
+        "hierarchical_phase_receipts": {
+            "add_agent_declarations": {
+                "text": json.dumps(declaration, separators=(",", ":")),
+                "prompt_text": role_prompt,
+            }
+        },
+    }
+    assert _validate_v3_hierarchical_action_receipt(
+        action,
+        legacy_metadata,
+        {
+            **schema_request,
+            "action_target_domain_version": (
+                "agentgraph.live-action-target-domains.v3"
+            ),
+        },
+    ) == {"add_agent_declarations"}
+    with pytest.raises(ReceiptValidationError, match="did not use role-first"):
+        _validate_v3_hierarchical_action_receipt(
+            action,
+            legacy_metadata,
+            schema_request,
+        )
+
+    finish_actions = ("finish",)
+    finish_domains = {"finish": {"admissible": True}}
+    with pytest.raises(ReceiptValidationError, match="non-ADD"):
+        _validate_v3_hierarchical_action_receipt(
+            AgentActionParser().parse('{"action":"finish"}'),
+            {
+                "action_decoding_strategy": ROLE_FIRST_ADD_DECODING_STRATEGY,
+                "selected_action": "finish",
+                "request_count": 1,
+                "hierarchical_phase_receipts": {},
+            },
+            {
+                "action_schema_branch": (
+                    director_model_admissible_schema_branch_v3(finish_actions)
+                ),
+                "action_target_domains_json": (
+                    director_live_action_target_domains_json(
+                        finish_actions,
+                        finish_domains,
+                    )
+                ),
+                "action_target_domain_version": (
+                    DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION
+                ),
+            },
         )
 
 
