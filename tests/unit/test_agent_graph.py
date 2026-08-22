@@ -2582,11 +2582,50 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             recovery_policy="preserve_diagnose_repair_augment",
             required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
         )
+        successful_tool_trace = {
+            "turn": 1,
+            "structured_action": {
+                "kind": "tool",
+                "name": "read",
+                "resource_id": QA_RETRIEVAL_TOOL_ID,
+                "skill_id": None,
+                "arguments": {"passage_id": "p1"},
+            },
+            "observation": {
+                "observation_status": "success",
+                "tool_id": QA_RETRIEVAL_TOOL_ID,
+                "executed_action": {
+                    "kind": "tool",
+                    "name": "read",
+                    "resource_id": QA_RETRIEVAL_TOOL_ID,
+                    "skill_id": None,
+                    "arguments": {"passage_id": "p1"},
+                },
+                "result": {"operation": "read", "passage_id": "p1"},
+            },
+        }
+        role_specific_completion_error = {
+            "turn": 2,
+            "observation_status": "schema_invalid",
+            "public_error_code": (
+                "qa_semantic_evidence_provenance_invalid: Reasoner "
+                "candidate_answer must occur verbatim in the selected evidence_span"
+            ),
+            "executed_action": {
+                "kind": "complete",
+                "name": "complete",
+                "resource_id": None,
+                "skill_id": None,
+                "arguments": {"value": "invalid Reasoner artifact"},
+            },
+        }
         trace = [
+            successful_tool_trace,
+            role_specific_completion_error,
             {
-                "turn": 1,
-                "observation_status": "tool_result",
-                "public_error_code": None,
+                "turn": 3,
+                "observation_status": "schema_invalid",
+                "public_error_code": "qa_retrieval_duplicate_normalized_query",
             }
         ]
         receipts = [_test_read_receipt("p1")]
@@ -2623,7 +2662,7 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             "reasoner",
             projected["continuation_source_agent_id"],
         )
-        self.assertEqual(trace, projected["react_trace"])
+        self.assertEqual([successful_tool_trace], projected["react_trace"])
         self.assertEqual(receipts, projected["tool_receipts"])
         self.assertNotIn("repair_reader", env._failure_continuations)
         self.assertNotIn(
@@ -2761,6 +2800,67 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
                 parse_target("evidence_retriever")
             ),
         )
+
+    def test_recovery_handoff_survives_target_provider_failure(self) -> None:
+        graph = _hotpot_semantic_graph()
+        registry = make_registry()
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_hotpot_semantic_runtime(registry, _ImmediateGateway()),
+            graph=graph,
+            problem="What is the capital of France?",
+            execute_on_edit=False,
+            semantic_protocol="hotpotqa_verified_answer_slot_v1",
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+        )
+        tool_trace = {
+            "turn": 1,
+            "observation": {
+                "observation_status": "success",
+                "tool_id": QA_RETRIEVAL_TOOL_ID,
+                "executed_action": {
+                    "kind": "tool",
+                    "name": "read",
+                    "resource_id": QA_RETRIEVAL_TOOL_ID,
+                    "skill_id": None,
+                    "arguments": {"passage_id": "p1"},
+                },
+                "result": {"operation": "read", "passage_id": "p1"},
+            },
+        }
+        source_completion_error = {
+            "turn": 2,
+            "observation_status": "schema_invalid",
+            "public_error_code": "completion_schema_invalid",
+        }
+        receipt = _test_read_receipt("p1")
+        env._failure_continuations["reasoner"] = {
+            "execution_phase": "single",
+            "react_trace": [tool_trace, source_completion_error],
+            "tool_receipts": [receipt],
+        }
+
+        env._record_failure_state(
+            (
+                AgentFailureRecord(
+                    request_id="reader-provider-failure",
+                    agent_id="reader",
+                    phase=ExecutionPhase.SINGLE,
+                    graph_revision=graph.revision,
+                    error_type="OpenAICompatibleGatewayError",
+                    message="provider request failed for reader with HTTP 403",
+                    metadata={"continuation_source_agent_id": "reasoner"},
+                ),
+            ),
+            current_agent_ids={node.id for node in graph.nodes},
+        )
+
+        retained = env._failure_continuations["reader"]
+        self.assertEqual("reasoner", retained["continuation_source_agent_id"])
+        self.assertEqual("single", retained["execution_phase"])
+        self.assertEqual([tool_trace], retained["react_trace"])
+        self.assertEqual([receipt], retained["tool_receipts"])
 
     async def test_hotpot_non_react_failures_do_not_exhaust_react_repair(
         self,
@@ -4221,6 +4321,7 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
 
         for concrete_tool_contract in (
             "Call search(query='David Soul birthplace', limit=10).",
+            "Perform a focused search for 'Dame Judi Dench birthplace'.",
             'Use {"query": "David Soul birthplace"} for retrieval.',
             "Expand retrieval with top-k=25.",
             'Read the Tool receipt with "passage_id": "atlas:123".',
@@ -4256,6 +4357,20 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(neutral_retrieval_responsibility.accepted)
 
+        neutral_tool_reference = await env.step(
+            json.dumps(
+                {
+                    "action": "modify_agent",
+                    "agent_id": "reasoner",
+                    "contract": (
+                        "Retrieve evidence using the 'qa-retrieval' tool; bind "
+                        "the entity and relation before semantic completion"
+                    ),
+                }
+            )
+        )
+        self.assertTrue(neutral_tool_reference.accepted)
+
         for answer_precommit in (
             {
                 "action": "modify_agent",
@@ -4266,6 +4381,14 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
                 "action": "modify_agent",
                 "agent_id": "reasoner",
                 "completion_condition": "Return ONLY the word 'Shirley'.",
+            },
+            {
+                "action": "modify_agent",
+                "agent_id": "reasoner",
+                "contract": (
+                    "Resolve entity 'Sinclair' to 'Joseph C. Lincoln' before "
+                    "forming the evidence proposition"
+                ),
             },
         ):
             revision = env.revision

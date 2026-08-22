@@ -345,9 +345,46 @@ query rewriting, entity disambiguation and expanded top-k responsibilities,
 but concrete query, limit and passage-ID values remain owned by the Runtime's
 state-conditioned Tool schema.
 
+### r10 live evidence and r11 role-bound recovery
+
+The r10 main canary collected both tasks without operational or evaluator
+failure but passed only `1/2` legal terminal lineages.  `triviaqa:tc_1`
+explicitly finished with `Harry Sinclair Lewis` and official EM/F1 `1.0/1.0`.
+`triviaqa:tc_3` ended at `max_rounds` with a null terminal answer and EM/F1
+`0.0/0.0`, while its Retriever had already read the public passage
+`atlas-dpr-wikipedia:000000874654` containing the exact sentence
+`Dench was born in Heworth, North Riding of Yorkshire.`  The failure therefore
+is not database coverage failure.
+
+Two implementation defects caused the terminal failure.  First, the Retriever
+submitted the abstract label `birthplace` for a field that requires an exact
+predicate surface from the cited span (`was born in`).  The strict provenance
+gate correctly rejected that field, but r10 incorrectly routed the rejection
+to a new search/read instead of repairing the structured artifact on the
+preserved read; repeated retries were then mislabeled
+`knowledge_base_coverage_failure`.  Second, the cross-Agent projection copied
+the failed Reasoner's role-specific completion observations into a new
+Retriever.  One helper received 64 such prior turns, including rejected
+`Chester` completions, and then repeated normalized queries.  A helper whose
+first provider call failed also lost the projected Tool state before its
+model-only repair.
+
+Recovery revision r11 keeps the same strict receipt, exact-span and exact-
+predicate requirements.  It routes Retriever field-shape and lexical-field
+alignment errors through the existing structured-artifact repair on the same
+successful read; missing receipt/span or unproven alias lineage still requires
+new evidence.  Entity fields explicitly require concise mentions rather than
+the whole question or sentence.  Cross-Agent recovery now transfers only
+dispatched Tool Action--Observation entries and same-Tool receipts, excluding
+source-role completion errors while retaining failed Tool dispatches that
+consumed budget.  If the target's first provider call fails, the filtered Tool
+projection survives the admitted model repair.  The Director admission gate
+also rejects natural-language hard-coded search phrases and concrete alias
+mappings while allowing neutral Tool references and retrieval responsibilities.
+
 ### Stable Zero status
 
-Static architecture, 780 unit tests, 142 subtests and both frozen data-selection
+Static architecture, 782 unit tests, 142 subtests and both frozen data-selection
 preconditions are complete.  The initial, r2, r3 and r4 canaries failed for
 the documented causes; r5 **passed Stable Zero** but its incomplete fixed-128
 run was stopped after measured recovery defects appeared.  Recovery revision
@@ -358,8 +395,11 @@ answer-lineage complete for `tc_3` but failed Stable Zero because one malformed
 Director parameter sample incorrectly aborted `tc_1` collection.  Recovery
 revision r9 passed the main two-task canary but failed the mandatory isolated
 `tc_9/tc_10` regression for the documented retrieval-recovery defects.
-Recovery revision r10 is **pending targeted tests, live Stable Zero, and the
-isolated regression**.  Formal fixed-128 v2 EM/F1 remain pending.  No score is
+Recovery revision r10 failed its main canary `1/2` for the documented
+role-bound structured-repair defects, so its isolated regression and fixed-128
+run were not started.  Recovery revision r11 has passed 782 unit tests, 142
+subtests and both frozen prepare-only checks; its live Stable Zero and isolated
+regression remain pending.  Formal fixed-128 v2 EM/F1 remain pending.  No score is
 inferred from unit tests, a two-task canary, an incomplete run, or the previous
 architecture.
 

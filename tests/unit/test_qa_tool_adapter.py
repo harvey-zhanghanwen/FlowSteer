@@ -2478,6 +2478,16 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         )
         for answer_field in ("candidate_answer", "answer_slot", "final_answer"):
             self.assertNotIn(answer_field, artifact_schema["properties"])
+        self.assertIn(
+            "not the whole question",
+            artifact_schema["properties"]["entity_identity"]["properties"][
+                "question_surface"
+            ]["description"],
+        )
+        self.assertIn(
+            "exact predicate surface",
+            artifact_schema["properties"]["target_relation"]["description"],
+        )
 
         completion_contract = adapter._contract(
             request,
@@ -2591,6 +2601,137 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual([("David Soul origin city", 5)], index.search_calls)
         self.assertEqual(["p1"], index.read_calls)
+        self.assertEqual(2, response.metadata["tool_calls"])
+
+    async def test_evidence_retriever_repairs_relation_surface_on_preserved_read(
+        self,
+    ) -> None:
+        question = "Where in England was Dame Judi Dench born?"
+        evidence = "Dench was born in Heworth, North Riding of Yorkshire."
+        base_artifact = {
+            "question_scope": question,
+            "entity_identity": {
+                "question_surface": "Dench",
+                "evidence_surface": "Dench",
+            },
+            "evidence_span": evidence,
+            "passage_id": "p1",
+        }
+
+        def action(name: str, arguments: object) -> str:
+            return json.dumps(
+                {
+                    "arguments": arguments,
+                    "kind": "complete" if name == "complete" else "tool",
+                    "name": name,
+                    "resource_id": (
+                        None if name == "complete" else QA_RETRIEVAL_TOOL_ID
+                    ),
+                    "skill_id": None,
+                }
+            )
+
+        class DenchIndex(FakeIndex):
+            def read(self, passage_id: str) -> FakePassage:
+                self.read_calls.append(passage_id)
+                return FakePassage(passage_id, "d1", "Judi Dench", evidence)
+
+        class SequenceGateway:
+            def __init__(self) -> None:
+                self.requests: list[AgentRequest] = []
+                self.outputs = [
+                    action(
+                        "search",
+                        {"query": "Dame Judi Dench birthplace", "limit": 5},
+                    ),
+                    action("read", {"passage_id": "p1"}),
+                    action(
+                        "complete",
+                        {
+                            "value": {
+                                **base_artifact,
+                                "entity_identity": {
+                                    "question_surface": question,
+                                    "evidence_surface": evidence,
+                                },
+                                "target_relation": "birthplace",
+                            }
+                        },
+                    ),
+                    action(
+                        "complete",
+                        {
+                            "value": {
+                                **base_artifact,
+                                "entity_identity": {
+                                    "question_surface": "Dench",
+                                    "evidence_surface": evidence,
+                                },
+                                "target_relation": "birthplace",
+                            }
+                        },
+                    ),
+                    action(
+                        "complete",
+                        {"value": {**base_artifact, "target_relation": "birthplace"}},
+                    ),
+                    action(
+                        "complete",
+                        {"value": {**base_artifact, "target_relation": "was born in"}},
+                    ),
+                ]
+
+            async def generate(self, request: AgentRequest) -> AgentResponse:
+                self.requests.append(request)
+                return AgentResponse(self.outputs.pop(0))
+
+        index = DenchIndex()
+        gateway = SequenceGateway()
+        response = await QARetrievalReactExecutionAdapter(
+            gateway=gateway,
+            tool_registry=build_qa_tool_registry(index),
+            max_turns=6,
+            max_tool_calls=10,
+            task_type="factual_qa",
+            completion_policy="required_evidence",
+        ).execute(
+            AgentRequest(
+                request_id="trivia:evidence-retriever-relation-repair",
+                run_id="trivia",
+                graph_revision=1,
+                problem=question,
+                agent=AgentNode(
+                    "evidence_retriever",
+                    "model",
+                    "retrieve receipt-grounded entity and relation evidence",
+                    role_family="evidence_retriever",
+                    allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                    execution_mode="react",
+                ),
+                model=ModelSpec("model", "provider"),
+                provider=ProviderSpec("provider", kind="test"),
+                phase=ExecutionPhase.SINGLE,
+                semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            )
+        )
+
+        self.assertEqual([("Dame Judi Dench birthplace", 5)], index.search_calls)
+        self.assertEqual(["p1"], index.read_calls)
+        public_errors = [
+            response.metadata["react_trace"][index]["public_error_code"]
+            for index in (2, 3, 4)
+        ]
+        self.assertTrue(
+            all(
+                error.startswith("qa_semantic_artifact_invalid:")
+                for error in public_errors
+            )
+        )
+        self.assertIn("whole original question", public_errors[0])
+        self.assertIn("whole evidence_span", public_errors[1])
+        self.assertIn("target_relation does not occur", public_errors[2])
+        for request in gateway.requests[3:6]:
+            self.assertIn("do not add a search or read", request.agent.contract)
         self.assertEqual(2, response.metadata["tool_calls"])
 
     def test_evidence_retriever_rejects_unprovenanced_or_answer_only_artifacts(

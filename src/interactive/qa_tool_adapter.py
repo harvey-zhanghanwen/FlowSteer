@@ -983,12 +983,32 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                                     "evidence_surface",
                                 ],
                                 "properties": {
-                                    "question_surface": dict(non_empty_text),
-                                    "evidence_surface": dict(non_empty_text),
+                                    "question_surface": {
+                                        **non_empty_text,
+                                        "description": (
+                                            "A concise entity mention copied from "
+                                            "the original question, not the whole "
+                                            "question."
+                                        ),
+                                    },
+                                    "evidence_surface": {
+                                        **non_empty_text,
+                                        "description": (
+                                            "A concise entity mention copied from "
+                                            "evidence_span, not the whole sentence."
+                                        ),
+                                    },
                                 },
                                 "additionalProperties": False,
                             },
-                            "target_relation": dict(non_empty_text),
+                            "target_relation": {
+                                **non_empty_text,
+                                "description": (
+                                    "Copy the exact predicate surface from "
+                                    "evidence_span (for example, `was born in`), "
+                                    "not an abstract relation label."
+                                ),
+                            },
                             "evidence_span": {
                                 **non_empty_text,
                                 "description": (
@@ -1800,6 +1820,16 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 "Evidence Retriever entity_identity.evidence_surface does not "
                 "occur in evidence_span"
             )
+        if canonical_question_surface == canonical_question:
+            return (
+                "Evidence Retriever entity_identity.question_surface must be a "
+                "concise entity mention, not the whole original question"
+            )
+        if canonical_evidence_surface == canonical_span:
+            return (
+                "Evidence Retriever entity_identity.evidence_surface must be a "
+                "concise entity mention, not the whole evidence_span"
+            )
         if canonical_relation not in canonical_span:
             return "Evidence Retriever target_relation does not occur in evidence_span"
 
@@ -1902,11 +1932,42 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             if issue is None:
                 return None
             retriever_protocol = self._semantic_evidence_retriever_protocol.get()
-            prefix = (
-                _HOTPOTQA_SEMANTIC_EVIDENCE_ERROR_PREFIX
-                if retriever_protocol == "hotpotqa_verified_answer_slot_v1"
-                else _QA_SEMANTIC_EVIDENCE_ERROR_PREFIX
+            # A receipt/span/alias-lineage failure needs another search/read.
+            # A malformed or lexically misaligned Retriever field can be
+            # corrected against the already-successful read.  Route that case
+            # through the existing structured-artifact repair branch so the
+            # SkillFlow Action--Observation continuation does not mislabel a
+            # usable passage as database coverage failure.
+            structured_repair = issue.startswith(
+                (
+                    "artifact is empty",
+                    "labelled artifact",
+                    "artifact must",
+                    "field ",
+                    "Evidence Retriever question_scope",
+                    (
+                        "Evidence Retriever passage_id, target_relation, and "
+                        "evidence_span"
+                    ),
+                    "Evidence Retriever entity_identity must contain",
+                    "Evidence Retriever entity surfaces",
+                    "Evidence Retriever entity_identity.question_surface",
+                    "Evidence Retriever entity_identity.evidence_surface",
+                    "Evidence Retriever target_relation",
+                )
             )
+            if retriever_protocol == "hotpotqa_verified_answer_slot_v1":
+                prefix = (
+                    _HOTPOTQA_SEMANTIC_STRUCTURE_ERROR_PREFIX
+                    if structured_repair
+                    else _HOTPOTQA_SEMANTIC_EVIDENCE_ERROR_PREFIX
+                )
+            else:
+                prefix = (
+                    _QA_SEMANTIC_STRUCTURE_ERROR_PREFIX
+                    if structured_repair
+                    else _QA_SEMANTIC_EVIDENCE_ERROR_PREFIX
+                )
             return prefix + " " + issue
 
         original_question = self._semantic_reasoner_question.get()

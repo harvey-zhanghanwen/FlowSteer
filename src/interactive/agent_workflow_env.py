@@ -2440,27 +2440,65 @@ class AgentWorkflowEnv:
         if len(source_ids) != 1:
             return {}
         source_id = source_ids[0]
-        source = self._failure_continuations[source_id]
+        result = self._tool_continuation_projection(
+            self._failure_continuations[source_id],
+            execution_phase="single",
+            source_agent_id=source_id,
+        )
+        return {target.agent_id: result} if result is not None else {}
+
+    def _tool_continuation_projection(
+        self,
+        source: Mapping[str, object],
+        *,
+        execution_phase: str,
+        source_agent_id: str,
+    ) -> Optional[dict[str, object]]:
+        """Project only public Tool state across an Agent-role boundary."""
+
         result: dict[str, object] = {
             # The newly added one-way auxiliary Agent executes as a singleton.
-            # Bind the envelope to its target phase while preserving every
-            # public Action--Observation item and measured Tool receipt.
-            "execution_phase": "single",
-            "continuation_source_agent_id": source_id,
+            # Bind the envelope to its target phase while preserving measured
+            # Tool receipts and dispatched public Tool Action--Observation
+            # state.  A source Reasoner's rejected completion is role-specific
+            # and must not become a Retriever imitation target.  Tool errors
+            # remain public because those dispatches consumed the shared budget.
+            "execution_phase": execution_phase,
+            "continuation_source_agent_id": source_agent_id,
         }
-        for field_name in ("react_trace", "tool_receipts"):
-            raw_items = source.get(field_name, ())
-            if isinstance(raw_items, (list, tuple)):
-                items = [
-                    dict(item)
-                    for item in raw_items
-                    if isinstance(item, Mapping)
-                ]
-                if items:
-                    result[field_name] = items
+        raw_trace = source.get("react_trace", ())
+        if isinstance(raw_trace, (list, tuple)):
+            tool_trace = []
+            for raw_item in raw_trace:
+                if not isinstance(raw_item, Mapping):
+                    continue
+                observation = raw_item.get("observation")
+                if not isinstance(observation, Mapping):
+                    continue
+                executed_action = observation.get("executed_action")
+                if (
+                    not isinstance(executed_action, Mapping)
+                    or executed_action.get("kind") != "tool"
+                    or executed_action.get("resource_id")
+                    != self.required_evidence_tool_id
+                ):
+                    continue
+                tool_trace.append(dict(raw_item))
+            if tool_trace:
+                result["react_trace"] = tool_trace
+        raw_receipts = source.get("tool_receipts", ())
+        if isinstance(raw_receipts, (list, tuple)):
+            receipts = [
+                dict(item)
+                for item in raw_receipts
+                if isinstance(item, Mapping)
+                and item.get("tool_id") == self.required_evidence_tool_id
+            ]
+            if receipts:
+                result["tool_receipts"] = receipts
         if not any(field_name in result for field_name in ("react_trace", "tool_receipts")):
-            return {}
-        return {target.agent_id: result}
+            return None
+        return result
 
     @staticmethod
     def _failure_continuation_weight(metadata: Mapping[str, object]) -> tuple[int, int]:
@@ -2518,6 +2556,30 @@ class AgentWorkflowEnv:
             else:
                 self._diagnosed_unusable_agent_ids.discard(record.agent_id)
             continuation = self._failure_continuation_candidate(record)
+            if continuation is not None and not any(
+                field_name in continuation
+                for field_name in ("react_trace", "tool_receipts")
+            ):
+                source_agent_id = continuation.get(
+                    "continuation_source_agent_id"
+                )
+                source_continuation = (
+                    self._failure_continuations.get(source_agent_id)
+                    if isinstance(source_agent_id, str)
+                    else None
+                )
+                if source_continuation is not None:
+                    projected = self._tool_continuation_projection(
+                        source_continuation,
+                        execution_phase=record.phase.value,
+                        source_agent_id=source_agent_id,
+                    )
+                    if projected is not None:
+                        # The provider failure occurred before the target
+                        # adapter could publish its own trace.  Retain the
+                        # source projection so an admitted model repair resumes
+                        # the same bounded public Tool state.
+                        continuation = projected
             current_continuation = self._failure_continuations.get(
                 record.agent_id
             )
@@ -3064,6 +3126,16 @@ class AgentWorkflowEnv:
         concrete_tool_argument_patterns = (
             re.compile(r"\b(?:search|read)\s*\(", flags=re.IGNORECASE),
             re.compile(
+                r"\b(?:search|retrieve|read)\b[^.!?\n]{0,80}?"
+                r"\bfor\s+[\"'][^\"'\n]+[\"']",
+                flags=re.IGNORECASE,
+            ),
+            re.compile(
+                r"\b(?:using|with)\s+(?:the\s+)?"
+                r"(?:query|search\s+phrase)\s+[\"'][^\"'\n]+[\"']",
+                flags=re.IGNORECASE,
+            ),
+            re.compile(
                 r"[\"']query[\"']\s*:\s*[\"'][^\"'\n]+[\"']",
                 flags=re.IGNORECASE,
             ),
@@ -3093,6 +3165,30 @@ class AgentWorkflowEnv:
                 "and terminal predicates without concrete Tool invocation arguments. "
                 "The Runtime state-conditioned action schema selects the exact query, "
                 "top-k, and passage_id from current public observations"
+            )
+
+        concrete_entity_mapping = re.compile(
+            r"\b(?:resolve|map|link|normalize|disambiguate)\b"
+            r"[^.!?\n]{0,96}?[\"']([^\"'\n]+)[\"']\s+"
+            r"(?:to|as|into|->)\s+[\"']([^\"'\n]+)[\"']",
+            flags=re.IGNORECASE,
+        )
+        if any(
+            any(
+                not all(
+                    literal.strip().casefold() in allowed_protocol_literals
+                    or question_contains(literal)
+                    for literal in match.groups()
+                )
+                for match in concrete_entity_mapping.finditer(obligation)
+            )
+            for obligation in obligations
+        ):
+            return (
+                f"{self._semantic_protocol_label()} Agent contract and "
+                "completion_condition fields are pre-execution obligations only: "
+                "entity linking and alias resolution must remain evidence-grounded "
+                "responsibilities, not a concrete precommitted entity mapping"
             )
 
         for obligation in obligations:
