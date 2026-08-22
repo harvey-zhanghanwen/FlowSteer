@@ -19,7 +19,7 @@ import json
 from pathlib import Path
 import re
 from tempfile import TemporaryDirectory
-from typing import Callable, Mapping, Protocol, Sequence
+from typing import Callable, Mapping, Optional, Protocol, Sequence
 import unicodedata
 
 from .agent_runtime import AgentGateway, AgentRequest, GatewayResponse
@@ -434,6 +434,18 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             f"qa_semantic_reasoner_protocol_{id(self)}",
             default=None,
         )
+        self._semantic_evidence_retriever_question: ContextVar[
+            str | None
+        ] = ContextVar(
+            f"qa_semantic_evidence_retriever_question_{id(self)}",
+            default=None,
+        )
+        self._semantic_evidence_retriever_protocol: ContextVar[
+            str | None
+        ] = ContextVar(
+            f"qa_semantic_evidence_retriever_protocol_{id(self)}",
+            default=None,
+        )
         self._semantic_upstream_tool_receipts: ContextVar[
             tuple[Mapping[str, object], ...]
         ] = ContextVar(
@@ -620,6 +632,14 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             ):
                 invalid_key = (str(status), public_error_code)
                 if invalid_key == last_invalid_key:
+                    prior = compacted[-1]
+                    repeat_count = prior.get("repeat_count", 1)
+                    prior["repeat_count"] = (
+                        repeat_count + 1
+                        if isinstance(repeat_count, int)
+                        and not isinstance(repeat_count, bool)
+                        else 2
+                    )
                     continue
                 last_invalid_key = invalid_key
             else:
@@ -919,7 +939,71 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         request: AgentRequest,
     ) -> Mapping[str, object]:
         semantic_protocol = request.semantic_protocol
-        if (request.agent.role_family or "").casefold() != "reasoner" or (
+        semantic_role = (request.agent.role_family or "").casefold()
+        if semantic_role == "evidence_retriever" and semantic_protocol in {
+            "hotpotqa_verified_answer_slot_v1",
+            QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+        }:
+            non_empty_text = {"type": "string", "minLength": 1}
+            question_scope = (
+                hotpotqa_question_scope(request.problem)
+                if semantic_protocol == "hotpotqa_verified_answer_slot_v1"
+                else qa_question_scope(request.problem)
+            )
+            # PROJECT_NECESSARY_ADAPTATION: SkillFlow constrains every public
+            # StructuredAction and read receipt, while the shared AgentGraph
+            # recovery branch needs an answer-free intermediate artifact.  The
+            # Retriever owns evidence provenance only; semantic answer
+            # selection remains exclusively with the Reasoner.
+            return {
+                "type": "object",
+                "required": ["value"],
+                "properties": {
+                    "value": {
+                        "type": "object",
+                        "required": [
+                            "question_scope",
+                            "entity_identity",
+                            "target_relation",
+                            "evidence_span",
+                            "passage_id",
+                        ],
+                        "properties": {
+                            "question_scope": {
+                                "const": question_scope,
+                                "description": (
+                                    "Copy the original question exactly without "
+                                    "narrowing its semantic scope."
+                                ),
+                            },
+                            "entity_identity": {
+                                "type": "object",
+                                "required": [
+                                    "question_surface",
+                                    "evidence_surface",
+                                ],
+                                "properties": {
+                                    "question_surface": dict(non_empty_text),
+                                    "evidence_surface": dict(non_empty_text),
+                                },
+                                "additionalProperties": False,
+                            },
+                            "target_relation": dict(non_empty_text),
+                            "evidence_span": {
+                                **non_empty_text,
+                                "description": (
+                                    "An exact supporting span from the cited read "
+                                    "receipt."
+                                ),
+                            },
+                            "passage_id": dict(non_empty_text),
+                        },
+                        "additionalProperties": False,
+                    }
+                },
+                "additionalProperties": False,
+            }
+        if semantic_role != "reasoner" or (
             semantic_protocol
             not in {
                 "hotpotqa_verified_answer_slot_v1",
@@ -1197,6 +1281,17 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             and (request.agent.role_family or "").casefold() == "reasoner"
             else None
         )
+        semantic_evidence_retriever_protocol = (
+            request.semantic_protocol
+            if request.semantic_protocol
+            in {
+                "hotpotqa_verified_answer_slot_v1",
+                QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            }
+            and (request.agent.role_family or "").casefold()
+            == "evidence_retriever"
+            else None
+        )
         semantic_reasoner_question = (
             (
                 hotpotqa_question_scope(request.problem)
@@ -1205,6 +1300,16 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 else qa_question_scope(request.problem)
             )
             if semantic_reasoner_protocol is not None
+            else None
+        )
+        semantic_evidence_retriever_question = (
+            (
+                hotpotqa_question_scope(request.problem)
+                if semantic_evidence_retriever_protocol
+                == "hotpotqa_verified_answer_slot_v1"
+                else qa_question_scope(request.problem)
+            )
+            if semantic_evidence_retriever_protocol is not None
             else None
         )
         semantic_upstream_tool_receipts = (
@@ -1218,6 +1323,16 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         )
         semantic_protocol_token = self._semantic_reasoner_protocol.set(
             semantic_reasoner_protocol
+        )
+        evidence_retriever_question_token = (
+            self._semantic_evidence_retriever_question.set(
+                semantic_evidence_retriever_question
+            )
+        )
+        evidence_retriever_protocol_token = (
+            self._semantic_evidence_retriever_protocol.set(
+                semantic_evidence_retriever_protocol
+            )
         )
         upstream_receipts_token = self._semantic_upstream_tool_receipts.set(
             semantic_upstream_tool_receipts
@@ -1321,6 +1436,12 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     tool_plan_exhausted=True,
                 ) from exc
         finally:
+            self._semantic_evidence_retriever_protocol.reset(
+                evidence_retriever_protocol_token
+            )
+            self._semantic_evidence_retriever_question.reset(
+                evidence_retriever_question_token
+            )
             self._semantic_upstream_tool_receipts.reset(
                 upstream_receipts_token
             )
@@ -1339,7 +1460,6 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             request,
             observations,
         )
-        required_evidence = evidence_state.required
         searched_passage_ids = evidence_state.latest_unread_passage_ids
         if self._task_type == "multi_hop_qa":
             guidance = SKILLFLOW_MULTI_HOP_QA_GUIDANCE
@@ -1394,6 +1514,26 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     " The Reasoner remains responsible for semantic alignment after "
                     "evidence is read, but no semantic-answer field belongs in the "
                     "current Tool arguments."
+                )
+        elif request.semantic_protocol in {
+            "hotpotqa_verified_answer_slot_v1",
+            QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+        } and semantic_role == "evidence_retriever":
+            if completion_admitted:
+                terminal_wire += (
+                    " As the Evidence Retriever, arguments.value must contain "
+                    "exactly question_scope, entity_identity, target_relation, "
+                    "evidence_span, and passage_id. entity_identity contains "
+                    "exactly question_surface and evidence_surface. Cite one "
+                    "successful qa-retrieval read receipt and copy an exact "
+                    "evidence span that binds the entity and relation. Do not "
+                    "select or emit candidate_answer, answer_slot, or final_answer."
+                )
+            else:
+                terminal_wire += (
+                    " The Evidence Retriever owns only receipt-grounded entity, "
+                    "relation, and evidence provenance; no answer field belongs "
+                    "in the current Tool arguments."
                 )
         elif request.semantic_protocol in {
             "hotpotqa_verified_answer_slot_v1",
@@ -1528,6 +1668,151 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         )
         return contract + qa_guidance + evidence_continuation
 
+    @staticmethod
+    def _evidence_retriever_completion_issue(
+        *,
+        original_question: str,
+        artifact: str,
+        tool_receipts: Sequence[Mapping[str, object]],
+    ) -> str | None:
+        """Validate one answer-free Retriever artifact against one read receipt."""
+
+        from .agent_workflow_env import (
+            AgentWorkflowEnv,
+            _canonical_evidence_text,
+            _evidence_span_matches_read,
+        )
+
+        required_fields = (
+            "question_scope",
+            "entity_identity",
+            "target_relation",
+            "evidence_span",
+            "passage_id",
+        )
+        fields, issue = AgentWorkflowEnv._structured_semantic_fields(
+            artifact,
+            required_fields,
+        )
+        if issue is not None or fields is None:
+            return issue or "Evidence Retriever artifact is missing"
+        if fields.get("question_scope") != original_question:
+            return "Evidence Retriever question_scope must equal the original question"
+
+        passage_id = fields.get("passage_id")
+        evidence_span = fields.get("evidence_span")
+        target_relation = fields.get("target_relation")
+        identity = fields.get("entity_identity")
+        if (
+            not isinstance(passage_id, str)
+            or not passage_id.strip()
+            or passage_id != passage_id.strip()
+            or not isinstance(evidence_span, str)
+            or not evidence_span.strip()
+            or evidence_span != evidence_span.strip()
+            or not isinstance(target_relation, str)
+            or not target_relation.strip()
+            or target_relation != target_relation.strip()
+        ):
+            return (
+                "Evidence Retriever passage_id, target_relation, and evidence_span "
+                "must be non-empty trimmed text"
+            )
+        if not isinstance(identity, Mapping) or set(identity) != {
+            "question_surface",
+            "evidence_surface",
+        }:
+            return (
+                "Evidence Retriever entity_identity must contain exactly "
+                "question_surface and evidence_surface"
+            )
+        question_surface = identity.get("question_surface")
+        evidence_surface = identity.get("evidence_surface")
+        if any(
+            not isinstance(value, str)
+            or not value.strip()
+            or value != value.strip()
+            for value in (question_surface, evidence_surface)
+        ):
+            return "Evidence Retriever entity surfaces must be non-empty trimmed text"
+        assert isinstance(question_surface, str)
+        assert isinstance(evidence_surface, str)
+
+        cited_read_text: str | None = None
+        for receipt in tool_receipts:
+            if not AgentWorkflowEnv._successful_read_receipt(
+                receipt,
+                QA_RETRIEVAL_TOOL_ID,
+            ):
+                continue
+            receipt_request = receipt.get("request")
+            assert isinstance(receipt_request, Mapping)
+            receipt_arguments = receipt_request.get("arguments")
+            if not isinstance(receipt_arguments, Mapping):
+                continue
+            request_passage_id = receipt_arguments.get("passage_id")
+            if request_passage_id != passage_id:
+                continue
+            result = receipt.get("result")
+            assert isinstance(result, Mapping)
+            value = result.get("value", result)
+            assert isinstance(value, Mapping)
+            passage = value.get("passage")
+            assert isinstance(passage, Mapping)
+            result_ids = (
+                value.get("passage_id"),
+                passage.get("passage_id"),
+            )
+            if any(
+                result_id is not None and result_id != passage_id
+                for result_id in result_ids
+            ):
+                continue
+            cited_read_text = AgentWorkflowEnv._successful_read_text(
+                receipt,
+                QA_RETRIEVAL_TOOL_ID,
+            )
+            if cited_read_text is not None:
+                break
+        if cited_read_text is None:
+            return (
+                "Evidence Retriever passage_id has no matching successful "
+                "qa-retrieval read receipt"
+            )
+        if not _evidence_span_matches_read(evidence_span, cited_read_text):
+            return (
+                "Evidence Retriever evidence_span has no typography-canonical "
+                "lexical match in the cited qa-retrieval read receipt"
+            )
+
+        canonical_question = _canonical_evidence_text(original_question)
+        canonical_span = _canonical_evidence_text(evidence_span)
+        canonical_question_surface = _canonical_evidence_text(question_surface)
+        canonical_evidence_surface = _canonical_evidence_text(evidence_surface)
+        canonical_relation = _canonical_evidence_text(target_relation)
+        if canonical_question_surface not in canonical_question:
+            return (
+                "Evidence Retriever entity_identity.question_surface does not "
+                "occur in the original question"
+            )
+        if canonical_evidence_surface not in canonical_span:
+            return (
+                "Evidence Retriever entity_identity.evidence_surface does not "
+                "occur in evidence_span"
+            )
+        if canonical_relation not in canonical_span:
+            return "Evidence Retriever target_relation does not occur in evidence_span"
+
+        if (
+            canonical_question_surface != canonical_evidence_surface
+            and canonical_question_surface not in canonical_span
+        ):
+            return (
+                "Evidence Retriever alias identity lacks an explicit binding "
+                "between question_surface and evidence_surface in the cited read"
+            )
+        return None
+
     def _completion_error(
         self,
         *,
@@ -1604,6 +1889,25 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 if unified_factual and retrieval_budget_exhausted:
                     return _KNOWLEDGE_BASE_COVERAGE_FAILURE
                 return "qa_completion_requires_successful_read_evidence"
+
+        evidence_retriever_question = (
+            self._semantic_evidence_retriever_question.get()
+        )
+        if evidence_retriever_question is not None:
+            issue = self._evidence_retriever_completion_issue(
+                original_question=evidence_retriever_question,
+                artifact=artifact,
+                tool_receipts=tool_receipts,
+            )
+            if issue is None:
+                return None
+            retriever_protocol = self._semantic_evidence_retriever_protocol.get()
+            prefix = (
+                _HOTPOTQA_SEMANTIC_EVIDENCE_ERROR_PREFIX
+                if retriever_protocol == "hotpotqa_verified_answer_slot_v1"
+                else _QA_SEMANTIC_EVIDENCE_ERROR_PREFIX
+            )
+            return prefix + " " + issue
 
         original_question = self._semantic_reasoner_question.get()
         if original_question is None:

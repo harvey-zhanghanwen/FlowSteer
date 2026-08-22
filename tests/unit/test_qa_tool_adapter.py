@@ -98,6 +98,8 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("success", visible[1]["observation_status"])
         self.assertIn("repair_instruction", visible[0])
         self.assertIn("repair_instruction", visible[2])
+        self.assertEqual(2, visible[0]["repeat_count"])
+        self.assertEqual(2, visible[2]["repeat_count"])
 
     async def test_duplicate_normalized_query_exposes_query_rewrite_feedback(
         self,
@@ -2427,6 +2429,455 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             "qa_completion_requires_successful_read_evidence",
             error.react_trace[-1]["public_error_code"],
         )
+
+    def test_evidence_retriever_schema_and_contract_are_answer_free(self) -> None:
+        adapter = QARetrievalReactExecutionAdapter(
+            gateway=SimpleNamespace(generate=lambda request: None),
+            tool_registry=build_qa_tool_registry(FakeIndex()),
+            max_turns=3,
+            max_tool_calls=2,
+            task_type="factual_qa",
+            completion_policy="required_evidence",
+        )
+        request = AgentRequest(
+            request_id="trivia:evidence-retriever-schema",
+            run_id="trivia",
+            graph_revision=1,
+            problem="Which city does David Soul come from?",
+            agent=AgentNode(
+                "evidence_retriever",
+                "model",
+                "retrieve evidence for the requested entity and relation",
+                role_family="evidence_retriever",
+                allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                execution_mode="react",
+            ),
+            model=ModelSpec("model", "provider"),
+            provider=ProviderSpec("provider", kind="test"),
+            phase=ExecutionPhase.SINGLE,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+        )
+
+        schema = adapter._completion_arguments_schema(request)
+        artifact_schema = schema["properties"]["value"]
+        expected_fields = {
+            "question_scope",
+            "entity_identity",
+            "target_relation",
+            "evidence_span",
+            "passage_id",
+        }
+        self.assertEqual(expected_fields, set(artifact_schema["required"]))
+        self.assertEqual(expected_fields, set(artifact_schema["properties"]))
+        self.assertFalse(artifact_schema["additionalProperties"])
+        self.assertEqual(
+            {"question_surface", "evidence_surface"},
+            set(
+                artifact_schema["properties"]["entity_identity"]["required"]
+            ),
+        )
+        for answer_field in ("candidate_answer", "answer_slot", "final_answer"):
+            self.assertNotIn(answer_field, artifact_schema["properties"])
+
+        completion_contract = adapter._contract(
+            request,
+            [
+                {
+                    "observation_status": "success",
+                    "result": {
+                        "operation": "read",
+                        "passage_id": "p1",
+                        "passage": {
+                            "passage_id": "p1",
+                            "text": "David Soul is from Chicago.",
+                        },
+                    },
+                }
+            ],
+        )
+        self.assertIn("As the Evidence Retriever", completion_contract)
+        self.assertIn(
+            "Cite one successful qa-retrieval read receipt",
+            completion_contract,
+        )
+        self.assertIn(
+            "Do not select or emit candidate_answer, answer_slot, or final_answer",
+            completion_contract,
+        )
+
+    async def test_evidence_retriever_completes_one_grounded_read_artifact(
+        self,
+    ) -> None:
+        question = "Which city does David Soul come from?"
+        evidence = "David Soul is from Chicago."
+        artifact = {
+            "question_scope": question,
+            "entity_identity": {
+                "question_surface": "David Soul",
+                "evidence_surface": "David Soul",
+            },
+            "target_relation": "is from",
+            "evidence_span": evidence,
+            "passage_id": "p1",
+        }
+
+        def action(name: str, arguments: object) -> str:
+            return json.dumps(
+                {
+                    "arguments": arguments,
+                    "kind": "complete" if name == "complete" else "tool",
+                    "name": name,
+                    "resource_id": (
+                        None if name == "complete" else QA_RETRIEVAL_TOOL_ID
+                    ),
+                    "skill_id": None,
+                }
+            )
+
+        class SoulIndex(FakeIndex):
+            def read(self, passage_id: str) -> FakePassage:
+                self.read_calls.append(passage_id)
+                return FakePassage(passage_id, "d1", "David Soul", evidence)
+
+        class SequenceGateway:
+            def __init__(self) -> None:
+                self.outputs = [
+                    action("search", {"query": "David Soul origin city", "limit": 5}),
+                    action("read", {"passage_id": "p1"}),
+                    action("complete", {"value": artifact}),
+                ]
+
+            async def generate(self, request: AgentRequest) -> AgentResponse:
+                del request
+                return AgentResponse(self.outputs.pop(0))
+
+        index = SoulIndex()
+        response = await QARetrievalReactExecutionAdapter(
+            gateway=SequenceGateway(),
+            tool_registry=build_qa_tool_registry(index),
+            max_turns=3,
+            max_tool_calls=2,
+            task_type="factual_qa",
+            completion_policy="required_evidence",
+        ).execute(
+            AgentRequest(
+                request_id="trivia:evidence-retriever-grounded",
+                run_id="trivia",
+                graph_revision=1,
+                problem=question,
+                agent=AgentNode(
+                    "evidence_retriever",
+                    "model",
+                    "retrieve receipt-grounded entity and relation evidence",
+                    role_family="evidence_retriever",
+                    allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                    execution_mode="react",
+                ),
+                model=ModelSpec("model", "provider"),
+                provider=ProviderSpec("provider", kind="test"),
+                phase=ExecutionPhase.SINGLE,
+                semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            )
+        )
+
+        self.assertEqual(
+            json.dumps(
+                artifact,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            response.text,
+        )
+        self.assertEqual([("David Soul origin city", 5)], index.search_calls)
+        self.assertEqual(["p1"], index.read_calls)
+        self.assertEqual(2, response.metadata["tool_calls"])
+
+    def test_evidence_retriever_rejects_unprovenanced_or_answer_only_artifacts(
+        self,
+    ) -> None:
+        question = "Which city does David Soul come from?"
+        evidence = "David Soul comes from Chicago."
+        receipt = {
+            "tool_id": QA_RETRIEVAL_TOOL_ID,
+            "tool_version": "frozen-index-v1",
+            "request": {
+                "action": "read",
+                "arguments": {"passage_id": "p1"},
+            },
+            "result": {
+                "value": {
+                    "operation": "read",
+                    "passage_id": "p1",
+                    "passage": {"passage_id": "p1", "text": evidence},
+                },
+                "completed": True,
+            },
+            "error_type": None,
+        }
+        valid = {
+            "question_scope": question,
+            "entity_identity": {
+                "question_surface": "David Soul",
+                "evidence_surface": "David Soul",
+            },
+            "target_relation": "comes from",
+            "evidence_span": evidence,
+            "passage_id": "p1",
+        }
+
+        issue = QARetrievalReactExecutionAdapter._evidence_retriever_completion_issue
+        self.assertIsNone(
+            issue(
+                original_question=question,
+                artifact=json.dumps(valid),
+                tool_receipts=[receipt],
+            )
+        )
+
+        invalid_cases: dict[str, tuple[object, str]] = {}
+        for name, path, value, expected in (
+            (
+                "passage",
+                ("passage_id",),
+                "p2",
+                "no matching successful",
+            ),
+            (
+                "span",
+                ("evidence_span",),
+                "David Soul comes from London.",
+                "no typography-canonical lexical match",
+            ),
+            (
+                "question entity",
+                ("entity_identity", "question_surface"),
+                "David Crockett",
+                "does not occur in the original question",
+            ),
+            (
+                "evidence entity",
+                ("entity_identity", "evidence_surface"),
+                "David Crockett",
+                "does not occur in evidence_span",
+            ),
+            (
+                "relation",
+                ("target_relation",),
+                "was born in",
+                "target_relation does not occur",
+            ),
+        ):
+            candidate = json.loads(json.dumps(valid))
+            target = candidate
+            for key in path[:-1]:
+                target = target[key]
+            target[path[-1]] = value
+            invalid_cases[name] = (candidate, expected)
+        invalid_cases["bare answer"] = (
+            "London",
+            "labelled artifact must begin with a declared `Field:` label",
+        )
+
+        for name, (candidate, expected) in invalid_cases.items():
+            with self.subTest(name=name):
+                detail = issue(
+                    original_question=question,
+                    artifact=(
+                        candidate
+                        if isinstance(candidate, str)
+                        else json.dumps(candidate)
+                    ),
+                    tool_receipts=[receipt],
+                )
+                self.assertIsNotNone(detail)
+                assert detail is not None
+                self.assertIn(expected, detail)
+
+    def test_evidence_retriever_alias_requires_explicit_identity_binding(
+        self,
+    ) -> None:
+        question = "Where was Norma Jeane Mortenson born?"
+
+        def receipt(passage_id: str, text: str) -> dict[str, object]:
+            return {
+                "tool_id": QA_RETRIEVAL_TOOL_ID,
+                "tool_version": "frozen-index-v1",
+                "request": {
+                    "action": "read",
+                    "arguments": {"passage_id": passage_id},
+                },
+                "result": {
+                    "value": {
+                        "operation": "read",
+                        "passage_id": passage_id,
+                        "passage": {
+                            "passage_id": passage_id,
+                            "text": text,
+                        },
+                    },
+                    "completed": True,
+                },
+                "error_type": None,
+            }
+
+        positive_text = (
+            "Norma Jeane Mortenson, known as Marilyn Monroe, was born in "
+            "Los Angeles."
+        )
+        positive = {
+            "question_scope": question,
+            "entity_identity": {
+                "question_surface": "Norma Jeane Mortenson",
+                "evidence_surface": "Marilyn Monroe",
+            },
+            "target_relation": "was born in",
+            "evidence_span": positive_text,
+            "passage_id": "positive",
+        }
+        issue = QARetrievalReactExecutionAdapter._evidence_retriever_completion_issue
+        self.assertIsNone(
+            issue(
+                original_question=question,
+                artifact=json.dumps(positive),
+                tool_receipts=[receipt("positive", positive_text)],
+            )
+        )
+
+        negative_text = "Marilyn Monroe was born in Los Angeles."
+        negative = {
+            **positive,
+            "evidence_span": negative_text,
+            "passage_id": "negative",
+        }
+        detail = issue(
+            original_question=question,
+            artifact=json.dumps(negative),
+            tool_receipts=[receipt("negative", negative_text)],
+        )
+        self.assertIsNotNone(detail)
+        assert detail is not None
+        self.assertIn("alias identity lacks an explicit binding", detail)
+
+    async def test_irrelevant_david_crockett_read_advances_david_soul_retrieval(
+        self,
+    ) -> None:
+        question = "Which city does David Soul come from?"
+        crockett_evidence = (
+            "David Crockett was born in Greene County, Tennessee."
+        )
+        invalid_artifact = {
+            "question_scope": question,
+            "entity_identity": {
+                "question_surface": "David Soul",
+                "evidence_surface": "David Crockett",
+            },
+            "target_relation": "was born in",
+            "evidence_span": crockett_evidence,
+            "passage_id": "p1",
+        }
+
+        def action(name: str, arguments: object) -> str:
+            return json.dumps(
+                {
+                    "arguments": arguments,
+                    "kind": "complete" if name == "complete" else "tool",
+                    "name": name,
+                    "resource_id": (
+                        None if name == "complete" else QA_RETRIEVAL_TOOL_ID
+                    ),
+                    "skill_id": None,
+                }
+            )
+
+        class DisambiguationIndex(FakeIndex):
+            def search(self, query: str, *, limit: int) -> tuple[FakeHit, ...]:
+                self.search_calls.append((query, limit))
+                passage_id = "p1" if len(self.search_calls) == 1 else "p2"
+                title = "David Crockett" if passage_id == "p1" else "David Soul"
+                return (FakeHit(passage_id, passage_id, title, title, 1),)
+
+            def read(self, passage_id: str) -> FakePassage:
+                self.read_calls.append(passage_id)
+                return FakePassage(
+                    passage_id,
+                    passage_id,
+                    "David Crockett",
+                    crockett_evidence,
+                )
+
+        class SequenceGateway:
+            def __init__(self) -> None:
+                self.outputs = [
+                    action("search", {"query": "David Soul birthplace", "limit": 5}),
+                    action("read", {"passage_id": "p1"}),
+                    action("complete", {"value": invalid_artifact}),
+                    action(
+                        "search",
+                        {"query": "David Soul origin city", "limit": 10},
+                    ),
+                ]
+                self.requests: list[AgentRequest] = []
+
+            async def generate(self, request: AgentRequest) -> AgentResponse:
+                self.requests.append(request)
+                return AgentResponse(self.outputs.pop(0))
+
+        index = DisambiguationIndex()
+        gateway = SequenceGateway()
+        request = AgentRequest(
+            request_id="trivia:david-soul-retrieval-recovery",
+            run_id="trivia",
+            graph_revision=1,
+            problem=question,
+            agent=AgentNode(
+                "evidence_retriever",
+                "model",
+                "retrieve evidence for the original entity and relation",
+                role_family="evidence_retriever",
+                allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                execution_mode="react",
+            ),
+            model=ModelSpec("model", "provider"),
+            provider=ProviderSpec("provider", kind="test"),
+            phase=ExecutionPhase.SINGLE,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+        )
+
+        with self.assertRaises(ReactExecutionError) as caught:
+            await QARetrievalReactExecutionAdapter(
+                gateway=gateway,
+                tool_registry=build_qa_tool_registry(index),
+                max_turns=4,
+                max_tool_calls=10,
+                task_type="factual_qa",
+                completion_policy="required_evidence",
+            ).execute(request)
+
+        self.assertEqual(
+            [
+                ("David Soul birthplace", 5),
+                ("David Soul origin city", 10),
+            ],
+            index.search_calls,
+        )
+        invalid_feedback = caught.exception.react_trace[2]["public_error_code"]
+        self.assertTrue(
+            invalid_feedback.startswith(
+                "qa_semantic_evidence_provenance_invalid:"
+            )
+        )
+        self.assertIn("alias identity lacks an explicit binding", invalid_feedback)
+        retry_schema = json.loads(
+            gateway.requests[3].model.metadata["response_json_schema"]
+        )
+        self.assertEqual(
+            10,
+            retry_schema["properties"]["arguments"]["properties"]["limit"][
+                "const"
+            ],
+        )
+        self.assertIn("`spelling_normalization`", gateway.requests[3].agent.contract)
 
     async def test_react_direct_completion_remains_valid_when_dispatch_is_impossible(self) -> None:
         def complete(value: str) -> str:

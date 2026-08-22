@@ -424,8 +424,17 @@ class ToolReactExecutionAdapter:
                 "execution adapter mode does not match the Agent contract"
             )
         observations = self._continuation_observations(request.action_history)
+        continuation_source = request.continuation_source_agent_id
         trace: list[dict[str, object]] = [
-            {**dict(item), "continued_from_prior_revision": True}
+            {
+                **dict(item),
+                "continued_from_prior_revision": True,
+                **(
+                    {"continuation_source_agent_id": continuation_source}
+                    if continuation_source is not None
+                    else {}
+                ),
+            }
             for item in request.action_history
         ]
         tool_receipts: list[dict[str, object]] = [
@@ -601,6 +610,7 @@ class ToolReactExecutionAdapter:
                         "continued_tool_receipt_count": len(
                             request.prior_tool_receipts
                         ),
+                        "continuation_source_agent_id": continuation_source,
                         "tool_calls": tool_calls,
                         "tool_receipts": tool_receipts,
                         "react_trace": trace,

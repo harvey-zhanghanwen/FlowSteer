@@ -2567,6 +2567,201 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(["reasoner"], recovery["mandatory_repair_agent_ids"])
         self.assertEqual(("modify_agent",), env.model_admissible_action_types())
 
+    async def test_hotpot_recovery_continuation_handoff_is_target_scoped_and_ephemeral(
+        self,
+    ) -> None:
+        graph = _hotpot_semantic_graph()
+        registry = make_registry()
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_hotpot_semantic_runtime(registry, _ImmediateGateway()),
+            graph=graph,
+            problem="What is the capital of France?",
+            execute_on_edit=False,
+            semantic_protocol="hotpotqa_verified_answer_slot_v1",
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+        )
+        trace = [
+            {
+                "turn": 1,
+                "observation_status": "tool_result",
+                "public_error_code": None,
+            }
+        ]
+        receipts = [_test_read_receipt("p1")]
+        env._repair_exhausted_agent_ids.add("reasoner")
+        env._failure_continuations["reasoner"] = {
+            "execution_phase": "single",
+            "react_trace": trace,
+            "tool_receipts": receipts,
+        }
+        action_payload = json.dumps(
+            {
+                "action": "add_subgraph",
+                "agents": [
+                    {
+                        "agent_id": "repair_reader",
+                        "model_id": "cheap",
+                        "contract": "retrieve grounded evidence for the Reasoner",
+                        "role_family": "evidence_retriever",
+                        "allowed_tools": [QA_RETRIEVAL_TOOL_ID],
+                        "execution_mode": "react",
+                    }
+                ],
+                "relations": [],
+            }
+        )
+        action = env.parser.parse(action_payload)
+
+        handoff = env._recovery_continuation_handoff(action)
+
+        self.assertEqual(["repair_reader"], list(handoff))
+        projected = handoff["repair_reader"]
+        self.assertEqual("single", projected["execution_phase"])
+        self.assertEqual(
+            "reasoner",
+            projected["continuation_source_agent_id"],
+        )
+        self.assertEqual(trace, projected["react_trace"])
+        self.assertEqual(receipts, projected["tool_receipts"])
+        self.assertNotIn("repair_reader", env._failure_continuations)
+        self.assertNotIn(
+            "continuation_source_agent_id",
+            env._failure_continuations["reasoner"],
+        )
+
+        observed_failure_metadata: dict[str, object] = {}
+
+        async def capture_overlay(
+            candidate_graph: AgentGraph,
+            *args: object,
+            **kwargs: object,
+        ) -> AgentRuntimeResult:
+            del args
+            observed_failure_metadata.update(
+                kwargs["prior_failure_metadata"]
+            )
+            return AgentRuntimeResult(
+                run_id="handoff-overlay",
+                graph_revision=candidate_graph.revision,
+                output_agent_id=candidate_graph.output_agent_id,
+                final_answer=None,
+                outputs={},
+                output_metadata={},
+                calls=(),
+                block_completion_order=(),
+                executed_agent_ids=(),
+                deferred_agent_ids=tuple(
+                    node.id for node in candidate_graph.nodes
+                ),
+            )
+
+        env.execute_on_edit = True
+        with patch.object(env.runtime, "execute", side_effect=capture_overlay):
+            result = await env.step(action_payload)
+
+        self.assertTrue(result.accepted)
+        self.assertEqual(projected, observed_failure_metadata["repair_reader"])
+        self.assertEqual(
+            "single",
+            observed_failure_metadata["repair_reader"]["execution_phase"],
+        )
+        self.assertEqual(
+            "reasoner",
+            observed_failure_metadata["repair_reader"][
+                "continuation_source_agent_id"
+            ],
+        )
+        self.assertNotIn("repair_reader", env._failure_continuations)
+        self.assertIn("reasoner", env._failure_continuations)
+
+    def test_hotpot_recovery_continuation_handoff_fails_closed(self) -> None:
+        registry = make_registry()
+        graph = _hotpot_semantic_graph()
+        graph.add_agent(
+            AgentNode(
+                "reasoner_2",
+                "balanced",
+                "reason over grounded evidence",
+                role_family="reasoner",
+                allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                execution_mode="react",
+            )
+        )
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_hotpot_semantic_runtime(registry, _ImmediateGateway()),
+            graph=graph,
+            problem="What is the capital of France?",
+            execute_on_edit=False,
+            semantic_protocol="hotpotqa_verified_answer_slot_v1",
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+        )
+        continuation = {
+            "execution_phase": "single",
+            "react_trace": [{"turn": 1, "observation_status": "tool_result"}],
+            "tool_receipts": [_test_read_receipt("p1")],
+        }
+        env._repair_exhausted_agent_ids.update({"reasoner", "reasoner_2"})
+        env._failure_continuations.update(
+            {
+                "reasoner": continuation,
+                "reasoner_2": continuation,
+            }
+        )
+
+        def parse_target(role_family: str):
+            return env.parser.parse(
+                json.dumps(
+                    {
+                        "action": "add_subgraph",
+                        "agents": [
+                            {
+                                "agent_id": "repair_reader",
+                                "model_id": "cheap",
+                                "contract": "repair the failed semantic path",
+                                "role_family": role_family,
+                                "allowed_tools": [QA_RETRIEVAL_TOOL_ID],
+                                "execution_mode": "react",
+                            }
+                        ],
+                        "relations": [],
+                    }
+                )
+            )
+
+        self.assertEqual(
+            {},
+            env._recovery_continuation_handoff(
+                parse_target("evidence_retriever")
+            ),
+        )
+
+        env._repair_exhausted_agent_ids.remove("reasoner_2")
+        self.assertEqual(
+            {},
+            env._recovery_continuation_handoff(parse_target("repair")),
+        )
+
+        non_recovery = AgentWorkflowEnv(
+            registry,
+            runtime=AgentRuntime(registry, _ImmediateGateway()),
+            graph=_hotpot_semantic_graph(),
+            problem="What is the capital of France?",
+            execute_on_edit=False,
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+        )
+        non_recovery._repair_exhausted_agent_ids.add("reasoner")
+        non_recovery._failure_continuations["reasoner"] = continuation
+        self.assertEqual(
+            {},
+            non_recovery._recovery_continuation_handoff(
+                parse_target("evidence_retriever")
+            ),
+        )
+
     async def test_hotpot_non_react_failures_do_not_exhaust_react_repair(
         self,
     ) -> None:
@@ -4023,6 +4218,43 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         self.assertTrue(schema_repair.accepted)
+
+        for concrete_tool_contract in (
+            "Call search(query='David Soul birthplace', limit=10).",
+            'Use {"query": "David Soul birthplace"} for retrieval.',
+            "Expand retrieval with top-k=25.",
+            'Read the Tool receipt with "passage_id": "atlas:123".',
+        ):
+            revision = env.revision
+            rejected_tool_arguments = await env.step(
+                json.dumps(
+                    {
+                        "action": "modify_agent",
+                        "agent_id": "reasoner",
+                        "contract": concrete_tool_contract,
+                    }
+                )
+            )
+            self.assertFalse(rejected_tool_arguments.accepted)
+            self.assertIn(
+                "without concrete Tool invocation arguments",
+                rejected_tool_arguments.feedback,
+            )
+            self.assertEqual(revision, env.revision)
+
+        neutral_retrieval_responsibility = await env.step(
+            json.dumps(
+                {
+                    "action": "modify_agent",
+                    "agent_id": "reasoner",
+                    "contract": (
+                        "Rewrite the query using the current entity and relation "
+                        "evidence, and expand top-k when retrieval recall is insufficient"
+                    ),
+                }
+            )
+        )
+        self.assertTrue(neutral_retrieval_responsibility.accepted)
 
         for answer_precommit in (
             {

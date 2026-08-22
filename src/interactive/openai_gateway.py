@@ -302,6 +302,16 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
                     )
                 )
             )
+        elif semantic_lineage and semantic_role == "evidence_retriever":
+            protocol += (
+                " ReAct is only this node's execution schedule, not its role. "
+                "You are the Evidence Retriever and own only public retrieval "
+                "provenance. Use the admitted search/read actions; only when "
+                "completion is admitted, submit the exact grounded evidence "
+                "artifact defined by the assigned schema in arguments.value. "
+                "Cite a successful read receipt and do not select or emit "
+                "candidate_answer, answer_slot, or final_answer."
+            )
         elif semantic_lineage and semantic_role == "verifier":
             protocol += (
                 " ReAct is only this node's execution schedule, not its role. "

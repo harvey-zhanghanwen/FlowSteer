@@ -100,7 +100,7 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(routed.content, routed.artifact)
         self.assertEqual(snapshot.to_dict(), graph.snapshot().to_dict())
 
-    async def test_runtime_routes_public_failure_continuation_to_same_agent(
+    async def test_runtime_routes_target_keyed_public_failure_continuation(
         self,
     ) -> None:
         catalog = registry()
@@ -146,6 +146,7 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     "tool_receipts": [
                         {"tool_id": "qa-retrieval", "success": True}
                     ],
+                    "continuation_source_agent_id": "failed_reasoner",
                 }
             },
         )
@@ -158,6 +159,10 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             "qa-retrieval",
             adapter.requests[0].prior_tool_receipts[0]["tool_id"],
+        )
+        self.assertEqual(
+            "failed_reasoner",
+            adapter.requests[0].continuation_source_agent_id,
         )
 
         await runtime.execute(
@@ -173,11 +178,17 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
                             "public_error_code": "wrong communication phase",
                         }
                     ],
+                    "tool_receipts": [
+                        {"tool_id": "qa-retrieval", "success": True}
+                    ],
+                    "continuation_source_agent_id": "failed_reasoner",
                 }
             },
         )
         self.assertEqual(2, len(adapter.requests))
         self.assertEqual((), adapter.requests[1].action_history)
+        self.assertEqual((), adapter.requests[1].prior_tool_receipts)
+        self.assertIsNone(adapter.requests[1].continuation_source_agent_id)
 
     async def test_semantic_protocol_is_propagated_to_every_agent_request(self) -> None:
         catalog = registry()

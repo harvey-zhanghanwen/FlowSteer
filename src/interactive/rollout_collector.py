@@ -2116,6 +2116,10 @@ _PROVIDER_RESPONSE_METADATA_FIELDS: Tuple[str, ...] = (
 _UNIFIED_EXECUTION_METADATA_FIELDS: Tuple[str, ...] = (
     "execution_mode",
     "react_turns_used",
+    "new_react_turns_used",
+    "continued_action_history_count",
+    "continued_tool_receipt_count",
+    "continuation_source_agent_id",
     "tool_calls",
     "tool_receipts",
     "react_trace",
@@ -2236,6 +2240,7 @@ def _request_record(call: AgentCallRecord) -> Mapping[str, Any]:
         "is_format_agent": request.is_format_agent,
         "is_format_predecessor": request.is_format_predecessor,
         "semantic_protocol": request.semantic_protocol,
+        "continuation_source_agent_id": request.continuation_source_agent_id,
         "communication_condition": request.communication_condition.value,
         "upstream": [item.to_dict() for item in request.upstream],
         "own_draft": request.own_draft,

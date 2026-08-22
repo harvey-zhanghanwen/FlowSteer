@@ -1703,6 +1703,9 @@ class AgentWorkflowEnv:
                     "edit rejected: " + format_issue,
                 )
 
+        recovery_continuation_handoff = (
+            self._recovery_continuation_handoff(action)
+        )
         self._graph = candidate
         current_agent_ids = {node.id for node in self._graph.nodes}
         self._retain_current_failure_state(current_agent_ids)
@@ -1742,13 +1745,15 @@ class AgentWorkflowEnv:
         if self.execute_on_edit:
             if self._graph.nodes:
                 try:
+                    prior_failure_metadata = dict(self._failure_continuations)
+                    prior_failure_metadata.update(recovery_continuation_handoff)
                     execution = await self.runtime.execute(
                         self._graph,
                         self._problem,
                         require_complete=False,
                         prior_outputs=self._progressive_outputs,
                         prior_output_metadata=self._progressive_output_metadata,
-                        prior_failure_metadata=self._failure_continuations,
+                        prior_failure_metadata=prior_failure_metadata,
                         dirty_agents=self._unresolved_dirty_agents,
                         format_output_agent=self._uses_format_agent_protocol(),
                     )
@@ -2393,7 +2398,69 @@ class AgentWorkflowEnv:
             ]
             if public_items:
                 result[field_name] = public_items
+        source_agent_id = record.metadata.get("continuation_source_agent_id")
+        if isinstance(source_agent_id, str) and source_agent_id.strip():
+            result["continuation_source_agent_id"] = source_agent_id.strip()
         return result if len(result) > 1 else None
+
+    def _recovery_continuation_handoff(
+        self,
+        action: AgentAction,
+    ) -> dict[str, dict[str, object]]:
+        """Project one failed Reasoner's public continuation to a new Retriever.
+
+        Normal repair remains same-Agent and phase-scoped.  This narrowly
+        admitted augmentation is a public recovery handoff at FlowSteer's
+        edit--execute boundary; it does not create an AgentGraph message edge or
+        transfer a semantic artifact, model transcript, Ground Truth, or
+        evaluator state.
+        """
+
+        if (
+            not self._uses_semantic_lineage_protocol()
+            or self.recovery_policy != _PRESERVE_REPAIR_RECOVERY_POLICY
+            or action.action_type is not AgentActionType.ADD_SUBGRAPH
+            or len(action.agents) != 1
+            or self.required_evidence_tool_id is None
+        ):
+            return {}
+        target = action.agents[0]
+        if (
+            (target.role_family or "").casefold() != "evidence_retriever"
+            or target.execution_mode != "react"
+            or target.allowed_tools is None
+            or self.required_evidence_tool_id not in target.allowed_tools
+        ):
+            return {}
+        source_ids = tuple(
+            source_id
+            for source_id in self._repair_exhausted_reasoner_ids()
+            if source_id in self._failure_continuations
+        )
+        if len(source_ids) != 1:
+            return {}
+        source_id = source_ids[0]
+        source = self._failure_continuations[source_id]
+        result: dict[str, object] = {
+            # The newly added one-way auxiliary Agent executes as a singleton.
+            # Bind the envelope to its target phase while preserving every
+            # public Action--Observation item and measured Tool receipt.
+            "execution_phase": "single",
+            "continuation_source_agent_id": source_id,
+        }
+        for field_name in ("react_trace", "tool_receipts"):
+            raw_items = source.get(field_name, ())
+            if isinstance(raw_items, (list, tuple)):
+                items = [
+                    dict(item)
+                    for item in raw_items
+                    if isinstance(item, Mapping)
+                ]
+                if items:
+                    result[field_name] = items
+        if not any(field_name in result for field_name in ("react_trace", "tool_receipts")):
+            return {}
+        return {target.agent_id: result}
 
     @staticmethod
     def _failure_continuation_weight(metadata: Mapping[str, object]) -> tuple[int, int]:
@@ -2987,6 +3054,46 @@ class AgentWorkflowEnv:
             r"([A-Z][A-Za-z0-9'’.-]*(?:\s+[A-Z][A-Za-z0-9'’.-]*){0,5}"
             r"|\d{3,}(?:[.,]\d+)?)",
         )
+
+        # PROJECT_NECESSARY_ADAPTATION: FlowSteer's Director authors semantic
+        # Agent obligations, while SkillFlow's request-scoped action schema is
+        # the authority for concrete Tool arguments.  Reject only explicit
+        # invocations or literal argument values; ordinary responsibility terms
+        # such as query rewriting, entity disambiguation, and expanded top-k
+        # remain available to the Director.
+        concrete_tool_argument_patterns = (
+            re.compile(r"\b(?:search|read)\s*\(", flags=re.IGNORECASE),
+            re.compile(
+                r"[\"']query[\"']\s*:\s*[\"'][^\"'\n]+[\"']",
+                flags=re.IGNORECASE,
+            ),
+            re.compile(
+                r"\bquery\s*=\s*[\"'][^\"'\n]+[\"']",
+                flags=re.IGNORECASE,
+            ),
+            re.compile(
+                r"[\"']?(?:limit|top[_ -]?k)[\"']?\s*(?:=|:)\s*\d+",
+                flags=re.IGNORECASE,
+            ),
+            re.compile(
+                r"[\"']?passage[_ -]?id[\"']?\s*(?:=|:)\s*"
+                r"[\"'][^\"'\n]+[\"']",
+                flags=re.IGNORECASE,
+            ),
+        )
+
+        if any(
+            pattern.search(obligation) is not None
+            for obligation in obligations
+            for pattern in concrete_tool_argument_patterns
+        ):
+            return (
+                f"{self._semantic_protocol_label()} Agent contract and "
+                "completion_condition fields must express semantic responsibility "
+                "and terminal predicates without concrete Tool invocation arguments. "
+                "The Runtime state-conditioned action schema selects the exact query, "
+                "top-k, and passage_id from current public observations"
+            )
 
         for obligation in obligations:
             # Exact public semantic values include one-word entities that a

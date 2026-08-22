@@ -165,6 +165,10 @@ class UnifiedMetadataGateway:
                 "max_tokens": 64,
                 "execution_mode": "react",
                 "react_turns_used": 2,
+                "new_react_turns_used": 1,
+                "continued_action_history_count": 1,
+                "continued_tool_receipt_count": 1,
+                "continuation_source_agent_id": "failed_reasoner",
                 "tool_calls": 1,
                 "tool_receipts": (
                     {
@@ -1426,12 +1430,17 @@ def test_collector_materializes_exact_finish_trajectory_and_evidence(tmp_path):
     ]
     request_receipt = trajectory.turns[-1].executions[0].metadata["request"]
     assert request_receipt["is_output_agent"] is True
+    assert request_receipt["continuation_source_agent_id"] is None
     assert request_receipt["communication_condition"] == "normal"
     assert request_receipt["rendered_messages"][0]["role"] == "system"
     assert request_receipt["rendered_messages"][1]["role"] == "user"
     response_receipt = trajectory.turns[-1].executions[0].metadata["response"]
     assert response_receipt["execution_mode"] == "react"
     assert response_receipt["react_turns_used"] == 2
+    assert response_receipt["new_react_turns_used"] == 1
+    assert response_receipt["continued_action_history_count"] == 1
+    assert response_receipt["continued_tool_receipt_count"] == 1
+    assert response_receipt["continuation_source_agent_id"] == "failed_reasoner"
     assert response_receipt["tool_calls"] == 1
     assert response_receipt["tool_receipts"][0]["tool_id"] == "qa-retrieval.search"
     assert response_receipt["react_trace"][1]["observation_status"] == "completed"
@@ -1461,6 +1470,9 @@ def test_collector_materializes_exact_finish_trajectory_and_evidence(tmp_path):
     assert trajectory.turns[-1].runtime_summary["communication_condition"] == "normal"
     output_metadata = trajectory.turns[-1].runtime_summary["output_metadata"]["solver"]
     assert output_metadata["tool_receipts"] == response_receipt["tool_receipts"]
+    assert output_metadata["continuation_source_agent_id"] == "failed_reasoner"
+    assert output_metadata["continued_action_history_count"] == 1
+    assert output_metadata["continued_tool_receipt_count"] == 1
     assert output_metadata["evaluator_environment_trace"] == response_receipt[
         "evaluator_environment_trace"
     ]

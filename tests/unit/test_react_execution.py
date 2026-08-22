@@ -153,6 +153,7 @@ class ToolReactExecutionTests(unittest.IsolatedAsyncioTestCase):
             prior_tool_receipts=(
                 {"tool_id": "wiki.search", "success": True},
             ),
+            continuation_source_agent_id="failed_reasoner",
         )
 
         response = await ToolReactExecutionAdapter(
@@ -165,12 +166,22 @@ class ToolReactExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("Ada Lovelace", response.text)
         self.assertEqual(2, response.metadata["continued_action_history_count"])
         self.assertEqual(1, response.metadata["continued_tool_receipt_count"])
+        self.assertEqual(
+            "failed_reasoner",
+            response.metadata["continuation_source_agent_id"],
+        )
         self.assertEqual(3, response.metadata["react_turns_used"])
         self.assertEqual(1, response.metadata["new_react_turns_used"])
         self.assertTrue(
             response.metadata["react_trace"][0][
                 "continued_from_prior_revision"
             ]
+        )
+        self.assertEqual(
+            "failed_reasoner",
+            response.metadata["react_trace"][0][
+                "continuation_source_agent_id"
+            ],
         )
         self.assertIn(
             "completion_schema_invalid",

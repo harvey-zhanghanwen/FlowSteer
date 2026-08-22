@@ -288,6 +288,28 @@ class MessageTests(unittest.TestCase):
         )
         self.assertNotIn("ReAct Agent", system)
 
+    def test_unified_qa_evidence_retriever_owns_only_provenance(self) -> None:
+        messages = build_agent_messages(
+            request(
+                is_output_agent=False,
+                execution_mode="react",
+                role_family="evidence_retriever",
+                semantic_protocol="qa_verified_answer_lineage_v2",
+                problem="Which city does David Soul come from?",
+            )
+        )
+        system = messages[0]["content"]
+
+        self.assertIn("ReAct is only this node's execution schedule", system)
+        self.assertIn("You are the Evidence Retriever", system)
+        self.assertIn("own only public retrieval provenance", system)
+        self.assertIn("Cite a successful read receipt", system)
+        self.assertIn(
+            "do not select or emit candidate_answer, answer_slot, or final_answer",
+            system,
+        )
+        self.assertNotIn("You are the semantic Reasoner", system)
+
     def test_unified_qa_verifier_and_formatter_preserve_candidate(self) -> None:
         verifier_messages = build_agent_messages(
             request(

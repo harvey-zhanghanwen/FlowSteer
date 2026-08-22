@@ -39,7 +39,7 @@ with HTTP 403; no existing branch was overwritten.
 
 ### Verified without a live model
 
-- The complete unit suite passes: 771 tests passed across AgentGraph, Runtime,
+- The complete unit suite passes: 780 tests and 142 subtests passed across AgentGraph, Runtime,
   Tool adapter, gateway prompts, Director action domains, configuration,
   records, collector, evaluator and reporting.  The only warning is the
   existing Pydantic class-config deprecation in `scripts/formatter.py`.
@@ -308,9 +308,46 @@ to an executed action: it is recorded with `action={}` and
 Director turn, and the trajectory is ineligible for GRPO.  A regression test
 covers the complete collector path rather than only the JSON parser.
 
+### r9 live evidence and r10 retrieval recovery
+
+The r9 main Stable Zero canary produced `2/2` legal explicit-FINISH lineages.
+`triviaqa:tc_1` returned `Sinclair Lewis` with EM `1.0` and F1 `1.0`;
+`triviaqa:tc_3` retained the evidence-grounded surface
+`Heworth, North Riding of Yorkshire` with EM `0.0` and F1 `0.5`.  The latter
+remains an evaluator-only accepted-answer canonicalization/granularity
+mismatch and is not rewritten by inference.
+
+The required isolated `tc_9/tc_10` regression passed only `1/2` in r9.
+`tc_10` explicitly finished with `Chicago Bears` (EM/F1 `1.0/1.0`).  `tc_9`
+ended at `max_rounds` with no legal evidence lineage.  Its failed Reasoner had
+two successful searches and two reads, but 296 later attempts repeated the
+same normalized query.  Consecutive duplicate feedback was compacted without
+a repeat count, so the deterministic Director input did not change.  Every
+new Evidence Retriever started without the failed Reasoner's public
+Action--Observation history or Tool receipts, reread the same irrelevant
+David Crockett passage, and the generic completion schema admitted unsupported
+city text.  This is retrieval recall/entity disambiguation and recovery-state
+handoff failure, not `knowledge_base_coverage_failure`: the bounded strategy
+sequence was never genuinely exhausted.
+
+Recovery revision r10 is a minimal shared-runtime repair.  Duplicate public
+errors retain one compact observation plus `repeat_count`; a semantic Evidence
+Retriever may complete only with an answer-free, receipt-bound artifact
+containing question scope, explicit entity identity, target relation, exact
+evidence span and passage ID.  When one ReAct-repair-exhausted Reasoner is
+augmented by one new ReAct Evidence Retriever, the FlowSteer edit--execute
+boundary temporarily projects only that Reasoner's public Action--Observation
+history and Tool receipts to the new node, phase-bound to `single` and recorded
+with `continuation_source_agent_id`.  Existing receipts continue to count
+against the same bounded Tool budget; no semantic answer, hidden reasoning,
+Ground Truth or evaluator state is transferred.  Agent contracts may express
+query rewriting, entity disambiguation and expanded top-k responsibilities,
+but concrete query, limit and passage-ID values remain owned by the Runtime's
+state-conditioned Tool schema.
+
 ### Stable Zero status
 
-Static architecture, 772 unit tests and both frozen data-selection
+Static architecture, 780 unit tests, 142 subtests and both frozen data-selection
 preconditions are complete.  The initial, r2, r3 and r4 canaries failed for
 the documented causes; r5 **passed Stable Zero** but its incomplete fixed-128
 run was stopped after measured recovery defects appeared.  Recovery revision
@@ -319,9 +356,12 @@ revision r7 fixed that defect but failed Stable Zero for the documented
 semantic-verification/repair-attribution defect.  Recovery revision r8 is
 answer-lineage complete for `tc_3` but failed Stable Zero because one malformed
 Director parameter sample incorrectly aborted `tc_1` collection.  Recovery
-revision r9 is **pending live Stable Zero and targeted regression**.  Formal
-fixed-128 v2 EM/F1 remain pending.  No score is inferred from unit tests, a
-two-task canary, an incomplete run, or the previous architecture.
+revision r9 passed the main two-task canary but failed the mandatory isolated
+`tc_9/tc_10` regression for the documented retrieval-recovery defects.
+Recovery revision r10 is **pending targeted tests, live Stable Zero, and the
+isolated regression**.  Formal fixed-128 v2 EM/F1 remain pending.  No score is
+inferred from unit tests, a two-task canary, an incomplete run, or the previous
+architecture.
 
 ## Historical comparison condition
 

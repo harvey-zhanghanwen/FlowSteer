@@ -1,21 +1,21 @@
-# TriviaQA evaluation for the second shared HotpotQA/TriviaQA architecture.
-# It keeps FlowSteer's execute-on-edit Canvas and SkillFlow's public bounded
-# search/read Action--Observation contract.  Training and Skills stay disabled.
+# Isolated regression canary for the two r5 failure cases.  It uses the same
+# unified v2 Runtime and frozen validation records without changing the fixed
+# 128-task benchmark selection or repeating Direct inference.
 
 schema_version: "flowsteer.agentgraph.config.v1"
 experiment:
-  name: "triviaqa_unified_architecture_v2"
+  name: "triviaqa_unified_architecture_v2_tc9_tc10_r10"
   phase: "triviaqa_evaluation"
   baseline_id: "triviaqa_unified_architecture_v2"
-  step_id: "stable_zero_recovery_r10"
+  step_id: "stable_zero_recovery_r10_tc9_tc10"
   training_enabled: false
   seed: 20260817
-  condition_id: "triviaqa_unified_architecture_v2_recovery_r10"
-  sampling_schedule_purpose: "triviaqa_fixed_development_unified_architecture_v2_recovery_r10"
+  condition_id: "triviaqa_unified_architecture_v2_recovery_r10_tc9_tc10"
+  sampling_schedule_purpose: "triviaqa_tc9_tc10_regression_r10"
   catalog_order_namespace: "unified_architecture_v2"
   prompt_version: "agentgraph.director.qa-semantic-recovery.v1"
   tool_version: "skillflow.qa-retrieval.factual-semantic-retry.v3"
-  output_dir: "artifacts/unified_architecture_v2/triviaqa_recovery_r10"
+  output_dir: "artifacts/unified_architecture_v2/triviaqa_recovery_r10_tc9_tc10"
 
 data:
   catalog_path: "config/joint_qa_partitions_v2.yaml"
@@ -31,9 +31,10 @@ triviaqa_evaluation:
   dataset_key: "triviaqa"
   stage: "development"
   split: "validation"
-  selection: "sequential"
-  sample_count: 128
+  selection: "task_ids"
+  sample_count: 2
   stable_zero_sample_count: 2
+  task_ids: ["triviaqa:tc_9", "triviaqa:tc_10"]
   rollouts_per_task: 1
   concurrency: 2
   direct_model_id: "qwen3.5-9b-local"
@@ -48,14 +49,12 @@ triviaqa_evaluation:
 
 qa_tool_runtime:
   enabled: true
-  condition_id: "triviaqa_unified_architecture_v2_recovery_r10"
+  condition_id: "triviaqa_unified_architecture_v2_recovery_r10_tc9_tc10"
   mode: "model_driven_search_read"
   passage_source: "external_corpus"
   dataset_scope: ["triviaqa"]
   skillflow_source: "/home/test/SKILLEV/skillflow-bayesian-improve-deploy/src"
   index_path: "/ssd1/iclr/SKILLEV/skillev-new-b2-temp/data/datasets/dpr-wikipedia/atlas-retrieval.sqlite3"
-  # Five bounded search/read opportunities cover the initial query followed
-  # by normalization, aliases, disambiguation and rewritten queries.
   max_turns_per_agent_call: 16
   max_tool_calls_per_agent_call: 10
   tool_timeout_seconds: 30.0
@@ -63,17 +62,17 @@ qa_tool_runtime:
 
 storage:
   schema_version: "flowsteer.completion_benchmark.round.v1"
-  root: "artifacts/unified_architecture_v2/triviaqa_recovery_r10/evidence"
-  selected_tasks_path: "artifacts/unified_architecture_v2/triviaqa_recovery_r10/selected_tasks.jsonl"
-  direct_predictions_path: "artifacts/unified_architecture_v2/triviaqa_recovery_r10/direct_question_only_predictions.jsonl"
-  trajectories_path: "artifacts/unified_architecture_v2/triviaqa_recovery_r10/agentgraph_trajectories.jsonl"
-  failures_path: "artifacts/unified_architecture_v2/triviaqa_recovery_r10/collection_failures.jsonl"
-  paired_results_path: "artifacts/unified_architecture_v2/triviaqa_recovery_r10/paired_results.jsonl"
-  wrong_demos_path: "artifacts/unified_architecture_v2/triviaqa_recovery_r10/wrong_demos.jsonl"
-  manifest_path: "artifacts/unified_architecture_v2/triviaqa_recovery_r10/run_manifest.json"
-  preflight_receipt_path: "artifacts/unified_architecture_v2/triviaqa_recovery_r10/preflight_receipt.json"
-  report_json_path: "reports/unified_architecture_v2/triviaqa_recovery_r10_report.json"
-  report_markdown_path: "reports/unified_architecture_v2/triviaqa_recovery_r10_report.md"
+  root: "artifacts/unified_architecture_v2/triviaqa_recovery_r10_tc9_tc10/evidence"
+  selected_tasks_path: "artifacts/unified_architecture_v2/triviaqa_recovery_r10_tc9_tc10/selected_tasks.jsonl"
+  direct_predictions_path: "artifacts/unified_architecture_v2/triviaqa_recovery_r10_tc9_tc10/direct_question_only_predictions.jsonl"
+  trajectories_path: "artifacts/unified_architecture_v2/triviaqa_recovery_r10_tc9_tc10/agentgraph_trajectories.jsonl"
+  failures_path: "artifacts/unified_architecture_v2/triviaqa_recovery_r10_tc9_tc10/collection_failures.jsonl"
+  paired_results_path: "artifacts/unified_architecture_v2/triviaqa_recovery_r10_tc9_tc10/paired_results.jsonl"
+  wrong_demos_path: "artifacts/unified_architecture_v2/triviaqa_recovery_r10_tc9_tc10/wrong_demos.jsonl"
+  manifest_path: "artifacts/unified_architecture_v2/triviaqa_recovery_r10_tc9_tc10/run_manifest.json"
+  preflight_receipt_path: "artifacts/unified_architecture_v2/triviaqa_recovery_r10_tc9_tc10/preflight_receipt.json"
+  report_json_path: "reports/unified_architecture_v2/triviaqa_recovery_r10_tc9_tc10_report.json"
+  report_markdown_path: "reports/unified_architecture_v2/triviaqa_recovery_r10_tc9_tc10_report.md"
 
 director:
   base_model: "${QWEN35_9B_MODEL_PATH:-/home/test/SKILLEV/skillev-new-b2-temp/model/Qwen3.5-9B-modelscope}"

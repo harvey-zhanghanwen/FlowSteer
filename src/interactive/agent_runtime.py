@@ -164,6 +164,7 @@ class AgentRequest:
     # not turn a failed completion into a semantic artifact.
     action_history: Tuple[Mapping[str, object], ...] = ()
     prior_tool_receipts: Tuple[Mapping[str, object], ...] = ()
+    continuation_source_agent_id: Optional[str] = None
 
     def __post_init__(self) -> None:
         if type(self.is_output_agent) is not bool:
@@ -187,6 +188,13 @@ class AgentRequest:
         if any(not isinstance(item, Mapping) for item in self.prior_tool_receipts):
             raise TypeError(
                 "AgentRequest.prior_tool_receipts must contain mappings"
+            )
+        if self.continuation_source_agent_id is not None and (
+            not isinstance(self.continuation_source_agent_id, str)
+            or not self.continuation_source_agent_id.strip()
+        ):
+            raise ValueError(
+                "AgentRequest.continuation_source_agent_id must be non-empty text"
             )
         object.__setattr__(
             self,
@@ -1234,6 +1242,15 @@ class AgentRuntime:
             continuation = {}
         raw_action_history = continuation.get("react_trace", ())
         raw_tool_receipts = continuation.get("tool_receipts", ())
+        raw_continuation_source_agent_id = continuation.get(
+            "continuation_source_agent_id"
+        )
+        continuation_source_agent_id = (
+            raw_continuation_source_agent_id.strip()
+            if isinstance(raw_continuation_source_agent_id, str)
+            and raw_continuation_source_agent_id.strip()
+            else None
+        )
         action_history = (
             tuple(item for item in raw_action_history if isinstance(item, Mapping))
             if isinstance(raw_action_history, (list, tuple))
@@ -1265,6 +1282,7 @@ class AgentRuntime:
             semantic_protocol=self.semantic_protocol,
             action_history=action_history,
             prior_tool_receipts=prior_tool_receipts,
+            continuation_source_agent_id=continuation_source_agent_id,
         )
 
     async def _invoke(
@@ -1332,6 +1350,15 @@ class AgentRuntime:
                 {
                     **dict(cancelled_adapter_metadata()),
                     **dict(_public_failure_metadata(exc)),
+                    **(
+                        {
+                            "continuation_source_agent_id": (
+                                request.continuation_source_agent_id
+                            )
+                        }
+                        if request.continuation_source_agent_id is not None
+                        else {}
+                    ),
                 }
             )
             if metadata:
@@ -1367,6 +1394,16 @@ class AgentRuntime:
                             {
                                 **dict(adapter_cancellation_metadata),
                                 **dict(_public_failure_metadata(exc)),
+                                **(
+                                    {
+                                        "continuation_source_agent_id": (
+                                            request.continuation_source_agent_id
+                                        )
+                                    }
+                                    if request.continuation_source_agent_id
+                                    is not None
+                                    else {}
+                                ),
                             }
                         ),
                     ),
