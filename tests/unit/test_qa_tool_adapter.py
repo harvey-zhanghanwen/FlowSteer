@@ -475,7 +475,20 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_react_rejects_initial_completion_then_continues_after_dispatch(self) -> None:
-        index = FakeIndex()
+        class EvidenceIndex(FakeIndex):
+            def read(self, passage_id: str) -> FakePassage:
+                self.read_calls.append(passage_id)
+                return FakePassage(
+                    passage_id,
+                    "d1",
+                    "Ada Lovelace",
+                    (
+                        "Ada Lovelace wrote the algorithm. "
+                        "Ada Lovelace was an English mathematician."
+                    ),
+                )
+
+        index = EvidenceIndex()
 
         def action(name: str, arguments: object) -> str:
             return json.dumps(
@@ -724,6 +737,7 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
                 return (
                     FakeHit("p1", "d1", "Ada Lovelace", "Ada was a mathematician.", 1),
                     FakeHit("p2", "d2", "Algorithm", "The algorithm was published.", 2),
+                    FakeHit("p3", "d3", "Program", "The earliest program.", 3),
                 )
 
             def read(self, passage_id: str) -> FakePassage:
@@ -731,6 +745,7 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
                 text = {
                     "p1": "Ada Lovelace was an English mathematician.",
                     "p2": "Ada Lovelace published the first algorithm.",
+                    "p3": "Ada Lovelace authored the earliest computer program.",
                 }[passage_id]
                 return FakePassage(passage_id, passage_id, passage_id, text)
 
@@ -779,23 +794,25 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
                 "Ada Lovelace published the first algorithm.",
             ],
         }
+        unsupported_span_artifact = json.loads(json.dumps(semantic_artifact))
+        unsupported_span_artifact["evidence_propositions"][0][
+            "evidence_span"
+        ] = "Ada Lovelace authored the earliest computer program."
 
         class SequenceGateway:
             def __init__(self) -> None:
                 self.outputs = [
                     action("search", {"query": "Ada Lovelace algorithm", "limit": 10}),
                     action("read", {"passage_id": "p1"}),
+                    action("search", {"query": "first published algorithm", "limit": 10}),
                     action("read", {"passage_id": "p2"}),
                     action(
                         "complete",
-                        {
-                            "value": {
-                                **semantic_artifact,
-                                "candidate_answer": "Charles Babbage",
-                            }
-                        },
+                        {"value": unsupported_span_artifact},
                     ),
-                    action("complete", {"value": semantic_artifact}),
+                    action("search", {"query": "earliest computer program", "limit": 10}),
+                    action("read", {"passage_id": "p3"}),
+                    action("complete", {"value": unsupported_span_artifact}),
                 ]
                 self.requests: list[AgentRequest] = []
 
@@ -827,19 +844,24 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         response = await QARetrievalReactExecutionAdapter(
             gateway=gateway,
             tool_registry=build_qa_tool_registry(index),
-            max_turns=6,
-            max_tool_calls=4,
+            max_turns=8,
+            max_tool_calls=6,
             task_type="multi_hop_qa",
             completion_policy="required_evidence",
         ).execute(request)
 
-        self.assertEqual(json.dumps(semantic_artifact, ensure_ascii=False, sort_keys=True, separators=(",", ":")), response.text)
-        self.assertEqual(3, response.metadata["tool_calls"])
-        self.assertEqual(["p1", "p2"], index.read_calls)
+        self.assertEqual(json.dumps(unsupported_span_artifact, ensure_ascii=False, sort_keys=True, separators=(",", ":")), response.text)
+        self.assertEqual(6, response.metadata["tool_calls"])
+        self.assertEqual(["p1", "p2", "p3"], index.read_calls)
+        self.assertEqual(3, len(index.search_calls))
         self.assertTrue(
-            response.metadata["react_trace"][3]["public_error_code"].startswith(
+            response.metadata["react_trace"][4]["public_error_code"].startswith(
                 "hotpotqa_semantic_artifact_invalid:"
             )
+        )
+        self.assertIn(
+            "has no typography-canonical lexical match",
+            response.metadata["react_trace"][4]["public_error_code"],
         )
         search_schema = json.loads(
             gateway.requests[0].model.metadata["response_json_schema"]
@@ -849,17 +871,20 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             search_schema["properties"]["arguments"]["properties"]["limit"]["const"],
         )
         second_read_schema = json.loads(
-            gateway.requests[2].model.metadata["response_json_schema"]
+            gateway.requests[3].model.metadata["response_json_schema"]
         )
-        self.assertEqual(
-            ["p2"],
+        self.assertIn(
+            "p2",
             second_read_schema["properties"]["arguments"]["properties"]
             ["passage_id"]["enum"],
         )
-        self.assertIn("next action must be qa-retrieval read", gateway.requests[2].agent.contract)
-        self.assertIn("next action must complete", gateway.requests[3].agent.contract)
+        self.assertIn("next action must be qa-retrieval search", gateway.requests[2].agent.contract)
+        self.assertIn("next action must be qa-retrieval read", gateway.requests[3].agent.contract)
+        self.assertIn("next action must complete", gateway.requests[4].agent.contract)
+        self.assertIn("next action must be qa-retrieval search", gateway.requests[5].agent.contract)
+        self.assertIn("next action must be qa-retrieval read", gateway.requests[6].agent.contract)
         completion_schema = json.loads(
-            gateway.requests[3].model.metadata["response_json_schema"]
+            gateway.requests[4].model.metadata["response_json_schema"]
         )
         semantic_properties = completion_schema["properties"]["arguments"][
             "properties"

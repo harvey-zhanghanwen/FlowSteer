@@ -198,7 +198,7 @@ class ConfigLoaderTests(unittest.TestCase):
 
         self.assertEqual(
             config["experiment"]["prompt_version"],
-            "agentgraph.director.hotpotqa-semantic-recovery.v18",
+            "agentgraph.director.hotpotqa-semantic-recovery.v19",
         )
         self.assertEqual(config["director"]["action_decoding"], "json_schema")
         self.assertEqual(
@@ -207,8 +207,10 @@ class ConfigLoaderTests(unittest.TestCase):
         )
         self.assertEqual(
             config["director"]["sampling_schema_version"],
-            "agentgraph.model-admissible-action-mask.v2",
+            "agentgraph.model-admissible-action-mask.v3",
         )
+        self.assertEqual(config["qa_tool_runtime"]["max_turns_per_agent_call"], 9)
+        self.assertEqual(config["qa_tool_runtime"]["max_tool_calls_per_agent_call"], 6)
         self.assertEqual(
             config["agent_graph"]["semantic_protocol_by_source"],
             {"hotpotqa": "hotpotqa_verified_answer_slot_v1"},

@@ -58,6 +58,9 @@ DIRECTOR_PROMPT_VERSION = "agentgraph.director.minimal-neutral.v10"
 LEGACY_DIRECTOR_PROMPT_VERSION_V9 = "agentgraph.director.minimal-neutral.v9"
 LEGACY_DIRECTOR_PROMPT_VERSION_V8 = "agentgraph.director.minimal-neutral.v8"
 HOTPOTQA_DIRECTOR_PROMPT_VERSION = (
+    "agentgraph.director.hotpotqa-semantic-recovery.v19"
+)
+LEGACY_HOTPOTQA_DIRECTOR_PROMPT_VERSION_V18 = (
     "agentgraph.director.hotpotqa-semantic-recovery.v18"
 )
 LEGACY_HOTPOTQA_DIRECTOR_PROMPT_VERSION_V17 = (
@@ -198,6 +201,31 @@ HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V18 = HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V17.replac
     1,
 )
 
+# v19 keeps the v18 policy and makes the runtime declarations required by the
+# HotpotQA semantic protocol explicit.  ReAct remains an execution schedule,
+# not an Agent role, and FINISH follows the progressive Canvas terminal gate.
+HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V19 = HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V18.replace(
+    "role_family is a semantic responsibility. execution_mode is only reasoning, "
+    "react, or coding.",
+    "Every Agent declaration includes role_family, execution_mode, and "
+    "allowed_tools. role_family is a semantic responsibility. execution_mode is "
+    "only reasoning, react, or coding.",
+    1,
+).replace(
+    "It may retrieve with qa-retrieval in execution_mode react or consume explicit "
+    "read evidence from a direct Retriever predecessor; in either case it resolves",
+    "It uses execution_mode react and declares qa-retrieval in allowed_tools; it "
+    "resolves",
+    1,
+).replace(
+    "Never hard-code a sample, answer, evidence span, Ground Truth, or evaluator "
+    "result, and never assume an unlisted Skill.",
+    "When finish_admissibility.admissible is true, submit finish. Never hard-code "
+    "a sample, answer, evidence span, Ground Truth, or evaluator result, and never "
+    "assume an unlisted Skill.",
+    1,
+)
+
 
 def director_system_prompt_for_version(prompt_version: str) -> str:
     """Resolve one explicitly versioned Director policy without changing v10."""
@@ -218,7 +246,10 @@ def director_system_prompt_for_version(prompt_version: str) -> str:
         "agentgraph.director.skillflow_continuation_v8": (
             LEGACY_DIRECTOR_SYSTEM_PROMPT_V8
         ),
-        HOTPOTQA_DIRECTOR_PROMPT_VERSION: HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V18,
+        HOTPOTQA_DIRECTOR_PROMPT_VERSION: HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V19,
+        LEGACY_HOTPOTQA_DIRECTOR_PROMPT_VERSION_V18: (
+            HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V18
+        ),
         LEGACY_HOTPOTQA_DIRECTOR_PROMPT_VERSION_V17: (
             HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V17
         ),
@@ -259,6 +290,7 @@ _SUPPORTED_DIRECTOR_SYSTEM_PROMPTS = frozenset(
         HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V16,
         HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V17,
         HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V18,
+        HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V19,
         LEGACY_DIRECTOR_SYSTEM_PROMPT_V9,
         LEGACY_DIRECTOR_SYSTEM_PROMPT_V8,
     }
@@ -424,6 +456,12 @@ DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V1 = (
 )
 DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION = (
     "agentgraph.model-admissible-action-mask.v2"
+)
+DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3 = (
+    "agentgraph.model-admissible-action-mask.v3"
+)
+DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION = (
+    "agentgraph.live-action-target-domains.v1"
 )
 DIRECTOR_ACTION_JSON_SCHEMA_TEXT = json.dumps(
     DIRECTOR_ACTION_JSON_SCHEMA,
@@ -601,11 +639,74 @@ def director_model_admissible_sampling_json_schema_text(
     )
 
 
+def director_model_admissible_sampling_json_schema_text_v3(
+    actions: Sequence[str],
+) -> str:
+    """Render the v3 live-domain action discriminator.
+
+    The first phase is intentionally byte-equivalent to the v2 discriminator;
+    its new version applies only to the later request-local parameter phases.
+    Keeping a separate renderer makes persisted v2 receipts unambiguous.
+    """
+
+    return director_model_admissible_sampling_json_schema_text(actions)
+
+
+def director_live_action_target_domains_json(
+    actions: Sequence[str],
+    action_target_domains: Mapping[str, Any],
+) -> str:
+    """Canonicalize the exact current-Canvas domains carried by a v3 request."""
+
+    normalized_actions = tuple(actions)
+    director_model_admissible_sampling_json_schema_text_v3(normalized_actions)
+    if not isinstance(action_target_domains, Mapping):
+        raise ValueError("live action target domains must be an object")
+    if set(action_target_domains) != set(normalized_actions):
+        raise ValueError("live action target domains must match admitted actions")
+    selected: dict[str, Any] = {}
+    for action in normalized_actions:
+        domain = action_target_domains.get(action)
+        if not isinstance(domain, Mapping):
+            raise ValueError(f"live target domain for {action} must be an object")
+        selected[action] = dict(domain)
+    try:
+        # The round trip rejects non-JSON runtime objects and gives receipts a
+        # deterministic representation without changing any sampled action.
+        normalized = json.loads(
+            json.dumps(
+                selected,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError("live action target domains must be JSON serializable") from exc
+    director_validate_live_action_target_domains(normalized_actions, normalized)
+    return json.dumps(
+        normalized,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
 DIRECTOR_MODIFY_AGENT_FIELDS = tuple(_MUTABLE_AGENT_PROPERTIES)
 
 
-def director_modify_agent_field_selector_json_schema_text() -> str:
+def director_modify_agent_field_selector_json_schema_text(
+    fields: Optional[Sequence[str]] = None,
+) -> str:
     """Render the v2 atomic MODIFY-field selector."""
+
+    admitted_fields = DIRECTOR_MODIFY_AGENT_FIELDS if fields is None else tuple(fields)
+    if (
+        not admitted_fields
+        or any(field not in DIRECTOR_MODIFY_AGENT_FIELDS for field in admitted_fields)
+        or len(admitted_fields) != len(set(admitted_fields))
+    ):
+        raise ValueError("modify_agent field domain is empty or invalid")
 
     return json.dumps(
         {
@@ -614,13 +715,632 @@ def director_modify_agent_field_selector_json_schema_text() -> str:
             "required": ["action", "field"],
             "properties": {
                 "action": {"const": "modify_agent"},
-                "field": {"enum": list(DIRECTOR_MODIFY_AGENT_FIELDS)},
+                "field": {"enum": list(admitted_fields)},
             },
         },
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
     )
+
+
+def _live_string_domain(value: Any, *, label: str) -> tuple[str, ...]:
+    if (
+        not isinstance(value, (list, tuple))
+        or not value
+        or any(not isinstance(item, str) or not item for item in value)
+    ):
+        raise ValueError(f"{label} must be a non-empty string domain")
+    result = tuple(value)
+    if len(result) != len(set(result)):
+        raise ValueError(f"{label} must not contain duplicates")
+    return result
+
+
+def _live_role_agent_schema(
+    required_fields: Sequence[str],
+    role_family: str,
+    constraint: Mapping[str, Any],
+    model_ids: Sequence[str],
+) -> Mapping[str, Any]:
+    execution_modes = _live_string_domain(
+        constraint.get("execution_modes"),
+        label=f"{role_family}.execution_modes",
+    )
+    if any(mode not in {"reasoning", "react", "coding"} for mode in execution_modes):
+        raise ValueError("live role constraint contains an unknown execution mode")
+    allowed_tools = constraint.get("allowed_tools")
+    if (
+        not isinstance(allowed_tools, (list, tuple))
+        or not allowed_tools
+        or any(
+            not isinstance(tool_set, (list, tuple))
+            or any(not isinstance(tool_id, str) or not tool_id for tool_id in tool_set)
+            for tool_set in allowed_tools
+        )
+    ):
+        raise ValueError(f"{role_family}.allowed_tools must contain Tool-ID lists")
+    normalized_tool_sets = [list(tool_set) for tool_set in allowed_tools]
+    if len({json.dumps(item, separators=(",", ":")) for item in normalized_tool_sets}) != len(
+        normalized_tool_sets
+    ):
+        raise ValueError(f"{role_family}.allowed_tools must not contain duplicates")
+    properties = json.loads(json.dumps(_AGENT_SPEC_JSON_SCHEMA["properties"]))
+    properties["model_id"] = {"enum": list(model_ids)}
+    properties["role_family"] = {"const": role_family}
+    properties["execution_mode"] = {"enum": list(execution_modes)}
+    properties["allowed_tools"] = {"enum": normalized_tool_sets}
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": list(required_fields),
+        "properties": properties,
+    }
+
+
+def director_live_add_subgraph_agent_declarations_json_schema_text(
+    action_target_domains: Mapping[str, Any],
+) -> str:
+    """Render the first v3 ADD phase for exact Agent declarations.
+
+    JSON Schema cannot express that a relation endpoint equals an ``agent_id``
+    sampled elsewhere in the same object.  V3 therefore samples declarations
+    first, then uses their exact IDs to render the complete ADD action schema.
+    The final action is still sampled in full; no phase output is spliced into
+    or substituted for the Canvas action.
+    """
+
+    domain = action_target_domains.get("add_subgraph")
+    if not isinstance(domain, Mapping):
+        raise ValueError("add_subgraph live target domain is missing")
+    min_agents = domain.get("min_new_agents")
+    max_agents = domain.get("max_new_agents")
+    if (
+        type(min_agents) is not int
+        or type(max_agents) is not int
+        or not 1 <= min_agents <= max_agents <= 3
+    ):
+        raise ValueError("add_subgraph live Agent-count domain is invalid")
+    required_fields = domain.get("required_agent_fields")
+    required_minimum = {
+        "agent_id",
+        "model_id",
+        "contract",
+        "role_family",
+        "allowed_tools",
+        "execution_mode",
+    }
+    if (
+        not isinstance(required_fields, (list, tuple))
+        or any(
+            field not in _AGENT_SPEC_JSON_SCHEMA["properties"]
+            for field in required_fields
+        )
+        or not required_minimum.issubset(required_fields)
+        or len(required_fields) != len(set(required_fields))
+    ):
+        raise ValueError("add_subgraph required Agent fields are incomplete")
+    model_ids = _live_string_domain(
+        domain.get("model_ids"),
+        label="add_subgraph.model_ids",
+    )
+    existing_agent_ids = domain.get("existing_agent_ids")
+    if not isinstance(existing_agent_ids, (list, tuple)) or any(
+        not isinstance(agent_id, str) or not agent_id
+        for agent_id in existing_agent_ids
+    ):
+        raise ValueError("add_subgraph existing Agent IDs are invalid")
+    if len(existing_agent_ids) != len(set(existing_agent_ids)):
+        raise ValueError("add_subgraph existing Agent IDs contain duplicates")
+    endpoint_scope = domain.get("endpoint_scope")
+    expected_endpoint_sources = {"existing_agent_ids", "same_action_agent_ids"}
+    if not isinstance(endpoint_scope, Mapping) or any(
+        set(endpoint_scope.get(key, ())) != expected_endpoint_sources
+        for key in ("relation_endpoint_sources", "output_agent_id_sources")
+    ):
+        raise ValueError("add_subgraph endpoint scope is incomplete")
+    role_constraints = domain.get("role_constraints")
+    if not isinstance(role_constraints, Mapping) or not role_constraints:
+        raise ValueError("add_subgraph role constraints are missing")
+    role_branches = [
+        _live_role_agent_schema(
+            required_fields,
+            role_family,
+            constraint,
+            model_ids,
+        )
+        for role_family, constraint in role_constraints.items()
+        if isinstance(role_family, str)
+        and role_family
+        and isinstance(constraint, Mapping)
+    ]
+    if len(role_branches) != len(role_constraints):
+        raise ValueError("add_subgraph role constraints are malformed")
+    return json.dumps(
+        {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["action", "agents"],
+            "properties": {
+                "action": {"const": "add_subgraph"},
+                "agents": {
+                    "type": "array",
+                    "minItems": min_agents,
+                    "maxItems": max_agents,
+                    "items": {"anyOf": role_branches},
+                },
+            },
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _live_add_subgraph_agents(
+    action_target_domains: Mapping[str, Any],
+    agents: Sequence[Mapping[str, Any]],
+) -> tuple[dict[str, Any], ...]:
+    """Validate sampled declarations against the exact first-phase schema."""
+
+    declaration_schema = json.loads(
+        director_live_add_subgraph_agent_declarations_json_schema_text(
+            action_target_domains
+        )
+    )
+    agent_schema = declaration_schema["properties"]["agents"]
+    if (
+        not isinstance(agents, (list, tuple))
+        or not agent_schema["minItems"] <= len(agents) <= agent_schema["maxItems"]
+    ):
+        raise ValueError("add_subgraph sampled Agent declarations have invalid count")
+    domain = action_target_domains["add_subgraph"]
+    existing_ids = set(domain["existing_agent_ids"])
+    role_constraints = domain["role_constraints"]
+    model_ids = set(domain["model_ids"])
+    required_fields = set(domain["required_agent_fields"])
+    known_fields = set(_AGENT_SPEC_JSON_SCHEMA["properties"])
+    normalized: list[dict[str, Any]] = []
+    new_ids: set[str] = set()
+    for raw_agent in agents:
+        if not isinstance(raw_agent, Mapping):
+            raise ValueError("add_subgraph Agent declaration must be an object")
+        agent = dict(raw_agent)
+        if not required_fields.issubset(agent) or not set(agent).issubset(known_fields):
+            raise ValueError("add_subgraph Agent declaration fields are invalid")
+        agent_id = agent.get("agent_id")
+        model_id = agent.get("model_id")
+        role_family = agent.get("role_family")
+        contract = agent.get("contract")
+        execution_mode = agent.get("execution_mode")
+        allowed_tools = agent.get("allowed_tools")
+        if (
+            not isinstance(agent_id, str)
+            or not agent_id
+            or agent_id != agent_id.strip()
+            or agent_id in existing_ids
+            or agent_id in new_ids
+        ):
+            raise ValueError(
+                "add_subgraph new Agent IDs must be unique and absent from the Canvas"
+            )
+        if not isinstance(model_id, str) or model_id != model_id.strip() or model_id not in model_ids:
+            raise ValueError("add_subgraph Agent model_id is outside the live catalog")
+        if not isinstance(contract, str) or not contract or contract != contract.strip():
+            raise ValueError("add_subgraph Agent contract must be non-empty")
+        if (
+            not isinstance(role_family, str)
+            or not role_family
+            or role_family != role_family.strip()
+        ):
+            raise ValueError("add_subgraph Agent role is outside the live domain")
+        constraint = role_constraints.get(role_family)
+        if not isinstance(constraint, Mapping):
+            raise ValueError("add_subgraph Agent role is outside the live domain")
+        if (
+            execution_mode not in constraint.get("execution_modes", ())
+        ):
+            raise ValueError("add_subgraph Agent execution mode violates its role")
+        if not isinstance(allowed_tools, list) or allowed_tools not in [
+            list(tool_set) for tool_set in constraint.get("allowed_tools", ())
+        ]:
+            raise ValueError("add_subgraph Agent Tool set violates its role")
+        if any(tool_id != tool_id.strip() for tool_id in allowed_tools):
+            raise ValueError("add_subgraph Agent Tool IDs must be canonical")
+        for optional_text in ("artifact_type", "completion_condition"):
+            value = agent.get(optional_text)
+            if value is not None and (
+                not isinstance(value, str)
+                or not value
+                or value != value.strip()
+            ):
+                raise ValueError(
+                    f"add_subgraph Agent {optional_text} must be non-empty text"
+                )
+        new_ids.add(agent_id)
+        normalized.append(agent)
+    return tuple(normalized)
+
+
+def director_live_add_subgraph_agent_declarations_from_text(
+    text: str,
+    action_target_domains: Mapping[str, Any],
+) -> tuple[dict[str, Any], ...]:
+    """Parse one exact declaration-phase object without repairing its text."""
+
+    if not isinstance(text, str):
+        raise ValueError("add_subgraph Agent declarations must be text")
+    stripped = text.strip()
+    try:
+        payload, end = json.JSONDecoder().raw_decode(stripped)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("add_subgraph Agent declarations are not JSON") from exc
+    if stripped[end:].strip():
+        raise ValueError("add_subgraph Agent declarations contain trailing text")
+    if not isinstance(payload, Mapping) or set(payload) != {"action", "agents"}:
+        raise ValueError("add_subgraph Agent declaration fields are invalid")
+    if payload.get("action") != "add_subgraph":
+        raise ValueError("add_subgraph Agent declarations changed their action")
+    return _live_add_subgraph_agents(
+        action_target_domains,
+        payload.get("agents"),
+    )
+
+
+def _live_discrete_values(
+    candidate: Mapping[str, Any],
+    field_name: str,
+) -> Optional[tuple[Any, ...]]:
+    raw_domains = candidate.get("discrete_value_domains", {})
+    if not isinstance(raw_domains, Mapping):
+        raise ValueError("modify_agent discrete_value_domains must be an object")
+    if field_name not in raw_domains:
+        return None
+    raw_values = raw_domains[field_name]
+    if not isinstance(raw_values, (list, tuple)) or not raw_values:
+        raise ValueError("modify_agent discrete value domain must be non-empty")
+    normalized: list[Any] = []
+    identities: set[str] = set()
+    for value in raw_values:
+        if field_name in {
+            "model_id",
+            "contract",
+            "role_family",
+            "artifact_type",
+            "completion_condition",
+        } and (
+            not isinstance(value, str)
+            or not value
+            or value != value.strip()
+        ):
+            raise ValueError(
+                f"modify_agent {field_name} discrete values must be canonical text"
+            )
+        if field_name == "execution_mode" and value not in {
+            "reasoning",
+            "react",
+            "coding",
+        }:
+            raise ValueError("modify_agent execution_mode domain is invalid")
+        if field_name == "allowed_tools" and (
+            not isinstance(value, list)
+            or any(
+                not isinstance(tool_id, str)
+                or not tool_id
+                or tool_id != tool_id.strip()
+                for tool_id in value
+            )
+            or len(value) != len(set(value))
+        ):
+            raise ValueError("modify_agent allowed_tools domain is invalid")
+        try:
+            identity = json.dumps(
+                value,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "modify_agent discrete value is not JSON serializable"
+            ) from exc
+        if identity in identities:
+            raise ValueError("modify_agent discrete value domain has duplicates")
+        identities.add(identity)
+        normalized.append(value)
+    return tuple(normalized)
+
+
+def _live_modify_agent_candidates(
+    action_target_domains: Mapping[str, Any],
+    field_name: str,
+) -> tuple[Mapping[str, Any], ...]:
+    domain = action_target_domains.get("modify_agent")
+    if not isinstance(domain, Mapping):
+        raise ValueError("modify_agent live target domain is missing")
+    global_fields = _live_string_domain(
+        domain.get("mutable_fields"),
+        label="modify_agent.mutable_fields",
+    )
+    if field_name not in global_fields or field_name not in DIRECTOR_MODIFY_AGENT_FIELDS:
+        raise ValueError("modify_agent field is outside the live domain")
+    candidates = domain.get("per_agent_candidates")
+    if not isinstance(candidates, (list, tuple)):
+        raise ValueError("modify_agent per-Agent candidates are missing")
+    admitted: list[Mapping[str, Any]] = []
+    seen_ids: set[str] = set()
+    for candidate in candidates:
+        if not isinstance(candidate, Mapping):
+            raise ValueError("modify_agent candidate must be an object")
+        agent_id = candidate.get("agent_id")
+        fields = candidate.get("mutable_fields")
+        if (
+            not isinstance(agent_id, str)
+            or not agent_id
+            or agent_id in seen_ids
+            or not isinstance(fields, (list, tuple))
+            or any(field not in DIRECTOR_MODIFY_AGENT_FIELDS for field in fields)
+            or len(fields) != len(set(fields))
+        ):
+            raise ValueError("modify_agent candidate is malformed")
+        seen_ids.add(agent_id)
+        raw_discrete = candidate.get("discrete_value_domains", {})
+        if not isinstance(raw_discrete, Mapping) or any(
+            discrete_field not in fields for discrete_field in raw_discrete
+        ):
+            raise ValueError("modify_agent discrete value domain has an invalid field")
+        for discrete_field in raw_discrete:
+            _live_discrete_values(candidate, discrete_field)
+        if field_name in fields:
+            admitted.append(candidate)
+    if not admitted:
+        raise ValueError("modify_agent field has no live Agent target")
+    return tuple(admitted)
+
+
+def director_live_modify_agent_selector_json_schema_text(
+    action_target_domains: Mapping[str, Any],
+    field_name: str,
+) -> str:
+    """Render the v3 Agent selector for one already-selected atomic field."""
+
+    candidates = _live_modify_agent_candidates(action_target_domains, field_name)
+    return json.dumps(
+        {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["action", "agent_id"],
+            "properties": {
+                "action": {"const": "modify_agent"},
+                "agent_id": {
+                    "enum": [candidate["agent_id"] for candidate in candidates]
+                },
+            },
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def director_live_action_parameter_json_schema_text(
+    action: str,
+    action_target_domains: Mapping[str, Any],
+    *,
+    add_agents: Optional[Sequence[Mapping[str, Any]]] = None,
+    modify_field: Optional[str] = None,
+    modify_agent_id: Optional[str] = None,
+    relation_candidate_index: Optional[int] = None,
+) -> str:
+    """Render one exact v3 parameter phase from current Canvas domains.
+
+    The function only projects domains supplied by ``AgentWorkflowEnv``.  It
+    does not infer missing targets, repair a sample, or replace parser/Canvas
+    validation.
+    """
+
+    if not isinstance(action_target_domains, Mapping):
+        raise ValueError("live action target domains must be an object")
+    domain = action_target_domains.get(action)
+    if not isinstance(domain, Mapping):
+        raise ValueError(f"missing live target domain for {action}")
+
+    if action == "add_subgraph":
+        if add_agents is None:
+            raise ValueError(
+                "add_subgraph v3 parameter phase requires sampled Agent declarations"
+            )
+        normalized_agents = _live_add_subgraph_agents(
+            action_target_domains,
+            add_agents,
+        )
+        endpoint_ids = list(domain["existing_agent_ids"]) + [
+            agent["agent_id"] for agent in normalized_agents
+        ]
+        schema = json.loads(
+            director_state_conditioned_sampling_json_schema_text("add_subgraph")
+        )
+        schema["properties"]["agents"] = {"const": list(normalized_agents)}
+        relation_items = schema["properties"]["relations"]["items"]
+        for branch in relation_items["anyOf"]:
+            branch["properties"]["source_id"] = {"enum": endpoint_ids}
+            branch["properties"]["target_id"] = {"enum": endpoint_ids}
+        schema["properties"]["output_agent_id"] = {
+            "anyOf": [{"enum": endpoint_ids}, {"type": "null"}]
+        }
+    elif action == "modify_agent":
+        if modify_field not in DIRECTOR_MODIFY_AGENT_FIELDS:
+            raise ValueError("modify_agent v3 parameter phase requires a live field")
+        candidates = _live_modify_agent_candidates(
+            action_target_domains,
+            modify_field,
+        )
+        by_id = {candidate["agent_id"]: candidate for candidate in candidates}
+        if not isinstance(modify_agent_id, str) or modify_agent_id not in by_id:
+            raise ValueError(
+                "modify_agent v3 parameter phase requires a live Agent target"
+            )
+        schema = json.loads(
+            director_modify_agent_field_sampling_json_schema_text(modify_field)
+        )
+        schema["properties"]["agent_id"] = {"const": modify_agent_id}
+        discrete_values = _live_discrete_values(
+            by_id[modify_agent_id],
+            modify_field,
+        )
+        if discrete_values is not None:
+            schema["properties"][modify_field] = {"enum": list(discrete_values)}
+    elif action in {"delete_agent", "set_output"}:
+        agent_ids = _live_string_domain(
+            domain.get("agent_ids"),
+            label=f"{action}.agent_ids",
+        )
+        schema = json.loads(director_state_conditioned_sampling_json_schema_text(action))
+        schema["properties"]["agent_id"] = {"enum": list(agent_ids)}
+    elif action == "set_relation":
+        candidates = domain.get("candidates")
+        if not isinstance(candidates, (list, tuple)) or not candidates:
+            raise ValueError("set_relation exact live candidates are missing")
+        if (
+            type(relation_candidate_index) is not int
+            or not 0 <= relation_candidate_index < len(candidates)
+        ):
+            raise ValueError("set_relation candidate index is outside the live domain")
+        candidate = candidates[relation_candidate_index]
+        required = (
+            "source_id",
+            "target_id",
+            "source_to_target",
+            "target_to_source",
+        )
+        if not isinstance(candidate, Mapping) or set(candidate) != set(required):
+            raise ValueError("set_relation live candidate is malformed")
+        source_id = candidate.get("source_id")
+        target_id = candidate.get("target_id")
+        source_to_target = candidate.get("source_to_target")
+        target_to_source = candidate.get("target_to_source")
+        if (
+            not isinstance(source_id, str)
+            or not source_id
+            or not isinstance(target_id, str)
+            or not target_id
+            or source_id == target_id
+            or type(source_to_target) is not bool
+            or type(target_to_source) is not bool
+        ):
+            raise ValueError("set_relation live candidate violates relation semantics")
+        schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["action", *required],
+            "properties": {
+                "action": {"const": "set_relation"},
+                "source_id": {"const": source_id},
+                "target_id": {"const": target_id},
+                "source_to_target": {"const": source_to_target},
+                "target_to_source": {"const": target_to_source},
+            },
+        }
+    elif action == "finish":
+        if domain.get("admissible") is not True:
+            raise ValueError("finish is outside the live terminal domain")
+        schema = json.loads(director_state_conditioned_sampling_json_schema_text("finish"))
+    else:
+        raise ValueError("live parameter schema received an unknown action")
+    return json.dumps(
+        schema,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def director_live_relation_candidate_selector_json_schema_text(
+    action_target_domains: Mapping[str, Any],
+) -> str:
+    """Render the v3 selector for exact non-self, non-no-op relation candidates."""
+
+    domain = action_target_domains.get("set_relation")
+    if not isinstance(domain, Mapping):
+        raise ValueError("set_relation live target domain is missing")
+    candidates = domain.get("candidates")
+    if not isinstance(candidates, (list, tuple)) or not candidates:
+        raise ValueError("set_relation exact live candidates are missing")
+    # Validate every candidate through the exact parameter renderer before
+    # exposing its index to constrained decoding.
+    for index in range(len(candidates)):
+        director_live_action_parameter_json_schema_text(
+            "set_relation",
+            action_target_domains,
+            relation_candidate_index=index,
+        )
+    return json.dumps(
+        {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["action", "candidate_index"],
+            "properties": {
+                "action": {"const": "set_relation"},
+                "candidate_index": {"enum": list(range(len(candidates)))},
+            },
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def director_validate_live_action_target_domains(
+    actions: Sequence[str],
+    action_target_domains: Mapping[str, Any],
+) -> None:
+    """Fail closed on every v3 domain before the first generation request."""
+
+    normalized_actions = tuple(actions)
+    if set(action_target_domains) != set(normalized_actions):
+        raise ValueError("live action target domains must match admitted actions")
+    for action in normalized_actions:
+        if action == "add_subgraph":
+            director_live_add_subgraph_agent_declarations_json_schema_text(
+                action_target_domains
+            )
+        elif action == "modify_agent":
+            domain = action_target_domains.get("modify_agent")
+            if not isinstance(domain, Mapping):
+                raise ValueError("modify_agent live target domain is missing")
+            fields = _live_string_domain(
+                domain.get("mutable_fields"),
+                label="modify_agent.mutable_fields",
+            )
+            if any(field not in DIRECTOR_MODIFY_AGENT_FIELDS for field in fields):
+                raise ValueError("modify_agent mutable field domain is invalid")
+            candidates = domain.get("per_agent_candidates")
+            if not isinstance(candidates, (list, tuple)):
+                raise ValueError("modify_agent per-Agent candidates are missing")
+            admitted_fields = tuple(
+                field
+                for field in fields
+                if any(
+                    isinstance(candidate, Mapping)
+                    and field in candidate.get("mutable_fields", ())
+                    for candidate in candidates
+                )
+            )
+            director_modify_agent_field_selector_json_schema_text(admitted_fields)
+            for field in admitted_fields:
+                director_live_modify_agent_selector_json_schema_text(
+                    action_target_domains,
+                    field,
+                )
+        elif action == "set_relation":
+            director_live_relation_candidate_selector_json_schema_text(
+                action_target_domains
+            )
+        else:
+            director_live_action_parameter_json_schema_text(
+                action,
+                action_target_domains,
+            )
 
 
 def director_modify_agent_field_sampling_json_schema_text(field_name: str) -> str:
@@ -661,14 +1381,25 @@ def director_model_admissible_schema_branch(actions: Sequence[str]) -> str:
     return "admissible-v2:" + "|".join(normalized)
 
 
+def director_model_admissible_schema_branch_v3(actions: Sequence[str]) -> str:
+    """Encode one v3 action discriminator paired with live target domains."""
+
+    normalized = tuple(actions)
+    director_model_admissible_sampling_json_schema_text_v3(normalized)
+    return "admissible-v3:" + "|".join(normalized)
+
+
 def director_actions_from_admissible_schema_branch(
     branch: str,
 ) -> Tuple[str, ...]:
-    """Decode and validate one v1 or v2 action-domain receipt label."""
+    """Decode and validate one v1, v2, or v3 action-domain receipt label."""
 
     if not isinstance(branch, str):
         raise ValueError("model-admissible schema branch has an invalid prefix")
-    if branch.startswith("admissible-v2:"):
+    if branch.startswith("admissible-v3:"):
+        prefix = "admissible-v3:"
+        renderer = director_model_admissible_sampling_json_schema_text_v3
+    elif branch.startswith("admissible-v2:"):
         prefix = "admissible-v2:"
         renderer = director_model_admissible_sampling_json_schema_text
     elif branch.startswith("admissible:"):
@@ -770,6 +1501,8 @@ class DirectorClient(Protocol):
         action_json_schema: Optional[str] = None,
         action_json_schema_version: Optional[str] = None,
         action_schema_branch: Optional[str] = None,
+        action_target_domains_json: Optional[str] = None,
+        action_target_domain_version: Optional[str] = None,
     ) -> DirectorResponse:
         ...
 
@@ -820,6 +1553,8 @@ class OpenAIDirectorClient:
         action_json_schema: Optional[str] = None,
         action_json_schema_version: Optional[str] = None,
         action_schema_branch: Optional[str] = None,
+        action_target_domains_json: Optional[str] = None,
+        action_target_domain_version: Optional[str] = None,
     ) -> DirectorResponse:
         if any(
             value is not None
@@ -827,6 +1562,8 @@ class OpenAIDirectorClient:
                 action_json_schema,
                 action_json_schema_version,
                 action_schema_branch,
+                action_target_domains_json,
+                action_target_domain_version,
             )
         ):
             raise DirectorError(
@@ -1036,6 +1773,7 @@ class AgentGraphOrchestrator:
             not in {
                 DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V1,
                 DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION,
+                DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3,
             }
         ):
             raise ValueError("unsupported model-admissible action schema version")
@@ -1065,6 +1803,30 @@ class AgentGraphOrchestrator:
                 self.sampling_action_schema_version
                 == DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V1
             )
+            live_v3 = (
+                self.sampling_action_schema_version
+                == DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3
+            )
+            if live_v3:
+                target_domains = env.model_admissible_action_targets()
+                return {
+                    "action_json_schema": (
+                        director_model_admissible_sampling_json_schema_text_v3(actions)
+                    ),
+                    "action_json_schema_version": self.sampling_action_schema_version,
+                    "action_schema_branch": (
+                        director_model_admissible_schema_branch_v3(actions)
+                    ),
+                    "action_target_domains_json": (
+                        director_live_action_target_domains_json(
+                            actions,
+                            target_domains,
+                        )
+                    ),
+                    "action_target_domain_version": (
+                        DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION
+                    ),
+                }
             return {
                 "action_json_schema": (
                     director_model_admissible_sampling_json_schema_text_v1(actions)
@@ -1456,9 +2218,11 @@ __all__ = [
     "DIRECTOR_ACTION_JSON_SCHEMA",
     "DIRECTOR_ACTION_JSON_SCHEMA_TEXT",
     "DIRECTOR_ACTION_SCHEMA_VERSION",
+    "DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION",
     "DIRECTOR_MODEL_ADMISSIBLE_ACTION_MASK_PROFILE",
     "DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION",
     "DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V1",
+    "DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3",
     "DIRECTOR_MODIFY_AGENT_FIELDS",
     "DIRECTOR_PROGRESSIVE_ACTION_MASK_PROFILE",
     "DIRECTOR_SGLANG_SAMPLING_SCHEMA_VERSION",
@@ -1471,6 +2235,7 @@ __all__ = [
     "HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V16",
     "HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V17",
     "HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V18",
+    "HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V19",
     "HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V11",
     "HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V13",
     "HOTPOTQA_SEMANTIC_PROTOCOL",
@@ -1491,8 +2256,17 @@ __all__ = [
     "director_actions_from_admissible_schema_branch",
     "director_model_admissible_sampling_json_schema_text",
     "director_model_admissible_sampling_json_schema_text_v1",
+    "director_model_admissible_sampling_json_schema_text_v3",
     "director_model_admissible_schema_branch",
     "director_model_admissible_schema_branch_v1",
+    "director_model_admissible_schema_branch_v3",
+    "director_live_add_subgraph_agent_declarations_from_text",
+    "director_live_add_subgraph_agent_declarations_json_schema_text",
+    "director_live_action_parameter_json_schema_text",
+    "director_live_action_target_domains_json",
+    "director_live_modify_agent_selector_json_schema_text",
+    "director_live_relation_candidate_selector_json_schema_text",
+    "director_validate_live_action_target_domains",
     "director_modify_agent_field_sampling_json_schema_text",
     "director_modify_agent_field_selector_json_schema_text",
     "director_system_prompt_for_version",

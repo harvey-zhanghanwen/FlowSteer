@@ -6,6 +6,7 @@ import os
 import random
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from src.interactive.agent_action_parser import (
     AgentActionParseError,
@@ -38,6 +39,10 @@ from src.interactive.model_registry import (
     ModelRegistryError,
     ModelSpec,
     ProviderSpec,
+)
+from src.interactive.qa_tool_adapter import (
+    QA_RETRIEVAL_TOOL_ID,
+    build_qa_tool_registry,
 )
 
 
@@ -666,6 +671,8 @@ def _hotpot_semantic_graph(*, format_predecessor: str = "verifier") -> AgentGrap
                 "balanced",
                 "align facts to answer slot and select semantic answer",
                 role_family="reasoner",
+                allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                execution_mode="react",
                 artifact_type="semantic_candidate",
             ),
             AgentNode(
@@ -689,6 +696,43 @@ def _hotpot_semantic_graph(*, format_predecessor: str = "verifier") -> AgentGrap
             AgentRelation(format_predecessor, "formatter", True, False),
         ],
         output_agent_id="formatter",
+    )
+
+
+class _HotpotNoopRetrievalIndex:
+    manifest = type(
+        "Manifest",
+        (),
+        {
+            "corpus_name": "test-public-wikipedia",
+            "corpus_version": "test-v1",
+            "index_id": "test-index-v1",
+            "format": "skillev-public-retrieval-index@2",
+            "retrieval_backend": "test",
+        },
+    )()
+
+    def search(self, query: str, *, limit: int) -> tuple[object, ...]:
+        del query, limit
+        return ()
+
+    def read(self, passage_id: str) -> object:
+        raise AssertionError(f"unexpected test retrieval read {passage_id!r}")
+
+
+def _hotpot_semantic_runtime(
+    registry: ModelRegistry,
+    gateway: _ImmediateGateway,
+) -> AgentRuntime:
+    """Test fixture for a semantic graph whose real Reasoner mode is ReAct."""
+
+    return AgentRuntime(
+        registry,
+        gateway,
+        execution_adapters={"react": ReasoningExecutionAdapter(gateway)},
+        tool_registry=build_qa_tool_registry(_HotpotNoopRetrievalIndex()),
+        dataset_id="hotpotqa",
+        semantic_protocol="hotpotqa_verified_answer_slot_v1",
     )
 
 
@@ -1764,12 +1808,138 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             admission["recovery_state"]["strategy"],
         )
 
+    async def test_hotpot_finish_attribution_prioritizes_structure_repair(self) -> None:
+        registry = make_registry()
+        output_missing = AgentWorkflowEnv(
+            registry,
+            _ImmediateGateway(),
+            graph=AgentGraph(
+                [
+                    AgentNode(
+                        "formatter",
+                        "fast",
+                        "format only",
+                        role_family="format",
+                    )
+                ]
+            ),
+            problem="What is the capital of France?",
+            semantic_protocol="hotpotqa_verified_answer_slot_v1",
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id="qa-retrieval",
+        ).finish_admissibility()
+
+        self.assertEqual("graph_validation", output_missing["stage"])
+        self.assertEqual(
+            "format_output_assignment",
+            output_missing["failure_attribution"]["responsible_constraint"],
+        )
+        self.assertEqual(
+            "formatter",
+            output_missing["failure_attribution"]["responsible_agent_id"],
+        )
+        self.assertEqual(
+            "set_output",
+            output_missing["failure_attribution"]["preferred_action_order"][0],
+        )
+
+        disconnected = _hotpot_semantic_graph()
+        disconnected.add_agent(
+            AgentNode(
+                "orphan",
+                "cheap",
+                "preserve supplementary evidence",
+                role_family="evidence_retriever",
+            )
+        )
+        unreachable = AgentWorkflowEnv(
+            registry,
+            _ImmediateGateway(),
+            graph=disconnected,
+            problem="What is the capital of France?",
+            semantic_protocol="hotpotqa_verified_answer_slot_v1",
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id="qa-retrieval",
+        ).finish_admissibility()
+
+        attribution = unreachable["failure_attribution"]
+        self.assertEqual("terminal_reachability", attribution["responsible_constraint"])
+        self.assertEqual(["orphan"], attribution["responsible_agent_ids"])
+        self.assertEqual("set_relation", attribution["preferred_action_order"][0])
+        self.assertFalse(attribution["delete_allowed_before_replacement_takeover"])
+
+    async def test_hotpot_cached_semantic_diagnostic_cannot_replace_structure_target(
+        self,
+    ) -> None:
+        registry = make_registry()
+        gateway = _HotpotSemanticGateway(
+            reasoner_candidate="Lyon",
+            verifier_candidate="Paris",
+        )
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_hotpot_semantic_runtime(registry, gateway),
+            graph=_hotpot_semantic_graph(),
+            problem="What is the capital of France?",
+            semantic_protocol="hotpotqa_verified_answer_slot_v1",
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id="qa-retrieval",
+        )
+        execution = await env.execute()
+        env._progressive_execution = execution
+        env._graph.add_agent(
+            AgentNode(
+                "orphan",
+                "cheap",
+                "supplementary diagnosis",
+                role_family="repair",
+            )
+        )
+        env._progressive_execution_revision = env.graph.revision
+
+        admission = env.finish_admissibility()
+
+        self.assertEqual("graph_validation", admission["stage"])
+        self.assertIn("semantic_lineage_diagnostic", admission)
+        self.assertEqual(
+            "terminal_reachability",
+            admission["failure_attribution"]["responsible_constraint"],
+        )
+        self.assertEqual(
+            ["orphan"],
+            admission["failure_attribution"]["responsible_agent_ids"],
+        )
+
+    async def test_model_admissible_mask_excludes_empty_relation_domain(self) -> None:
+        env = AgentWorkflowEnv(
+            make_registry(),
+            _ImmediateGateway(),
+            graph=AgentGraph(
+                [
+                    AgentNode("source", "cheap", "source"),
+                    AgentNode("output", "fast", "output"),
+                ],
+                output_agent_id="output",
+            ),
+            problem="question",
+        )
+
+        with patch.object(
+            env,
+            "_model_admissible_relation_candidates",
+            return_value=[],
+        ):
+            self.assertNotIn(
+                "set_relation",
+                env.model_admissible_action_types(),
+            )
+
     async def test_hotpot_semantic_protocol_accepts_only_verified_answer_lineage(self) -> None:
         registry = make_registry()
         gateway = _HotpotSemanticGateway()
         env = AgentWorkflowEnv(
             registry,
-            gateway,
+            runtime=_hotpot_semantic_runtime(registry, gateway),
             graph=_hotpot_semantic_graph(),
             problem="What is the capital of France?",
             require_exact_answer_tag=True,
@@ -1779,7 +1949,17 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             required_evidence_tool_id="qa-retrieval",
         )
 
-        self.assertFalse(env.finish_admissibility()["admissible"])
+        before_execution = env.finish_admissibility()
+        self.assertFalse(before_execution["admissible"])
+        self.assertEqual("execution", before_execution["stage"])
+        self.assertEqual(
+            "output_artifact",
+            before_execution["failure_attribution"]["responsible_constraint"],
+        )
+        self.assertEqual(
+            "formatter",
+            before_execution["failure_attribution"]["responsible_agent_id"],
+        )
         finished = await env.step('{"action":"finish"}')
 
         self.assertTrue(finished.accepted)
@@ -1798,7 +1978,7 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         gateway = _HotpotSemanticGateway(verifier_candidate="Lyon")
         env = AgentWorkflowEnv(
             registry,
-            gateway,
+            runtime=_hotpot_semantic_runtime(registry, gateway),
             graph=_hotpot_semantic_graph(),
             problem="What is the capital of France?",
             require_exact_answer_tag=True,
@@ -1820,7 +2000,7 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         gateway = _HotpotSemanticGateway(include_read_receipt=False)
         env = AgentWorkflowEnv(
             registry,
-            gateway,
+            runtime=_hotpot_semantic_runtime(registry, gateway),
             graph=_hotpot_semantic_graph(),
             problem="What is the capital of France?",
             require_exact_answer_tag=True,
@@ -1861,7 +2041,7 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         gateway = _HotpotSemanticGateway(formatter_value="Paris, France")
         env = AgentWorkflowEnv(
             registry,
-            gateway,
+            runtime=_hotpot_semantic_runtime(registry, gateway),
             graph=_hotpot_semantic_graph(),
             problem="What is the capital of France?",
             require_exact_answer_tag=True,
@@ -2064,6 +2244,103 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((), env.graph.nodes)
         self.assertIn("ReAct is an execution_mode", rejected.feedback)
 
+    async def test_hotpot_semantic_edits_require_roles_and_exact_reasoner_tool_mode(
+        self,
+    ) -> None:
+        env = AgentWorkflowEnv(
+            make_registry(),
+            _ImmediateGateway(),
+            problem="question",
+            semantic_protocol="hotpotqa_verified_answer_slot_v1",
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id="qa-retrieval",
+        )
+        missing_role = AgentGraph(
+            [AgentNode("unknown", "balanced", "untyped contract")]
+        )
+        wrong_reasoner = AgentGraph(
+            [
+                AgentNode(
+                    "reasoner",
+                    "balanced",
+                    "align answer slot",
+                    role_family="reasoner",
+                )
+            ]
+        )
+        exact_reasoner = AgentGraph(
+            [
+                AgentNode(
+                    "reasoner",
+                    "balanced",
+                    "align answer slot",
+                    role_family="reasoner",
+                    allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                    execution_mode="react",
+                )
+            ]
+        )
+
+        self.assertIn(
+            "non-empty role_family",
+            env._semantic_edit_issue_for(missing_role) or "",
+        )
+        self.assertIn(
+            "exactly allowed_tools=['qa-retrieval']",
+            env._semantic_edit_issue_for(wrong_reasoner) or "",
+        )
+        self.assertIsNone(env._semantic_edit_issue_for(exact_reasoner))
+
+    async def test_hotpot_live_action_targets_filter_relation_candidates(self) -> None:
+        env = AgentWorkflowEnv(
+            make_registry(),
+            _ImmediateGateway(),
+            graph=_hotpot_semantic_graph(),
+            problem="What is the capital of France?",
+            semantic_protocol="hotpotqa_verified_answer_slot_v1",
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id="qa-retrieval",
+        )
+
+        targets = env.model_admissible_action_targets()
+
+        add_domain = targets["add_subgraph"]
+        self.assertIn("role_family", add_domain["required_agent_fields"])
+        self.assertEqual(
+            [["qa-retrieval"]],
+            add_domain["role_constraints"]["reasoner"]["allowed_tools"],
+        )
+        modify_domain = targets["modify_agent"]
+        self.assertNotIn("allowed_tools", modify_domain["mutable_fields"])
+        self.assertIn("model_id", modify_domain["mutable_fields"])
+        self.assertEqual(4, len(modify_domain["per_agent_candidates"]))
+        self.assertEqual(
+            sorted(make_registry().model_ids),
+            sorted(add_domain["model_ids"]),
+        )
+        self.assertIn("evidence_retriever", add_domain["role_constraints"])
+        relation_candidates = targets["set_relation"]["candidates"]
+        self.assertTrue(relation_candidates)
+        self.assertFalse(
+            any(
+                item["source_id"] == "reader"
+                and item["target_id"] == "verifier"
+                and item["source_to_target"] is True
+                for item in relation_candidates
+            )
+        )
+        self.assertFalse(
+            any(
+                item == {
+                    "source_id": "reasoner",
+                    "target_id": "verifier",
+                    "source_to_target": True,
+                    "target_to_source": False,
+                }
+                for item in relation_candidates
+            )
+        )
+
     async def test_hotpot_format_predecessor_must_be_verifier(self) -> None:
         registry = make_registry()
         gateway = _ImmediateGateway()
@@ -2123,7 +2400,8 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         rejected = await env.step(
             '{"action":"add_subgraph","agents":['
             '{"agent_id":"reasoner","model_id":"balanced",'
-            '"contract":"answer","role_family":"reasoner"},'
+            '"contract":"answer","role_family":"reasoner",'
+            '"allowed_tools":["qa-retrieval"],"execution_mode":"react"},'
             '{"agent_id":"verifier","model_id":"balanced",'
             '"contract":"verify","role_family":"verifier"},'
             '{"agent_id":"formatter","model_id":"fast",'
@@ -2213,13 +2491,17 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
                 "cheap",
                 "replacement semantic alignment",
                 role_family="reasoner",
+                allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                execution_mode="react",
                 artifact_type="semantic_candidate",
             )
         )
         graph.set_relation("replacement_reasoner", "verifier", True, False)
+        registry = make_registry()
+        gateway = _ImmediateGateway()
         env = AgentWorkflowEnv(
-            make_registry(),
-            _ImmediateGateway(),
+            registry,
+            runtime=_hotpot_semantic_runtime(registry, gateway),
             graph=graph,
             problem="What is the capital of France?",
             semantic_protocol="hotpotqa_verified_answer_slot_v1",
@@ -2339,7 +2621,7 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Output Agent identity", rejected.feedback)
         self.assertTrue(env.graph.has_node("out"))
 
-    async def test_recovery_policy_allows_terminal_unreachable_redundancy_after_takeover(
+    async def test_recovery_policy_protects_unreachable_artifact_without_failed_node(
         self,
     ) -> None:
         registry = make_registry()
@@ -2385,11 +2667,12 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             '{"action":"delete_agent","agent_id":"redundant"}'
         )
 
-        self.assertTrue(deleted.accepted)
-        self.assertFalse(env.graph.has_node("redundant"))
+        self.assertFalse(deleted.accepted)
+        self.assertIn("replacement artifact takeover is required", deleted.feedback)
+        self.assertTrue(env.graph.has_node("redundant"))
         self.assertTrue(env.graph.has_node("out"))
 
-    async def test_hotpot_recovery_allows_disconnected_duplicate_after_verified_takeover(
+    async def test_hotpot_recovery_protects_disconnected_evidence_without_failure(
         self,
     ) -> None:
         graph = _hotpot_semantic_graph()
@@ -2399,6 +2682,8 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
                 "balanced",
                 "superseded semantic candidate",
                 role_family="reasoner",
+                allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                execution_mode="react",
                 artifact_type="semantic_candidate",
             )
         )
@@ -2422,9 +2707,11 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         )
         graph.set_relation("duplicate_reasoner", "duplicate_verifier", True, False)
         graph.set_relation("duplicate_verifier", "duplicate_formatter", True, False)
+        registry = make_registry()
+        gateway = _ImmediateGateway()
         env = AgentWorkflowEnv(
-            make_registry(),
-            _ImmediateGateway(),
+            registry,
+            runtime=_hotpot_semantic_runtime(registry, gateway),
             graph=graph,
             problem="What is the capital of France?",
             semantic_protocol="hotpotqa_verified_answer_slot_v1",
@@ -2519,14 +2806,15 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             "duplicate_reasoner",
             state["redundant_after_replacement_takeover_agent_ids"],
         )
-        self.assertEqual("delete_agent", state["preferred_actions"][0])
+        self.assertNotIn("duplicate_reasoner", state["deletable_agent_ids"])
 
         deleted = await env.step(
             '{"action":"delete_agent","agent_id":"duplicate_reasoner"}'
         )
 
-        self.assertTrue(deleted.accepted)
-        self.assertFalse(env.graph.has_node("duplicate_reasoner"))
+        self.assertFalse(deleted.accepted)
+        self.assertIn("replacement artifact takeover is required", deleted.feedback)
+        self.assertTrue(env.graph.has_node("duplicate_reasoner"))
         self.assertTrue(env.graph.has_node("reasoner"))
 
     async def test_recovery_policy_keeps_successful_reachable_lineage(self) -> None:

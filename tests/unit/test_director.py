@@ -8,9 +8,11 @@ from src.interactive.agent_runtime import AgentResponse
 from src.interactive.agent_workflow_env import AgentWorkflowEnv
 from src.interactive.director import (
     AgentGraphOrchestrator,
+    DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION,
     DIRECTOR_MODEL_ADMISSIBLE_ACTION_MASK_PROFILE,
     DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION,
     DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V1,
+    DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3,
     DIRECTOR_PROGRESSIVE_ACTION_MASK_PROFILE,
     DIRECTOR_PROMPT_VERSION,
     DIRECTOR_STATE_CONDITIONED_ACTION_SCHEMA_VERSION,
@@ -23,6 +25,7 @@ from src.interactive.director import (
     HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V16,
     HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V17,
     HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V18,
+    HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V19,
     HOTPOTQA_SEMANTIC_PROTOCOL,
     LEGACY_DIRECTOR_SYSTEM_PROMPT_V8,
     LEGACY_DIRECTOR_SYSTEM_PROMPT_V9,
@@ -34,8 +37,16 @@ from src.interactive.director import (
     director_action_json_schema_text,
     director_model_admissible_sampling_json_schema_text,
     director_model_admissible_sampling_json_schema_text_v1,
+    director_model_admissible_sampling_json_schema_text_v3,
     director_model_admissible_schema_branch,
     director_model_admissible_schema_branch_v1,
+    director_model_admissible_schema_branch_v3,
+    director_live_add_subgraph_agent_declarations_from_text,
+    director_live_add_subgraph_agent_declarations_json_schema_text,
+    director_live_action_parameter_json_schema_text,
+    director_live_action_target_domains_json,
+    director_live_modify_agent_selector_json_schema_text,
+    director_live_relation_candidate_selector_json_schema_text,
     director_modify_agent_field_sampling_json_schema_text,
     director_modify_agent_field_selector_json_schema_text,
     director_system_prompt_for_version,
@@ -65,6 +76,8 @@ class ScriptedDirector:
         action_json_schema=None,
         action_json_schema_version=None,
         action_schema_branch=None,
+        action_target_domains_json=None,
+        action_target_domain_version=None,
     ):
         self.prompts.append(prompt)
         self.seeds.append(seed)
@@ -73,6 +86,8 @@ class ScriptedDirector:
                 "action_json_schema": action_json_schema,
                 "action_json_schema_version": action_json_schema_version,
                 "action_schema_branch": action_schema_branch,
+                "action_target_domains_json": action_target_domains_json,
+                "action_target_domain_version": action_target_domain_version,
             }
         )
         return DirectorResponse(self.actions.pop(0), {"policy_version": "test"})
@@ -171,8 +186,14 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
             director_system_prompt_for_version("prompt-v1"),
         )
         self.assertIs(
-            HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V18,
+            HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V19,
             director_system_prompt_for_version(HOTPOTQA_DIRECTOR_PROMPT_VERSION),
+        )
+        self.assertIs(
+            HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V18,
+            director_system_prompt_for_version(
+                "agentgraph.director.hotpotqa-semantic-recovery.v18"
+            ),
         )
         self.assertIs(
             HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V17,
@@ -213,7 +234,7 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             director_system_prompt_for_version(" ")
 
-    async def test_hotpot_v18_prompt_encodes_semantic_and_recovery_policy(self) -> None:
+    async def test_hotpot_v19_prompt_encodes_semantic_and_recovery_policy(self) -> None:
         model_registry = registry()
         env = AgentWorkflowEnv(
             model_registry,
@@ -226,7 +247,7 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         orchestrator = AgentGraphOrchestrator(
             model_registry,
             ScriptedDirector([]),
-            system_prompt=HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V18,
+            system_prompt=HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V19,
             prompt_version=HOTPOTQA_DIRECTOR_PROMPT_VERSION,
             semantic_protocol=HOTPOTQA_SEMANTIC_PROTOCOL,
             recovery_policy=PRESERVE_DIAGNOSE_REPAIR_AUGMENT_POLICY,
@@ -235,7 +256,7 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         messages = transcript_messages(orchestrator.build_prompt(env, 0, ()))
         state = observation_payload(messages[-1])
 
-        self.assertEqual(HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V18, messages[0]["content"])
+        self.assertEqual(HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V19, messages[0]["content"])
         self.assertEqual(HOTPOTQA_SEMANTIC_PROTOCOL, state["semantic_protocol"])
         self.assertEqual(
             PRESERVE_DIAGNOSE_REPAIR_AUGMENT_POLICY,
@@ -284,15 +305,32 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
             messages[0]["content"],
         )
         self.assertIn("never reference a future Agent", messages[0]["content"])
+        self.assertIn(
+            "Every Agent declaration includes role_family, execution_mode, and allowed_tools",
+            messages[0]["content"],
+        )
+        self.assertIn(
+            "It uses execution_mode react and declares qa-retrieval",
+            messages[0]["content"],
+        )
+        self.assertIn(
+            "finish_admissibility.admissible is true, submit finish",
+            messages[0]["content"],
+        )
+        add_domain = state["action_target_domains"]["add_subgraph"]
+        self.assertEqual(1, add_domain["min_new_agents"])
+        self.assertEqual(3, add_domain["max_new_agents"])
+        self.assertEqual([], add_domain["existing_agent_ids"])
         self.assertEqual(
-            {
-                "add_subgraph": {
-                    "min_new_agents": 1,
-                    "max_new_agents": 3,
-                    "existing_agent_ids": [],
-                }
-            },
-            state["action_target_domains"],
+            [
+                "agent_id",
+                "model_id",
+                "contract",
+                "role_family",
+                "allowed_tools",
+                "execution_mode",
+            ],
+            add_domain["required_agent_fields"],
         )
         self.assertEqual(
             {"provider"},
@@ -1021,6 +1059,244 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             {"action", "agent_id", "contract"},
             set(contract_branch["properties"]),
+        )
+
+    def test_model_admissible_v3_binds_live_parameter_domains(self) -> None:
+        actions = (
+            "add_subgraph",
+            "modify_agent",
+            "set_relation",
+            "set_output",
+            "finish",
+        )
+        domains = {
+            "add_subgraph": {
+                "min_new_agents": 1,
+                "max_new_agents": 3,
+                "existing_agent_ids": ["reasoner"],
+                "required_agent_fields": [
+                    "agent_id",
+                    "model_id",
+                    "contract",
+                    "role_family",
+                    "allowed_tools",
+                    "execution_mode",
+                ],
+                "model_ids": ["qwen", "other"],
+                "role_constraints": {
+                    "reasoner": {
+                        "execution_modes": ["react"],
+                        "allowed_tools": [["qa-retrieval"]],
+                    },
+                    "verifier": {
+                        "execution_modes": ["reasoning"],
+                        "allowed_tools": [[]],
+                    },
+                    "format": {
+                        "execution_modes": ["reasoning"],
+                        "allowed_tools": [[]],
+                    },
+                },
+                "endpoint_scope": {
+                    "relation_endpoint_sources": [
+                        "existing_agent_ids",
+                        "same_action_agent_ids",
+                    ],
+                    "output_agent_id_sources": [
+                        "existing_agent_ids",
+                        "same_action_agent_ids",
+                    ],
+                },
+            },
+            "modify_agent": {
+                "mutable_fields": ["contract", "model_id"],
+                "per_agent_candidates": [
+                    {
+                        "agent_id": "reasoner",
+                        "mutable_fields": ["contract", "model_id"],
+                        "discrete_value_domains": {"model_id": ["other"]},
+                    },
+                    {
+                        "agent_id": "verifier",
+                        "mutable_fields": ["model_id"],
+                        "discrete_value_domains": {"model_id": ["qwen"]},
+                    },
+                ],
+            },
+            "set_relation": {
+                "candidates": [
+                    {
+                        "source_id": "reasoner",
+                        "target_id": "verifier",
+                        "source_to_target": True,
+                        "target_to_source": False,
+                    },
+                    {
+                        "source_id": "verifier",
+                        "target_id": "format",
+                        "source_to_target": True,
+                        "target_to_source": False,
+                    },
+                ]
+            },
+            "set_output": {"agent_ids": ["format"]},
+            "finish": {"admissible": True},
+        }
+
+        self.assertEqual(
+            "admissible-v3:" + "|".join(actions),
+            director_model_admissible_schema_branch_v3(actions),
+        )
+        canonical_domains = director_live_action_target_domains_json(
+            actions,
+            domains,
+        )
+        self.assertEqual(domains, json.loads(canonical_domains))
+        self.assertEqual(
+            json.loads(director_model_admissible_sampling_json_schema_text(actions)),
+            json.loads(director_model_admissible_sampling_json_schema_text_v3(actions)),
+        )
+
+        declaration_schema = json.loads(
+            director_live_add_subgraph_agent_declarations_json_schema_text(domains)
+        )
+        reasoner_branch = declaration_schema["properties"]["agents"]["items"][
+            "anyOf"
+        ][0]
+        self.assertIn("role_family", reasoner_branch["required"])
+        self.assertEqual(
+            {"const": "reasoner"},
+            reasoner_branch["properties"]["role_family"],
+        )
+        self.assertEqual(
+            {"enum": [["qa-retrieval"]]},
+            reasoner_branch["properties"]["allowed_tools"],
+        )
+        self.assertEqual(
+            {"enum": ["qwen", "other"]},
+            reasoner_branch["properties"]["model_id"],
+        )
+        sampled_agents = director_live_add_subgraph_agent_declarations_from_text(
+            '{"action":"add_subgraph","agents":['
+            '{"agent_id":"reader","model_id":"qwen",'
+            '"contract":"align evidence","role_family":"reasoner",'
+            '"allowed_tools":["qa-retrieval"],"execution_mode":"react"}]}',
+            domains,
+        )
+        add_schema = json.loads(
+            director_live_action_parameter_json_schema_text(
+                "add_subgraph",
+                domains,
+                add_agents=sampled_agents,
+            )
+        )
+        self.assertEqual(
+            list(sampled_agents),
+            add_schema["properties"]["agents"]["const"],
+        )
+        relation_branch = add_schema["properties"]["relations"]["items"]["anyOf"][0]
+        self.assertEqual(
+            ["reasoner", "reader"],
+            relation_branch["properties"]["source_id"]["enum"],
+        )
+        self.assertEqual(
+            ["reasoner", "reader"],
+            add_schema["properties"]["output_agent_id"]["anyOf"][0]["enum"],
+        )
+        modify_schema = json.loads(
+            director_live_action_parameter_json_schema_text(
+                "modify_agent",
+                domains,
+                modify_field="model_id",
+                modify_agent_id="reasoner",
+            )
+        )
+        self.assertEqual(
+            {"const": "reasoner"},
+            modify_schema["properties"]["agent_id"],
+        )
+        self.assertEqual(
+            {"enum": ["other"]},
+            modify_schema["properties"]["model_id"],
+        )
+        modify_selector = json.loads(
+            director_live_modify_agent_selector_json_schema_text(
+                domains,
+                "model_id",
+            )
+        )
+        self.assertEqual(
+            ["reasoner", "verifier"],
+            modify_selector["properties"]["agent_id"]["enum"],
+        )
+        relation_selector = json.loads(
+            director_live_relation_candidate_selector_json_schema_text(domains)
+        )
+        self.assertEqual(
+            [0, 1],
+            relation_selector["properties"]["candidate_index"]["enum"],
+        )
+        relation_schema = json.loads(
+            director_live_action_parameter_json_schema_text(
+                "set_relation",
+                domains,
+                relation_candidate_index=0,
+            )
+        )
+        self.assertEqual(
+            {"const": "reasoner"},
+            relation_schema["properties"]["source_id"],
+        )
+        self.assertEqual(
+            {"enum": ["format"]},
+            json.loads(
+                director_live_action_parameter_json_schema_text(
+                    "set_output",
+                    domains,
+                )
+            )["properties"]["agent_id"],
+        )
+        self.assertEqual(
+            {"const": "finish"},
+            json.loads(
+                director_live_action_parameter_json_schema_text(
+                    "finish",
+                    domains,
+                )
+            )["properties"]["action"],
+        )
+        with self.assertRaises(ValueError):
+            director_live_relation_candidate_selector_json_schema_text(
+                {"set_relation": {"candidates": []}}
+            )
+
+        model_registry = registry()
+        env = AgentWorkflowEnv(
+            model_registry,
+            gateway=FakeGateway(),
+            semantic_protocol=HOTPOTQA_SEMANTIC_PROTOCOL,
+            recovery_policy=PRESERVE_DIAGNOSE_REPAIR_AUGMENT_POLICY,
+            required_evidence_tool_id="qa-retrieval",
+        )
+        request = AgentGraphOrchestrator(
+            model_registry,
+            ScriptedDirector([]),
+            sampling_action_profile=DIRECTOR_MODEL_ADMISSIBLE_ACTION_MASK_PROFILE,
+            sampling_action_schema_version=(
+                DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3
+            ),
+        ).action_schema_request(env)
+        self.assertEqual(
+            DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION,
+            request["action_target_domain_version"],
+        )
+        self.assertEqual(
+            env.model_admissible_action_targets(),
+            json.loads(request["action_target_domains_json"]),
+        )
+        self.assertEqual(
+            "admissible-v3:add_subgraph",
+            request["action_schema_branch"],
         )
 
     async def test_model_admissible_v1_receipts_remain_replayable(self) -> None:

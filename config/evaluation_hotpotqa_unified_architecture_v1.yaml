@@ -13,8 +13,8 @@ experiment:
   condition_id: "hotpotqa_unified_architecture_v1"
   sampling_schedule_purpose: "hotpotqa_fixed_development_unified_architecture"
   catalog_order_namespace: "hotpotqa_unified_architecture_v1"
-  prompt_version: "agentgraph.director.hotpotqa-semantic-recovery.v18"
-  tool_version: "skillflow.qa-retrieval.top10-semantic-slot-verifier.v11"
+  prompt_version: "agentgraph.director.hotpotqa-semantic-recovery.v19"
+  tool_version: "skillflow.qa-retrieval.multihop-semantic-repair.v12"
   output_dir: "artifacts/unified_architecture_v1/hotpotqa"
 
 data:
@@ -57,8 +57,11 @@ qa_tool_runtime:
   dataset_scope: ["hotpotqa"]
   skillflow_source: "/home/test/SKILLEV/skillflow-bayesian-improve-deploy/src"
   index_path: "/ssd1/iclr/SKILLEV/skillev-new-b2-temp/data/datasets/dpr-wikipedia/atlas-retrieval.sqlite3"
-  max_turns_per_agent_call: 7
-  max_tool_calls_per_agent_call: 4
+  # search->read->search->read->complete uses five turns.  A rejected
+  # provenance-bound completion may spend one additional search->read pair and
+  # then complete again without leaving the bounded ReAct call.
+  max_turns_per_agent_call: 9
+  max_tool_calls_per_agent_call: 6
   tool_timeout_seconds: 30.0
   # This Tool-enabled protocol is reported separately from closed-context
   # Direct. HotpotQA retrieves ten ranked passage candidates, reads two distinct
@@ -101,7 +104,7 @@ director:
   # exact singleton parameters; AgentActionParser remains authoritative.
   action_decoding: "json_schema"
   action_schema_version: "agentgraph.canvas-action-json-schema.v1"
-  sampling_schema_version: "agentgraph.model-admissible-action-mask.v2"
+  sampling_schema_version: "agentgraph.model-admissible-action-mask.v3"
   sampling_action_profile: "model_admissible_canvas_actions"
   temperature: 1.0
   top_p: 1.0

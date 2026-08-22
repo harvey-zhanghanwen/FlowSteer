@@ -35,8 +35,10 @@ from .agent_runtime import AgentCallRecord, AgentRuntimeResult
 from .agent_workflow_env import AgentWorkflowEnv
 from .director import (
     AgentGraphOrchestrator,
+    DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION,
     DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION,
     DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V1,
+    DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3,
     DIRECTOR_SYSTEM_PROMPT,
     DirectorError,
     DirectorResponse,
@@ -44,6 +46,13 @@ from .director import (
     director_actions_from_admissible_schema_branch,
     director_model_admissible_sampling_json_schema_text,
     director_model_admissible_sampling_json_schema_text_v1,
+    director_model_admissible_sampling_json_schema_text_v3,
+    director_live_add_subgraph_agent_declarations_from_text,
+    director_live_add_subgraph_agent_declarations_json_schema_text,
+    director_live_action_parameter_json_schema_text,
+    director_live_action_target_domains_json,
+    director_live_modify_agent_selector_json_schema_text,
+    director_live_relation_candidate_selector_json_schema_text,
     director_modify_agent_field_sampling_json_schema_text,
     director_modify_agent_field_selector_json_schema_text,
     director_state_conditioned_sampling_json_schema_text,
@@ -428,6 +437,8 @@ class SGLangReceiptDirectorClient:
         action_json_schema: Optional[str] = None,
         action_json_schema_version: Optional[str] = None,
         action_schema_branch: Optional[str] = None,
+        action_target_domains_json: Optional[str] = None,
+        action_target_domain_version: Optional[str] = None,
     ) -> Mapping[str, Any]:
         if seed is not None and (
             isinstance(seed, bool) or not isinstance(seed, int) or seed < 0
@@ -460,10 +471,14 @@ class SGLangReceiptDirectorClient:
             resolved_action_schema,
             _,
             _,
+            _,
+            _,
         ) = self._resolve_action_schema(
             action_json_schema=action_json_schema,
             action_json_schema_version=action_json_schema_version,
             action_schema_branch=action_schema_branch,
+            action_target_domains_json=action_target_domains_json,
+            action_target_domain_version=action_target_domain_version,
         )
         if resolved_action_schema is not None:
             # NECESSARY_ADAPTATION: deployed SGLang 0.5.15 exposes
@@ -484,6 +499,8 @@ class SGLangReceiptDirectorClient:
         action_json_schema: Optional[str] = None,
         action_json_schema_version: Optional[str] = None,
         action_schema_branch: Optional[str] = None,
+        action_target_domains_json: Optional[str] = None,
+        action_target_domain_version: Optional[str] = None,
     ) -> Mapping[str, Any]:
         _, adapter_name, _ = self._policy_route()
         return self._request_payload(
@@ -493,6 +510,8 @@ class SGLangReceiptDirectorClient:
             action_json_schema=action_json_schema,
             action_json_schema_version=action_json_schema_version,
             action_schema_branch=action_schema_branch,
+            action_target_domains_json=action_target_domains_json,
+            action_target_domain_version=action_target_domain_version,
         )
 
     def _resolve_action_schema(
@@ -501,19 +520,31 @@ class SGLangReceiptDirectorClient:
         action_json_schema: Optional[str],
         action_json_schema_version: Optional[str],
         action_schema_branch: Optional[str],
-    ) -> tuple[Optional[str], Optional[str], Optional[str]]:
+        action_target_domains_json: Optional[str],
+        action_target_domain_version: Optional[str],
+    ) -> tuple[
+        Optional[str],
+        Optional[str],
+        Optional[str],
+        Optional[str],
+        Optional[str],
+    ]:
         override_requested = any(
             value is not None
             for value in (
                 action_json_schema,
                 action_json_schema_version,
                 action_schema_branch,
+                action_target_domains_json,
+                action_target_domain_version,
             )
         )
         if not override_requested:
             return (
                 self.action_json_schema,
                 self.action_json_schema_version,
+                None,
+                None,
                 None,
             )
         if any(
@@ -534,7 +565,47 @@ class SGLangReceiptDirectorClient:
         try:
             supplied_schema = json.loads(action_json_schema)
             normalized_branch = action_schema_branch.strip()
-            if normalized_branch.startswith("admissible-v2:"):
+            normalized_domains_json: str | None = None
+            normalized_domain_version: str | None = None
+            if normalized_branch.startswith("admissible-v3:"):
+                if (
+                    action_json_schema_version.strip()
+                    != DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3
+                ):
+                    raise ValueError(
+                        "v3 admissible branch requires its exact schema version"
+                    )
+                if (
+                    not isinstance(action_target_domains_json, str)
+                    or not action_target_domains_json.strip()
+                    or action_target_domain_version
+                    != DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION
+                ):
+                    raise ValueError(
+                        "v3 admissible branch requires exact live target domains"
+                    )
+                actions = director_actions_from_admissible_schema_branch(
+                    normalized_branch
+                )
+                expected_schema_text = (
+                    director_model_admissible_sampling_json_schema_text_v3(actions)
+                )
+                if action_json_schema.strip() != expected_schema_text:
+                    raise ValueError("v3 action schema is not canonical")
+                parsed_domains = json.loads(action_target_domains_json)
+                normalized_domains_json = director_live_action_target_domains_json(
+                    actions,
+                    parsed_domains,
+                )
+                if action_target_domains_json.strip() != normalized_domains_json:
+                    raise ValueError("v3 live target domains are not canonical")
+                normalized_domain_version = action_target_domain_version
+            elif normalized_branch.startswith("admissible-v2:"):
+                if (
+                    action_target_domains_json is not None
+                    or action_target_domain_version is not None
+                ):
+                    raise ValueError("v2 receipts cannot carry v3 target domains")
                 if (
                     action_json_schema_version.strip()
                     != DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION
@@ -551,6 +622,11 @@ class SGLangReceiptDirectorClient:
                 )
             elif normalized_branch.startswith("admissible:"):
                 if (
+                    action_target_domains_json is not None
+                    or action_target_domain_version is not None
+                ):
+                    raise ValueError("v1 receipts cannot carry v3 target domains")
+                if (
                     action_json_schema_version.strip()
                     != DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V1
                 ):
@@ -565,6 +641,13 @@ class SGLangReceiptDirectorClient:
                     )
                 )
             else:
+                if (
+                    action_target_domains_json is not None
+                    or action_target_domain_version is not None
+                ):
+                    raise ValueError(
+                        "state-conditioned receipts cannot carry v3 target domains"
+                    )
                 expected_schema_text = (
                     director_state_conditioned_sampling_json_schema_text(
                         normalized_branch
@@ -583,6 +666,8 @@ class SGLangReceiptDirectorClient:
             action_json_schema.strip(),
             action_json_schema_version.strip(),
             action_schema_branch.strip(),
+            normalized_domains_json,
+            normalized_domain_version,
         )
 
     async def propose(
@@ -593,6 +678,8 @@ class SGLangReceiptDirectorClient:
         action_json_schema: Optional[str] = None,
         action_json_schema_version: Optional[str] = None,
         action_schema_branch: Optional[str] = None,
+        action_target_domains_json: Optional[str] = None,
+        action_target_domain_version: Optional[str] = None,
     ) -> DirectorResponse:
         await self.rollout_gate.acquire()
         try:
@@ -603,10 +690,14 @@ class SGLangReceiptDirectorClient:
                 resolved_action_schema,
                 resolved_action_schema_version,
                 resolved_action_schema_branch,
+                resolved_target_domains_json,
+                resolved_target_domain_version,
             ) = self._resolve_action_schema(
                 action_json_schema=action_json_schema,
                 action_json_schema_version=action_json_schema_version,
                 action_schema_branch=action_schema_branch,
+                action_target_domains_json=action_target_domains_json,
+                action_target_domain_version=action_target_domain_version,
             )
             payload = self._request_payload(
                 prompt,
@@ -615,10 +706,15 @@ class SGLangReceiptDirectorClient:
                 action_json_schema=action_json_schema,
                 action_json_schema_version=action_json_schema_version,
                 action_schema_branch=action_schema_branch,
+                action_target_domains_json=action_target_domains_json,
+                action_target_domain_version=action_target_domain_version,
             )
             if (
                 resolved_action_schema_version
-                == DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION
+                in {
+                    DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION,
+                    DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3,
+                }
             ):
                 assert resolved_action_schema_branch is not None
                 actions = director_actions_from_admissible_schema_branch(
@@ -634,6 +730,13 @@ class SGLangReceiptDirectorClient:
                     policy_version=policy_version,
                     adapter_name=adapter_name,
                     expected_server_weight_version=expected_server_weight_version,
+                    action_target_domains=(
+                        None
+                        if resolved_target_domains_json is None
+                        else json.loads(resolved_target_domains_json)
+                    ),
+                    action_target_domains_json=resolved_target_domains_json,
+                    action_target_domain_version=resolved_target_domain_version,
                 )
 
             value, latency_ms, attempt_count = await self._post_with_retries(payload)
@@ -650,6 +753,8 @@ class SGLangReceiptDirectorClient:
                     else None
                 ),
                 action_schema_branch=resolved_action_schema_branch,
+                action_target_domains_json=resolved_target_domains_json,
+                action_target_domain_version=resolved_target_domain_version,
                 latency_ms=latency_ms,
                 attempt_count=attempt_count,
             )
@@ -722,9 +827,42 @@ class SGLangReceiptDirectorClient:
         return selected
 
     @staticmethod
+    def _hierarchical_index_choice(
+        text: str,
+        *,
+        admitted: Sequence[int],
+        required_action: str,
+    ) -> int:
+        """Parse one integer candidate selector without rewriting its text."""
+
+        try:
+            value, _ = json.JSONDecoder().raw_decode(text.lstrip())
+        except (TypeError, ValueError) as exc:
+            raise ReceiptValidationError(
+                "hierarchical Director candidate selector is not JSON"
+            ) from exc
+        if not isinstance(value, Mapping) or set(value) != {
+            "action",
+            "candidate_index",
+        }:
+            raise ReceiptValidationError(
+                "hierarchical Director candidate selector has incompatible fields"
+            )
+        if value.get("action") != required_action:
+            raise ReceiptValidationError(
+                "hierarchical Director candidate selector changed its action"
+            )
+        selected = value.get("candidate_index")
+        if type(selected) is not int or selected not in admitted:
+            raise ReceiptValidationError(
+                "hierarchical Director candidate selector selected an inadmissible value"
+            )
+        return selected
+
+    @staticmethod
     def _hierarchical_phase_receipt(response: DirectorResponse) -> Mapping[str, Any]:
         metadata = response.metadata
-        return {
+        receipt = {
             "text": response.text,
             "prompt_token_ids": metadata.get("prompt_token_ids"),
             "output_token_ids": metadata.get("output_token_ids"),
@@ -739,6 +877,20 @@ class SGLangReceiptDirectorClient:
             "server_weight_version": metadata.get("server_weight_version"),
             "receipt_verified": metadata.get("receipt_verified"),
         }
+        if metadata.get("action_target_domain_version") is not None:
+            receipt["action_json_schema_version"] = metadata.get(
+                "action_json_schema_version"
+            )
+            receipt["action_schema_branch"] = metadata.get(
+                "action_schema_branch"
+            )
+            receipt["action_target_domain_version"] = metadata.get(
+                "action_target_domain_version"
+            )
+            receipt["action_target_domains_json"] = metadata.get(
+                "action_target_domains_json"
+            )
+        return receipt
 
     async def _propose_hierarchical_action(
         self,
@@ -752,6 +904,9 @@ class SGLangReceiptDirectorClient:
         policy_version: str,
         adapter_name: Optional[str],
         expected_server_weight_version: Optional[str],
+        action_target_domains: Optional[Mapping[str, Any]],
+        action_target_domains_json: Optional[str],
+        action_target_domain_version: Optional[str],
     ) -> DirectorResponse:
         """Sample action type, optional MODIFY field, then exact parameters."""
 
@@ -776,6 +931,8 @@ class SGLangReceiptDirectorClient:
                 expected_server_weight_version=expected_server_weight_version,
                 action_json_schema_version=action_schema_version,
                 action_schema_branch=action_schema_branch,
+                action_target_domains_json=action_target_domains_json,
+                action_target_domain_version=action_target_domain_version,
                 latency_ms=latency_ms,
                 attempt_count=attempt_count,
             )
@@ -788,9 +945,89 @@ class SGLangReceiptDirectorClient:
                 selector_response
             )
 
+        selected_add_agents: tuple[dict[str, Any], ...] | None = None
         selected_modify_field: str | None = None
-        if selected_action == "modify_agent":
-            field_schema = director_modify_agent_field_selector_json_schema_text()
+        selected_modify_agent_id: str | None = None
+        selected_relation_candidate: int | None = None
+        if selected_action == "add_subgraph" and action_target_domains is not None:
+            declaration_schema = (
+                director_live_add_subgraph_agent_declarations_json_schema_text(
+                    action_target_domains
+                )
+            )
+            declaration_payload = dict(
+                self._request_payload(prompt, adapter_name, seed)
+            )
+            declaration_sampling = dict(declaration_payload["sampling_params"])
+            declaration_sampling["json_schema"] = declaration_schema
+            declaration_payload["sampling_params"] = declaration_sampling
+            value, latency_ms, attempt_count = await self._post_with_retries(
+                declaration_payload
+            )
+            total_latency_ms += latency_ms
+            total_attempt_count += attempt_count
+            declaration_response = self._parse_response(
+                prompt,
+                declaration_payload,
+                value,
+                policy_version=policy_version,
+                adapter_name=adapter_name,
+                expected_server_weight_version=expected_server_weight_version,
+                action_json_schema_version=action_schema_version,
+                action_schema_branch=action_schema_branch,
+                action_target_domains_json=action_target_domains_json,
+                action_target_domain_version=action_target_domain_version,
+                latency_ms=latency_ms,
+                attempt_count=attempt_count,
+            )
+            try:
+                selected_add_agents = (
+                    director_live_add_subgraph_agent_declarations_from_text(
+                        declaration_response.text,
+                        action_target_domains,
+                    )
+                )
+            except ValueError as exc:
+                raise ReceiptValidationError(
+                    "v3 add_subgraph Agent declaration phase is invalid"
+                ) from exc
+            phase_receipts["add_agent_declarations"] = (
+                self._hierarchical_phase_receipt(declaration_response)
+            )
+            parameter_schema = director_live_action_parameter_json_schema_text(
+                "add_subgraph",
+                action_target_domains,
+                add_agents=selected_add_agents,
+            )
+        elif selected_action == "modify_agent":
+            admitted_modify_fields: Sequence[str] | None = None
+            if action_target_domains is not None:
+                modify_domain = action_target_domains.get("modify_agent")
+                if not isinstance(modify_domain, Mapping):
+                    raise ReceiptValidationError(
+                        "v3 modify_agent action has no live target domain"
+                    )
+                raw_fields = modify_domain.get("mutable_fields")
+                raw_candidates = modify_domain.get("per_agent_candidates")
+                if not isinstance(raw_fields, (list, tuple)) or not isinstance(
+                    raw_candidates, (list, tuple)
+                ):
+                    raise ReceiptValidationError(
+                        "v3 modify_agent action has no live field candidates"
+                    )
+                candidate_fields = {
+                    field
+                    for candidate in raw_candidates
+                    if isinstance(candidate, Mapping)
+                    for field in candidate.get("mutable_fields", ())
+                    if isinstance(field, str)
+                }
+                admitted_modify_fields = tuple(
+                    field for field in raw_fields if field in candidate_fields
+                )
+            field_schema = director_modify_agent_field_selector_json_schema_text(
+                admitted_modify_fields
+            )
             field_payload = dict(self._request_payload(prompt, adapter_name, seed))
             field_sampling = dict(field_payload["sampling_params"])
             field_sampling["json_schema"] = field_schema
@@ -809,6 +1046,8 @@ class SGLangReceiptDirectorClient:
                 expected_server_weight_version=expected_server_weight_version,
                 action_json_schema_version=action_schema_version,
                 action_schema_branch=action_schema_branch,
+                action_target_domains_json=action_target_domains_json,
+                action_target_domain_version=action_target_domain_version,
                 latency_ms=latency_ms,
                 attempt_count=attempt_count,
             )
@@ -823,12 +1062,119 @@ class SGLangReceiptDirectorClient:
             phase_receipts["modify_field_selection"] = (
                 self._hierarchical_phase_receipt(field_response)
             )
-            parameter_schema = director_modify_agent_field_sampling_json_schema_text(
-                selected_modify_field
+            if action_target_domains is None:
+                parameter_schema = (
+                    director_modify_agent_field_sampling_json_schema_text(
+                        selected_modify_field
+                    )
+                )
+            else:
+                agent_schema = director_live_modify_agent_selector_json_schema_text(
+                    action_target_domains,
+                    selected_modify_field,
+                )
+                admitted_agent_ids = json.loads(agent_schema)["properties"][
+                    "agent_id"
+                ]["enum"]
+                if len(admitted_agent_ids) == 1:
+                    selected_modify_agent_id = admitted_agent_ids[0]
+                else:
+                    agent_payload = dict(
+                        self._request_payload(prompt, adapter_name, seed)
+                    )
+                    agent_sampling = dict(agent_payload["sampling_params"])
+                    agent_sampling["json_schema"] = agent_schema
+                    agent_payload["sampling_params"] = agent_sampling
+                    value, latency_ms, attempt_count = await self._post_with_retries(
+                        agent_payload
+                    )
+                    total_latency_ms += latency_ms
+                    total_attempt_count += attempt_count
+                    agent_response = self._parse_response(
+                        prompt,
+                        agent_payload,
+                        value,
+                        policy_version=policy_version,
+                        adapter_name=adapter_name,
+                        expected_server_weight_version=(
+                            expected_server_weight_version
+                        ),
+                        action_json_schema_version=action_schema_version,
+                        action_schema_branch=action_schema_branch,
+                        action_target_domains_json=action_target_domains_json,
+                        action_target_domain_version=action_target_domain_version,
+                        latency_ms=latency_ms,
+                        attempt_count=attempt_count,
+                    )
+                    selected_modify_agent_id = self._hierarchical_choice(
+                        agent_response.text,
+                        field_name="agent_id",
+                        admitted=admitted_agent_ids,
+                        required_action="modify_agent",
+                    )
+                    phase_receipts["modify_agent_selection"] = (
+                        self._hierarchical_phase_receipt(agent_response)
+                    )
+                parameter_schema = director_live_action_parameter_json_schema_text(
+                    "modify_agent",
+                    action_target_domains,
+                    modify_field=selected_modify_field,
+                    modify_agent_id=selected_modify_agent_id,
+                )
+        elif selected_action == "set_relation" and action_target_domains is not None:
+            candidate_schema = (
+                director_live_relation_candidate_selector_json_schema_text(
+                    action_target_domains
+                )
+            )
+            candidate_payload = dict(self._request_payload(prompt, adapter_name, seed))
+            candidate_sampling = dict(candidate_payload["sampling_params"])
+            candidate_sampling["json_schema"] = candidate_schema
+            candidate_payload["sampling_params"] = candidate_sampling
+            value, latency_ms, attempt_count = await self._post_with_retries(
+                candidate_payload
+            )
+            total_latency_ms += latency_ms
+            total_attempt_count += attempt_count
+            candidate_response = self._parse_response(
+                prompt,
+                candidate_payload,
+                value,
+                policy_version=policy_version,
+                adapter_name=adapter_name,
+                expected_server_weight_version=expected_server_weight_version,
+                action_json_schema_version=action_schema_version,
+                action_schema_branch=action_schema_branch,
+                action_target_domains_json=action_target_domains_json,
+                action_target_domain_version=action_target_domain_version,
+                latency_ms=latency_ms,
+                attempt_count=attempt_count,
+            )
+            candidate_selector = json.loads(candidate_schema)
+            admitted_indices = candidate_selector["properties"]["candidate_index"][
+                "enum"
+            ]
+            selected_relation_candidate = self._hierarchical_index_choice(
+                candidate_response.text,
+                admitted=admitted_indices,
+                required_action="set_relation",
+            )
+            phase_receipts["relation_candidate_selection"] = (
+                self._hierarchical_phase_receipt(candidate_response)
+            )
+            parameter_schema = director_live_action_parameter_json_schema_text(
+                "set_relation",
+                action_target_domains,
+                relation_candidate_index=selected_relation_candidate,
             )
         else:
-            parameter_schema = director_state_conditioned_sampling_json_schema_text(
-                selected_action
+            parameter_schema = (
+                director_state_conditioned_sampling_json_schema_text(selected_action)
+                if action_target_domains is None
+                else director_live_action_parameter_json_schema_text(
+                    selected_action,
+                    action_target_domains,
+                )
             )
 
         parameter_payload = dict(self._request_payload(prompt, adapter_name, seed))
@@ -849,6 +1195,8 @@ class SGLangReceiptDirectorClient:
             expected_server_weight_version=expected_server_weight_version,
             action_json_schema_version=action_schema_version,
             action_schema_branch=action_schema_branch,
+            action_target_domains_json=action_target_domains_json,
+            action_target_domain_version=action_target_domain_version,
             latency_ms=latency_ms,
             attempt_count=attempt_count,
         )
@@ -861,7 +1209,12 @@ class SGLangReceiptDirectorClient:
                 "parameter_schema_branch": (
                     selected_action
                     if selected_modify_field is None
-                    else f"modify_agent:{selected_modify_field}"
+                    and selected_relation_candidate is None
+                    else (
+                        f"modify_agent:{selected_modify_field}"
+                        if selected_modify_field is not None
+                        else f"set_relation:{selected_relation_candidate}"
+                    )
                 ),
                 "hierarchical_phase_receipts": phase_receipts,
                 "request_count": len(phase_receipts) + 1,
@@ -869,6 +1222,15 @@ class SGLangReceiptDirectorClient:
                 "attempt_count": total_attempt_count,
             }
         )
+        if action_target_domains is not None:
+            metadata["selected_add_agent_ids"] = (
+                None
+                if selected_add_agents is None
+                else [agent["agent_id"] for agent in selected_add_agents]
+            )
+            metadata["selected_modify_agent_id"] = selected_modify_agent_id
+        if selected_relation_candidate is not None:
+            metadata["selected_relation_candidate"] = selected_relation_candidate
         return DirectorResponse(text=response.text, metadata=metadata)
 
     def _post_json(self, payload: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -915,6 +1277,8 @@ class SGLangReceiptDirectorClient:
         expected_server_weight_version: Optional[str],
         action_json_schema_version: Optional[str],
         action_schema_branch: Optional[str],
+        action_target_domains_json: Optional[str],
+        action_target_domain_version: Optional[str],
         latency_ms: float,
         attempt_count: int,
     ) -> DirectorResponse:
@@ -965,9 +1329,7 @@ class SGLangReceiptDirectorClient:
                 "SGLang server weight_version does not match the expected server receipt"
             )
 
-        return DirectorResponse(
-            text=text,
-            metadata={
+        metadata = {
                 "prompt_text": prompt,
                 "prompt_token_ids": prompt_ids,
                 "output_token_ids": output_ids,
@@ -988,8 +1350,11 @@ class SGLangReceiptDirectorClient:
                 "action_json_schema_version": action_json_schema_version,
                 "action_schema_branch": action_schema_branch,
                 "receipt_verified": True,
-            },
-        )
+            }
+        if action_target_domain_version is not None:
+            metadata["action_target_domains_json"] = action_target_domains_json
+            metadata["action_target_domain_version"] = action_target_domain_version
+        return DirectorResponse(text=text, metadata=metadata)
 
     def executed_prefix_tokens(
         self,
@@ -1019,6 +1384,182 @@ class SGLangReceiptDirectorClient:
         raise ReceiptValidationError(
             "the Canvas-consumed character prefix is not a sampled token prefix"
         )
+
+
+def _validate_v3_hierarchical_action_receipt(
+    action: AgentAction,
+    metadata: Mapping[str, Any],
+    schema_request: Mapping[str, str],
+) -> set[str]:
+    """Validate the exact v3 phase/action/domain correspondence."""
+
+    branch = schema_request.get("action_schema_branch")
+    domains_json = schema_request.get("action_target_domains_json")
+    if not isinstance(branch, str) or not isinstance(domains_json, str):
+        raise ReceiptValidationError("v3 Director request has no branch/domain identity")
+    try:
+        actions = director_actions_from_admissible_schema_branch(branch)
+        domains = json.loads(domains_json)
+        director_live_action_target_domains_json(actions, domains)
+    except (TypeError, ValueError) as exc:
+        raise ReceiptValidationError("v3 Director target-domain receipt is invalid") from exc
+    selected_action = metadata.get("selected_action")
+    action_value = action.to_dict()
+    if selected_action not in actions or action_value.get("action") != selected_action:
+        raise ReceiptValidationError(
+            "v3 selected action differs from its branch or parsed Canvas action"
+        )
+
+    expected_phases: set[str] = set()
+    if len(actions) > 1:
+        expected_phases.add("action_selection")
+    expected_parameter_branch = selected_action
+
+    if selected_action == "add_subgraph":
+        expected_phases.add("add_agent_declarations")
+        phase_receipts = metadata.get("hierarchical_phase_receipts")
+        phase = (
+            phase_receipts.get("add_agent_declarations")
+            if isinstance(phase_receipts, Mapping)
+            else None
+        )
+        if not isinstance(phase, Mapping) or not isinstance(phase.get("text"), str):
+            raise ReceiptValidationError(
+                "v3 add_subgraph receipt has no Agent declaration phase"
+            )
+        try:
+            declarations = director_live_add_subgraph_agent_declarations_from_text(
+                phase["text"],
+                domains,
+            )
+            director_live_action_parameter_json_schema_text(
+                "add_subgraph",
+                domains,
+                add_agents=declarations,
+            )
+        except ValueError as exc:
+            raise ReceiptValidationError(
+                "v3 add_subgraph declaration receipt violates its live domain"
+            ) from exc
+        declaration_values = list(declarations)
+        if action_value.get("agents") != declaration_values:
+            raise ReceiptValidationError(
+                "v3 final add_subgraph changed its sampled Agent declarations"
+            )
+        declared_ids = [agent["agent_id"] for agent in declarations]
+        if metadata.get("selected_add_agent_ids") != declared_ids:
+            raise ReceiptValidationError(
+                "v3 add_subgraph Agent-ID receipt differs from its declarations"
+            )
+        endpoint_ids = set(domains["add_subgraph"]["existing_agent_ids"])
+        endpoint_ids.update(declared_ids)
+        for relation in action_value.get("relations", ()):  # parser-normalized values
+            if (
+                not isinstance(relation, Mapping)
+                or relation.get("source_id") not in endpoint_ids
+                or relation.get("target_id") not in endpoint_ids
+            ):
+                raise ReceiptValidationError(
+                    "v3 add_subgraph relation endpoint is outside the live domain"
+                )
+        output_agent_id = action_value.get("output_agent_id")
+        if output_agent_id is not None and output_agent_id not in endpoint_ids:
+            raise ReceiptValidationError(
+                "v3 add_subgraph Output Agent is outside the live domain"
+            )
+        if metadata.get("selected_modify_agent_id") is not None:
+            raise ReceiptValidationError(
+                "v3 add_subgraph receipt carries a MODIFY target"
+            )
+    elif selected_action == "modify_agent":
+        expected_phases.add("modify_field_selection")
+        selected_field = metadata.get("selected_modify_field")
+        selected_agent_id = metadata.get("selected_modify_agent_id")
+        if (
+            not isinstance(selected_field, str)
+            or not isinstance(selected_agent_id, str)
+            or set(action_value) != {"action", "agent_id", selected_field}
+            or action_value.get("agent_id") != selected_agent_id
+        ):
+            raise ReceiptValidationError(
+                "v3 MODIFY field/Agent receipt differs from the parsed atomic patch"
+            )
+        try:
+            agent_selector = json.loads(
+                director_live_modify_agent_selector_json_schema_text(
+                    domains,
+                    selected_field,
+                )
+            )
+            admitted_agent_ids = agent_selector["properties"]["agent_id"]["enum"]
+            parameter_schema = json.loads(
+                director_live_action_parameter_json_schema_text(
+                    "modify_agent",
+                    domains,
+                    modify_field=selected_field,
+                    modify_agent_id=selected_agent_id,
+                )
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ReceiptValidationError(
+                "v3 MODIFY receipt violates its live parameter domain"
+            ) from exc
+        if selected_agent_id not in admitted_agent_ids:
+            raise ReceiptValidationError("v3 MODIFY selected an inadmissible Agent")
+        if len(admitted_agent_ids) > 1:
+            expected_phases.add("modify_agent_selection")
+        value_schema = parameter_schema["properties"][selected_field]
+        if "enum" in value_schema and action_value[selected_field] not in value_schema["enum"]:
+            raise ReceiptValidationError(
+                "v3 MODIFY value is outside its discrete live domain"
+            )
+        expected_parameter_branch = f"modify_agent:{selected_field}"
+        if metadata.get("selected_add_agent_ids") is not None:
+            raise ReceiptValidationError("v3 MODIFY receipt carries ADD declarations")
+    elif selected_action == "set_relation":
+        expected_phases.add("relation_candidate_selection")
+        selected_index = metadata.get("selected_relation_candidate")
+        candidates = domains.get("set_relation", {}).get("candidates")
+        if (
+            type(selected_index) is not int
+            or not isinstance(candidates, list)
+            or not 0 <= selected_index < len(candidates)
+        ):
+            raise ReceiptValidationError(
+                "v3 relation candidate receipt is outside the live domain"
+            )
+        expected_action = {"action": "set_relation", **candidates[selected_index]}
+        if action_value != expected_action:
+            raise ReceiptValidationError(
+                "v3 final relation differs from its selected exact candidate"
+            )
+        expected_parameter_branch = f"set_relation:{selected_index}"
+    else:
+        try:
+            director_live_action_parameter_json_schema_text(
+                selected_action,
+                domains,
+            )
+        except ValueError as exc:
+            raise ReceiptValidationError(
+                "v3 final action violates its live target domain"
+            ) from exc
+        if selected_action in {"delete_agent", "set_output"}:
+            admitted_ids = domains[selected_action]["agent_ids"]
+            if action_value.get("agent_id") not in admitted_ids:
+                raise ReceiptValidationError(
+                    "v3 final Agent target is outside its live domain"
+                )
+
+    if metadata.get("parameter_schema_branch") != expected_parameter_branch:
+        raise ReceiptValidationError(
+            "v3 parameter-schema branch differs from the sampled action"
+        )
+    if metadata.get("request_count") != len(expected_phases) + 1:
+        raise ReceiptValidationError(
+            "v3 hierarchical request count differs from its required phases"
+        )
+    return expected_phases
 
 
 def select_balanced_tasks(
@@ -1674,6 +2215,18 @@ class AgentGraphRolloutCollector:
                     raise ReceiptValidationError(
                         "Director action schema branch differs from the request"
                     )
+                if metadata.get(
+                    "action_target_domain_version"
+                ) != schema_request.get("action_target_domain_version"):
+                    raise ReceiptValidationError(
+                        "Director target-domain version differs from the request"
+                    )
+                if metadata.get(
+                    "action_target_domains_json"
+                ) != schema_request.get("action_target_domains_json"):
+                    raise ReceiptValidationError(
+                        "Director target domains differ from the request"
+                    )
             if metadata.get("prompt_text") != prompt:
                 raise ReceiptValidationError("Director receipt is bound to a different prompt")
             if _optional_int(metadata.get("generation_seed")) != generation_seed:
@@ -1734,6 +2287,14 @@ class AgentGraphRolloutCollector:
                     raise ReceiptValidationError(
                         "hierarchical Director receipt has no selected action"
                     )
+                live_v3_receipt = (
+                    schema_request.get("action_json_schema_version")
+                    == DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3
+                )
+                if live_v3_receipt and action is None:
+                    raise ReceiptValidationError(
+                        "v3 hierarchical Director response has no parsed Canvas action"
+                    )
                 if action is not None and selected_action != action.action_type.value:
                     raise ReceiptValidationError(
                         "hierarchical action selection differs from the parsed action"
@@ -1743,6 +2304,18 @@ class AgentGraphRolloutCollector:
                     raise ReceiptValidationError(
                         "hierarchical Director receipt has no phase receipts"
                     )
+                expected_v3_phases: set[str] | None = None
+                if live_v3_receipt:
+                    assert action is not None
+                    expected_v3_phases = _validate_v3_hierarchical_action_receipt(
+                        action,
+                        metadata,
+                        schema_request,
+                    )
+                    if set(phase_receipts) != expected_v3_phases:
+                        raise ReceiptValidationError(
+                            "v3 hierarchical phase set differs from the required phases"
+                        )
                 for phase_name, phase_receipt in phase_receipts.items():
                     if not isinstance(phase_name, str) or not isinstance(
                         phase_receipt, Mapping
@@ -1754,6 +2327,31 @@ class AgentGraphRolloutCollector:
                         raise ReceiptValidationError(
                             "hierarchical Director phase lacks an exact receipt"
                         )
+                    if live_v3_receipt:
+                        if phase_receipt.get(
+                            "action_json_schema_version"
+                        ) != schema_request.get("action_json_schema_version"):
+                            raise ReceiptValidationError(
+                                "v3 hierarchical phase schema version differs from the request"
+                            )
+                        if phase_receipt.get(
+                            "action_schema_branch"
+                        ) != schema_request.get("action_schema_branch"):
+                            raise ReceiptValidationError(
+                                "v3 hierarchical phase branch differs from the request"
+                            )
+                        if phase_receipt.get(
+                            "action_target_domain_version"
+                        ) != schema_request.get("action_target_domain_version"):
+                            raise ReceiptValidationError(
+                                "v3 hierarchical phase domain version differs from the request"
+                            )
+                        if phase_receipt.get(
+                            "action_target_domains_json"
+                        ) != schema_request.get("action_target_domains_json"):
+                            raise ReceiptValidationError(
+                                "v3 hierarchical phase domains differ from the request"
+                            )
                     phase_output_ids = _token_ids(
                         phase_receipt.get("output_token_ids"),
                         f"{phase_name}.output_token_ids",
@@ -1805,8 +2403,28 @@ class AgentGraphRolloutCollector:
                 runtime_summary["director_action_schema_branch"] = (
                     action_schema_branch
                 )
+            action_target_domain_version = metadata.get(
+                "action_target_domain_version"
+            )
+            if action_target_domain_version is not None:
+                runtime_summary["director_action_target_domain_version"] = (
+                    action_target_domain_version
+                )
+                raw_target_domains = metadata.get("action_target_domains_json")
+                if not isinstance(raw_target_domains, str):
+                    raise ReceiptValidationError(
+                        "Director receipt has no serialized target domains"
+                    )
+                try:
+                    runtime_summary["director_action_target_domains"] = json.loads(
+                        raw_target_domains
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise ReceiptValidationError(
+                        "Director receipt target domains are not JSON"
+                    ) from exc
             if action_decoding_strategy is not None:
-                runtime_summary["director_action_decoding"] = {
+                action_decoding = {
                     "strategy": action_decoding_strategy,
                     "selected_action": metadata.get("selected_action"),
                     "selected_modify_field": metadata.get(
@@ -1820,6 +2438,19 @@ class AgentGraphRolloutCollector:
                         "hierarchical_phase_receipts"
                     ),
                 }
+                if metadata.get("selected_relation_candidate") is not None:
+                    action_decoding["selected_relation_candidate"] = metadata.get(
+                        "selected_relation_candidate"
+                    )
+                if "selected_add_agent_ids" in metadata:
+                    action_decoding["selected_add_agent_ids"] = metadata.get(
+                        "selected_add_agent_ids"
+                    )
+                if "selected_modify_agent_id" in metadata:
+                    action_decoding["selected_modify_agent_id"] = metadata.get(
+                        "selected_modify_agent_id"
+                    )
+                runtime_summary["director_action_decoding"] = action_decoding
             turn = TurnRecord(
                 turn_id=stable_id(
                     "turn",

@@ -96,6 +96,8 @@ class _RequiredEvidenceState:
     latest_search_passage_ids: tuple[str, ...]
     read_passage_ids: tuple[str, ...]
     dispatched_tool_calls: int
+    latest_successful_operation: str | None
+    semantic_repair_required: bool
 
     @property
     def unread_passage_ids(self) -> tuple[str, ...]:
@@ -379,8 +381,20 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         latest_search_passage_ids: list[str] = []
         read_passage_ids: list[str] = []
         dispatched_tool_calls = 0
-        for observation in observations:
+        latest_successful_operation: str | None = None
+        latest_successful_read_index = -1
+        latest_semantic_rejection_index = -1
+        for observation_index, observation in enumerate(observations):
             status = observation.get("observation_status")
+            public_error_code = observation.get("public_error_code")
+            if (
+                status == "schema_invalid"
+                and isinstance(public_error_code, str)
+                and public_error_code.startswith(
+                    "hotpotqa_semantic_artifact_invalid:"
+                )
+            ):
+                latest_semantic_rejection_index = observation_index
             if status not in {"success", "tool_error"}:
                 continue
             executed_action = observation.get("executed_action")
@@ -401,6 +415,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             if not isinstance(result, Mapping):
                 continue
             if result.get("operation") == "search":
+                latest_successful_operation = "search"
                 latest_search_passage_ids = []
                 raw_ids = result.get("passage_ids")
                 if isinstance(raw_ids, list):
@@ -418,6 +433,8 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 and isinstance(result["passage"].get("text"), str)
                 and bool(result["passage"]["text"].strip())
             ):
+                latest_successful_operation = "read"
+                latest_successful_read_index = observation_index
                 raw_passage_id = result.get("passage_id")
                 if not isinstance(raw_passage_id, str):
                     raw_passage_id = result["passage"].get("passage_id")
@@ -437,6 +454,10 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             latest_search_passage_ids=tuple(latest_search_passage_ids),
             read_passage_ids=tuple(read_passage_ids),
             dispatched_tool_calls=dispatched_tool_calls,
+            latest_successful_operation=latest_successful_operation,
+            semantic_repair_required=(
+                latest_semantic_rejection_index > latest_successful_read_index
+            ),
         )
 
     def _state_conditioned_action_domain(
@@ -460,11 +481,45 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             and request.semantic_protocol == "hotpotqa_verified_answer_slot_v1"
             else 1
         )
+        hotpot_multi_hop = (
+            self._task_type == "multi_hop_qa"
+            and request.semantic_protocol == "hotpotqa_verified_answer_slot_v1"
+        )
+
+        # A rejected semantic completion is a public diagnosis, not a terminal
+        # dead end.  When the bounded budget still permits a complete
+        # search->read transition, augment retrieval before asking the
+        # Reasoner to complete again.
+        if state.semantic_repair_required:
+            if (
+                state.latest_successful_operation == "search"
+                and state.latest_unread_passage_ids
+                and remaining_tool_calls >= 1
+            ):
+                return frozenset({(QA_RETRIEVAL_TOOL_ID, "read")}), False
+            if remaining_tool_calls >= 2:
+                return frozenset({(QA_RETRIEVAL_TOOL_ID, "search")}), False
+            return frozenset(), state.successful_read_count > 0
+
         if (
             state.successful_read_count >= minimum_reads
             or remaining_tool_calls == 0
             and state.successful_read_count > 0
         ):
+            return frozenset(), True
+
+        # HotpotQA multi-hop retrieval uses the newest read Observation to
+        # formulate the next missing-hop search.  This preserves SkillFlow's
+        # public Action--Observation continuation while avoiding two blind
+        # reads from one initial query.
+        if hotpot_multi_hop and state.successful_read_count > 0:
+            if (
+                state.latest_successful_operation == "search"
+                and state.latest_unread_passage_ids
+            ):
+                return frozenset({(QA_RETRIEVAL_TOOL_ID, "read")}), False
+            if remaining_tool_calls >= 2:
+                return frozenset({(QA_RETRIEVAL_TOOL_ID, "search")}), False
             return frozenset(), True
 
         if state.latest_unread_passage_ids:
@@ -902,6 +957,24 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         if issue is not None or candidate is None:
             detail = issue or "Reasoner candidate_answer is missing"
             return "hotpotqa_semantic_artifact_invalid: " + detail
+        read_evidence_texts = tuple(
+            text
+            for receipt in tool_receipts
+            if isinstance(receipt, Mapping)
+            for text in (
+                AgentWorkflowEnv._successful_read_text(
+                    receipt,
+                    QA_RETRIEVAL_TOOL_ID,
+                ),
+            )
+            if text is not None
+        )
+        provenance_issue = AgentWorkflowEnv._reasoner_evidence_provenance_issue(
+            artifact,
+            read_evidence_texts,
+        )
+        if provenance_issue is not None:
+            return "hotpotqa_semantic_artifact_invalid: " + provenance_issue
         return None
 
     def _tool_action_error(
