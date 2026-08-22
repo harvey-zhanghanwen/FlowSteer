@@ -794,7 +794,7 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             gateway.requests[0].model.metadata["response_json_schema"]
         )
         self.assertEqual(
-            5,
+            10,
             search_schema["properties"]["arguments"]["properties"]["limit"]["const"],
         )
         second_read_schema = json.loads(

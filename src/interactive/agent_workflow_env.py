@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 import re
+import unicodedata
 from typing import Mapping, Optional, Sequence, Tuple, Union
 
 from .agent_action_parser import (
@@ -71,6 +72,27 @@ def _answer_protocol_state(answer: str) -> tuple[int, bool, bool]:
     exact_single = opening_count == 1 and closing_count == 1 and match is not None
     non_empty = exact_single and bool(match.group(1).strip())
     return opening_count, exact_single, non_empty
+
+
+def _canonical_evidence_text(value: str) -> str:
+    """Canonicalize typography only for evidence-provenance comparison.
+
+    The retrieved passage remains the provenance authority.  This accepts the
+    presentation-only differences observed at the structured-output boundary
+    (Unicode compatibility forms, quotation-mark style, and whitespace) while
+    still rejecting lexical paraphrases or unsupported facts.
+    """
+
+    normalized = unicodedata.normalize("NFKC", value)
+    normalized = normalized.translate(
+        str.maketrans("", "", "'\"‘’‚‛“”„‟«»‹›")
+    )
+    return " ".join(normalized.split())
+
+
+def _evidence_span_matches_read(evidence_span: str, read_text: str) -> bool:
+    span = _canonical_evidence_text(evidence_span)
+    return bool(span) and span in _canonical_evidence_text(read_text)
 
 
 @dataclass(frozen=True, slots=True)
@@ -935,11 +957,15 @@ class AgentWorkflowEnv:
             }
         semantic_issue = self._semantic_protocol_issue(execution)
         if semantic_issue is not None:
-            return {
+            result: dict[str, object] = {
                 "admissible": False,
                 "stage": "semantic_protocol",
                 "reason": semantic_issue,
             }
+            repair = self._semantic_repair_attribution(semantic_issue)
+            if repair is not None:
+                result["failure_attribution"] = repair
+            return result
         terminal_issue = self._terminal_validation_error(execution.final_answer)
         if terminal_issue is not None:
             return {
@@ -951,6 +977,58 @@ class AgentWorkflowEnv:
             "admissible": True,
             "graph_revision": self._graph.revision,
             "submission_semantics": "explicit_finish",
+        }
+
+    def _semantic_repair_attribution(
+        self,
+        reason: str,
+    ) -> Optional[dict[str, object]]:
+        """Project the responsible semantic stage for the next Canvas repair."""
+
+        if self.semantic_protocol != _HOTPOTQA_SEMANTIC_PROTOCOL:
+            return None
+        formatter_id = self._graph.output_agent_id
+        verifier_id: Optional[str] = None
+        reasoner_id: Optional[str] = None
+        if formatter_id is not None:
+            predecessors = self._graph.directed_predecessors(formatter_id)
+            if len(predecessors) == 1:
+                verifier_id = predecessors[0]
+                reasoner_predecessors = tuple(
+                    agent_id
+                    for agent_id in self._graph.directed_predecessors(verifier_id)
+                    if (
+                        self._graph.get_node(agent_id).role_family or ""
+                    ).casefold()
+                    == "reasoner"
+                )
+                if len(reasoner_predecessors) == 1:
+                    reasoner_id = reasoner_predecessors[0]
+        if reason.startswith("Reasoner"):
+            target_id, role_family = reasoner_id, "reasoner"
+        elif reason.startswith("Verifier"):
+            target_id, role_family = verifier_id, "verifier"
+        elif reason.startswith("Format"):
+            target_id, role_family = formatter_id, "format"
+        else:
+            return None
+        if target_id is None:
+            return None
+        preserved = [
+            agent_id
+            for agent_id in (reasoner_id, verifier_id, formatter_id)
+            if agent_id is not None and self._has_successful_artifact(agent_id)
+        ]
+        return {
+            "responsible_agent_id": target_id,
+            "responsible_role_family": role_family,
+            "preserve_agent_ids": preserved,
+            "preferred_action_order": [
+                "modify_agent",
+                "set_relation",
+                "add_subgraph",
+            ],
+            "delete_allowed_before_replacement_takeover": False,
         }
 
     def _cached_progressive_execution(self) -> Optional[AgentRuntimeResult]:
@@ -1171,15 +1249,15 @@ class AgentWorkflowEnv:
             for node in graph.nodes
             if (node.role_family or "").casefold() == "react"
         )
-        if not invalid_role_ids:
-            return None
-        return (
-            "HotpotQA semantic protocol rejects role_family='react' for Agents "
-            f"{list(invalid_role_ids)!r}; ReAct is an execution_mode "
-            "(Thought -> Action(tool) -> Observation -> Thought -> Final). "
-            "Use a semantic role such as reasoner, evidence_retriever, or verifier "
-            "and set execution_mode='react' only when Tool orchestration is needed"
-        )
+        if invalid_role_ids:
+            return (
+                "HotpotQA semantic protocol rejects role_family='react' for Agents "
+                f"{list(invalid_role_ids)!r}; ReAct is an execution_mode "
+                "(Thought -> Action(tool) -> Observation -> Thought -> Final). "
+                "Use a semantic role such as reasoner, evidence_retriever, or verifier "
+                "and set execution_mode='react' only when Tool orchestration is needed"
+            )
+        return None
 
     @staticmethod
     def _structured_semantic_fields(
@@ -1606,11 +1684,13 @@ class AgentWorkflowEnv:
                     assert isinstance(proposition, Mapping)
                     evidence_span = proposition.get("evidence_span")
                     if not isinstance(evidence_span, str) or not any(
-                        evidence_span in text for text in read_evidence_texts
+                        _evidence_span_matches_read(evidence_span, text)
+                        for text in read_evidence_texts
                     ):
                         return (
                             f"Reasoner evidence_propositions[{index}].evidence_span "
-                            "is not an exact span in any successful qa-retrieval read. "
+                            "has no typography-canonical lexical match in any "
+                            "successful qa-retrieval read. "
                             "Preserve the existing candidate and valid evidence; repair "
                             "or augment retrieval before FINISH"
                         )
@@ -1800,7 +1880,9 @@ class AgentWorkflowEnv:
                 isinstance(proposition, Mapping)
                 and isinstance(proposition.get("evidence_span"), str)
                 and any(
-                    proposition["evidence_span"] in evidence_text
+                    _evidence_span_matches_read(
+                        proposition["evidence_span"], evidence_text
+                    )
                     for evidence_text in evidence_texts
                 )
                 for proposition in propositions

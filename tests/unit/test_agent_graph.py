@@ -25,7 +25,11 @@ from src.interactive.agent_runtime import (
     AgentRuntime,
     ReasoningExecutionAdapter,
 )
-from src.interactive.agent_workflow_env import AgentWorkflowEnv, AgentWorkflowStateError
+from src.interactive.agent_workflow_env import (
+    AgentWorkflowEnv,
+    AgentWorkflowStateError,
+    _evidence_span_matches_read,
+)
 from src.interactive.model_registry import (
     ModelRegistry,
     ModelRegistryError,
@@ -51,6 +55,21 @@ def codes(graph: AgentGraph, registry: ModelRegistry, complete: bool = True) -> 
         issue.code
         for issue in graph.validate(registry, require_complete=complete).issues
     }
+
+
+def test_evidence_provenance_accepts_typography_but_not_paraphrase() -> None:
+    passage = (
+        'Margaret "Peggy" Seeger is an American folksinger.  '
+        "She married Ewan MacColl."
+    )
+    assert _evidence_span_matches_read(
+        "Margaret 'Peggy' Seeger is an American folksinger. She married Ewan MacColl.",
+        passage,
+    )
+    assert not _evidence_span_matches_read(
+        "Peggy Seeger had American nationality and was Ewan MacColl's spouse.",
+        passage,
+    )
 
 
 class AgentGraphTests(unittest.TestCase):

@@ -66,7 +66,9 @@ SKILLFLOW_FACTUAL_QA_GUIDANCE = (
 HOTPOTQA_VERIFIED_ANSWER_SLOT_GUIDANCE = (
     "Treat ReAct only as the execution schedule Thought -> Action(tool) -> "
     "Observation -> Thought -> Final, never as an Agent role. Preserve the "
-    "question's exact scope and answer slot. Represent retrieved facts as "
+    "question's exact scope and answer slot. Resolve entity aliases and coreference "
+    "from the supplied passages before composing the retrieval query, and retain "
+    "that entity binding through every hop. Represent retrieved facts as "
     "subject/entity, predicate/relation, object or attribute value, and qualifiers; "
     "keep the entity-to-attribute binding explicit and show every bridge in the "
     "multi-hop chain. If compared values are unexpectedly equal, recheck scope, "
@@ -630,7 +632,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             action_name == "search"
             and request.semantic_protocol == "hotpotqa_verified_answer_slot_v1"
         ):
-            argument_properties["limit"] = {"const": 5}
+            argument_properties["limit"] = {"const": 10}
             return schema
         if action_name != "read":
             return schema

@@ -58,6 +58,9 @@ DIRECTOR_PROMPT_VERSION = "agentgraph.director.minimal-neutral.v10"
 LEGACY_DIRECTOR_PROMPT_VERSION_V9 = "agentgraph.director.minimal-neutral.v9"
 LEGACY_DIRECTOR_PROMPT_VERSION_V8 = "agentgraph.director.minimal-neutral.v8"
 HOTPOTQA_DIRECTOR_PROMPT_VERSION = (
+    "agentgraph.director.hotpotqa-semantic-recovery.v14"
+)
+LEGACY_HOTPOTQA_DIRECTOR_PROMPT_VERSION_V13 = (
     "agentgraph.director.hotpotqa-semantic-recovery.v13"
 )
 LEGACY_HOTPOTQA_DIRECTOR_PROMPT_VERSION_V12 = (
@@ -108,6 +111,35 @@ HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V13 = HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V11.replac
     1,
 )
 
+HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V14 = HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V13.replace(
+    "Use role_family reasoner for the Agent that owns the semantic answer, verifier",
+    "Use exactly one role_family reasoner as the semantic-answer owner, verifier",
+    1,
+).replace(
+    "an additional retrieval Agent may augment evidence later but must not replace "
+    "this capability or own the semantic answer; route that evidence into the "
+    "Reasoner, never directly into the Verifier.",
+    "an additional retrieval Agent may augment evidence later but must use "
+    "role_family evidence_retriever, must not replace this capability or own the "
+    "semantic answer, and must route its evidence into the Reasoner, never directly "
+    "into the Verifier. Before searching, resolve entity aliases and coreference "
+    "from the supplied passages and retain that entity binding through every hop.",
+    1,
+).replace(
+    "output_agent_id is optional in add_subgraph: omit it until the complete terminal "
+    "semantic lineage exists.",
+    "output_agent_id is optional in add_subgraph: omit it until the complete terminal "
+    "semantic lineage exists. Once a Format output is selected, later augmentation "
+    "must omit output_agent_id and preserve the selected output.",
+    1,
+).replace(
+    "Inspect Canvas validation and execution feedback before every edit,",
+    "When finish_admissibility exposes failure_attribution, repair its responsible "
+    "Agent before augmentation and preserve every listed artifact. Inspect Canvas "
+    "validation and execution feedback before every edit,",
+    1,
+)
+
 
 def director_system_prompt_for_version(prompt_version: str) -> str:
     """Resolve one explicitly versioned Director policy without changing v10."""
@@ -128,7 +160,10 @@ def director_system_prompt_for_version(prompt_version: str) -> str:
         "agentgraph.director.skillflow_continuation_v8": (
             LEGACY_DIRECTOR_SYSTEM_PROMPT_V8
         ),
-        HOTPOTQA_DIRECTOR_PROMPT_VERSION: HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V13,
+        HOTPOTQA_DIRECTOR_PROMPT_VERSION: HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V14,
+        LEGACY_HOTPOTQA_DIRECTOR_PROMPT_VERSION_V13: (
+            HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V13
+        ),
         LEGACY_HOTPOTQA_DIRECTOR_PROMPT_VERSION_V12: (
             HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V11
         ),
@@ -149,6 +184,7 @@ _SUPPORTED_DIRECTOR_SYSTEM_PROMPTS = frozenset(
         DIRECTOR_SYSTEM_PROMPT,
         HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V11,
         HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V13,
+        HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V14,
         LEGACY_DIRECTOR_SYSTEM_PROMPT_V9,
         LEGACY_DIRECTOR_SYSTEM_PROMPT_V8,
     }
@@ -942,6 +978,7 @@ class AgentGraphOrchestrator:
                 "output_role_family": "format",
                 "formatter_original_question_visible": False,
                 "formatter_answer_reselection_allowed": False,
+                "semantic_answer_owner_count": 1,
                 "max_agents_per_add_subgraph": env.max_agents_per_subgraph,
                 "output_agent_id_optional_until_lineage_complete": True,
             }
@@ -1141,6 +1178,7 @@ __all__ = [
     "DIRECTOR_SYSTEM_PROMPT",
     "DIRECTOR_PROMPT_VERSION",
     "HOTPOTQA_DIRECTOR_PROMPT_VERSION",
+    "HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V14",
     "HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V11",
     "HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V13",
     "HOTPOTQA_SEMANTIC_PROTOCOL",
