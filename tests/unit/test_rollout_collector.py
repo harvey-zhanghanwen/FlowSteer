@@ -990,6 +990,11 @@ def test_v3_receipt_validation_fails_closed_on_phase_and_final_action_mismatch()
         metadata,
         schema_request,
     ) == {"add_agent_role_selection", "add_agent_declarations"}
+    assert _validate_v3_hierarchical_action_receipt(
+        None,
+        metadata,
+        schema_request,
+    ) == {"add_agent_role_selection", "add_agent_declarations"}
     with pytest.raises(ReceiptValidationError, match="request count"):
         _validate_v3_hierarchical_action_receipt(
             action,
@@ -1607,6 +1612,72 @@ def test_collector_records_model_admissible_schema_on_every_canvas_turn():
     assert finish_decoding["selected_action"] == "finish"
     assert finish_decoding["request_count"] == 2
     assert set(finish_decoding["phase_receipts"]) == {"action_selection"}
+
+
+def test_collector_preserves_v3_malformed_parameter_sample_as_rejected_turn():
+    registry = _registry()
+    client = ScriptedSGLangClient(
+        ['{"action":"finish"'],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+    )
+    orchestrator = _orchestrator(registry, client, max_rounds=1)
+    actions = ("finish",)
+    domains = {"finish": {"admissible": True}}
+    schema_request = {
+        "action_json_schema": (
+            director_model_admissible_sampling_json_schema_text_v3(actions)
+        ),
+        "action_json_schema_version": (
+            DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3
+        ),
+        "action_schema_branch": director_model_admissible_schema_branch_v3(actions),
+        "action_target_domains_json": director_live_action_target_domains_json(
+            actions,
+            domains,
+        ),
+        "action_target_domain_version": (
+            DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION
+        ),
+    }
+    orchestrator.action_schema_request = lambda _env: dict(schema_request)
+    collector = AgentGraphRolloutCollector(
+        orchestrator,
+        AgentWorkflowEnv(
+            registry,
+            gateway=FakeGateway(),
+            execute_on_edit=True,
+        ),
+        _versions(),
+    )
+
+    def evaluator(task, final_answer, final_graph, runtime):
+        assert final_answer is None
+        assert runtime is None
+        return {
+            "evaluator_version": EVALUATOR_VERSION,
+            "valid": True,
+            "reward": 0.0,
+            "metrics": {"f1": 0.0},
+        }
+
+    trajectory = asyncio.run(collector.collect(_task(), 0, evaluator))
+
+    assert trajectory.explicit_finish is False
+    assert trajectory.termination_reason == "max_rounds"
+    assert trajectory.grpo_eligible is False
+    assert len(trajectory.turns) == 1
+    turn = trajectory.turns[0]
+    assert turn.action == {}
+    assert turn.executed_prefix_tokens == 0
+    assert "invalid action" in turn.canvas_feedback
+    assert turn.receipt_verified is True
+    decoding = turn.runtime_summary["director_action_decoding"]
+    assert decoding["strategy"] == HIERARCHICAL_JSON_SCHEMA_STRATEGY
+    assert decoding["selected_action"] == "finish"
+    assert decoding["parameter_schema_branch"] == "finish"
+    assert decoding["request_count"] == 1
+    assert decoding["phase_receipts"] == {}
 
 
 def test_collector_does_not_duplicate_reused_progressive_execution():

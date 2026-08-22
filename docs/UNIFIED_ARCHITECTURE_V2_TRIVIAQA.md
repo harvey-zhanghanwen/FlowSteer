@@ -281,18 +281,47 @@ owns the candidate and answer slot; malformed Verifier structure remains a
 Verifier repair.  These rules are answer-free and apply identically to the
 shared HotpotQA/TriviaQA semantic protocol.
 
+### r8 live evidence and r9 structured-action recovery
+
+The r8 canary completed `triviaqa:tc_3` with a legal explicit FINISH in seven
+Canvas turns.  Its bounded ReAct call used timeout recovery, query rewriting,
+top-k escalation, one successful read and one answer-field schema correction
+in five Action--Observation turns.  The final evidence-grounded answer remained
+`Heworth, North Riding of Yorkshire`, with EM `0` and F1 `0.5`; the trajectory
+is preserved as an accepted-answer canonicalization/granularity mismatch.
+
+`triviaqa:tc_1` did not produce an evaluable r8 trajectory.  A hierarchical
+`modify_agent` parameter generation ended with an unterminated JSON string.
+The Canvas correctly returned an invalid-action observation, but the collector
+treated `canvas.action=None` as a fatal receipt error before constructing the
+TurnRecord.  The whole task was therefore marked `collection_failed`, even
+though the sampled token/log-probability receipt itself was exact.  No zero
+EM/F1 value from that unavailable paired record is interpreted as a task
+score.
+
+Recovery revision r9 restores FlowSteer's invalid-action continuation
+semantics for this v3 hierarchical boundary.  The selected branch, live target
+domain, parameter phase, token IDs and behavior log probabilities are still
+validated exactly.  The malformed final sample is never repaired or converted
+to an executed action: it is recorded with `action={}` and
+`executed_prefix_tokens=0`, the public parse feedback is returned to the next
+Director turn, and the trajectory is ineligible for GRPO.  A regression test
+covers the complete collector path rather than only the JSON parser.
+
 ### Stable Zero status
 
-Static architecture, 771 unit tests and both frozen data-selection
+Static architecture, 772 unit tests and both frozen data-selection
 preconditions are complete.  The initial, r2, r3 and r4 canaries failed for
 the documented causes; r5 **passed Stable Zero** but its incomplete fixed-128
 run was stopped after measured recovery defects appeared.  Recovery revision
 r6 failed Stable Zero for the documented retrieval-recovery defect.  Recovery
 revision r7 fixed that defect but failed Stable Zero for the documented
 semantic-verification/repair-attribution defect.  Recovery revision r8 is
-**pending live Stable Zero and targeted regression**.  Formal fixed-128 v2
-EM/F1 remain pending.  No score is inferred from unit tests, a two-task canary,
-an incomplete run, or the previous architecture.
+answer-lineage complete for `tc_3` but failed Stable Zero because one malformed
+Director parameter sample incorrectly aborted `tc_1` collection.  Recovery
+revision r9 is **pending live Stable Zero and targeted regression**.  Formal
+fixed-128 v2 EM/F1 remain pending.  No score is inferred from unit tests, a
+two-task canary, an incomplete run, or the previous architecture.
 
 ## Historical comparison condition
 

@@ -1546,11 +1546,18 @@ class SGLangReceiptDirectorClient:
 
 
 def _validate_v3_hierarchical_action_receipt(
-    action: AgentAction,
+    action: AgentAction | None,
     metadata: Mapping[str, Any],
     schema_request: Mapping[str, str],
 ) -> set[str]:
-    """Validate the exact v3 phase/action/domain correspondence."""
+    """Validate the exact v3 phase/action/domain correspondence.
+
+    A malformed final parameter sample has no parsed ``AgentAction``.  It is
+    still an exact behavior receipt and FlowSteer's Canvas returns it as an
+    invalid-action observation for the next Director turn.  In that case the
+    hierarchical selections and phase receipts remain fully validated, while
+    no sampled text is repaired or represented as an executed action.
+    """
 
     branch = schema_request.get("action_schema_branch")
     domains_json = schema_request.get("action_target_domains_json")
@@ -1564,8 +1571,11 @@ def _validate_v3_hierarchical_action_receipt(
         raise ReceiptValidationError("v3 Director target-domain receipt is invalid") from exc
     selected_action = metadata.get("selected_action")
     decoding_strategy = metadata.get("action_decoding_strategy")
-    action_value = action.to_dict()
-    if selected_action not in actions or action_value.get("action") != selected_action:
+    action_value = None if action is None else action.to_dict()
+    if selected_action not in actions or (
+        action_value is not None
+        and action_value.get("action") != selected_action
+    ):
         raise ReceiptValidationError(
             "v3 selected action differs from its branch or parsed Canvas action"
         )
@@ -1701,7 +1711,10 @@ def _validate_v3_hierarchical_action_receipt(
                     "its Agent declarations"
                 )
         declaration_values = list(declarations)
-        if action_value.get("agents") != declaration_values:
+        if (
+            action_value is not None
+            and action_value.get("agents") != declaration_values
+        ):
             raise ReceiptValidationError(
                 "v3 final add_subgraph changed its sampled Agent declarations"
             )
@@ -1723,7 +1736,9 @@ def _validate_v3_hierarchical_action_receipt(
             )
         endpoint_ids = set(domains["add_subgraph"]["existing_agent_ids"])
         endpoint_ids.update(declared_ids)
-        for relation in action_value.get("relations", ()):  # parser-normalized values
+        for relation in (
+            () if action_value is None else action_value.get("relations", ())
+        ):  # parser-normalized values
             if (
                 not isinstance(relation, Mapping)
                 or relation.get("source_id") not in endpoint_ids
@@ -1734,7 +1749,10 @@ def _validate_v3_hierarchical_action_receipt(
                 )
         add_domain = domains["add_subgraph"]
         if verified_qa_semantic_protocol(add_domain.get("semantic_protocol")):
-            if len(action_value.get("relations", ())) > 1:
+            if (
+                action_value is not None
+                and len(action_value.get("relations", ())) > 1
+            ):
                 raise ReceiptValidationError(
                     "v3 verified-QA add_subgraph exceeds its one-relation edit boundary"
                 )
@@ -1751,7 +1769,9 @@ def _validate_v3_hierarchical_action_receipt(
                 )
             }
             relation_pairs: set[frozenset[str]] = set()
-            for relation in action_value.get("relations", ()):
+            for relation in (
+                () if action_value is None else action_value.get("relations", ())
+            ):
                 relation_identity = json.dumps(
                     dict(relation),
                     ensure_ascii=False,
@@ -1770,7 +1790,9 @@ def _validate_v3_hierarchical_action_receipt(
                         "v3 verified-QA add_subgraph repeats an unordered relation pair"
                     )
                 relation_pairs.add(relation_pair)
-        output_agent_id = action_value.get("output_agent_id")
+        output_agent_id = (
+            None if action_value is None else action_value.get("output_agent_id")
+        )
         if output_agent_id is not None and output_agent_id not in endpoint_ids:
             raise ReceiptValidationError(
                 "v3 add_subgraph Output Agent is outside the live domain"
@@ -1808,10 +1830,14 @@ def _validate_v3_hierarchical_action_receipt(
         expected_phases.add("modify_field_selection")
         selected_field = metadata.get("selected_modify_field")
         selected_agent_id = metadata.get("selected_modify_agent_id")
-        if (
-            not isinstance(selected_field, str)
-            or not isinstance(selected_agent_id, str)
-            or set(action_value) != {"action", "agent_id", selected_field}
+        if not isinstance(selected_field, str) or not isinstance(
+            selected_agent_id, str
+        ):
+            raise ReceiptValidationError(
+                "v3 MODIFY field/Agent receipt is incomplete"
+            )
+        if action_value is not None and (
+            set(action_value) != {"action", "agent_id", selected_field}
             or action_value.get("agent_id") != selected_agent_id
         ):
             raise ReceiptValidationError(
@@ -1842,7 +1868,11 @@ def _validate_v3_hierarchical_action_receipt(
         if len(admitted_agent_ids) > 1:
             expected_phases.add("modify_agent_selection")
         value_schema = parameter_schema["properties"][selected_field]
-        if "enum" in value_schema and action_value[selected_field] not in value_schema["enum"]:
+        if (
+            action_value is not None
+            and "enum" in value_schema
+            and action_value[selected_field] not in value_schema["enum"]
+        ):
             raise ReceiptValidationError(
                 "v3 MODIFY value is outside its discrete live domain"
             )
@@ -1864,7 +1894,7 @@ def _validate_v3_hierarchical_action_receipt(
                 "v3 relation candidate receipt is outside the live domain"
             )
         expected_action = {"action": "set_relation", **candidates[selected_index]}
-        if action_value != expected_action:
+        if action_value is not None and action_value != expected_action:
             raise ReceiptValidationError(
                 "v3 final relation differs from its selected exact candidate"
             )
@@ -1879,7 +1909,10 @@ def _validate_v3_hierarchical_action_receipt(
             raise ReceiptValidationError(
                 "v3 final action violates its live target domain"
             ) from exc
-        if selected_action in {"delete_agent", "set_output"}:
+        if (
+            action_value is not None
+            and selected_action in {"delete_agent", "set_output"}
+        ):
             admitted_ids = domains[selected_action]["agent_ids"]
             if action_value.get("agent_id") not in admitted_ids:
                 raise ReceiptValidationError(
@@ -2761,12 +2794,6 @@ class AgentGraphRolloutCollector:
                     raise ReceiptValidationError(
                         "role-first ADD decoding requires a live-v3 ADD action"
                     )
-                if live_v3_receipt and action is None:
-                    raise ReceiptValidationError(
-                        "v3 hierarchical Director response has no parsed Canvas action: "
-                        f"response={response.text[:160]!r}; "
-                        f"feedback={canvas.feedback[:240]!r}"
-                    )
                 if action is not None and selected_action != action.action_type.value:
                     raise ReceiptValidationError(
                         "hierarchical action selection differs from the parsed action"
@@ -2778,7 +2805,6 @@ class AgentGraphRolloutCollector:
                     )
                 expected_v3_phases: set[str] | None = None
                 if live_v3_receipt:
-                    assert action is not None
                     expected_v3_phases = _validate_v3_hierarchical_action_receipt(
                         action,
                         metadata,
