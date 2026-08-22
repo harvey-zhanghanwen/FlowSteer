@@ -23,7 +23,10 @@ from typing import Callable, Mapping, Protocol, Sequence
 
 from .agent_runtime import AgentGateway, AgentRequest, GatewayResponse
 from .react_execution import ToolReactExecutionAdapter
-from .task_dataset import hotpotqa_question_scope
+from .task_dataset import (
+    hotpotqa_answer_type_constraint,
+    hotpotqa_question_scope,
+)
 from .qa_retrieval import (
     DEFAULT_QA_RETRIEVAL_INDEX,
     DEFAULT_SKILLFLOW_SOURCE,
@@ -68,7 +71,10 @@ HOTPOTQA_VERIFIED_ANSWER_SLOT_GUIDANCE = (
     "Observation -> Thought -> Final, never as an Agent role. Preserve the "
     "question's exact scope and answer slot. Resolve entity aliases and coreference "
     "from the supplied passages before composing the retrieval query, and retain "
-    "that entity binding through every hop. Represent retrieved facts as "
+    "that entity binding through every hop. Apply the original wh-word answer type: "
+    "a Which-comparison returns the compared entity, not the numeric/date comparison "
+    "value; a who-question returns the person/possessor, not a possessive attribute "
+    "phrase. Represent retrieved facts as "
     "subject/entity, predicate/relation, object or attribute value, and qualifiers; "
     "keep the entity-to-attribute binding explicit and show every bridge in the "
     "multi-hop chain. If compared values are unexpectedly equal, recheck scope, "
@@ -504,16 +510,15 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     "description": "The relation requested by the original question.",
                 },
                 "answer_type": {
-                    **non_empty_text,
+                    "const": hotpotqa_answer_type_constraint(request.problem),
                     "description": "The answer type requested by the original question.",
                 },
                 "qualifiers": dict(qualifier_list),
                 "proposition_index": {
-                    "type": "integer",
-                    "minimum": 0,
+                    "const": 0,
                     "description": (
-                        "Zero-based index of the evidence proposition that supplies "
-                        "the candidate answer."
+                        "The answer-bearing proposition is always serialized first; "
+                        "candidate_answer must be supplied by evidence_propositions[0]."
                     ),
                 },
                 "answer_field": {
@@ -585,6 +590,10 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                         "evidence_propositions": {
                             "type": "array",
                             "minItems": 2,
+                            "description": (
+                                "Serialize the answer-bearing proposition first, "
+                                "followed by the bridge/supporting propositions."
+                            ),
                             "items": proposition_schema,
                         },
                         "multi_hop_chain": {

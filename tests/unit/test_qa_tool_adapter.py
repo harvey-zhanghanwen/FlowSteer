@@ -716,23 +716,23 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
                 "relation": "published",
                 "answer_type": "person",
                 "qualifiers": ["first algorithm"],
-                "proposition_index": 1,
+                "proposition_index": 0,
                 "answer_field": "subject",
             },
             "evidence_propositions": [
-                {
-                    "subject": "Ada Lovelace",
-                    "relation": "occupation",
-                    "object_or_attribute_value": "English mathematician",
-                    "qualifiers": [],
-                    "evidence_span": "Ada Lovelace was an English mathematician.",
-                },
                 {
                     "subject": "Ada Lovelace",
                     "relation": "published",
                     "object_or_attribute_value": "the first algorithm",
                     "qualifiers": [],
                     "evidence_span": "Ada Lovelace published the first algorithm.",
+                },
+                {
+                    "subject": "Ada Lovelace",
+                    "relation": "occupation",
+                    "object_or_attribute_value": "English mathematician",
+                    "qualifiers": [],
+                    "evidence_span": "Ada Lovelace was an English mathematician.",
                 },
             ],
             "multi_hop_chain": ["Ada Lovelace", "published", "first algorithm"],
@@ -746,7 +746,7 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         class SequenceGateway:
             def __init__(self) -> None:
                 self.outputs = [
-                    action("search", {"query": "Ada Lovelace algorithm", "limit": 5}),
+                    action("search", {"query": "Ada Lovelace algorithm", "limit": 10}),
                     action("read", {"passage_id": "p1"}),
                     action("read", {"passage_id": "p2"}),
                     action("complete", {"value": semantic_artifact}),
@@ -807,6 +807,24 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("next action must be qa-retrieval read", gateway.requests[2].agent.contract)
         self.assertIn("next action must complete", gateway.requests[3].agent.contract)
+        completion_schema = json.loads(
+            gateway.requests[3].model.metadata["response_json_schema"]
+        )
+        semantic_properties = completion_schema["properties"]["arguments"][
+            "properties"
+        ]["value"]["properties"]
+        self.assertEqual(
+            "person",
+            semantic_properties["answer_slot"]["properties"]["answer_type"][
+                "const"
+            ],
+        )
+        self.assertEqual(
+            0,
+            semantic_properties["answer_slot"]["properties"][
+                "proposition_index"
+            ]["const"],
+        )
 
     async def test_react_failed_retrieval_receipt_admits_explicit_completion(self) -> None:
         class FailingIndex(FakeIndex):

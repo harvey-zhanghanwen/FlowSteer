@@ -745,7 +745,7 @@ class _HotpotSemanticGateway(_ImmediateGateway):
                     "answer_slot": {
                         "entity": "France",
                         "relation": "capital",
-                        "answer_type": "city",
+                        "answer_type": "short_answer",
                         "qualifiers": [],
                         "proposition_index": 0,
                         "answer_field": "object_or_attribute_value",
@@ -1840,6 +1840,16 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("answer_slot", reasoner_issue or "")
         self.assertIsNone(verifier_issue)
         self.assertEqual("Paris", verifier_candidate)
+        numeric_candidate, numeric_issue = env._verifier_candidate(
+            "Candidate answer: 1844  \n"
+            "Evidence supported: true\n"
+            "Entity attribute binding correct: true\n"
+            "Multi-hop complete: true\n"
+            "Scope preserved: true\n"
+            "Verification status: supported"
+        )
+        self.assertEqual("1844", numeric_candidate)
+        self.assertIsNone(numeric_issue)
 
     async def test_hotpot_structured_answer_slot_binds_candidate_and_exact_scope(
         self,
@@ -1857,7 +1867,7 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             "answer_slot": {
                 "entity": "France",
                 "relation": "capital",
-                "answer_type": "city",
+                "answer_type": "short_answer",
                 "qualifiers": [],
                 "proposition_index": 0,
                 "answer_field": "object_or_attribute_value",
@@ -1889,6 +1899,51 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual("Paris", candidate)
         self.assertIsNone(issue)
+
+        comparison = json.loads(json.dumps(artifact))
+        comparison["question_scope"] = "Which magazine was started first, A or B?"
+        comparison["answer_slot"]["answer_type"] = "entity"
+        comparison["answer_slot"]["entity"] = "A"
+        comparison["answer_slot"]["relation"] = "publication date"
+        comparison["answer_slot"]["answer_field"] = "object_or_attribute_value"
+        comparison["evidence_propositions"][0].update(
+            {
+                "subject": "A",
+                "relation": "publication date",
+                "object_or_attribute_value": "1844",
+                "evidence_span": "A was first published in 1844.",
+            }
+        )
+        comparison["candidate_answer"] = "1844"
+        candidate, issue = env._reasoner_candidate(
+            json.dumps(comparison),
+            original_question="Which magazine was started first, A or B?",
+        )
+        self.assertIsNone(candidate)
+        self.assertIn("requires answer type 'entity'", str(issue))
+
+        possessive = json.loads(json.dumps(artifact))
+        possessive["question_scope"] = "The character was named after who?"
+        possessive["answer_slot"]["answer_type"] = "person"
+        possessive["answer_slot"]["entity"] = "Milhouse"
+        possessive["answer_slot"]["relation"] = "named after"
+        possessive["evidence_propositions"][0].update(
+            {
+                "subject": "Milhouse",
+                "relation": "named after",
+                "object_or_attribute_value": "President Nixon's middle name",
+                "evidence_span": (
+                    "Milhouse was named after President Nixon's middle name."
+                ),
+            }
+        )
+        possessive["candidate_answer"] = "President Nixon's middle name"
+        candidate, issue = env._reasoner_candidate(
+            json.dumps(possessive),
+            original_question="The character was named after who?",
+        )
+        self.assertIsNone(candidate)
+        self.assertIn("possessive noun phrase", str(issue))
 
         narrowed = dict(artifact)
         narrowed["question_scope"] = "What is the singles capital of France?"
@@ -2114,7 +2169,7 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             "answer_slot": {
                 "entity": "France",
                 "relation": "capital",
-                "answer_type": "city",
+                "answer_type": "short_answer",
                 "qualifiers": [],
                 "proposition_index": 0,
                 "answer_field": "object_or_attribute_value",

@@ -13,8 +13,8 @@ experiment:
   condition_id: "hotpotqa_unified_architecture_v1"
   sampling_schedule_purpose: "hotpotqa_fixed_development_unified_architecture"
   catalog_order_namespace: "hotpotqa_unified_architecture_v1"
-  prompt_version: "agentgraph.director.hotpotqa-semantic-recovery.v14"
-  tool_version: "skillflow.qa-retrieval.top10-multihop-evidence-binding.v9"
+  prompt_version: "agentgraph.director.hotpotqa-semantic-recovery.v15"
+  tool_version: "skillflow.qa-retrieval.top10-answer-type-binding.v10"
   output_dir: "artifacts/unified_architecture_v1/hotpotqa"
 
 data:
@@ -106,7 +106,7 @@ director:
   temperature: 1.0
   top_p: 1.0
   top_k: -1
-  max_rounds: 24
+  max_rounds: 28
   execute_on_edit: true
   history_window: 4
   lora:

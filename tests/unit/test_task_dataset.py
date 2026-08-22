@@ -4,6 +4,7 @@ import pytest
 
 from src.interactive.task_dataset import (
     TASK_SCHEMA_VERSION,
+    hotpotqa_answer_type_constraint,
     hotpotqa_question_scope,
     iter_task_records,
     task_record_from_mapping,
@@ -64,6 +65,23 @@ def test_hotpot_loader_rehydrates_full_context_without_evaluator_payload():
 
 def test_hotpot_question_scope_preserves_plain_question():
     assert hotpotqa_question_scope("Who wrote the book?") == "Who wrote the book?"
+
+
+@pytest.mark.parametrize(
+    ("question", "answer_type"),
+    [
+        ("Which magazine was started first, A or B?", "entity"),
+        ("The character was named after who?", "person"),
+        ("What nationality was the singer's wife?", "nationality"),
+        ("How many albums were released?", "number"),
+        ("Was the film released first?", "yes_no"),
+    ],
+)
+def test_hotpot_answer_type_constraint_uses_question_surface_only(
+    question: str,
+    answer_type: str,
+) -> None:
+    assert hotpotqa_answer_type_constraint(question) == answer_type
 
 
 def test_iter_task_records_reports_jsonl_line(tmp_path):

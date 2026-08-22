@@ -31,7 +31,10 @@ from .agent_runtime import (
     AgentRuntimeResult,
 )
 from .model_registry import ModelRegistry
-from .task_dataset import hotpotqa_question_scope
+from .task_dataset import (
+    hotpotqa_answer_type_constraint,
+    hotpotqa_question_scope,
+)
 
 
 class AgentWorkflowStateError(RuntimeError):
@@ -1331,6 +1334,12 @@ class AgentWorkflowEnv:
             fields = {}
             for key, lines in labelled_values.items():
                 value_text = "\n".join(lines).strip()
+                if key == "candidate_answer":
+                    # A bare numeric answer remains text.  JSON scalar coercion
+                    # here would turn `Candidate answer: 1844` into an integer
+                    # and incorrectly reject an otherwise valid Verifier wire.
+                    fields[key] = value_text
+                    continue
                 try:
                     value = json.loads(value_text)
                 except (TypeError, ValueError, json.JSONDecodeError):
@@ -1411,6 +1420,19 @@ class AgentWorkflowEnv:
             value = answer_slot[field]
             if not isinstance(value, str) or not value.strip():
                 return None, f"Reasoner answer_slot.{field} must be non-empty text"
+        expected_answer_type = (
+            None
+            if original_question is None
+            else hotpotqa_answer_type_constraint(original_question)
+        )
+        if (
+            expected_answer_type is not None
+            and answer_slot["answer_type"] != expected_answer_type
+        ):
+            return None, (
+                "Reasoner answer_slot.answer_type must equal the original "
+                f"question's answer-type constraint {expected_answer_type!r}"
+            )
         qualifiers = answer_slot["qualifiers"]
         if not isinstance(qualifiers, (list, tuple)) or any(
             not isinstance(item, str) or not item.strip() for item in qualifiers
@@ -1504,6 +1526,31 @@ class AgentWorkflowEnv:
             return None, (
                 "Reasoner candidate_answer must copy answer_slot.answer_field "
                 "from the selected evidence proposition exactly"
+            )
+        if expected_answer_type in {"entity", "person", "location"} and re.fullmatch(
+            r"[\d\s.,:/-]+",
+            candidate,
+        ):
+            return None, (
+                f"Reasoner candidate_answer is numeric/date-like but the original "
+                f"question requires answer type {expected_answer_type!r}"
+            )
+        if expected_answer_type == "person" and re.search(
+            r"(?:'s|’s)\s+\S",
+            candidate,
+        ):
+            return None, (
+                "Reasoner candidate_answer is a possessive noun phrase, but a who "
+                "question requires the person/possessor entity rather than the "
+                "possessed attribute phrase"
+            )
+        if expected_answer_type == "yes_no" and candidate.casefold() not in {
+            "yes",
+            "no",
+        }:
+            return None, (
+                "Reasoner candidate_answer must be yes or no for the original "
+                "yes/no question"
             )
         evidence_span = selected["evidence_span"]
         assert isinstance(evidence_span, str)

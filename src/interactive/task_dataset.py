@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 from typing import Any, Dict, Iterator, List, Mapping, Optional
 
 from .records import TaskRecord, VALID_SPLITS
@@ -45,6 +46,47 @@ def hotpotqa_question_scope(rendered_question: str) -> str:
     if not scope:
         raise ValueError("HotpotQA rendered question has an empty Question field")
     return scope
+
+
+def hotpotqa_answer_type_constraint(rendered_question: str) -> str:
+    """Return the question's surface-syntax answer-type constraint.
+
+    This is an answer-independent wh-word/auxiliary classification.  It does
+    not inspect passages, candidate answers, Ground Truth, or evaluator state.
+    """
+
+    question = hotpotqa_question_scope(rendered_question)
+    normalized = " ".join(question.casefold().split())
+    if normalized.startswith("what nationality"):
+        return "nationality"
+    if normalized.startswith(("how many ", "how much ")):
+        return "number"
+    if normalized.startswith(("when ", "what year ", "what date ")):
+        return "date"
+    if normalized.startswith("where "):
+        return "location"
+    if normalized.startswith("which "):
+        return "entity"
+    if normalized.startswith("who ") or re.search(r"\bwho\s*\?\s*$", normalized):
+        return "person"
+    if normalized.startswith(
+        (
+            "are ",
+            "is ",
+            "was ",
+            "were ",
+            "do ",
+            "does ",
+            "did ",
+            "has ",
+            "have ",
+            "had ",
+            "can ",
+            "could ",
+        )
+    ):
+        return "yes_no"
+    return "short_answer"
 
 
 def task_record_from_mapping(
@@ -163,6 +205,8 @@ def load_task_records(
 __all__ = [
     "TASK_SCHEMA_VERSION",
     "build_hotpotqa_question",
+    "hotpotqa_answer_type_constraint",
+    "hotpotqa_question_scope",
     "iter_task_records",
     "load_task_records",
     "task_record_from_mapping",
