@@ -179,9 +179,10 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
         if hotpot_semantic and semantic_role == "reasoner":
             protocol += (
                 " ReAct is only this node's execution schedule, not its role. "
-                "When completing, put the full labeled Reasoner artifact required "
-                "below in arguments.value. "
-                + _HOTPOTQA_REASONER_PROTOCOL
+                "Never place semantic-answer fields in search/read arguments. "
+                "Only when the assigned contract marks completion currently "
+                "admissible, put the semantic Reasoner artifact defined there in "
+                "arguments.value."
             )
         elif hotpot_semantic and semantic_role == "verifier":
             protocol += (

@@ -367,17 +367,6 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         action_name = "read" if passage_ids else "search"
         return frozenset({(QA_RETRIEVAL_TOOL_ID, action_name)}), False
 
-    @staticmethod
-    def _question_scope_query(problem: str) -> str:
-        """Return the original QA question as a valid scope-preserving query."""
-
-        marker = "\n\nQuestion:"
-        if marker in problem:
-            question = problem.rsplit(marker, 1)[1].strip()
-            if question:
-                return question
-        return problem.strip()
-
     async def execute(self, request: AgentRequest) -> GatewayResponse:
         # NECESSARY_ADAPTATION: the generic AgentGraph completion hook receives
         # Tool receipts but not the current AgentRequest.  Bind only the QA
@@ -401,6 +390,10 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         observations: list[Mapping[str, object]],
     ) -> str:
         contract = super()._contract(request, observations)
+        required_evidence, searched_passage_ids, has_successful_read = (
+            self._required_evidence_state(request, observations)
+        )
+        completion_admitted = not required_evidence or has_successful_read
         if self._task_type == "multi_hop_qa":
             guidance = SKILLFLOW_MULTI_HOP_QA_GUIDANCE
             if request.semantic_protocol == "hotpotqa_verified_answer_slot_v1":
@@ -415,19 +408,32 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         terminal_wire = (
             " On completion, arguments.value is the completed QA artifact, "
             "not a schema label or placeholder."
+            if completion_admitted
+            else (
+                " Completion is not admitted in this Tool-only state; preserve "
+                "the eventual artifact responsibility but emit only the current "
+                "Tool action and its declared arguments."
+            )
         )
         semantic_role = (request.agent.role_family or "").casefold()
         if (
             request.semantic_protocol == "hotpotqa_verified_answer_slot_v1"
             and semantic_role == "reasoner"
         ):
-            terminal_wire += (
-                " As the Reasoner, arguments.value must contain the labeled "
-                "Question scope, Answer slot, Evidence propositions, Multi-hop "
-                "chain, Candidate answer, and Evidence fields. Determine the one "
-                "semantic candidate only after aligning the evidence proposition "
-                "to the requested answer slot."
-            )
+            if completion_admitted:
+                terminal_wire += (
+                    " As the Reasoner, arguments.value must contain the labeled "
+                    "Question scope, Answer slot, Evidence propositions, Multi-hop "
+                    "chain, Candidate answer, and Evidence fields. Determine the one "
+                    "semantic candidate only after aligning the evidence proposition "
+                    "to the requested answer slot."
+                )
+            else:
+                terminal_wire += (
+                    " The Reasoner remains responsible for semantic alignment after "
+                    "evidence is read, but no semantic-answer field belongs in the "
+                    "current Tool arguments."
+                )
         elif (
             request.semantic_protocol == "hotpotqa_verified_answer_slot_v1"
             and semantic_role == "verifier"
@@ -451,9 +457,6 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             self._completion_policy == "required_evidence"
             and QA_RETRIEVAL_TOOL_ID in request.agent.allowed_tools
         ):
-            _, searched_passage_ids, has_successful_read = (
-                self._required_evidence_state(request, observations)
-            )
             evidence_continuation = (
                 "\nRequired-evidence ReAct continuation: preserve any semantic "
                 "candidate already present in the public action history; do not "
@@ -495,32 +498,17 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     + ". Do not call complete before that read succeeds."
                 )
             else:
-                search_wire = {
-                    "arguments": {
-                        "query": self._question_scope_query(request.problem),
-                        "limit": 3,
-                    },
-                    "kind": "tool",
-                    "name": "search",
-                    "resource_id": QA_RETRIEVAL_TOOL_ID,
-                    "skill_id": None,
-                }
                 evidence_continuation += (
                     "The next action must be qa-retrieval search with a concise "
                     "entity-and-relation query. Then read an exact returned "
                     "passage_id. Search arguments contain exactly query and limit; "
                     "never copy JSON-Schema properties/additionalProperties or the "
-                    "eventual semantic artifact into those arguments. This valid "
-                    "scope-preserving wire uses the original question as the query; "
-                    "the model may replace only the query string with a more concise "
-                    "entity-and-relation query: "
-                    + json.dumps(
-                        search_wire,
-                        ensure_ascii=False,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    )
-                    + ". Do not call complete before a non-empty read succeeds."
+                    "eventual semantic artifact into those arguments. Set query to "
+                    "one non-empty focused entity-and-relation string selected from "
+                    "the original question and limit to one positive integer. Keep "
+                    "the outer constants kind=tool, name=search, "
+                    "resource_id=qa-retrieval, and skill_id=null. Do not call "
+                    "complete before a non-empty read succeeds."
                 )
         qa_guidance = (
             "\nSkillFlow QA execution guidance: " + guidance + terminal_wire

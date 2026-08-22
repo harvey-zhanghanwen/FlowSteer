@@ -170,6 +170,8 @@ class ToolReactExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             "not JSON", response.metadata["react_trace"][0]["action_text"]
         )
+        self.assertNotIn("not JSON", gateway.requests[1].agent.contract)
+        self.assertIn('"observation_status":"parse_error"', gateway.requests[1].agent.contract)
         self.assertEqual(
             "wiki.search", response.metadata["tool_receipts"][0]["tool_id"]
         )

@@ -348,6 +348,65 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Evidence propositions", default_contract)
         self.assertNotIn("unexpectedly equal", default_contract)
 
+    def test_required_evidence_shows_reasoner_artifact_only_at_completion_state(
+        self,
+    ) -> None:
+        adapter = QARetrievalReactExecutionAdapter(
+            gateway=SimpleNamespace(generate=lambda request: None),
+            tool_registry=build_qa_tool_registry(FakeIndex()),
+            max_turns=4,
+            max_tool_calls=2,
+            task_type="multi_hop_qa",
+            completion_policy="required_evidence",
+        )
+        request = AgentRequest(
+            request_id="qa:semantic-stage",
+            run_id="qa",
+            graph_revision=1,
+            problem="Which city is requested?",
+            agent=AgentNode(
+                "reasoner",
+                "model",
+                "preserve scope and determine the semantic answer",
+                role_family="reasoner",
+                allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                execution_mode="react",
+            ),
+            model=ModelSpec("model", "provider"),
+            provider=ProviderSpec("provider", kind="test"),
+            phase=ExecutionPhase.SINGLE,
+            semantic_protocol="hotpotqa_verified_answer_slot_v1",
+        )
+        search_observation = {
+            "observation_status": "success",
+            "result": {
+                "operation": "search",
+                "passage_ids": ["p1"],
+            },
+        }
+        read_observation = {
+            "observation_status": "success",
+            "result": {
+                "operation": "read",
+                "passage": {"text": "Paris is the capital of France."},
+            },
+        }
+
+        search_contract = adapter._contract(request, [])
+        read_contract = adapter._contract(request, [search_observation])
+        completion_contract = adapter._contract(
+            request,
+            [search_observation, read_observation],
+        )
+
+        self.assertNotIn("arguments.value must contain the labeled", search_contract)
+        self.assertNotIn("arguments.value must contain the labeled", read_contract)
+        self.assertIn("arguments.value must contain the labeled", completion_contract)
+        self.assertNotIn('"arguments":{"type":"object"', search_contract)
+        self.assertNotIn('"arguments":{"type":"object"', read_contract)
+        self.assertIn("Completion is not admitted in this Tool-only state", search_contract)
+        self.assertIn("Completion is not admitted in this Tool-only state", read_contract)
+
     async def test_react_read_requires_canonical_id_from_successful_search(self) -> None:
         index = FakeIndex()
         registry = build_qa_tool_registry(index)
@@ -485,7 +544,7 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             gateway.requests[1].agent.contract,
         )
         self.assertIn(
-            '"arguments":{"limit":3,"query":"Who wrote the first published algorithm?"}',
+            "Search arguments contain exactly query and limit",
             gateway.requests[1].agent.contract,
         )
         self.assertIn(
@@ -503,20 +562,24 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("Do not use kind=completion", gateway.requests[3].agent.contract)
         search_domain = gateway.requests[1].agent.contract.split(
-            "Currently admissible Tool action schemas", 1
+            "Currently admissible Tool action contracts", 1
         )[1].split("\nCompletion", 1)[0]
         read_domain = gateway.requests[2].agent.contract.split(
-            "Currently admissible Tool action schemas", 1
+            "Currently admissible Tool action contracts", 1
         )[1].split("\nCompletion", 1)[0]
         completion_domain = gateway.requests[3].agent.contract.split(
-            "Currently admissible Tool action schemas", 1
+            "Currently admissible Tool action contracts", 1
         )[1].split("\nCurrently admissible completion", 1)[0]
         self.assertIn('"name":"search"', search_domain)
         self.assertNotIn('"name":"read"', search_domain)
         self.assertIn("Completion is not admissible", gateway.requests[1].agent.contract)
         self.assertIn('"name":"read"', read_domain)
         self.assertNotIn('"name":"search"', read_domain)
-        self.assertEqual(" (name and resource_id are exact; arguments must satisfy the shown JSON schema): []", completion_domain)
+        self.assertIn("argument_json_schema", search_domain)
+        self.assertIn("argument_json_schema", read_domain)
+        self.assertIn("action_envelope", search_domain)
+        self.assertIn("action_envelope", read_domain)
+        self.assertTrue(completion_domain.endswith(": []"))
         self.assertIn(
             "Currently admissible completion schema",
             gateway.requests[3].agent.contract,

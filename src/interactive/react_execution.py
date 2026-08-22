@@ -123,6 +123,43 @@ class ToolReactExecutionAdapter:
         del request, observations
         return None, True
 
+    @staticmethod
+    def _model_visible_observations(
+        observations: list[Mapping[str, object]],
+    ) -> list[dict[str, object]]:
+        """Render canonical public observations without replaying invalid actions.
+
+        SkillFlow persists the complete sampled Action in the trajectory while
+        presenting an invalid next-turn Observation as status/error feedback.
+        Keep successful Action--Observation state intact, but do not feed a
+        malformed action body back to the model as an imitation target.
+        """
+
+        visible: list[dict[str, object]] = []
+        invalid_fields = (
+            "observation_status",
+            "public_error_code",
+            "tool_id",
+            "action_name",
+            "argument_validation",
+            "allowed_action_names",
+        )
+        for observation in observations:
+            if observation.get("observation_status") in {
+                "parse_error",
+                "schema_invalid",
+            }:
+                visible.append(
+                    {
+                        key: observation[key]
+                        for key in invalid_fields
+                        if key in observation
+                    }
+                )
+            else:
+                visible.append(dict(observation))
+        return visible
+
     def _contract(
         self,
         request: AgentRequest,
@@ -142,17 +179,19 @@ class ToolReactExecutionAdapter:
                 "generic Tool/ReAct execution requires fixed action schemas for "
                 + ", ".join(without_fixed_actions)
             )
-        tools = [capability.to_value() for capability in capabilities]
+        tool_ids = [capability.tool_id for capability in capabilities]
         admitted_tool_actions, completion_admitted = (
             self._state_conditioned_action_domain(request, observations)
         )
-        action_schemas = [
+        action_contracts = [
             {
-                "kind": "tool",
-                "name": action_name,
-                "arguments": dict(argument_schema),
-                "resource_id": capability.tool_id,
-                "skill_id": None,
+                "action_envelope": {
+                    "kind": "tool",
+                    "name": action_name,
+                    "resource_id": capability.tool_id,
+                    "skill_id": None,
+                },
+                "argument_json_schema": dict(argument_schema),
             }
             for capability in capabilities
             for action_name, argument_schema in capability.action_schemas.items()
@@ -218,11 +257,11 @@ class ToolReactExecutionAdapter:
                 if completion_admitted
                 else "A completion action is not currently admissible.\n"
             )
-            + "Currently admissible Tool action schemas (name and resource_id "
-            "are exact; arguments "
-            "must satisfy the shown JSON schema): "
+            + "Currently admissible Tool action contracts. action_envelope gives "
+            "the exact outer constants; argument_json_schema validates only the "
+            "instance placed in the StructuredAction arguments field: "
             + json.dumps(
-                action_schemas,
+                action_contracts,
                 ensure_ascii=False,
                 sort_keys=True,
                 separators=(",", ":"),
@@ -237,13 +276,18 @@ class ToolReactExecutionAdapter:
                 if completion_admitted
                 else "\nCompletion is not admissible in the current public state."
             )
-            + "\nAllowed tools: "
-            + json.dumps(tools, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            + "\nAllowed tool resource IDs: "
+            + json.dumps(
+                tool_ids,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
             + "\nCompletion condition: "
             + (request.agent.completion_condition or "produce the declared artifact")
             + "\nPublic observations: "
             + json.dumps(
-                [dict(observation) for observation in observations],
+                self._model_visible_observations(observations),
                 ensure_ascii=False,
                 sort_keys=True,
                 separators=(",", ":"),
