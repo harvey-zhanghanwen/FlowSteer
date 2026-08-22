@@ -3532,6 +3532,328 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("reasoner", env._failure_continuations)
         self.assertIn("reasoner", env.unresolved_dirty_agent_ids)
 
+    async def test_repair_exhausted_auxiliary_replacement_takeover_deletes_first(
+        self,
+    ) -> None:
+        graph = _hotpot_semantic_graph()
+        graph.add_agent(
+            AgentNode(
+                "failed_reader",
+                "cheap",
+                "retrieve replacement evidence",
+                role_family="evidence_retriever",
+                allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                execution_mode="react",
+                artifact_type="retrieval_evidence",
+            )
+        )
+        graph.set_relation("failed_reader", "reasoner", True, False)
+        registry = make_registry()
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_hotpot_semantic_runtime(registry, _ImmediateGateway()),
+            graph=graph,
+            problem="What is the capital of France?",
+            execute_on_edit=False,
+            semantic_protocol="hotpotqa_verified_answer_slot_v1",
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+        )
+        env._progressive_outputs["reader"] = "grounded replacement evidence"
+        env._failed_agent_ids.update({"failed_reader", "reasoner"})
+        env._repair_exhausted_agent_ids.update({"failed_reader", "reasoner"})
+        env._latest_failure_record_by_agent["failed_reader"] = AgentFailureRecord(
+            request_id="failed-reader-repair-exhausted",
+            agent_id="failed_reader",
+            phase=ExecutionPhase.SINGLE,
+            graph_revision=graph.revision,
+            error_type="ReactExecutionError",
+            message="react agent 'failed_reader' exhausted 8 turns",
+        )
+
+        self.assertEqual(("delete_agent",), env.model_admissible_action_types())
+        self.assertEqual(
+            ["failed_reader"],
+            env.model_admissible_action_targets()["delete_agent"]["agent_ids"],
+        )
+        recovery = env.recovery_state()
+        self.assertEqual(["delete_agent"], recovery["preferred_actions"])
+        self.assertEqual(
+            ["failed_reader"],
+            recovery[
+                "repair_exhausted_auxiliary_takeover_delete_agent_ids"
+            ],
+        )
+        rejected_add = await env.step(
+            json.dumps(
+                {
+                    "action": "add_subgraph",
+                    "agents": [
+                        {
+                            "agent_id": "another_reader",
+                            "model_id": "cheap",
+                            "contract": "retrieve more evidence",
+                            "role_family": "evidence_retriever",
+                            "allowed_tools": [QA_RETRIEVAL_TOOL_ID],
+                            "execution_mode": "react",
+                        }
+                    ],
+                    "relations": [],
+                }
+            )
+        )
+        self.assertFalse(rejected_add.accepted)
+        self.assertIn("admissible_delete_agent_ids", rejected_add.feedback)
+
+        deleted = await env.step(
+            '{"action":"delete_agent","agent_id":"failed_reader"}'
+        )
+
+        self.assertTrue(deleted.accepted)
+        self.assertFalse(env.graph.has_node("failed_reader"))
+        self.assertTrue(
+            env.graph.validate(registry, require_complete=True).valid
+        )
+        execution = await env.execute()
+        self.assertIn("reasoner", execution.outputs)
+
+    async def test_failed_auxiliary_without_successful_takeover_still_augments(
+        self,
+    ) -> None:
+        graph = _hotpot_semantic_graph()
+        graph.add_agent(
+            AgentNode(
+                "failed_reader",
+                "cheap",
+                "retrieve replacement evidence",
+                role_family="evidence_retriever",
+                allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                execution_mode="react",
+                artifact_type="retrieval_evidence",
+            )
+        )
+        graph.set_relation("failed_reader", "reasoner", True, False)
+        registry = make_registry()
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_hotpot_semantic_runtime(registry, _ImmediateGateway()),
+            graph=graph,
+            problem="What is the capital of France?",
+            execute_on_edit=False,
+            semantic_protocol="hotpotqa_verified_answer_slot_v1",
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+        )
+        env._failed_agent_ids.update({"failed_reader", "reasoner"})
+        env._repair_exhausted_agent_ids.update({"failed_reader", "reasoner"})
+        env._latest_failure_record_by_agent["failed_reader"] = AgentFailureRecord(
+            request_id="failed-reader-no-takeover",
+            agent_id="failed_reader",
+            phase=ExecutionPhase.SINGLE,
+            graph_revision=graph.revision,
+            error_type="ReactExecutionError",
+            message="react agent 'failed_reader' exhausted 8 turns",
+        )
+
+        self.assertEqual(("add_subgraph",), env.model_admissible_action_types())
+        protected = await env.step(
+            '{"action":"delete_agent","agent_id":"failed_reader"}'
+        )
+        self.assertFalse(protected.accepted)
+        self.assertTrue(env.graph.has_node("failed_reader"))
+
+    async def test_ordinary_auxiliary_failure_cannot_use_replacement_delete(
+        self,
+    ) -> None:
+        graph = _hotpot_semantic_graph()
+        graph.add_agent(
+            AgentNode(
+                "failed_reader",
+                "cheap",
+                "retrieve replacement evidence",
+                role_family="evidence_retriever",
+                allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                execution_mode="react",
+                artifact_type="retrieval_evidence",
+            )
+        )
+        graph.set_relation("failed_reader", "reasoner", True, False)
+        registry = make_registry()
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_hotpot_semantic_runtime(registry, _ImmediateGateway()),
+            graph=graph,
+            problem="What is the capital of France?",
+            execute_on_edit=False,
+            semantic_protocol="hotpotqa_verified_answer_slot_v1",
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+        )
+        env._progressive_outputs["reader"] = "grounded replacement evidence"
+        env._record_failure_state(
+            (
+                AgentFailureRecord(
+                    request_id="failed-reader-first-attempt",
+                    agent_id="failed_reader",
+                    phase=ExecutionPhase.SINGLE,
+                    graph_revision=graph.revision,
+                    error_type="ReactExecutionError",
+                    message="react agent 'failed_reader' exhausted 8 turns",
+                ),
+            ),
+            current_agent_ids={node.id for node in graph.nodes},
+        )
+
+        self.assertEqual(("modify_agent",), env.model_admissible_action_types())
+        protected = await env.step(
+            '{"action":"delete_agent","agent_id":"failed_reader"}'
+        )
+        self.assertFalse(protected.accepted)
+        self.assertTrue(env.graph.has_node("failed_reader"))
+
+    async def test_failed_auxiliary_ingress_relation_domain_is_exact_and_complete(
+        self,
+    ) -> None:
+        nodes = [
+            AgentNode(
+                "successful_repair",
+                "cheap",
+                "preserve grounded repair evidence",
+                role_family="repair",
+                artifact_type="repair_evidence",
+            ),
+            AgentNode(
+                "failed_reader",
+                "cheap",
+                "retrieve replacement evidence",
+                role_family="evidence_retriever",
+                allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                execution_mode="react",
+                artifact_type="retrieval_evidence",
+            ),
+            *[
+                node
+                for node in _hotpot_semantic_graph().nodes
+                if node.id != "reader"
+            ],
+        ]
+        graph = AgentGraph(
+            nodes,
+            [
+                AgentRelation("failed_reader", "successful_repair", True, False),
+                AgentRelation("failed_reader", "reasoner", True, False),
+                AgentRelation("successful_repair", "reasoner", True, False),
+                AgentRelation("reasoner", "verifier", True, False),
+                AgentRelation("verifier", "formatter", True, False),
+            ],
+            output_agent_id="formatter",
+        )
+        registry = make_registry()
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_hotpot_semantic_runtime(registry, _ImmediateGateway()),
+            graph=graph,
+            problem="What is the capital of France?",
+            execute_on_edit=False,
+            semantic_protocol="hotpotqa_verified_answer_slot_v1",
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+        )
+        env._progressive_outputs["successful_repair"] = "grounded repair evidence"
+        env._failed_agent_ids.update({"failed_reader", "reasoner"})
+        env._repair_exhausted_agent_ids.update({"failed_reader", "reasoner"})
+
+        self.assertEqual(("set_relation",), env.model_admissible_action_types())
+        self.assertEqual(
+            [
+                {
+                    "source_id": "failed_reader",
+                    "target_id": "reasoner",
+                    "source_to_target": False,
+                    "target_to_source": False,
+                }
+            ],
+            env.model_admissible_action_targets()["set_relation"]["candidates"],
+        )
+        rejected_add = await env.step(
+            json.dumps(
+                {
+                    "action": "add_subgraph",
+                    "agents": [
+                        {
+                            "agent_id": "extra_repair",
+                            "model_id": "cheap",
+                            "contract": "repair evidence",
+                            "role_family": "repair",
+                            "allowed_tools": [],
+                            "execution_mode": "reasoning",
+                        }
+                    ],
+                    "relations": [],
+                }
+            )
+        )
+        self.assertFalse(rejected_add.accepted)
+        self.assertIn("exact admitted set_relation", rejected_add.feedback)
+
+    def test_scheduler_cancellation_preserves_receipt_without_failure_state(
+        self,
+    ) -> None:
+        graph = _hotpot_semantic_graph()
+        registry = make_registry()
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_hotpot_semantic_runtime(registry, _ImmediateGateway()),
+            graph=graph,
+            problem="What is the capital of France?",
+            execute_on_edit=False,
+            semantic_protocol="hotpotqa_verified_answer_slot_v1",
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+        )
+        receipt = _test_read_receipt("cancelled-prefix")
+        record = AgentFailureRecord(
+            request_id="scheduler-cancelled-reader",
+            agent_id="reader",
+            phase=ExecutionPhase.SINGLE,
+            graph_revision=graph.revision,
+            error_type="CancelledError",
+            message="Agent invocation was cancelled after partial public execution",
+            metadata={
+                "react_trace": [
+                    {
+                        "turn": 1,
+                        "observation": {
+                            "executed_action": {
+                                "kind": "tool",
+                                "resource_id": QA_RETRIEVAL_TOOL_ID,
+                            }
+                        },
+                    }
+                ],
+                "tool_receipts": [receipt],
+            },
+        )
+
+        env._record_failure_state(
+            (record,),
+            current_agent_ids={node.id for node in graph.nodes},
+        )
+
+        self.assertEqual(
+            "sibling_fail_fast_cancellation",
+            env._execution_failure_diagnosis(record)[0],
+        )
+        self.assertNotIn("reader", env._failed_agent_ids)
+        self.assertNotIn("reader", env._latest_failure_record_by_agent)
+        self.assertNotIn("reader", env._react_exhausted_agent_ids)
+        self.assertNotIn("reader", env._repair_exhausted_agent_ids)
+        self.assertEqual((), env._mandatory_repair_agent_ids())
+        self.assertEqual(
+            [receipt],
+            env._failure_continuations["reader"]["tool_receipts"],
+        )
+
     async def test_hotpot_cached_semantic_diagnostic_cannot_replace_structure_target(
         self,
     ) -> None:

@@ -491,15 +491,39 @@ class AgentWorkflowEnv:
             # A typed Runtime failure or a revision-local semantic-artifact
             # failure identifies an existing Agent that can still be repaired.
             # Keep FlowSteer's action mask on that measured repair boundary;
-            # augmentation becomes available only after repair succeeds or an
-            # explicit ``node_unusable`` receipt admits replacement takeover.
+            # augmentation becomes available only after repair succeeds or a
+            # typed bounded-failure replacement takeover is established.
             return (AgentActionType.MODIFY_AGENT.value,)
+
+        takeover_delete_ids = (
+            self._repair_exhausted_auxiliary_takeover_delete_ids()
+        )
+        if (
+            takeover_delete_ids
+            and AgentActionType.DELETE_AGENT.value
+            in self._allowed_action_type_set
+        ):
+            # A bounded ReAct repair has failed without advancing its public
+            # Tool receipts and a same-role/same-artifact auxiliary has already
+            # taken over every downstream responsibility.  Reuse FlowSteer's
+            # existing replacement-takeover delete boundary before adding yet
+            # another recovery branch.
+            return (AgentActionType.DELETE_AGENT.value,)
 
         node_count = len(self._graph.nodes)
         node_ids = tuple(node.id for node in self._graph.nodes)
         can_add = self.max_agents is None or node_count < self.max_agents
         exhausted_reasoner_ids = self._repair_exhausted_reasoner_ids()
         if exhausted_reasoner_ids:
+            failed_ingress_candidates = (
+                self._failed_auxiliary_ingress_relation_candidates()
+            )
+            if (
+                failed_ingress_candidates
+                and AgentActionType.SET_RELATION.value
+                in self._allowed_action_type_set
+            ):
+                return (AgentActionType.SET_RELATION.value,)
             routing_candidates = self._repair_exhausted_relation_candidates()
             if (
                 routing_candidates
@@ -671,6 +695,11 @@ class AgentWorkflowEnv:
         """Return the exact state-conditioned FlowSteer relation domain."""
 
         all_candidates = self._all_model_admissible_relation_candidates()
+        failed_ingress_candidates = (
+            self._failed_auxiliary_ingress_relation_candidates(all_candidates)
+        )
+        if failed_ingress_candidates:
+            return failed_ingress_candidates
         routing_candidates = self._repair_exhausted_relation_candidates(
             all_candidates
         )
@@ -832,6 +861,87 @@ class AgentWorkflowEnv:
                 for auxiliary_id in unrouted_auxiliary_ids
                 for reasoner_id in exhausted_reasoner_ids
             ):
+                result.append(dict(item))
+        return result
+
+    def _failed_auxiliary_ingress_relation_candidates(
+        self,
+        candidates: Optional[Sequence[Mapping[str, object]]] = None,
+    ) -> list[dict[str, object]]:
+        """Detach only a failed fan-in edge when terminal reachability survives.
+
+        AgentRuntime executes fan-in as an AND dependency.  A failed auxiliary
+        ingress must therefore not remain attached beside an already successful
+        auxiliary artifact.  FlowSteer's Canvas relation edit remains the only
+        operation here: no OR-join or inactive-node state is introduced.  Since
+        FINISH requires every Agent block to reach Output, expose this narrow
+        relation repair only when the prospective graph is still complete.
+        """
+
+        if (
+            not self._uses_semantic_lineage_protocol()
+            or self.recovery_policy != _PRESERVE_REPAIR_RECOVERY_POLICY
+        ):
+            return []
+        exhausted_reasoner_ids = self._repair_exhausted_reasoner_ids()
+        if not exhausted_reasoner_ids:
+            return []
+        successful_ingress = {
+            (auxiliary_id, reasoner_id)
+            for auxiliary_id in self._recovery_auxiliary_agent_ids()
+            if self._has_successful_artifact(auxiliary_id)
+            for reasoner_id in exhausted_reasoner_ids
+            if reasoner_id
+            in self._directed_successors(self._graph, auxiliary_id)
+            and auxiliary_id
+            not in self._directed_successors(self._graph, reasoner_id)
+        }
+        failed_ids = self._failed_agent_ids | self._repair_exhausted_agent_ids
+        failed_ingress = {
+            (auxiliary_id, reasoner_id)
+            for auxiliary_id in self._recovery_auxiliary_agent_ids()
+            if auxiliary_id in failed_ids
+            for reasoner_id in exhausted_reasoner_ids
+            if reasoner_id
+            in self._directed_successors(self._graph, auxiliary_id)
+        }
+        if not successful_ingress or not failed_ingress:
+            return []
+        source_candidates = (
+            self._all_model_admissible_relation_candidates()
+            if candidates is None
+            else [dict(item) for item in candidates]
+        )
+        result: list[dict[str, object]] = []
+        for item in source_candidates:
+            candidate = self._graph.fork()
+            candidate.set_relation(
+                str(item["source_id"]),
+                str(item["target_id"]),
+                bool(item["source_to_target"]),
+                bool(item["target_to_source"]),
+            )
+            if not candidate.validate(
+                self.model_registry,
+                require_complete=True,
+            ).valid:
+                continue
+            candidate_successful_ingress = {
+                edge
+                for edge in successful_ingress
+                if edge[1]
+                in self._directed_successors(candidate, edge[0])
+                and edge[0]
+                not in self._directed_successors(candidate, edge[1])
+            }
+            if candidate_successful_ingress != successful_ingress:
+                continue
+            candidate_failed_ingress = {
+                edge
+                for edge in failed_ingress
+                if edge[1] in self._directed_successors(candidate, edge[0])
+            }
+            if candidate_failed_ingress < failed_ingress:
                 result.append(dict(item))
         return result
 
@@ -1029,6 +1139,27 @@ class AgentWorkflowEnv:
                 node_id for node_id in node_ids if node_id in repairable_failed
             )
         return self._semantic_artifact_repair_agent_ids()
+
+    def _repair_exhausted_auxiliary_takeover_delete_ids(self) -> Tuple[str, ...]:
+        """Return bounded failed auxiliaries whose replacement already took over."""
+
+        if self.recovery_policy != _PRESERVE_REPAIR_RECOVERY_POLICY:
+            return ()
+        return tuple(
+            node.id
+            for node in self._graph.nodes
+            if (node.role_family or "").casefold()
+            in {"evidence_retriever", "repair"}
+            and node.id in self._failed_agent_ids
+            and node.id in self._repair_exhausted_agent_ids
+            and (
+                record := self._latest_failure_record_by_agent.get(node.id)
+            )
+            is not None
+            and self._execution_failure_diagnosis(record)[0]
+            == "react_turn_exhaustion"
+            and self._delete_admission_issue(node.id) is None
+        )
 
     def _admissible_augmentation_role_families(self) -> Tuple[str, ...]:
         """Return semantic QA roles that may be added at this recovery boundary."""
@@ -2545,16 +2676,7 @@ class AgentWorkflowEnv:
         for record in records:
             if record.agent_id not in current_agent_ids:
                 continue
-            recorded_agent_ids.add(record.agent_id)
-            self._failed_agent_ids.add(record.agent_id)
-            self._latest_failure_record_by_agent[record.agent_id] = record
             category, _, _ = self._execution_failure_diagnosis(record)
-            if category == "react_turn_exhaustion":
-                react_exhausted_agent_ids.add(record.agent_id)
-            if record.metadata.get("node_unusable") is True:
-                self._diagnosed_unusable_agent_ids.add(record.agent_id)
-            else:
-                self._diagnosed_unusable_agent_ids.discard(record.agent_id)
             continuation = self._failure_continuation_candidate(record)
             if continuation is not None and not any(
                 field_name in continuation
@@ -2575,11 +2697,31 @@ class AgentWorkflowEnv:
                         source_agent_id=source_agent_id,
                     )
                     if projected is not None:
-                        # The provider failure occurred before the target
-                        # adapter could publish its own trace.  Retain the
-                        # source projection so an admitted model repair resumes
-                        # the same bounded public Tool state.
+                        # The provider failure or scheduler cancellation
+                        # occurred before the target adapter published its own
+                        # trace. Preserve the same bounded public Tool state.
                         continuation = projected
+            if category == "sibling_fail_fast_cancellation":
+                # AgentRuntime cancels still-running sibling blocks after the
+                # first measured failure.  Preserve any public ReAct prefix or
+                # Tool receipts published before cancellation, but do not
+                # diagnose the sibling Agent itself as failed or repairable.
+                if continuation is not None:
+                    current = self._failure_continuations.get(record.agent_id)
+                    if current is None or self._failure_continuation_weight(
+                        continuation
+                    ) >= self._failure_continuation_weight(current):
+                        self._failure_continuations[record.agent_id] = continuation
+                continue
+            recorded_agent_ids.add(record.agent_id)
+            self._failed_agent_ids.add(record.agent_id)
+            self._latest_failure_record_by_agent[record.agent_id] = record
+            if category == "react_turn_exhaustion":
+                react_exhausted_agent_ids.add(record.agent_id)
+            if record.metadata.get("node_unusable") is True:
+                self._diagnosed_unusable_agent_ids.add(record.agent_id)
+            else:
+                self._diagnosed_unusable_agent_ids.discard(record.agent_id)
             current_continuation = self._failure_continuations.get(
                 record.agent_id
             )
@@ -4179,6 +4321,12 @@ class AgentWorkflowEnv:
         )
         deletable_set = set(deletable)
         repair_routing_candidates = self._repair_exhausted_relation_candidates()
+        failed_ingress_relation_candidates = (
+            self._failed_auxiliary_ingress_relation_candidates()
+        )
+        takeover_delete_ids = (
+            self._repair_exhausted_auxiliary_takeover_delete_ids()
+        )
         required_relation_candidates = (
             self._required_semantic_relation_candidates()
         )
@@ -4231,10 +4379,17 @@ class AgentWorkflowEnv:
                 redundant_after_takeover
             ),
             "deletable_agent_ids": list(deletable),
+            "repair_exhausted_auxiliary_takeover_delete_agent_ids": list(
+                takeover_delete_ids
+            ),
             "deletion_protected": protected,
             "preferred_actions": (
                 ["modify_agent"]
                 if mandatory_repair
+                else ["delete_agent"]
+                if takeover_delete_ids
+                else ["set_relation"]
+                if failed_ingress_relation_candidates
                 else ["set_relation"]
                 if repair_routing_candidates
                 else ["set_relation"]
@@ -4405,8 +4560,9 @@ class AgentWorkflowEnv:
         node = self._graph.get_node(agent_id)
         terminal_unreachable_ids = set(self._terminal_unreachable_agent_ids())
         # Topological disconnection is a relation fault, not evidence that the
-        # node itself is unusable.  Deletion therefore requires a measured
-        # execution failure plus a same-responsibility replacement takeover.
+        # node itself is unusable.  Deletion therefore requires either the
+        # adapter's explicit unusable diagnosis or bounded ReAct exhaustion,
+        # plus a same-responsibility replacement takeover.
         diagnosed_unusable = agent_id in self._diagnosed_unusable_agent_ids
         downstream_ids = set(self._directed_successors(self._graph, agent_id))
         protected_reasons: list[str] = []
@@ -4422,6 +4578,15 @@ class AgentWorkflowEnv:
 
         role = (node.role_family or "").casefold()
         artifact_type = node.artifact_type.casefold()
+        latest_failure = self._latest_failure_record_by_agent.get(agent_id)
+        bounded_auxiliary_exhaustion = (
+            role in {"evidence_retriever", "repair"}
+            and agent_id in self._failed_agent_ids
+            and agent_id in self._repair_exhausted_agent_ids
+            and latest_failure is not None
+            and self._execution_failure_diagnosis(latest_failure)[0]
+            == "react_turn_exhaustion"
+        )
         replacements: list[str] = []
         for candidate in self._graph.nodes:
             if candidate.id == agent_id:
@@ -4447,7 +4612,7 @@ class AgentWorkflowEnv:
             if self._graph.output_agent_id == agent_id:
                 continue
             replacements.append(candidate.id)
-        if diagnosed_unusable and replacements:
+        if (diagnosed_unusable or bounded_auxiliary_exhaustion) and replacements:
             return None
         return (
             f"recovery_policy={_PRESERVE_REPAIR_RECOVERY_POLICY} protects Agent "
@@ -4494,8 +4659,38 @@ class AgentWorkflowEnv:
             # it; topology closure resumes after the repaired Agent executes.
             return None
 
+        takeover_delete_ids = (
+            self._repair_exhausted_auxiliary_takeover_delete_ids()
+        )
+        if takeover_delete_ids:
+            if (
+                action.action_type is AgentActionType.DELETE_AGENT
+                and action.agent_id in takeover_delete_ids
+            ):
+                return None
+            return (
+                "remove the bounded repair-exhausted auxiliary only after its "
+                "same-role/same-artifact successful replacement has taken over "
+                "all downstream relations; admissible_delete_agent_ids="
+                f"{list(takeover_delete_ids)!r}"
+            )
+
         exhausted_reasoner_ids = self._repair_exhausted_reasoner_ids()
         if exhausted_reasoner_ids:
+            failed_ingress_candidates = (
+                self._failed_auxiliary_ingress_relation_candidates()
+            )
+            if failed_ingress_candidates:
+                if any(
+                    self._relation_action_matches_candidate(action, candidate)
+                    for candidate in failed_ingress_candidates
+                ):
+                    return None
+                return (
+                    "close only the failed auxiliary ingress while preserving "
+                    "the successful ingress and complete semantic dataflow; use "
+                    "an exact admitted set_relation candidate"
+                )
             routing_candidates = self._repair_exhausted_relation_candidates()
             if routing_candidates:
                 if any(
@@ -4686,6 +4881,14 @@ class AgentWorkflowEnv:
             normalized,
         )
         status_code = None if status_match is None else int(status_match.group(1))
+        if "cancellederror" in normalized or (
+            "cancelled" in normalized and "partial public execution" in normalized
+        ):
+            return (
+                "sibling_fail_fast_cancellation",
+                "preserve_public_continuation",
+                status_code,
+            )
         if "knowledge_base_coverage_failure" in normalized:
             return (
                 "knowledge_base_coverage_failure",

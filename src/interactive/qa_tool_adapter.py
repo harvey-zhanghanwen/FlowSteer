@@ -138,6 +138,80 @@ _FACTUAL_QA_RETRIEVAL_STRATEGIES = (
 )
 _FACTUAL_QA_SEARCH_LIMITS = (5, 10, 15, 20, 25)
 
+_CALENDAR_MONTH_PATTERN = (
+    r"(?:january|february|march|april|may|june|july|august|september|"
+    r"october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|sept|"
+    r"oct|nov|dec)"
+)
+
+
+def _strong_answer_surface_type(surface: str) -> str | None:
+    """Classify only unambiguous answer surfaces without external knowledge.
+
+    This deliberately leaves names and places unclassified: deciding whether
+    an arbitrary proper noun is a person or location requires knowledge that
+    the answer-free Retriever does not own.  Calendar and scalar surfaces are
+    sufficiently explicit to reject a read that fills the wrong relation
+    argument (for example, a birth date for a birthplace question).
+    """
+
+    normalized = " ".join(surface.casefold().split()).strip(" .,:;()[]")
+    if normalized in {"yes", "no"}:
+        return "yes_no"
+    if re.fullmatch(r"(?:1[0-9]{3}|20[0-9]{2})", normalized):
+        return "year_or_number"
+    if re.search(rf"\b{_CALENDAR_MONTH_PATTERN}\b", normalized) and re.search(
+        r"\b\d{1,4}\b", normalized
+    ):
+        return "date"
+    if re.fullmatch(
+        r"\d{1,4}[-/]\d{1,2}(?:[-/]\d{1,4})?",
+        normalized,
+    ):
+        return "date"
+    if re.fullmatch(
+        r"(?:the\s+)?(?:\d{1,2}(?:st|nd|rd|th)|[a-z-]+)\s+century",
+        normalized,
+    ):
+        return "date"
+    if re.fullmatch(
+        r"[+-]?(?:\d+(?:[,.]\d+)*|\.\d+)(?:\s*(?:%|percent))?",
+        normalized,
+    ):
+        return "number"
+    return None
+
+
+def _answer_surface_type_issue(*, expected_type: str, surface: str) -> str | None:
+    """Return a conservative question-slot/evidence-argument mismatch."""
+
+    observed_type = _strong_answer_surface_type(surface)
+    admitted_observed_types = {
+        "date": {"date", "year_or_number"},
+        "number": {"number", "year_or_number"},
+        "yes_no": {"yes_no"},
+    }
+    if expected_type in admitted_observed_types:
+        if observed_type not in admitted_observed_types[expected_type]:
+            return (
+                "Evidence Retriever evidence proposition does not supply the "
+                f"question's requested {expected_type} relation argument"
+            )
+        return None
+    if expected_type in {"location", "entity", "nationality"} and observed_type in {
+        "date",
+        "number",
+        "year_or_number",
+        "yes_no",
+    }:
+        return (
+            "Evidence Retriever evidence proposition supplies a "
+            f"{observed_type.replace('_', '/')} relation argument, not the "
+            "question's requested "
+            f"{expected_type} relation argument"
+        )
+    return None
+
 
 def _normalized_retrieval_query(query: str) -> str:
     """Canonicalize only for duplicate-request admission, not retrieval."""
@@ -950,6 +1024,11 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 if semantic_protocol == "hotpotqa_verified_answer_slot_v1"
                 else qa_question_scope(request.problem)
             )
+            answer_type = (
+                hotpotqa_answer_type_constraint(request.problem)
+                if semantic_protocol == "hotpotqa_verified_answer_slot_v1"
+                else qa_answer_type_constraint(request.problem)
+            )
             # PROJECT_NECESSARY_ADAPTATION: SkillFlow constrains every public
             # StructuredAction and read receipt, while the shared AgentGraph
             # recovery branch needs an answer-free intermediate artifact.  The
@@ -965,6 +1044,8 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                             "question_scope",
                             "entity_identity",
                             "target_relation",
+                            "answer_type_constraint",
+                            "evidence_proposition",
                             "evidence_span",
                             "passage_id",
                         ],
@@ -1008,6 +1089,51 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                                     "evidence_span (for example, `was born in`), "
                                     "not an abstract relation label."
                                 ),
+                            },
+                            "answer_type_constraint": {
+                                "const": answer_type,
+                                "description": (
+                                    "The question-only answer type returned by "
+                                    "qa_answer_type_constraint; this constrains "
+                                    "the open relation argument but is not an "
+                                    "answer selection."
+                                ),
+                            },
+                            "evidence_proposition": {
+                                "type": "object",
+                                "required": [
+                                    "subject",
+                                    "predicate",
+                                    "object_or_attribute_value",
+                                ],
+                                "properties": {
+                                    "subject": {
+                                        **non_empty_text,
+                                        "description": (
+                                            "Exact subject/entity surface copied "
+                                            "from evidence_span."
+                                        ),
+                                    },
+                                    "predicate": {
+                                        **non_empty_text,
+                                        "description": (
+                                            "Exact predicate surface copied from "
+                                            "evidence_span; it must equal "
+                                            "target_relation."
+                                        ),
+                                    },
+                                    "object_or_attribute_value": {
+                                        **non_empty_text,
+                                        "description": (
+                                            "Exact object or attribute-value "
+                                            "surface copied from evidence_span. "
+                                            "Together with subject and predicate, "
+                                            "this records evidence provenance; it "
+                                            "does not select a candidate answer."
+                                        ),
+                                    },
+                                },
+                                "additionalProperties": False,
                             },
                             "evidence_span": {
                                 **non_empty_text,
@@ -1543,10 +1669,14 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 terminal_wire += (
                     " As the Evidence Retriever, arguments.value must contain "
                     "exactly question_scope, entity_identity, target_relation, "
-                    "evidence_span, and passage_id. entity_identity contains "
+                    "answer_type_constraint, evidence_proposition, evidence_span, "
+                    "and passage_id. entity_identity contains "
                     "exactly question_surface and evidence_surface. Cite one "
                     "successful qa-retrieval read receipt and copy an exact "
-                    "evidence span that binds the entity and relation. Do not "
+                    "evidence span that binds the entity, exact predicate, and "
+                    "the open relation argument matching answer_type_constraint. "
+                    "evidence_proposition records only receipt-grounded subject, "
+                    "predicate, and object_or_attribute_value surfaces. Do not "
                     "select or emit candidate_answer, answer_slot, or final_answer."
                 )
             else:
@@ -1707,6 +1837,8 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             "question_scope",
             "entity_identity",
             "target_relation",
+            "answer_type_constraint",
+            "evidence_proposition",
             "evidence_span",
             "passage_id",
         )
@@ -1722,6 +1854,8 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         passage_id = fields.get("passage_id")
         evidence_span = fields.get("evidence_span")
         target_relation = fields.get("target_relation")
+        answer_type_constraint = fields.get("answer_type_constraint")
+        evidence_proposition = fields.get("evidence_proposition")
         identity = fields.get("entity_identity")
         if (
             not isinstance(passage_id, str)
@@ -1757,6 +1891,44 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             return "Evidence Retriever entity surfaces must be non-empty trimmed text"
         assert isinstance(question_surface, str)
         assert isinstance(evidence_surface, str)
+
+        expected_answer_type = qa_answer_type_constraint(original_question)
+        if answer_type_constraint != expected_answer_type:
+            return (
+                "Evidence Retriever answer_type_constraint must equal the "
+                "question-only qa_answer_type_constraint"
+            )
+        if not isinstance(evidence_proposition, Mapping) or set(
+            evidence_proposition
+        ) != {
+            "subject",
+            "predicate",
+            "object_or_attribute_value",
+        }:
+            return (
+                "Evidence Retriever evidence_proposition must contain exactly "
+                "subject, predicate, and object_or_attribute_value"
+            )
+        proposition_values = tuple(
+            evidence_proposition.get(field)
+            for field in ("subject", "predicate", "object_or_attribute_value")
+        )
+        if any(
+            not isinstance(value, str)
+            or not value.strip()
+            or value != value.strip()
+            for value in proposition_values
+        ):
+            return (
+                "Evidence Retriever evidence proposition surfaces must be "
+                "non-empty trimmed text"
+            )
+        proposition_subject, proposition_predicate, proposition_object = (
+            proposition_values
+        )
+        assert isinstance(proposition_subject, str)
+        assert isinstance(proposition_predicate, str)
+        assert isinstance(proposition_object, str)
 
         cited_read_text: str | None = None
         for receipt in tool_receipts:
@@ -1810,6 +1982,9 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         canonical_question_surface = _canonical_evidence_text(question_surface)
         canonical_evidence_surface = _canonical_evidence_text(evidence_surface)
         canonical_relation = _canonical_evidence_text(target_relation)
+        canonical_subject = _canonical_evidence_text(proposition_subject)
+        canonical_predicate = _canonical_evidence_text(proposition_predicate)
+        canonical_object = _canonical_evidence_text(proposition_object)
         if canonical_question_surface not in canonical_question:
             return (
                 "Evidence Retriever entity_identity.question_surface does not "
@@ -1832,6 +2007,45 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             )
         if canonical_relation not in canonical_span:
             return "Evidence Retriever target_relation does not occur in evidence_span"
+        if canonical_question_surface == canonical_relation or (
+            canonical_evidence_surface == canonical_relation
+        ):
+            return (
+                "Evidence Retriever entity surface must not be the relation "
+                "predicate surface"
+            )
+        for field_name, proposition_surface in (
+            ("subject", canonical_subject),
+            ("predicate", canonical_predicate),
+            ("object_or_attribute_value", canonical_object),
+        ):
+            if proposition_surface not in canonical_span:
+                return (
+                    "Evidence Retriever evidence_proposition."
+                    f"{field_name} does not occur in evidence_span"
+                )
+        if canonical_predicate != canonical_relation:
+            return (
+                "Evidence Retriever evidence_proposition.predicate must equal "
+                "target_relation"
+            )
+
+        entity_in_subject = canonical_evidence_surface in canonical_subject
+        entity_in_object = canonical_evidence_surface in canonical_object
+        if entity_in_subject == entity_in_object:
+            return (
+                "Evidence Retriever evidence proposition must bind "
+                "entity_identity.evidence_surface to exactly one relation argument"
+            )
+        open_argument = (
+            proposition_object if entity_in_subject else proposition_subject
+        )
+        answer_type_issue = _answer_surface_type_issue(
+            expected_type=expected_answer_type,
+            surface=open_argument,
+        )
+        if answer_type_issue is not None:
+            return answer_type_issue
 
         if (
             canonical_question_surface != canonical_evidence_surface
@@ -1954,6 +2168,13 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     "Evidence Retriever entity_identity.question_surface",
                     "Evidence Retriever entity_identity.evidence_surface",
                     "Evidence Retriever target_relation",
+                    "Evidence Retriever answer_type_constraint",
+                    "Evidence Retriever evidence_proposition must contain",
+                    "Evidence Retriever evidence proposition surfaces",
+                    "Evidence Retriever entity surface must not be",
+                    "Evidence Retriever evidence_proposition.",
+                    "Evidence Retriever evidence_proposition.predicate",
+                    "Evidence Retriever evidence proposition must bind",
                 )
             )
             if retriever_protocol == "hotpotqa_verified_answer_slot_v1":

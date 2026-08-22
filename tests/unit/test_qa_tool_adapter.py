@@ -2464,6 +2464,8 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             "question_scope",
             "entity_identity",
             "target_relation",
+            "answer_type_constraint",
+            "evidence_proposition",
             "evidence_span",
             "passage_id",
         }
@@ -2487,6 +2489,15 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(
             "exact predicate surface",
             artifact_schema["properties"]["target_relation"]["description"],
+        )
+        self.assertEqual(
+            "entity",
+            artifact_schema["properties"]["answer_type_constraint"]["const"],
+        )
+        proposition_schema = artifact_schema["properties"]["evidence_proposition"]
+        self.assertEqual(
+            {"subject", "predicate", "object_or_attribute_value"},
+            set(proposition_schema["required"]),
         )
 
         completion_contract = adapter._contract(
@@ -2514,6 +2525,7 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             "Do not select or emit candidate_answer, answer_slot, or final_answer",
             completion_contract,
         )
+        self.assertIn("open relation argument", completion_contract)
 
     async def test_evidence_retriever_completes_one_grounded_read_artifact(
         self,
@@ -2527,6 +2539,12 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
                 "evidence_surface": "David Soul",
             },
             "target_relation": "is from",
+            "answer_type_constraint": "entity",
+            "evidence_proposition": {
+                "subject": "David Soul",
+                "predicate": "is from",
+                "object_or_attribute_value": "Chicago",
+            },
             "evidence_span": evidence,
             "passage_id": "p1",
         }
@@ -2613,6 +2631,12 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             "entity_identity": {
                 "question_surface": "Dench",
                 "evidence_surface": "Dench",
+            },
+            "answer_type_constraint": "location",
+            "evidence_proposition": {
+                "subject": "Dench",
+                "predicate": "was born in",
+                "object_or_attribute_value": "Heworth, North Riding of Yorkshire",
             },
             "evidence_span": evidence,
             "passage_id": "p1",
@@ -2763,6 +2787,12 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
                 "evidence_surface": "David Soul",
             },
             "target_relation": "comes from",
+            "answer_type_constraint": "entity",
+            "evidence_proposition": {
+                "subject": "David Soul",
+                "predicate": "comes from",
+                "object_or_attribute_value": "Chicago",
+            },
             "evidence_span": evidence,
             "passage_id": "p1",
         }
@@ -2873,6 +2903,12 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
                 "evidence_surface": "Marilyn Monroe",
             },
             "target_relation": "was born in",
+            "answer_type_constraint": "location",
+            "evidence_proposition": {
+                "subject": "Marilyn Monroe",
+                "predicate": "was born in",
+                "object_or_attribute_value": "Los Angeles",
+            },
             "evidence_span": positive_text,
             "passage_id": "positive",
         }
@@ -2900,6 +2936,281 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         assert detail is not None
         self.assertIn("alias identity lacks an explicit binding", detail)
 
+    def test_evidence_retriever_binds_relation_argument_to_question_answer_type(
+        self,
+    ) -> None:
+        def receipt(passage_id: str, text: str) -> dict[str, object]:
+            return {
+                "tool_id": QA_RETRIEVAL_TOOL_ID,
+                "tool_version": "frozen-index-v1",
+                "request": {
+                    "action": "read",
+                    "arguments": {"passage_id": passage_id},
+                },
+                "result": {
+                    "value": {
+                        "operation": "read",
+                        "passage_id": passage_id,
+                        "passage": {"passage_id": passage_id, "text": text},
+                    },
+                    "completed": True,
+                },
+                "error_type": None,
+            }
+
+        issue = QARetrievalReactExecutionAdapter._evidence_retriever_completion_issue
+        question = "Where in England was Dame Judi Dench born?"
+        date_evidence = "Dench was born 9 December 1934."
+        date_artifact = {
+            "question_scope": question,
+            "entity_identity": {
+                "question_surface": "Dench",
+                "evidence_surface": "Dench",
+            },
+            "target_relation": "was born",
+            "answer_type_constraint": "location",
+            "evidence_proposition": {
+                "subject": "Dench",
+                "predicate": "was born",
+                "object_or_attribute_value": "9 December 1934",
+            },
+            "evidence_span": date_evidence,
+            "passage_id": "date",
+        }
+        detail = issue(
+            original_question=question,
+            artifact=json.dumps(date_artifact),
+            tool_receipts=[receipt("date", date_evidence)],
+        )
+        self.assertIsNotNone(detail)
+        assert detail is not None
+        self.assertIn("supplies a date relation argument", detail)
+        self.assertIn("requested location relation argument", detail)
+
+        predicate_as_entity = json.loads(json.dumps(date_artifact))
+        predicate_as_entity["entity_identity"] = {
+            "question_surface": "born",
+            "evidence_surface": "born",
+        }
+        predicate_as_entity["target_relation"] = "born"
+        predicate_as_entity["evidence_proposition"]["predicate"] = "born"
+        detail = issue(
+            original_question=question,
+            artifact=json.dumps(predicate_as_entity),
+            tool_receipts=[receipt("date", date_evidence)],
+        )
+        self.assertIsNotNone(detail)
+        assert detail is not None
+        self.assertIn("entity surface must not be the relation predicate", detail)
+
+        place_evidence = (
+            "Dench was born in Heworth, North Riding of Yorkshire."
+        )
+        place_artifact = {
+            **date_artifact,
+            "target_relation": "was born in",
+            "evidence_proposition": {
+                "subject": "Dench",
+                "predicate": "was born in",
+                "object_or_attribute_value": (
+                    "Heworth, North Riding of Yorkshire"
+                ),
+            },
+            "evidence_span": place_evidence,
+            "passage_id": "place",
+        }
+        self.assertIsNone(
+            issue(
+                original_question=question,
+                artifact=json.dumps(place_artifact),
+                tool_receipts=[receipt("place", place_evidence)],
+            )
+        )
+
+    def test_evidence_retriever_city_and_date_constraints_are_question_only(
+        self,
+    ) -> None:
+        def validate(
+            *, question: str, evidence: str, answer_type: str, value: str
+        ) -> str | None:
+            passage_id = answer_type
+            artifact = {
+                "question_scope": question,
+                "entity_identity": {
+                    "question_surface": "conference",
+                    "evidence_surface": "conference",
+                },
+                "target_relation": "was held in" if answer_type == "location" else "was held on",
+                "answer_type_constraint": answer_type,
+                "evidence_proposition": {
+                    "subject": "conference",
+                    "predicate": (
+                        "was held in" if answer_type == "location" else "was held on"
+                    ),
+                    "object_or_attribute_value": value,
+                },
+                "evidence_span": evidence,
+                "passage_id": passage_id,
+            }
+            receipt = {
+                "tool_id": QA_RETRIEVAL_TOOL_ID,
+                "tool_version": "frozen-index-v1",
+                "request": {
+                    "action": "read",
+                    "arguments": {"passage_id": passage_id},
+                },
+                "result": {
+                    "value": {
+                        "operation": "read",
+                        "passage_id": passage_id,
+                        "passage": {
+                            "passage_id": passage_id,
+                            "text": evidence,
+                        },
+                    },
+                    "completed": True,
+                },
+                "error_type": None,
+            }
+            return QARetrievalReactExecutionAdapter._evidence_retriever_completion_issue(
+                original_question=question,
+                artifact=json.dumps(artifact),
+                tool_receipts=[receipt],
+            )
+
+        self.assertIsNone(
+            validate(
+                question="What city was the conference held in?",
+                evidence="The conference was held in Kyoto.",
+                answer_type="location",
+                value="Kyoto",
+            )
+        )
+        self.assertIsNone(
+            validate(
+                question="When was the conference held?",
+                evidence="The conference was held on 12 March 2020.",
+                answer_type="date",
+                value="12 March 2020",
+            )
+        )
+        mismatch = validate(
+            question="When was the conference held?",
+            evidence="The conference was held on Kyoto.",
+            answer_type="date",
+            value="Kyoto",
+        )
+        self.assertIsNotNone(mismatch)
+        assert mismatch is not None
+        self.assertIn("does not supply the question's requested date", mismatch)
+
+    async def test_wrong_relation_argument_type_advances_retrieval_strategy(
+        self,
+    ) -> None:
+        question = "Where in England was Dame Judi Dench born?"
+        evidence = "Dench was born 9 December 1934."
+        invalid_artifact = {
+            "question_scope": question,
+            "entity_identity": {
+                "question_surface": "Dench",
+                "evidence_surface": "Dench",
+            },
+            "target_relation": "was born",
+            "answer_type_constraint": "location",
+            "evidence_proposition": {
+                "subject": "Dench",
+                "predicate": "was born",
+                "object_or_attribute_value": "9 December 1934",
+            },
+            "evidence_span": evidence,
+            "passage_id": "p1",
+        }
+
+        def action(name: str, arguments: object) -> str:
+            return json.dumps(
+                {
+                    "arguments": arguments,
+                    "kind": "complete" if name == "complete" else "tool",
+                    "name": name,
+                    "resource_id": (
+                        None if name == "complete" else QA_RETRIEVAL_TOOL_ID
+                    ),
+                    "skill_id": None,
+                }
+            )
+
+        class DenchDateIndex(FakeIndex):
+            def search(self, query: str, *, limit: int) -> tuple[FakeHit, ...]:
+                self.search_calls.append((query, limit))
+                passage_id = "p1" if len(self.search_calls) == 1 else "p2"
+                return (FakeHit(passage_id, passage_id, "Judi Dench", evidence, 1),)
+
+            def read(self, passage_id: str) -> FakePassage:
+                self.read_calls.append(passage_id)
+                return FakePassage(passage_id, passage_id, "Judi Dench", evidence)
+
+        class SequenceGateway:
+            def __init__(self) -> None:
+                self.requests: list[AgentRequest] = []
+                self.outputs = [
+                    action("search", {"query": "Judi Dench born", "limit": 5}),
+                    action("read", {"passage_id": "p1"}),
+                    action("complete", {"value": invalid_artifact}),
+                    action(
+                        "search",
+                        {"query": "Judi Dench birthplace England", "limit": 10},
+                    ),
+                ]
+
+            async def generate(self, request: AgentRequest) -> AgentResponse:
+                self.requests.append(request)
+                return AgentResponse(self.outputs.pop(0))
+
+        index = DenchDateIndex()
+        gateway = SequenceGateway()
+        with self.assertRaises(ReactExecutionError) as caught:
+            await QARetrievalReactExecutionAdapter(
+                gateway=gateway,
+                tool_registry=build_qa_tool_registry(index),
+                max_turns=4,
+                max_tool_calls=10,
+                task_type="factual_qa",
+                completion_policy="required_evidence",
+            ).execute(
+                AgentRequest(
+                    request_id="trivia:dench-answer-type-recovery",
+                    run_id="trivia",
+                    graph_revision=1,
+                    problem=question,
+                    agent=AgentNode(
+                        "evidence_retriever",
+                        "model",
+                        "retrieve the requested relation argument",
+                        role_family="evidence_retriever",
+                        allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                        execution_mode="react",
+                    ),
+                    model=ModelSpec("model", "provider"),
+                    provider=ProviderSpec("provider", kind="test"),
+                    phase=ExecutionPhase.SINGLE,
+                    semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+                )
+            )
+
+        self.assertEqual(
+            [
+                ("Judi Dench born", 5),
+                ("Judi Dench birthplace England", 10),
+            ],
+            index.search_calls,
+        )
+        feedback = caught.exception.react_trace[2]["public_error_code"]
+        self.assertTrue(
+            feedback.startswith("qa_semantic_evidence_provenance_invalid:")
+        )
+        self.assertIn("supplies a date relation argument", feedback)
+        self.assertIn("`spelling_normalization`", gateway.requests[3].agent.contract)
+
     async def test_irrelevant_david_crockett_read_advances_david_soul_retrieval(
         self,
     ) -> None:
@@ -2914,6 +3225,12 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
                 "evidence_surface": "David Crockett",
             },
             "target_relation": "was born in",
+            "answer_type_constraint": "entity",
+            "evidence_proposition": {
+                "subject": "David Crockett",
+                "predicate": "was born in",
+                "object_or_attribute_value": "Greene County, Tennessee",
+            },
             "evidence_span": crockett_evidence,
             "passage_id": "p1",
         }

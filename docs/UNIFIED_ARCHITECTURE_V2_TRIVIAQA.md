@@ -382,6 +382,38 @@ projection survives the admitted model repair.  The Director admission gate
 also rejects natural-language hard-coded search phrases and concrete alias
 mappings while allowing neutral Tool references and retrieval responsibilities.
 
+### r11 live evidence and r12 recovery preparation
+
+The r11 main Stable Zero canary collected both frozen tasks but passed only
+`1/2` legal terminal lineages.  `triviaqa:tc_1` explicitly finished with
+`Harry Sinclair Lewis` and official EM/F1 `1.0/1.0`.  `triviaqa:tc_3`
+reached `max_rounds`, retained `final_answer=null`, and scored EM/F1
+`0.0/0.0`.  Because the main gate failed, the isolated `tc_9/tc_10`
+regression and fixed-128 run were not started.
+
+The r11 lossless trajectory identifies two measured causes.  First, `node_4`
+was a replacement Reasoner with several active predecessors.  The Runtime's
+AND-join required every routed predecessor to be ready, so this replacement
+could not execute even though a usable evidence branch existed.  Second,
+preserved auxiliary artifacts from `node_5` and `node_6` bound birth-date
+evidence to the requested birthplace relation.  Those artifacts were therefore
+false-positive evidence, not a valid downstream takeover, and cannot authorize
+deletion of the failed responsibility or terminal admission.
+
+Recovery revision r12 is prepared as a minimal shared-Runtime correction, not
+as a new workflow.  It retains FlowSteer's execute-on-edit transaction and
+permits replacement takeover only after a successful same-role downstream
+artifact has actually executed; deletion remains unavailable until that
+takeover exists.  SkillFlow's public Tool Action--Observation entries and
+receipts remain the only cross-revision continuation state.  The auxiliary
+Retriever uses an answer-free `evidence_proposition` with the same proposition
+shape already required from the Reasoner, and constrains the proposition object
+with the question-only `qa_answer_type_constraint`; it does not own or receive
+an answer.  A sibling fail-fast `CancelledError` is treated as orchestration
+cancellation rather than attributed as an Agent execution failure.  These r12
+changes are statically configured under isolated condition, Tool-version and
+artifact paths; they are **not yet live-validated**.
+
 ### Stable Zero status
 
 Static architecture, 782 unit tests, 142 subtests and both frozen data-selection
@@ -397,11 +429,14 @@ revision r9 passed the main two-task canary but failed the mandatory isolated
 `tc_9/tc_10` regression for the documented retrieval-recovery defects.
 Recovery revision r10 failed its main canary `1/2` for the documented
 role-bound structured-repair defects, so its isolated regression and fixed-128
-run were not started.  Recovery revision r11 has passed 782 unit tests, 142
-subtests and both frozen prepare-only checks; its live Stable Zero and isolated
-regression remain pending.  Formal fixed-128 v2 EM/F1 remain pending.  No score is
-inferred from unit tests, a two-task canary, an incomplete run, or the previous
-architecture.
+run were not started.  Recovery revision r11 passed 782 unit tests, 142
+subtests and both frozen prepare-only checks, then failed its live main canary
+`1/2`: `tc_1` returned `Harry Sinclair Lewis` at EM/F1 `1.0/1.0`, while
+`tc_3` ended at `max_rounds` with a null answer.  Its isolated `tc_9/tc_10`
+regression and fixed-128 run were therefore not started.  Recovery revision
+r12 is a static, isolated preparation and has not yet run a live canary.
+Formal fixed-128 v2 EM/F1 remain pending.  No score is inferred from unit
+tests, a two-task canary, an incomplete run, or the previous architecture.
 
 ## Historical comparison condition
 
