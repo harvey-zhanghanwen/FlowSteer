@@ -58,6 +58,9 @@ DIRECTOR_PROMPT_VERSION = "agentgraph.director.minimal-neutral.v10"
 LEGACY_DIRECTOR_PROMPT_VERSION_V9 = "agentgraph.director.minimal-neutral.v9"
 LEGACY_DIRECTOR_PROMPT_VERSION_V8 = "agentgraph.director.minimal-neutral.v8"
 HOTPOTQA_DIRECTOR_PROMPT_VERSION = (
+    "agentgraph.director.hotpotqa-semantic-recovery.v21"
+)
+LEGACY_HOTPOTQA_DIRECTOR_PROMPT_VERSION_V20 = (
     "agentgraph.director.hotpotqa-semantic-recovery.v20"
 )
 LEGACY_HOTPOTQA_DIRECTOR_PROMPT_VERSION_V19 = (
@@ -254,6 +257,18 @@ HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V20 = HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V19.replac
     1,
 )
 
+# v21 retains v20's neutral FlowSteer action search space.  Its only prompt
+# delta exposes the generic SkillFlow public repair instruction already carried
+# by Runtime feedback; Canvas admission remains authoritative and answer-free.
+HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V21 = HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V20.replace(
+    "condition before changing models or adding a replacement.",
+    "condition before changing models or adding a replacement. When a public "
+    "repair_instruction is present, apply it only as a generic output-schema "
+    "obligation for that Agent; do not copy any task candidate, value, alias, "
+    "or evidence span into the contract.",
+    1,
+)
+
 
 def director_system_prompt_for_version(prompt_version: str) -> str:
     """Resolve one explicitly versioned Director policy without changing v10."""
@@ -274,7 +289,10 @@ def director_system_prompt_for_version(prompt_version: str) -> str:
         "agentgraph.director.skillflow_continuation_v8": (
             LEGACY_DIRECTOR_SYSTEM_PROMPT_V8
         ),
-        HOTPOTQA_DIRECTOR_PROMPT_VERSION: HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V20,
+        HOTPOTQA_DIRECTOR_PROMPT_VERSION: HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V21,
+        LEGACY_HOTPOTQA_DIRECTOR_PROMPT_VERSION_V20: (
+            HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V20
+        ),
         LEGACY_HOTPOTQA_DIRECTOR_PROMPT_VERSION_V19: (
             HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V19
         ),
@@ -323,6 +341,7 @@ _SUPPORTED_DIRECTOR_SYSTEM_PROMPTS = frozenset(
         HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V18,
         HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V19,
         HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V20,
+        HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V21,
         LEGACY_DIRECTOR_SYSTEM_PROMPT_V9,
         LEGACY_DIRECTOR_SYSTEM_PROMPT_V8,
     }
@@ -2814,6 +2833,7 @@ __all__ = [
     "HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V18",
     "HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V19",
     "HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V20",
+    "HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V21",
     "HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V11",
     "HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V13",
     "HOTPOTQA_SEMANTIC_PROTOCOL",

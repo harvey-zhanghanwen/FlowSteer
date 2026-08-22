@@ -1842,6 +1842,10 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
                         "turn": 4,
                         "observation_status": "schema_invalid",
                         "public_error_code": "completion_artifact_empty",
+                        "repair_instruction": (
+                            "Remove action_envelope and place arguments, kind, name, "
+                            "resource_id, and skill_id at the top level."
+                        ),
                     },
                 ],
                 "tool_receipts": [read_receipt],
@@ -1877,6 +1881,10 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             {
                 "observation_status": "schema_invalid",
                 "public_error_code": "completion_artifact_empty",
+                "repair_instruction": (
+                    "Remove action_envelope and place arguments, kind, name, "
+                    "resource_id, and skill_id at the top level."
+                ),
             },
             summary["last_public_error"],
         )
@@ -1932,7 +1940,7 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
 
         modify_domain = targets["modify_agent"]
         self.assertEqual(
-            ["formatter", "reader", "reasoner", "verifier"],
+            ["reader", "reasoner"],
             modify_domain["agent_ids"],
         )
         self.assertIn("model_id", modify_domain["mutable_fields"])
@@ -1996,6 +2004,49 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("reasoner", env._failure_continuations)
         self.assertNotIn("reasoner", env.recovery_state()["failed_agent_ids"])
         self.assertIn("reader", env.recovery_state()["failed_agent_ids"])
+
+    async def test_hotpot_measured_failure_is_not_attributed_to_blocked_downstream(
+        self,
+    ) -> None:
+        graph = _hotpot_semantic_graph()
+        registry = make_registry()
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_hotpot_semantic_runtime(registry, _ImmediateGateway()),
+            graph=graph,
+            problem="Who founded the Meridian Archive?",
+            semantic_protocol="hotpotqa_verified_answer_slot_v1",
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id="qa-retrieval",
+        )
+        env._record_failure_state(
+            (
+                AgentFailureRecord(
+                    request_id="request-reasoner",
+                    agent_id="reasoner",
+                    phase=ExecutionPhase.SINGLE,
+                    graph_revision=graph.revision,
+                    error_type="ReactExecutionError",
+                    message="react agent 'reasoner' exhausted 8 turns",
+                ),
+            ),
+            current_agent_ids={node.id for node in graph.nodes},
+        )
+        # Runtime pending/dirty closure contains the downstream consumers, but
+        # neither one raised the measured failure.
+        env._unresolved_dirty_agents.update(
+            {"reasoner", "verifier", "formatter"}
+        )
+
+        modify_domain = env.model_admissible_action_targets()["modify_agent"]
+
+        self.assertEqual(["reasoner"], modify_domain["agent_ids"])
+        self.assertEqual(["reasoner"], modify_domain["failed_agent_ids"])
+        self.assertEqual(["reasoner"], modify_domain["responsible_agent_ids"])
+        self.assertEqual(
+            ["contract", "completion_condition"],
+            modify_domain["per_agent_candidates"][0]["mutable_fields"],
+        )
 
     async def test_finish_admissibility_keeps_structured_graph_diagnosis(self) -> None:
         graph = AgentGraph(
@@ -2432,6 +2483,51 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(candidate)
         self.assertIn("possessive noun phrase", str(issue))
 
+        incomplete_surface = json.loads(json.dumps(artifact))
+        incomplete_surface["question_scope"] = "The role was named after who?"
+        incomplete_surface["answer_slot"]["answer_type"] = "person"
+        incomplete_surface["evidence_propositions"][0].update(
+            {
+                "subject": "The role",
+                "relation": "named after",
+                "object_or_attribute_value": "Ada Lovelace",
+                "evidence_span": (
+                    "The role was named after Professor Ada Lovelace's surname."
+                ),
+            }
+        )
+        incomplete_surface["candidate_answer"] = "Ada Lovelace"
+        candidate, issue = env._reasoner_candidate(
+            json.dumps(incomplete_surface),
+            original_question="The role was named after who?",
+        )
+        self.assertIsNone(candidate)
+        self.assertIn("strict subspan", str(issue))
+        self.assertIn("complete referential surface", str(issue))
+
+        complete_surface = json.loads(json.dumps(incomplete_surface))
+        complete_surface["evidence_propositions"][0][
+            "object_or_attribute_value"
+        ] = "Professor Ada Lovelace"
+        complete_surface["candidate_answer"] = "Professor Ada Lovelace"
+        candidate, issue = env._reasoner_candidate(
+            json.dumps(complete_surface),
+            original_question="The role was named after who?",
+        )
+        self.assertEqual("Professor Ada Lovelace", candidate)
+        self.assertIsNone(issue)
+
+        unqualified_surface = json.loads(json.dumps(incomplete_surface))
+        unqualified_surface["evidence_propositions"][0]["evidence_span"] = (
+            "The role was named after Ada Lovelace's surname."
+        )
+        candidate, issue = env._reasoner_candidate(
+            json.dumps(unqualified_surface),
+            original_question="The role was named after who?",
+        )
+        self.assertEqual("Ada Lovelace", candidate)
+        self.assertIsNone(issue)
+
         narrowed = dict(artifact)
         narrowed["question_scope"] = "What is the singles capital of France?"
         candidate, issue = env._reasoner_candidate(
@@ -2702,6 +2798,127 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(rejected.accepted)
         self.assertIn("neutral formatting-only contract", rejected.feedback)
         self.assertEqual((), env.graph.nodes)
+
+    async def test_hotpot_contract_admission_keeps_obligations_answer_free(
+        self,
+    ) -> None:
+        registry = make_registry()
+        gateway = _ImmediateGateway()
+        problem = (
+            "Based on the following passages, answer the question.\n\n"
+            "[Professor Ada Lovelace founded the Meridian Archive beside the "
+            "river in 1843.]\n\nQuestion: Who founded the Meridian Archive?"
+        )
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_hotpot_semantic_runtime(registry, gateway),
+            problem=problem,
+            semantic_protocol="hotpotqa_verified_answer_slot_v1",
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id="qa-retrieval",
+        )
+        revision = env.revision
+
+        copied_candidate = await env.step(
+            json.dumps(
+                {
+                    "action": "add_subgraph",
+                    "agents": [
+                        {
+                            "agent_id": "reasoner",
+                            "model_id": "balanced",
+                            "contract": "Return Ada Lovelace as the answer",
+                            "role_family": "reasoner",
+                            "allowed_tools": ["qa-retrieval"],
+                            "execution_mode": "react",
+                        }
+                    ],
+                    "relations": [],
+                }
+            )
+        )
+
+        self.assertFalse(copied_candidate.accepted)
+        self.assertIn("pre-execution obligations only", copied_candidate.feedback)
+        self.assertEqual(revision, env.revision)
+        self.assertEqual((), env.graph.nodes)
+        self.assertEqual([], gateway.requests)
+
+        obligation_only = await env.step(
+            json.dumps(
+                {
+                    "action": "add_subgraph",
+                    "agents": [
+                        {
+                            "agent_id": "reasoner",
+                            "model_id": "balanced",
+                            "contract": (
+                                "Preserve the Meridian Archive question scope; align "
+                                "the requested person answer slot to explicit evidence"
+                            ),
+                            "role_family": "reasoner",
+                            "allowed_tools": ["qa-retrieval"],
+                            "execution_mode": "react",
+                        }
+                    ],
+                    "relations": [],
+                }
+            )
+        )
+
+        self.assertTrue(obligation_only.accepted)
+        self.assertTrue(env.graph.has_node("reasoner"))
+
+        schema_repair = await env.step(
+            json.dumps(
+                {
+                    "action": "modify_agent",
+                    "agent_id": "reasoner",
+                    "contract": (
+                        "Return exactly one StructuredAction with arguments, kind, "
+                        "name, resource_id, and skill_id at the top level"
+                    ),
+                }
+            )
+        )
+        self.assertTrue(schema_repair.accepted)
+
+        env._failure_continuations["reasoner"] = {
+            "execution_phase": "single",
+            "react_trace": [
+                {
+                    "structured_action": {
+                        "kind": "complete",
+                        "arguments": {
+                            "value": json.dumps(
+                                {
+                                    "candidate_answer": "Riverport",
+                                    "evidence_span": (
+                                        "The archive opened in Riverport beside the river."
+                                    ),
+                                }
+                            )
+                        },
+                    }
+                }
+            ],
+        }
+        revision = env.revision
+        copied_public_candidate = await env.step(
+            json.dumps(
+                {
+                    "action": "modify_agent",
+                    "agent_id": "reasoner",
+                    "contract": "Select Riverport as the candidate answer",
+                }
+            )
+        )
+        self.assertFalse(copied_public_candidate.accepted)
+        self.assertIn(
+            "public Tool/Agent observations",
+            copied_public_candidate.feedback,
+        )
+        self.assertEqual(revision, env.revision)
 
     async def test_hotpot_formatter_contract_cannot_be_mutated_to_an_answer(self) -> None:
         registry = make_registry()

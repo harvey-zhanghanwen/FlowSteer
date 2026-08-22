@@ -335,10 +335,46 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("evidence_propositions", reasoner)
         self.assertIn("bind the candidate", reasoner)
+        self.assertIn(
+            "minimal but complete evidence-aligned referential surface",
+            reasoner,
+        )
+        self.assertIn("possessive marker", reasoner)
+        self.assertIn("complete possessor entity mention", reasoner)
         self.assertIn("Do not replace the Reasoner's candidate", verifier)
         self.assertIn("seven explicit boolean check fields", verifier)
         self.assertIn("Set supported only when all checks pass", verifier)
+        self.assertIn(
+            "minimal but complete evidence-aligned referential surface",
+            verifier,
+        )
+        self.assertIn("drops part of the possessor entity mention", verifier)
         self.assertNotIn("bind the candidate", verifier)
+
+        completion_schema = adapter._completion_arguments_schema(
+            role_request("reasoner")
+        )
+        semantic_properties = completion_schema["properties"]["value"]["properties"]
+        proposition_properties = semantic_properties["evidence_propositions"][
+            "items"
+        ]["properties"]
+        for field in ("subject", "object_or_attribute_value"):
+            description = proposition_properties[field]["description"]
+            self.assertIn(
+                "minimal but complete evidence-aligned referential surface",
+                description,
+            )
+            self.assertIn("complete possessor mention", description)
+            self.assertIn("possessive marker", description)
+            self.assertIn("name suffix", description)
+        candidate_description = semantic_properties["candidate_answer"][
+            "description"
+        ]
+        self.assertIn(
+            "minimal but complete evidence-aligned referential surface",
+            candidate_description,
+        )
+        self.assertIn("not a strict subspan", candidate_description)
 
         default_reasoner = replace(
             role_request("reasoner"),
@@ -1061,6 +1097,12 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             "Repair only the diagnosed structured semantic artifact fields",
             repair_contract,
         )
+        self.assertIn(
+            "minimal but complete evidence-aligned referential surface",
+            repair_contract,
+        )
+        self.assertIn("complete possessor entity mention", repair_contract)
+        self.assertIn("possessive marker", repair_contract)
         self.assertIn("do not add a search or read", repair_contract)
         repair_domain = repair_contract.split(
             "Currently admissible Tool action contracts", 1

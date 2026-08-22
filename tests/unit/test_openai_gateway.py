@@ -189,7 +189,15 @@ class MessageTests(unittest.TestCase):
         self.assertIn("answer_slot", system)
         self.assertIn("answer_cardinality", system)
         self.assertIn("proposition_index selects one item", system)
-        self.assertIn("minimal canonical answer surface", system)
+        self.assertIn("complete, evidence-aligned referential surface", system)
+        self.assertIn("never permits truncating that entity mention", system)
+        self.assertIn(
+            "full possessor entity mention immediately before the possessive marker",
+            system,
+        )
+        self.assertIn("title, honorific, or name suffix", system)
+        self.assertIn("reclassified as an unrequested qualifier", system)
+        self.assertIn("even when a shorter form is coreferential", system)
         self.assertIn("multi_hop_chain", system)
         self.assertIn("candidate_answer", system)
         self.assertIn("unexpectedly equal values", system)
@@ -211,7 +219,17 @@ class MessageTests(unittest.TestCase):
         self.assertIn("multi-hop bridge is complete", system)
         self.assertIn("scope was not narrowed", system)
         self.assertIn("answer type and cardinality", system)
-        self.assertIn("answer surface is minimal", system)
+        self.assertIn(
+            "answer surface is one complete, evidence-aligned referential surface",
+            system,
+        )
+        self.assertIn(
+            "full possessor entity mention immediately before the possessive marker",
+            system,
+        )
+        self.assertIn("title, honorific, or name suffix", system)
+        self.assertIn("incomplete possessor entity mention", system)
+        self.assertIn("any candidate that shortens the full possessor mention", system)
         self.assertIn("explicit identity binding", system)
         self.assertIn("must not select, replace, canonicalize", system)
         self.assertIn("Answer type cardinality correct:", system)
@@ -235,6 +253,12 @@ class MessageTests(unittest.TestCase):
         self.assertIn("StructuredAction JSON object", system)
         self.assertIn("ReAct is only this node's execution schedule", system)
         self.assertIn("semantic Reasoner", system)
+        self.assertIn("complete, evidence-aligned referential surface", system)
+        self.assertIn(
+            "full possessor entity mention immediately before the possessive marker",
+            system,
+        )
+        self.assertIn("title, honorific, or name suffix", system)
 
     def test_format_agent_extracts_one_upstream_solution_without_resolving(self) -> None:
         original_question = "SECRET ORIGINAL QUESTION"
@@ -270,6 +294,8 @@ class MessageTests(unittest.TestCase):
         self.assertIn("Copy character-for-character", user)
         self.assertIn("value following its single `Candidate answer:` label", user)
         self.assertIn("never change an alias, abbreviation", user)
+        self.assertNotIn("possessor entity mention", system)
+        self.assertNotIn("possessor entity mention", user)
         self.assertNotIn(original_question, system)
         self.assertNotIn(original_question, user)
         self.assertNotIn("Contract:\nverify carefully", system)

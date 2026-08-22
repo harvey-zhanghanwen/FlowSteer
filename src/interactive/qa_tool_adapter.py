@@ -80,8 +80,13 @@ HOTPOTQA_VERIFIED_ANSWER_SLOT_GUIDANCE = (
     "Bind candidate_answer to exactly one evidence_propositions item through "
     "answer_slot.proposition_index and answer_field; keep the entity-to-attribute "
     "binding explicit and show every bridge in the multi-hop chain. Return one "
-    "minimal canonical answer surface when answer_cardinality is single; do not "
-    "return an alias list or repeat the question's head noun. If compared values "
+    "minimal but complete evidence-aligned referential surface when "
+    "answer_cardinality is single; do not return an alias list, appositive gloss, "
+    "or the question's answer-type head noun. For a who-question whose evidence "
+    "expresses the requested person through a possessive construction, exclude the "
+    "possessive marker and possessed attribute, but retain the complete possessor "
+    "entity mention immediately before the marker, including any title, honorific, "
+    "or name suffix present in the evidence. If compared values "
     "are unexpectedly equal, recheck scope, "
     "both bindings, retrieved passages, and contract narrowing before calling a tie."
 )
@@ -625,6 +630,14 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             "type": "array",
             "items": dict(non_empty_text),
         }
+        entity_surface_description = (
+            "When this field supplies an entity answer, copy one minimal but "
+            "complete evidence-aligned referential surface. Do not truncate a "
+            "title, honorific, or name suffix that belongs to the source entity "
+            "mention. For a possessive construction, retain the complete possessor "
+            "mention before the possessive marker and exclude the marker plus the "
+            "possessed attribute."
+        )
         answer_slot_schema = {
             "type": "object",
             "required": [
@@ -676,14 +689,14 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 "evidence_span",
             ],
             "properties": {
-                "subject": dict(non_empty_text),
+                "subject": {
+                    **non_empty_text,
+                    "description": entity_surface_description,
+                },
                 "relation": dict(non_empty_text),
                 "object_or_attribute_value": {
                     **non_empty_text,
-                    "description": (
-                        "Copy the full evidence-aligned referential span, including "
-                        "a title or qualifier when the source uses it."
-                    ),
+                    "description": entity_surface_description,
                 },
                 "qualifiers": dict(qualifier_list),
                 "evidence_span": {
@@ -736,7 +749,16 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                             "minItems": 2,
                             "items": dict(non_empty_text),
                         },
-                        "candidate_answer": dict(non_empty_text),
+                        "candidate_answer": {
+                            **non_empty_text,
+                            "description": (
+                                "Copy the selected proposition field exactly. For an "
+                                "entity answer, it must be the minimal but complete "
+                                "evidence-aligned referential surface described by "
+                                "that field, not a strict subspan of the source entity "
+                                "mention."
+                            ),
+                        },
                         "evidence": dict(non_empty_text_list),
                     },
                     "additionalProperties": False,
@@ -865,9 +887,13 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     "candidate to one explicit evidence proposition; candidate_answer "
                     "must equal that proposition's selected field. Set answer_type and "
                     "answer_cardinality from the original question and preserve its "
-                    "qualifiers. For single-answer questions, return one minimal canonical "
-                    "answer surface rather than an alias list or a phrase that repeats the "
-                    "question's head noun."
+                    "qualifiers. For single-answer questions, return one minimal but "
+                    "complete evidence-aligned referential surface rather than an alias "
+                    "list, appositive gloss, or the question's answer-type head noun. In "
+                    "a who-question with a possessive construction, exclude the "
+                    "possessive marker and possessed attribute but retain the complete "
+                    "possessor entity mention before it, including any title, honorific, "
+                    "or name suffix present in the evidence."
                 )
             else:
                 terminal_wire += (
@@ -882,8 +908,12 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             terminal_wire += (
                 " As the Verifier, check explicit retrieved evidence, entity-to-"
                 "attribute binding, multi-hop completeness, and unchanged question "
-                "scope; also check answer type/cardinality, minimal answer surface, "
-                "and alias binding. Do not replace the Reasoner's candidate. Return "
+                "scope; also check answer type/cardinality, a minimal but complete "
+                "evidence-aligned referential surface, and alias binding. For a who-"
+                "question with a possessive construction, reject a candidate that "
+                "drops part of the possessor entity mention before the possessive "
+                "marker, including a source title, honorific, or name suffix. Do not "
+                "replace the Reasoner's candidate. Return "
                 "Candidate answer, the seven explicit boolean check fields, and "
                 "Verification status. Set supported only when all checks pass; "
                 "otherwise request repair without a substitute candidate."
@@ -894,6 +924,12 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 "answer span after `Candidate answer:` and the supporting "
                 "retrieved passage span after `Evidence:` in arguments.value."
             )
+        # DIRECT_REUSE: SkillFlow's bounded Agent resumes from public
+        # Action--Observation history rather than discarding completed Tool
+        # transitions after a rejected completion.  The HotpotQA wording below
+        # narrows only the semantic repair obligation; the retained search/read
+        # receipts and the next state-conditioned action remain that upstream
+        # continuation boundary.
         evidence_continuation = ""
         if (
             self._completion_policy == "required_evidence"

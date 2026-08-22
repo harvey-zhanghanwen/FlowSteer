@@ -73,6 +73,19 @@ _VERIFIER_SEMANTIC_FIELDS = (
     "verification_status",
 )
 
+# Question-answering titles and suffixes are linguistic entity-surface markers,
+# not benchmark entities.  The bounded list keeps the deterministic completion
+# gate conservative: it catches a strict subspan such as a name with its title
+# removed without treating every sentence-initial capitalized word as part of
+# the person mention.
+_PERSON_TITLE_PATTERN = (
+    r"(?:Dr\.?|Doctor|Professor|President|Vice President|Prime Minister|"
+    r"Mr\.?|Mrs\.?|Ms\.?|Miss|Sir|Dame|Lord|Lady|King|Queen|Prince|Princess|"
+    r"Pope|Saint|St\.?|General|Colonel|Captain|Reverend|Rev\.?|Judge|Justice|"
+    r"Chancellor|Governor|Senator|Representative)"
+)
+_PERSON_SUFFIX_PATTERN = r"(?:Jr\.?|Sr\.?|II|III|IV|V)"
+
 
 def _answer_protocol_state(answer: str) -> tuple[int, bool, bool]:
     """Return tag count, exact-single-wrapper state, and non-empty state."""
@@ -492,9 +505,17 @@ class AgentWorkflowEnv:
         node_ids = tuple(node.id for node in self._graph.nodes)
         if self.recovery_policy != _PRESERVE_REPAIR_RECOVERY_POLICY:
             return node_ids
+        measured_failed = self._failed_agent_ids.intersection(node_ids)
+        if measured_failed:
+            # AgentRuntime distinguishes the Agent that raised a typed failure
+            # from blocked/pending descendants.  FlowSteer's next Canvas edit
+            # should repair every measured root failure, not mutate downstream
+            # Agents that merely could not execute because their input is absent.
+            return tuple(
+                node_id for node_id in node_ids if node_id in measured_failed
+            )
         protected = set(self._active_semantic_lineage_ids())
-        responsible = set(self._failed_agent_ids)
-        responsible.update(self._unresolved_dirty_agents)
+        responsible = set(self._unresolved_dirty_agents)
         responsible.update(self._terminal_unreachable_agent_ids())
         return tuple(
             node_id
@@ -602,10 +623,15 @@ class AgentWorkflowEnv:
                     "allowed_tools",
                     "execution_mode",
                 ]
-            responsible_ids = set(self._failed_agent_ids)
-            responsible_ids.update(self._unresolved_dirty_agents)
-            responsible_ids.update(self._terminal_unreachable_agent_ids())
-            if self.semantic_protocol == _HOTPOTQA_SEMANTIC_PROTOCOL:
+            measured_failed_ids = self._failed_agent_ids.intersection(node_ids)
+            responsible_ids = set(measured_failed_ids)
+            if not measured_failed_ids:
+                responsible_ids.update(self._unresolved_dirty_agents)
+                responsible_ids.update(self._terminal_unreachable_agent_ids())
+            if (
+                not measured_failed_ids
+                and self.semantic_protocol == _HOTPOTQA_SEMANTIC_PROTOCOL
+            ):
                 execution = self._cached_progressive_execution()
                 if execution is not None:
                     semantic_issue = self._semantic_protocol_issue(execution)
@@ -976,6 +1002,12 @@ class AgentWorkflowEnv:
             return self._reject_after_count(
                 action,
                 "edit rejected: " + semantic_edit_issue,
+            )
+        contract_obligation_issue = self._contract_obligation_issue(action)
+        if contract_obligation_issue is not None:
+            return self._reject_after_count(
+                action,
+                "edit rejected: " + contract_obligation_issue,
             )
         try:
             # Reuse the Runtime's execution-contract boundary before the
@@ -1922,6 +1954,198 @@ class AgentWorkflowEnv:
         return None
 
     @staticmethod
+    def _lexical_tokens(value: str) -> Tuple[str, ...]:
+        normalized = unicodedata.normalize("NFKC", value).casefold()
+        return tuple(
+            re.findall(r"[a-z0-9]+(?:['’][a-z0-9]+)?", normalized)
+        )
+
+    @classmethod
+    def _contains_lexical_span(cls, text: str, span: str) -> bool:
+        haystack = cls._lexical_tokens(text)
+        needle = cls._lexical_tokens(span)
+        if not needle or len(needle) > len(haystack):
+            return False
+        width = len(needle)
+        return any(
+            haystack[index : index + width] == needle
+            for index in range(len(haystack) - width + 1)
+        )
+
+    @staticmethod
+    def _context_named_phrases(context: str) -> Tuple[str, ...]:
+        """Return multi-token proper-name spans from public task context.
+
+        Generate subspans as well as maximal matches so a contract containing
+        ``First Last`` is still detected when the passage says ``Title First
+        Last``.  Single capitalized words are intentionally excluded here to
+        avoid treating an ordinary sentence-initial word as an entity.
+        """
+
+        proper_token = r"[A-Z][A-Za-z0-9]*(?:[-'’][A-Za-z0-9]+)*"
+        phrases: set[str] = set()
+        for match in re.finditer(
+            rf"(?<![A-Za-z0-9]){proper_token}(?:\s+{proper_token}){{1,5}}",
+            context,
+        ):
+            tokens = match.group(0).split()
+            for width in range(2, len(tokens) + 1):
+                for start in range(len(tokens) - width + 1):
+                    phrases.add(" ".join(tokens[start : start + width]))
+        return tuple(sorted(phrases, key=lambda item: (-len(item), item)))
+
+    def _public_semantic_contract_literals(self) -> Tuple[str, ...]:
+        """Collect answer-bearing literals already present in public receipts.
+
+        This projection deliberately ignores Ground Truth and evaluator state.
+        It reads only progressive Agent artifacts and SkillFlow's public
+        Action--Observation continuation retained by the current Runtime.
+        """
+
+        literals: set[str] = set()
+        semantic_keys = {
+            "candidate_answer",
+            "object_or_attribute_value",
+            "evidence_span",
+            "evidence",
+        }
+
+        def visit(value: object, *, semantic_value: bool = False) -> None:
+            if isinstance(value, str):
+                stripped = value.strip()
+                if semantic_value and stripped:
+                    literals.add(stripped)
+                if stripped.startswith(("{", "[")):
+                    try:
+                        parsed = json.loads(stripped)
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        return
+                    visit(parsed)
+                return
+            if isinstance(value, Mapping):
+                for raw_key, item in value.items():
+                    key = re.sub(
+                        r"[ -]+", "_", str(raw_key).strip().casefold()
+                    )
+                    visit(item, semantic_value=key in semantic_keys)
+                return
+            if isinstance(value, (list, tuple)):
+                for item in value:
+                    visit(item, semantic_value=semantic_value)
+
+        for artifact in (
+            *self._progressive_outputs.values(),
+            *self._previous_revision_outputs.values(),
+        ):
+            visit(artifact)
+        for continuation in self._failure_continuations.values():
+            visit(continuation)
+        return tuple(sorted(literals, key=lambda item: (-len(item), item)))
+
+    def _contract_obligation_issue(
+        self,
+        action: AgentAction,
+    ) -> Optional[str]:
+        """Reject task-answer content in a newly authored Agent contract.
+
+        FlowSteer's Canvas remains transactional and SkillFlow's public
+        observations remain available to the next turn.  This project-specific
+        HotpotQA admission prevents those observations from being copied into a
+        pre-execution contract as a concrete answer.  It never rewrites a
+        sampled action and never consults an answer key or evaluator.
+        """
+
+        if self.semantic_protocol != _HOTPOTQA_SEMANTIC_PROTOCOL:
+            return None
+        contracts: Tuple[str, ...]
+        if action.action_type is AgentActionType.ADD_SUBGRAPH:
+            contracts = tuple(spec.contract for spec in action.agents)
+        elif (
+            action.action_type is AgentActionType.MODIFY_AGENT
+            and action.contract is not None
+        ):
+            contracts = (action.contract,)
+        else:
+            return None
+
+        question = hotpotqa_question_scope(self._problem)
+        context = self._problem
+        if context.endswith(question) and context != question:
+            context = context[: -len(question)]
+        public_literals = self._public_semantic_contract_literals()
+        named_phrases = self._context_named_phrases(context)
+        context_tokens = self._lexical_tokens(context)
+        question_tokens = self._lexical_tokens(question)
+
+        def question_contains(span: str) -> bool:
+            return self._contains_lexical_span(question, span)
+
+        for contract in contracts:
+            # Exact public semantic values include one-word entities that a
+            # proper-name phrase detector cannot safely infer from raw prose.
+            if any(
+                not question_contains(literal)
+                and self._contains_lexical_span(contract, literal)
+                for literal in public_literals
+            ):
+                break
+            if any(
+                not question_contains(phrase)
+                and self._contains_lexical_span(contract, phrase)
+                for phrase in named_phrases
+            ):
+                break
+
+            # A copied evidence sentence need not contain a named entity.  Six
+            # contiguous lexical tokens are long enough to identify a passage
+            # fragment while leaving ordinary scope/relation obligations free.
+            contract_tokens = self._lexical_tokens(contract)
+            copied_evidence = False
+            for width in range(min(10, len(contract_tokens)), 5, -1):
+                for start in range(len(contract_tokens) - width + 1):
+                    span = contract_tokens[start : start + width]
+                    if any(
+                        context_tokens[index : index + width] == span
+                        for index in range(len(context_tokens) - width + 1)
+                    ) and not any(
+                        question_tokens[index : index + width] == span
+                        for index in range(len(question_tokens) - width + 1)
+                    ):
+                        copied_evidence = True
+                        break
+                if copied_evidence:
+                    break
+            if copied_evidence:
+                break
+
+            # Catch a one-token candidate or date only when the contract itself
+            # uses answer-selection language; unmarked capitalized words remain
+            # available for ordinary natural-language obligations.
+            selected_literals = re.findall(
+                r"\b(?:answer|candidate|value|return|select|choose|emit|copy)\b"
+                r"(?:\s+[A-Za-z_-]+){0,5}?\s+"
+                r"(?:as\s+|is\s+)?([A-Z][A-Za-z0-9'’.-]*|\d{3,}(?:[.,]\d+)?)",
+                contract,
+            )
+            if any(
+                self._contains_lexical_span(context, literal)
+                and not question_contains(literal)
+                for literal in selected_literals
+            ):
+                break
+        else:
+            return None
+
+        return (
+            "HotpotQA Agent contracts are pre-execution obligations only: a new "
+            "or modified contract must not embed a concrete candidate, alias, "
+            "attribute value, number/date, or evidence span copied from task "
+            "context or public Tool/Agent observations outside the original "
+            "question. Preserve the original scope and express only relation, "
+            "answer-slot, evidence, Tool, and output-schema obligations"
+        )
+
+    @staticmethod
     def _structured_semantic_fields(
         artifact: str,
         required_fields: Tuple[str, ...],
@@ -2018,6 +2242,38 @@ class AgentWorkflowEnv:
         if isinstance(value, (list, tuple)):
             return bool(value)
         return False
+
+    @staticmethod
+    def _possessor_surface_issue(
+        candidate: str,
+        evidence_span: str,
+    ) -> Optional[str]:
+        """Reject a strict subspan of an explicit possessive person mention."""
+
+        for candidate_match in re.finditer(re.escape(candidate), evidence_span):
+            suffix_and_marker = re.match(
+                rf"(?P<suffix>(?:,\s*|\s+){_PERSON_SUFFIX_PATTERN})?"
+                r"\s*(?:'s|’s)\b",
+                evidence_span[candidate_match.end() :],
+            )
+            if suffix_and_marker is None:
+                continue
+            title_match = re.search(
+                rf"(?<![A-Za-z0-9])(?P<title>{_PERSON_TITLE_PATTERN})\s+$",
+                evidence_span[: candidate_match.start()],
+            )
+            omitted_title = title_match is not None
+            omitted_suffix = bool(suffix_and_marker.group("suffix"))
+            if omitted_title or omitted_suffix:
+                return (
+                    "Reasoner candidate_answer is a strict subspan of the "
+                    "evidence-aligned possessor entity mention. A who-question "
+                    "must preserve the complete referential surface before the "
+                    "possessive marker, including any title, honorific, or name "
+                    "suffix, while excluding the possessed attribute"
+                )
+            return None
+        return None
 
     @classmethod
     def _reasoner_candidate(
@@ -2227,6 +2483,13 @@ class AgentWorkflowEnv:
                 "Reasoner candidate_answer must occur verbatim in the selected "
                 "evidence_span"
             )
+        if expected_answer_type == "person":
+            possessor_surface_issue = cls._possessor_surface_issue(
+                candidate,
+                evidence_span,
+            )
+            if possessor_surface_issue is not None:
+                return None, possessor_surface_issue
         return candidate, None
 
     @classmethod
@@ -2937,6 +3200,9 @@ class AgentWorkflowEnv:
             source = observation if isinstance(observation, Mapping) else entry
             status = source.get("observation_status")
             code = source.get("public_error_code")
+            repair_instruction = source.get("repair_instruction")
+            if not isinstance(repair_instruction, str):
+                repair_instruction = entry.get("repair_instruction")
             if isinstance(status, str) and status:
                 status_counts[status] = status_counts.get(status, 0) + 1
             if isinstance(code, str) and code:
@@ -2948,6 +3214,13 @@ class AgentWorkflowEnv:
                 last_public_error = {"observation_status": status}
                 if isinstance(code, str) and code:
                     last_public_error["public_error_code"] = code
+                if isinstance(repair_instruction, str) and repair_instruction.strip():
+                    # SkillFlow makes this instruction part of the public
+                    # Observation. Keep the generic schema repair, while still
+                    # omitting the retrieved passage and complete trace.
+                    last_public_error["repair_instruction"] = " ".join(
+                        repair_instruction.split()
+                    )[:400]
 
         raw_receipts = record.metadata.get("tool_receipts", ())
         receipts = (

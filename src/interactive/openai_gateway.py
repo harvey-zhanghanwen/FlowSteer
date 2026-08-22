@@ -113,6 +113,22 @@ def _semantic_role(request: AgentRequest) -> str:
     return role_family.casefold() if isinstance(role_family, str) else ""
 
 
+_HOTPOTQA_COMPLETE_ENTITY_SURFACE_RULE = (
+    "A single-entity answer surface is one complete, evidence-aligned referential "
+    "surface. Minimality removes only alias lists, explanations, redundant "
+    "question-head nouns, and text outside the selected entity mention; it never "
+    "permits truncating that entity mention. For a who-question licensed by a "
+    "possessive construction, the answer slot is the full possessor entity mention "
+    "immediately before the possessive marker ('s or its typographic equivalent), "
+    "not the possessed attribute. Preserve every component of that evidence-aligned "
+    "mention, including any title, honorific, or name suffix; no component may be "
+    "dropped or reclassified as an unrequested qualifier, even when a shorter form is "
+    "coreferential. Outside that possessive construction, a shorter canonical name or "
+    "alias is admissible only when an explicit identity proposition supports that exact "
+    "surface choice. "
+)
+
+
 _HOTPOTQA_REASONER_PROTOCOL = (
     "You are the semantic Reasoner, not a formatter or verifier. Preserve the "
     "question's original scope, relation, qualifiers, comparison criterion, and "
@@ -130,11 +146,8 @@ _HOTPOTQA_REASONER_PROTOCOL = (
     "proposition_index, and answer_field. proposition_index selects one item in "
     "evidence_propositions and answer_field selects either its subject or its "
     "object_or_attribute_value; candidate_answer must equal that selected value. "
-    "For single-answer questions, use one minimal canonical answer surface supported "
-    "by the selected proposition and any explicit alias proposition: do not emit an "
-    "alias enumeration, repeat the question's head noun, or append an unrequested "
-    "qualifier. Preserve a qualifier only when it is part of the entity's canonical "
-    "name or required by the original answer slot. If a comparison produces unexpectedly "
+    + _HOTPOTQA_COMPLETE_ENTITY_SURFACE_RULE
+    + "If a comparison produces unexpectedly "
     "equal values, recheck the "
     "original scope, both entity-attribute bindings, retrieved evidence, and any "
     "upstream contract narrowing before concluding a tie."
@@ -146,12 +159,16 @@ _HOTPOTQA_VERIFIER_PROTOCOL = (
     "seven gates: evidence explicitly supports the candidate; each entity is bound "
     "to the correct attribute/value; every required multi-hop bridge is complete; "
     "the original question scope was not narrowed or changed; the answer type and "
-    "cardinality match the original question; the answer surface is minimal and does "
-    "not contain an alias list, redundant question-head noun, or unrequested qualifier; "
+    "cardinality match the original question; the answer surface is one complete, "
+    "evidence-aligned referential surface without an alias list, redundant "
+    "question-head noun, or text outside the selected entity mention; "
     "and every canonical-name or alias choice has an explicit identity binding in the "
     "evidence propositions. In a Which-comparison, reject a numeric/date comparison "
-    "value as the candidate; in a who-question, reject a possessive attribute phrase "
-    "instead of the person entity. You must not "
+    "value as the candidate. "
+    + _HOTPOTQA_COMPLETE_ENTITY_SURFACE_RULE
+    + "In that possessive construction, reject the possessed attribute, an incomplete "
+    "possessor entity mention, or any candidate that shortens the full possessor mention. "
+    "You must not "
     "select, replace, canonicalize, or invent a different candidate. Return exactly "
     "these labeled fields: `Candidate answer:`, `Evidence supported:`, "
     "`Entity attribute binding correct:`, `Multi-hop complete:`, `Scope preserved:`, "
@@ -202,7 +219,8 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
                 "Never place semantic-answer fields in search/read arguments. "
                 "Only when the assigned contract marks completion currently "
                 "admissible, put the structured semantic Reasoner artifact defined "
-                "there in arguments.value."
+                "there in arguments.value. "
+                + _HOTPOTQA_COMPLETE_ENTITY_SURFACE_RULE
             )
         elif hotpot_semantic and semantic_role == "verifier":
             protocol += (
