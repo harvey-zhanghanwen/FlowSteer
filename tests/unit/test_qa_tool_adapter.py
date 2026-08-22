@@ -493,6 +493,89 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             "next action may complete",
             gateway.requests[3].agent.contract,
         )
+        search_domain = gateway.requests[1].agent.contract.split(
+            "Currently admissible Tool action schemas", 1
+        )[1].split("\nCompletion", 1)[0]
+        read_domain = gateway.requests[2].agent.contract.split(
+            "Currently admissible Tool action schemas", 1
+        )[1].split("\nCompletion", 1)[0]
+        completion_domain = gateway.requests[3].agent.contract.split(
+            "Currently admissible Tool action schemas", 1
+        )[1].split("\nCurrently admissible completion", 1)[0]
+        self.assertIn('"name":"search"', search_domain)
+        self.assertNotIn('"name":"read"', search_domain)
+        self.assertIn("Completion is not admissible", gateway.requests[1].agent.contract)
+        self.assertIn('"name":"read"', read_domain)
+        self.assertNotIn('"name":"search"', read_domain)
+        self.assertEqual(" (name and resource_id are exact; arguments must satisfy the shown JSON schema): []", completion_domain)
+        self.assertIn(
+            "Currently admissible completion schema",
+            gateway.requests[3].agent.contract,
+        )
+        self.assertEqual([("Ada Lovelace", 1)], index.search_calls)
+        self.assertEqual(["p1"], index.read_calls)
+
+    async def test_required_evidence_action_domain_rejects_search_after_search(
+        self,
+    ) -> None:
+        index = FakeIndex()
+
+        def action(name: str, arguments: object) -> str:
+            return json.dumps(
+                {
+                    "arguments": arguments,
+                    "kind": "complete" if name == "complete" else "tool",
+                    "name": name,
+                    "resource_id": (
+                        None if name == "complete" else QA_RETRIEVAL_TOOL_ID
+                    ),
+                    "skill_id": None,
+                }
+            )
+
+        class SequenceGateway:
+            def __init__(self) -> None:
+                self.outputs = [
+                    action("search", {"query": "Ada Lovelace", "limit": 1}),
+                    action("search", {"query": "Ada Lovelace", "limit": 1}),
+                    action("read", {"passage_id": "p1"}),
+                    action("complete", {"value": "Ada Lovelace"}),
+                ]
+
+            async def generate(self, request: AgentRequest) -> AgentResponse:
+                del request
+                return AgentResponse(self.outputs.pop(0))
+
+        request = AgentRequest(
+            request_id="qa:state-conditioned-domain",
+            run_id="qa",
+            graph_revision=1,
+            problem="Who wrote the first published algorithm?",
+            agent=AgentNode(
+                "retriever",
+                "model",
+                "retrieve evidence and answer",
+                allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                execution_mode="react",
+            ),
+            model=ModelSpec("model", "provider"),
+            provider=ProviderSpec("provider", kind="test"),
+            phase=ExecutionPhase.SINGLE,
+        )
+
+        response = await QARetrievalReactExecutionAdapter(
+            gateway=SequenceGateway(),
+            tool_registry=build_qa_tool_registry(index),
+            max_turns=4,
+            max_tool_calls=2,
+            completion_policy="required_evidence",
+        ).execute(request)
+
+        self.assertEqual("Ada Lovelace", response.text)
+        self.assertEqual(
+            "qa_required_evidence_next_action_read",
+            response.metadata["react_trace"][1]["public_error_code"],
+        )
         self.assertEqual([("Ada Lovelace", 1)], index.search_calls)
         self.assertEqual(["p1"], index.read_calls)
 

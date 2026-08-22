@@ -19,7 +19,12 @@ from src.interactive.agent_graph import (
     DependencyEdgeEvidence,
     GraphMutationError,
 )
-from src.interactive.agent_runtime import AgentRequest, AgentResponse, AgentRuntime
+from src.interactive.agent_runtime import (
+    AgentRequest,
+    AgentResponse,
+    AgentRuntime,
+    ReasoningExecutionAdapter,
+)
 from src.interactive.agent_workflow_env import AgentWorkflowEnv, AgentWorkflowStateError
 from src.interactive.model_registry import (
     ModelRegistry,
@@ -1830,6 +1835,49 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("unique predecessor must have role_family='verifier'", rejected.feedback)
         self.assertEqual([], gateway.requests)
 
+    async def test_hotpot_format_execution_contract_is_rejected_before_commit(
+        self,
+    ) -> None:
+        registry = make_registry()
+        gateway = _ImmediateGateway()
+        runtime = AgentRuntime(
+            registry,
+            gateway,
+            execution_adapters={"react": ReasoningExecutionAdapter(gateway)},
+            semantic_protocol="hotpotqa_verified_answer_slot_v1",
+        )
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=runtime,
+            problem="question",
+            require_exact_answer_tag=True,
+            require_format_agent=True,
+            semantic_protocol="hotpotqa_verified_answer_slot_v1",
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id="qa-retrieval",
+        )
+
+        rejected = await env.step(
+            '{"action":"add_subgraph","agents":['
+            '{"agent_id":"reasoner","model_id":"balanced",'
+            '"contract":"answer","role_family":"reasoner"},'
+            '{"agent_id":"verifier","model_id":"balanced",'
+            '"contract":"verify","role_family":"verifier"},'
+            '{"agent_id":"formatter","model_id":"fast",'
+            '"contract":"format","role_family":"format",'
+            '"execution_mode":"react"}'
+            '],"relations":['
+            '{"source_id":"reasoner","target_id":"verifier",'
+            '"source_to_target":true,"target_to_source":false},'
+            '{"source_id":"verifier","target_id":"formatter",'
+            '"source_to_target":true,"target_to_source":false}'
+            '],"output_agent_id":"formatter"}'
+        )
+
+        self.assertFalse(rejected.accepted)
+        self.assertIn("Format Agent must use reasoning execution", rejected.feedback)
+        self.assertEqual((), env.graph.nodes)
+
     async def test_preserve_repair_policy_blocks_delete_until_takeover(self) -> None:
         registry = make_registry()
         gateway = _FailAgentGateway("source")
@@ -1906,6 +1954,105 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(rejected.accepted)
         self.assertIn("Output Agent identity", rejected.feedback)
         self.assertTrue(env.graph.has_node("out"))
+
+    async def test_recovery_policy_allows_terminal_unreachable_redundancy_after_takeover(
+        self,
+    ) -> None:
+        registry = make_registry()
+        graph = AgentGraph(
+            [
+                AgentNode(
+                    "out",
+                    "fast",
+                    "active output",
+                    role_family="format",
+                    artifact_type="answer",
+                ),
+                AgentNode(
+                    "redundant",
+                    "cheap",
+                    "redundant output",
+                    role_family="format",
+                    artifact_type="answer",
+                ),
+            ],
+            output_agent_id="out",
+        )
+        env = AgentWorkflowEnv(
+            registry,
+            _ImmediateGateway(),
+            graph=graph,
+            problem="question",
+            execute_on_edit=True,
+            recovery_policy="preserve_diagnose_repair_augment",
+        )
+        executed = await env.step(
+            '{"action":"modify_agent","agent_id":"redundant",'
+            '"contract":"redundant output artifact"}'
+        )
+        self.assertTrue(executed.accepted)
+        self.assertEqual(
+            ["redundant"],
+            env.recovery_state()["terminal_unreachable_agent_ids"],
+        )
+        self.assertIn("redundant", env.recovery_state()["preserved_agent_ids"])
+
+        deleted = await env.step(
+            '{"action":"delete_agent","agent_id":"redundant"}'
+        )
+
+        self.assertTrue(deleted.accepted)
+        self.assertFalse(env.graph.has_node("redundant"))
+        self.assertTrue(env.graph.has_node("out"))
+
+    async def test_recovery_policy_keeps_successful_reachable_lineage(self) -> None:
+        registry = make_registry()
+        graph = AgentGraph(
+            [
+                AgentNode(
+                    "source_a",
+                    "balanced",
+                    "evidence a",
+                    role_family="evidence",
+                    artifact_type="facts",
+                ),
+                AgentNode(
+                    "source_b",
+                    "cheap",
+                    "evidence b",
+                    role_family="evidence",
+                    artifact_type="facts",
+                ),
+                AgentNode("out", "fast", "answer", role_family="output"),
+            ],
+            [
+                AgentRelation("source_a", "out", True, False),
+                AgentRelation("source_b", "out", True, False),
+            ],
+            output_agent_id="out",
+        )
+        env = AgentWorkflowEnv(
+            registry,
+            _ImmediateGateway(),
+            graph=graph,
+            problem="question",
+            execute_on_edit=True,
+            recovery_policy="preserve_diagnose_repair_augment",
+        )
+        executed = await env.step(
+            '{"action":"modify_agent","agent_id":"source_a",'
+            '"contract":"evidence a repaired"}'
+        )
+        self.assertTrue(executed.accepted)
+        self.assertEqual([], env.recovery_state()["terminal_unreachable_agent_ids"])
+
+        rejected = await env.step(
+            '{"action":"delete_agent","agent_id":"source_a"}'
+        )
+
+        self.assertFalse(rejected.accepted)
+        self.assertIn("not been diagnosed unusable", rejected.feedback)
+        self.assertTrue(env.graph.has_node("source_a"))
 
     async def test_semantic_and_recovery_configuration_forks_and_defaults_are_legacy(self) -> None:
         registry = make_registry()

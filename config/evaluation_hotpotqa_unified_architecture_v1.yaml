@@ -14,7 +14,7 @@ experiment:
   sampling_schedule_purpose: "hotpotqa_fixed_development_unified_architecture"
   catalog_order_namespace: "hotpotqa_unified_architecture_v1"
   prompt_version: "agentgraph.director.hotpotqa-semantic-recovery.v11"
-  tool_version: "skillflow.qa-retrieval.search-read.exact-structured-action.v2"
+  tool_version: "skillflow.qa-retrieval.search-read.state-conditioned-exact-structured-action.v3"
   output_dir: "artifacts/unified_architecture_v1/hotpotqa"
 
 data:

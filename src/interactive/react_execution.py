@@ -107,6 +107,22 @@ class ToolReactExecutionAdapter:
         self._max_action_tokens = max_action_tokens
         self._execution_mode = execution_mode
 
+    def _state_conditioned_action_domain(
+        self,
+        request: AgentRequest,
+        observations: list[Mapping[str, object]],
+    ) -> tuple[Optional[frozenset[tuple[str, str]]], bool]:
+        """Return the model-visible action domain for the current public state.
+
+        The generic SkillFlow-style bounded executor exposes every registered
+        Tool action plus explicit completion.  Dataset adapters may narrow
+        that public domain when their environment contract has a measured
+        state transition; ``None`` preserves the complete Tool domain.
+        """
+
+        del request, observations
+        return None, True
+
     def _contract(
         self,
         request: AgentRequest,
@@ -127,6 +143,9 @@ class ToolReactExecutionAdapter:
                 + ", ".join(without_fixed_actions)
             )
         tools = [capability.to_value() for capability in capabilities]
+        admitted_tool_actions, completion_admitted = (
+            self._state_conditioned_action_domain(request, observations)
+        )
         action_schemas = [
             {
                 "kind": "tool",
@@ -137,6 +156,8 @@ class ToolReactExecutionAdapter:
             }
             for capability in capabilities
             for action_name, argument_schema in capability.action_schemas.items()
+            if admitted_tool_actions is None
+            or (capability.tool_id, action_name) in admitted_tool_actions
         ]
         # DIRECT_REUSE: SkillFlow rollout/context.py::_ACTION_GUIDANCE uses
         # ``arguments={"value": ...}`` for completion.  Do not place a
@@ -186,13 +207,19 @@ class ToolReactExecutionAdapter:
             # Qwen service otherwise sometimes emits the legacy
             # {"action": ..., "arguments": ...} ToolRequest shape, which is
             # not an admitted StructuredAction.
-            + "Every action object must contain exactly these five fields: "
+            + "Choose exactly one action from the currently admissible schemas "
+            "below. Every action object must contain exactly these five fields: "
             "arguments, kind, name, resource_id, skill_id. Do not use an "
             "action field. For a tool action use kind=tool, the exact name and "
-            "resource_id below, and skill_id=null. For completion use "
-            "kind=complete, name=complete, arguments={\"value\": ...}, "
-            "resource_id=null, and skill_id=null.\n"
-            + "Tool action schemas (name and resource_id are exact; arguments "
+            "resource_id below, and skill_id=null. "
+            + (
+                "For completion use kind=complete, name=complete, "
+                "arguments={\"value\": ...}, resource_id=null, and skill_id=null.\n"
+                if completion_admitted
+                else "A completion action is not currently admissible.\n"
+            )
+            + "Currently admissible Tool action schemas (name and resource_id "
+            "are exact; arguments "
             "must satisfy the shown JSON schema): "
             + json.dumps(
                 action_schemas,
@@ -200,8 +227,16 @@ class ToolReactExecutionAdapter:
                 sort_keys=True,
                 separators=(",", ":"),
             )
-            + "\nCompletion schema: "
-            + json.dumps(completion_schema, sort_keys=True, separators=(",", ":"))
+            + (
+                "\nCurrently admissible completion schema: "
+                + json.dumps(
+                    completion_schema,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                if completion_admitted
+                else "\nCompletion is not admissible in the current public state."
+            )
             + "\nAllowed tools: "
             + json.dumps(tools, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
             + "\nCompletion condition: "
@@ -402,6 +437,7 @@ class ToolReactExecutionAdapter:
                 observations.append(observation)
                 continue
             admission_error = self._tool_action_error(
+                request=request,
                 action=action,
                 observations=observations,
             )
@@ -547,12 +583,13 @@ class ToolReactExecutionAdapter:
     def _tool_action_error(
         self,
         *,
+        request: AgentRequest,
         action: StructuredAction,
         observations: list[Mapping[str, object]],
     ) -> Optional[str]:
         """Dataset adapters may add public action-admission checks."""
 
-        del action, observations
+        del request, action, observations
         return None
 
     def _completion_artifact(

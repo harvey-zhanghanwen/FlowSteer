@@ -313,6 +313,60 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             default=False,
         )
 
+    def _required_evidence_state(
+        self,
+        request: AgentRequest,
+        observations: list[Mapping[str, object]],
+    ) -> tuple[bool, tuple[str, ...], bool]:
+        required = (
+            self._completion_policy == "required_evidence"
+            and self._max_tool_calls > 0
+            and QA_RETRIEVAL_TOOL_ID in request.agent.allowed_tools
+        )
+        searched_passage_ids: list[str] = []
+        has_successful_read = False
+        if required:
+            for observation in observations:
+                if observation.get("observation_status") != "success":
+                    continue
+                result = observation.get("result")
+                if not isinstance(result, Mapping):
+                    continue
+                if result.get("operation") == "search":
+                    raw_ids = result.get("passage_ids")
+                    if isinstance(raw_ids, list):
+                        searched_passage_ids = [
+                            value.strip()
+                            for value in raw_ids
+                            if isinstance(value, str) and value.strip()
+                        ]
+                elif (
+                    result.get("operation") == "read"
+                    and isinstance(result.get("passage"), Mapping)
+                    and isinstance(result["passage"].get("text"), str)
+                    and bool(result["passage"]["text"].strip())
+                ):
+                    has_successful_read = True
+        return required, tuple(searched_passage_ids), has_successful_read
+
+    def _state_conditioned_action_domain(
+        self,
+        request: AgentRequest,
+        observations: list[Mapping[str, object]],
+    ) -> tuple[Optional[frozenset[tuple[str, str]]], bool]:
+        """Expose the canonical search -> read -> complete action domain."""
+
+        required, passage_ids, has_successful_read = self._required_evidence_state(
+            request,
+            observations,
+        )
+        if not required:
+            return super()._state_conditioned_action_domain(request, observations)
+        if has_successful_read:
+            return frozenset(), True
+        action_name = "read" if passage_ids else "search"
+        return frozenset({(QA_RETRIEVAL_TOOL_ID, action_name)}), False
+
     async def execute(self, request: AgentRequest) -> GatewayResponse:
         # NECESSARY_ADAPTATION: the generic AgentGraph completion hook receives
         # Tool receipts but not the current AgentRequest.  Bind only the QA
@@ -386,27 +440,9 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             self._completion_policy == "required_evidence"
             and QA_RETRIEVAL_TOOL_ID in request.agent.allowed_tools
         ):
-            searched_passage_ids: list[str] = []
-            has_successful_read = False
-            for observation in observations:
-                result = observation.get("result")
-                if not isinstance(result, Mapping):
-                    continue
-                if result.get("operation") == "search":
-                    raw_ids = result.get("passage_ids")
-                    if isinstance(raw_ids, list):
-                        searched_passage_ids = [
-                            value.strip()
-                            for value in raw_ids
-                            if isinstance(value, str) and value.strip()
-                        ]
-                elif (
-                    result.get("operation") == "read"
-                    and isinstance(result.get("passage"), Mapping)
-                    and isinstance(result["passage"].get("text"), str)
-                    and bool(result["passage"]["text"].strip())
-                ):
-                    has_successful_read = True
+            _, searched_passage_ids, has_successful_read = (
+                self._required_evidence_state(request, observations)
+            )
             evidence_continuation = (
                 "\nRequired-evidence ReAct continuation: preserve any semantic "
                 "candidate already present in the public action history; do not "
@@ -488,9 +524,23 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
     def _tool_action_error(
         self,
         *,
+        request: AgentRequest,
         action: StructuredAction,
         observations: list[Mapping[str, object]],
     ) -> str | None:
+        required, passage_ids, has_successful_read = self._required_evidence_state(
+            request,
+            observations,
+        )
+        if required and action.kind is ActionKind.TOOL:
+            if has_successful_read:
+                return "qa_required_evidence_next_action_complete"
+            expected_action = "read" if passage_ids else "search"
+            if (
+                action.resource_id != QA_RETRIEVAL_TOOL_ID
+                or action.name != expected_action
+            ):
+                return f"qa_required_evidence_next_action_{expected_action}"
         if (
             action.kind is not ActionKind.TOOL
             or action.resource_id != QA_RETRIEVAL_TOOL_ID

@@ -987,6 +987,12 @@ class AgentWorkflowEnv:
                 "role_family='format'; keep semantic-answer computation in "
                 "its upstream Agent"
             )
+        if output_node.execution_mode.value != "reasoning" or output_node.allowed_tools:
+            return (
+                "Format Agent must use reasoning execution without tools; it only "
+                "formats the verified semantic answer and must not invoke a Tool, "
+                "reselect the answer, or participate in reasoning"
+            )
         validation = graph.validate(
             self.model_registry,
             require_complete=False,
@@ -1375,6 +1381,29 @@ class AgentWorkflowEnv:
             and agent_id not in self._unresolved_dirty_agents
         )
 
+    def _terminal_unreachable_agent_ids(self) -> Tuple[str, ...]:
+        """Project the existing complete-graph reachability diagnosis.
+
+        ``AgentGraphValidator`` is the terminal-topology authority.  Reuse its
+        reciprocal-component contraction and quotient-DAG reachability result
+        here instead of maintaining a second graph traversal in recovery.
+        """
+
+        validation = self._graph.validate(
+            self.model_registry,
+            require_complete=True,
+        )
+        return tuple(
+            sorted(
+                {
+                    agent_id
+                    for issue in validation.issues
+                    if issue.code == "cannot_reach_output"
+                    for agent_id in issue.agent_ids
+                }
+            )
+        )
+
     def recovery_state(self) -> dict[str, object]:
         """Expose measured preservation state without changing scheduling/cache rules."""
 
@@ -1386,6 +1415,8 @@ class AgentWorkflowEnv:
                 if self._has_successful_artifact(agent_id)
             )
         )
+        terminal_unreachable = self._terminal_unreachable_agent_ids()
+        terminal_unreachable_set = set(terminal_unreachable)
         protected: dict[str, list[str]] = {}
         for node in self._graph.nodes:
             reasons: list[str] = []
@@ -1395,7 +1426,9 @@ class AgentWorkflowEnv:
                 reasons.append("downstream_responsibility")
             if self._graph.output_agent_id == node.id:
                 reasons.append("output_identity")
-            if node.id not in self._unresolved_dirty_agents:
+            if node.id in terminal_unreachable_set:
+                reasons.append("terminal_unreachable")
+            elif node.id not in self._unresolved_dirty_agents:
                 reasons.append("not_diagnosed_unusable")
             reasons.append("replacement_takeover_required")
             if reasons:
@@ -1410,6 +1443,7 @@ class AgentWorkflowEnv:
             ),
             "preserved_agent_ids": list(preserved),
             "unresolved_dirty_agent_ids": list(self.unresolved_dirty_agent_ids),
+            "terminal_unreachable_agent_ids": list(terminal_unreachable),
             "deletion_protected": protected,
             "preferred_actions": ["modify_agent", "set_relation", "add_subgraph"],
         }
@@ -1420,6 +1454,11 @@ class AgentWorkflowEnv:
         if agent_id is None or not self._graph.has_node(agent_id):
             return None
         node = self._graph.get_node(agent_id)
+        terminal_unreachable_ids = set(self._terminal_unreachable_agent_ids())
+        diagnosed_unusable = (
+            agent_id in self._unresolved_dirty_agents
+            or agent_id in terminal_unreachable_ids
+        )
         downstream_ids = set(self._directed_successors(self._graph, agent_id))
         protected_reasons: list[str] = []
         if self._has_successful_artifact(agent_id):
@@ -1428,7 +1467,7 @@ class AgentWorkflowEnv:
             protected_reasons.append("downstream responsibility")
         if self._graph.output_agent_id == agent_id:
             protected_reasons.append("Output Agent identity")
-        if agent_id not in self._unresolved_dirty_agents:
+        if not diagnosed_unusable:
             protected_reasons.append("node has not been diagnosed unusable")
         protected_reasons.append("replacement artifact takeover is required")
 
@@ -1442,6 +1481,7 @@ class AgentWorkflowEnv:
                 (candidate.role_family or "").casefold() != role
                 or candidate.artifact_type.casefold() != artifact_type
                 or not self._has_successful_artifact(candidate.id)
+                or candidate.id in terminal_unreachable_ids
             ):
                 continue
             candidate_downstream = set(
@@ -1454,7 +1494,7 @@ class AgentWorkflowEnv:
             if self._graph.output_agent_id == agent_id:
                 continue
             replacements.append(candidate.id)
-        if agent_id in self._unresolved_dirty_agents and replacements:
+        if diagnosed_unusable and replacements:
             return None
         return (
             f"recovery_policy={_PRESERVE_REPAIR_RECOVERY_POLICY} protects Agent "
