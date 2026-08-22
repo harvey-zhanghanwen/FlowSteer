@@ -1838,6 +1838,14 @@ class AgentWorkflowEnv:
         terminal_unreachable_set = set(terminal_unreachable)
         failed = tuple(sorted(self._failed_agent_ids & current_ids))
         failed_set = set(failed)
+        active_semantic_lineage = self._active_semantic_lineage_ids()
+        active_semantic_lineage_set = set(active_semantic_lineage)
+        redundant_after_takeover = tuple(
+            agent_id
+            for agent_id in terminal_unreachable
+            if agent_id not in active_semantic_lineage_set
+            and bool(active_semantic_lineage)
+        )
         protected: dict[str, list[str]] = {}
         for node in self._graph.nodes:
             reasons: list[str] = []
@@ -1869,9 +1877,56 @@ class AgentWorkflowEnv:
             "failed_agent_ids": list(failed),
             "unresolved_dirty_agent_ids": list(self.unresolved_dirty_agent_ids),
             "terminal_unreachable_agent_ids": list(terminal_unreachable),
+            "active_semantic_lineage_agent_ids": list(active_semantic_lineage),
+            "redundant_after_replacement_takeover_agent_ids": list(
+                redundant_after_takeover
+            ),
             "deletion_protected": protected,
-            "preferred_actions": ["modify_agent", "set_relation", "add_subgraph"],
+            "preferred_actions": (
+                ["delete_agent", "set_relation", "modify_agent"]
+                if redundant_after_takeover
+                else ["modify_agent", "set_relation", "add_subgraph"]
+            ),
         }
+
+    def _active_semantic_lineage_ids(self) -> Tuple[str, ...]:
+        """Return the current verified Reasoner→Verifier→Formatter lineage."""
+
+        if self.semantic_protocol != _HOTPOTQA_SEMANTIC_PROTOCOL:
+            return ()
+        formatter_id = self._graph.output_agent_id
+        if formatter_id is None or not self._graph.has_node(formatter_id):
+            return ()
+        formatter = self._graph.get_node(formatter_id)
+        if (formatter.role_family or "").casefold() != "format":
+            return ()
+        verifier_ids = self._graph.directed_predecessors(formatter_id)
+        if len(verifier_ids) != 1:
+            return ()
+        verifier_id = verifier_ids[0]
+        verifier = self._graph.get_node(verifier_id)
+        if (verifier.role_family or "").casefold() != "verifier":
+            return ()
+        reasoner_ids = self._graph.directed_predecessors(verifier_id)
+        if len(reasoner_ids) != 1:
+            return ()
+        reasoner_id = reasoner_ids[0]
+        reasoner = self._graph.get_node(reasoner_id)
+        if (reasoner.role_family or "").casefold() != "reasoner":
+            return ()
+        for agent_id, role_family in (
+            (reasoner_id, "reasoner"),
+            (verifier_id, "verifier"),
+            (formatter_id, "format"),
+        ):
+            if not self._has_successful_artifact(agent_id):
+                return ()
+            if not self._semantic_replacement_has_valid_artifact(
+                agent_id,
+                role_family,
+            ):
+                return ()
+        return reasoner_id, verifier_id, formatter_id
 
     def _semantic_replacement_has_valid_artifact(
         self,
@@ -1990,6 +2045,18 @@ class AgentWorkflowEnv:
             agent_id in self._failed_agent_ids
             or agent_id in terminal_unreachable_ids
         )
+        active_semantic_lineage = set(self._active_semantic_lineage_ids())
+        if (
+            agent_id in terminal_unreachable_ids
+            and active_semantic_lineage
+            and agent_id not in active_semantic_lineage
+        ):
+            # Replacement takeover is already complete: a current, verified
+            # Reasoner→Verifier→Formatter lineage owns the semantic artifact
+            # and Output identity.  A disconnected duplicate cannot contribute
+            # to terminal lineage and may now be removed without transferring
+            # its obsolete edges into the active chain.
+            return None
         downstream_ids = set(self._directed_successors(self._graph, agent_id))
         protected_reasons: list[str] = []
         if self._has_successful_artifact(agent_id):

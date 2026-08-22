@@ -214,11 +214,11 @@ def validate_agent_graph_config(value: Mapping[str, Any]) -> None:
     if hotpot_semantic_protocol == "hotpotqa_verified_answer_slot_v1":
         if (
             value["experiment"].get("prompt_version")
-            != "agentgraph.director.hotpotqa-semantic-recovery.v15"
+            != "agentgraph.director.hotpotqa-semantic-recovery.v16"
         ):
             raise ConfigurationError(
                 "HotpotQA verified answer-slot protocol requires the exact "
-                "HotpotQA Director v15 observation contract"
+                "HotpotQA Director v16 observation contract"
             )
         if recovery_policy != "preserve_diagnose_repair_augment":
             raise ConfigurationError(

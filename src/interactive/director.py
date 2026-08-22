@@ -58,6 +58,9 @@ DIRECTOR_PROMPT_VERSION = "agentgraph.director.minimal-neutral.v10"
 LEGACY_DIRECTOR_PROMPT_VERSION_V9 = "agentgraph.director.minimal-neutral.v9"
 LEGACY_DIRECTOR_PROMPT_VERSION_V8 = "agentgraph.director.minimal-neutral.v8"
 HOTPOTQA_DIRECTOR_PROMPT_VERSION = (
+    "agentgraph.director.hotpotqa-semantic-recovery.v16"
+)
+LEGACY_HOTPOTQA_DIRECTOR_PROMPT_VERSION_V15 = (
     "agentgraph.director.hotpotqa-semantic-recovery.v15"
 )
 LEGACY_HOTPOTQA_DIRECTOR_PROMPT_VERSION_V14 = (
@@ -152,6 +155,15 @@ HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V15 = HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V14.replac
     1,
 )
 
+HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V16 = HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V15.replace(
+    "Do not delete an Agent merely because it failed.",
+    "Do not delete an Agent merely because it failed. When recovery_state reports "
+    "an active_semantic_lineage and redundant_after_replacement_takeover_agent_ids, "
+    "replacement takeover is complete: remove only those reported disconnected "
+    "duplicates and preserve the active lineage.",
+    1,
+)
+
 
 def director_system_prompt_for_version(prompt_version: str) -> str:
     """Resolve one explicitly versioned Director policy without changing v10."""
@@ -172,7 +184,10 @@ def director_system_prompt_for_version(prompt_version: str) -> str:
         "agentgraph.director.skillflow_continuation_v8": (
             LEGACY_DIRECTOR_SYSTEM_PROMPT_V8
         ),
-        HOTPOTQA_DIRECTOR_PROMPT_VERSION: HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V15,
+        HOTPOTQA_DIRECTOR_PROMPT_VERSION: HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V16,
+        LEGACY_HOTPOTQA_DIRECTOR_PROMPT_VERSION_V15: (
+            HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V15
+        ),
         LEGACY_HOTPOTQA_DIRECTOR_PROMPT_VERSION_V14: (
             HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V14
         ),
@@ -201,6 +216,7 @@ _SUPPORTED_DIRECTOR_SYSTEM_PROMPTS = frozenset(
         HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V13,
         HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V14,
         HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V15,
+        HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V16,
         LEGACY_DIRECTOR_SYSTEM_PROMPT_V9,
         LEGACY_DIRECTOR_SYSTEM_PROMPT_V8,
     }
@@ -1196,6 +1212,7 @@ __all__ = [
     "HOTPOTQA_DIRECTOR_PROMPT_VERSION",
     "HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V14",
     "HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V15",
+    "HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V16",
     "HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V11",
     "HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V13",
     "HOTPOTQA_SEMANTIC_PROTOCOL",

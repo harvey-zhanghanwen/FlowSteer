@@ -2320,6 +2320,144 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(env.graph.has_node("redundant"))
         self.assertTrue(env.graph.has_node("out"))
 
+    async def test_hotpot_recovery_allows_disconnected_duplicate_after_verified_takeover(
+        self,
+    ) -> None:
+        graph = _hotpot_semantic_graph()
+        graph.add_agent(
+            AgentNode(
+                "duplicate_reasoner",
+                "balanced",
+                "superseded semantic candidate",
+                role_family="reasoner",
+                artifact_type="semantic_candidate",
+            )
+        )
+        graph.add_agent(
+            AgentNode(
+                "duplicate_verifier",
+                "balanced",
+                "superseded verification",
+                role_family="verifier",
+                artifact_type="verified_semantic_answer",
+            )
+        )
+        graph.add_agent(
+            AgentNode(
+                "duplicate_formatter",
+                "fast",
+                "superseded wrapper",
+                role_family="format",
+                artifact_type="answer_wrapper",
+            )
+        )
+        graph.set_relation("duplicate_reasoner", "duplicate_verifier", True, False)
+        graph.set_relation("duplicate_verifier", "duplicate_formatter", True, False)
+        env = AgentWorkflowEnv(
+            make_registry(),
+            _ImmediateGateway(),
+            graph=graph,
+            problem="What is the capital of France?",
+            semantic_protocol="hotpotqa_verified_answer_slot_v1",
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id="qa-retrieval",
+        )
+        reasoner_artifact = json.dumps(
+            {
+                "question_scope": "What is the capital of France?",
+                "answer_slot": {
+                    "entity": "France",
+                    "relation": "capital",
+                    "answer_type": "short_answer",
+                    "qualifiers": [],
+                    "proposition_index": 0,
+                    "answer_field": "object_or_attribute_value",
+                },
+                "evidence_propositions": [
+                    {
+                        "subject": "France",
+                        "relation": "capital",
+                        "object_or_attribute_value": "Paris",
+                        "qualifiers": [],
+                        "evidence_span": "Paris is the capital of France.",
+                    },
+                    {
+                        "subject": "France",
+                        "relation": "located in",
+                        "object_or_attribute_value": "Europe",
+                        "qualifiers": [],
+                        "evidence_span": "France is a country in Europe.",
+                    },
+                ],
+                "multi_hop_chain": ["France", "capital", "Paris"],
+                "candidate_answer": "Paris",
+                "evidence": ["Paris is the capital of France."],
+            }
+        )
+        verifier_artifact = (
+            "Candidate answer: Paris\n"
+            "Evidence supported: true\n"
+            "Entity attribute binding correct: true\n"
+            "Multi-hop complete: true\n"
+            "Scope preserved: true\n"
+            "Verification status: supported"
+        )
+        env._progressive_outputs.update(
+            {
+                "reader": "retrieved evidence",
+                "reasoner": reasoner_artifact,
+                "verifier": verifier_artifact,
+                "formatter": "<answer>Paris</answer>",
+                "duplicate_reasoner": "superseded candidate",
+                "duplicate_verifier": "superseded verification",
+                "duplicate_formatter": "<answer>Paris</answer>",
+            }
+        )
+        env._progressive_output_metadata["reader"] = {
+            "tool_receipts": [
+                {
+                    "tool_id": "qa-retrieval",
+                    "request": {
+                        "action": "read",
+                        "arguments": {"passage_id": "p1"},
+                    },
+                    "result": {
+                        "value": {
+                            "operation": "read",
+                            "passage": {
+                                "id": "p1",
+                                "text": (
+                                    "Paris is the capital of France. "
+                                    "France is a country in Europe."
+                                ),
+                            },
+                        },
+                        "completed": True,
+                    },
+                    "error_type": None,
+                }
+            ]
+        }
+
+        state = env.recovery_state()
+        self.assertEqual(
+            ["reasoner", "verifier", "formatter"],
+            state["active_semantic_lineage_agent_ids"],
+        )
+        self.assertIn(
+            "duplicate_reasoner",
+            state["redundant_after_replacement_takeover_agent_ids"],
+        )
+        self.assertEqual("delete_agent", state["preferred_actions"][0])
+
+        deleted = await env.step(
+            '{"action":"delete_agent","agent_id":"duplicate_reasoner"}'
+        )
+
+        self.assertTrue(deleted.accepted)
+        self.assertFalse(env.graph.has_node("duplicate_reasoner"))
+        self.assertTrue(env.graph.has_node("reasoner"))
+
     async def test_recovery_policy_keeps_successful_reachable_lineage(self) -> None:
         registry = make_registry()
         graph = AgentGraph(
