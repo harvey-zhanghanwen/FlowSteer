@@ -384,7 +384,7 @@ class AgentWorkflowEnv:
         self._react_exhausted_agent_ids: set[str] = set()
         self._repair_exhausted_agent_ids: set[str] = set()
         self._latest_failure_record_by_agent: dict[str, AgentFailureRecord] = {}
-        self._pending_repair_baseline_by_agent: dict[str, tuple[int, int]] = {}
+        self._pending_repair_receipt_count_by_agent: dict[str, int] = {}
         # Runtime-only SkillFlow continuation state.  Canvas snapshots do not
         # serialize Runtime results, but an in-process repair turn must retain
         # the failed Agent's public Action--Observation history and Tool
@@ -656,14 +656,52 @@ class AgentWorkflowEnv:
                 "artifact type, completion condition, and relations"
             )
         if action.model_id not in admitted_model_ids:
-            failed_provider_id = self.model_registry.provider_for(
-                self._graph.get_node(action.agent_id).model_id
-            ).provider_id
+            failed_provider_id = self._provider_repair_avoid_provider_id(
+                action.agent_id
+            )
             return (
                 "provider repair model_id must come from the live admitted "
-                "different-provider domain when available; "
+                "domain; "
                 f"avoid_provider_id={failed_provider_id!r}, "
                 f"admitted_model_ids={list(admitted_model_ids)!r}"
+            )
+        return None
+
+    def _react_repair_admission_issue(
+        self,
+        action: AgentAction,
+    ) -> Optional[str]:
+        """Keep authoritative ReAct repair equal to the live action domain."""
+
+        if (
+            action.action_type is not AgentActionType.MODIFY_AGENT
+            or action.agent_id is None
+            or action.agent_id not in self._mandatory_repair_agent_ids()
+            or action.agent_id not in self._react_exhausted_agent_ids
+            or self._provider_repair_model_ids(action.agent_id)
+        ):
+            return None
+        mutable_fields = tuple(
+            field_name
+            for field_name in (
+                "model_id",
+                "contract",
+                "role_family",
+                "allowed_tools",
+                "execution_mode",
+                "artifact_type",
+                "completion_condition",
+            )
+            if getattr(action, field_name) is not None
+        )
+        if (
+            len(mutable_fields) != 1
+            or mutable_fields[0] not in {"contract", "completion_condition"}
+        ):
+            return (
+                "a measured ReAct repair must modify exactly one of contract "
+                "or completion_condition while preserving the Agent model, "
+                "role, tools, execution mode, artifact type, and relations"
             )
         return None
 
@@ -746,6 +784,28 @@ class AgentWorkflowEnv:
                 admitted.append(role_family)
         return tuple(admitted)
 
+    def _provider_repair_catalog_domain(
+        self,
+        current_model_id: str,
+    ) -> Tuple[str, ...]:
+        """Return cross-provider arms, or same-provider fallback if necessary."""
+
+        current_provider_id = self.model_registry.provider_for(
+            current_model_id
+        ).provider_id
+        alternatives = tuple(
+            model_id
+            for model_id in self.model_registry.model_ids
+            if model_id != current_model_id
+        )
+        cross_provider = tuple(
+            model_id
+            for model_id in alternatives
+            if self.model_registry.provider_for(model_id).provider_id
+            != current_provider_id
+        )
+        return cross_provider or alternatives
+
     def _provider_repair_model_ids(self, agent_id: str) -> Tuple[str, ...]:
         """Return the typed provider-failure model repair domain.
 
@@ -766,21 +826,28 @@ class AgentWorkflowEnv:
         ):
             return ()
         current_model_id = self._graph.get_node(agent_id).model_id
+        return self._provider_repair_catalog_domain(current_model_id)
+
+    def _provider_repair_avoid_provider_id(
+        self,
+        agent_id: str,
+    ) -> Optional[str]:
+        """Return the failed provider only when a cross-provider arm exists."""
+
+        if not self._graph.has_node(agent_id):
+            return None
+        current_model_id = self._graph.get_node(agent_id).model_id
         current_provider_id = self.model_registry.provider_for(
             current_model_id
         ).provider_id
-        alternatives = tuple(
-            model_id
-            for model_id in self.model_registry.model_ids
-            if model_id != current_model_id
-        )
-        cross_provider = tuple(
-            model_id
-            for model_id in alternatives
-            if self.model_registry.provider_for(model_id).provider_id
+        admitted_model_ids = self._provider_repair_model_ids(agent_id)
+        if any(
+            self.model_registry.provider_for(model_id).provider_id
             != current_provider_id
-        )
-        return cross_provider or alternatives
+            for model_id in admitted_model_ids
+        ):
+            return current_provider_id
+        return None
 
     def model_admissible_action_targets(self) -> dict[str, object]:
         """Project exact current Canvas target domains for constrained sampling.
@@ -972,12 +1039,17 @@ class AgentWorkflowEnv:
                             else {}
                         ),
                         **(
-                            {
-                                "avoid_provider_id": self.model_registry.provider_for(
-                                    self._graph.get_node(agent_id).model_id
-                                ).provider_id
-                            }
-                            if agent_id in provider_failure_agent_ids
+                            {"avoid_provider_id": avoid_provider_id}
+                            if (
+                                agent_id in provider_failure_agent_ids
+                                and (
+                                    avoid_provider_id
+                                    := self._provider_repair_avoid_provider_id(
+                                        agent_id
+                                    )
+                                )
+                                is not None
+                            )
                             else {}
                         ),
                     }
@@ -1324,6 +1396,9 @@ class AgentWorkflowEnv:
         self._graph = candidate
         current_agent_ids = {node.id for node in self._graph.nodes}
         self._retain_current_failure_state(current_agent_ids)
+        # One accepted edit is one FlowSteer execute-and-feedback boundary.
+        # A repair baseline must never leak into a later unrelated edit.
+        self._pending_repair_receipt_count_by_agent.clear()
         if (
             action.action_type is AgentActionType.MODIFY_AGENT
             and action.agent_id is not None
@@ -1332,12 +1407,12 @@ class AgentWorkflowEnv:
             # Clear that diagnosis once its admitted repair is committed, but
             # retain SkillFlow's public Action--Observation continuation until
             # the repaired Agent executes so successful reads are not repeated.
-            if action.agent_id in self._failed_agent_ids:
+            if action.agent_id in self._react_exhausted_agent_ids:
                 continuation = self._failure_continuations.get(action.agent_id)
                 if continuation is not None:
-                    self._pending_repair_baseline_by_agent[action.agent_id] = (
-                        self._failure_continuation_weight(continuation)
-                    )
+                    self._pending_repair_receipt_count_by_agent[
+                        action.agent_id
+                    ] = self._failure_continuation_weight(continuation)[0]
             self._failed_agent_ids.discard(action.agent_id)
             self._diagnosed_unusable_agent_ids.discard(action.agent_id)
             self._react_exhausted_agent_ids.discard(action.agent_id)
@@ -1926,9 +2001,11 @@ class AgentWorkflowEnv:
             for agent_id, record in self._latest_failure_record_by_agent.items()
             if agent_id in current_agent_ids
         }
-        self._pending_repair_baseline_by_agent = {
-            agent_id: baseline
-            for agent_id, baseline in self._pending_repair_baseline_by_agent.items()
+        self._pending_repair_receipt_count_by_agent = {
+            agent_id: receipt_count
+            for agent_id, receipt_count in (
+                self._pending_repair_receipt_count_by_agent.items()
+            )
             if agent_id in current_agent_ids
         }
         self._failure_continuations = {
@@ -1962,8 +2039,8 @@ class AgentWorkflowEnv:
         trace = metadata.get("react_trace", ())
         receipts = metadata.get("tool_receipts", ())
         return (
-            len(trace) if isinstance(trace, (list, tuple)) else 0,
             len(receipts) if isinstance(receipts, (list, tuple)) else 0,
+            len(trace) if isinstance(trace, (list, tuple)) else 0,
         )
 
     def _mark_agents_recovered(self, agent_ids: Collection[str]) -> None:
@@ -1977,7 +2054,7 @@ class AgentWorkflowEnv:
         for agent_id in recovered:
             self._failure_continuations.pop(agent_id, None)
             self._latest_failure_record_by_agent.pop(agent_id, None)
-            self._pending_repair_baseline_by_agent.pop(agent_id, None)
+            self._pending_repair_receipt_count_by_agent.pop(agent_id, None)
 
     def _record_failure_state(
         self,
@@ -2011,16 +2088,36 @@ class AgentWorkflowEnv:
             else:
                 self._diagnosed_unusable_agent_ids.discard(record.agent_id)
             continuation = self._failure_continuation_candidate(record)
-            baseline = self._pending_repair_baseline_by_agent.pop(
+            current_continuation = self._failure_continuations.get(
+                record.agent_id
+            )
+            current_receipt_count = (
+                0
+                if current_continuation is None
+                else self._failure_continuation_weight(current_continuation)[0]
+            )
+            baseline_receipt_count = self._pending_repair_receipt_count_by_agent.pop(
                 record.agent_id,
                 None,
             )
+            new_receipt_count = (
+                current_receipt_count
+                if continuation is None
+                else self._failure_continuation_weight(continuation)[0]
+            )
             if (
                 category == "react_turn_exhaustion"
-                and baseline is not None
                 and record.metadata.get("tool_plan_exhausted") is True
-                and continuation is not None
-                and self._failure_continuation_weight(continuation) <= baseline
+                and (
+                    (
+                        baseline_receipt_count is not None
+                        and new_receipt_count <= baseline_receipt_count
+                    )
+                    or (
+                        record.agent_id in self._repair_exhausted_agent_ids
+                        and new_receipt_count <= current_receipt_count
+                    )
+                )
             ):
                 self._repair_exhausted_agent_ids.add(record.agent_id)
             else:
@@ -2041,7 +2138,7 @@ class AgentWorkflowEnv:
         self._repair_exhausted_agent_ids.clear()
         self._failure_continuations.clear()
         self._latest_failure_record_by_agent.clear()
-        self._pending_repair_baseline_by_agent.clear()
+        self._pending_repair_receipt_count_by_agent.clear()
 
     def _invalidate_progressive_outputs(
         self,
@@ -3430,7 +3527,9 @@ class AgentWorkflowEnv:
             "policy": self.recovery_policy,
             "strategy": "preserve -> diagnose -> repair -> augment",
             "phase": (
-                "diagnose_repair"
+                "augment"
+                if repair_exhausted
+                else "diagnose_repair"
                 if (
                     self._unresolved_dirty_agents
                     or self._failed_agent_ids
@@ -3456,7 +3555,9 @@ class AgentWorkflowEnv:
             "deletable_agent_ids": list(deletable),
             "deletion_protected": protected,
             "preferred_actions": (
-                ["delete_agent", "set_relation", "modify_agent"]
+                ["add_subgraph", "set_relation", "modify_agent"]
+                if repair_exhausted
+                else ["delete_agent", "set_relation", "modify_agent"]
                 if deletable
                 else ["modify_agent", "set_relation", "add_subgraph"]
             ),
@@ -3677,6 +3778,9 @@ class AgentWorkflowEnv:
         provider_repair_issue = self._provider_repair_admission_issue(action)
         if provider_repair_issue is not None:
             return provider_repair_issue
+        react_repair_issue = self._react_repair_admission_issue(action)
+        if react_repair_issue is not None:
+            return react_repair_issue
         if action.action_type is AgentActionType.ADD_SUBGRAPH:
             admitted_roles = set(self._admissible_augmentation_role_families())
             sampled_roles = [
@@ -3925,11 +4029,28 @@ class AgentWorkflowEnv:
                     ],
                 }
             elif category == "provider_request_failure" and model_id is not None:
+                admitted_model_ids = self._provider_repair_catalog_domain(
+                    model_id
+                )
+                avoid_provider_id = (
+                    provider_id
+                    if any(
+                        self.model_registry.provider_for(candidate_model_id).provider_id
+                        != provider_id
+                        for candidate_model_id in admitted_model_ids
+                    )
+                    else None
+                )
                 item["preferred_repair"] = {
                     "action": "modify_agent",
                     "agent_id": record.agent_id,
                     "field": "model_id",
-                    "avoid_provider_id": provider_id,
+                    "admitted_model_ids": list(admitted_model_ids),
+                    **(
+                        {"avoid_provider_id": avoid_provider_id}
+                        if avoid_provider_id is not None
+                        else {"fallback_provider_id": provider_id}
+                    ),
                     "preserve_fields": [
                         "contract",
                         "role_family",
@@ -3944,20 +4065,43 @@ class AgentWorkflowEnv:
                 item["react_public_error_summary"] = (
                     self._react_public_error_summary(record)
                 )
-                item["preferred_repair"] = {
-                    "action": "modify_agent",
-                    "agent_id": record.agent_id,
-                    "field": "contract",
-                    "optional_field": "completion_condition",
-                    "preserve_fields": [
-                        "model_id",
-                        "role_family",
-                        "allowed_tools",
-                        "execution_mode",
-                        "artifact_type",
-                        "relations",
-                    ],
-                }
+                if record.agent_id in self._repair_exhausted_agent_ids:
+                    item["preferred_repair"] = {
+                        "action_order": [
+                            "add_subgraph",
+                            "set_relation",
+                            "modify_agent",
+                        ],
+                        "admitted_role_families": [
+                            role_family
+                            for role_family in ("evidence_retriever", "repair")
+                            if role_family
+                            in self._admissible_augmentation_role_families()
+                        ],
+                        "preserve_agent_id": record.agent_id,
+                        "preserve_fields": [
+                            "existing_tool_receipts",
+                            "react_trace",
+                            "valid_evidence",
+                            "semantic_answer",
+                            "relations",
+                        ],
+                    }
+                else:
+                    item["preferred_repair"] = {
+                        "action": "modify_agent",
+                        "agent_id": record.agent_id,
+                        "field": "contract",
+                        "optional_field": "completion_condition",
+                        "preserve_fields": [
+                            "model_id",
+                            "role_family",
+                            "allowed_tools",
+                            "execution_mode",
+                            "artifact_type",
+                            "relations",
+                        ],
+                    }
             failed_agents.append(item)
         payload = json.dumps(
             {

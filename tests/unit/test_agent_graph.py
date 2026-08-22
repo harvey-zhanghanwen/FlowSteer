@@ -784,6 +784,7 @@ def _react_exhaustion_record(
     request_id: str,
     receipts: tuple[dict[str, object], ...] = (),
     tool_plan_exhausted: bool = True,
+    trace_length: int = 1,
 ) -> AgentFailureRecord:
     return AgentFailureRecord(
         request_id=request_id,
@@ -795,10 +796,11 @@ def _react_exhaustion_record(
         metadata={
             "react_trace": [
                 {
-                    "turn": 8,
+                    "turn": turn,
                     "observation_status": "schema_invalid",
                     "public_error_code": "completion_schema_invalid",
                 }
+                for turn in range(1, trace_length + 1)
             ],
             "tool_receipts": list(receipts),
             "tool_plan_exhausted": tool_plan_exhausted,
@@ -1846,7 +1848,11 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("fake", attributed["provider_id"])
         self.assertEqual("provider_request_failure", attributed["failure_category"])
         self.assertEqual("modify_agent", attributed["preferred_repair"]["action"])
-        self.assertEqual("fake", attributed["preferred_repair"]["avoid_provider_id"])
+        self.assertNotIn("avoid_provider_id", attributed["preferred_repair"])
+        self.assertEqual(
+            "fake",
+            attributed["preferred_repair"]["fallback_provider_id"],
+        )
 
     async def test_hotpot_transient_provider_repair_is_cross_provider_model_only(
         self,
@@ -1886,6 +1892,7 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             ["alternate", "fast"],
             candidate["discrete_value_domains"]["model_id"],
         )
+        self.assertEqual("provider-a", candidate["avoid_provider_id"])
 
         revision = env.revision
         request_count = len(gateway.requests)
@@ -1973,6 +1980,7 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             ["cheap", "fast"],
             fallback_candidate["discrete_value_domains"]["model_id"],
         )
+        self.assertNotIn("avoid_provider_id", fallback_candidate)
 
     async def test_react_exhaustion_feedback_preserves_compact_public_diagnosis(
         self,
@@ -2153,6 +2161,29 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             targets["modify_agent"]["responsible_agent_ids"],
         )
         self.assertEqual(("modify_agent",), env.model_admissible_action_types())
+
+        revision = env.revision
+        for invalid_repair in (
+            {
+                "action": "modify_agent",
+                "agent_id": "reasoner",
+                "model_id": "fast",
+            },
+            {
+                "action": "modify_agent",
+                "agent_id": "reasoner",
+                "artifact_type": "changed artifact",
+            },
+            {
+                "action": "modify_agent",
+                "agent_id": "reasoner",
+                "contract": "repair contract",
+                "completion_condition": "repair completion",
+            },
+        ):
+            rejected = await env.step(json.dumps(invalid_repair))
+            self.assertFalse(rejected.accepted)
+            self.assertEqual(revision, env.revision)
         self.assertNotIn("add_subgraph", targets)
         self.assertEqual(
             ["reasoner"],
@@ -2253,6 +2284,9 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
                     env.graph,
                     request_id="react-after-repair",
                     receipts=(receipt,),
+                    # Repeated model turns without a new Tool receipt are not
+                    # retrieval progress and must open augmentation.
+                    trace_length=3,
                 ),
             ),
             current_agent_ids={node.id for node in env.graph.nodes},
@@ -2261,6 +2295,8 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         recovery = env.recovery_state()
         self.assertEqual(["reasoner"], recovery["repair_exhausted_agent_ids"])
         self.assertEqual([], recovery["mandatory_repair_agent_ids"])
+        self.assertEqual("augment", recovery["phase"])
+        self.assertEqual("add_subgraph", recovery["preferred_actions"][0])
         self.assertNotEqual(("modify_agent",), env.model_admissible_action_types())
         add_domain = env.model_admissible_action_targets()["add_subgraph"]
         self.assertIn(
@@ -2284,6 +2320,23 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         continuation = env._failure_continuations["reasoner"]
         self.assertEqual("single", continuation["execution_phase"])
         self.assertEqual(1, len(continuation["tool_receipts"]))
+
+        # A later same-diagnosis failure during augmentation must not reopen
+        # the already exhausted mandatory MODIFY loop.
+        env._record_failure_state(
+            (
+                _react_exhaustion_record(
+                    env.graph,
+                    request_id="react-during-augmentation",
+                    receipts=(receipt,),
+                    trace_length=4,
+                ),
+            ),
+            current_agent_ids={node.id for node in env.graph.nodes},
+        )
+        recovery = env.recovery_state()
+        self.assertEqual(["reasoner"], recovery["repair_exhausted_agent_ids"])
+        self.assertEqual([], recovery["mandatory_repair_agent_ids"])
 
     async def test_hotpot_react_repair_is_not_exhausted_when_receipts_grow(
         self,

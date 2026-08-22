@@ -200,6 +200,10 @@ class ConfigLoaderTests(unittest.TestCase):
             config["experiment"]["prompt_version"],
             "agentgraph.director.hotpotqa-semantic-recovery.v22",
         )
+        self.assertEqual(
+            config["experiment"]["tool_version"],
+            "skillflow.qa-retrieval.multihop-semantic-repair.v15",
+        )
         self.assertEqual(config["director"]["action_decoding"], "json_schema")
         self.assertEqual(
             config["director"]["sampling_action_profile"],
