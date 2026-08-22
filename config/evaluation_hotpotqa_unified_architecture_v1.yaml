@@ -93,7 +93,11 @@ director:
   dtype: "bfloat16"
   max_context_tokens: 32768
   max_action_tokens: 1024
-  action_decoding: "json_schema"
+  # Match the completed v4 FlowSteer boundary: Qwen emits one action and the
+  # unchanged strict AgentActionParser validates it. SGLang 0.5.15's flat
+  # multi-action JSON schema merges mutually exclusive action fields and is
+  # therefore not used for this condition.
+  action_decoding: "unconstrained"
   action_schema_version: "agentgraph.canvas-action-json-schema.v1"
   sampling_schema_version: "agentgraph.sglang-flat-action-sampling-schema.v1"
   temperature: 1.0

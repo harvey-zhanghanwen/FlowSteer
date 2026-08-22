@@ -167,6 +167,9 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
             model_registry,
             gateway=FakeGateway(),
             problem="Which player won more titles?",
+            semantic_protocol=HOTPOTQA_SEMANTIC_PROTOCOL,
+            recovery_policy=PRESERVE_DIAGNOSE_REPAIR_AUGMENT_POLICY,
+            required_evidence_tool_id="qa-retrieval",
         )
         orchestrator = AgentGraphOrchestrator(
             model_registry,
@@ -185,6 +188,10 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             PRESERVE_DIAGNOSE_REPAIR_AUGMENT_POLICY,
             state["recovery_policy"],
+        )
+        self.assertEqual(
+            "qa-retrieval",
+            state["terminal_constraints"]["required_evidence_tool_id"],
         )
         self.assertIn("answer slot actually requested", messages[0]["content"])
         self.assertIn("Reasoner alone determines", messages[0]["content"])
