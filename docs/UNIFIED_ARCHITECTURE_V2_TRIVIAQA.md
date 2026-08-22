@@ -39,7 +39,7 @@ with HTTP 403; no existing branch was overwritten.
 
 ### Verified without a live model
 
-- The complete unit suite passes: 769 tests passed across AgentGraph, Runtime,
+- The complete unit suite passes: 771 tests passed across AgentGraph, Runtime,
   Tool adapter, gateway prompts, Director action domains, configuration,
   records, collector, evaluator and reporting.  The only warning is the
   existing Pydantic class-config deprecation in `scripts/formatter.py`.
@@ -209,13 +209,53 @@ reuses existing Direct records.
 - The last-valid-lineage fallback intentionally remains a terminal failure and
   is excluded from training, even when its evaluator answer is correct.
 
+### r6 live evidence and r7 recovery repair
+
+The r6 two-task canary collected both tasks without collection failure but
+failed Stable Zero at `1/2` explicit terminal lineages.  `triviaqa:tc_1`
+completed in seven Canvas turns with answer `Sinclair Lewis` and EM/F1 `1/1`.
+`triviaqa:tc_3` reached `max_rounds`, had no valid evidence lineage and
+therefore correctly retained `final_answer=null`; it was not replaced by an
+unsupported historical guess.  Provider HTTP 403 failures were all repaired
+by model-only cross-provider edits, so provider recovery was not the remaining
+cause.
+
+The lossless r6 trajectory identified a state-conditioned action-domain defect.
+After one auxiliary Retriever supplied any successful read receipt, direct
+upstream provenance reopened `complete` after every evidence rejection.  The
+Reasoner consequently emitted 284 invalid semantic actions but made only two
+own searches and reads.  Existing read receipts did not contain the requested
+birthplace relation.  Read-only queries against the same frozen Atlas DPR index
+located public passages supporting the answer-bearing chain
+`Dame Judi Dench -> born in -> Heworth -> part of the city of -> York`.
+Accordingly this run is classified as retrieval recall/recovery failure, not
+`knowledge_base_coverage_failure`; neither accepted answers nor evaluator data
+were used by retrieval or generation.
+
+Recovery revision r7 keeps the same Canvas and Runtime.  A direct upstream read
+may admit the Reasoner's first completion, but an evidence/provenance rejection
+against that state revokes completion until the Reasoner obtains a new
+successful read through the public search/read continuation.  Duplicate
+normalized-query feedback now explicitly requires a semantically distinct
+entity-and-relation query while preserving Tool receipts.  When Runtime has a
+typed failed Agent, execution-stage failure attribution now targets that Agent
+instead of defaulting to the Formatter.  The provenance validator, evaluator,
+accepted-answer boundary and terminal fallback gate are unchanged.
+
+FlowSteer treats an accepted Canvas repair as a new execute-on-edit boundary.
+Each ReAct call remains bounded by `max_turns_per_agent_call`; public
+Action--Observation history and Tool receipts are retained across the repaired
+revision as a project adaptation.  The aggregate r6 trace therefore contains
+multiple bounded calls, not one unbounded SkillFlow invocation.
+
 ### Stable Zero status
 
-Static architecture, 769 unit tests and both frozen data-selection
+Static architecture, 771 unit tests and both frozen data-selection
 preconditions are complete.  The initial, r2, r3 and r4 canaries failed for
 the documented causes; r5 **passed Stable Zero** but its incomplete fixed-128
 run was stopped after measured recovery defects appeared.  Recovery revision
-r6 is **pending live Stable Zero and targeted regression**.  Formal fixed-128
+r6 failed Stable Zero for the documented retrieval-recovery defect.  Recovery
+revision r7 is **pending live Stable Zero and targeted regression**.  Formal fixed-128
 v2 EM/F1 remain pending.  No score is inferred from unit tests, a two-task
 canary, an incomplete run, or the previous architecture.
 

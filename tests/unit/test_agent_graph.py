@@ -3315,6 +3315,21 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             "formatter",
             before_execution["failure_attribution"]["responsible_agent_id"],
         )
+        env._failed_agent_ids.add("reasoner")
+        failed_execution = env.finish_admissibility()
+        self.assertEqual(
+            "execution_contract_or_runtime_failure",
+            failed_execution["failure_attribution"]["responsible_constraint"],
+        )
+        self.assertEqual(
+            "reasoner",
+            failed_execution["failure_attribution"]["responsible_agent_id"],
+        )
+        self.assertEqual(
+            ["reasoner"],
+            failed_execution["failure_attribution"]["responsible_agent_ids"],
+        )
+        env._failed_agent_ids.clear()
         executed = await env.step(
             '{"action":"modify_agent","agent_id":"reader",'
             '"contract":"read explicit database evidence"}'

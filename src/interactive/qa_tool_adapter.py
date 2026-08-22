@@ -590,6 +590,14 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         )
         for observation in visible:
             public_error_code = observation.get("public_error_code")
+            if public_error_code == "qa_retrieval_duplicate_normalized_query":
+                observation["repair_instruction"] = (
+                    "Preserve all successful Tool receipts and issue a "
+                    "semantically distinct entity-and-relation query using the "
+                    "current retrieval strategy; do not repeat a prior query "
+                    "after Unicode normalization and case folding."
+                )
+                continue
             repair_kind = cls._semantic_rejection_kind(public_error_code)
             if repair_kind is not None:
                 observation["repair_instruction"] = (
@@ -816,8 +824,18 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         ) -> tuple[Optional[frozenset[tuple[str, str]]], bool]:
             # A direct Retriever predecessor may satisfy semantic provenance,
             # but its receipts remain outside this Reasoner's own Tool budget.
-            # Completion validation below still checks every cited span.
-            return tool_actions, completion or upstream_completion_admitted
+            # Completion validation below still checks every cited span.  Once
+            # that exact upstream evidence has produced an evidence/provenance
+            # rejection, preserve it but revoke completion until this Reasoner
+            # obtains a new successful read through the public SkillFlow
+            # Action--Observation continuation.  Otherwise one irrelevant
+            # predecessor read permanently masks the search/read recovery
+            # domain and causes repeated invalid completion actions.
+            upstream_can_complete = (
+                upstream_completion_admitted
+                and state.semantic_repair_kind not in {"evidence", "coverage"}
+            )
+            return tool_actions, completion or upstream_can_complete
 
         if self._unified_factual_protocol(request):
             tool_actions, completion = self._unified_factual_action_domain(state)

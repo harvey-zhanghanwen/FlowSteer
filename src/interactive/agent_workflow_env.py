@@ -2172,6 +2172,11 @@ class AgentWorkflowEnv:
                 )
             )
         )
+        graph_agent_ids = {node.id for node in self._graph.nodes}
+        failed_ids = tuple(
+            sorted(self._failed_agent_ids.intersection(graph_agent_ids))
+        )
+        responsible_agent_ids: tuple[str, ...] = unreachable_ids
         if unreachable_ids:
             target_id = unreachable_ids[0]
             role_family = (
@@ -2203,6 +2208,16 @@ class AgentWorkflowEnv:
                 role_family = None
                 responsible_constraint = "semantic_lineage_construction"
                 preferred_actions = ["add_subgraph", "set_relation", "set_output"]
+        elif stage == "execution" and failed_ids:
+            target_id = failed_ids[0]
+            role_family = (
+                self._graph.get_node(target_id).role_family
+                if self._graph.has_node(target_id)
+                else None
+            )
+            responsible_agent_ids = failed_ids
+            responsible_constraint = "execution_contract_or_runtime_failure"
+            preferred_actions = ["modify_agent", "add_subgraph", "set_relation"]
         elif stage == "execution" and formatter_id is not None:
             target_id, role_family = formatter_id, "format"
             responsible_constraint = "output_artifact"
@@ -2270,7 +2285,7 @@ class AgentWorkflowEnv:
         result: dict[str, object] = {
             "responsible_constraint": responsible_constraint,
             "responsible_role_family": role_family,
-            "responsible_agent_ids": list(unreachable_ids),
+            "responsible_agent_ids": list(responsible_agent_ids),
             "format_target_agent_ids": list(formatter_ids),
             "preserve_agent_ids": preserved,
             "preferred_action_order": preferred_actions,

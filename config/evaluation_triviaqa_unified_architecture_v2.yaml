@@ -7,15 +7,15 @@ experiment:
   name: "triviaqa_unified_architecture_v2"
   phase: "triviaqa_evaluation"
   baseline_id: "triviaqa_unified_architecture_v2"
-  step_id: "stable_zero_recovery_r6"
+  step_id: "stable_zero_recovery_r7"
   training_enabled: false
   seed: 20260817
-  condition_id: "triviaqa_unified_architecture_v2_recovery_r6"
-  sampling_schedule_purpose: "triviaqa_fixed_development_unified_architecture_v2_recovery_r6"
+  condition_id: "triviaqa_unified_architecture_v2_recovery_r7"
+  sampling_schedule_purpose: "triviaqa_fixed_development_unified_architecture_v2_recovery_r7"
   catalog_order_namespace: "unified_architecture_v2"
   prompt_version: "agentgraph.director.qa-semantic-recovery.v1"
   tool_version: "skillflow.qa-retrieval.factual-semantic-retry.v2"
-  output_dir: "artifacts/unified_architecture_v2/triviaqa_recovery_r6"
+  output_dir: "artifacts/unified_architecture_v2/triviaqa_recovery_r7"
 
 data:
   catalog_path: "config/joint_qa_partitions_v2.yaml"
@@ -48,7 +48,7 @@ triviaqa_evaluation:
 
 qa_tool_runtime:
   enabled: true
-  condition_id: "triviaqa_unified_architecture_v2_recovery_r6"
+  condition_id: "triviaqa_unified_architecture_v2_recovery_r7"
   mode: "model_driven_search_read"
   passage_source: "external_corpus"
   dataset_scope: ["triviaqa"]
@@ -63,17 +63,17 @@ qa_tool_runtime:
 
 storage:
   schema_version: "flowsteer.completion_benchmark.round.v1"
-  root: "artifacts/unified_architecture_v2/triviaqa_recovery_r6/evidence"
-  selected_tasks_path: "artifacts/unified_architecture_v2/triviaqa_recovery_r6/selected_tasks.jsonl"
-  direct_predictions_path: "artifacts/unified_architecture_v2/triviaqa_recovery_r6/direct_question_only_predictions.jsonl"
-  trajectories_path: "artifacts/unified_architecture_v2/triviaqa_recovery_r6/agentgraph_trajectories.jsonl"
-  failures_path: "artifacts/unified_architecture_v2/triviaqa_recovery_r6/collection_failures.jsonl"
-  paired_results_path: "artifacts/unified_architecture_v2/triviaqa_recovery_r6/paired_results.jsonl"
-  wrong_demos_path: "artifacts/unified_architecture_v2/triviaqa_recovery_r6/wrong_demos.jsonl"
-  manifest_path: "artifacts/unified_architecture_v2/triviaqa_recovery_r6/run_manifest.json"
-  preflight_receipt_path: "artifacts/unified_architecture_v2/triviaqa_recovery_r6/preflight_receipt.json"
-  report_json_path: "reports/unified_architecture_v2/triviaqa_recovery_r6_report.json"
-  report_markdown_path: "reports/unified_architecture_v2/triviaqa_recovery_r6_report.md"
+  root: "artifacts/unified_architecture_v2/triviaqa_recovery_r7/evidence"
+  selected_tasks_path: "artifacts/unified_architecture_v2/triviaqa_recovery_r7/selected_tasks.jsonl"
+  direct_predictions_path: "artifacts/unified_architecture_v2/triviaqa_recovery_r7/direct_question_only_predictions.jsonl"
+  trajectories_path: "artifacts/unified_architecture_v2/triviaqa_recovery_r7/agentgraph_trajectories.jsonl"
+  failures_path: "artifacts/unified_architecture_v2/triviaqa_recovery_r7/collection_failures.jsonl"
+  paired_results_path: "artifacts/unified_architecture_v2/triviaqa_recovery_r7/paired_results.jsonl"
+  wrong_demos_path: "artifacts/unified_architecture_v2/triviaqa_recovery_r7/wrong_demos.jsonl"
+  manifest_path: "artifacts/unified_architecture_v2/triviaqa_recovery_r7/run_manifest.json"
+  preflight_receipt_path: "artifacts/unified_architecture_v2/triviaqa_recovery_r7/preflight_receipt.json"
+  report_json_path: "reports/unified_architecture_v2/triviaqa_recovery_r7_report.json"
+  report_markdown_path: "reports/unified_architecture_v2/triviaqa_recovery_r7_report.md"
 
 director:
   base_model: "${QWEN35_9B_MODEL_PATH:-/home/test/SKILLEV/skillev-new-b2-temp/model/Qwen3.5-9B-modelscope}"

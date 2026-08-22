@@ -99,6 +99,27 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("repair_instruction", visible[0])
         self.assertIn("repair_instruction", visible[2])
 
+    async def test_duplicate_normalized_query_exposes_query_rewrite_feedback(
+        self,
+    ) -> None:
+        visible = QARetrievalReactExecutionAdapter._model_visible_observations(
+            [
+                {
+                    "observation_status": "schema_invalid",
+                    "public_error_code": (
+                        "qa_retrieval_duplicate_normalized_query"
+                    ),
+                }
+            ]
+        )
+
+        self.assertEqual(1, len(visible))
+        self.assertIn(
+            "semantically distinct entity-and-relation query",
+            visible[0]["repair_instruction"],
+        )
+        self.assertIn("do not repeat", visible[0]["repair_instruction"])
+
     async def test_search_receipt_preserves_frozen_identity_query_top_k_and_ids(self) -> None:
         index = FakeIndex()
         registry = build_qa_tool_registry(index)
@@ -764,6 +785,127 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             admitted_after_retry,
         )
         self.assertFalse(completion_after_retry)
+
+    def test_unified_factual_upstream_read_does_not_mask_evidence_recovery(
+        self,
+    ) -> None:
+        adapter = QARetrievalReactExecutionAdapter(
+            gateway=SimpleNamespace(generate=lambda request: None),
+            tool_registry=build_qa_tool_registry(FakeIndex()),
+            max_turns=8,
+            max_tool_calls=10,
+            task_type="factual_qa",
+            completion_policy="required_evidence",
+        )
+        upstream_read_receipt = {
+            "tool_id": QA_RETRIEVAL_TOOL_ID,
+            "request": {
+                "action": "read",
+                "arguments": {"passage_id": "upstream-p1"},
+            },
+            "result": {
+                "value": {
+                    "operation": "read",
+                    "passage": {
+                        "passage_id": "upstream-p1",
+                        "text": "This passage discusses a different entity.",
+                    },
+                }
+            },
+            "error_type": None,
+        }
+        request = AgentRequest(
+            request_id="trivia:upstream-recovery",
+            run_id="trivia",
+            graph_revision=2,
+            problem="Where was the actor born?",
+            agent=AgentNode(
+                "reasoner",
+                "model",
+                "bind retrieved evidence to the requested relation",
+                role_family="reasoner",
+                allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                execution_mode="react",
+            ),
+            model=ModelSpec("model", "provider"),
+            provider=ProviderSpec("provider", kind="test"),
+            phase=ExecutionPhase.SINGLE,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            upstream=(
+                UpstreamMessage(
+                    "retriever",
+                    "reasoner",
+                    "retrieved upstream-p1",
+                    graph_revision=2,
+                    artifact_type="retrieval_evidence",
+                    tool_receipts=(upstream_read_receipt,),
+                ),
+            ),
+        )
+
+        initial_actions, initial_completion = (
+            adapter._state_conditioned_action_domain(request, [])
+        )
+        self.assertEqual(
+            frozenset({(QA_RETRIEVAL_TOOL_ID, "search")}),
+            initial_actions,
+        )
+        self.assertTrue(initial_completion)
+
+        rejection = {
+            "observation_status": "schema_invalid",
+            "public_error_code": (
+                "qa_semantic_evidence_provenance_invalid: target relation absent"
+            ),
+        }
+        recovery_actions, recovery_completion = (
+            adapter._state_conditioned_action_domain(request, [rejection])
+        )
+        self.assertEqual(
+            frozenset({(QA_RETRIEVAL_TOOL_ID, "search")}),
+            recovery_actions,
+        )
+        self.assertFalse(recovery_completion)
+
+        own_search = {
+            "observation_status": "success",
+            "executed_action": {
+                "kind": "tool",
+                "name": "search",
+                "resource_id": QA_RETRIEVAL_TOOL_ID,
+                "skill_id": None,
+                "arguments": {"query": "actor birthplace", "limit": 5},
+            },
+            "result": {
+                "operation": "search",
+                "query": "actor birthplace",
+                "top_k": 5,
+                "passage_ids": ["own-p1"],
+            },
+        }
+        own_read = {
+            "observation_status": "success",
+            "executed_action": {
+                "kind": "tool",
+                "name": "read",
+                "resource_id": QA_RETRIEVAL_TOOL_ID,
+                "skill_id": None,
+                "arguments": {"passage_id": "own-p1"},
+            },
+            "result": {
+                "operation": "read",
+                "passage_id": "own-p1",
+                "passage": {"text": "The actor was born in the city."},
+            },
+        }
+        final_actions, final_completion = (
+            adapter._state_conditioned_action_domain(
+                request,
+                [rejection, own_search, own_read],
+            )
+        )
+        self.assertEqual(frozenset(), final_actions)
+        self.assertTrue(final_completion)
 
     async def test_unified_factual_exhaustion_reports_coverage_failure(
         self,
