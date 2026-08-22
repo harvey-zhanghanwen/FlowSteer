@@ -1781,6 +1781,222 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("modify_agent", attributed["preferred_repair"]["action"])
         self.assertEqual("fake", attributed["preferred_repair"]["avoid_provider_id"])
 
+    async def test_react_exhaustion_feedback_preserves_compact_public_diagnosis(
+        self,
+    ) -> None:
+        graph = _hotpot_semantic_graph()
+        registry = make_registry()
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_hotpot_semantic_runtime(registry, _ImmediateGateway()),
+            graph=graph,
+            problem="What is the capital of France?",
+            semantic_protocol="hotpotqa_verified_answer_slot_v1",
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id="qa-retrieval",
+        )
+        passage = "Paris is the capital of France. " + ("long evidence " * 80)
+        read_receipt = {
+            "tool_id": "qa-retrieval",
+            "tool_version": "test-v1",
+            "request": {
+                "action": "read",
+                "arguments": {"passage_id": "p1"},
+            },
+            "result": {
+                "value": {
+                    "operation": "read",
+                    "passage": {"id": "p1", "text": passage},
+                },
+                "completed": True,
+            },
+            "error_type": None,
+        }
+        record = AgentFailureRecord(
+            request_id="request-react",
+            agent_id="reasoner",
+            phase=ExecutionPhase.SINGLE,
+            graph_revision=graph.revision,
+            error_type="ReactExecutionError",
+            message="react agent 'reasoner' exhausted 8 turns",
+            metadata={
+                "react_trace": [
+                    {
+                        "turn": 1,
+                        "observation": {
+                            "observation_status": "success",
+                            "result": {"passage": {"text": passage}},
+                        },
+                    },
+                    {
+                        "turn": 2,
+                        "observation_status": "schema_invalid",
+                        "public_error_code": "completion_schema_invalid",
+                    },
+                    {
+                        "turn": 3,
+                        "observation_status": "schema_invalid",
+                        "public_error_code": "completion_schema_invalid",
+                    },
+                    {
+                        "turn": 4,
+                        "observation_status": "schema_invalid",
+                        "public_error_code": "completion_artifact_empty",
+                    },
+                ],
+                "tool_receipts": [read_receipt],
+            },
+        )
+        failure = AgentRuntimeError(
+            "bounded ReAct execution failed",
+            failure_records=(record,),
+        )
+
+        feedback_text = env._execution_error_feedback(failure)
+        feedback = json.loads(feedback_text.split("=", 1)[1])
+
+        attributed = feedback["failed_agents"][0]
+        self.assertEqual("react_turn_exhaustion", attributed["failure_category"])
+        self.assertEqual("contract", attributed["preferred_repair"]["field"])
+        self.assertEqual(
+            "completion_condition",
+            attributed["preferred_repair"]["optional_field"],
+        )
+        self.assertNotIn("avoid_provider_id", attributed["preferred_repair"])
+        summary = attributed["react_public_error_summary"]
+        self.assertEqual(4, summary["react_turn_count"])
+        self.assertEqual(
+            3,
+            summary["observation_status_counts"]["schema_invalid"],
+        )
+        self.assertEqual(
+            2,
+            summary["public_error_code_counts"]["completion_schema_invalid"],
+        )
+        self.assertEqual(
+            {
+                "observation_status": "schema_invalid",
+                "public_error_code": "completion_artifact_empty",
+            },
+            summary["last_public_error"],
+        )
+        self.assertEqual(1, summary["successful_tool_receipt_count"])
+        self.assertEqual(1, summary["successful_evidence_read_count"])
+        self.assertNotIn(passage, feedback_text)
+
+    async def test_hotpot_recovery_fields_are_agent_specific_without_shrinking_add(
+        self,
+    ) -> None:
+        graph = _hotpot_semantic_graph()
+        registry = make_registry()
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_hotpot_semantic_runtime(registry, _ImmediateGateway()),
+            graph=graph,
+            problem="What is the capital of France?",
+            semantic_protocol="hotpotqa_verified_answer_slot_v1",
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id="qa-retrieval",
+        )
+        record = AgentFailureRecord(
+            request_id="request-react",
+            agent_id="reasoner",
+            phase=ExecutionPhase.SINGLE,
+            graph_revision=graph.revision,
+            error_type="ReactExecutionError",
+            message="react agent 'reasoner' exhausted 8 turns",
+            metadata={
+                "react_trace": [
+                    {
+                        "turn": 8,
+                        "observation_status": "schema_invalid",
+                        "public_error_code": "completion_schema_invalid",
+                    }
+                ]
+            },
+        )
+        provider_record = AgentFailureRecord(
+            request_id="request-provider",
+            agent_id="reader",
+            phase=ExecutionPhase.SINGLE,
+            graph_revision=graph.revision,
+            error_type="OpenAICompatibleGatewayError",
+            message="provider request failed with HTTP status 429",
+        )
+        env._record_failure_state(
+            (record, provider_record),
+            current_agent_ids={node.id for node in graph.nodes},
+        )
+
+        targets = env.model_admissible_action_targets()
+
+        modify_domain = targets["modify_agent"]
+        self.assertEqual(
+            ["formatter", "reader", "reasoner", "verifier"],
+            modify_domain["agent_ids"],
+        )
+        self.assertIn("model_id", modify_domain["mutable_fields"])
+        per_agent = {
+            item["agent_id"]: item
+            for item in modify_domain["per_agent_candidates"]
+        }
+        self.assertEqual(
+            ["contract", "completion_condition"],
+            per_agent["reasoner"]["mutable_fields"],
+        )
+        self.assertEqual({}, per_agent["reasoner"]["discrete_value_domains"])
+        self.assertIn("model_id", per_agent["reader"]["mutable_fields"])
+        self.assertIn("model_id", per_agent["reader"]["discrete_value_domains"])
+        self.assertEqual(
+            ["reader", "reasoner"],
+            targets["modify_agent"]["responsible_agent_ids"],
+        )
+        self.assertEqual(3, targets["add_subgraph"]["max_new_agents"])
+        self.assertTrue(
+            {"evidence_retriever", "repair", "verifier"}.issubset(
+                targets["add_subgraph"]["role_constraints"]
+            )
+        )
+        self.assertEqual(
+            ["reasoner"],
+            env.recovery_state()["react_turn_exhausted_agent_ids"],
+        )
+        self.assertEqual(
+            "single",
+            env._failure_continuations["reasoner"]["execution_phase"],
+        )
+        self.assertEqual(
+            "completion_schema_invalid",
+            env._failure_continuations["reasoner"]["react_trace"][0][
+                "public_error_code"
+            ],
+        )
+
+        repair = await env.step(
+            json.dumps(
+                {
+                    "action": "add_subgraph",
+                    "agents": [
+                        {
+                            "agent_id": "repair_node",
+                            "model_id": "balanced",
+                            "contract": "diagnose the existing semantic contract",
+                            "role_family": "repair",
+                            "allowed_tools": [],
+                            "execution_mode": "reasoning",
+                        }
+                    ],
+                    "relations": [],
+                }
+            )
+        )
+        self.assertTrue(repair.accepted)
+
+        env._mark_agents_recovered({"reasoner"})
+        self.assertNotIn("reasoner", env._failure_continuations)
+        self.assertNotIn("reasoner", env.recovery_state()["failed_agent_ids"])
+        self.assertIn("reader", env.recovery_state()["failed_agent_ids"])
+
     async def test_finish_admissibility_keeps_structured_graph_diagnosis(self) -> None:
         graph = AgentGraph(
             [

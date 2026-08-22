@@ -58,6 +58,9 @@ DIRECTOR_PROMPT_VERSION = "agentgraph.director.minimal-neutral.v10"
 LEGACY_DIRECTOR_PROMPT_VERSION_V9 = "agentgraph.director.minimal-neutral.v9"
 LEGACY_DIRECTOR_PROMPT_VERSION_V8 = "agentgraph.director.minimal-neutral.v8"
 HOTPOTQA_DIRECTOR_PROMPT_VERSION = (
+    "agentgraph.director.hotpotqa-semantic-recovery.v20"
+)
+LEGACY_HOTPOTQA_DIRECTOR_PROMPT_VERSION_V19 = (
     "agentgraph.director.hotpotqa-semantic-recovery.v19"
 )
 LEGACY_HOTPOTQA_DIRECTOR_PROMPT_VERSION_V18 = (
@@ -226,6 +229,31 @@ HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V19 = HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V18.replac
     1,
 )
 
+# v20 keeps the neutral progressive-Canvas search space and makes two measured
+# recovery boundaries explicit: contracts cannot precommit a semantic answer
+# before execution, and non-provider ReAct failures repair the current
+# contract/completion condition while retaining public Action--Observation
+# state.  Neither rule supplies a workflow template or task answer.
+HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V20 = HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V19.replace(
+    "Exactly one Reasoner owns the semantic answer.",
+    "Exactly one Reasoner owns the semantic answer. Before execution, an Agent "
+    "contract states only the unchanged scope, requested relation and answer-slot "
+    "and evidence obligations; it must not predict or embed a concrete candidate "
+    "answer, alias, value, or evidence span.",
+    1,
+).replace(
+    "For a transient provider failure, keep the failed Agent's role, contract, "
+    "tools, and relations and modify only its model_id to a catalog model on a "
+    "different provider when available.",
+    "For a transient provider failure, keep the failed Agent's role, contract, "
+    "tools, and relations and modify only its model_id to a catalog model on a "
+    "different provider when available. For ReAct exhaustion or a semantic "
+    "completion-schema error, preserve the public Action--Observation history "
+    "and Tool receipts and repair the responsible Agent's contract or completion "
+    "condition before changing models or adding a replacement.",
+    1,
+)
+
 
 def director_system_prompt_for_version(prompt_version: str) -> str:
     """Resolve one explicitly versioned Director policy without changing v10."""
@@ -246,7 +274,10 @@ def director_system_prompt_for_version(prompt_version: str) -> str:
         "agentgraph.director.skillflow_continuation_v8": (
             LEGACY_DIRECTOR_SYSTEM_PROMPT_V8
         ),
-        HOTPOTQA_DIRECTOR_PROMPT_VERSION: HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V19,
+        HOTPOTQA_DIRECTOR_PROMPT_VERSION: HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V20,
+        LEGACY_HOTPOTQA_DIRECTOR_PROMPT_VERSION_V19: (
+            HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V19
+        ),
         LEGACY_HOTPOTQA_DIRECTOR_PROMPT_VERSION_V18: (
             HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V18
         ),
@@ -291,6 +322,7 @@ _SUPPORTED_DIRECTOR_SYSTEM_PROMPTS = frozenset(
         HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V17,
         HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V18,
         HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V19,
+        HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V20,
         LEGACY_DIRECTOR_SYSTEM_PROMPT_V9,
         LEGACY_DIRECTOR_SYSTEM_PROMPT_V8,
     }
@@ -2781,6 +2813,7 @@ __all__ = [
     "HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V17",
     "HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V18",
     "HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V19",
+    "HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V20",
     "HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V11",
     "HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V13",
     "HOTPOTQA_SEMANTIC_PROTOCOL",

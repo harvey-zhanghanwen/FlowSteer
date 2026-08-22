@@ -741,8 +741,8 @@ action.
 ## HotpotQA unified_architecture_v1 verified answer-slot and recovery adaptation
 
 This condition is selected only by
-`agentgraph.director.hotpotqa-semantic-recovery.v19` and
-`hotpotqa_verified_answer_slot_v1`.  Prompts v18 and earlier remain legacy,
+`agentgraph.director.hotpotqa-semantic-recovery.v20` and
+`hotpotqa_verified_answer_slot_v1`.  Prompts v19 and earlier remain legacy,
 explicitly versioned policies for old receipts, while the neutral v10 Director and every other
 dataset retain their existing prompt/runtime behavior.  The semantic answer
 slot, Verifier protocol, and recovery policy below are required by the user
@@ -755,6 +755,26 @@ design document.  They are not attributed to FlowSteer or SkillFlow.
 | `qa_tool_adapter.py`; `agent_workflow_env.py::_reasoner_candidate`; `task_dataset.py::{hotpotqa_question_scope,hotpotqa_answer_type_constraint,hotpotqa_answer_cardinality_constraint}` | User-design-required HotpotQA semantic adaptation | Existing answer-free HotpotQA question rendering and the SkillFlow QA evidence receipts above; no upstream answer-slot implementation is claimed | Retrieved passages and their public evidence spans remain the only factual input to semantic completion | The Reasoner owns `candidate_answer`. It copies the unchanged question scope, represents evidence as subject–relation–object/attribute propositions with qualifiers, and binds the requested answer slot by `(proposition_index, answer_field)` to the selected proposition argument. Answer type/cardinality are derived from question text only. The pointer may select any in-range proposition; evidence order is not an answer prior. Candidate/proposition/evidence consistency is admitted at runtime. No sample ID, query, passage, entity, candidate, Ground Truth, or evaluator result is hard-coded. |
 | `openai_gateway.py::build_agent_messages`; `agent_workflow_env.py::{model_admissible_action_targets,_semantic_edit_issue_for,_semantic_protocol_issue}`; `director.py::_live_role_agent_schema`; FlowSteer `scripts/prompts/prompt.py::FORMAT_PROMPT` | Direct FlowSteer Format reuse plus user-design-required Verifier adaptation | FlowSteer's terminal Format Operator serializes an already computed solution and does not solve the task | Reasoner determines the semantic answer; Verifier is a separate evidence/contract gate; Formatter is the terminal extraction sink | The Verifier consumes only the Reasoner artifact and checks explicit evidence, entity–attribute/alias binding, answer-slot type and cardinality, complete multi-hop support, minimal answer surface, and unchanged question scope. It must preserve the identical candidate rather than select a replacement. Formatter receives only one supported Verifier artifact, omits the original question, and copies that candidate character-for-character into one `<answer>...</answer>` wrapper; it cannot reason, verify, canonicalize, or reselect. Its live ADD domain admits only the neutral formatting contract, the Canvas rejects any other Formatter contract, and MODIFY cannot mutate that contract; therefore the Director cannot place a sample-specific answer or reasoning instruction in the Formatter node. Semantic role and execution-mode admission rejects `ReAct` as a role and prevents Retriever-to-Verifier bypass. These checks are runtime protocol fields, not hidden chain-of-thought supervision. |
 | `agent_workflow_env.py::{recovery_state,_semantic_repair_attribution,_delete_admission_issue,_preservation_admission_issue,_execution_error_feedback,finish_admissibility}`; `agent_runtime.py::_public_failure_metadata`; `director.py::{_model_catalog,_canvas_observation}` | FlowSteer/SkillFlow failure-feedback reuse plus user-design-required recovery adaptation | FlowSteer returns execution/rejection/terminal diagnostics to the next Canvas turn; SkillFlow retains nonterminal provider/Tool failure as a public observation and keeps provider identity separate from model identity | Existing successful artifacts, directed communication, Output identity, failure receipts, and explicit terminal semantics remain visible and revision-bound | HotpotQA applies `preserve -> diagnose -> repair -> augment`: preserve valid evidence, semantic answer, lineage, and relations; attribute the measured failure to its Agent/relation/provider; prefer `modify_agent` or `set_relation`; add a repair/retrieval/Verifier branch only when needed. Structural validation remains the primary repair target when structure and semantics are both invalid. The catalog exposes exact `provider_id`, and provider-failure feedback identifies the failed model/provider so the Director may modify only `model_id` while retaining role, contract, tools, and relations; there is no silent fallback or automatic rerouting. Disconnection, provider failure, ReAct exhaustion, Tool failure, timeout, and contract failure are repair diagnoses and never by themselves make a node deletable. Deletion is admissible only after the execution adapter emits an explicit typed `node_unusable=true` receipt and a successfully executed same-role/same-artifact replacement has inherited every downstream responsibility and, when applicable, Output identity. A verified semantic lineage is protected from MODIFY/SET_OUTPUT/edge removal, and a verified terminal revision exposes only the explicit FINISH action. |
+
+Prompt v20 is the current policy delta over the versioned v19 row above.  It
+keeps the same FlowSteer Canvas and live-domain decoding boundary, but requires
+pre-execution Agent contracts to state only scope, relation, answer-slot and
+evidence obligations; a contract may not predict a candidate answer, alias,
+value or evidence span.  Provider failures still target `model_id`, whereas
+ReAct/schema failures retain the SkillFlow public Action--Observation trace and
+Tool receipts and first target the responsible Agent's `contract` or optional
+`completion_condition`.
+
+The corresponding Runtime continuation is phase-scoped: only the same Agent
+and failed `single`, `draft`, or `revision` phase receives the retained public
+history after a Canvas repair.  Evidence/provenance rejection may reopen an
+admissible `search -> read` pair; answer-slot or semantic-schema rejection keeps
+successful reads and admits only corrected completion.  The Director sees a
+compact count/error-code diagnosis, not retrieved passage text or hidden
+reasoning.  Recovery does not reduce the ordinary one-to-three-Agent ADD search
+space: connected retrieval, repair, verification, fan-in, and replacement
+functional units remain available.  Deletion is still separately gated on a
+typed unusable-node receipt and completed replacement artifact takeover.
 
 The current configuration is evaluation-only: GRPO, backward, optimizer
 updates, LoRA publication, MACE/Bayesian exploration, and Skill retrieval are

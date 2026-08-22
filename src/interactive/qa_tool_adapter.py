@@ -86,6 +86,14 @@ HOTPOTQA_VERIFIED_ANSWER_SLOT_GUIDANCE = (
     "both bindings, retrieved passages, and contract narrowing before calling a tie."
 )
 
+_HOTPOTQA_SEMANTIC_STRUCTURE_ERROR_PREFIX = (
+    "hotpotqa_semantic_artifact_invalid:"
+)
+_HOTPOTQA_SEMANTIC_EVIDENCE_ERROR_PREFIX = (
+    "hotpotqa_semantic_evidence_provenance_invalid:"
+)
+_QA_MISSING_EVIDENCE_ERROR = "qa_completion_requires_successful_read_evidence"
+
 
 @dataclass(frozen=True, slots=True)
 class _RequiredEvidenceState:
@@ -97,7 +105,8 @@ class _RequiredEvidenceState:
     read_passage_ids: tuple[str, ...]
     dispatched_tool_calls: int
     latest_successful_operation: str | None
-    semantic_repair_required: bool
+    semantic_repair_kind: str | None
+    semantic_repair_error_code: str | None
 
     @property
     def unread_passage_ids(self) -> tuple[str, ...]:
@@ -367,6 +376,60 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             default=None,
         )
 
+    @staticmethod
+    def _semantic_rejection_kind(public_error_code: object) -> str | None:
+        """Classify public completion feedback without inspecting hidden labels."""
+
+        if not isinstance(public_error_code, str):
+            return None
+        if (
+            public_error_code == _QA_MISSING_EVIDENCE_ERROR
+            or public_error_code.startswith(
+                _HOTPOTQA_SEMANTIC_EVIDENCE_ERROR_PREFIX
+            )
+        ):
+            return "evidence"
+        if public_error_code.startswith(
+            _HOTPOTQA_SEMANTIC_STRUCTURE_ERROR_PREFIX
+        ):
+            return "structure"
+        return None
+
+    @classmethod
+    def _model_visible_observations(
+        cls,
+        observations: list[Mapping[str, object]],
+    ) -> list[dict[str, object]]:
+        """Attach the public continuation repair to semantic rejections.
+
+        SkillFlow carries Action--Observation feedback into the next model
+        turn.  Keep the sampled invalid completion only in the trajectory and
+        expose a diagnosis that says whether the existing read evidence must
+        be augmented or only the structured completion must be repaired.
+        """
+
+        visible = ToolReactExecutionAdapter._model_visible_observations(
+            observations
+        )
+        for observation in visible:
+            public_error_code = observation.get("public_error_code")
+            repair_kind = cls._semantic_rejection_kind(public_error_code)
+            if repair_kind == "structure":
+                observation["repair_instruction"] = (
+                    "Preserve all successful qa-retrieval read evidence and "
+                    "every semantic field not implicated by this "
+                    "public_error_code. Repair only the diagnosed structured "
+                    "semantic artifact fields, then emit a complete action; "
+                    "do not add a search or read."
+                )
+            elif repair_kind == "evidence":
+                observation["repair_instruction"] = (
+                    "Preserve the current semantic work and use the admitted "
+                    "qa-retrieval search/read continuation to obtain the "
+                    "missing evidence or provenance before completing again."
+                )
+        return visible
+
     def _required_evidence_state(
         self,
         request: AgentRequest,
@@ -384,17 +447,19 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         latest_successful_operation: str | None = None
         latest_successful_read_index = -1
         latest_semantic_rejection_index = -1
+        latest_semantic_rejection_kind: str | None = None
+        latest_semantic_rejection_code: str | None = None
         for observation_index, observation in enumerate(observations):
             status = observation.get("observation_status")
             public_error_code = observation.get("public_error_code")
-            if (
-                status == "schema_invalid"
-                and isinstance(public_error_code, str)
-                and public_error_code.startswith(
-                    "hotpotqa_semantic_artifact_invalid:"
-                )
-            ):
+            semantic_rejection_kind = self._semantic_rejection_kind(
+                public_error_code
+            )
+            if status == "schema_invalid" and semantic_rejection_kind is not None:
                 latest_semantic_rejection_index = observation_index
+                latest_semantic_rejection_kind = semantic_rejection_kind
+                assert isinstance(public_error_code, str)
+                latest_semantic_rejection_code = public_error_code
             if status not in {"success", "tool_error"}:
                 continue
             executed_action = observation.get("executed_action")
@@ -455,8 +520,15 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             read_passage_ids=tuple(read_passage_ids),
             dispatched_tool_calls=dispatched_tool_calls,
             latest_successful_operation=latest_successful_operation,
-            semantic_repair_required=(
-                latest_semantic_rejection_index > latest_successful_read_index
+            semantic_repair_kind=(
+                latest_semantic_rejection_kind
+                if latest_semantic_rejection_index > latest_successful_read_index
+                else None
+            ),
+            semantic_repair_error_code=(
+                latest_semantic_rejection_code
+                if latest_semantic_rejection_index > latest_successful_read_index
+                else None
             ),
         )
 
@@ -486,11 +558,13 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             and request.semantic_protocol == "hotpotqa_verified_answer_slot_v1"
         )
 
-        # A rejected semantic completion is a public diagnosis, not a terminal
-        # dead end.  When the bounded budget still permits a complete
-        # search->read transition, augment retrieval before asking the
-        # Reasoner to complete again.
-        if state.semantic_repair_required:
+        # SkillFlow's public Action--Observation continuation distinguishes a
+        # missing evidence/provenance diagnosis from a structured completion
+        # diagnosis.  The latter must repair on the already-read evidence;
+        # blindly retrieving again cannot fix answer-slot or schema binding.
+        if state.semantic_repair_kind == "structure":
+            return frozenset(), state.successful_read_count > 0
+        if state.semantic_repair_kind == "evidence":
             if (
                 state.latest_successful_operation == "search"
                 and state.latest_unread_passage_ids
@@ -956,7 +1030,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         )
         if issue is not None or candidate is None:
             detail = issue or "Reasoner candidate_answer is missing"
-            return "hotpotqa_semantic_artifact_invalid: " + detail
+            return _HOTPOTQA_SEMANTIC_STRUCTURE_ERROR_PREFIX + " " + detail
         read_evidence_texts = tuple(
             text
             for receipt in tool_receipts
@@ -974,7 +1048,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             read_evidence_texts,
         )
         if provenance_issue is not None:
-            return "hotpotqa_semantic_artifact_invalid: " + provenance_issue
+            return _HOTPOTQA_SEMANTIC_EVIDENCE_ERROR_PREFIX + " " + provenance_issue
         return None
 
     def _tool_action_error(

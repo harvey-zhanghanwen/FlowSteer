@@ -158,6 +158,12 @@ class AgentRequest:
     own_draft: Optional[str] = None
     peer_draft: Optional[UpstreamMessage] = None
     semantic_protocol: str = "none"
+    # SkillFlow continuation state: a repaired Agent keeps the public
+    # Action--Observation history and measured Tool receipts from its failed
+    # bounded execution.  These fields never contain hidden reasoning and do
+    # not turn a failed completion into a semantic artifact.
+    action_history: Tuple[Mapping[str, object], ...] = ()
+    prior_tool_receipts: Tuple[Mapping[str, object], ...] = ()
 
     def __post_init__(self) -> None:
         if type(self.is_output_agent) is not bool:
@@ -175,6 +181,24 @@ class AgentRequest:
             "hotpotqa_verified_answer_slot_v1",
         }:
             raise ValueError("unsupported AgentRequest semantic_protocol")
+        if any(not isinstance(item, Mapping) for item in self.action_history):
+            raise TypeError("AgentRequest.action_history must contain mappings")
+        if any(not isinstance(item, Mapping) for item in self.prior_tool_receipts):
+            raise TypeError(
+                "AgentRequest.prior_tool_receipts must contain mappings"
+            )
+        object.__setattr__(
+            self,
+            "action_history",
+            tuple(MappingProxyType(dict(item)) for item in self.action_history),
+        )
+        object.__setattr__(
+            self,
+            "prior_tool_receipts",
+            tuple(
+                MappingProxyType(dict(item)) for item in self.prior_tool_receipts
+            ),
+        )
         object.__setattr__(
             self,
             "communication_condition",
@@ -476,6 +500,9 @@ class AgentRuntime:
         prior_output_metadata: Optional[
             Mapping[str, Mapping[str, object]]
         ] = None,
+        prior_failure_metadata: Optional[
+            Mapping[str, Mapping[str, object]]
+        ] = None,
         dirty_agents: Optional[Collection[str]] = None,
         format_output_agent: bool = False,
         communication_condition: Union[
@@ -523,6 +550,7 @@ class AgentRuntime:
                 )
         outputs: Dict[str, str] = {}
         output_metadata: Dict[str, Mapping[str, object]] = {}
+        failure_metadata: Dict[str, Mapping[str, object]] = {}
         for agent_id, output in dict(prior_outputs or {}).items():
             if agent_id in nodes:
                 if not isinstance(output, str):
@@ -535,6 +563,14 @@ class AgentRuntime:
                         "prior_output_metadata values must be mappings"
                     )
                 output_metadata[agent_id] = MappingProxyType(dict(metadata))
+        for agent_id, metadata in dict(prior_failure_metadata or {}).items():
+            if agent_id not in nodes:
+                continue
+            if not isinstance(metadata, Mapping):
+                raise TypeError(
+                    "prior_failure_metadata values must be mappings"
+                )
+            failure_metadata[agent_id] = MappingProxyType(dict(metadata))
         if dirty_agents is None:
             dirty_seeds = set(nodes)
         else:
@@ -607,6 +643,7 @@ class AgentRuntime:
                     calls,
                     output_metadata,
                     cancelled_failure_records,
+                    failure_metadata,
                     output_agent_id=execution_graph.output_agent_id,
                     format_output_agent=format_output_agent,
                     communication_condition=resolved_condition,
@@ -954,6 +991,7 @@ class AgentRuntime:
         calls: List[AgentCallRecord],
         output_metadata: Dict[str, Mapping[str, object]],
         cancelled_failure_records: List[AgentFailureRecord],
+        failure_metadata: Mapping[str, Mapping[str, object]],
         *,
         output_agent_id: Optional[str],
         format_output_agent: bool,
@@ -987,6 +1025,7 @@ class AgentRuntime:
                 format_output_agent=format_output_agent,
                 is_format_predecessor=agent_id in format_predecessor_ids,
                 communication_condition=communication_condition,
+                continuation_metadata=failure_metadata.get(agent_id),
             )
             response = await self._invoke(
                 request,
@@ -1026,6 +1065,7 @@ class AgentRuntime:
             format_output_agent=format_output_agent,
             is_format_predecessor=left_id in format_predecessor_ids,
             communication_condition=communication_condition,
+            continuation_metadata=failure_metadata.get(left_id),
         )
         right_draft_request = self._request(
             agent=nodes[right_id],
@@ -1038,6 +1078,7 @@ class AgentRuntime:
             format_output_agent=format_output_agent,
             is_format_predecessor=right_id in format_predecessor_ids,
             communication_condition=communication_condition,
+            continuation_metadata=failure_metadata.get(right_id),
         )
         left_draft, right_draft = await _gather_pair(
             self._invoke(left_draft_request, calls, cancelled_failure_records),
@@ -1069,6 +1110,7 @@ class AgentRuntime:
             format_output_agent=format_output_agent,
             is_format_predecessor=left_id in format_predecessor_ids,
             communication_condition=communication_condition,
+            continuation_metadata=failure_metadata.get(left_id),
         )
         right_revision_request = self._request(
             agent=nodes[right_id],
@@ -1095,6 +1137,7 @@ class AgentRuntime:
             format_output_agent=format_output_agent,
             is_format_predecessor=right_id in format_predecessor_ids,
             communication_condition=communication_condition,
+            continuation_metadata=failure_metadata.get(right_id),
         )
         left_revision, right_revision = await _gather_pair(
             self._invoke(left_revision_request, calls, cancelled_failure_records),
@@ -1167,10 +1210,33 @@ class AgentRuntime:
         format_output_agent: bool,
         is_format_predecessor: bool,
         communication_condition: CommunicationCondition,
+        continuation_metadata: Optional[Mapping[str, object]] = None,
     ) -> AgentRequest:
         model = self.model_registry.require_model(agent.model_id)
         provider = self.model_registry.provider_for(agent.model_id)
         request_id = f"{run_id}:{graph_revision}:{agent.id}:{phase.value}"
+        continuation = dict(continuation_metadata or {})
+        continuation_phase = continuation.get("execution_phase")
+        if (
+            continuation_phase is not None
+            and continuation_phase != phase.value
+        ):
+            # A reciprocal block invokes an Agent in distinct draft/revision
+            # phases.  Public ReAct state belongs to the phase that failed and
+            # must not be replayed into a different communication contract.
+            continuation = {}
+        raw_action_history = continuation.get("react_trace", ())
+        raw_tool_receipts = continuation.get("tool_receipts", ())
+        action_history = (
+            tuple(item for item in raw_action_history if isinstance(item, Mapping))
+            if isinstance(raw_action_history, (list, tuple))
+            else ()
+        )
+        prior_tool_receipts = (
+            tuple(item for item in raw_tool_receipts if isinstance(item, Mapping))
+            if isinstance(raw_tool_receipts, (list, tuple))
+            else ()
+        )
         return AgentRequest(
             request_id=request_id,
             run_id=run_id,
@@ -1190,6 +1256,8 @@ class AgentRuntime:
             own_draft=own_draft,
             peer_draft=peer_draft,
             semantic_protocol=self.semantic_protocol,
+            action_history=action_history,
+            prior_tool_receipts=prior_tool_receipts,
         )
 
     async def _invoke(

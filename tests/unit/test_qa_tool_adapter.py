@@ -856,7 +856,7 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(3, len(index.search_calls))
         self.assertTrue(
             response.metadata["react_trace"][4]["public_error_code"].startswith(
-                "hotpotqa_semantic_artifact_invalid:"
+                "hotpotqa_semantic_evidence_provenance_invalid:"
             )
         )
         self.assertIn(
@@ -882,6 +882,10 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("next action must be qa-retrieval read", gateway.requests[3].agent.contract)
         self.assertIn("next action must complete", gateway.requests[4].agent.contract)
         self.assertIn("next action must be qa-retrieval search", gateway.requests[5].agent.contract)
+        self.assertIn(
+            "use the admitted qa-retrieval search/read continuation",
+            gateway.requests[5].agent.contract,
+        )
         self.assertIn("next action must be qa-retrieval read", gateway.requests[6].agent.contract)
         completion_schema = json.loads(
             gateway.requests[4].model.metadata["response_json_schema"]
@@ -917,6 +921,152 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             },
             set(semantic_properties["answer_slot"]["required"]),
         )
+
+    async def test_structural_semantic_rejection_repairs_with_existing_evidence(
+        self,
+    ) -> None:
+        class TwoPassageIndex(FakeIndex):
+            def search(self, query: str, *, limit: int) -> tuple[FakeHit, ...]:
+                self.search_calls.append((query, limit))
+                return (
+                    FakeHit("p1", "d1", "Ada Lovelace", "Occupation.", 1),
+                    FakeHit("p2", "d2", "Algorithm", "Publication.", 2),
+                )
+
+            def read(self, passage_id: str) -> FakePassage:
+                self.read_calls.append(passage_id)
+                text = {
+                    "p1": "Ada Lovelace was an English mathematician.",
+                    "p2": "Ada Lovelace published the first algorithm.",
+                }[passage_id]
+                return FakePassage(passage_id, passage_id, passage_id, text)
+
+        def action(name: str, arguments: object) -> str:
+            return json.dumps(
+                {
+                    "arguments": arguments,
+                    "kind": "complete" if name == "complete" else "tool",
+                    "name": name,
+                    "resource_id": (
+                        None if name == "complete" else QA_RETRIEVAL_TOOL_ID
+                    ),
+                    "skill_id": None,
+                }
+            )
+
+        valid_artifact = {
+            "question_scope": "Who published the first algorithm?",
+            "answer_slot": {
+                "answer_type": "person",
+                "answer_cardinality": "single",
+                "qualifiers": ["first algorithm"],
+                "proposition_index": 0,
+                "answer_field": "subject",
+            },
+            "evidence_propositions": [
+                {
+                    "subject": "Ada Lovelace",
+                    "relation": "published",
+                    "object_or_attribute_value": "the first algorithm",
+                    "qualifiers": [],
+                    "evidence_span": "Ada Lovelace published the first algorithm.",
+                },
+                {
+                    "subject": "Ada Lovelace",
+                    "relation": "occupation",
+                    "object_or_attribute_value": "English mathematician",
+                    "qualifiers": [],
+                    "evidence_span": "Ada Lovelace was an English mathematician.",
+                },
+            ],
+            "multi_hop_chain": ["Ada Lovelace", "published", "first algorithm"],
+            "candidate_answer": "Ada Lovelace",
+            "evidence": [
+                "Ada Lovelace was an English mathematician.",
+                "Ada Lovelace published the first algorithm.",
+            ],
+        }
+        binding_mismatch = json.loads(json.dumps(valid_artifact))
+        binding_mismatch["candidate_answer"] = "the first algorithm"
+
+        class SequenceGateway:
+            def __init__(self) -> None:
+                self.outputs = [
+                    action("search", {"query": "Ada Lovelace", "limit": 10}),
+                    action("read", {"passage_id": "p1"}),
+                    action("search", {"query": "first algorithm", "limit": 10}),
+                    action("read", {"passage_id": "p2"}),
+                    action("complete", {"value": binding_mismatch}),
+                    action("complete", {"value": valid_artifact}),
+                ]
+                self.requests: list[AgentRequest] = []
+
+            async def generate(self, request: AgentRequest) -> AgentResponse:
+                self.requests.append(request)
+                return AgentResponse(self.outputs.pop(0))
+
+        index = TwoPassageIndex()
+        gateway = SequenceGateway()
+        request = AgentRequest(
+            request_id="qa:structural-semantic-repair",
+            run_id="qa",
+            graph_revision=1,
+            problem="Who published the first algorithm?",
+            agent=AgentNode(
+                "reasoner",
+                "model",
+                "retrieve both supporting passages and determine the answer",
+                role_family="reasoner",
+                allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                execution_mode="react",
+            ),
+            model=ModelSpec("model", "provider"),
+            provider=ProviderSpec("provider", kind="test"),
+            phase=ExecutionPhase.SINGLE,
+            semantic_protocol="hotpotqa_verified_answer_slot_v1",
+        )
+
+        response = await QARetrievalReactExecutionAdapter(
+            gateway=gateway,
+            tool_registry=build_qa_tool_registry(index),
+            max_turns=6,
+            max_tool_calls=4,
+            task_type="multi_hop_qa",
+            completion_policy="required_evidence",
+        ).execute(request)
+
+        self.assertEqual(
+            json.dumps(
+                valid_artifact,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            response.text,
+        )
+        self.assertEqual(4, response.metadata["tool_calls"])
+        self.assertEqual(2, len(index.search_calls))
+        self.assertEqual(["p1", "p2"], index.read_calls)
+        structural_error = response.metadata["react_trace"][4][
+            "public_error_code"
+        ]
+        self.assertTrue(
+            structural_error.startswith("hotpotqa_semantic_artifact_invalid:")
+        )
+        self.assertIn("answer_slot.proposition_index", structural_error)
+
+        repair_contract = gateway.requests[5].agent.contract
+        self.assertIn(structural_error, repair_contract)
+        self.assertIn(
+            "Repair only the diagnosed structured semantic artifact fields",
+            repair_contract,
+        )
+        self.assertIn("do not add a search or read", repair_contract)
+        repair_domain = repair_contract.split(
+            "Currently admissible Tool action contracts", 1
+        )[1].split("\nCurrently admissible completion", 1)[0]
+        self.assertTrue(repair_domain.endswith("- none"))
+        self.assertIn("Currently admissible completion schema", repair_contract)
 
     async def test_react_failed_retrieval_receipt_admits_explicit_completion(self) -> None:
         class FailingIndex(FakeIndex):

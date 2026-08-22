@@ -100,6 +100,85 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(routed.content, routed.artifact)
         self.assertEqual(snapshot.to_dict(), graph.snapshot().to_dict())
 
+    async def test_runtime_routes_public_failure_continuation_to_same_agent(
+        self,
+    ) -> None:
+        catalog = registry()
+
+        class ContinuationAdapter:
+            def __init__(self) -> None:
+                self.requests: list[AgentRequest] = []
+
+            async def execute(self, request: AgentRequest) -> AgentResponse:
+                self.requests.append(request)
+                return AgentResponse("repaired")
+
+        adapter = ContinuationAdapter()
+        runtime = AgentRuntime(
+            catalog,
+            RecordingGateway(),
+            execution_adapters={"react": adapter},
+        )
+        graph = AgentGraph(
+            [
+                AgentNode(
+                    "reasoner",
+                    "m1",
+                    "repair the semantic artifact",
+                    execution_mode="react",
+                )
+            ],
+            output_agent_id="reasoner",
+        )
+        await runtime.execute(
+            graph,
+            "question",
+            prior_failure_metadata={
+                "reasoner": {
+                    "execution_phase": "single",
+                    "react_trace": [
+                        {
+                            "turn": 1,
+                            "observation_status": "schema_invalid",
+                            "public_error_code": "candidate binding mismatch",
+                        }
+                    ],
+                    "tool_receipts": [
+                        {"tool_id": "qa-retrieval", "success": True}
+                    ],
+                }
+            },
+        )
+
+        self.assertEqual(1, len(adapter.requests))
+        self.assertEqual(
+            "candidate binding mismatch",
+            adapter.requests[0].action_history[0]["public_error_code"],
+        )
+        self.assertEqual(
+            "qa-retrieval",
+            adapter.requests[0].prior_tool_receipts[0]["tool_id"],
+        )
+
+        await runtime.execute(
+            graph,
+            "question",
+            prior_failure_metadata={
+                "reasoner": {
+                    "execution_phase": "revision",
+                    "react_trace": [
+                        {
+                            "turn": 1,
+                            "observation_status": "schema_invalid",
+                            "public_error_code": "wrong communication phase",
+                        }
+                    ],
+                }
+            },
+        )
+        self.assertEqual(2, len(adapter.requests))
+        self.assertEqual((), adapter.requests[1].action_history)
+
     async def test_semantic_protocol_is_propagated_to_every_agent_request(self) -> None:
         catalog = registry()
         gateway = RecordingGateway()

@@ -102,6 +102,81 @@ class SequenceGateway:
 
 
 class ToolReactExecutionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_public_action_history_continues_after_canvas_repair(self) -> None:
+        completed = action(
+            "complete",
+            name="complete",
+            arguments={"value": "Ada Lovelace"},
+            resource_id=None,
+        )
+        gateway = SequenceGateway([completed])
+        continued_request = request()
+        continued_request = AgentRequest(
+            request_id=continued_request.request_id,
+            run_id=continued_request.run_id,
+            graph_revision=2,
+            problem=continued_request.problem,
+            agent=continued_request.agent,
+            model=continued_request.model,
+            provider=continued_request.provider,
+            phase=continued_request.phase,
+            action_history=(
+                {
+                    "turn": 1,
+                    "structured_action": {
+                        "arguments": {"query": "Ada Lovelace"},
+                        "kind": "tool",
+                        "name": "search",
+                        "resource_id": "wiki.search",
+                        "skill_id": None,
+                    },
+                    "observation": {
+                        "observation_status": "success",
+                        "tool_id": "wiki.search",
+                        "executed_action": {
+                            "arguments": {"query": "Ada Lovelace"},
+                            "kind": "tool",
+                            "name": "search",
+                            "resource_id": "wiki.search",
+                            "skill_id": None,
+                        },
+                        "result": {"passage_ids": ["p1"]},
+                    },
+                },
+                {
+                    "turn": 2,
+                    "observation_status": "schema_invalid",
+                    "public_error_code": "completion_schema_invalid",
+                    "repair_instruction": "repair the completion schema",
+                },
+            ),
+            prior_tool_receipts=(
+                {"tool_id": "wiki.search", "success": True},
+            ),
+        )
+
+        response = await ToolReactExecutionAdapter(
+            gateway=gateway,
+            tool_registry=registry(),
+            max_turns=1,
+            max_tool_calls=2,
+        ).execute(continued_request)
+
+        self.assertEqual("Ada Lovelace", response.text)
+        self.assertEqual(2, response.metadata["continued_action_history_count"])
+        self.assertEqual(1, response.metadata["continued_tool_receipt_count"])
+        self.assertEqual(3, response.metadata["react_turns_used"])
+        self.assertEqual(1, response.metadata["new_react_turns_used"])
+        self.assertTrue(
+            response.metadata["react_trace"][0][
+                "continued_from_prior_revision"
+            ]
+        )
+        self.assertIn(
+            "completion_schema_invalid",
+            gateway.requests[0].agent.contract,
+        )
+
     async def test_fixed_action_adapter_rejects_dynamic_native_capability(self) -> None:
         gateway = SequenceGateway([])
         dynamic_registry = ToolRegistry(

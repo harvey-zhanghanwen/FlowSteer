@@ -7,7 +7,7 @@ import hashlib
 import json
 import re
 import unicodedata
-from typing import Mapping, Optional, Sequence, Tuple, Union
+from typing import Collection, Mapping, Optional, Sequence, Tuple, Union
 
 from .agent_action_parser import (
     AgentAction,
@@ -326,6 +326,13 @@ class AgentWorkflowEnv:
         self._unresolved_dirty_agents: set[str] = set()
         self._failed_agent_ids: set[str] = set()
         self._diagnosed_unusable_agent_ids: set[str] = set()
+        self._react_exhausted_agent_ids: set[str] = set()
+        # Runtime-only SkillFlow continuation state.  Canvas snapshots do not
+        # serialize Runtime results, but an in-process repair turn must retain
+        # the failed Agent's public Action--Observation history and Tool
+        # receipts so a contract edit does not repeat retrieval or discard
+        # evidence already obtained on the current task.
+        self._failure_continuations: dict[str, dict[str, object]] = {}
         self._validate_agent_limit(self._graph)
         partial = self._graph.validate(self.model_registry, require_complete=False)
         if not partial.valid:
@@ -583,14 +590,14 @@ class AgentWorkflowEnv:
             }
         if AgentActionType.MODIFY_AGENT.value in admitted:
             modifiable_node_ids = list(self._model_admissible_modify_agent_ids())
-            mutable_fields = [
+            base_mutable_fields = [
                 "model_id",
                 "contract",
                 "artifact_type",
                 "completion_condition",
             ]
             if self.semantic_protocol != _HOTPOTQA_SEMANTIC_PROTOCOL:
-                mutable_fields[2:2] = [
+                base_mutable_fields[2:2] = [
                     "role_family",
                     "allowed_tools",
                     "execution_mode",
@@ -610,6 +617,37 @@ class AgentWorkflowEnv:
                             responsible = attribution.get("responsible_agent_id")
                             if isinstance(responsible, str):
                                 responsible_ids.add(responsible)
+            per_agent_mutable_fields = {
+                agent_id: [
+                    field
+                    for field in (
+                        ["contract", "completion_condition"]
+                        if (
+                            self.semantic_protocol
+                            == _HOTPOTQA_SEMANTIC_PROTOCOL
+                            and agent_id in self._react_exhausted_agent_ids
+                        )
+                        else base_mutable_fields
+                    )
+                    if not (
+                        self.semantic_protocol == _HOTPOTQA_SEMANTIC_PROTOCOL
+                        and (
+                            self._graph.get_node(agent_id).role_family or ""
+                        ).casefold()
+                        == "format"
+                        and field == "contract"
+                    )
+                ]
+                for agent_id in modifiable_node_ids
+            }
+            mutable_fields = [
+                field
+                for field in base_mutable_fields
+                if any(
+                    field in fields
+                    for fields in per_agent_mutable_fields.values()
+                )
+            ]
             targets[AgentActionType.MODIFY_AGENT.value] = {
                 "agent_ids": modifiable_node_ids,
                 "failed_agent_ids": sorted(self._failed_agent_ids),
@@ -620,27 +658,19 @@ class AgentWorkflowEnv:
                 "per_agent_candidates": [
                     {
                         "agent_id": agent_id,
-                        "mutable_fields": [
-                            field
-                            for field in mutable_fields
-                            if not (
-                                self.semantic_protocol
-                                == _HOTPOTQA_SEMANTIC_PROTOCOL
-                                and (
-                                    self._graph.get_node(agent_id).role_family or ""
-                                ).casefold()
-                                == "format"
-                                and field == "contract"
-                            )
-                        ],
-                        "discrete_value_domains": {
-                            "model_id": [
-                                model_id
-                                for model_id in self.model_registry.model_ids
-                                if model_id
-                                != self._graph.get_node(agent_id).model_id
-                            ]
-                        },
+                        "mutable_fields": per_agent_mutable_fields[agent_id],
+                        "discrete_value_domains": (
+                            {
+                                "model_id": [
+                                    model_id
+                                    for model_id in self.model_registry.model_ids
+                                    if model_id
+                                    != self._graph.get_node(agent_id).model_id
+                                ]
+                            }
+                            if "model_id" in per_agent_mutable_fields[agent_id]
+                            else {}
+                        ),
                     }
                     for agent_id in modifiable_node_ids
                 ],
@@ -825,6 +855,7 @@ class AgentWorkflowEnv:
                         self._problem,
                         prior_outputs=self._progressive_outputs,
                         prior_output_metadata=self._progressive_output_metadata,
+                        prior_failure_metadata=self._failure_continuations,
                         format_output_agent=self._uses_format_agent_protocol(),
                     )
                 except AgentRuntimeError as exc:
@@ -847,6 +878,7 @@ class AgentWorkflowEnv:
                             else set(exc.partial_result.executed_agent_ids)
                         )
                     )
+                    self._mark_agents_recovered(completed_agent_ids)
                     self._unresolved_dirty_agents = (
                         current_agent_ids - completed_agent_ids
                     )
@@ -995,6 +1027,7 @@ class AgentWorkflowEnv:
                         require_complete=False,
                         prior_outputs=self._progressive_outputs,
                         prior_output_metadata=self._progressive_output_metadata,
+                        prior_failure_metadata=self._failure_continuations,
                         dirty_agents=self._unresolved_dirty_agents,
                         format_output_agent=self._uses_format_agent_protocol(),
                     )
@@ -1029,6 +1062,11 @@ class AgentWorkflowEnv:
                         else partial_execution.outputs
                     )
                     self._diagnosed_unusable_agent_ids.difference_update(
+                        ()
+                        if partial_execution is None
+                        else partial_execution.outputs
+                    )
+                    self._mark_agents_recovered(
                         ()
                         if partial_execution is None
                         else partial_execution.outputs
@@ -1499,6 +1537,51 @@ class AgentWorkflowEnv:
 
         self._failed_agent_ids.intersection_update(current_agent_ids)
         self._diagnosed_unusable_agent_ids.intersection_update(current_agent_ids)
+        self._react_exhausted_agent_ids.intersection_update(current_agent_ids)
+        self._failure_continuations = {
+            agent_id: metadata
+            for agent_id, metadata in self._failure_continuations.items()
+            if agent_id in current_agent_ids
+        }
+
+    @staticmethod
+    def _failure_continuation_candidate(
+        record: AgentFailureRecord,
+    ) -> Optional[dict[str, object]]:
+        """Return adapter-published continuation state for one failed phase."""
+
+        result: dict[str, object] = {"execution_phase": record.phase.value}
+        for field_name in ("react_trace", "tool_receipts"):
+            raw_value = record.metadata.get(field_name, ())
+            if not isinstance(raw_value, (list, tuple)):
+                continue
+            public_items = [
+                dict(item) for item in raw_value if isinstance(item, Mapping)
+            ]
+            if public_items:
+                result[field_name] = public_items
+        return result if len(result) > 1 else None
+
+    @staticmethod
+    def _failure_continuation_weight(metadata: Mapping[str, object]) -> tuple[int, int]:
+        """Prefer the most advanced public continuation for an Agent."""
+
+        trace = metadata.get("react_trace", ())
+        receipts = metadata.get("tool_receipts", ())
+        return (
+            len(trace) if isinstance(trace, (list, tuple)) else 0,
+            len(receipts) if isinstance(receipts, (list, tuple)) else 0,
+        )
+
+    def _mark_agents_recovered(self, agent_ids: Collection[str]) -> None:
+        """Clear failure-only state after those Agents produced artifacts."""
+
+        recovered = set(agent_ids)
+        self._failed_agent_ids.difference_update(recovered)
+        self._diagnosed_unusable_agent_ids.difference_update(recovered)
+        self._react_exhausted_agent_ids.difference_update(recovered)
+        for agent_id in recovered:
+            self._failure_continuations.pop(agent_id, None)
 
     def _record_failure_state(
         self,
@@ -1516,18 +1599,35 @@ class AgentWorkflowEnv:
         """
 
         self._retain_current_failure_state(current_agent_ids)
+        recorded_agent_ids: set[str] = set()
+        react_exhausted_agent_ids: set[str] = set()
         for record in records:
             if record.agent_id not in current_agent_ids:
                 continue
+            recorded_agent_ids.add(record.agent_id)
             self._failed_agent_ids.add(record.agent_id)
+            category, _, _ = self._execution_failure_diagnosis(record)
+            if category == "react_turn_exhaustion":
+                react_exhausted_agent_ids.add(record.agent_id)
             if record.metadata.get("node_unusable") is True:
                 self._diagnosed_unusable_agent_ids.add(record.agent_id)
             else:
                 self._diagnosed_unusable_agent_ids.discard(record.agent_id)
+            continuation = self._failure_continuation_candidate(record)
+            if continuation is not None:
+                current = self._failure_continuations.get(record.agent_id)
+                if current is None or self._failure_continuation_weight(
+                    continuation
+                ) >= self._failure_continuation_weight(current):
+                    self._failure_continuations[record.agent_id] = continuation
+        self._react_exhausted_agent_ids.difference_update(recorded_agent_ids)
+        self._react_exhausted_agent_ids.update(react_exhausted_agent_ids)
 
     def _clear_failure_state(self) -> None:
         self._failed_agent_ids.clear()
         self._diagnosed_unusable_agent_ids.clear()
+        self._react_exhausted_agent_ids.clear()
+        self._failure_continuations.clear()
 
     def _invalidate_progressive_outputs(
         self,
@@ -2432,6 +2532,9 @@ class AgentWorkflowEnv:
         terminal_unreachable = self._terminal_unreachable_agent_ids()
         terminal_unreachable_set = set(terminal_unreachable)
         failed = tuple(sorted(self._failed_agent_ids & current_ids))
+        react_exhausted = tuple(
+            sorted(self._react_exhausted_agent_ids & current_ids)
+        )
         diagnosed_unusable = tuple(
             sorted(self._diagnosed_unusable_agent_ids & current_ids)
         )
@@ -2485,6 +2588,7 @@ class AgentWorkflowEnv:
                 self._previous_revision_outputs
             ),
             "failed_agent_ids": list(failed),
+            "react_turn_exhausted_agent_ids": list(react_exhausted),
             "diagnosed_unusable_agent_ids": list(diagnosed_unusable),
             "unresolved_dirty_agent_ids": list(self.unresolved_dirty_agent_ids),
             "terminal_unreachable_agent_ids": list(terminal_unreachable),
@@ -2765,6 +2869,121 @@ class AgentWorkflowEnv:
                 return "a verified semantic-lineage relation must be preserved"
         return None
 
+    @staticmethod
+    def _execution_failure_diagnosis(
+        record: AgentFailureRecord,
+    ) -> Tuple[str, str, Optional[int]]:
+        """Classify one public Runtime failure without inferring node deletion."""
+
+        failure_text = " ".join(record.message.split())
+        normalized = f"{record.error_type} {failure_text}".casefold()
+        status_match = re.search(
+            r"(?:http(?: error)?|status)[ :=]*(\d{3})",
+            normalized,
+        )
+        status_code = None if status_match is None else int(status_match.group(1))
+        if (
+            "openaicompatiblegatewayerror" in normalized
+            or "provider request failed" in normalized
+            or status_code is not None
+        ):
+            return (
+                "provider_request_failure",
+                (
+                    "permanent_configuration"
+                    if status_code in {400, 401, 403, 404}
+                    else "transient_provider"
+                ),
+                status_code,
+            )
+        if "reactexecutionerror" in normalized or (
+            "react" in normalized
+            and ("turn" in normalized or "exhaust" in normalized)
+        ):
+            return (
+                "react_turn_exhaustion",
+                "repair_execution_contract_or_tool_plan",
+                status_code,
+            )
+        if "tool" in normalized:
+            return (
+                "tool_capability_failure",
+                "repair_tool_capability_or_arguments",
+                status_code,
+            )
+        return (
+            "execution_contract_or_runtime_failure",
+            "diagnose_existing_agent",
+            status_code,
+        )
+
+    def _react_public_error_summary(
+        self,
+        record: AgentFailureRecord,
+    ) -> dict[str, object]:
+        """Compress public ReAct receipts without replaying retrieved passages."""
+
+        raw_trace = record.metadata.get("react_trace", ())
+        trace = (
+            tuple(item for item in raw_trace if isinstance(item, Mapping))
+            if isinstance(raw_trace, (list, tuple))
+            else ()
+        )
+        status_counts: dict[str, int] = {}
+        code_counts: dict[str, int] = {}
+        last_public_error: Optional[dict[str, str]] = None
+        for entry in trace:
+            observation = entry.get("observation")
+            source = observation if isinstance(observation, Mapping) else entry
+            status = source.get("observation_status")
+            code = source.get("public_error_code")
+            if isinstance(status, str) and status:
+                status_counts[status] = status_counts.get(status, 0) + 1
+            if isinstance(code, str) and code:
+                code_counts[code] = code_counts.get(code, 0) + 1
+            if (
+                isinstance(status, str)
+                and status not in {"success", "completed"}
+            ):
+                last_public_error = {"observation_status": status}
+                if isinstance(code, str) and code:
+                    last_public_error["public_error_code"] = code
+
+        raw_receipts = record.metadata.get("tool_receipts", ())
+        receipts = (
+            tuple(item for item in raw_receipts if isinstance(item, Mapping))
+            if isinstance(raw_receipts, (list, tuple))
+            else ()
+        )
+        successful_tool_count = sum(
+            receipt.get("error_type") is None
+            and isinstance(receipt.get("result"), Mapping)
+            for receipt in receipts
+        )
+        successful_evidence_read_count = 0
+        if self.required_evidence_tool_id is not None:
+            successful_evidence_read_count = sum(
+                self._successful_read_receipt(
+                    receipt,
+                    self.required_evidence_tool_id,
+                )
+                for receipt in receipts
+            )
+        summary: dict[str, object] = {
+            "react_turn_count": len(trace),
+            "observation_status_counts": {
+                key: status_counts[key] for key in sorted(status_counts)
+            },
+            "public_error_code_counts": {
+                key: code_counts[key] for key in sorted(code_counts)
+            },
+            "successful_tool_receipt_count": successful_tool_count,
+            "successful_evidence_read_count": successful_evidence_read_count,
+        }
+        if last_public_error is not None:
+            summary["last_public_error"] = last_public_error
+        return summary
+
     def _execution_error_feedback(self, exc: AgentRuntimeError) -> str:
         message = " ".join(str(exc).split())
         if len(message) > 240:
@@ -2782,36 +3001,9 @@ class AgentWorkflowEnv:
                 if model_id is None
                 else self.model_registry.provider_for(model_id).provider_id
             )
-            failure_text = " ".join(record.message.split())
-            normalized = f"{record.error_type} {failure_text}".casefold()
-            status_match = re.search(r"(?:http(?: error)?|status)[ :=]*(\d{3})", normalized)
-            status_code = (
-                None if status_match is None else int(status_match.group(1))
+            category, retryability, status_code = (
+                self._execution_failure_diagnosis(record)
             )
-            if (
-                "openaicompatiblegatewayerror" in normalized
-                or "provider request failed" in normalized
-                or status_code is not None
-            ):
-                category = "provider_request_failure"
-                retryability = (
-                    "permanent_configuration"
-                    if status_code in {400, 401, 403, 404}
-                    else "transient_provider"
-                )
-            elif (
-                "reactexecutionerror" in normalized
-                or "react" in normalized
-                and ("turn" in normalized or "exhaust" in normalized)
-            ):
-                category = "react_turn_exhaustion"
-                retryability = "repair_execution_contract_or_tool_plan"
-            elif "tool" in normalized:
-                category = "tool_capability_failure"
-                retryability = "repair_tool_capability_or_arguments"
-            else:
-                category = "execution_contract_or_runtime_failure"
-                retryability = "diagnose_existing_agent"
             item: dict[str, object] = {
                 "agent_id": record.agent_id,
                 "model_id": model_id,
@@ -2836,6 +3028,24 @@ class AgentWorkflowEnv:
                         "execution_mode",
                         "artifact_type",
                         "completion_condition",
+                        "relations",
+                    ],
+                }
+            elif category == "react_turn_exhaustion":
+                item["react_public_error_summary"] = (
+                    self._react_public_error_summary(record)
+                )
+                item["preferred_repair"] = {
+                    "action": "modify_agent",
+                    "agent_id": record.agent_id,
+                    "field": "contract",
+                    "optional_field": "completion_condition",
+                    "preserve_fields": [
+                        "model_id",
+                        "role_family",
+                        "allowed_tools",
+                        "execution_mode",
+                        "artifact_type",
                         "relations",
                     ],
                 }
@@ -2873,6 +3083,7 @@ class AgentWorkflowEnv:
             self._graph,
             self._problem,
             run_id=run_id,
+            prior_failure_metadata=self._failure_continuations,
             format_output_agent=self._uses_format_agent_protocol(),
         )
 

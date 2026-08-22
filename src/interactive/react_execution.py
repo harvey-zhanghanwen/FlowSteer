@@ -240,6 +240,47 @@ class ToolReactExecutionAdapter:
                 visible.append(dict(observation))
         return visible
 
+    @staticmethod
+    def _continuation_observations(
+        action_history: tuple[Mapping[str, object], ...],
+    ) -> list[Mapping[str, object]]:
+        """Restore SkillFlow public Action--Observation continuation state.
+
+        Successful Tool turns persist their Observation under ``observation``;
+        parse/schema failures publish the canonical error fields directly on
+        the trace entry.  Only those public fields are restored, never model
+        hidden state or an unvalidated semantic artifact.
+        """
+
+        result: list[Mapping[str, object]] = []
+        for entry in action_history:
+            nested = entry.get("observation")
+            if isinstance(nested, Mapping):
+                result.append(MappingProxyType(dict(nested)))
+                continue
+            status = entry.get("observation_status")
+            if not isinstance(status, str):
+                continue
+            public = {
+                key: entry[key]
+                for key in (
+                    "observation_status",
+                    "public_error_code",
+                    "tool_id",
+                    "action_name",
+                    "argument_validation",
+                    "allowed_action_names",
+                    "expected_top_level_fields",
+                    "forbidden_wrapper_fields",
+                    "repair_instruction",
+                    "executed_action",
+                    "error_type",
+                )
+                if key in entry
+            }
+            result.append(MappingProxyType(public))
+        return result
+
     def _contract(
         self,
         request: AgentRequest,
@@ -378,12 +419,31 @@ class ToolReactExecutionAdapter:
             raise ReactExecutionError(
                 "execution adapter mode does not match the Agent contract"
             )
-        observations: list[Mapping[str, object]] = []
-        trace: list[dict[str, object]] = []
-        tool_receipts: list[dict[str, object]] = []
+        observations = self._continuation_observations(request.action_history)
+        trace: list[dict[str, object]] = [
+            {**dict(item), "continued_from_prior_revision": True}
+            for item in request.action_history
+        ]
+        tool_receipts: list[dict[str, object]] = [
+            dict(item) for item in request.prior_tool_receipts
+        ]
         model_calls: list[dict[str, object]] = []
-        tool_calls = 0
+        tool_calls = len(tool_receipts)
+        continuation_turn_count = len(trace)
         last_dispatched_tool_action_key: Optional[str] = None
+        for observation in reversed(observations):
+            executed_action = observation.get("executed_action")
+            if (
+                isinstance(executed_action, Mapping)
+                and executed_action.get("kind") == "tool"
+            ):
+                last_dispatched_tool_action_key = json.dumps(
+                    dict(executed_action),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                break
 
         for turn in range(1, self._max_turns + 1):
             response_schema = self._state_conditioned_response_schema(
@@ -426,7 +486,7 @@ class ToolReactExecutionAdapter:
                 }
             )
             entry: dict[str, object] = {
-                "turn": turn,
+                "turn": continuation_turn_count + turn,
                 "action_text": response.text,
             }
             try:
@@ -531,7 +591,12 @@ class ToolReactExecutionAdapter:
                     artifact,
                     {
                         "execution_mode": self._execution_mode,
-                        "react_turns_used": turn,
+                        "react_turns_used": continuation_turn_count + turn,
+                        "new_react_turns_used": turn,
+                        "continued_action_history_count": continuation_turn_count,
+                        "continued_tool_receipt_count": len(
+                            request.prior_tool_receipts
+                        ),
                         "tool_calls": tool_calls,
                         "tool_receipts": tool_receipts,
                         "react_trace": trace,
