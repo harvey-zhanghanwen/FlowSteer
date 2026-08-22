@@ -2986,6 +2986,21 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             "reasoner",
             answer_slot_attribution["responsible_agent_id"],
         )
+        wrapped_surface_attribution = semantic_env._semantic_repair_attribution(
+            "Verifier 'verifier' semantic artifact is invalid: Verifier field "
+            "'minimal_answer_surface' must be true. The Reasoner candidate "
+            "already passed answer-slot binding and retrieved-evidence alignment"
+        )
+        self.assertIsNotNone(wrapped_surface_attribution)
+        assert wrapped_surface_attribution is not None
+        self.assertEqual(
+            "reasoner",
+            wrapped_surface_attribution["responsible_role_family"],
+        )
+        self.assertEqual(
+            "reasoner",
+            wrapped_surface_attribution["responsible_agent_id"],
+        )
         verifier_schema_attribution = semantic_env._semantic_repair_attribution(
             "Verifier field 'candidate_answer' must be one bare answer span"
         )

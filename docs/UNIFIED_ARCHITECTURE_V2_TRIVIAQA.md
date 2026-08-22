@@ -248,6 +248,39 @@ Action--Observation history and Tool receipts are retained across the repaired
 revision as a project adaptation.  The aggregate r6 trace therefore contains
 multiple bounded calls, not one unbounded SkillFlow invocation.
 
+### r7 live evidence and r8 semantic repair
+
+The r7 two-task canary again collected both tasks without collection failure
+but passed only `1/2` legal terminal lineages.  The r6 retrieval-continuation
+defect is fixed: `triviaqa:tc_3` performed query rewriting, increased top-k,
+obtained a new successful Reasoner read and explicitly finished the legal
+`Retriever -> Reasoner -> Verifier -> Formatter` lineage.  Its evidence-grounded
+answer `Heworth, North Riding of Yorkshire` scored EM `0` and F1 `0.5` against
+the accepted York surfaces, so this case is retained as an accepted-answer
+canonicalization/granularity mismatch rather than rewritten during inference.
+
+`triviaqa:tc_1` retrieved direct evidence for `Harry Sinclair Lewis`; the
+Reasoner candidate, Verifier candidate and Formatter output all preserved that
+same accepted surface.  The Verifier nevertheless returned
+`minimal_answer_surface=false`, and the Runtime wrapped that field diagnosis
+inside the full Verifier-artifact error.  The previous attribution predicate
+recognized only an unwrapped `Verifier field ...` prefix, so the live action
+domain repeatedly exposed Verifier repair instead of the Reasoner-owned
+semantic repair and ended at `max_rounds` with no admitted terminal answer.
+This is a semantic-verification/repair-attribution defect, not a retrieval,
+Agent-communication or evaluator-input defect.
+
+Recovery revision r8 keeps the same shared Canvas, Runtime, Tool backend and
+evaluator.  A candidate that exactly copies the selected proposition argument
+and one complete entity mention is no longer rejected merely because the
+passage also contains a shorter coreferential alias.  The Reasoner must copy
+entity surfaces exactly from each proposition's evidence span and represent
+coreference through a separate evidence-supported identity proposition.
+Wrapped Verifier false-field diagnostics are attributed to the Reasoner that
+owns the candidate and answer slot; malformed Verifier structure remains a
+Verifier repair.  These rules are answer-free and apply identically to the
+shared HotpotQA/TriviaQA semantic protocol.
+
 ### Stable Zero status
 
 Static architecture, 771 unit tests and both frozen data-selection
@@ -255,9 +288,11 @@ preconditions are complete.  The initial, r2, r3 and r4 canaries failed for
 the documented causes; r5 **passed Stable Zero** but its incomplete fixed-128
 run was stopped after measured recovery defects appeared.  Recovery revision
 r6 failed Stable Zero for the documented retrieval-recovery defect.  Recovery
-revision r7 is **pending live Stable Zero and targeted regression**.  Formal fixed-128
-v2 EM/F1 remain pending.  No score is inferred from unit tests, a two-task
-canary, an incomplete run, or the previous architecture.
+revision r7 fixed that defect but failed Stable Zero for the documented
+semantic-verification/repair-attribution defect.  Recovery revision r8 is
+**pending live Stable Zero and targeted regression**.  Formal fixed-128 v2
+EM/F1 remain pending.  No score is inferred from unit tests, a two-task canary,
+an incomplete run, or the previous architecture.
 
 ## Historical comparison condition
 

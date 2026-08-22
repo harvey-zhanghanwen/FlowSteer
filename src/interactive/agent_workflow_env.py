@@ -2240,7 +2240,7 @@ class AgentWorkflowEnv:
             target_id, role_family = reasoner_id, "reasoner"
             responsible_constraint = "reasoner_semantic_artifact"
             preferred_actions = ["modify_agent", "set_relation", "add_subgraph"]
-        elif reason.startswith("Verifier field ") and any(
+        elif reason.startswith("Verifier") and any(
             f"{field_name!r} must be true" in reason
             for field_name in (
                 "evidence_supported",

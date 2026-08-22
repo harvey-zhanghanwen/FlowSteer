@@ -278,6 +278,14 @@ class MessageTests(unittest.TestCase):
         self.assertIn("requested relation", system)
         self.assertIn("Tool receipts", system)
         self.assertIn("explicit identity binding", system)
+        self.assertIn(
+            "copy each entity surface exactly as it occurs",
+            system,
+        )
+        self.assertIn(
+            "separate evidence-supported identity proposition",
+            system,
+        )
         self.assertNotIn("ReAct Agent", system)
 
     def test_unified_qa_verifier_and_formatter_preserve_candidate(self) -> None:
@@ -293,6 +301,14 @@ class MessageTests(unittest.TestCase):
         self.assertIn("semantic Verifier", verifier_system)
         self.assertIn("entity-to-relation binding", verifier_system)
         self.assertIn("must not select, replace, canonicalize", verifier_system)
+        self.assertIn(
+            "exactly copies the selected proposition argument",
+            verifier_system,
+        )
+        self.assertIn(
+            "do not reject that complete mention merely because a shorter alias",
+            verifier_system,
+        )
         self.assertIn("Verification status:", verifier_system)
 
         original_question = "PRIVATE QUESTION SHOULD NOT REACH FORMATTER"

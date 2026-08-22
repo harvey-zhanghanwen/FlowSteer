@@ -192,8 +192,14 @@ _QA_COMPLETE_ENTITY_SURFACE_RULE = (
     "Preserve the entity identity, requested relation, answer type, cardinality, "
     "and question qualifiers. A spelling variant, alias, abbreviation, or "
     "canonical name is admissible only when an explicit identity binding in the "
-    "retrieved evidence supports that surface; the Formatter must not perform "
-    "canonicalization. "
+    "retrieved evidence supports that surface. A candidate that exactly copies "
+    "the selected proposition argument and occurs verbatim as one complete entity "
+    "mention in its evidence span satisfies the concise-surface check even when "
+    "the passage also contains a shorter coreferential name; do not reject that "
+    "complete mention merely because a shorter alias or subspan exists. Reject "
+    "alias lists, appositive glosses, redundant answer-type nouns, text outside a "
+    "single complete entity mention, and surfaces without explicit identity "
+    "support. The Formatter must not perform canonicalization. "
 )
 
 _QA_REASONER_PROTOCOL = (
@@ -204,7 +210,12 @@ _QA_REASONER_PROTOCOL = (
     "predicate/relation, object or attribute value, qualifiers, and an exact "
     "evidence span. Resolve spelling variants, aliases, and entity ambiguity only "
     "when retrieved evidence supplies the identity binding. You alone determine "
-    "the semantic candidate. Return exactly the six structured fields "
+    "the semantic candidate. In every evidence proposition, copy each entity "
+    "surface exactly as it occurs in that proposition's evidence span; do not "
+    "silently replace a surname, pronoun, or shortened mention with the longer "
+    "question entity. Represent that coreference or alias only through a separate "
+    "evidence-supported identity proposition. Return exactly the six structured "
+    "fields "
     "question_scope, answer_slot, evidence_propositions, multi_hop_chain, "
     "candidate_answer, and evidence. Copy question_scope exactly. answer_slot "
     "contains exactly answer_type, answer_cardinality, qualifiers, "
@@ -223,7 +234,9 @@ _QA_VERIFIER_PROTOCOL = (
     "receipts. Verify evidence support, entity-to-relation binding, complete "
     "reasoning lineage, unchanged question scope, answer type and cardinality, "
     "concise evidence-grounded answer surface, and explicit alias or canonical-name "
-    "binding. You must not select, replace, canonicalize, or invent a candidate. "
+    "binding. "
+    + _QA_COMPLETE_ENTITY_SURFACE_RULE
+    + "You must not select, replace, canonicalize, or invent a candidate. "
     "Return exactly these labeled fields: `Candidate answer:`, `Evidence supported:`, "
     "`Entity attribute binding correct:`, `Multi-hop complete:`, `Scope preserved:`, "
     "`Answer type cardinality correct:`, `Minimal answer surface:`, "
@@ -278,6 +291,11 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
                     if hotpot_semantic
                     else (
                         _QA_COMPLETE_ENTITY_SURFACE_RULE
+                        + "In every evidence proposition, copy each entity surface "
+                        "exactly as it occurs in that proposition's evidence span; "
+                        "represent a surname, pronoun, shortened mention, or longer "
+                        "question entity coreference only through a separate "
+                        "evidence-supported identity proposition. "
                         + "Bind entity identity and the requested relation to "
                         "successful qa-retrieval read Tool receipts; if that "
                         "grounding is absent, do not guess or fabricate evidence."
