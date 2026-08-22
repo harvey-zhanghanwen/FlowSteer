@@ -157,6 +157,7 @@ class AgentRequest:
     upstream: Tuple[UpstreamMessage, ...] = ()
     own_draft: Optional[str] = None
     peer_draft: Optional[UpstreamMessage] = None
+    semantic_protocol: str = "none"
 
     def __post_init__(self) -> None:
         if type(self.is_output_agent) is not bool:
@@ -169,6 +170,11 @@ class AgentRequest:
             raise ValueError("Format Agent must be the Output Agent")
         if self.is_format_agent and self.is_format_predecessor:
             raise ValueError("Format Agent cannot be its own predecessor")
+        if self.semantic_protocol not in {
+            "none",
+            "hotpotqa_verified_answer_slot_v1",
+        }:
+            raise ValueError("unsupported AgentRequest semantic_protocol")
         object.__setattr__(
             self,
             "communication_condition",
@@ -278,8 +284,86 @@ class AgentRuntimeResult:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class AgentFailureRecord:
+    """Public execution-failure receipt for one Agent invocation.
+
+    SkillFlow retains the sampled action and public observation when a bounded
+    executor fails to complete.  AgentGraph keeps the same public receipt at
+    the Runtime boundary so a Canvas correction does not erase already-spent
+    Tool calls.  The record never becomes an upstream semantic artifact.
+    """
+
+    request_id: str
+    agent_id: str
+    phase: ExecutionPhase
+    graph_revision: int
+    error_type: str
+    message: str
+    metadata: Mapping[str, object] = field(default_factory=dict, compare=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))
+
+    def to_dict(self) -> Dict[str, object]:
+        return {
+            "request_id": self.request_id,
+            "agent_id": self.agent_id,
+            "phase": self.phase.value,
+            "graph_revision": self.graph_revision,
+            "error_type": self.error_type,
+            "message": self.message,
+            "metadata": dict(self.metadata),
+        }
+
+
 class AgentRuntimeError(RuntimeError):
     """Wraps a gateway or scheduler failure with AgentGraph context."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        failure_records: Tuple[AgentFailureRecord, ...] = (),
+        partial_result: Optional[AgentRuntimeResult] = None,
+        blocked_agent_ids: Tuple[str, ...] = (),
+        pending_agent_ids: Tuple[str, ...] = (),
+    ) -> None:
+        super().__init__(message)
+        self.failure_records = tuple(failure_records)
+        self.partial_result = partial_result
+        self.blocked_agent_ids = tuple(sorted(set(blocked_agent_ids)))
+        self.pending_agent_ids = tuple(sorted(set(pending_agent_ids)))
+
+
+def _public_failure_metadata(exc: BaseException) -> Mapping[str, object]:
+    """Copy only adapter-published Action--Observation failure receipts."""
+
+    result: Dict[str, object] = {}
+    for field_name in (
+        "react_trace",
+        "tool_receipts",
+        "model_calls",
+        "environment_reset_receipt",
+        "environment_receipts",
+        "evaluator_environment_trace",
+    ):
+        value = getattr(exc, field_name, None)
+        if isinstance(value, Mapping):
+            result[field_name] = dict(value)
+        elif isinstance(value, (list, tuple)):
+            result[field_name] = [
+                dict(item) if isinstance(item, Mapping) else item for item in value
+            ]
+    for field_name in (
+        "environment_revision",
+        "environment_terminal",
+        "cause_error_type",
+    ):
+        value = getattr(exc, field_name, None)
+        if value is not None:
+            result[field_name] = value
+    return MappingProxyType(result)
 
 
 @dataclass(frozen=True, slots=True)
@@ -325,6 +409,7 @@ class AgentRuntime:
         execution_adapters: Optional[Mapping[str, AgentExecutionAdapter]] = None,
         tool_registry: Optional[ToolRegistry] = None,
         dataset_id: Optional[str] = None,
+        semantic_protocol: str = "none",
     ) -> None:
         if max_concurrency is not None and (
             type(max_concurrency) is not int or max_concurrency <= 0
@@ -336,6 +421,11 @@ class AgentRuntime:
             not isinstance(dataset_id, str) or not dataset_id.strip()
         ):
             raise ValueError("dataset_id must be non-empty when supplied")
+        if semantic_protocol not in {
+            "none",
+            "hotpotqa_verified_answer_slot_v1",
+        }:
+            raise ValueError("unsupported AgentRuntime semantic_protocol")
         self.model_registry = model_registry
         self.gateway = gateway
         adapters: Dict[str, AgentExecutionAdapter] = {
@@ -354,6 +444,7 @@ class AgentRuntime:
         )
         self.tool_registry = tool_registry
         self.dataset_id = None if dataset_id is None else dataset_id.strip()
+        self.semantic_protocol = semantic_protocol
         self.timeout_seconds = timeout_seconds
         self._global_semaphore = (
             asyncio.Semaphore(max_concurrency) if max_concurrency is not None else None
@@ -437,18 +528,31 @@ class AgentRuntime:
                     )
                 output_metadata[agent_id] = MappingProxyType(dict(metadata))
         if dirty_agents is None:
-            dirty = set(nodes)
+            dirty_seeds = set(nodes)
         else:
             if any(not isinstance(agent_id, str) for agent_id in dirty_agents):
                 raise TypeError("dirty_agents must contain strings")
-            dirty = execution_graph.dirty_closure(dirty_agents)
-        dirty.update(agent_id for agent_id in nodes if agent_id not in outputs)
+            dirty_seeds = set(dirty_agents)
+        # Missing upstream artifacts invalidate their complete dependent
+        # closure just like an explicit Canvas edit.  Computing the closure
+        # only before adding missing IDs could otherwise reuse a stale cached
+        # downstream artifact.
+        dirty_seeds.update(agent_id for agent_id in nodes if agent_id not in outputs)
+        dirty = execution_graph.dirty_closure(dirty_seeds)
+        # FlowSteer's executor cache is valid only for an unchanged input
+        # identity.  A dirty Agent and every dependent successor therefore
+        # lose their prior artifact before execution starts; otherwise a
+        # failed recomputation could expose a stale value as current state.
+        for agent_id in dirty:
+            outputs.pop(agent_id, None)
+            output_metadata.pop(agent_id, None)
         dirty_components = {
             plan.component_for[agent_id]
             for agent_id in dirty
             if agent_id in plan.component_for
         }
         calls: List[AgentCallRecord] = []
+        cancelled_failure_records: List[AgentFailureRecord] = []
         completion_order: List[Tuple[str, ...]] = []
         executed_agents: Set[str] = set()
         reused_agents: Set[str] = set()
@@ -477,6 +581,7 @@ class AgentRuntime:
                     snapshot.revision,
                     calls,
                     output_metadata,
+                    cancelled_failure_records,
                     output_agent_id=execution_graph.output_agent_id,
                     format_output_agent=format_output_agent,
                     communication_condition=resolved_condition,
@@ -499,23 +604,18 @@ class AgentRuntime:
                 completed: List[
                     Tuple[Tuple[str, ...], Dict[str, str], bool]
                 ] = []
-                failure: Optional[BaseException] = None
+                failures: List[Tuple[Tuple[str, ...], BaseException]] = []
                 for task in sorted(done, key=lambda item: active[item]):
                     component = active.pop(task)
                     try:
                         block_outputs, reused = task.result()
                         completed.append((component, block_outputs, reused))
                     except BaseException as exc:
-                        failure = exc
-                        break
-                if failure is not None:
-                    await _cancel_and_wait(list(active))  # type: ignore[arg-type]
-                    if isinstance(failure, asyncio.CancelledError):
-                        raise failure
-                    if isinstance(failure, AgentRuntimeError):
-                        raise failure
-                    raise AgentRuntimeError(f"AgentGraph block execution failed: {failure}") from failure
+                        failures.append((component, exc))
 
+                # Preserve every block that had already completed in this
+                # scheduler tick before handling a sibling failure.  Pending
+                # blocks are still cancelled by the fail-fast boundary.
                 for component, block_outputs, reused in completed:
                     outputs.update(block_outputs)
                     completion_order.append(component)
@@ -523,6 +623,81 @@ class AgentRuntime:
                         reused_agents.update(component)
                     else:
                         executed_agents.update(component)
+                if failures:
+                    await _cancel_and_wait(list(active))  # type: ignore[arg-type]
+                    failure_component, failure = failures[0]
+                    if isinstance(failure, asyncio.CancelledError):
+                        raise failure
+                    failed_component_ids = {
+                        agent_id
+                        for component, _ in failures
+                        for agent_id in component
+                    }
+                    blocked_agent_ids = tuple(
+                        sorted(
+                            execution_graph.dirty_closure(failed_component_ids)
+                            - failed_component_ids
+                        )
+                    )
+                    partial_result = AgentRuntimeResult(
+                        run_id=resolved_run_id,
+                        graph_revision=snapshot.revision,
+                        output_agent_id=execution_graph.output_agent_id,
+                        final_answer=None,
+                        outputs=outputs,
+                        calls=tuple(
+                            sorted(calls, key=lambda record: record.request.request_id)
+                        ),
+                        block_completion_order=tuple(completion_order),
+                        executed_agent_ids=tuple(sorted(executed_agents)),
+                        reused_agent_ids=tuple(sorted(reused_agents)),
+                        communication_condition=resolved_condition,
+                        output_metadata=output_metadata,
+                    )
+                    pending_agent_ids = tuple(
+                        sorted(set(nodes) - set(partial_result.outputs))
+                    )
+                    failure_records = tuple(
+                        sorted(
+                            (
+                                record
+                                for _, item in failures
+                                if isinstance(item, AgentRuntimeError)
+                                for record in item.failure_records
+                            ),
+                            key=lambda record: (
+                                record.request_id,
+                                record.error_type,
+                            ),
+                        )
+                    ) + tuple(
+                        sorted(
+                            cancelled_failure_records,
+                            key=lambda record: (
+                                record.request_id,
+                                record.error_type,
+                            ),
+                        )
+                    )
+                    if isinstance(failure, AgentRuntimeError):
+                        raise AgentRuntimeError(
+                            str(failure),
+                            failure_records=failure_records,
+                            partial_result=partial_result,
+                            blocked_agent_ids=(
+                                *failure.blocked_agent_ids,
+                                *blocked_agent_ids,
+                            ),
+                            pending_agent_ids=pending_agent_ids,
+                        ) from failure
+                    raise AgentRuntimeError(
+                        f"AgentGraph block {failure_component!r} execution failed: "
+                        f"{failure}",
+                        partial_result=partial_result,
+                        blocked_agent_ids=blocked_agent_ids,
+                        pending_agent_ids=pending_agent_ids,
+                    ) from failure
+
                 newly_ready: Set[Tuple[str, ...]] = set()
                 for component, _, _ in completed:
                     for successor in plan.successors[component]:
@@ -692,6 +867,7 @@ class AgentRuntime:
         graph_revision: int,
         calls: List[AgentCallRecord],
         output_metadata: Dict[str, Mapping[str, object]],
+        cancelled_failure_records: List[AgentFailureRecord],
         *,
         output_agent_id: Optional[str],
         format_output_agent: bool,
@@ -726,7 +902,11 @@ class AgentRuntime:
                 is_format_predecessor=agent_id in format_predecessor_ids,
                 communication_condition=communication_condition,
             )
-            response = await self._invoke(request, calls)
+            response = await self._invoke(
+                request,
+                calls,
+                cancelled_failure_records,
+            )
             output_metadata[agent_id] = response.metadata
             return {agent_id: response.text}
 
@@ -774,8 +954,8 @@ class AgentRuntime:
             communication_condition=communication_condition,
         )
         left_draft, right_draft = await _gather_pair(
-            self._invoke(left_draft_request, calls),
-            self._invoke(right_draft_request, calls),
+            self._invoke(left_draft_request, calls, cancelled_failure_records),
+            self._invoke(right_draft_request, calls, cancelled_failure_records),
         )
 
         left_revision_request = self._request(
@@ -831,8 +1011,8 @@ class AgentRuntime:
             communication_condition=communication_condition,
         )
         left_revision, right_revision = await _gather_pair(
-            self._invoke(left_revision_request, calls),
-            self._invoke(right_revision_request, calls),
+            self._invoke(left_revision_request, calls, cancelled_failure_records),
+            self._invoke(right_revision_request, calls, cancelled_failure_records),
         )
         output_metadata[left_id] = left_revision.metadata
         output_metadata[right_id] = right_revision.metadata
@@ -923,13 +1103,36 @@ class AgentRuntime:
             upstream=upstream,
             own_draft=own_draft,
             peer_draft=peer_draft,
+            semantic_protocol=self.semantic_protocol,
         )
 
     async def _invoke(
         self,
         request: AgentRequest,
         calls: List[AgentCallRecord],
+        cancelled_failure_records: List[AgentFailureRecord],
     ) -> AgentResponse:
+        def cancelled_adapter_metadata() -> Mapping[str, object]:
+            mode_value = getattr(
+                request.agent.execution_mode,
+                "value",
+                request.agent.execution_mode,
+            )
+            adapter = self.execution_adapters.get(mode_value)
+            take_metadata = getattr(
+                adapter,
+                "take_cancelled_failure_metadata",
+                None,
+            )
+            if not callable(take_metadata):
+                return MappingProxyType({})
+            value = take_metadata(request.request_id)
+            return (
+                MappingProxyType(dict(value))
+                if isinstance(value, Mapping)
+                else MappingProxyType({})
+            )
+
         async def call_gateway() -> GatewayResponse:
             mode_value = getattr(
                 request.agent.execution_mode,
@@ -963,11 +1166,56 @@ class AgentRuntime:
                         if self.timeout_seconds is None
                         else await asyncio.wait_for(invocation, timeout=self.timeout_seconds)
                     )
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as exc:
+            metadata = MappingProxyType(
+                {
+                    **dict(cancelled_adapter_metadata()),
+                    **dict(_public_failure_metadata(exc)),
+                }
+            )
+            if metadata:
+                cancelled_failure_records.append(
+                    AgentFailureRecord(
+                        request_id=request.request_id,
+                        agent_id=request.agent.id,
+                        phase=request.phase,
+                        graph_revision=request.graph_revision,
+                        error_type=type(exc).__name__,
+                        message=(
+                            "Agent invocation was cancelled after partial public "
+                            "execution"
+                        ),
+                        metadata=metadata,
+                    )
+                )
             raise
         except Exception as exc:
+            adapter_cancellation_metadata = cancelled_adapter_metadata()
+            nested_records = (
+                exc.failure_records
+                if isinstance(exc, AgentRuntimeError) and exc.failure_records
+                else (
+                    AgentFailureRecord(
+                        request_id=request.request_id,
+                        agent_id=request.agent.id,
+                        phase=request.phase,
+                        graph_revision=request.graph_revision,
+                        error_type=type(exc).__name__,
+                        message=" ".join(str(exc).split()),
+                        metadata=MappingProxyType(
+                            {
+                                **dict(adapter_cancellation_metadata),
+                                **dict(_public_failure_metadata(exc)),
+                            }
+                        ),
+                    ),
+                )
+            )
             raise AgentRuntimeError(
-                f"gateway failed for agent {request.agent.id!r} during {request.phase.value}: {exc}"
+                f"gateway failed for agent {request.agent.id!r} during "
+                f"{request.phase.value}: {exc}",
+                failure_records=nested_records,
+                pending_agent_ids=(request.agent.id,),
             ) from exc
         response = raw_response if isinstance(raw_response, AgentResponse) else AgentResponse(raw_response)
         calls.append(AgentCallRecord(request=request, response=response))
@@ -976,6 +1224,7 @@ class AgentRuntime:
 
 __all__ = [
     "AgentCallRecord",
+    "AgentFailureRecord",
     "AgentGateway",
     "AgentExecutionAdapter",
     "AgentRequest",

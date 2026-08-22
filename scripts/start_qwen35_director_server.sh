@@ -29,13 +29,13 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   cat <<EOF
 usage: $(basename "$0") [additional sglang.launch_server arguments]
 
-Starts the Qwen3.5-9B Flow-Director on the rollout GPU (physical GPU 4 by
+Starts the Qwen3.5-9B Flow-Director on the rollout GPU (physical GPU 0 by
 default). The local Qwen3.5 model and tokenizer can be overridden separately:
 
   QWEN35_9B_MODEL_PATH       default: $default_model_path
   QWEN35_9B_TOKENIZER_PATH   default: $default_tokenizer_path
   FLOWSTEER_PYTHON_BIN       default: python3
-  FLOWSTEER_ROLLOUT_GPU      default: 4
+  FLOWSTEER_ROLLOUT_GPU      default: 0
   FLOWSTEER_SUPERVISOR_PORT  default: 8015
 
 All remaining arguments are passed to sglang.launch_server.

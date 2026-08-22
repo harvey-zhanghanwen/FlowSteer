@@ -180,6 +180,47 @@ class ToolReactExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("executed_action", gateway.requests[2].agent.contract)
         self.assertEqual("256", gateway.requests[0].model.metadata["max_tokens"])
 
+    async def test_argument_schema_is_enforced_before_tool_dispatch(self) -> None:
+        gateway = SequenceGateway(
+            [
+                action(
+                    "tool",
+                    name="search",
+                    arguments={},
+                    resource_id="wiki.search",
+                ),
+                action(
+                    "tool",
+                    name="search",
+                    arguments={"query": "Ada Lovelace"},
+                    resource_id="wiki.search",
+                ),
+                action(
+                    "complete",
+                    name="complete",
+                    arguments={"value": "Ada Lovelace"},
+                    resource_id=None,
+                ),
+            ]
+        )
+
+        response = await ToolReactExecutionAdapter(
+            gateway=gateway,
+            tool_registry=registry(),
+            max_turns=3,
+            max_tool_calls=1,
+        ).execute(request())
+
+        self.assertEqual("Ada Lovelace", response.text)
+        self.assertEqual(1, response.metadata["tool_calls"])
+        self.assertEqual(1, len(response.metadata["tool_receipts"]))
+        invalid = response.metadata["react_trace"][0]
+        self.assertEqual(
+            "tool_arguments_schema_invalid",
+            invalid["public_error_code"],
+        )
+        self.assertIn("query", invalid["argument_validation"]["message"])
+
     async def test_unregistered_action_name_is_rejected_before_backend(self) -> None:
         gateway = SequenceGateway(
             [

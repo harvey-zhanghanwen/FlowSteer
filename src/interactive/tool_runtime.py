@@ -18,6 +18,9 @@ import time
 from types import MappingProxyType
 from typing import Any, Optional, Protocol, Union, cast
 
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import SchemaError
+
 
 JsonValue = Union[
     None,
@@ -224,7 +227,16 @@ class ToolCapability:
             normalized_name = name.strip()
             if normalized_name in raw_action_schemas:
                 raise ValueError("action_schemas action names must be unique")
-            raw_action_schemas[normalized_name] = dict(schema)
+            normalized_schema = _normalize_json(dict(schema))
+            if not isinstance(normalized_schema, dict):
+                raise TypeError("action schema must be a JSON object")
+            try:
+                Draft202012Validator.check_schema(normalized_schema)
+            except SchemaError as exc:
+                raise ValueError(
+                    f"action schema for {normalized_name!r} is invalid: {exc.message}"
+                ) from exc
+            raw_action_schemas[normalized_name] = normalized_schema
         if self.timeout_seconds is not None and self.timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive when supplied")
         if type(self.availability) is not bool:
@@ -267,6 +279,37 @@ class ToolCapability:
 
     def supports_dataset(self, dataset_id: str) -> bool:
         return "*" in self.dataset_scope or dataset_id in self.dataset_scope
+
+    def argument_validation_error(
+        self,
+        action_name: str,
+        arguments: Mapping[str, object],
+    ) -> Optional[dict[str, object]]:
+        """Return the first deterministic Draft 2020-12 validation error."""
+
+        schema = self.action_schemas.get(action_name)
+        if schema is None:
+            return {
+                "message": "action is absent from the registered action schema",
+                "instance_path": [],
+                "schema_path": [],
+            }
+        errors = sorted(
+            Draft202012Validator(dict(schema)).iter_errors(dict(arguments)),
+            key=lambda item: (
+                tuple(str(value) for value in item.absolute_path),
+                tuple(str(value) for value in item.absolute_schema_path),
+                item.message,
+            ),
+        )
+        if not errors:
+            return None
+        error = errors[0]
+        return {
+            "message": error.message,
+            "instance_path": list(error.absolute_path),
+            "schema_path": list(error.absolute_schema_path),
+        }
 
     def to_value(self) -> dict[str, object]:
         return {

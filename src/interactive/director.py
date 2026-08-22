@@ -42,15 +42,78 @@ An add_subgraph action adds one functional subgraph of one to three Agents and i
 # legal edits and execution feedback through the progressive Canvas.  This
 # prompt therefore defines only the policy/environment boundary.  Task-solving
 # recipes belong in evidence-gated Skills or graph-authored Agent contracts.
-DIRECTOR_SYSTEM_PROMPT = """You are the Flow-Director. Incrementally edit the executable AgentGraph from the latest Canvas observation. Return exactly one valid JSON action each turn and no other text.
+LEGACY_DIRECTOR_SYSTEM_PROMPT_V9 = """You are the Flow-Director. Incrementally edit the executable AgentGraph from the latest Canvas observation. Return exactly one valid JSON action each turn and no other text.
 
 Legal actions are add_subgraph, modify_agent, delete_agent, set_relation, set_output, and finish. add_subgraph adds one functional subgraph of one to three Agents as one transaction. Use only model_id values from model_catalog and exact tool_id values from tool_catalog. execution_mode is reasoning, react, or coding.
 
 A directed relation routes the source artifact to the target. A bidirectional relation performs one bounded two-Agent exchange. Each accepted edit is executed once, and its Canvas validation and execution feedback appear in the next observation. Inspect that state before choosing the next action. Use finish only when finish_admissibility is present and admissible. Do not assume a fixed workflow topology or an unlisted Skill."""
 
-DIRECTOR_PROMPT_VERSION = "agentgraph.director.minimal-neutral.v9"
+DIRECTOR_SYSTEM_PROMPT = """You are the Flow-Director. Incrementally edit the executable AgentGraph from the latest Canvas observation. Return exactly one valid JSON action each turn and no other text.
+
+Use only action types listed in admissible_action_types, model_id values from model_catalog, and exact tool_id values from tool_catalog. add_subgraph adds one functional subgraph of one to three Agents as one transaction. execution_mode is reasoning, react, or coding.
+
+A directed relation routes the source artifact to the target. A bidirectional relation performs one bounded two-Agent exchange. Each accepted edit is executed once, and its Canvas validation and execution feedback appear in the next observation. Inspect that state before choosing the next action. Use finish only when finish_admissibility is present and admissible. Do not assume a fixed workflow topology or an unlisted Skill."""
+
+DIRECTOR_PROMPT_VERSION = "agentgraph.director.minimal-neutral.v10"
+LEGACY_DIRECTOR_PROMPT_VERSION_V9 = "agentgraph.director.minimal-neutral.v9"
+LEGACY_DIRECTOR_PROMPT_VERSION_V8 = "agentgraph.director.minimal-neutral.v8"
+HOTPOTQA_DIRECTOR_PROMPT_VERSION = (
+    "agentgraph.director.hotpotqa-semantic-recovery.v11"
+)
+HOTPOTQA_SEMANTIC_PROTOCOL = "hotpotqa_verified_answer_slot_v1"
+PRESERVE_DIAGNOSE_REPAIR_AUGMENT_POLICY = (
+    "preserve_diagnose_repair_augment"
+)
+
+# This is an explicitly selected HotpotQA policy.  The neutral v10 prompt above
+# remains the default for every other dataset and for existing callers.
+HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V11 = """You are the Flow-Director. Incrementally edit the executable AgentGraph from the latest Canvas observation. Return exactly one valid JSON action each turn and no other text.
+
+Use only action types listed in admissible_action_types, model_id values from model_catalog, and exact tool_id values from tool_catalog. add_subgraph adds one functional subgraph of one to three Agents as one transaction. role_family names a semantic responsibility; execution_mode is only the execution schedule reasoning, react, or coding. Never define ReAct as an Agent role. When tools are needed, execution_mode react follows one bounded Thought -> Action(tool) -> Observation -> Thought -> Final schedule.
+
+For the HotpotQA semantic protocol, preserve the original question scope, relation, qualifiers, comparison criterion, and answer type in every contract. Never introduce a narrower qualifier such as "singles" unless it is present in the question. Use role_family reasoner for the Agent that owns the semantic answer, verifier for the Agent that checks it, and format only for the terminal Formatter. A Reasoner must align each retrieved database fact with both (a) its proposition structure--subject/entity, predicate/relation, object/attribute value, and qualifiers--and (b) the answer slot actually requested by the question. The Reasoner alone determines the semantic answer and emits Question scope, Answer slot, Evidence propositions, Multi-hop chain, Candidate answer, and Evidence fields. Completion requires at least one successful non-empty qa-retrieval read. Assign that exact Tool to a Reasoner or evidence-retrieval Agent with execution_mode react, and route the receipt-bearing artifact directly into the Verifier; the Verifier must also receive exactly one direct Reasoner candidate. The Verifier checks that the candidate has explicit database evidence, the entity-to-attribute binding is correct, every required hop is complete, and the question scope is unchanged. It copies the identical candidate and emits Candidate answer, Evidence supported, Entity attribute binding correct, Multi-hop complete, Scope preserved, and Verification status fields; it must not select, replace, or invent a different candidate. A terminal Formatter receives only one passed Verifier artifact, never the original question, and copies the Candidate answer value exactly into the required output wrapper. It must not reason, verify, canonicalize, or reselect an answer.
+
+For a comparison, if both retrieved values are unexpectedly equal, do not conclude a tie immediately. Recheck the original scope, both entity bindings, retrieved evidence, and whether any upstream contract narrowed the question before determining the candidate.
+
+Recover from failures in this order: preserve -> diagnose -> repair -> augment. Preserve valid evidence, semantic answers, and working relations. Diagnose execution_mode, Tool capability, relation, and contract faults; repair the existing node or edge first, then augment with a repair, retrieval, or Verifier Agent if needed. Do not delete an Agent merely because it failed. Delete only when the node itself is unusable, a replacement has already taken over its artifact, and deletion cannot break semantic lineage. Inspect Canvas validation and execution feedback before every edit, and use finish only when finish_admissibility is present and admissible. Do not hard-code a benchmark sample, accepted answer, fixed evidence, or Ground Truth, and do not assume an unlisted Skill."""
+
+
+def director_system_prompt_for_version(prompt_version: str) -> str:
+    """Resolve one explicitly versioned Director policy without changing v10."""
+
+    if not isinstance(prompt_version, str) or not prompt_version.strip():
+        raise ValueError("Director prompt_version must be non-empty text")
+    normalized = prompt_version.strip()
+    by_version = {
+        DIRECTOR_PROMPT_VERSION: DIRECTOR_SYSTEM_PROMPT,
+        LEGACY_DIRECTOR_PROMPT_VERSION_V9: LEGACY_DIRECTOR_SYSTEM_PROMPT_V9,
+        LEGACY_DIRECTOR_PROMPT_VERSION_V8: LEGACY_DIRECTOR_SYSTEM_PROMPT_V8,
+        # These are the two historical v8 experiment labels still present in
+        # checked-in evaluation configs.  Their exact transcript policy is the
+        # canonical v8 prompt above.
+        "agentgraph.director.constrained-action.skillflow-qa.v8": (
+            LEGACY_DIRECTOR_SYSTEM_PROMPT_V8
+        ),
+        "agentgraph.director.skillflow_continuation_v8": (
+            LEGACY_DIRECTOR_SYSTEM_PROMPT_V8
+        ),
+        HOTPOTQA_DIRECTOR_PROMPT_VERSION: HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V11,
+    }
+    # Older experiment and unit-test receipts used arbitrary version labels
+    # (for example ``prompt-v1``) while executing the then-current default
+    # prompt.  Preserve that metadata compatibility by resolving unrecognized
+    # legacy labels to neutral v10; HotpotQA v11 is selected only by its exact
+    # version above.
+    return by_version.get(normalized, DIRECTOR_SYSTEM_PROMPT)
+
+
 _SUPPORTED_DIRECTOR_SYSTEM_PROMPTS = frozenset(
-    {DIRECTOR_SYSTEM_PROMPT, LEGACY_DIRECTOR_SYSTEM_PROMPT_V8}
+    {
+        DIRECTOR_SYSTEM_PROMPT,
+        HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V11,
+        LEGACY_DIRECTOR_SYSTEM_PROMPT_V9,
+        LEGACY_DIRECTOR_SYSTEM_PROMPT_V8,
+    }
 )
 
 
@@ -615,6 +678,10 @@ class AgentGraphOrchestrator:
         sampling_action_schema_version: str = (
             DIRECTOR_STATE_CONDITIONED_ACTION_SCHEMA_VERSION
         ),
+        system_prompt: Optional[str] = None,
+        prompt_version: str = DIRECTOR_PROMPT_VERSION,
+        semantic_protocol: str = "none",
+        recovery_policy: str = "default",
     ) -> None:
         if max_rounds < 1:
             raise ValueError("max_rounds must be positive")
@@ -640,6 +707,31 @@ class AgentGraphOrchestrator:
         self.catalog_order_seed = seed if catalog_order_seed is None else catalog_order_seed
         self.history_window = history_window
         self.tool_registry = tool_registry
+        if not isinstance(prompt_version, str) or not prompt_version.strip():
+            raise ValueError("Director prompt_version must be non-empty text")
+        self.prompt_version = prompt_version.strip()
+        expected_system_prompt = director_system_prompt_for_version(
+            self.prompt_version
+        )
+        if system_prompt is None:
+            self.system_prompt = expected_system_prompt
+        elif not isinstance(system_prompt, str) or not system_prompt.strip():
+            raise ValueError("Director system_prompt must be non-empty text")
+        elif system_prompt != expected_system_prompt:
+            raise ValueError(
+                "Director system_prompt does not match its prompt_version"
+            )
+        else:
+            self.system_prompt = system_prompt
+        if semantic_protocol not in {"none", HOTPOTQA_SEMANTIC_PROTOCOL}:
+            raise ValueError("unsupported Director semantic_protocol")
+        if recovery_policy not in {
+            "default",
+            PRESERVE_DIAGNOSE_REPAIR_AUGMENT_POLICY,
+        }:
+            raise ValueError("unsupported Director recovery_policy")
+        self.semantic_protocol = semantic_protocol
+        self.recovery_policy = recovery_policy
         if sampling_action_profile not in {
             None,
             DIRECTOR_PROGRESSIVE_ACTION_MASK_PROFILE,
@@ -774,6 +866,7 @@ class AgentGraphOrchestrator:
             "current_graph": env.graph.to_dict(),
             "topology_statistics": env.graph.topology_statistics(),
             "canvas_feedback": snapshot.last_feedback,
+            "admissible_action_types": list(env.allowed_action_types),
             # These are existing admission constraints enforced by
             # AgentWorkflowEnv, not a role or topology template.  Surfacing
             # them lets the minimal policy observe its terminal boundary.
@@ -784,6 +877,10 @@ class AgentGraphOrchestrator:
                 "required_tool_id": env.required_tool_id,
             },
         }
+        if self.semantic_protocol != "none":
+            payload["semantic_protocol"] = self.semantic_protocol
+        if self.recovery_policy != "default":
+            payload["recovery_policy"] = self.recovery_policy
         if directed_edges:
             # The two-bit relation remains the canonical mutation receipt.  A
             # direct edge view avoids making the Director mentally invert a
@@ -869,7 +966,7 @@ class AgentGraphOrchestrator:
         )
         return encode_director_transcript(
             (
-                {"role": "system", "content": DIRECTOR_SYSTEM_PROMPT},
+                {"role": "system", "content": self.system_prompt},
                 {"role": "user", "content": self._observation_message(initial)},
             )
         )
@@ -973,7 +1070,14 @@ __all__ = [
     "DIRECTOR_STATE_CONDITIONED_ACTION_SCHEMA_VERSION",
     "DIRECTOR_SYSTEM_PROMPT",
     "DIRECTOR_PROMPT_VERSION",
+    "HOTPOTQA_DIRECTOR_PROMPT_VERSION",
+    "HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V11",
+    "HOTPOTQA_SEMANTIC_PROTOCOL",
+    "PRESERVE_DIAGNOSE_REPAIR_AUGMENT_POLICY",
     "LEGACY_DIRECTOR_SYSTEM_PROMPT_V8",
+    "LEGACY_DIRECTOR_SYSTEM_PROMPT_V9",
+    "LEGACY_DIRECTOR_PROMPT_VERSION_V8",
+    "LEGACY_DIRECTOR_PROMPT_VERSION_V9",
     "DIRECTOR_TRANSCRIPT_SCHEMA",
     "DirectorClient",
     "DirectorError",
@@ -983,6 +1087,7 @@ __all__ = [
     "OrchestrationResult",
     "decode_director_transcript",
     "director_action_json_schema_text",
+    "director_system_prompt_for_version",
     "director_sglang_sampling_json_schema_text",
     "director_state_conditioned_sampling_json_schema_text",
     "encode_director_transcript",

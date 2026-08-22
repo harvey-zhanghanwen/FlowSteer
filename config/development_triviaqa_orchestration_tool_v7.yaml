@@ -57,6 +57,7 @@ qa_tool_runtime:
   max_turns_per_agent_call: 6
   max_tool_calls_per_agent_call: 4
   tool_timeout_seconds: 60.0
+  completion_policy: "required_tool_call"
 
 storage:
   schema_version: "flowsteer.completion_benchmark.round.v1"

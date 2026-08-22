@@ -27,7 +27,7 @@ class ConfigLoaderTests(unittest.TestCase):
         self.assertEqual(config["director"]["base_model"], "Qwen/Qwen3.5-9B")
         self.assertEqual(config["director"]["backend"], "sglang")
         self.assertEqual(config["gpu"]["learner_physical"], 3)
-        self.assertEqual(config["gpu"]["rollout_physical"], 4)
+        self.assertEqual(config["gpu"]["rollout_physical"], 0)
         self.assertEqual(config["gpu"]["gradient_replica_physical"], 5)
         self.assertTrue(config["director"]["execute_on_edit"])
         self.assertEqual(config["director"]["history_window"], 4)
@@ -191,6 +191,70 @@ class ConfigLoaderTests(unittest.TestCase):
         }
         with self.assertRaises(ConfigurationError):
             validate_agent_graph_config(config)
+
+    def test_hotpot_unified_semantic_protocol_is_explicit_and_inference_only(self) -> None:
+        config = load_yaml("config/evaluation_hotpotqa_unified_architecture_v1.yaml")
+        validate_agent_graph_config(config)
+
+        self.assertEqual(
+            config["experiment"]["prompt_version"],
+            "agentgraph.director.hotpotqa-semantic-recovery.v11",
+        )
+        self.assertEqual(
+            config["agent_graph"]["semantic_protocol_by_source"],
+            {"hotpotqa": "hotpotqa_verified_answer_slot_v1"},
+        )
+        self.assertEqual(
+            config["agent_graph"]["recovery_policy"],
+            "preserve_diagnose_repair_augment",
+        )
+        self.assertEqual(
+            config["agent_graph"]["required_evidence_tool_id"],
+            "qa-retrieval",
+        )
+        self.assertEqual(config["hotpotqa_evaluation"]["sample_count"], 128)
+        self.assertEqual(
+            config["hotpotqa_evaluation"]["required_partition"],
+            "development",
+        )
+        self.assertEqual(config["gpu"]["rollout_physical"], 0)
+        self.assertFalse(config["experiment"]["training_enabled"])
+        self.assertFalse(config["grpo"]["enabled"])
+
+    def test_hotpot_semantic_protocol_combination_is_fail_closed(self) -> None:
+        mutations = (
+            ("prompt_version", "agentgraph.director.minimal-neutral.v10"),
+            ("recovery_policy", "default"),
+            ("required_evidence_tool_id", "other-tool"),
+            ("terminal_protocol", "none"),
+            ("qa_completion_policy", "optional"),
+        )
+        for field, value in mutations:
+            with self.subTest(field=field):
+                config = load_yaml(
+                    "config/evaluation_hotpotqa_unified_architecture_v1.yaml"
+                )
+                if field == "prompt_version":
+                    config["experiment"][field] = value
+                elif field == "terminal_protocol":
+                    config["agent_graph"]["terminal_protocol_by_source"][
+                        "hotpotqa"
+                    ] = value
+                elif field == "qa_completion_policy":
+                    config["qa_tool_runtime"]["completion_policy"] = value
+                else:
+                    config["agent_graph"][field] = value
+                with self.assertRaises(ConfigurationError):
+                    validate_agent_graph_config(config)
+
+        wrong_dataset = load_yaml(
+            "config/evaluation_hotpotqa_unified_architecture_v1.yaml"
+        )
+        wrong_dataset["agent_graph"]["semantic_protocol_by_source"] = {
+            "triviaqa": "hotpotqa_verified_answer_slot_v1"
+        }
+        with self.assertRaises(ConfigurationError):
+            validate_agent_graph_config(wrong_dataset)
 
 
 if __name__ == "__main__":

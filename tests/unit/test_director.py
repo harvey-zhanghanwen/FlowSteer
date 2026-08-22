@@ -12,11 +12,17 @@ from src.interactive.director import (
     DIRECTOR_PROMPT_VERSION,
     DIRECTOR_STATE_CONDITIONED_ACTION_SCHEMA_VERSION,
     DIRECTOR_SYSTEM_PROMPT,
+    HOTPOTQA_DIRECTOR_PROMPT_VERSION,
+    HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V11,
+    HOTPOTQA_SEMANTIC_PROTOCOL,
     LEGACY_DIRECTOR_SYSTEM_PROMPT_V8,
+    LEGACY_DIRECTOR_SYSTEM_PROMPT_V9,
+    PRESERVE_DIAGNOSE_REPAIR_AUGMENT_POLICY,
     DirectorResponse,
     OpenAIDirectorClient,
     decode_director_transcript,
     director_action_json_schema_text,
+    director_system_prompt_for_version,
     director_state_conditioned_sampling_json_schema_text,
     encode_director_transcript,
 )
@@ -123,9 +129,88 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         assert decoded is not None
         self.assertEqual(LEGACY_DIRECTOR_SYSTEM_PROMPT_V8, decoded[0]["content"])
         self.assertEqual(
-            "agentgraph.director.minimal-neutral.v9",
+            "agentgraph.director.minimal-neutral.v10",
             DIRECTOR_PROMPT_VERSION,
         )
+
+    async def test_versioned_prompt_resolver_preserves_legacy_and_default(self) -> None:
+        self.assertIs(
+            DIRECTOR_SYSTEM_PROMPT,
+            director_system_prompt_for_version(DIRECTOR_PROMPT_VERSION),
+        )
+        self.assertIs(
+            LEGACY_DIRECTOR_SYSTEM_PROMPT_V9,
+            director_system_prompt_for_version(
+                "agentgraph.director.minimal-neutral.v9"
+            ),
+        )
+        self.assertIs(
+            LEGACY_DIRECTOR_SYSTEM_PROMPT_V8,
+            director_system_prompt_for_version(
+                "agentgraph.director.constrained-action.skillflow-qa.v8"
+            ),
+        )
+        self.assertIs(
+            DIRECTOR_SYSTEM_PROMPT,
+            director_system_prompt_for_version("prompt-v1"),
+        )
+        self.assertIs(
+            HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V11,
+            director_system_prompt_for_version(HOTPOTQA_DIRECTOR_PROMPT_VERSION),
+        )
+        with self.assertRaises(ValueError):
+            director_system_prompt_for_version(" ")
+
+    async def test_hotpot_v11_prompt_encodes_semantic_and_recovery_policy(self) -> None:
+        model_registry = registry()
+        env = AgentWorkflowEnv(
+            model_registry,
+            gateway=FakeGateway(),
+            problem="Which player won more titles?",
+        )
+        orchestrator = AgentGraphOrchestrator(
+            model_registry,
+            ScriptedDirector([]),
+            system_prompt=HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V11,
+            prompt_version=HOTPOTQA_DIRECTOR_PROMPT_VERSION,
+            semantic_protocol=HOTPOTQA_SEMANTIC_PROTOCOL,
+            recovery_policy=PRESERVE_DIAGNOSE_REPAIR_AUGMENT_POLICY,
+        )
+
+        messages = transcript_messages(orchestrator.build_prompt(env, 0, ()))
+        state = observation_payload(messages[-1])
+
+        self.assertEqual(HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V11, messages[0]["content"])
+        self.assertEqual(HOTPOTQA_SEMANTIC_PROTOCOL, state["semantic_protocol"])
+        self.assertEqual(
+            PRESERVE_DIAGNOSE_REPAIR_AUGMENT_POLICY,
+            state["recovery_policy"],
+        )
+        self.assertIn("answer slot actually requested", messages[0]["content"])
+        self.assertIn("Reasoner alone determines", messages[0]["content"])
+        self.assertIn("must not select, replace", messages[0]["content"])
+        self.assertIn("never the original question", messages[0]["content"])
+        self.assertIn("unexpectedly equal", messages[0]["content"])
+        self.assertIn("preserve -> diagnose -> repair -> augment", messages[0]["content"])
+
+        default = AgentGraphOrchestrator(
+            model_registry,
+            ScriptedDirector([]),
+        )
+        default_state = observation_payload(
+            transcript_messages(default.build_prompt(env, 0, ()))[-1]
+        )
+        self.assertNotIn("semantic_protocol", default_state)
+        self.assertNotIn("recovery_policy", default_state)
+
+    async def test_orchestrator_rejects_prompt_and_version_mismatch(self) -> None:
+        with self.assertRaisesRegex(ValueError, "does not match"):
+            AgentGraphOrchestrator(
+                registry(),
+                ScriptedDirector([]),
+                system_prompt=HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V11,
+                prompt_version=DIRECTOR_PROMPT_VERSION,
+            )
 
     async def test_openai_director_boundary_is_local_qwen_supervisor(self) -> None:
         OpenAIDirectorClient(
@@ -450,14 +535,21 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
             state["finish_admissibility"],
         )
         self.assertNotIn("remaining_rounds", state)
+        self.assertEqual(
+            list(env.allowed_action_types),
+            state["admissible_action_types"],
+        )
 
     async def test_director_terminal_policy_is_issue_driven_without_role_template(
         self,
     ) -> None:
         self.assertIn("exactly one valid JSON action each turn", DIRECTOR_SYSTEM_PROMPT)
-        self.assertIn("Legal actions are add_subgraph", DIRECTOR_SYSTEM_PROMPT)
         self.assertIn(
-            "one functional subgraph of one to three Agents as one transaction",
+            "action types listed in admissible_action_types",
+            DIRECTOR_SYSTEM_PROMPT,
+        )
+        self.assertIn(
+            "add_subgraph adds one functional subgraph of one to three Agents as one transaction",
             DIRECTOR_SYSTEM_PROMPT,
         )
         self.assertIn(

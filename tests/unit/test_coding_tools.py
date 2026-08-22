@@ -297,6 +297,12 @@ class RepositoryToolRegistryTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 ["path"], capability.action_schemas["view_file"]["required"]
             )
+            self.assertTrue(
+                all(
+                    schema.get("additionalProperties") is False
+                    for schema in capability.action_schemas.values()
+                )
+            )
             result = await registry.ainvoke(
                 SWEBENCH_REPOSITORY_TOOL_ID,
                 ToolRequest("view_file", {"path": "module.py"}),

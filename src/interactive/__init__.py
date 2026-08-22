@@ -95,6 +95,7 @@ from .agent_graph import (
 )
 from .agent_action_parser import AgentAction, AgentActionParser, AgentActionType
 from .agent_runtime import (
+    AgentFailureRecord,
     AgentExecutionAdapter,
     AgentRuntime,
     AgentRuntimeResult,
@@ -216,6 +217,7 @@ __all__ = [
     'AgentActionParser',
     'AgentActionType',
     'AgentRuntime',
+    'AgentFailureRecord',
     'AgentExecutionAdapter',
     'AgentRuntimeResult',
     'CommunicationCondition',

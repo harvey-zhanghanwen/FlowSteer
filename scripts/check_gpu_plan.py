@@ -12,7 +12,7 @@ import sys
 
 ROLES = (
     ("learner model/optimizer", "FLOWSTEER_LEARNER_GPU", "3"),
-    ("SGLang Supervisor rollout", "FLOWSTEER_ROLLOUT_GPU", "4"),
+    ("SGLang Supervisor rollout", "FLOWSTEER_ROLLOUT_GPU", "0"),
     ("gradient replica/backward", "FLOWSTEER_GRADIENT_GPU", "5"),
 )
 

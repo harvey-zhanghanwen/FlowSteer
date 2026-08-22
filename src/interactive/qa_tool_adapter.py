@@ -60,6 +60,15 @@ SKILLFLOW_FACTUAL_QA_GUIDANCE = (
     "Extract the answer from retrieved passages and do not guess from memory. "
     "Complete with a concise name, place, number, or short phrase."
 )
+HOTPOTQA_VERIFIED_ANSWER_SLOT_GUIDANCE = (
+    "Treat ReAct only as the execution schedule Thought -> Action(tool) -> "
+    "Observation -> Thought -> Final, never as an Agent role. Preserve the "
+    "question's exact scope and answer slot. Represent retrieved facts as "
+    "subject/entity, predicate/relation, object or attribute value, and qualifiers; "
+    "keep the entity-to-attribute binding explicit and show every bridge in the "
+    "multi-hop chain. If compared values are unexpectedly equal, recheck scope, "
+    "both bindings, retrieved passages, and contract narrowing before calling a tie."
+)
 
 
 class _RetrievalIndex(Protocol):
@@ -276,9 +285,19 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         max_tool_calls: int,
         max_action_tokens: int = 512,
         task_type: str | None = None,
+        completion_policy: str = "required_tool_call",
     ) -> None:
         if task_type not in {None, "multi_hop_qa", "factual_qa"}:
             raise ValueError("QA task_type must be multi_hop_qa, factual_qa, or None")
+        if completion_policy not in {
+            "optional",
+            "required_tool_call",
+            "required_evidence",
+        }:
+            raise ValueError(
+                "QA completion_policy must be optional, required_tool_call, "
+                "or required_evidence"
+            )
         super().__init__(
             gateway=gateway,
             tool_registry=tool_registry,
@@ -287,6 +306,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             max_action_tokens=max_action_tokens,
         )
         self._task_type = task_type
+        self._completion_policy = completion_policy
         self._retrieval_completion_required: ContextVar[bool] = ContextVar(
             f"qa_retrieval_completion_required_{id(self)}",
             default=False,
@@ -299,7 +319,8 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         # leak allowed-tool state across Agents.  A zero Tool budget preserves
         # the generic direct-completion boundary because no dispatch is legal.
         requires_retrieval = (
-            self._max_tool_calls > 0
+            self._completion_policy != "optional"
+            and self._max_tool_calls > 0
             and QA_RETRIEVAL_TOOL_ID in request.agent.allowed_tools
         )
         token = self._retrieval_completion_required.set(requires_retrieval)
@@ -316,6 +337,8 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         contract = super()._contract(request, observations)
         if self._task_type == "multi_hop_qa":
             guidance = SKILLFLOW_MULTI_HOP_QA_GUIDANCE
+            if request.semantic_protocol == "hotpotqa_verified_answer_slot_v1":
+                guidance += " " + HOTPOTQA_VERIFIED_ANSWER_SLOT_GUIDANCE
         elif self._task_type == "factual_qa":
             guidance = SKILLFLOW_FACTUAL_QA_GUIDANCE
         else:
@@ -327,7 +350,31 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             " On completion, arguments.value is the completed QA artifact, "
             "not a schema label or placeholder."
         )
-        if request.is_format_predecessor:
+        semantic_role = (request.agent.role_family or "").casefold()
+        if (
+            request.semantic_protocol == "hotpotqa_verified_answer_slot_v1"
+            and semantic_role == "reasoner"
+        ):
+            terminal_wire += (
+                " As the Reasoner, arguments.value must contain the labeled "
+                "Question scope, Answer slot, Evidence propositions, Multi-hop "
+                "chain, Candidate answer, and Evidence fields. Determine the one "
+                "semantic candidate only after aligning the evidence proposition "
+                "to the requested answer slot."
+            )
+        elif (
+            request.semantic_protocol == "hotpotqa_verified_answer_slot_v1"
+            and semantic_role == "verifier"
+        ):
+            terminal_wire += (
+                " As the Verifier, check explicit retrieved evidence, entity-to-"
+                "attribute binding, multi-hop completeness, and unchanged question "
+                "scope. Do not replace the Reasoner's candidate. Return Candidate "
+                "answer, the four explicit boolean check fields, and Verification "
+                "status. Set supported only when all checks pass; "
+                "otherwise request repair without a substitute candidate."
+            )
+        elif request.is_format_predecessor:
             terminal_wire += (
                 " As the direct predecessor of the Format Agent, put the brief "
                 "answer span after `Candidate answer:` and the supporting "
@@ -351,10 +398,12 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         if not self._retrieval_completion_required.get():
             return None
 
-        # DIRECT_REUSE: SkillFlow training/environment.py::step rejects the
-        # terminal ``answer`` action until action history contains a real
-        # non-answer Tool turn (lines 389-416).  AgentGraph's equivalent public
-        # evidence is a measured ToolReceipt appended only after dispatch.
+        # DIRECT_REUSE: SkillFlow training/environment.py::step admits the
+        # terminal answer after at least one non-answer Tool turn.  Preserve
+        # that historical ``required_tool_call`` boundary, including a failed
+        # receipt, so a Tool outage cannot discard a usable upstream answer.
+        # ``required_evidence`` is an explicit stricter experiment condition:
+        # only a successful read receipt carrying non-empty public text counts.
         for receipt in tool_receipts:
             if receipt.get("tool_id") != QA_RETRIEVAL_TOOL_ID:
                 continue
@@ -364,13 +413,25 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 "read",
             }:
                 continue
-            result = receipt.get("result")
-            error_type = receipt.get("error_type")
-            successful = isinstance(result, Mapping) and error_type is None
-            failed = result is None and isinstance(error_type, str) and bool(error_type)
-            if successful or failed:
+            if self._completion_policy == "required_tool_call":
                 return None
-        return "qa_completion_requires_retrieval_dispatch"
+            result = receipt.get("result")
+            if not isinstance(result, Mapping) or receipt.get("error_type") is not None:
+                continue
+            value = result.get("value")
+            if not isinstance(value, Mapping):
+                continue
+            has_evidence = (
+                value.get("operation") == "read"
+                and isinstance(value.get("passage"), Mapping)
+                and isinstance(value["passage"].get("text"), str)
+                and bool(value["passage"]["text"].strip())
+            )
+            if has_evidence:
+                return None
+        if self._completion_policy == "required_tool_call":
+            return "qa_completion_requires_retrieval_dispatch"
+        return "qa_completion_requires_successful_read_evidence"
 
     def _tool_action_error(
         self,

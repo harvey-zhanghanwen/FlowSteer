@@ -1907,7 +1907,13 @@ def _completion_stable_zero_check(
 ) -> Mapping[str, Any]:
     """Extend the reused chain check with dataset evaluator receipts."""
 
-    base = _stable_zero_check(tasks, direct, trajectories)
+    environment_dataset = dataset_key in {"webshop", "alfworld"}
+    base = _stable_zero_check(
+        tasks,
+        direct,
+        trajectories,
+        require_non_empty_final_answer=not environment_dataset,
+    )
     checks: list[dict[str, Any]] = []
     for task, base_check in zip(tasks, base["checks"], strict=True):
         direct_value = direct.get(task.task_id)
@@ -1927,6 +1933,7 @@ def _completion_stable_zero_check(
         )
         judge_receipts_valid = True
         official_harness_receipts_valid = True
+        environment_terminal_receipt_valid = True
         if dataset_key == "healthbench_professional":
             judge_receipts_valid = all(
                 isinstance(value.get("details"), Mapping)
@@ -1942,12 +1949,17 @@ def _completion_stable_zero_check(
                 and value["details"].get("proxy_metric_used") is False
                 for value in (direct_evaluation, graph_evaluation)
             )
+        elif environment_dataset:
+            environment_terminal_receipt_valid = _graph_environment_terminal_receipt(
+                graph_value
+            )
         check = {
             **dict(base_check),
             "direct_evaluator_valid": direct_evaluator_valid,
             "agentgraph_evaluator_valid": graph_evaluator_valid,
             "judge_receipts_valid": judge_receipts_valid,
             "official_harness_receipts_valid": official_harness_receipts_valid,
+            "environment_terminal_receipt_valid": environment_terminal_receipt_valid,
         }
         check["passed"] = bool(
             check.get("passed")
@@ -1955,6 +1967,7 @@ def _completion_stable_zero_check(
             and graph_evaluator_valid
             and judge_receipts_valid
             and official_harness_receipts_valid
+            and environment_terminal_receipt_valid
         )
         checks.append(check)
     return {
@@ -1964,6 +1977,41 @@ def _completion_stable_zero_check(
         ),
         "checks": checks,
     }
+
+
+def _graph_environment_terminal_receipt(
+    trajectory: Optional[Mapping[str, Any]],
+) -> bool:
+    """Validate the persisted terminal Action--Observation edge."""
+
+    if not isinstance(trajectory, Mapping):
+        return False
+    turns = trajectory.get("turns")
+    if not isinstance(turns, list):
+        return False
+    for turn in reversed(turns):
+        if not isinstance(turn, Mapping):
+            continue
+        runtime_summary = turn.get("runtime_summary")
+        if not isinstance(runtime_summary, Mapping):
+            continue
+        output_metadata = runtime_summary.get("output_metadata")
+        if not isinstance(output_metadata, Mapping):
+            continue
+        for metadata in output_metadata.values():
+            if not isinstance(metadata, Mapping):
+                continue
+            trace = metadata.get("evaluator_environment_trace")
+            if (
+                metadata.get("environment_terminal") is True
+                and isinstance(trace, list)
+                and bool(trace)
+                and isinstance(trace[-1], Mapping)
+                and trace[-1].get("done") is True
+                and trace[-1].get("state_advanced") is True
+            ):
+                return True
+    return False
 
 
 async def run_completion_benchmark_round(

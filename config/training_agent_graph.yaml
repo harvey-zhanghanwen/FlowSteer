@@ -140,12 +140,12 @@ skills:
 gpu:
   # SkillFlow mapping. Do not combine this with a CUDA_VISIBLE_DEVICES remap.
   learner_physical: 3
-  rollout_physical: 4
+  rollout_physical: 0
   gradient_replica_physical: 5
   learner_device: "cuda:3"
   rollout_engine: "sglang"
   gradient_replica_device: "cuda:5"
-  supervisor_gpu_id: 4
+  supervisor_gpu_id: 0
   supervisor_api_base: "http://127.0.0.1:8015/v1"
   training_enabled: false
   # Future trainer knobs copied from SkillFlow's two-copy backward path. They

@@ -850,6 +850,7 @@ def create_swebench_repository_registration(
     action_schemas = {
         "apply_patch": {
             "type": "object",
+            "additionalProperties": False,
             "required": ["patch"],
             "properties": {
                 "patch": {"type": "string", "minLength": 1},
@@ -857,6 +858,7 @@ def create_swebench_repository_registration(
         },
         "bash": {
             "type": "object",
+            "additionalProperties": False,
             "required": ["command"],
             "properties": {
                 "command": {"type": "string", "minLength": 1},
@@ -864,10 +866,12 @@ def create_swebench_repository_registration(
         },
         "list_files": {
             "type": "object",
+            "additionalProperties": False,
             "properties": {"file_pattern": {"type": "string"}},
         },
         "search_code": {
             "type": "object",
+            "additionalProperties": False,
             "required": ["query"],
             "properties": {
                 "query": {"type": "string", "minLength": 1},
@@ -876,6 +880,7 @@ def create_swebench_repository_registration(
         },
         "view_file": {
             "type": "object",
+            "additionalProperties": False,
             "required": ["path"],
             "properties": {
                 "path": {"type": "string", "minLength": 1},
@@ -885,6 +890,7 @@ def create_swebench_repository_registration(
         },
         "exact_edit": {
             "type": "object",
+            "additionalProperties": False,
             "required": ["path", "old_str", "new_str"],
             "properties": {
                 "path": {"type": "string", "minLength": 1},
@@ -894,6 +900,7 @@ def create_swebench_repository_registration(
         },
         "str_replace_editor": {
             "type": "object",
+            "additionalProperties": False,
             "required": ["command", "path"],
             "properties": {
                 "command": {
@@ -917,9 +924,14 @@ def create_swebench_repository_registration(
                 },
             },
         },
-        "diff": {"type": "object", "properties": {}},
+        "diff": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {},
+        },
         "run_tests": {
             "type": "object",
+            "additionalProperties": False,
             "required": ["command"],
             "properties": {
                 "command": {

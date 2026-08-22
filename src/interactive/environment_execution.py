@@ -10,6 +10,7 @@ terminal success predicates are deliberately outside this module.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field, replace
@@ -32,6 +33,41 @@ from .tool_runtime import (
 
 class EnvironmentExecutionError(RuntimeError):
     """A public environment session could not complete its execution contract."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        environment_reset_receipt: Optional[Mapping[str, object]] = None,
+        environment_receipts: Sequence[Mapping[str, object]] = (),
+        evaluator_environment_trace: Sequence[Mapping[str, object]] = (),
+        tool_receipts: Sequence[Mapping[str, object]] = (),
+        model_calls: Sequence[Mapping[str, object]] = (),
+        environment_revision: int = 0,
+        environment_terminal: bool = False,
+        cause_error_type: Optional[str] = None,
+    ) -> None:
+        super().__init__(message)
+        # DIRECT_REUSE: SkillFlow persists every completed Action--Observation
+        # edge even when a bounded episode later fails.  Carry the same public
+        # prefix through AgentRuntime; it is diagnostic state, never a terminal
+        # artifact and never evaluator input.
+        self.environment_reset_receipt = (
+            None
+            if environment_reset_receipt is None
+            else dict(environment_reset_receipt)
+        )
+        self.environment_receipts = tuple(
+            dict(item) for item in environment_receipts
+        )
+        self.evaluator_environment_trace = tuple(
+            dict(item) for item in evaluator_environment_trace
+        )
+        self.tool_receipts = tuple(dict(item) for item in tool_receipts)
+        self.model_calls = tuple(dict(item) for item in model_calls)
+        self.environment_revision = environment_revision
+        self.environment_terminal = environment_terminal
+        self.cause_error_type = cause_error_type
 
 
 class EnvironmentSession(Protocol):
@@ -414,11 +450,338 @@ def _history_text(receipts: Sequence[Mapping[str, object]]) -> str:
         return "(none)"
     lines = []
     for receipt in receipts[-4:]:
+        line = (
+            "[Turn {turn}: action={action!r}, status={observation_status}, "
+            "state_advanced={state_advanced}, terminal={terminal}]".format(
+                **receipt
+            )
+        )
+        raw_output = receipt.get("raw_model_output")
+        if (
+            receipt.get("observation_status") == "parse_error"
+            and isinstance(raw_output, str)
+            and raw_output.strip()
+        ):
+            compact = " ".join(raw_output.split())[:240]
+            line += (
+                " Previous response was not an admissible native action and the "
+                f"environment state did not change: {compact!r}."
+            )
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _alfworld_task_facts(task: str) -> dict[str, object]:
+    """Parse only task-visible ALFWorld fields used by SkillFlow state feedback.
+
+    This is a compact adaptation of SkillFlow
+    ``training.environment._parse_alfworld_task``.  It deliberately returns
+    no action recommendation and consumes neither simulator internals nor
+    evaluator state.
+    """
+
+    facts: dict[str, object] = {
+        "target_class": None,
+        "destination_class": None,
+        "source_hint": None,
+        "required_transform": None,
+        "count": 1,
+        "examine_with_desklamp": False,
+    }
+    text = " ".join(str(task or "").lower().rstrip(".").split())
+    if not text:
+        return facts
+    match = re.search(
+        r"pick up (?:the |a |some )?(\S+?)(?: \d)? from (\S+?)(?: \d)? "
+        r"and put it (?:in/on|in|on) (\S+?)(?: \d)?$",
+        text,
+    )
+    if match:
+        facts.update(
+            target_class=match.group(1),
+            source_hint=match.group(2),
+            destination_class=match.group(3),
+        )
+        return facts
+    match = re.search(
+        r"(?:examine|look at) (?:the |a |some )?(\S+?)(?: \d)? "
+        r"(?:with|under|by) (?:the |a )?(?:desklamp|lamp)",
+        text,
+    )
+    if match:
+        facts.update(
+            target_class=match.group(1),
+            required_transform="examine_with_desklamp",
+            examine_with_desklamp=True,
+        )
+        return facts
+    match = re.search(
+        r"(heat|cool|clean) (?:some |a |the )?(\S+?)(?: \d)? and put it "
+        r"(?:in/on|in|on) (\S+?)(?: \d)?$",
+        text,
+    )
+    if match:
+        facts.update(
+            required_transform=match.group(1),
+            target_class=match.group(2),
+            destination_class=match.group(3),
+        )
+        return facts
+    match = re.search(
+        r"(?:find|put) two (\S+?)(?: \d)? (?:and put them )?"
+        r"(?:in/on|in|on) (\S+?)(?: \d)?$",
+        text,
+    )
+    if match:
+        facts.update(
+            target_class=match.group(1),
+            destination_class=match.group(2),
+            count=2,
+        )
+        return facts
+    match = re.search(
+        r"put (?:a |some |the )?(?:(clean|washed|cool|cold|hot|heated|cooked) )?"
+        r"(\S+?)(?: \d)? (?:in/on|in|on) (\S+?)(?: \d)?$",
+        text,
+    )
+    if match:
+        adjective, target, destination = match.groups()
+        transform = None
+        if adjective in {"clean", "washed"}:
+            transform = "clean"
+        elif adjective in {"cool", "cold"}:
+            transform = "cool"
+        elif adjective in {"hot", "heated", "cooked"}:
+            transform = "heat"
+        facts.update(
+            target_class=target,
+            destination_class=destination,
+            required_transform=transform,
+        )
+    return facts
+
+
+def _alfworld_object_class(value: object) -> str:
+    text = str(value or "").strip().lower()
+    text = re.sub(r"^(?:a|an|the|some)\s+", "", text)
+    return re.sub(r"\s+\d+\s*$", "", text).strip()
+
+
+def _alfworld_action_object(action: object) -> str:
+    text = str(action or "").strip()
+    for pattern in (
+        r"^take\s+(.+?)\s+from\s+",
+        r"^move\s+(.+?)\s+to\s+",
+        r"^(?:clean|heat|cool)\s+(.+?)\s+with\s+",
+        r"^use\s+(.+?)\s+",
+    ):
+        match = re.match(pattern, text, flags=re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+    return ""
+
+
+def _webshop_task_constraints(task: str) -> tuple[str, ...]:
+    """Project SkillFlow's visible WebShop price/attribute fields only."""
+
+    text = str(task or "")
+    constraints: list[str] = []
+    price = re.search(
+        r"price\s+lower\s+than\s*\$?\s*([0-9]+(?:\.[0-9]+)?)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if price:
+        constraints.append(f"price_lower_than={price.group(1)}")
+    labels = (
+        "color",
+        "size",
+        "fit type",
+        "flavor name",
+        "flavor",
+        "scent",
+        "style",
+        "pattern",
+        "count",
+        "number",
+        "dimension",
+        "dimensions",
+        "width",
+        "height",
+        "item shape",
+        "shape",
+    )
+    labels_pattern = "|".join(re.escape(label) for label in labels)
+    for label in labels:
+        match = re.search(
+            rf"\b{re.escape(label)}\s*:\s*(.*?)"
+            rf"(?=,\s*(?:and\s+)?(?:{labels_pattern})\b\s*:?|"
+            r",?\s*and\s+price\s+lower\s+than\b|$)",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if match:
+            value = re.sub(
+                r"^\s*and\s+", "", match.group(1), flags=re.IGNORECASE
+            ).strip(" ,.;")
+            if value:
+                constraints.append(f"{label.replace(' ', '_')}={value}")
+    return tuple(dict.fromkeys(constraints))
+
+
+def _public_state_feedback(
+    request: AgentRequest,
+    *,
+    task_family: str,
+    observation: str,
+    admissible_actions: Sequence[str],
+    receipts: Sequence[Mapping[str, object]],
+) -> str:
+    """Summarize public task/environment state without evaluator leakage.
+
+    SkillFlow's ALFWorld/WebShop visible-state feedback is intentionally
+    reduced to neutral facts.  The block may expose a repeated-state warning,
+    but it never ranks actions, blocks a legal action, or reads reward/``won``.
+    """
+
+    lines = [
+        "[PUBLIC OBSERVABLE STATE]",
+        "Derived only from the task, current observation, admissible actions, "
+        "and completed public Action--Observation history.",
+    ]
+    completed_actions = [
+        str(item.get("action"))
+        for item in receipts
+        if item.get("state_advanced") is True
+        and isinstance(item.get("action"), str)
+    ]
+    if task_family.lower() == "alfworld":
+        facts = _alfworld_task_facts(request.problem)
+        visible = [
+            f"target_class={facts['target_class']}",
+            f"destination_class={facts['destination_class']}",
+            f"required_transform={facts['required_transform']}",
+            f"count={facts['count']}",
+        ]
+        lines.append("Task facts: " + "; ".join(visible) + ".")
+        target = facts.get("target_class")
+        task_lower = request.problem.lower()
+        if target and re.search(r"\bit\b", task_lower):
+            lines.append(f"Task coreference: `it` refers to `{target}`.")
+        if target and re.search(r"\bthem\b", task_lower):
+            lines.append(
+                f"Task coreference: `them` refers to the required `{target}` instances."
+            )
+        held: list[str] = []
+        for action in admissible_actions:
+            if action.lower().startswith(("move ", "clean ", "heat ", "cool ")):
+                obj = _alfworld_action_object(action)
+                if obj and obj not in held:
+                    held.append(obj)
+        if held:
+            lines.append("Objects implied as held by current actions: " + ", ".join(held[:6]) + ".")
+        transform_actions = [
+            action
+            for action in completed_actions
+            if action.lower().startswith(("clean ", "heat ", "cool "))
+        ]
+        if transform_actions:
+            lines.append(
+                "Completed visible transform actions: "
+                + " | ".join(transform_actions[-4:])
+                + "."
+            )
+        if target and facts.get("destination_class"):
+            target_class = str(target)
+            destination_class = str(facts["destination_class"])
+            placed = []
+            for action in completed_actions:
+                match = re.match(
+                    r"^move\s+(.+?)\s+to\s+(.+)$", action, flags=re.IGNORECASE
+                )
+                if not match:
+                    continue
+                if (
+                    _alfworld_object_class(match.group(1)) == target_class
+                    and _alfworld_object_class(match.group(2)) == destination_class
+                ):
+                    placed.append(match.group(1).strip())
+            if placed:
+                lines.append(
+                    "Visible placement progress: "
+                    f"{len(dict.fromkeys(placed))}/{facts['count']} distinct target instance(s); "
+                    + ", ".join(dict.fromkeys(placed))
+                    + "."
+                )
+    elif task_family.lower() == "webshop":
+        constraints = _webshop_task_constraints(request.problem)
+        if constraints:
+            lines.append(
+                "Task constraints retained from the instruction: "
+                + "; ".join(constraints)
+                + "."
+            )
+        searches = []
+        opened = []
+        for action in completed_actions:
+            search = re.fullmatch(r"search\[(.*)\]", action, flags=re.IGNORECASE)
+            asin = re.fullmatch(
+                r"click\[(b[0-9a-z]{9})\]", action, flags=re.IGNORECASE
+            )
+            if search and search.group(1).strip():
+                searches.append(search.group(1).strip())
+            if asin:
+                opened.append(asin.group(1).lower())
+        if searches:
+            lines.append("Recent search queries: " + " | ".join(searches[-3:]) + ".")
+        if opened:
+            lines.append("Opened candidate ASINs: " + ", ".join(opened[-8:]) + ".")
+
+    recent_actions = completed_actions[-6:]
+    if recent_actions:
+        lines.append("Recent executed actions: " + " | ".join(recent_actions) + ".")
+    if len(recent_actions) >= 4 and (
+        recent_actions[-4] == recent_actions[-2]
+        and recent_actions[-3] == recent_actions[-1]
+    ):
         lines.append(
-            "[Turn {turn}: observation={observation!r}, action={action!r}, "
-            "next_observation={next_observation!r}]".format(**receipt)
+            "No-progress signal: the last four public actions form an A-B-A-B "
+            "oscillation; reassess the task constraints and current observation."
+        )
+    repeated_pairs = 0
+    for item in receipts:
+        if (
+            item.get("state_advanced") is True
+            and item.get("observation") == observation
+            and isinstance(item.get("action"), str)
+        ):
+            repeated_pairs += 1
+    if repeated_pairs:
+        lines.append(
+            "No-progress signal: this exact public observation has already been "
+            "used as an action-decision state; avoid repeating an action that did not "
+            "advance the task."
+        )
+    if receipts and receipts[-1].get("observation_status") == "parse_error":
+        lines.append(
+            "Format repair: the preceding response was invalid and the environment "
+            "state is unchanged; copy exactly one current admissible action."
         )
     return "\n".join(lines)
+
+
+def _prompt_observation(observation: str, max_observation_chars: int) -> tuple[str, bool]:
+    """Apply SkillFlow's configured observation-size bound to model input only."""
+
+    if max_observation_chars <= 0 or len(observation) <= max_observation_chars:
+        return observation, False
+    clipped = observation[:max_observation_chars]
+    return (
+        clipped
+        + f"\n[OBSERVATION CLIPPED: retained first {max_observation_chars} of "
+        f"{len(observation)} characters; full observation remains in the receipt.]",
+        True,
+    )
 
 
 def _action_prompt(
@@ -429,10 +792,21 @@ def _action_prompt(
     admissible_actions: Sequence[str],
     receipts: Sequence[Mapping[str, object]],
     turn: int,
+    max_observation_chars: int = 0,
 ) -> str:
     """Render SkillFlow's state/action/history boundary without a fixed role."""
 
     actions = "\n".join(admissible_actions)
+    visible_observation, _ = _prompt_observation(
+        observation, max_observation_chars
+    )
+    public_state = _public_state_feedback(
+        request,
+        task_family=task_family,
+        observation=observation,
+        admissible_actions=admissible_actions,
+        receipts=receipts,
+    )
     format_instruction = (
         "Return exactly one native WebShop action: search[keywords] or click[value]."
         if task_family.lower() == "webshop"
@@ -441,7 +815,8 @@ def _action_prompt(
     return (
         f"Task:\n{request.problem}\n\n"
         f"Previous environment turns:\n{_history_text(receipts)}\n\n"
-        f"Current observation (turn {turn}):\n{observation}\n\n"
+        f"{public_state}\n\n"
+        f"Current observation (turn {turn}):\n{visible_observation}\n\n"
         f"Admissible actions:\n{actions}\n\n"
         f"{format_instruction} You may enclose that native action in one <action> "
         "tag. Do not return JSON, an object, a code fence, or an explanation."
@@ -463,6 +838,7 @@ class EnvironmentExecutionAdapter:
         environment_backend: EnvironmentToolBackend,
         max_turns: int,
         max_action_tokens: int = 512,
+        max_observation_chars: int = 0,
     ) -> None:
         if not hasattr(gateway, "generate"):
             raise TypeError("gateway must implement generate")
@@ -474,6 +850,8 @@ class EnvironmentExecutionAdapter:
             raise ValueError("max_turns must be a positive integer")
         if type(max_action_tokens) is not int or max_action_tokens < 1:
             raise ValueError("max_action_tokens must be a positive integer")
+        if type(max_observation_chars) is not int or max_observation_chars < 0:
+            raise ValueError("max_observation_chars must be a non-negative integer")
         if environment_backend.tool_id not in tool_registry.resource_ids:
             raise ValueError("environment backend tool is absent from ToolRegistry")
         capability = tool_registry.require_capability(environment_backend.tool_id)
@@ -491,6 +869,20 @@ class EnvironmentExecutionAdapter:
         # generic Executor completion budget can make input+output exceed the
         # local Qwen context window after several long WebShop observations.
         self._max_action_tokens = max_action_tokens
+        self._max_observation_chars = max_observation_chars
+        # ``asyncio.wait_for`` may insert a Task boundary between this adapter
+        # and AgentRuntime.  Task cancellation intentionally normalizes the
+        # raised ``CancelledError``, so retain the completed public prefix in
+        # a request-keyed handoff until Runtime has recorded it.
+        self._cancelled_prefixes: dict[str, Mapping[str, object]] = {}
+
+    def take_cancelled_failure_metadata(
+        self,
+        request_id: str,
+    ) -> Mapping[str, object]:
+        """Consume one cancellation prefix before the Task boundary erases it."""
+
+        return self._cancelled_prefixes.pop(request_id, MappingProxyType({}))
 
     async def execute(self, request: AgentRequest) -> GatewayResponse:
         if request.agent.allowed_tools != (self._tool_id,):
@@ -535,6 +927,17 @@ class EnvironmentExecutionAdapter:
                     admissible_actions=admissible_actions,
                     receipts=receipts,
                     turn=turn,
+                    max_observation_chars=self._max_observation_chars,
+                )
+                public_state = _public_state_feedback(
+                    request,
+                    task_family=session.task_family,
+                    observation=observation,
+                    admissible_actions=admissible_actions,
+                    receipts=receipts,
+                )
+                _, observation_clipped = _prompt_observation(
+                    observation, self._max_observation_chars
                 )
                 model_request = replace(
                     request,
@@ -578,6 +981,8 @@ class EnvironmentExecutionAdapter:
                         "turn": turn,
                         "request_id": model_request.request_id,
                         "metadata": dict(response.metadata),
+                        "public_state": public_state,
+                        "observation_clipped": observation_clipped,
                     }
                 )
                 action = _parse_action(
@@ -602,6 +1007,7 @@ class EnvironmentExecutionAdapter:
                             "terminal": False,
                             "state_advanced": False,
                             "observation_status": "parse_error",
+                            "public_state": public_state,
                         }
                     )
                     evaluator_trace.append(
@@ -618,6 +1024,7 @@ class EnvironmentExecutionAdapter:
                             "state_advanced": False,
                             "parse_error": True,
                             "info": {"parse_error": True},
+                            "public_state": public_state,
                         }
                     )
                     continue
@@ -661,6 +1068,7 @@ class EnvironmentExecutionAdapter:
                         "terminal": done,
                         "state_advanced": True,
                         "observation_status": "success",
+                        "public_state": public_state,
                     }
                 )
                 evaluator_trace.append(
@@ -675,6 +1083,7 @@ class EnvironmentExecutionAdapter:
                         "done": done,
                         "info": dict(transition.info),
                         "state_advanced": True,
+                        "public_state": public_state,
                     }
                 )
                 observation = next_observation
@@ -701,6 +1110,58 @@ class EnvironmentExecutionAdapter:
                     "evaluator_environment_trace": evaluator_trace,
                 },
             )
+        except asyncio.CancelledError as exc:
+            # ``asyncio`` must still observe a real cancellation so the
+            # Runtime's fail-fast scheduler cannot mistake this invocation for
+            # a completed Agent.  Publish SkillFlow's already-completed
+            # Action--Observation prefix on the in-flight exception; the
+            # enclosing AgentRuntime consumes it before the Task boundary
+            # normalizes ``CancelledError``.
+            exc.environment_reset_receipt = dict(reset_receipt)
+            exc.environment_receipts = tuple(dict(item) for item in receipts)
+            exc.evaluator_environment_trace = tuple(
+                dict(item) for item in evaluator_trace
+            )
+            exc.tool_receipts = tuple(dict(item) for item in tool_receipts)
+            exc.model_calls = tuple(dict(item) for item in model_calls)
+            exc.environment_revision = revision
+            exc.environment_terminal = terminal
+            exc.cause_error_type = type(exc).__name__
+            self._cancelled_prefixes[request.request_id] = MappingProxyType(
+                {
+                    "environment_reset_receipt": dict(reset_receipt),
+                    "environment_receipts": tuple(
+                        dict(item) for item in receipts
+                    ),
+                    "evaluator_environment_trace": tuple(
+                        dict(item) for item in evaluator_trace
+                    ),
+                    "tool_receipts": tuple(dict(item) for item in tool_receipts),
+                    "model_calls": tuple(dict(item) for item in model_calls),
+                    "environment_revision": revision,
+                    "environment_terminal": terminal,
+                    "cause_error_type": type(exc).__name__,
+                }
+            )
+            raise
+        except Exception as exc:
+            cause_error_type = (
+                exc.cause_error_type
+                if isinstance(exc, EnvironmentExecutionError)
+                and exc.cause_error_type is not None
+                else type(exc).__name__
+            )
+            raise EnvironmentExecutionError(
+                " ".join(str(exc).split()) or "environment execution failed",
+                environment_reset_receipt=reset_receipt,
+                environment_receipts=receipts,
+                evaluator_environment_trace=evaluator_trace,
+                tool_receipts=tool_receipts,
+                model_calls=model_calls,
+                environment_revision=revision,
+                environment_terminal=terminal,
+                cause_error_type=cause_error_type,
+            ) from exc
         finally:
             self._environment_backend.end(token)
 
@@ -721,6 +1182,7 @@ def build_environment_execution_resources(
     task_family: str,
     max_turns: int,
     max_action_tokens: int = 512,
+    max_observation_chars: int = 0,
     tool_version: str = "skillflow.ragen_adapter.v2",
     timeout_seconds: Optional[float] = None,
 ) -> EnvironmentExecutionResources:
@@ -784,6 +1246,7 @@ def build_environment_execution_resources(
         environment_backend=backend,
         max_turns=max_turns,
         max_action_tokens=max_action_tokens,
+        max_observation_chars=max_observation_chars,
     )
     return EnvironmentExecutionResources(tool_id, registry, adapter)
 

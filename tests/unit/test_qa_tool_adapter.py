@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,6 +10,7 @@ from unittest.mock import patch
 from src.interactive.agent_graph import AgentNode
 from src.interactive.agent_runtime import AgentRequest, AgentResponse, ExecutionPhase
 from src.interactive.model_registry import ModelSpec, ProviderSpec
+from src.interactive.react_execution import ReactExecutionError
 from src.interactive.qa_tool_adapter import (
     QARetrievalReactExecutionAdapter,
     QA_RETRIEVAL_TOOL_ID,
@@ -275,6 +276,9 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("Chain evidence across passages", rendered)
         self.assertIn("specific entity names (not the full question)", rendered)
+        self.assertNotIn("ReAct only as the execution schedule", rendered)
+        self.assertNotIn("subject/entity, predicate/relation", rendered)
+        self.assertNotIn("unexpectedly equal", rendered)
         self.assertNotIn('"value":"final artifact"', rendered)
         self.assertIn(
             "The completed artifact required by the Agent contract",
@@ -295,6 +299,54 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         rendered_predecessor = adapter._contract(format_predecessor, [])
         self.assertIn("Candidate answer:", rendered_predecessor)
         self.assertIn("Evidence:", rendered_predecessor)
+
+    def test_reasoner_and_verifier_receive_distinct_completion_guidance(self) -> None:
+        adapter = QARetrievalReactExecutionAdapter(
+            gateway=SimpleNamespace(generate=lambda request: None),
+            tool_registry=build_qa_tool_registry(FakeIndex()),
+            max_turns=3,
+            max_tool_calls=2,
+            task_type="multi_hop_qa",
+        )
+
+        def role_request(role_family: str) -> AgentRequest:
+            return AgentRequest(
+                request_id=f"qa:{role_family}",
+                run_id="qa",
+                graph_revision=1,
+                problem="Which entity has the larger value?",
+                agent=AgentNode(
+                    role_family,
+                    "model",
+                    "preserve the original question scope",
+                    role_family=role_family,
+                    allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                    execution_mode="react",
+                ),
+                model=ModelSpec("model", "provider"),
+                provider=ProviderSpec("provider", kind="test"),
+                phase=ExecutionPhase.SINGLE,
+                is_format_predecessor=role_family == "verifier",
+                semantic_protocol="hotpotqa_verified_answer_slot_v1",
+            )
+
+        reasoner = adapter._contract(role_request("reasoner"), [])
+        verifier = adapter._contract(role_request("verifier"), [])
+
+        self.assertIn("Evidence propositions", reasoner)
+        self.assertIn("Determine the one semantic candidate", reasoner)
+        self.assertIn("Do not replace the Reasoner's candidate", verifier)
+        self.assertIn("four explicit boolean check fields", verifier)
+        self.assertIn("Set supported only when all checks pass", verifier)
+        self.assertNotIn("Determine the one semantic candidate", verifier)
+
+        default_reasoner = replace(
+            role_request("reasoner"),
+            semantic_protocol="none",
+        )
+        default_contract = adapter._contract(default_reasoner, [])
+        self.assertNotIn("Evidence propositions", default_contract)
+        self.assertNotIn("unexpectedly equal", default_contract)
 
     async def test_react_read_requires_canonical_id_from_successful_search(self) -> None:
         index = FakeIndex()
@@ -383,6 +435,7 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
                 self.outputs = [
                     action("complete", {"value": "unsupported answer"}),
                     action("search", {"query": "Ada Lovelace", "limit": 1}),
+                    action("read", {"passage_id": "p1"}),
                     action("complete", {"value": "Ada Lovelace"}),
                 ]
                 self.requests: list[AgentRequest] = []
@@ -412,21 +465,23 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         response = await QARetrievalReactExecutionAdapter(
             gateway=gateway,
             tool_registry=build_qa_tool_registry(index),
-            max_turns=3,
-            max_tool_calls=1,
+            max_turns=4,
+            max_tool_calls=2,
+            completion_policy="required_evidence",
         ).execute(request)
 
         self.assertEqual("Ada Lovelace", response.text)
-        self.assertEqual(1, response.metadata["tool_calls"])
+        self.assertEqual(2, response.metadata["tool_calls"])
         self.assertEqual(
-            "qa_completion_requires_retrieval_dispatch",
+            "qa_completion_requires_successful_read_evidence",
             response.metadata["react_trace"][0]["public_error_code"],
         )
         self.assertIn(
-            "qa_completion_requires_retrieval_dispatch",
+            "qa_completion_requires_successful_read_evidence",
             gateway.requests[1].agent.contract,
         )
         self.assertEqual([("Ada Lovelace", 1)], index.search_calls)
+        self.assertEqual(["p1"], index.read_calls)
 
     async def test_react_failed_retrieval_receipt_admits_explicit_completion(self) -> None:
         class FailingIndex(FakeIndex):
@@ -486,6 +541,69 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, response.metadata["tool_calls"])
         self.assertEqual("TimeoutError", response.metadata["tool_receipts"][0]["error_type"])
 
+    async def test_required_evidence_rejects_failed_retrieval_receipt(self) -> None:
+        class FailingIndex(FakeIndex):
+            def search(self, query: str, *, limit: int) -> tuple[FakeHit, ...]:
+                self.search_calls.append((query, limit))
+                raise TimeoutError("public retrieval timeout")
+
+        def action(name: str, arguments: object) -> str:
+            return json.dumps(
+                {
+                    "arguments": arguments,
+                    "kind": "complete" if name == "complete" else "tool",
+                    "name": name,
+                    "resource_id": (
+                        None if name == "complete" else QA_RETRIEVAL_TOOL_ID
+                    ),
+                    "skill_id": None,
+                }
+            )
+
+        class SequenceGateway:
+            def __init__(self) -> None:
+                self.outputs = [
+                    action("search", {"query": "Ada Lovelace", "limit": 1}),
+                    action("complete", {"value": "unsupported answer"}),
+                ]
+
+            async def generate(self, request: AgentRequest) -> AgentResponse:
+                del request
+                return AgentResponse(self.outputs.pop(0))
+
+        with self.assertRaises(ReactExecutionError) as caught:
+            await QARetrievalReactExecutionAdapter(
+                gateway=SequenceGateway(),
+                tool_registry=build_qa_tool_registry(FailingIndex()),
+                max_turns=2,
+                max_tool_calls=1,
+                completion_policy="required_evidence",
+            ).execute(
+                AgentRequest(
+                    request_id="qa:required-evidence-failure",
+                    run_id="qa",
+                    graph_revision=1,
+                    problem="Who wrote the first published algorithm?",
+                    agent=AgentNode(
+                        "retriever",
+                        "model",
+                        "retrieve evidence and answer",
+                        allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                        execution_mode="react",
+                    ),
+                    model=ModelSpec("model", "provider"),
+                    provider=ProviderSpec("provider", kind="test"),
+                    phase=ExecutionPhase.SINGLE,
+                )
+            )
+
+        error = caught.exception
+        self.assertEqual("TimeoutError", error.tool_receipts[0]["error_type"])
+        self.assertEqual(
+            "qa_completion_requires_successful_read_evidence",
+            error.react_trace[-1]["public_error_code"],
+        )
+
     async def test_react_direct_completion_remains_valid_when_dispatch_is_impossible(self) -> None:
         def complete(value: str) -> str:
             return json.dumps(
@@ -516,6 +634,7 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
                     tool_registry=build_qa_tool_registry(FakeIndex()),
                     max_turns=1,
                     max_tool_calls=max_tool_calls,
+                    completion_policy="optional",
                 ).execute(
                     AgentRequest(
                         request_id="qa:no-dispatch",

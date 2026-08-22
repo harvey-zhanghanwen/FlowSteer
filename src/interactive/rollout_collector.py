@@ -1072,6 +1072,7 @@ def _request_record(call: AgentCallRecord) -> Mapping[str, Any]:
         "execution_role": "format" if request.is_format_agent else "worker",
         "is_format_agent": request.is_format_agent,
         "is_format_predecessor": request.is_format_predecessor,
+        "semantic_protocol": request.semantic_protocol,
         "communication_condition": request.communication_condition.value,
         "upstream": [item.to_dict() for item in request.upstream],
         "own_draft": request.own_draft,
@@ -1479,12 +1480,25 @@ class AgentGraphRolloutCollector:
                 canvas.snapshot.graph.to_dict(),
                 previous_snapshot_id,
             )
+            receipt_execution = canvas.execution or canvas.partial_execution
             execution_records = (
-                tuple(_execution_record(call) for call in canvas.execution.calls)
-                if canvas.execution is not None and not canvas.execution_reused
+                tuple(_execution_record(call) for call in receipt_execution.calls)
+                if receipt_execution is not None and not canvas.execution_reused
                 else ()
             )
-            runtime_summary = dict(_runtime_summary(canvas.execution))
+            runtime_summary = dict(_runtime_summary(receipt_execution))
+            if (
+                canvas.partial_execution is not None
+                or canvas.execution_failure_records
+            ):
+                runtime_summary["execution_status"] = "failed"
+                runtime_summary["failure_records"] = [
+                    record.to_dict()
+                    for record in canvas.execution_failure_records
+                ]
+                runtime_summary["unresolved_dirty_agent_ids"] = list(
+                    env.unresolved_dirty_agent_ids
+                )
             action_schema_version = metadata.get("action_json_schema_version")
             if action_schema_version is not None:
                 runtime_summary["director_action_schema_version"] = (

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 import re
-from typing import Optional, Tuple, Union
+from typing import Mapping, Optional, Sequence, Tuple, Union
 
 from .agent_action_parser import (
     AgentAction,
@@ -23,6 +23,7 @@ from .agent_graph import (
     GraphValidationResult,
 )
 from .agent_runtime import (
+    AgentFailureRecord,
     AgentGateway,
     AgentRuntime,
     AgentRuntimeError,
@@ -33,6 +34,31 @@ from .model_registry import ModelRegistry
 
 class AgentWorkflowStateError(RuntimeError):
     """Raised for invalid environment construction or restoration."""
+
+
+_HOTPOTQA_SEMANTIC_PROTOCOL = "hotpotqa_verified_answer_slot_v1"
+_PRESERVE_REPAIR_RECOVERY_POLICY = "preserve_diagnose_repair_augment"
+_SUPPORTED_SEMANTIC_PROTOCOLS = frozenset({"none", _HOTPOTQA_SEMANTIC_PROTOCOL})
+_SUPPORTED_RECOVERY_POLICIES = frozenset(
+    {"default", _PRESERVE_REPAIR_RECOVERY_POLICY}
+)
+
+_REASONER_SEMANTIC_FIELDS = (
+    "question_scope",
+    "answer_slot",
+    "evidence_propositions",
+    "multi_hop_chain",
+    "candidate_answer",
+    "evidence",
+)
+_VERIFIER_SEMANTIC_FIELDS = (
+    "candidate_answer",
+    "evidence_supported",
+    "entity_attribute_binding_correct",
+    "multi_hop_complete",
+    "scope_preserved",
+    "verification_status",
+)
 
 
 def _answer_protocol_state(answer: str) -> tuple[int, bool, bool]:
@@ -104,6 +130,8 @@ class AgentWorkflowStepResult:
     validation_issues: Tuple[GraphValidationIssue, ...] = ()
     execution: Optional[AgentRuntimeResult] = None
     execution_reused: bool = False
+    partial_execution: Optional[AgentRuntimeResult] = None
+    execution_failure_records: Tuple[AgentFailureRecord, ...] = ()
 
     @property
     def success(self) -> bool:
@@ -131,6 +159,10 @@ class AgentWorkflowEnv:
         require_exact_answer_tag: bool = False,
         require_format_agent: bool = False,
         required_tool_id: Optional[str] = None,
+        allowed_actions: Optional[Sequence[str]] = None,
+        semantic_protocol: str = "none",
+        recovery_policy: str = "default",
+        required_evidence_tool_id: Optional[str] = None,
     ) -> None:
         if runtime is None and gateway is None:
             raise AgentWorkflowStateError("gateway or runtime is required")
@@ -158,8 +190,71 @@ class AgentWorkflowEnv:
             raise AgentWorkflowStateError(
                 "required_tool_id must be non-empty text or None"
             )
+        if (
+            not isinstance(semantic_protocol, str)
+            or semantic_protocol not in _SUPPORTED_SEMANTIC_PROTOCOLS
+        ):
+            raise AgentWorkflowStateError(
+                "semantic_protocol must be none or "
+                f"{_HOTPOTQA_SEMANTIC_PROTOCOL}"
+            )
+        if (
+            not isinstance(recovery_policy, str)
+            or recovery_policy not in _SUPPORTED_RECOVERY_POLICIES
+        ):
+            raise AgentWorkflowStateError(
+                "recovery_policy must be default or "
+                f"{_PRESERVE_REPAIR_RECOVERY_POLICY}"
+            )
+        if required_evidence_tool_id is not None and (
+            not isinstance(required_evidence_tool_id, str)
+            or not required_evidence_tool_id.strip()
+        ):
+            raise AgentWorkflowStateError(
+                "required_evidence_tool_id must be non-empty text or None"
+            )
+        if semantic_protocol == _HOTPOTQA_SEMANTIC_PROTOCOL:
+            if recovery_policy != _PRESERVE_REPAIR_RECOVERY_POLICY:
+                raise AgentWorkflowStateError(
+                    "hotpotqa_verified_answer_slot_v1 requires "
+                    "recovery_policy=preserve_diagnose_repair_augment"
+                )
+            if required_evidence_tool_id != "qa-retrieval":
+                raise AgentWorkflowStateError(
+                    "hotpotqa_verified_answer_slot_v1 requires "
+                    "required_evidence_tool_id='qa-retrieval'"
+                )
+        if runtime is not None and runtime.semantic_protocol != semantic_protocol:
+            raise AgentWorkflowStateError(
+                "runtime and environment must share semantic_protocol; "
+                f"runtime={runtime.semantic_protocol!r}, "
+                f"environment={semantic_protocol!r}"
+            )
+        if allowed_actions is None:
+            resolved_allowed_actions = tuple(item.value for item in AgentActionType)
+        else:
+            if isinstance(allowed_actions, (str, bytes)) or not allowed_actions:
+                raise AgentWorkflowStateError(
+                    "allowed_actions must be a non-empty sequence"
+                )
+            resolved_allowed_actions = tuple(allowed_actions)
+            known_actions = {item.value for item in AgentActionType}
+            if (
+                any(
+                    not isinstance(item, str) or item not in known_actions
+                    for item in resolved_allowed_actions
+                )
+                or len(resolved_allowed_actions) != len(set(resolved_allowed_actions))
+            ):
+                raise AgentWorkflowStateError(
+                    "allowed_actions contains an unknown or duplicate action"
+                )
         self.model_registry = model_registry
-        self.runtime = runtime or AgentRuntime(model_registry, gateway)  # type: ignore[arg-type]
+        self.runtime = runtime or AgentRuntime(  # type: ignore[arg-type]
+            model_registry,
+            gateway,
+            semantic_protocol=semantic_protocol,
+        )
         self.execute_on_edit = execute_on_edit
         self.max_agents = max_agents
         self.max_agents_per_subgraph = max_agents_per_subgraph
@@ -168,6 +263,15 @@ class AgentWorkflowEnv:
         self.required_tool_id = (
             None if required_tool_id is None else required_tool_id.strip()
         )
+        self.semantic_protocol = semantic_protocol
+        self.recovery_policy = recovery_policy
+        self.required_evidence_tool_id = (
+            None
+            if required_evidence_tool_id is None
+            else required_evidence_tool_id.strip()
+        )
+        self.allowed_action_types = resolved_allowed_actions
+        self._allowed_action_type_set = frozenset(resolved_allowed_actions)
         self.parser = AgentActionParser()
         self._problem = problem.strip()
         self._graph = graph.fork() if graph is not None else AgentGraph()
@@ -181,10 +285,14 @@ class AgentWorkflowEnv:
         self._progressive_output_metadata: dict[
             str, dict[str, object]
         ] = {}
+        self._unresolved_dirty_agents: set[str] = set()
         self._validate_agent_limit(self._graph)
         partial = self._graph.validate(self.model_registry, require_complete=False)
         if not partial.valid:
             raise AgentWorkflowStateError(self._format_issues(partial))
+        semantic_edit_issue = self._semantic_edit_issue_for(self._graph)
+        if semantic_edit_issue is not None:
+            raise AgentWorkflowStateError(semantic_edit_issue)
 
     @property
     def problem(self) -> str:
@@ -210,6 +318,10 @@ class AgentWorkflowEnv:
     def history(self) -> Tuple[AgentWorkflowHistoryEntry, ...]:
         return tuple(self._history)
 
+    @property
+    def unresolved_dirty_agent_ids(self) -> Tuple[str, ...]:
+        return tuple(sorted(self._unresolved_dirty_agents))
+
     def reset(self, problem: str, graph: Optional[AgentGraph] = None) -> AgentWorkflowSnapshot:
         if not isinstance(problem, str) or not problem.strip():
             raise AgentWorkflowStateError("problem must be a non-empty string")
@@ -218,6 +330,9 @@ class AgentWorkflowEnv:
         validation = candidate.validate(self.model_registry, require_complete=False)
         if not validation.valid:
             raise AgentWorkflowStateError(self._format_issues(validation))
+        semantic_edit_issue = self._semantic_edit_issue_for(candidate)
+        if semantic_edit_issue is not None:
+            raise AgentWorkflowStateError(semantic_edit_issue)
         self._problem = problem.strip()
         self._graph = candidate
         self._turn_count = 0
@@ -243,6 +358,9 @@ class AgentWorkflowEnv:
         validation = graph.validate(self.model_registry, require_complete=False)
         if not validation.valid:
             raise AgentWorkflowStateError(self._format_issues(validation))
+        semantic_edit_issue = self._semantic_edit_issue_for(graph)
+        if semantic_edit_issue is not None:
+            raise AgentWorkflowStateError(semantic_edit_issue)
         self._problem = snapshot.problem
         self._graph = graph
         self._turn_count = snapshot.turn_count
@@ -267,6 +385,10 @@ class AgentWorkflowEnv:
             require_exact_answer_tag=self.require_exact_answer_tag,
             require_format_agent=self.require_format_agent,
             required_tool_id=self.required_tool_id,
+            allowed_actions=self.allowed_action_types,
+            semantic_protocol=self.semantic_protocol,
+            recovery_policy=self.recovery_policy,
+            required_evidence_tool_id=self.required_evidence_tool_id,
         )
         result._turn_count = state.turn_count
         result._finished = state.finished
@@ -291,6 +413,19 @@ class AgentWorkflowEnv:
             return self._reject(None, "action must be AgentAction or JSON text")
 
         self._turn_count += 1
+        if action.action_type.value not in self._allowed_action_type_set:
+            return self._reject_after_count(
+                action,
+                "action rejected: action type is outside the configured Canvas "
+                f"action set {list(self.allowed_action_types)!r}",
+            )
+        if action.action_type is AgentActionType.DELETE_AGENT:
+            delete_issue = self._delete_admission_issue(action.agent_id)
+            if delete_issue is not None:
+                return self._reject_after_count(
+                    action,
+                    "edit rejected: " + delete_issue,
+                )
         if action.action_type is AgentActionType.FINISH:
             validation = self._graph.validate(self.model_registry, require_complete=True)
             if not validation.valid:
@@ -320,13 +455,53 @@ class AgentWorkflowEnv:
                         self._problem,
                         prior_outputs=self._progressive_outputs,
                         prior_output_metadata=self._progressive_output_metadata,
-                        format_output_agent=self.require_format_agent,
+                        format_output_agent=self._uses_format_agent_protocol(),
                     )
                 except AgentRuntimeError as exc:
+                    if exc.partial_result is not None:
+                        self._progressive_outputs = dict(exc.partial_result.outputs)
+                        self._progressive_output_metadata = {
+                            agent_id: dict(metadata)
+                            for agent_id, metadata in (
+                                exc.partial_result.output_metadata.items()
+                            )
+                        }
+                    current_agent_ids = {node.id for node in self._graph.nodes}
+                    completed_agent_ids = (
+                        set()
+                        if exc.partial_result is None
+                        else (
+                            set(exc.partial_result.outputs)
+                            if self.recovery_policy
+                            == _PRESERVE_REPAIR_RECOVERY_POLICY
+                            else set(exc.partial_result.executed_agent_ids)
+                        )
+                    )
+                    self._unresolved_dirty_agents = (
+                        current_agent_ids - completed_agent_ids
+                    )
                     return self._reject_after_count(
                         action,
                         "cannot finish: " + self._execution_error_feedback(exc),
+                        partial_execution=exc.partial_result,
+                        execution_failure_records=exc.failure_records,
                     )
+                self._progressive_outputs = dict(execution.outputs)
+                self._progressive_output_metadata = {
+                    agent_id: dict(metadata)
+                    for agent_id, metadata in execution.output_metadata.items()
+                }
+                self._progressive_execution = execution
+                self._progressive_execution_revision = self._graph.revision
+                self._unresolved_dirty_agents.clear()
+            environment_terminal_issue = self._environment_terminal_issue(execution)
+            if environment_terminal_issue is not None:
+                return self._reject_after_count(
+                    action,
+                    "cannot finish: " + environment_terminal_issue,
+                    execution=execution,
+                    execution_reused=execution_reused,
+                )
             if execution.final_answer is None:
                 return self._reject_after_count(
                     action,
@@ -338,7 +513,16 @@ class AgentWorkflowEnv:
                     action,
                     "cannot finish: " + terminal_issue,
                 )
+            semantic_issue = self._semantic_protocol_issue(execution)
+            if semantic_issue is not None:
+                return self._reject_after_count(
+                    action,
+                    "cannot finish: " + semantic_issue,
+                    execution=execution,
+                    execution_reused=execution_reused,
+                )
             self._finished = True
+            self._unresolved_dirty_agents.clear()
             self._last_feedback = "workflow finished"
             self._record_history(
                 accepted=True,
@@ -377,6 +561,12 @@ class AgentWorkflowEnv:
                 f"edit rejected: {self._format_issues(validation)}",
                 validation.issues,
             )
+        semantic_edit_issue = self._semantic_edit_issue_for(candidate)
+        if semantic_edit_issue is not None:
+            return self._reject_after_count(
+                action,
+                "edit rejected: " + semantic_edit_issue,
+            )
         try:
             # Reuse the Runtime's execution-contract boundary before the
             # candidate Canvas revision is committed.  FlowSteer's edit then
@@ -395,7 +585,7 @@ class AgentWorkflowEnv:
                 AgentActionType.ADD_SUBGRAPH,
             }
             and candidate.output_agent_id is not None
-            and self.require_format_agent
+            and self._uses_format_agent_protocol()
         ):
             format_issue = self._format_agent_issue_for(candidate)
             if format_issue is not None:
@@ -405,7 +595,16 @@ class AgentWorkflowEnv:
                 )
 
         self._graph = candidate
+        current_agent_ids = {node.id for node in self._graph.nodes}
+        self._unresolved_dirty_agents = (
+            self._unresolved_dirty_agents & current_agent_ids
+        ) | (set(dirty_agents) & current_agent_ids)
+        self._invalidate_progressive_outputs(
+            self._unresolved_dirty_agents,
+            current_agent_ids=current_agent_ids,
+        )
         execution = None
+        partial_execution = None
         execution_reused = False
         execution_error: Optional[AgentRuntimeError] = None
         if self.execute_on_edit:
@@ -417,14 +616,34 @@ class AgentWorkflowEnv:
                         require_complete=False,
                         prior_outputs=self._progressive_outputs,
                         prior_output_metadata=self._progressive_output_metadata,
-                        dirty_agents=dirty_agents,
-                        format_output_agent=self.require_format_agent,
+                        dirty_agents=self._unresolved_dirty_agents,
+                        format_output_agent=self._uses_format_agent_protocol(),
                     )
                 except AgentRuntimeError as exc:
                     # FlowSteer's progressive Canvas treats execution as edit
                     # feedback.  A provider/runtime failure must not roll back
                     # a structurally valid edit or abort the Director rollout.
                     execution_error = exc
+                    partial_execution = exc.partial_result
+                    if partial_execution is not None:
+                        self._progressive_outputs = dict(partial_execution.outputs)
+                        self._progressive_output_metadata = {
+                            agent_id: dict(metadata)
+                            for agent_id, metadata in (
+                                partial_execution.output_metadata.items()
+                            )
+                        }
+                        self._unresolved_dirty_agents.difference_update(
+                            partial_execution.outputs
+                            if self.recovery_policy
+                            == _PRESERVE_REPAIR_RECOVERY_POLICY
+                            else partial_execution.executed_agent_ids
+                        )
+                    self._unresolved_dirty_agents.update(
+                        agent_id
+                        for agent_id in exc.pending_agent_ids
+                        if agent_id in current_agent_ids
+                    )
                 else:
                     self._progressive_outputs = dict(execution.outputs)
                     self._progressive_output_metadata = {
@@ -433,6 +652,7 @@ class AgentWorkflowEnv:
                     }
                     self._progressive_execution = execution
                     self._progressive_execution_revision = self._graph.revision
+                    self._unresolved_dirty_agents.clear()
             else:
                 self._clear_progressive_execution()
         self._last_feedback = self._accepted_feedback(
@@ -456,6 +676,10 @@ class AgentWorkflowEnv:
             snapshot=self.snapshot(),
             execution=execution,
             execution_reused=execution_reused,
+            partial_execution=partial_execution,
+            execution_failure_records=(
+                () if execution_error is None else execution_error.failure_records
+            ),
         )
 
     def _accepted_feedback(
@@ -470,6 +694,13 @@ class AgentWorkflowEnv:
         if execution_error is not None:
             return f"{feedback}; {self._execution_error_feedback(execution_error)}"
         if execution is None:
+            if self.recovery_policy == _PRESERVE_REPAIR_RECOVERY_POLICY:
+                state = json.dumps(
+                    self.recovery_state(),
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+                return f"{feedback}; recovery_state={state}"
             return feedback
 
         # FlowSteer's progressive Canvas returns the just-executed workflow
@@ -561,6 +792,12 @@ class AgentWorkflowEnv:
                 "topology": self._graph.topology_statistics(),
                 "output_inbox": output_inbox,
                 "agent_artifacts": agent_artifacts,
+                **(
+                    {"recovery_state": self.recovery_state()}
+                    if self.recovery_policy
+                    == _PRESERVE_REPAIR_RECOVERY_POLICY
+                    else {}
+                ),
             },
             ensure_ascii=False,
             separators=(",", ":"),
@@ -611,7 +848,11 @@ class AgentWorkflowEnv:
         execution = self._cached_progressive_execution()
         if execution is None or execution.final_answer is None:
             return {"admissible": False}
+        if self._environment_terminal_issue(execution) is not None:
+            return {"admissible": False}
         if self._terminal_validation_error(execution.final_answer) is not None:
+            return {"admissible": False}
+        if self._semantic_protocol_issue(execution) is not None:
             return {"admissible": False}
         return {
             "admissible": True,
@@ -633,6 +874,22 @@ class AgentWorkflowEnv:
         self._progressive_execution_revision = None
         self._progressive_outputs.clear()
         self._progressive_output_metadata.clear()
+        self._unresolved_dirty_agents.clear()
+
+    def _invalidate_progressive_outputs(
+        self,
+        dirty_agent_ids: set[str],
+        *,
+        current_agent_ids: set[str],
+    ) -> None:
+        """Invalidate revision-local cache entries before executing an edit."""
+
+        self._progressive_execution = None
+        self._progressive_execution_revision = None
+        for agent_id in tuple(self._progressive_outputs):
+            if agent_id in dirty_agent_ids or agent_id not in current_agent_ids:
+                self._progressive_outputs.pop(agent_id, None)
+                self._progressive_output_metadata.pop(agent_id, None)
 
     def format_agent_issue(self) -> Optional[str]:
         """Return the terminal Format-Agent constraint that is still unmet.
@@ -673,8 +930,52 @@ class AgentWorkflowEnv:
             "Add or modify the required executor before retrying FINISH"
         )
 
+    def _environment_terminal_issue(
+        self,
+        execution: AgentRuntimeResult,
+    ) -> Optional[str]:
+        """Require the stateful environment actor's measured terminal receipt.
+
+        SkillFlow marks an interactive rollout complete only after a terminal
+        environment observation.  The AgentGraph Output Agent may be a later
+        consumer, so terminality is read from the unique environment actor's
+        execution metadata rather than inferred from free-form output text.
+        """
+
+        if self.required_tool_id is None:
+            return None
+        owners = tuple(
+            node.id
+            for node in self._graph.nodes
+            if node.execution_mode.value == "react"
+            and node.allowed_tools == (self.required_tool_id,)
+        )
+        if len(owners) != 1:
+            return self.required_tool_issue()
+        actor_id = owners[0]
+        metadata = execution.output_metadata.get(actor_id)
+        if not isinstance(metadata, Mapping):
+            return (
+                f"environment actor {actor_id!r} has no execution receipt for "
+                "the current Canvas revision"
+            )
+        trace = metadata.get("evaluator_environment_trace")
+        terminal_transition = (
+            isinstance(trace, (list, tuple))
+            and bool(trace)
+            and isinstance(trace[-1], Mapping)
+            and trace[-1].get("done") is True
+            and trace[-1].get("state_advanced") is True
+        )
+        if metadata.get("environment_terminal") is True and terminal_transition:
+            return None
+        return (
+            f"environment actor {actor_id!r} has not produced a terminal "
+            "Action--Observation transition for the current Canvas revision"
+        )
+
     def _format_agent_issue_for(self, graph: AgentGraph) -> Optional[str]:
-        if not self.require_format_agent:
+        if not self._uses_format_agent_protocol():
             return None
         output_agent_id = graph.output_agent_id
         if output_agent_id is None:
@@ -712,15 +1013,484 @@ class AgentWorkflowEnv:
                 "semantic-answer Agent and one directed relation from that Agent "
                 "to the Format Agent before FINISH"
             )
+        if self.semantic_protocol == _HOTPOTQA_SEMANTIC_PROTOCOL:
+            verifier_id = predecessors[0]
+            verifier = graph.get_node(verifier_id)
+            if (verifier.role_family or "").casefold() != "verifier":
+                return (
+                    "HotpotQA Format Agent's unique predecessor must have "
+                    "role_family='verifier'; the Formatter only wraps an already "
+                    "verified semantic answer and must never select or reason over "
+                    "an answer"
+                )
+            reasoner_predecessors = tuple(
+                agent_id
+                for agent_id in graph.directed_predecessors(verifier_id)
+                if (graph.get_node(agent_id).role_family or "").casefold()
+                == "reasoner"
+            )
+            if len(reasoner_predecessors) != 1:
+                return (
+                    "HotpotQA Verifier must consume exactly one direct Reasoner "
+                    "semantic-candidate artifact; found "
+                    f"{len(reasoner_predecessors)}. Preserve the original question "
+                    "scope and use set_relation or modify_agent before FINISH"
+                )
+        return None
+
+    def _uses_format_agent_protocol(self) -> bool:
+        return (
+            self.require_format_agent
+            or self.semantic_protocol == _HOTPOTQA_SEMANTIC_PROTOCOL
+        )
+
+    def _semantic_edit_issue_for(self, graph: AgentGraph) -> Optional[str]:
+        """Reject ReAct as a role while retaining it as execution semantics."""
+
+        if self.semantic_protocol != _HOTPOTQA_SEMANTIC_PROTOCOL:
+            return None
+        invalid_role_ids = tuple(
+            node.id
+            for node in graph.nodes
+            if (node.role_family or "").casefold() == "react"
+        )
+        if not invalid_role_ids:
+            return None
+        return (
+            "HotpotQA semantic protocol rejects role_family='react' for Agents "
+            f"{list(invalid_role_ids)!r}; ReAct is an execution_mode "
+            "(Thought -> Action(tool) -> Observation -> Thought -> Final). "
+            "Use a semantic role such as reasoner, evidence_retriever, or verifier "
+            "and set execution_mode='react' only when Tool orchestration is needed"
+        )
+
+    @staticmethod
+    def _structured_semantic_fields(
+        artifact: str,
+        required_fields: Tuple[str, ...],
+    ) -> tuple[Optional[dict[str, object]], Optional[str]]:
+        """Parse a JSON object or a strict one-field-per-line labelled artifact."""
+
+        if not isinstance(artifact, str) or not artifact.strip():
+            return None, "artifact is empty"
+        text = artifact.strip()
+        fenced = re.fullmatch(
+            r"```(?:json)?\s*(.*?)\s*```",
+            text,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+        if fenced is not None:
+            text = fenced.group(1).strip()
+        parsed: object
+        try:
+            parsed = json.loads(text)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            parsed = None
+        aliases = {"fact_propositions": "evidence_propositions"}
+        optional_fields = (
+            {"evidence", "repair_diagnosis"}
+            if required_fields == _VERIFIER_SEMANTIC_FIELDS
+            else set()
+        )
+        allowed_fields = set(required_fields) | optional_fields
+        if isinstance(parsed, Mapping):
+            fields = {}
+            for raw_key, value in parsed.items():
+                key = re.sub(r"[ -]+", "_", str(raw_key).strip().casefold())
+                key = aliases.get(key, key)
+                if key not in allowed_fields:
+                    return None, f"unexpected structured field {key!r}"
+                if key in fields:
+                    return None, f"duplicate structured field {key!r}"
+                fields[key] = value
+        else:
+            labelled_values: dict[str, list[str]] = {}
+            current_key: Optional[str] = None
+            for raw_line in text.splitlines():
+                line = raw_line.strip()
+                if not line:
+                    continue
+                match = re.fullmatch(r"([A-Za-z][A-Za-z _-]*):\s*(.*)", line)
+                if match is not None:
+                    key = re.sub(
+                        r"[ -]+",
+                        "_",
+                        match.group(1).strip().casefold(),
+                    )
+                    key = aliases.get(key, key)
+                    if key not in allowed_fields:
+                        return None, f"unexpected structured field {key!r}"
+                    if key in labelled_values:
+                        return None, f"duplicate structured field {key!r}"
+                    current_key = key
+                    labelled_values[key] = []
+                    inline_value = match.group(2).strip()
+                    if inline_value:
+                        labelled_values[key].append(inline_value)
+                    continue
+                if current_key is None:
+                    return None, (
+                        "labelled artifact must begin with a declared `Field:` label"
+                    )
+                labelled_values[current_key].append(line)
+            fields = {}
+            for key, lines in labelled_values.items():
+                value_text = "\n".join(lines).strip()
+                try:
+                    value = json.loads(value_text)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    value = value_text
+                fields[key] = value
+        missing = tuple(field for field in required_fields if field not in fields)
+        if missing:
+            return None, f"missing structured fields {list(missing)!r}"
+        return fields, None
+
+    @staticmethod
+    def _non_empty_semantic_value(value: object) -> bool:
+        if isinstance(value, str):
+            return bool(value.strip())
+        if isinstance(value, Mapping):
+            return bool(value)
+        if isinstance(value, (list, tuple)):
+            return bool(value)
+        return False
+
+    @classmethod
+    def _reasoner_candidate(
+        cls,
+        artifact: str,
+    ) -> tuple[Optional[str], Optional[str]]:
+        fields, issue = cls._structured_semantic_fields(
+            artifact,
+            _REASONER_SEMANTIC_FIELDS,
+        )
+        if issue is not None or fields is None:
+            return None, issue
+        for field in (
+            "question_scope",
+            "answer_slot",
+            "evidence_propositions",
+            "multi_hop_chain",
+            "evidence",
+        ):
+            if not cls._non_empty_semantic_value(fields[field]):
+                return None, f"Reasoner field {field!r} must be non-empty"
+        candidate = fields["candidate_answer"]
+        if (
+            not isinstance(candidate, str)
+            or not candidate
+            or candidate != candidate.strip()
+            or "\n" in candidate
+        ):
+            return None, (
+                "Reasoner field 'candidate_answer' must be one non-empty bare "
+                "answer span without surrounding whitespace"
+            )
+        return candidate, None
+
+    @classmethod
+    def _verifier_candidate(
+        cls,
+        artifact: str,
+    ) -> tuple[Optional[str], Optional[str]]:
+        fields, issue = cls._structured_semantic_fields(
+            artifact,
+            _VERIFIER_SEMANTIC_FIELDS,
+        )
+        if issue is not None or fields is None:
+            return None, issue
+        candidate = fields["candidate_answer"]
+        if (
+            not isinstance(candidate, str)
+            or not candidate
+            or candidate != candidate.strip()
+            or "\n" in candidate
+        ):
+            return None, (
+                "Verifier field 'candidate_answer' must be one non-empty bare "
+                "answer span without surrounding whitespace"
+            )
+        for field in (
+            "evidence_supported",
+            "entity_attribute_binding_correct",
+            "multi_hop_complete",
+            "scope_preserved",
+        ):
+            if fields[field] is not True:
+                return None, f"Verifier field {field!r} must be true"
+        status = fields["verification_status"]
+        if not isinstance(status, str) or status.strip().casefold() != "supported":
+            return None, "Verifier field 'verification_status' must be 'supported'"
+        return candidate, None
+
+    @staticmethod
+    def _successful_read_receipt(
+        receipt: Mapping[str, object],
+        required_tool_id: str,
+    ) -> bool:
+        if (
+            receipt.get("tool_id") != required_tool_id
+            or receipt.get("error_type") is not None
+        ):
+            return False
+        request = receipt.get("request")
+        if not isinstance(request, Mapping) or request.get("action") != "read":
+            return False
+        result = receipt.get("result")
+        if not isinstance(result, Mapping):
+            return False
+        value = result.get("value", result)
+        if not isinstance(value, Mapping) or value.get("operation") != "read":
+            return False
+        passage = value.get("passage")
+        return (
+            isinstance(passage, Mapping)
+            and isinstance(passage.get("text"), str)
+            and bool(passage["text"].strip())
+        )
+
+    def _semantic_protocol_issue(
+        self,
+        execution: AgentRuntimeResult,
+    ) -> Optional[str]:
+        """Return the shared HotpotQA FINISH/read-only-admissibility gate."""
+
+        if self.semantic_protocol != _HOTPOTQA_SEMANTIC_PROTOCOL:
+            return None
+        structure_issue = self._format_agent_issue_for(self._graph)
+        if structure_issue is not None:
+            return structure_issue
+        formatter_id = self._graph.output_agent_id
+        if formatter_id is None:
+            return "HotpotQA semantic protocol requires a selected Format Agent"
+        verifier_id = self._graph.directed_predecessors(formatter_id)[0]
+        reasoner_ids = tuple(
+            agent_id
+            for agent_id in self._graph.directed_predecessors(verifier_id)
+            if (self._graph.get_node(agent_id).role_family or "").casefold()
+            == "reasoner"
+        )
+        if len(reasoner_ids) != 1:
+            return (
+                "HotpotQA semantic protocol requires exactly one direct Reasoner "
+                "semantic candidate for the Verifier"
+            )
+        reasoner_id = reasoner_ids[0]
+        reasoner_artifact = execution.outputs.get(reasoner_id)
+        verifier_artifact = execution.outputs.get(verifier_id)
+        if reasoner_artifact is None:
+            return f"Reasoner {reasoner_id!r} has no current semantic artifact"
+        if verifier_artifact is None:
+            return f"Verifier {verifier_id!r} has no current verification artifact"
+        reasoner_candidate, reasoner_issue = self._reasoner_candidate(
+            reasoner_artifact
+        )
+        if reasoner_issue is not None or reasoner_candidate is None:
+            return (
+                f"Reasoner {reasoner_id!r} semantic artifact is invalid: "
+                f"{reasoner_issue}. Required fields are "
+                f"{list(_REASONER_SEMANTIC_FIELDS)!r}"
+            )
+        verifier_candidate, verifier_issue = self._verifier_candidate(
+            verifier_artifact
+        )
+        if verifier_issue is not None or verifier_candidate is None:
+            return (
+                f"Verifier {verifier_id!r} semantic artifact is invalid: "
+                f"{verifier_issue}. Diagnose evidence, entity--attribute binding, "
+                "multi-hop completeness, and original-question scope; repair the "
+                "existing Agent or augment retrieval before FINISH"
+            )
+        if verifier_candidate != reasoner_candidate:
+            return (
+                "Verifier changed the Reasoner's candidate_answer: "
+                f"reasoner={reasoner_candidate!r}, verifier={verifier_candidate!r}. "
+                "The Verifier may reject an unsupported candidate but must not select "
+                "a replacement answer; repair the Reasoner and preserve semantic lineage"
+            )
+        direct_predecessors = self._graph.directed_predecessors(verifier_id)
+        has_read_evidence = False
+        assert self.required_evidence_tool_id is not None
+        for predecessor_id in direct_predecessors:
+            metadata = execution.output_metadata.get(predecessor_id)
+            if not isinstance(metadata, Mapping):
+                continue
+            receipts = metadata.get("tool_receipts", ())
+            if not isinstance(receipts, (list, tuple)):
+                continue
+            if any(
+                isinstance(receipt, Mapping)
+                and self._successful_read_receipt(
+                    receipt,
+                    self.required_evidence_tool_id,
+                )
+                for receipt in receipts
+            ):
+                has_read_evidence = True
+                break
+        if not has_read_evidence:
+            return (
+                "Verifier has no direct predecessor with a successful "
+                f"{self.required_evidence_tool_id!r} read receipt containing a "
+                "non-empty passage. Preserve existing artifacts and add or repair a "
+                "retrieval relation before FINISH"
+            )
+        answer = execution.final_answer
+        if answer is None:
+            return "Format Agent produced no terminal wrapper"
+        wrapper = re.fullmatch(
+            r"\s*<answer>(.*?)</answer>\s*",
+            answer,
+            flags=re.DOTALL,
+        )
+        if wrapper is None or wrapper.group(1) != reasoner_candidate:
+            formatter_value = None if wrapper is None else wrapper.group(1)
+            return (
+                "Formatter must only wrap the verified candidate and may not "
+                "reselect or transform it: "
+                f"candidate_answer={reasoner_candidate!r}, "
+                f"wrapper_content={formatter_value!r}"
+            )
         return None
 
     @staticmethod
-    def _execution_error_feedback(exc: AgentRuntimeError) -> str:
+    def _directed_successors(graph: AgentGraph, agent_id: str) -> Tuple[str, ...]:
+        return tuple(
+            sorted(
+                {
+                    target_id
+                    for relation in graph.relations
+                    for source_id, target_id in relation.directed_edges()
+                    if source_id == agent_id
+                }
+            )
+        )
+
+    def _has_successful_artifact(self, agent_id: str) -> bool:
+        artifact = self._progressive_outputs.get(agent_id)
+        return (
+            isinstance(artifact, str)
+            and bool(artifact.strip())
+            and agent_id not in self._unresolved_dirty_agents
+        )
+
+    def recovery_state(self) -> dict[str, object]:
+        """Expose measured preservation state without changing scheduling/cache rules."""
+
+        current_ids = {node.id for node in self._graph.nodes}
+        preserved = tuple(
+            sorted(
+                agent_id
+                for agent_id in current_ids
+                if self._has_successful_artifact(agent_id)
+            )
+        )
+        protected: dict[str, list[str]] = {}
+        for node in self._graph.nodes:
+            reasons: list[str] = []
+            if node.id in preserved:
+                reasons.append("successful_artifact")
+            if self._directed_successors(self._graph, node.id):
+                reasons.append("downstream_responsibility")
+            if self._graph.output_agent_id == node.id:
+                reasons.append("output_identity")
+            if reasons:
+                protected[node.id] = reasons
+        return {
+            "policy": self.recovery_policy,
+            "strategy": "preserve -> diagnose -> repair -> augment",
+            "phase": (
+                "diagnose_repair"
+                if self._unresolved_dirty_agents
+                else "preserve"
+            ),
+            "preserved_agent_ids": list(preserved),
+            "unresolved_dirty_agent_ids": list(self.unresolved_dirty_agent_ids),
+            "deletion_protected": protected,
+            "preferred_actions": ["modify_agent", "set_relation", "add_subgraph"],
+        }
+
+    def _delete_admission_issue(self, agent_id: Optional[str]) -> Optional[str]:
+        if self.recovery_policy != _PRESERVE_REPAIR_RECOVERY_POLICY:
+            return None
+        if agent_id is None or not self._graph.has_node(agent_id):
+            return None
+        node = self._graph.get_node(agent_id)
+        downstream_ids = set(self._directed_successors(self._graph, agent_id))
+        protected_reasons: list[str] = []
+        if self._has_successful_artifact(agent_id):
+            protected_reasons.append("successful artifact/evidence")
+        if downstream_ids:
+            protected_reasons.append("downstream responsibility")
+        if self._graph.output_agent_id == agent_id:
+            protected_reasons.append("Output Agent identity")
+        if not protected_reasons:
+            return None
+
+        role = (node.role_family or "").casefold()
+        artifact_type = node.artifact_type.casefold()
+        replacements: list[str] = []
+        for candidate in self._graph.nodes:
+            if candidate.id == agent_id:
+                continue
+            if (
+                (candidate.role_family or "").casefold() != role
+                or candidate.artifact_type.casefold() != artifact_type
+                or not self._has_successful_artifact(candidate.id)
+            ):
+                continue
+            candidate_downstream = set(
+                self._directed_successors(self._graph, candidate.id)
+            )
+            if not downstream_ids <= candidate_downstream:
+                continue
+            # The Director must transfer Output identity before deleting the
+            # previous owner; a graph cannot have two simultaneous outputs.
+            if self._graph.output_agent_id == agent_id:
+                continue
+            replacements.append(candidate.id)
+        if replacements:
+            return None
+        return (
+            f"recovery_policy={_PRESERVE_REPAIR_RECOVERY_POLICY} protects Agent "
+            f"{agent_id!r} because it has {', '.join(protected_reasons)}. "
+            "Use preserve -> diagnose -> repair -> augment: prefer modify_agent, "
+            "set_relation, or add_subgraph. Delete is admitted only after a "
+            "same-role/same-artifact replacement has executed successfully, taken "
+            "every downstream relation, and (when applicable) received Output identity"
+        )
+
+    def _execution_error_feedback(self, exc: AgentRuntimeError) -> str:
         message = " ".join(str(exc).split())
         if len(message) > 240:
             message = message[:237] + "..."
         payload = json.dumps(
-            {"type": type(exc).__name__, "message": message},
+            {
+                "type": type(exc).__name__,
+                "message": message,
+                "failed_agents": [
+                    {
+                        "agent_id": record.agent_id,
+                        "phase": record.phase.value,
+                        "error_type": record.error_type,
+                    }
+                    for record in exc.failure_records[:4]
+                ],
+                "blocked_agent_ids": list(exc.blocked_agent_ids),
+                "pending_agent_ids": list(exc.pending_agent_ids),
+                "preserved_agent_ids": (
+                    []
+                    if exc.partial_result is None
+                    else sorted(exc.partial_result.outputs)
+                ),
+                **(
+                    {"recovery_state": self.recovery_state()}
+                    if self.recovery_policy
+                    == _PRESERVE_REPAIR_RECOVERY_POLICY
+                    else {}
+                ),
+            },
             ensure_ascii=False,
             separators=(",", ":"),
         )
@@ -735,7 +1505,7 @@ class AgentWorkflowEnv:
             self._graph,
             self._problem,
             run_id=run_id,
-            format_output_agent=self.require_format_agent,
+            format_output_agent=self._uses_format_agent_protocol(),
         )
 
     def _apply_mutation(self, graph: AgentGraph, action: AgentAction) -> set[str]:
@@ -899,6 +1669,11 @@ class AgentWorkflowEnv:
         action: Optional[AgentAction],
         feedback: str,
         issues: Tuple[GraphValidationIssue, ...] = (),
+        *,
+        execution: Optional[AgentRuntimeResult] = None,
+        execution_reused: bool = False,
+        partial_execution: Optional[AgentRuntimeResult] = None,
+        execution_failure_records: Tuple[AgentFailureRecord, ...] = (),
     ) -> AgentWorkflowStepResult:
         self._last_feedback = feedback
         self._record_history(
@@ -906,6 +1681,7 @@ class AgentWorkflowEnv:
             done=self._finished,
             action=action,
             feedback=feedback,
+            execution_reused=execution_reused,
         )
         return AgentWorkflowStepResult(
             accepted=False,
@@ -915,6 +1691,10 @@ class AgentWorkflowEnv:
             feedback=feedback,
             snapshot=self.snapshot(),
             validation_issues=issues,
+            execution=execution,
+            execution_reused=execution_reused,
+            partial_execution=partial_execution,
+            execution_failure_records=execution_failure_records,
         )
 
     def _record_history(

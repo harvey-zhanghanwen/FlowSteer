@@ -386,10 +386,22 @@ def test_stable_zero_requires_dataset_evaluator_receipts():
                 "director_generation_seed": 1,
                 "director_latency_ms": 1.0,
                 "action": {"action_type": "finish"},
-                "execution_records": [
+                "graph_snapshot": {"output_agent_id": "actor"},
+                "executions": [
                     {
-                        "is_output_agent": True,
-                        "input": {"inbox": []},
+                        "agent_id": "actor",
+                        "execution_id": "execution-1",
+                        "metadata": {
+                            "request": {
+                                "agent": {"agent_id": "actor"},
+                                "model": {"model_id": "m"},
+                                "phase": "single",
+                                "upstream": [],
+                                "own_draft": None,
+                                "peer_draft": None,
+                                "rendered_messages": [],
+                            }
+                        },
                     }
                 ],
             }
@@ -405,6 +417,96 @@ def test_stable_zero_requires_dataset_evaluator_receipts():
 
     assert result["passed"] is False
     assert result["checks"][0]["direct_evaluator_valid"] is False
+
+
+def test_environment_stable_zero_uses_terminal_receipt_not_free_text_answer():
+    task = _MODULE.TaskRecord(
+        task_id="webshop:00500",
+        question="buy the requested item",
+        ground_truth="environment_terminal_success",
+        split="validation",
+        metadata={"dataset_key": "webshop"},
+    )
+    evaluator_version = _MODULE.evaluator_version_for(task)
+    direct = {
+        task.task_id: {
+            "evaluation": {
+                "valid": True,
+                "evaluator_version": evaluator_version,
+            }
+        }
+    }
+    trajectory = {
+        "explicit_finish": True,
+        "final_answer": "",
+        "evaluation": {
+            "valid": True,
+            "evaluator_version": evaluator_version,
+        },
+        "turns": [
+            {
+                "receipt_verified": True,
+                "director_attempt_count": 1,
+                "director_generation_seed": 1,
+                "director_latency_ms": 1.0,
+                "action": {"action_type": "finish"},
+                "graph_snapshot": {"output_agent_id": "actor"},
+                "executions": [
+                    {
+                        "agent_id": "actor",
+                        "execution_id": "execution-1",
+                        "metadata": {
+                            "request": {
+                                "agent": {"agent_id": "actor"},
+                                "model": {"model_id": "m"},
+                                "phase": "single",
+                                "upstream": [],
+                                "own_draft": None,
+                                "peer_draft": None,
+                                "rendered_messages": [],
+                            }
+                        },
+                    }
+                ],
+                "runtime_summary": {
+                    "output_metadata": {
+                        "actor": {
+                            "environment_terminal": True,
+                            "evaluator_environment_trace": [
+                                {
+                                    "action": "click[buy now]",
+                                    "done": True,
+                                    "state_advanced": True,
+                                }
+                            ],
+                        }
+                    }
+                },
+            }
+        ],
+    }
+
+    passed = _MODULE._completion_stable_zero_check(
+        (task,),
+        direct,
+        {task.task_id: trajectory},
+        dataset_key="webshop",
+    )
+    assert passed["passed"] is True
+    assert passed["checks"][0]["terminal_artifact_saved"] is True
+    assert passed["checks"][0]["environment_terminal_receipt_valid"] is True
+
+    trajectory["turns"][0]["runtime_summary"]["output_metadata"]["actor"][
+        "environment_terminal"
+    ] = False
+    failed = _MODULE._completion_stable_zero_check(
+        (task,),
+        direct,
+        {task.task_id: trajectory},
+        dataset_key="webshop",
+    )
+    assert failed["passed"] is False
+    assert failed["checks"][0]["environment_terminal_receipt_valid"] is False
 
 
 def test_reports_aime_exact_match_and_healthbench_raw_score():

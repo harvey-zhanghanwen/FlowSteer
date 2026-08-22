@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import random
@@ -18,7 +19,7 @@ from src.interactive.agent_graph import (
     DependencyEdgeEvidence,
     GraphMutationError,
 )
-from src.interactive.agent_runtime import AgentRequest, AgentRuntime
+from src.interactive.agent_runtime import AgentRequest, AgentResponse, AgentRuntime
 from src.interactive.agent_workflow_env import AgentWorkflowEnv, AgentWorkflowStateError
 from src.interactive.model_registry import (
     ModelRegistry,
@@ -611,6 +612,126 @@ class _CountingRuntime(AgentRuntime):
         return await super().execute(*args, **kwargs)  # type: ignore[arg-type]
 
 
+def _hotpot_semantic_graph(*, format_predecessor: str = "verifier") -> AgentGraph:
+    return AgentGraph(
+        [
+            AgentNode(
+                "reader",
+                "cheap",
+                "read database evidence",
+                role_family="evidence_retriever",
+                artifact_type="retrieval_evidence",
+            ),
+            AgentNode(
+                "reasoner",
+                "balanced",
+                "align facts to answer slot and select semantic answer",
+                role_family="reasoner",
+                artifact_type="semantic_candidate",
+            ),
+            AgentNode(
+                "verifier",
+                "balanced",
+                "verify evidence binding hops and scope without changing candidate",
+                role_family="verifier",
+                artifact_type="verified_semantic_answer",
+            ),
+            AgentNode(
+                "formatter",
+                "fast",
+                "wrap the verified candidate without reasoning",
+                role_family="format",
+                artifact_type="answer_wrapper",
+            ),
+        ],
+        [
+            AgentRelation("reader", "verifier", True, False),
+            AgentRelation("reasoner", "verifier", True, False),
+            AgentRelation(format_predecessor, "formatter", True, False),
+        ],
+        output_agent_id="formatter",
+    )
+
+
+class _HotpotSemanticGateway(_ImmediateGateway):
+    def __init__(
+        self,
+        *,
+        reasoner_candidate: str = "Paris",
+        verifier_candidate: str = "Paris",
+        include_read_receipt: bool = True,
+        formatter_value: str = "Paris",
+        verifier_supported: bool = True,
+    ) -> None:
+        super().__init__()
+        self.reasoner_candidate = reasoner_candidate
+        self.verifier_candidate = verifier_candidate
+        self.include_read_receipt = include_read_receipt
+        self.formatter_value = formatter_value
+        self.verifier_supported = verifier_supported
+
+    async def generate(self, request: AgentRequest):  # type: ignore[no-untyped-def]
+        self.requests.append(request)
+        if request.agent.id == "reader":
+            metadata = {}
+            if self.include_read_receipt:
+                metadata = {
+                    "tool_receipts": [
+                        {
+                            "tool_id": "qa-retrieval",
+                            "tool_version": "test-v1",
+                            "request": {
+                                "action": "read",
+                                "arguments": {"passage_id": "p1"},
+                            },
+                            "result": {
+                                "value": {
+                                    "operation": "read",
+                                    "passage": {
+                                        "id": "p1",
+                                        "text": "Paris is the capital of France.",
+                                    },
+                                },
+                                "completed": True,
+                            },
+                            "error_type": None,
+                        }
+                    ]
+                }
+            return AgentResponse("retrieved passage p1", metadata)
+        if request.agent.id == "reasoner":
+            return json.dumps(
+                {
+                    "question_scope": "the capital relation exactly as asked",
+                    "answer_slot": {
+                        "subject": "France",
+                        "relation": "capital",
+                        "requested_value": "city",
+                    },
+                    "evidence_propositions": ["capital(France, Paris)"],
+                    "multi_hop_chain": ["France", "capital", "Paris"],
+                    "candidate_answer": self.reasoner_candidate,
+                    "evidence": ["Paris is the capital of France."],
+                }
+            )
+        if request.agent.id == "verifier":
+            return json.dumps(
+                {
+                    "candidate_answer": self.verifier_candidate,
+                    "evidence_supported": self.verifier_supported,
+                    "entity_attribute_binding_correct": True,
+                    "multi_hop_complete": True,
+                    "scope_preserved": True,
+                    "verification_status": (
+                        "supported" if self.verifier_supported else "unsupported"
+                    ),
+                }
+            )
+        if request.agent.id == "formatter":
+            return f"<answer>{self.formatter_value}</answer>"
+        raise AssertionError(f"unexpected Agent {request.agent.id!r}")
+
+
 class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
     async def test_execution_contract_is_rejected_before_canvas_commit(self) -> None:
         registry = make_registry()
@@ -1109,6 +1230,138 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("answer:a", retried.final_answer)
         self.assertEqual(2, len(gateway.requests))
 
+    async def test_failed_dirty_closure_survives_an_unrelated_edit(self) -> None:
+        registry = make_registry()
+
+        class ContractGateway(_ImmediateGateway):
+            def __init__(self) -> None:
+                super().__init__()
+                self.failed_revised_a = False
+
+            async def generate(self, request: AgentRequest) -> str:
+                self.requests.append(request)
+                if (
+                    request.agent.id == "a"
+                    and request.agent.contract == "left-v2"
+                    and not self.failed_revised_a
+                ):
+                    self.failed_revised_a = True
+                    await asyncio.sleep(0.01)
+                    raise RuntimeError("revised a failed once")
+                return f"{request.agent.id}:{request.agent.contract}"
+
+        gateway = ContractGateway()
+        graph = AgentGraph(
+            [
+                AgentNode("a", "balanced", "left-v1"),
+                AgentNode("b", "fast", "right-v1"),
+                AgentNode("merge", "balanced", "merge"),
+            ],
+            [
+                AgentRelation("a", "merge", True, False),
+                AgentRelation("b", "merge", True, False),
+            ],
+            output_agent_id="merge",
+        )
+        env = AgentWorkflowEnv(
+            registry,
+            gateway,
+            graph=graph,
+            problem="question",
+            execute_on_edit=True,
+        )
+
+        initial = await env.step(
+            '{"action":"modify_agent","agent_id":"b","contract":"right-v2"}'
+        )
+        self.assertIsNotNone(initial.execution)
+
+        failed = await env.step(
+            '{"action":"modify_agent","agent_id":"a","contract":"left-v2"}'
+        )
+        self.assertTrue(failed.accepted)
+        self.assertIsNone(failed.execution)
+        self.assertIsNotNone(failed.partial_execution)
+        assert failed.partial_execution is not None
+        self.assertEqual({"b": "b:right-v2"}, dict(failed.partial_execution.outputs))
+        self.assertEqual(("a", "merge"), env.unresolved_dirty_agent_ids)
+        self.assertFalse(env.finish_admissibility()["admissible"])
+
+        repaired = await env.step(
+            '{"action":"modify_agent","agent_id":"b","contract":"right-v3"}'
+        )
+        self.assertIsNotNone(repaired.execution)
+        assert repaired.execution is not None
+        self.assertEqual(
+            ("a", "b", "merge"),
+            repaired.execution.executed_agent_ids,
+        )
+        self.assertEqual((), repaired.execution.reused_agent_ids)
+        merge_request = next(
+            call.request
+            for call in repaired.execution.calls
+            if call.request.agent.id == "merge"
+        )
+        self.assertEqual(
+            ["a:left-v2", "b:right-v3"],
+            [message.content for message in merge_request.upstream],
+        )
+        self.assertEqual((), env.unresolved_dirty_agent_ids)
+
+        finished = await env.step('{"action":"finish"}')
+        self.assertTrue(finished.accepted)
+
+    async def test_same_run_successful_branch_is_reused_after_sibling_failure(self) -> None:
+        registry = make_registry()
+
+        class BranchGateway(_ImmediateGateway):
+            def __init__(self) -> None:
+                super().__init__()
+                self.failed_b = False
+
+            async def generate(self, request: AgentRequest) -> str:
+                self.requests.append(request)
+                if request.agent.id == "b" and not self.failed_b:
+                    self.failed_b = True
+                    await asyncio.sleep(0.01)
+                    raise RuntimeError("b failed once")
+                return f"{request.agent.id}:{request.agent.contract}"
+
+        gateway = BranchGateway()
+        env = AgentWorkflowEnv(
+            registry,
+            gateway,
+            problem="question",
+            execute_on_edit=True,
+        )
+        failed = await env.step(
+            '{"action":"add_subgraph","agents":['
+            '{"agent_id":"a","model_id":"balanced","contract":"left"},'
+            '{"agent_id":"b","model_id":"fast","contract":"right"},'
+            '{"agent_id":"merge","model_id":"balanced","contract":"merge"}'
+            '],"relations":['
+            '{"source_id":"a","target_id":"merge",'
+            '"source_to_target":true,"target_to_source":false},'
+            '{"source_id":"b","target_id":"merge",'
+            '"source_to_target":true,"target_to_source":false}'
+            '],"output_agent_id":"merge"}'
+        )
+
+        self.assertTrue(failed.accepted)
+        self.assertIsNotNone(failed.partial_execution)
+        assert failed.partial_execution is not None
+        self.assertEqual({"a": "a:left"}, dict(failed.partial_execution.outputs))
+        self.assertEqual(("b", "merge"), env.unresolved_dirty_agent_ids)
+
+        repaired = await env.step(
+            '{"action":"modify_agent","agent_id":"b","contract":"right-v2"}'
+        )
+        self.assertIsNotNone(repaired.execution)
+        assert repaired.execution is not None
+        self.assertEqual(("b", "merge"), repaired.execution.executed_agent_ids)
+        self.assertEqual(("a",), repaired.execution.reused_agent_ids)
+        self.assertEqual(1, len([item for item in gateway.requests if item.agent.id == "a"]))
+
     async def test_finish_reuses_successful_progressive_execution(self) -> None:
         registry = make_registry()
         gateway = _ImmediateGateway()
@@ -1153,6 +1406,32 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(env.finished)
         self.assertIn("exactly one ReAct environment actor", rejected.feedback)
         self.assertIn("alfworld.environment", rejected.feedback)
+
+    async def test_canvas_rejects_actions_outside_configured_search_space(self) -> None:
+        registry = make_registry()
+        env = AgentWorkflowEnv(
+            registry,
+            _ImmediateGateway(),
+            problem="question",
+            execute_on_edit=True,
+            allowed_actions=(
+                "add_subgraph",
+                "modify_agent",
+                "delete_agent",
+                "set_relation",
+                "set_output",
+                "finish",
+            ),
+        )
+
+        rejected = await env.step(
+            '{"action":"add_agent","agent_id":"a",'
+            '"model_id":"balanced","contract":"answer"}'
+        )
+
+        self.assertFalse(rejected.accepted)
+        self.assertEqual((), env.graph.nodes)
+        self.assertIn("configured Canvas action set", rejected.feedback)
 
     async def test_noop_edit_is_rejected_without_reusing_execution(self) -> None:
         registry = make_registry()
@@ -1357,6 +1636,298 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         finished = await env.step('{"action":"finish"}')
         self.assertTrue(finished.accepted)
         self.assertEqual("answer:a", finished.final_answer)
+
+    async def test_hotpot_semantic_protocol_accepts_only_verified_answer_lineage(self) -> None:
+        registry = make_registry()
+        gateway = _HotpotSemanticGateway()
+        env = AgentWorkflowEnv(
+            registry,
+            gateway,
+            graph=_hotpot_semantic_graph(),
+            problem="What is the capital of France?",
+            require_exact_answer_tag=True,
+            require_format_agent=True,
+            semantic_protocol="hotpotqa_verified_answer_slot_v1",
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id="qa-retrieval",
+        )
+
+        self.assertFalse(env.finish_admissibility()["admissible"])
+        finished = await env.step('{"action":"finish"}')
+
+        self.assertTrue(finished.accepted)
+        self.assertEqual("<answer>Paris</answer>", finished.final_answer)
+        self.assertEqual(
+            {
+                "admissible": True,
+                "graph_revision": env.revision,
+                "submission_semantics": "explicit_finish",
+            },
+            env.finish_admissibility(),
+        )
+
+    async def test_hotpot_finish_and_admissibility_share_candidate_gate(self) -> None:
+        registry = make_registry()
+        gateway = _HotpotSemanticGateway(verifier_candidate="Lyon")
+        env = AgentWorkflowEnv(
+            registry,
+            gateway,
+            graph=_hotpot_semantic_graph(),
+            problem="What is the capital of France?",
+            require_exact_answer_tag=True,
+            require_format_agent=True,
+            semantic_protocol="hotpotqa_verified_answer_slot_v1",
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id="qa-retrieval",
+        )
+
+        rejected = await env.step('{"action":"finish"}')
+
+        self.assertFalse(rejected.accepted)
+        self.assertIn("Verifier changed the Reasoner's candidate_answer", rejected.feedback)
+        self.assertFalse(env.finish_admissibility()["admissible"])
+        self.assertIsNotNone(rejected.execution)
+
+    async def test_hotpot_semantic_gate_requires_direct_successful_read_receipt(self) -> None:
+        registry = make_registry()
+        gateway = _HotpotSemanticGateway(include_read_receipt=False)
+        env = AgentWorkflowEnv(
+            registry,
+            gateway,
+            graph=_hotpot_semantic_graph(),
+            problem="What is the capital of France?",
+            require_exact_answer_tag=True,
+            require_format_agent=True,
+            semantic_protocol="hotpotqa_verified_answer_slot_v1",
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id="qa-retrieval",
+        )
+
+        rejected = await env.step('{"action":"finish"}')
+
+        self.assertFalse(rejected.accepted)
+        self.assertIn("successful 'qa-retrieval' read receipt", rejected.feedback)
+        self.assertFalse(env.finish_admissibility()["admissible"])
+
+    async def test_hotpot_formatter_must_wrap_exact_unchanged_candidate(self) -> None:
+        registry = make_registry()
+        gateway = _HotpotSemanticGateway(formatter_value="Paris, France")
+        env = AgentWorkflowEnv(
+            registry,
+            gateway,
+            graph=_hotpot_semantic_graph(),
+            problem="What is the capital of France?",
+            require_exact_answer_tag=True,
+            require_format_agent=True,
+            semantic_protocol="hotpotqa_verified_answer_slot_v1",
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id="qa-retrieval",
+        )
+
+        rejected = await env.step('{"action":"finish"}')
+
+        self.assertFalse(rejected.accepted)
+        self.assertIn("Formatter must only wrap", rejected.feedback)
+        self.assertIn("wrapper_content='Paris, France'", rejected.feedback)
+        self.assertFalse(env.finish_admissibility()["admissible"])
+
+    async def test_hotpot_structured_gate_accepts_strict_label_fields(self) -> None:
+        registry = make_registry()
+        env = AgentWorkflowEnv(
+            registry,
+            _ImmediateGateway(),
+            problem="question",
+            semantic_protocol="hotpotqa_verified_answer_slot_v1",
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id="qa-retrieval",
+        )
+        reasoner_candidate, reasoner_issue = env._reasoner_candidate(
+            "Question scope: the capital relation exactly as asked\n"
+            "Answer slot: city\n"
+            "Evidence propositions: [\"capital(France, Paris)\"]\n"
+            "Multi-hop chain: [\"France\", \"Paris\"]\n"
+            "Candidate answer: Paris\n"
+            "Evidence: Paris is the capital of France."
+        )
+        verifier_candidate, verifier_issue = env._verifier_candidate(
+            "Candidate answer: Paris\n"
+            "Evidence supported: true\n"
+            "Entity attribute binding correct: true\n"
+            "Multi-hop complete: true\n"
+            "Scope preserved: true\n"
+            "Verification status: supported"
+        )
+
+        self.assertIsNone(reasoner_issue)
+        self.assertEqual("Paris", reasoner_candidate)
+        self.assertIsNone(verifier_issue)
+        self.assertEqual("Paris", verifier_candidate)
+
+    async def test_hotpot_rejects_react_role_but_not_react_execution_semantics(self) -> None:
+        registry = make_registry()
+        env = AgentWorkflowEnv(
+            registry,
+            _ImmediateGateway(),
+            problem="question",
+            semantic_protocol="hotpotqa_verified_answer_slot_v1",
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id="qa-retrieval",
+        )
+
+        rejected = await env.step(
+            '{"action":"add_agent","agent_id":"bad","model_id":"balanced",'
+            '"contract":"retrieve","role_family":"ReAct"}'
+        )
+
+        self.assertFalse(rejected.accepted)
+        self.assertEqual((), env.graph.nodes)
+        self.assertIn("ReAct is an execution_mode", rejected.feedback)
+
+    async def test_hotpot_format_predecessor_must_be_verifier(self) -> None:
+        registry = make_registry()
+        gateway = _ImmediateGateway()
+        graph = AgentGraph(
+            [
+                AgentNode("reader", "cheap", "evidence", role_family="evidence_retriever"),
+                AgentNode("verifier", "balanced", "verify", role_family="verifier"),
+                AgentNode("reasoner", "balanced", "answer", role_family="reasoner"),
+                AgentNode("formatter", "fast", "format", role_family="format"),
+            ],
+            [
+                AgentRelation("reader", "verifier", True, False),
+                AgentRelation("verifier", "reasoner", True, False),
+                AgentRelation("reasoner", "formatter", True, False),
+            ],
+            output_agent_id="formatter",
+        )
+        env = AgentWorkflowEnv(
+            registry,
+            gateway,
+            graph=graph,
+            problem="question",
+            require_exact_answer_tag=True,
+            require_format_agent=True,
+            semantic_protocol="hotpotqa_verified_answer_slot_v1",
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id="qa-retrieval",
+        )
+
+        rejected = await env.step('{"action":"finish"}')
+
+        self.assertFalse(rejected.accepted)
+        self.assertIn("unique predecessor must have role_family='verifier'", rejected.feedback)
+        self.assertEqual([], gateway.requests)
+
+    async def test_preserve_repair_policy_blocks_delete_until_takeover(self) -> None:
+        registry = make_registry()
+        gateway = _ImmediateGateway()
+        graph = AgentGraph(
+            [
+                AgentNode(
+                    "source",
+                    "balanced",
+                    "evidence-v1",
+                    role_family="evidence",
+                    artifact_type="facts",
+                ),
+                AgentNode("out", "fast", "answer", role_family="output"),
+            ],
+            [AgentRelation("source", "out", True, False)],
+            output_agent_id="out",
+        )
+        env = AgentWorkflowEnv(
+            registry,
+            gateway,
+            graph=graph,
+            problem="question",
+            execute_on_edit=True,
+            recovery_policy="preserve_diagnose_repair_augment",
+        )
+        executed = await env.step(
+            '{"action":"modify_agent","agent_id":"source",'
+            '"contract":"evidence-v2"}'
+        )
+        self.assertTrue(executed.accepted)
+        self.assertIn('"recovery_state"', executed.feedback)
+
+        protected = await env.step('{"action":"delete_agent","agent_id":"source"}')
+        self.assertFalse(protected.accepted)
+        self.assertIn("preserve_diagnose_repair_augment protects", protected.feedback)
+        self.assertIn("modify_agent, set_relation, or add_subgraph", protected.feedback)
+        self.assertTrue(env.graph.has_node("source"))
+
+        takeover = await env.step(
+            '{"action":"add_subgraph","agents":['
+            '{"agent_id":"replacement","model_id":"cheap",'
+            '"contract":"replacement evidence","role_family":"evidence",'
+            '"artifact_type":"facts"}'
+            '],"relations":['
+            '{"source_id":"replacement","target_id":"out",'
+            '"source_to_target":true,"target_to_source":false}'
+            ']}'
+        )
+        self.assertTrue(takeover.accepted)
+        self.assertIn("replacement", env.recovery_state()["preserved_agent_ids"])
+
+        deleted = await env.step('{"action":"delete_agent","agent_id":"source"}')
+        self.assertTrue(deleted.accepted)
+        self.assertFalse(env.graph.has_node("source"))
+        self.assertTrue(env.graph.has_node("replacement"))
+
+    async def test_recovery_policy_requires_output_handoff_before_delete(self) -> None:
+        registry = make_registry()
+        graph = AgentGraph(
+            [AgentNode("out", "balanced", "answer", role_family="format")],
+            output_agent_id="out",
+        )
+        env = AgentWorkflowEnv(
+            registry,
+            _ImmediateGateway(),
+            graph=graph,
+            problem="question",
+            recovery_policy="preserve_diagnose_repair_augment",
+        )
+
+        rejected = await env.step('{"action":"delete_agent","agent_id":"out"}')
+
+        self.assertFalse(rejected.accepted)
+        self.assertIn("Output Agent identity", rejected.feedback)
+        self.assertTrue(env.graph.has_node("out"))
+
+    async def test_semantic_and_recovery_configuration_forks_and_defaults_are_legacy(self) -> None:
+        registry = make_registry()
+        default_graph = AgentGraph(
+            [
+                AgentNode("source", "balanced", "source"),
+                AgentNode("out", "fast", "out"),
+            ],
+            [AgentRelation("source", "out", True, False)],
+            output_agent_id="out",
+        )
+        legacy = AgentWorkflowEnv(
+            registry,
+            _ImmediateGateway(),
+            graph=default_graph,
+            problem="question",
+        )
+        deleted = await legacy.step('{"action":"delete_agent","agent_id":"source"}')
+        self.assertTrue(deleted.accepted)
+
+        configured = AgentWorkflowEnv(
+            registry,
+            _ImmediateGateway(),
+            problem="question",
+            semantic_protocol="hotpotqa_verified_answer_slot_v1",
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id="qa-retrieval",
+        )
+        fork = configured.fork()
+        self.assertEqual(configured.semantic_protocol, fork.semantic_protocol)
+        self.assertEqual(configured.recovery_policy, fork.recovery_policy)
+        self.assertEqual(
+            configured.required_evidence_tool_id,
+            fork.required_evidence_tool_id,
+        )
 
 
 if __name__ == "__main__":

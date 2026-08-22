@@ -108,6 +108,42 @@ def _format_upstream(
     return "\n\n".join(rendered)
 
 
+def _semantic_role(request: AgentRequest) -> str:
+    role_family = request.agent.role_family
+    return role_family.casefold() if isinstance(role_family, str) else ""
+
+
+_HOTPOTQA_REASONER_PROTOCOL = (
+    "You are the semantic Reasoner, not a formatter or verifier. Preserve the "
+    "question's original scope, relation, qualifiers, comparison criterion, and "
+    "answer type. Align every database or retrieved fact to a proposition with "
+    "subject/entity, predicate/relation, object or attribute value, and qualifiers; "
+    "then align that proposition to the answer slot actually requested. You alone "
+    "determine the semantic candidate. Return exactly these labeled fields: "
+    "`Question scope:`, `Answer slot:`, `Evidence propositions:`, `Multi-hop chain:`, "
+    "`Candidate answer:`, and `Evidence:`. Candidate answer contains only the final "
+    "answer value. If a comparison produces unexpectedly equal values, recheck the "
+    "original scope, both entity-attribute bindings, retrieved evidence, and any "
+    "upstream contract narrowing before concluding a tie."
+)
+
+_HOTPOTQA_VERIFIER_PROTOCOL = (
+    "You are the semantic Verifier, not a Reasoner or formatter. Inspect the routed "
+    "Reasoner candidate against explicit database or retrieved evidence. Check all "
+    "four gates: evidence explicitly supports the candidate; each entity is bound "
+    "to the correct attribute/value; every required multi-hop bridge is complete; "
+    "and the original question scope was not narrowed or changed. You must not "
+    "select, replace, canonicalize, or invent a different candidate. Return exactly "
+    "these labeled fields: `Candidate answer:`, `Evidence supported:`, "
+    "`Entity attribute binding correct:`, `Multi-hop complete:`, `Scope preserved:`, "
+    "and `Verification status:`. Copy the Reasoner's Candidate "
+    "answer character-for-character. Set each check to true only when explicitly "
+    "supported; set Verification status to supported only when all four checks pass, "
+    "otherwise set it to repair_required. The false check fields are the repair "
+    "diagnosis; do not supply a substitute candidate for the Formatter."
+)
+
+
 def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
     """Build finite-phase prompts without exposing provider credentials."""
 
@@ -115,6 +151,10 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
         request.agent.execution_mode,
         "value",
         request.agent.execution_mode,
+    )
+    semantic_role = _semantic_role(request)
+    hotpot_semantic = (
+        request.semantic_protocol == "hotpotqa_verified_answer_slot_v1"
     )
     if execution_mode in {"react", "coding"}:
         # SkillFlow's BoundedAgent asks the policy for one StructuredAction per
@@ -131,14 +171,40 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
             "observation; a complete action supplies the declared node "
             "artifact. Do not emit <answer> tags in this internal action."
         )
-        if request.is_format_predecessor:
+        if hotpot_semantic and semantic_role == "reasoner":
+            protocol += (
+                " ReAct is only this node's execution schedule, not its role. "
+                "When completing, put the full labeled Reasoner artifact required "
+                "below in arguments.value. "
+                + _HOTPOTQA_REASONER_PROTOCOL
+            )
+        elif hotpot_semantic and semantic_role == "verifier":
+            protocol += (
+                " ReAct is only this node's execution schedule, not its role. "
+                "When completing, put the full labeled Verifier artifact required "
+                "below in arguments.value. "
+                + _HOTPOTQA_VERIFIER_PROTOCOL
+            )
+        elif request.is_format_predecessor:
             protocol += (
                 " In a complete action that supplies the semantic answer to the "
-                "terminal Format Agent, set content to exactly two fields: one line "
+                "terminal Format Agent, set arguments.value to exactly two fields: one line "
                 "`Candidate answer: ...` containing only the answer value, followed by "
                 "one `Evidence: ...` field. Do not put a sentence or question restatement "
                 "in the Candidate answer field."
             )
+    elif request.is_format_agent and hotpot_semantic:
+        protocol = (
+            "You are the terminal FlowSteer Format Operator. The solution has already "
+            "been computed and passed by a Verifier in exactly one routed upstream "
+            "artifact. You will not receive the original question. Follow the copying "
+            "instructions in the user message; do not solve, verify, or extend the "
+            "answer; do not canonicalize or reselect it."
+        )
+    elif hotpot_semantic and semantic_role == "reasoner":
+        protocol = _HOTPOTQA_REASONER_PROTOCOL + " Do not use <answer> tags."
+    elif hotpot_semantic and semantic_role == "verifier":
+        protocol = _HOTPOTQA_VERIFIER_PROTOCOL + " Do not use <answer> tags."
     elif request.is_format_agent:
         protocol = (
             "You are the terminal FlowSteer Format Operator. The solution has already "
@@ -160,10 +226,10 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
             "each routed upstream artifact as the declared dependency for this node; do "
             "not silently redo or ignore an upstream responsibility unless its artifact "
             "has a concrete conflict with the task. Preserve a concise answer when the "
-            "artifacts support it and resolve concrete conflicts against the task. For a "
-            "factual or numeric answer, return exactly <answer>answer span</answer> with no "
-            "text outside the tag; the span itself must not be JSON, a key-value report, "
-            "or an explanation. If the task supplies legal or admissible actions and asks "
+            "artifacts support it and resolve concrete conflicts against the task. Preserve "
+            "the output form and level of detail required by the task and Agent contract; "
+            "do not collapse a required long-form, structured, code, or environment artifact "
+            "to a short answer span. If the task supplies legal or admissible actions and asks "
             "for one action, return exactly one listed executable action with no explanation."
         )
     else:
@@ -219,15 +285,34 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
             if len(request.upstream) == 1
             else ""
         )
-        common = FORMAT_PROMPT.format(
-            problem_description=request.problem,
-            solution=solution,
-        ) + (
-            "\nFor this AgentGraph terminal protocol, enclose only that extracted "
-            "answer value in exactly one <answer>...</answer> wrapper. Do not put a "
-            "sentence or explanation inside the wrapper. If the computed solution "
-            "does not contain one answer candidate, return exactly <answer></answer>."
-        )
+        if hotpot_semantic:
+            common = FORMAT_PROMPT.format(
+                problem_description=(
+                    "the formatting-only transfer of one verified Candidate answer"
+                ),
+                solution=solution,
+            ) + (
+                "\nFor this AgentGraph terminal protocol, the rules below take precedence "
+                "over every normalization or transformation example above. The solution "
+                "must be a Verifier artifact whose `Verification status:` is exactly "
+                "`supported`. Copy character-for-character only the value following its "
+                "single `Candidate answer:` label; never select another name or value, "
+                "and never change an alias, abbreviation, "
+                "unit, date, spelling, or symbolic form. Enclose that exact copied value "
+                "in exactly one <answer>...</answer> wrapper, with no explanation. If the "
+                "supported status or exactly one Candidate answer is absent, return "
+                "exactly <answer></answer>."
+            )
+        else:
+            common = FORMAT_PROMPT.format(
+                problem_description=request.problem,
+                solution=solution,
+            ) + (
+                "\nFor this AgentGraph terminal protocol, enclose only that extracted "
+                "answer value in exactly one <answer>...</answer> wrapper. Do not put a "
+                "sentence or explanation inside the wrapper. If the computed solution "
+                "does not contain one answer candidate, return exactly <answer></answer>."
+            )
     else:
         common = (
             f"Task:\n{request.problem}\n\n"

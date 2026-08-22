@@ -16,7 +16,7 @@ case "$role" in
     gpu="${FLOWSTEER_LEARNER_GPU:-${FLOWSTEER_TRAIN_GPU:-3}}"
     ;;
   rollout|inference)
-    gpu="${FLOWSTEER_ROLLOUT_GPU:-${FLOWSTEER_INFERENCE_GPU:-4}}"
+    gpu="${FLOWSTEER_ROLLOUT_GPU:-${FLOWSTEER_INFERENCE_GPU:-0}}"
     ;;
   gradient|backward|probe)
     gpu="${FLOWSTEER_GRADIENT_GPU:-${FLOWSTEER_PROBE_GPU:-5}}"

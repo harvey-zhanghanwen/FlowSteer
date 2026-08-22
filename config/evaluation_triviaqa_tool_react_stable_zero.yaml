@@ -55,6 +55,7 @@ qa_tool_runtime:
   # The frozen SQLite index takes about 16 seconds for a cold measured query
   # on this host; the prior 10-second boundary rejected every valid search.
   tool_timeout_seconds: 30.0
+  completion_policy: "required_tool_call"
 
 storage:
   schema_version: "flowsteer.completion_benchmark.round.v1"

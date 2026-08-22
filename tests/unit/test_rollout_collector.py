@@ -25,6 +25,7 @@ from src.interactive.director import (
     encode_director_transcript,
 )
 from src.interactive.model_registry import ModelRegistry, ModelSpec, ProviderSpec
+from src.interactive.react_execution import ReactExecutionError
 from src.interactive.persistence import EvidenceStore
 from src.interactive.records import TaskRecord
 from src.interactive.rollout_collector import (
@@ -202,6 +203,28 @@ class UnifiedMetadataGateway:
                 "opaque_runtime_object": object(),
             },
         )
+
+
+class FailOnceReceiptGateway(FakeGateway):
+    def __init__(self) -> None:
+        self.failed = False
+
+    async def generate(self, request):
+        if not self.failed:
+            self.failed = True
+            raise ReactExecutionError(
+                "bounded execution exhausted",
+                react_trace=(
+                    {"turn": 1, "observation_status": "success"},
+                ),
+                tool_receipts=(
+                    {"tool_id": "qa.search", "success": True},
+                ),
+                model_calls=(
+                    {"turn": 1, "request_id": request.request_id},
+                ),
+            )
+        return await super().generate(request)
 
 
 def _registry() -> ModelRegistry:
@@ -801,6 +824,54 @@ def test_collector_does_not_duplicate_reused_progressive_execution():
     assert trajectory.turns[1].execution_reused is False
     assert trajectory.turns[2].executions == ()
     assert trajectory.turns[2].execution_reused is True
+
+
+def test_collector_persists_public_failure_receipts_before_canvas_repair():
+    registry = _registry()
+    client = ScriptedSGLangClient(
+        [
+            (
+                '{"action":"add_subgraph","agents":['
+                '{"agent_id":"solver","model_id":"cheap-model",'
+                '"contract":"solve directly"}],"relations":[],'
+                '"output_agent_id":"solver"}'
+            ),
+            (
+                '{"action":"modify_agent","agent_id":"solver",'
+                '"contract":"solve after execution feedback"}'
+            ),
+            '{"action":"finish"}',
+        ],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+    )
+    collector = AgentGraphRolloutCollector(
+        _orchestrator(registry, client, max_rounds=3),
+        AgentWorkflowEnv(
+            registry,
+            gateway=FailOnceReceiptGateway(),
+            execute_on_edit=True,
+        ),
+        _versions(),
+    )
+
+    def evaluator(task, final_answer, final_graph, runtime):
+        return {
+            "evaluator_version": EVALUATOR_VERSION,
+            "valid": True,
+            "reward": 1.0,
+            "metrics": {"f1": 1.0},
+        }
+
+    trajectory = asyncio.run(collector.collect(_task(), 0, evaluator))
+
+    failed_turn = trajectory.turns[0]
+    self_receipt = failed_turn.runtime_summary["failure_records"][0]
+    assert failed_turn.runtime_summary["execution_status"] == "failed"
+    assert self_receipt["agent_id"] == "solver"
+    assert self_receipt["metadata"]["tool_receipts"][0]["tool_id"] == "qa.search"
+    assert failed_turn.runtime_summary["unresolved_dirty_agent_ids"] == ["solver"]
+    assert trajectory.explicit_finish is True
 
 
 def test_collector_refreshes_skill_priors_at_each_graph_stage():

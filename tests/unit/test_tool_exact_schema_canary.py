@@ -389,10 +389,9 @@ class ToolExactSchemaCanaryTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual("failed", receipt["status"])
         self.assertFalse(receipt["compliance"]["schema_compliance"]["passed"])
-        # The diagnostic keeps schema, backend, and policy-action compliance
-        # separate: this deliberately permissive fake backend can return a
-        # result even though the published argument schema was violated.
-        self.assertTrue(receipt["compliance"]["backend_compliance"]["passed"])
+        # Runtime admission rejects the invalid arguments before dispatch, so
+        # the deliberately permissive fake backend is never invoked.
+        self.assertFalse(receipt["compliance"]["backend_compliance"]["passed"])
         self.assertFalse(receipt["compliance"]["model_compliance"]["passed"])
         self.assertEqual(
             "model_generated_not_injected",

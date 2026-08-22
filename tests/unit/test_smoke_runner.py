@@ -24,7 +24,11 @@ from src.interactive.computation_tools import (
 )
 from src.interactive.coding_tools import SWEBENCH_REPOSITORY_TOOL_ID
 from src.interactive.config_loader import ConfigurationError, load_model_registry
-from src.interactive.director import AgentGraphOrchestrator, decode_director_transcript
+from src.interactive.director import (
+    AgentGraphOrchestrator,
+    HOTPOTQA_DIRECTOR_PROMPT_VERSION,
+    decode_director_transcript,
+)
 from src.interactive.healthbench_tool_adapter import (
     FrozenMedRAGBM25Corpus,
     HEALTHBENCH_MEDRAG_SEARCH_TOOL_ID,
@@ -398,6 +402,11 @@ class QAToolRuntimeWiringTests(unittest.TestCase):
         self.assertIs(base_runtime, runtime)
         self.assertIsNone(tool_registry)
         close()
+        with self.assertRaisesRegex(ConfigurationError, "task-scoped runtime"):
+            backend._runtime_for_task(
+                task,
+                semantic_protocol="hotpotqa_verified_answer_slot_v1",
+            )
 
     def test_tool_condition_shares_registry_and_exposes_only_capabilities(self) -> None:
         root = Path(self._temp_dir.name)
@@ -431,7 +440,10 @@ class QAToolRuntimeWiringTests(unittest.TestCase):
         with patch.object(
             _MODULE, "open_qa_tool_registry", return_value=owner
         ) as opened:
-            runtime, shared_registry, close_runtime = backend._runtime_for_task(task)
+            runtime, shared_registry, close_runtime = backend._runtime_for_task(
+                task,
+                semantic_protocol="hotpotqa_verified_answer_slot_v1",
+            )
 
         self.assertIs(tool_registry, shared_registry)
         self.assertIs(tool_registry, runtime.tool_registry)
@@ -440,6 +452,10 @@ class QAToolRuntimeWiringTests(unittest.TestCase):
             runtime.execution_adapters["react"]._tool_registry,
         )
         self.assertEqual("hotpotqa", runtime.dataset_id)
+        self.assertEqual(
+            "hotpotqa_verified_answer_slot_v1",
+            runtime.semantic_protocol,
+        )
         opened.assert_called_once_with(
             index_path=root / "data/public-retrieval.sqlite3",
             skillflow_source=root / "vendor/SkillFlow/src",
@@ -451,11 +467,17 @@ class QAToolRuntimeWiringTests(unittest.TestCase):
             registry,
             runtime=runtime,
             problem=task.question,
+            semantic_protocol="hotpotqa_verified_answer_slot_v1",
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id="qa-retrieval",
         )
         orchestrator = AgentGraphOrchestrator(
             registry,
             client=object(),  # type: ignore[arg-type]
             tool_registry=shared_registry,
+            prompt_version=HOTPOTQA_DIRECTOR_PROMPT_VERSION,
+            semantic_protocol="hotpotqa_verified_answer_slot_v1",
+            recovery_policy="preserve_diagnose_repair_augment",
         )
         messages = decode_director_transcript(
             orchestrator.build_prompt(environment, 0, ())
@@ -544,6 +566,37 @@ class QAToolRuntimeWiringTests(unittest.TestCase):
         out_of_scope["qa_tool_runtime"]["dataset_scope"] = ["triviaqa"]
         with self.assertRaisesRegex(ConfigurationError, "not configured"):
             qa_tool_runtime_settings(out_of_scope, task)
+
+    def test_completion_policy_defaults_to_required_tool_call_and_accepts_variants(
+        self,
+    ) -> None:
+        task = make_task("hotpotqa", 0)
+        settings = qa_tool_runtime_settings(self._config(), task)
+        self.assertIsNotNone(settings)
+        assert settings is not None
+        self.assertEqual("required_tool_call", settings["completion_policy"])
+
+        optional = self._config()
+        optional["qa_tool_runtime"]["completion_policy"] = "optional"
+        optional_settings = qa_tool_runtime_settings(optional, task)
+        self.assertIsNotNone(optional_settings)
+        assert optional_settings is not None
+        self.assertEqual("optional", optional_settings["completion_policy"])
+
+        required = self._config()
+        required["qa_tool_runtime"]["completion_policy"] = "required_evidence"
+        required_settings = qa_tool_runtime_settings(required, task)
+        self.assertIsNotNone(required_settings)
+        assert required_settings is not None
+        self.assertEqual(
+            "required_evidence",
+            required_settings["completion_policy"],
+        )
+
+        invalid = self._config()
+        invalid["qa_tool_runtime"]["completion_policy"] = "required_dispatch_twice"
+        with self.assertRaisesRegex(ConfigurationError, "completion_policy"):
+            qa_tool_runtime_settings(invalid, task)
 
     def setUp(self) -> None:
         import tempfile
@@ -1346,6 +1399,7 @@ class EnvironmentRuntimeWiringTests(unittest.TestCase):
             task_family="webshop",
             max_turns=3,
             max_action_tokens=256,
+            max_observation_chars=0,
             timeout_seconds=9.0,
         )
         self.assertIs(shared_registry, runtime.tool_registry)

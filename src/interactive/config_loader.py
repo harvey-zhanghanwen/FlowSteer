@@ -170,6 +170,82 @@ def validate_agent_graph_config(value: Mapping[str, Any]) -> None:
         raise ConfigurationError(
             "terminal protocols must be none or exact_single_answer_tag"
         )
+    semantic_protocols = graph.get("semantic_protocol_by_source", {})
+    if not isinstance(semantic_protocols, Mapping):
+        raise ConfigurationError(
+            "agent_graph.semantic_protocol_by_source must be a mapping"
+        )
+    invalid_semantic_protocols = {
+        str(source): protocol
+        for source, protocol in semantic_protocols.items()
+        if protocol not in {"none", "hotpotqa_verified_answer_slot_v1"}
+    }
+    if invalid_semantic_protocols:
+        raise ConfigurationError(
+            "semantic protocols must be none or "
+            "hotpotqa_verified_answer_slot_v1"
+        )
+    recovery_policy = graph.get("recovery_policy", "default")
+    if recovery_policy not in {
+        "default",
+        "preserve_diagnose_repair_augment",
+    }:
+        raise ConfigurationError(
+            "agent_graph.recovery_policy must be default or "
+            "preserve_diagnose_repair_augment"
+        )
+    required_evidence_tool_id = graph.get("required_evidence_tool_id")
+    if required_evidence_tool_id is not None and (
+        not isinstance(required_evidence_tool_id, str)
+        or not required_evidence_tool_id.strip()
+    ):
+        raise ConfigurationError(
+            "agent_graph.required_evidence_tool_id must be non-empty text or null"
+        )
+    hotpot_semantic_protocol = semantic_protocols.get("hotpotqa", "none")
+    if any(
+        source != "hotpotqa"
+        and protocol == "hotpotqa_verified_answer_slot_v1"
+        for source, protocol in semantic_protocols.items()
+    ):
+        raise ConfigurationError(
+            "hotpotqa_verified_answer_slot_v1 is scoped only to hotpotqa"
+        )
+    if hotpot_semantic_protocol == "hotpotqa_verified_answer_slot_v1":
+        if (
+            value["experiment"].get("prompt_version")
+            != "agentgraph.director.hotpotqa-semantic-recovery.v11"
+        ):
+            raise ConfigurationError(
+                "HotpotQA verified answer-slot protocol requires the exact "
+                "HotpotQA Director v11 prompt"
+            )
+        if recovery_policy != "preserve_diagnose_repair_augment":
+            raise ConfigurationError(
+                "HotpotQA verified answer-slot protocol requires "
+                "preserve_diagnose_repair_augment recovery"
+            )
+        if required_evidence_tool_id != "qa-retrieval":
+            raise ConfigurationError(
+                "HotpotQA verified answer-slot protocol requires the "
+                "qa-retrieval evidence tool"
+            )
+        if terminal_protocols.get("hotpotqa") != "exact_single_answer_tag":
+            raise ConfigurationError(
+                "HotpotQA verified answer-slot protocol requires the exact "
+                "single-answer terminal protocol"
+            )
+        qa_runtime = value.get("qa_tool_runtime")
+        if (
+            not isinstance(qa_runtime, Mapping)
+            or qa_runtime.get("enabled") is not True
+            or qa_runtime.get("completion_policy") != "required_evidence"
+            or "hotpotqa" not in qa_runtime.get("dataset_scope", ())
+        ):
+            raise ConfigurationError(
+                "HotpotQA verified answer-slot protocol requires the enabled "
+                "qa_tool_runtime with required_evidence completion"
+            )
     if graph.get("max_bidirectional_block_size") != 2:
         raise ConfigurationError("AgentGraph v1 supports bidirectional blocks of size two")
     if graph.get("require_unique_output") is not True:

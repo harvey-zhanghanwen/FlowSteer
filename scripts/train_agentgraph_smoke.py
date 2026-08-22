@@ -39,7 +39,9 @@ from src.interactive.director import (
     DIRECTOR_PROMPT_VERSION,
     DIRECTOR_SGLANG_SAMPLING_SCHEMA_VERSION,
     DIRECTOR_STATE_CONDITIONED_ACTION_SCHEMA_VERSION,
+    HOTPOTQA_DIRECTOR_PROMPT_VERSION,
     decode_director_transcript,
+    director_system_prompt_for_version,
     director_sglang_sampling_json_schema_text,
 )
 from src.interactive.environment_execution import (
@@ -645,6 +647,16 @@ def _qa_tool_runtime_settings(
         raise ConfigurationError(
             "qa_tool_runtime.tool_timeout_seconds must be positive"
         )
+    completion_policy = section.get("completion_policy", "required_tool_call")
+    if completion_policy not in {
+        "optional",
+        "required_tool_call",
+        "required_evidence",
+    }:
+        raise ConfigurationError(
+            "qa_tool_runtime.completion_policy must be optional, "
+            "required_tool_call, or required_evidence"
+        )
     if runtime_arm == "tool_off":
         return None
     return {
@@ -655,6 +667,7 @@ def _qa_tool_runtime_settings(
         "max_turns": int(section["max_turns_per_agent_call"]),
         "max_tool_calls": int(section["max_tool_calls_per_agent_call"]),
         "tool_timeout_seconds": float(timeout_seconds),
+        "completion_policy": completion_policy,
     }
 
 
@@ -985,12 +998,22 @@ def _environment_runtime_settings(
         raise ConfigurationError(
             "environment_runtime.max_action_tokens must be a positive integer"
         )
+    max_observation_chars = section.get("max_observation_chars", 0)
+    if (
+        isinstance(max_observation_chars, bool)
+        or not isinstance(max_observation_chars, int)
+        or max_observation_chars < 0
+    ):
+        raise ConfigurationError(
+            "environment_runtime.max_observation_chars must be a non-negative integer"
+        )
     return {
         "source_key": source_key,
         "ragen_adapter_path": ragen_adapter_path.strip(),
         "max_turns": int(runtime_budget),
         "tool_timeout_seconds": float(timeout_seconds),
         "max_action_tokens": max_action_tokens,
+        "max_observation_chars": max_observation_chars,
     }
 
 
@@ -1909,6 +1932,7 @@ class LiveSmokeBackend:
         task: TaskRecord,
         *,
         condition_id: Optional[str] = None,
+        semantic_protocol: str = "none",
     ) -> tuple[AgentRuntime, Any, Callable[[], None]]:
         """Build the task-scoped runtime selected by the frozen condition.
 
@@ -1983,6 +2007,10 @@ class LiveSmokeBackend:
                 "one rollout cannot enable multiple task-scoped Tool runtimes"
             )
         if enabled_runtimes == 0:
+            if semantic_protocol != "none":
+                raise ConfigurationError(
+                    "a non-default semantic protocol requires a task-scoped runtime"
+                )
             return self.runtime, None, lambda: None
 
         director_value = self.config.get("director", {})
@@ -2039,6 +2067,7 @@ class LiveSmokeBackend:
                     execution_adapters={"coding": adapter},
                     tool_registry=tool_registry,
                     dataset_id=source_key,
+                    semantic_protocol=semantic_protocol,
                 )
             except BaseException:
                 prepared.cleanup()
@@ -2068,6 +2097,7 @@ class LiveSmokeBackend:
                 execution_adapters={"react": adapter},
                 tool_registry=tool_registry,
                 dataset_id=source_key,
+                semantic_protocol=semantic_protocol,
             )
             return runtime, tool_registry, lambda: None
 
@@ -2101,6 +2131,7 @@ class LiveSmokeBackend:
                     execution_adapters={"react": adapter},
                     tool_registry=opened.registry,
                     dataset_id=source_key,
+                    semantic_protocol=semantic_protocol,
                 )
             except BaseException:
                 opened.close()
@@ -2127,6 +2158,9 @@ class LiveSmokeBackend:
                 max_action_tokens=int(
                     environment_settings["max_action_tokens"]
                 ),
+                max_observation_chars=int(
+                    environment_settings["max_observation_chars"]
+                ),
                 timeout_seconds=float(
                     environment_settings["tool_timeout_seconds"]
                 ),
@@ -2137,6 +2171,7 @@ class LiveSmokeBackend:
                 execution_adapters={"react": resources.execution_adapter},
                 tool_registry=resources.tool_registry,
                 dataset_id=source_key,
+                semantic_protocol=semantic_protocol,
             )
 
             # EnvironmentExecutionAdapter closes the request-scoped simulator
@@ -2205,6 +2240,7 @@ class LiveSmokeBackend:
                 max_tool_calls=int(qa_settings["max_tool_calls"]),
                 max_action_tokens=tool_action_tokens,
                 task_type=str(task_type),
+                completion_policy=str(qa_settings["completion_policy"]),
             )
             runtime = AgentRuntime(
                 self.registry,
@@ -2212,6 +2248,7 @@ class LiveSmokeBackend:
                 execution_adapters={"react": adapter},
                 tool_registry=opened.registry,
                 dataset_id=source_key,
+                semantic_protocol=semantic_protocol,
             )
         except BaseException:
             opened.close()
@@ -2983,6 +3020,52 @@ class LiveSmokeBackend:
             raise ConfigurationError(
                 "terminal protocol must be none or exact_single_answer_tag"
             )
+        semantic_protocols = graph_config.get("semantic_protocol_by_source", {})
+        if not isinstance(semantic_protocols, Mapping):
+            raise ConfigurationError(
+                "agent_graph.semantic_protocol_by_source must be a mapping"
+            )
+        semantic_protocol = str(
+            semantic_protocols.get(_dataset_key(task), "none")
+        ).strip()
+        if semantic_protocol not in {
+            "none",
+            "hotpotqa_verified_answer_slot_v1",
+        }:
+            raise ConfigurationError("unsupported AgentGraph semantic protocol")
+        recovery_policy = str(
+            graph_config.get("recovery_policy", "default")
+        ).strip()
+        if recovery_policy not in {
+            "default",
+            "preserve_diagnose_repair_augment",
+        }:
+            raise ConfigurationError("unsupported AgentGraph recovery policy")
+        required_evidence_tool_id_value = graph_config.get(
+            "required_evidence_tool_id"
+        )
+        required_evidence_tool_id = (
+            None
+            if required_evidence_tool_id_value is None
+            else str(required_evidence_tool_id_value).strip()
+        )
+        prompt_version = str(
+            experiment.get("prompt_version", PROMPT_VERSION)
+        ).strip()
+        if (
+            semantic_protocol == "hotpotqa_verified_answer_slot_v1"
+            and prompt_version != HOTPOTQA_DIRECTOR_PROMPT_VERSION
+        ):
+            raise ConfigurationError(
+                "hotpotqa_verified_answer_slot_v1 requires the exact "
+                f"Director prompt {HOTPOTQA_DIRECTOR_PROMPT_VERSION}"
+            )
+        try:
+            director_system_prompt = director_system_prompt_for_version(
+                prompt_version
+            )
+        except ValueError as exc:
+            raise ConfigurationError(str(exc)) from exc
         catalog_order_namespace = str(
             experiment.get(
                 "catalog_order_namespace",
@@ -3020,6 +3103,7 @@ class LiveSmokeBackend:
         task_runtime, task_tool_registry, close_task_runtime = self._runtime_for_task(
             task,
             condition_id=resolved_condition_id,
+            semantic_protocol=semantic_protocol,
         )
         try:
             environment_runtime_settings = _environment_runtime_settings(
@@ -3049,6 +3133,10 @@ class LiveSmokeBackend:
                         DIRECTOR_STATE_CONDITIONED_ACTION_SCHEMA_VERSION,
                     )
                 ),
+                system_prompt=director_system_prompt,
+                prompt_version=prompt_version,
+                semantic_protocol=semantic_protocol,
+                recovery_policy=recovery_policy,
             )
             environment = AgentWorkflowEnv(
                 self.registry,
@@ -3067,6 +3155,14 @@ class LiveSmokeBackend:
                 required_tool_id=(
                     f"{_dataset_key(task)}.environment"
                     if environment_runtime_settings is not None
+                    else None
+                ),
+                semantic_protocol=semantic_protocol,
+                recovery_policy=recovery_policy,
+                required_evidence_tool_id=required_evidence_tool_id,
+                allowed_actions=(
+                    tuple(str(value) for value in graph_config["actions"])
+                    if graph_config.get("actions") is not None
                     else None
                 ),
             )

@@ -1337,6 +1337,8 @@ def _stable_zero_check(
     tasks: Sequence[TaskRecord],
     direct: Mapping[str, Mapping[str, Any]],
     trajectories: Mapping[str, Mapping[str, Any]],
+    *,
+    require_non_empty_final_answer: bool = True,
 ) -> Mapping[str, Any]:
     checks: list[dict[str, Any]] = []
     for task in tasks:
@@ -1351,11 +1353,19 @@ def _stable_zero_check(
             and turn.get("director_latency_ms") is not None
             for turn in turns
         )
+        final_answer = trajectory.get("final_answer") if trajectory else None
+        terminal_artifact_saved = bool(
+            final_answer is not None
+            and (
+                not require_non_empty_final_answer
+                or final_answer != ""
+            )
+        )
         passed = bool(
             direct_value
             and trajectory
             and trajectory.get("explicit_finish") is True
-            and trajectory.get("final_answer") not in (None, "")
+            and terminal_artifact_saved
             and trajectory.get("evaluation", {}).get("valid") is True
             and _output_inbox(trajectory) is not None
             and full_turn_receipts
@@ -1367,6 +1377,7 @@ def _stable_zero_check(
                 "direct_complete": direct_value is not None,
                 "agentgraph_complete": trajectory is not None,
                 "explicit_finish": trajectory.get("explicit_finish") if trajectory else False,
+                "terminal_artifact_saved": terminal_artifact_saved,
                 "output_inbox_saved": _output_inbox(trajectory) is not None,
                 "full_turn_receipts": full_turn_receipts,
             }

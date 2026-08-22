@@ -227,7 +227,7 @@ class ToolReactExecutionAdapter:
         tool_receipts: list[dict[str, object]] = []
         model_calls: list[dict[str, object]] = []
         tool_calls = 0
-        dispatched_tool_actions: set[str] = set()
+        last_dispatched_tool_action_key: Optional[str] = None
 
         for turn in range(1, self._max_turns + 1):
             agent = replace(
@@ -384,9 +384,9 @@ class ToolReactExecutionAdapter:
             # NECESSARY_ADAPTATION: SkillFlow publishes the fixed action domain
             # in model-visible task context and leaves semantic validation to
             # the environment.  AgentGraph carries that same domain in
-            # ToolCapability, so reject an unpublished name before dispatch;
-            # the concrete backend remains authoritative for arguments and
-            # all operation-specific semantics.
+            # ToolCapability, so reject an unpublished name and arguments that
+            # violate its Draft 2020-12 schema before dispatch.  The concrete
+            # backend remains authoritative for operation-specific semantics.
             if action.name not in capability.action_names:
                 observation = MappingProxyType(
                     {
@@ -442,16 +442,39 @@ class ToolReactExecutionAdapter:
                 observations.append(observation)
                 continue
 
+            argument_validation_error = capability.argument_validation_error(
+                action.name,
+                action.arguments,
+            )
+            if argument_validation_error is not None:
+                observation = MappingProxyType(
+                    {
+                        "observation_status": "schema_invalid",
+                        "public_error_code": "tool_arguments_schema_invalid",
+                        "tool_id": action.resource_id,
+                        "action_name": action.name,
+                        "argument_validation": argument_validation_error,
+                        "executed_action": action.to_value(),
+                    }
+                )
+                entry.update(observation)
+                trace.append(entry)
+                observations.append(observation)
+                continue
+
             action_key = json.dumps(
                 action.to_value(),
                 ensure_ascii=False,
                 sort_keys=True,
                 separators=(",", ":"),
             )
-            if action_key in dispatched_tool_actions:
-                # SkillFlow's environment history treats an exact repeated
-                # executable action as already observed.  Do not spend another
-                # Tool call or hide the duplicate from the policy.
+            if action_key == last_dispatched_tool_action_key:
+                # SkillFlow exposes each Action--Observation transition to the
+                # policy.  Suppress only an immediately repeated executable
+                # action in the same Tool-interaction state.  A different Tool
+                # action may change that state (for example, an edit before
+                # rerunning the same test command), so the earlier request must
+                # then be admissible again.
                 observation = MappingProxyType(
                     {
                         "observation_status": "schema_invalid",
@@ -464,7 +487,7 @@ class ToolReactExecutionAdapter:
                 observations.append(observation)
                 continue
 
-            dispatched_tool_actions.add(action_key)
+            last_dispatched_tool_action_key = action_key
             tool_calls += 1
             result, receipt = await self._tool_registry.ainvoke_with_receipt(
                 action.resource_id,

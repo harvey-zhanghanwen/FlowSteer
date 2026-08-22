@@ -6,13 +6,18 @@ import unittest
 from src.interactive.agent_graph import AgentGraph, AgentGraphValidationError, AgentNode, AgentRelation
 from src.interactive.agent_runtime import (
     AgentRequest,
+    AgentResponse,
     AgentRuntime,
     AgentRuntimeError,
     CommunicationCondition,
     ExecutionPhase,
     ReasoningExecutionAdapter,
 )
+from src.interactive.environment_execution import (
+    build_environment_execution_resources,
+)
 from src.interactive.model_registry import ModelRegistry, ModelSpec, ProviderSpec
+from src.interactive.react_execution import ReactExecutionError
 from src.interactive.tool_runtime import (
     FakeTool,
     ToolCapability,
@@ -95,6 +100,28 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(routed.content, routed.artifact)
         self.assertEqual(snapshot.to_dict(), graph.snapshot().to_dict())
 
+    async def test_semantic_protocol_is_propagated_to_every_agent_request(self) -> None:
+        catalog = registry()
+        gateway = RecordingGateway()
+        runtime = AgentRuntime(
+            catalog,
+            gateway,
+            semantic_protocol="hotpotqa_verified_answer_slot_v1",
+        )
+        graph = AgentGraph(
+            [AgentNode("a", "m1", "reason"), AgentNode("b", "m2", "verify")],
+            [AgentRelation("a", "b", True, False)],
+            output_agent_id="b",
+        )
+
+        await runtime.execute(graph, "question", run_id="semantic-protocol")
+
+        self.assertTrue(gateway.requests)
+        self.assertEqual(
+            {"hotpotqa_verified_answer_slot_v1"},
+            {request.semantic_protocol for request in gateway.requests},
+        )
+
     async def test_masked_condition_keeps_canonical_upstream_and_marks_requests(self) -> None:
         catalog = registry()
         gateway = RecordingGateway()
@@ -174,6 +201,107 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
             ["a", "b"],
             [message.source_agent_id for message in request_c.upstream],
         )
+
+    async def test_missing_upstream_invalidates_cached_downstream(self) -> None:
+        catalog = registry()
+        gateway = RecordingGateway()
+        graph = AgentGraph(
+            [AgentNode("a", "m1", "evidence"), AgentNode("c", "m2", "answer")],
+            [AgentRelation("a", "c", True, False)],
+            output_agent_id="c",
+        )
+
+        result = await AgentRuntime(catalog, gateway).execute(
+            graph,
+            "question",
+            prior_outputs={"c": "stale-cached-answer"},
+            dirty_agents=set(),
+        )
+
+        self.assertEqual(("a", "c"), result.executed_agent_ids)
+        self.assertEqual((), result.reused_agent_ids)
+        self.assertNotEqual("stale-cached-answer", result.final_answer)
+
+    async def test_failure_evicts_dirty_prior_and_preserves_completed_clean_branch(self) -> None:
+        catalog = registry()
+
+        class FailingGateway(RecordingGateway):
+            async def generate(self, request: AgentRequest) -> str:
+                self.requests.append(request)
+                if request.agent.id == "a":
+                    await asyncio.sleep(0.01)
+                    raise RuntimeError("revised branch failed")
+                return request.agent.id
+
+        gateway = FailingGateway()
+        graph = AgentGraph(
+            [AgentNode(name, "m1", name) for name in ("a", "b", "c")],
+            [
+                AgentRelation("a", "c", True, False),
+                AgentRelation("b", "c", True, False),
+            ],
+            output_agent_id="c",
+        )
+
+        with self.assertRaises(AgentRuntimeError) as raised:
+            await AgentRuntime(catalog, gateway).execute(
+                graph,
+                "question",
+                require_complete=False,
+                prior_outputs={
+                    "a": "stale-a",
+                    "b": "cached-b",
+                    "c": "stale-c",
+                },
+                dirty_agents={"a"},
+            )
+
+        partial = raised.exception.partial_result
+        self.assertIsNotNone(partial)
+        assert partial is not None
+        self.assertEqual({"b": "cached-b"}, dict(partial.outputs))
+        self.assertEqual(("b",), partial.reused_agent_ids)
+        self.assertEqual(("c",), raised.exception.blocked_agent_ids)
+        self.assertEqual(("a", "c"), raised.exception.pending_agent_ids)
+        self.assertEqual("a", raised.exception.failure_records[0].agent_id)
+        self.assertNotIn("c", [item.agent.id for item in gateway.requests])
+
+    async def test_react_failure_keeps_public_action_observation_receipts(self) -> None:
+        catalog = registry()
+
+        class ReactFailureGateway:
+            async def generate(self, request: AgentRequest) -> str:
+                raise ReactExecutionError(
+                    "bounded execution exhausted",
+                    react_trace=(
+                        {
+                            "turn": 1,
+                            "observation_status": "success",
+                        },
+                    ),
+                    tool_receipts=(
+                        {"tool_id": "qa.search", "success": True},
+                    ),
+                    model_calls=(
+                        {"turn": 1, "request_id": request.request_id},
+                    ),
+                )
+
+        graph = AgentGraph([AgentNode("a", "m1", "answer")])
+        with self.assertRaises(AgentRuntimeError) as raised:
+            await AgentRuntime(catalog, ReactFailureGateway()).execute(
+                graph,
+                "question",
+                require_complete=False,
+            )
+
+        failure = raised.exception.failure_records[0]
+        self.assertEqual("ReactExecutionError", failure.error_type)
+        self.assertEqual(
+            "success",
+            failure.metadata["react_trace"][0]["observation_status"],
+        )
+        self.assertEqual("qa.search", failure.metadata["tool_receipts"][0]["tool_id"])
 
     async def test_format_execution_role_is_explicit_and_terminal(self) -> None:
         catalog = registry()
@@ -449,6 +577,113 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
             await AgentRuntime(catalog, gateway).execute(graph, "q")
         await asyncio.wait_for(gateway.b_cancelled.wait(), timeout=1.0)
         self.assertNotIn("c", gateway.called)
+
+    async def test_fail_fast_cancellation_preserves_environment_public_prefix(self) -> None:
+        catalog = registry()
+
+        class Session:
+            environment_id = "fake:alfworld"
+            task_family = "alfworld"
+            available_actions = ("look",)
+
+            def reset(self) -> str:
+                return "room zero"
+
+            def step(self, action: str):  # type: ignore[no-untyped-def]
+                self.available_actions = ("wait",)
+                return "room one", 0.0, False, {"won": False}
+
+        class Gateway:
+            def __init__(self) -> None:
+                self.actor_calls = 0
+                self.actor_second_call = asyncio.Event()
+                self.actor_cancelled = asyncio.Event()
+                self.called: list[str] = []
+
+            async def generate(self, request: AgentRequest) -> AgentResponse:
+                self.called.append(request.agent.id)
+                if request.agent.id == "failure":
+                    await self.actor_second_call.wait()
+                    raise RuntimeError("sibling failed")
+                if request.agent.id == "actor":
+                    self.actor_calls += 1
+                    if self.actor_calls == 1:
+                        return AgentResponse(
+                            "look",
+                            {"provider_request_id": "actor-turn-1"},
+                        )
+                    self.actor_second_call.set()
+                    try:
+                        await asyncio.Event().wait()
+                    except asyncio.CancelledError:
+                        self.actor_cancelled.set()
+                        raise
+                return AgentResponse(request.agent.id)
+
+        gateway = Gateway()
+        environment = build_environment_execution_resources(
+            gateway=gateway,
+            session_factory=lambda _request: Session(),
+            task_family="alfworld",
+            max_turns=3,
+        )
+        runtime = AgentRuntime(
+            catalog,
+            gateway,
+            execution_adapters={"react": environment.execution_adapter},
+            tool_registry=environment.tool_registry,
+            dataset_id="alfworld",
+            timeout_seconds=10.0,
+        )
+        graph = AgentGraph(
+            [
+                AgentNode(
+                    "actor",
+                    "m1",
+                    "act",
+                    allowed_tools=(environment.tool_id,),
+                    execution_mode="react",
+                    artifact_type="environment_observation",
+                ),
+                AgentNode("failure", "m1", "fail"),
+                AgentNode("output", "m1", "summarize"),
+            ],
+            [
+                AgentRelation("actor", "output", True, False),
+                AgentRelation("failure", "output", True, False),
+            ],
+            output_agent_id="output",
+        )
+
+        with self.assertRaises(AgentRuntimeError) as caught:
+            await runtime.execute(graph, "complete the task")
+
+        await asyncio.wait_for(gateway.actor_cancelled.wait(), timeout=1.0)
+        cancellation = next(
+            record
+            for record in caught.exception.failure_records
+            if record.agent_id == "actor"
+        )
+        self.assertEqual("CancelledError", cancellation.error_type)
+        self.assertEqual(1, cancellation.metadata["environment_revision"])
+        self.assertFalse(cancellation.metadata["environment_terminal"])
+        self.assertEqual(
+            "room zero",
+            cancellation.metadata["environment_reset_receipt"]["observation"],
+        )
+        self.assertEqual(
+            ["look"],
+            [
+                item["action"]
+                for item in cancellation.metadata["environment_receipts"]
+            ],
+        )
+        self.assertEqual(1, len(cancellation.metadata["tool_receipts"]))
+        self.assertEqual(1, len(cancellation.metadata["model_calls"]))
+        self.assertIsNotNone(caught.exception.partial_result)
+        self.assertIsNone(caught.exception.partial_result.final_answer)
+        self.assertNotIn("actor", caught.exception.partial_result.outputs)
+        self.assertNotIn("output", gateway.called)
 
     async def test_global_concurrency_limit(self) -> None:
         catalog = registry()

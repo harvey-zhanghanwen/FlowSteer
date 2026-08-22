@@ -13,8 +13,10 @@ from src.interactive.agent_runtime import (
     CommunicationCondition,
     ExecutionPhase,
 )
+from src.interactive.agent_workflow_env import AgentWorkflowEnv
 from src.interactive.environment_execution import (
     build_environment_execution_resources,
+    EnvironmentExecutionError,
     evaluator_locked_ragen_session_factory,
     RAGENEnvironmentSession,
 )
@@ -86,13 +88,18 @@ class SequenceGateway:
 
 
 def resources(
-    *, session: FakeSession, gateway: SequenceGateway, max_turns: int
+    *,
+    session: FakeSession,
+    gateway: SequenceGateway,
+    max_turns: int,
+    max_observation_chars: int = 0,
 ):
     return build_environment_execution_resources(
         gateway=gateway,
         session_factory=lambda _request: session,
         task_family=session.task_family,
         max_turns=max_turns,
+        max_observation_chars=max_observation_chars,
     )
 
 
@@ -176,6 +183,8 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([1, 2], [item["environment_revision_after"] for item in receipts])
         self.assertEqual("room one", receipts[0]["next_observation"])
         self.assertIn("room one", gateway.requests[1].problem)
+        self.assertIn("action='look'", gateway.requests[1].problem)
+        self.assertNotIn("next_observation='room one'", gateway.requests[1].problem)
         self.assertEqual("512", gateway.requests[0].model.metadata["max_tokens"])
         self.assertEqual("512", gateway.requests[1].model.metadata["max_tokens"])
         self.assertEqual("reasoning", gateway.requests[0].agent.execution_mode.value)
@@ -198,6 +207,142 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(0, receipts[0]["environment_revision_after"])
         self.assertEqual(["finish"], session.actions)
         self.assertEqual(1, response.metadata["environment_revision"])
+        self.assertIn("Format repair", gateway.requests[1].problem)
+        self.assertIn("environment state did not change", gateway.requests[1].problem)
+
+    async def test_alfworld_public_state_retains_target_coreference_and_count(self) -> None:
+        class CountSession(FakeSession):
+            def __init__(self) -> None:
+                super().__init__()
+                self._available = (
+                    "move newspaper 2 to sidetable 1",
+                    "finish",
+                )
+
+            def step(self, action: str):  # type: ignore[no-untyped-def]
+                self.actions.append(action)
+                if action.startswith("move "):
+                    self._available = ("finish",)
+                    return "one newspaper is placed", 0.0, False, {"won": False}
+                return "task terminal observation", 1.0, True, {"won": True}
+
+        request = make_request()
+        request = AgentRequest(
+            request_id=request.request_id,
+            run_id=request.run_id,
+            graph_revision=request.graph_revision,
+            problem="Put two newspaper and put them on sidetable.",
+            agent=request.agent,
+            model=request.model,
+            provider=request.provider,
+            phase=request.phase,
+            communication_condition=request.communication_condition,
+        )
+        session = CountSession()
+        gateway = SequenceGateway(["move newspaper 2 to sidetable 1", "finish"])
+        runtime = resources(session=session, gateway=gateway, max_turns=2)
+
+        response = await runtime.execution_adapter.execute(request)
+
+        first_prompt = gateway.requests[0].problem
+        second_prompt = gateway.requests[1].problem
+        self.assertIn("target_class=newspaper", first_prompt)
+        self.assertIn("destination_class=sidetable", first_prompt)
+        self.assertIn("count=2", first_prompt)
+        self.assertIn("`them` refers to the required `newspaper` instances", first_prompt)
+        self.assertIn("Visible placement progress: 1/2", second_prompt)
+        self.assertEqual(
+            "newspaper",
+            response.metadata["model_calls"][0]["public_state"]
+            .split("target_class=", 1)[1]
+            .split(";", 1)[0],
+        )
+
+    async def test_alfworld_public_state_binds_it_to_transformed_target(self) -> None:
+        request = make_request()
+        request = AgentRequest(
+            request_id=request.request_id,
+            run_id=request.run_id,
+            graph_revision=request.graph_revision,
+            problem="Heat some egg and put it in sidetable.",
+            agent=request.agent,
+            model=request.model,
+            provider=request.provider,
+            phase=request.phase,
+            communication_condition=request.communication_condition,
+        )
+        session = FakeSession()
+        gateway = SequenceGateway(["finish"])
+        runtime = resources(session=session, gateway=gateway, max_turns=1)
+
+        await runtime.execution_adapter.execute(request)
+
+        prompt = gateway.requests[0].problem
+        self.assertIn("required_transform=heat", prompt)
+        self.assertIn("`it` refers to `egg`", prompt)
+
+    async def test_webshop_public_state_retains_visible_instruction_constraints(self) -> None:
+        class WebShopSession(FakeSession):
+            environment_id = "fake:webshop"
+            task_family = "webshop"
+
+            def __init__(self) -> None:
+                super().__init__()
+                self._available = {
+                    "has_search_bar": True,
+                    "clickables": ["Back to Search"],
+                }
+
+            def step(self, action: str):  # type: ignore[no-untyped-def]
+                self.actions.append(action)
+                return "search results", 0.0, True, {"graded_score": 0.0}
+
+        base = make_request("webshop")
+        request = AgentRequest(
+            request_id=base.request_id,
+            run_id=base.run_id,
+            graph_revision=base.graph_revision,
+            problem=(
+                "Find a steel shelf with color: blue, item shape: rectangular, "
+                "and price lower than $40."
+            ),
+            agent=base.agent,
+            model=base.model,
+            provider=base.provider,
+            phase=base.phase,
+            communication_condition=base.communication_condition,
+        )
+        session = WebShopSession()
+        gateway = SequenceGateway(["search[blue rectangular steel shelf]"])
+        runtime = resources(session=session, gateway=gateway, max_turns=1)
+
+        await runtime.execution_adapter.execute(request)
+
+        prompt = gateway.requests[0].problem
+        self.assertIn("price_lower_than=40", prompt)
+        self.assertIn("color=blue", prompt)
+        self.assertIn("item_shape=rectangular", prompt)
+
+    async def test_model_prompt_observation_cap_does_not_truncate_receipt(self) -> None:
+        class LongSession(FakeSession):
+            def reset(self) -> str:
+                self.reset_count += 1
+                return "A" * 500
+
+        session = LongSession()
+        gateway = SequenceGateway(["finish"])
+        runtime = resources(
+            session=session,
+            gateway=gateway,
+            max_turns=1,
+            max_observation_chars=80,
+        )
+
+        response = await runtime.execution_adapter.execute(make_request())
+
+        self.assertIn("OBSERVATION CLIPPED", gateway.requests[0].problem)
+        self.assertTrue(response.metadata["model_calls"][0]["observation_clipped"])
+        self.assertEqual("A" * 500, response.metadata["environment_reset_receipt"]["observation"])
 
     async def test_turn_budget_returns_nonterminal_public_observation(self) -> None:
         session = FakeSession()
@@ -209,6 +354,149 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("room one", response.text)
         self.assertFalse(response.metadata["environment_terminal"])
         self.assertEqual(1, response.metadata["environment_steps"])
+
+    async def test_failure_preserves_completed_environment_prefix_receipts(self) -> None:
+        class FailingGateway(SequenceGateway):
+            async def generate(self, request: AgentRequest) -> AgentResponse:
+                self.requests.append(request)
+                if len(self.requests) == 1:
+                    return AgentResponse(
+                        "look",
+                        {"provider_request_id": "provider-1"},
+                    )
+                raise TimeoutError("provider timeout")
+
+        session = FakeSession()
+        runtime = resources(
+            session=session,
+            gateway=FailingGateway([]),
+            max_turns=2,
+        )
+
+        with self.assertRaises(EnvironmentExecutionError) as caught:
+            await runtime.execution_adapter.execute(make_request())
+
+        error = caught.exception
+        self.assertEqual("TimeoutError", error.cause_error_type)
+        self.assertEqual(1, error.environment_revision)
+        self.assertFalse(error.environment_terminal)
+        self.assertEqual(1, len(error.environment_receipts))
+        self.assertEqual("look", error.environment_receipts[0]["action"])
+        self.assertEqual(1, len(error.evaluator_environment_trace))
+        self.assertEqual(1, len(error.tool_receipts))
+        self.assertEqual(1, len(error.model_calls))
+        self.assertEqual("room zero", error.environment_reset_receipt["observation"])
+
+    async def test_canvas_finish_requires_measured_terminal_transition(self) -> None:
+        for raw_action, expected_terminal in (("look", False), ("finish", True)):
+            with self.subTest(raw_action=raw_action):
+                session = FakeSession()
+                gateway = SequenceGateway([raw_action])
+                environment = resources(
+                    session=session,
+                    gateway=gateway,
+                    max_turns=1,
+                )
+                model_registry = ModelRegistry(
+                    [ProviderSpec("fake", kind="test")],
+                    [ModelSpec("m", "fake")],
+                )
+                runtime = AgentRuntime(
+                    model_registry,
+                    gateway,
+                    execution_adapters={
+                        "react": environment.execution_adapter,
+                    },
+                    tool_registry=environment.tool_registry,
+                    dataset_id="alfworld",
+                )
+                canvas = AgentWorkflowEnv(
+                    model_registry,
+                    runtime=runtime,
+                    problem="complete the alfworld task",
+                    execute_on_edit=True,
+                    required_tool_id=environment.tool_id,
+                )
+                added = await canvas.step(
+                    '{"action":"add_subgraph","agents":['
+                    '{"agent_id":"actor","model_id":"m",'
+                    '"contract":"act in the environment",'
+                    '"allowed_tools":["alfworld.environment"],'
+                    '"execution_mode":"react",'
+                    '"artifact_type":"environment_observation",'
+                    '"completion_condition":"reach a terminal observation"}'
+                    '],"relations":[],"output_agent_id":"actor"}'
+                )
+                self.assertTrue(added.accepted)
+                self.assertIsNotNone(added.execution)
+
+                finished = await canvas.step('{"action":"finish"}')
+
+                self.assertEqual(expected_terminal, finished.accepted)
+                self.assertEqual(expected_terminal, finished.done)
+                if not expected_terminal:
+                    self.assertIn(
+                        "terminal Action--Observation transition",
+                        finished.feedback,
+                    )
+
+    async def test_fresh_finish_caches_and_returns_nonterminal_execution(self) -> None:
+        session = FakeSession()
+        gateway = SequenceGateway(["look"])
+        environment = resources(
+            session=session,
+            gateway=gateway,
+            max_turns=1,
+        )
+        model_registry = ModelRegistry(
+            [ProviderSpec("fake", kind="test")],
+            [ModelSpec("m", "fake")],
+        )
+        runtime = AgentRuntime(
+            model_registry,
+            gateway,
+            execution_adapters={"react": environment.execution_adapter},
+            tool_registry=environment.tool_registry,
+            dataset_id="alfworld",
+        )
+        graph = AgentGraph(
+            [make_request().agent],
+            output_agent_id="actor",
+        )
+        canvas = AgentWorkflowEnv(
+            model_registry,
+            runtime=runtime,
+            problem="complete the alfworld task",
+            graph=graph,
+            execute_on_edit=False,
+            required_tool_id=environment.tool_id,
+        )
+
+        first = await canvas.step('{"action":"finish"}')
+
+        self.assertFalse(first.accepted)
+        self.assertFalse(first.done)
+        self.assertFalse(first.execution_reused)
+        self.assertIsNotNone(first.execution)
+        self.assertIsNone(first.partial_execution)
+        self.assertEqual("room one", first.execution.outputs["actor"])
+        actor_metadata = first.execution.output_metadata["actor"]
+        self.assertFalse(actor_metadata["environment_terminal"])
+        self.assertEqual(1, len(actor_metadata["environment_receipts"]))
+        self.assertEqual(1, len(actor_metadata["tool_receipts"]))
+        self.assertIn(
+            "terminal Action--Observation transition",
+            first.feedback,
+        )
+
+        second = await canvas.step('{"action":"finish"}')
+
+        self.assertFalse(second.accepted)
+        self.assertFalse(second.done)
+        self.assertTrue(second.execution_reused)
+        self.assertIs(second.execution, first.execution)
+        self.assertEqual(["look"], session.actions)
+        self.assertEqual(1, len(gateway.requests))
 
     async def test_webshop_search_action_uses_public_search_bar_semantics(self) -> None:
         class WebShopSession(FakeSession):
