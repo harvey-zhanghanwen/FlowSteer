@@ -895,6 +895,16 @@ def _live_role_agent_schema(
                 )
             )
         }
+    raw_artifact_types = constraint.get("artifact_types")
+    if raw_artifact_types is not None:
+        properties["artifact_type"] = {
+            "enum": list(
+                _live_string_domain(
+                    raw_artifact_types,
+                    label=f"{role_family}.artifact_types",
+                )
+            )
+        }
     return {
         "type": "object",
         "additionalProperties": False,
@@ -1050,6 +1060,28 @@ def _hotpotqa_directed_role_relation_allowed(
     return True
 
 
+def _live_add_subgraph_isolated_boundary(
+    domain: Mapping[str, Any],
+) -> bool:
+    """Validate an explicit isolated ADD boundary supplied by the Canvas."""
+
+    has_relations = "relations" in domain
+    has_output = "output_agent_id" in domain
+    if has_relations != has_output:
+        raise ValueError(
+            "add_subgraph isolated boundary must declare relations and "
+            "output_agent_id together"
+        )
+    if not has_relations:
+        return False
+    if domain.get("relations") != [] or domain.get("output_agent_id") is not None:
+        raise ValueError(
+            "add_subgraph isolated boundary requires relations=[] and "
+            "output_agent_id=null"
+        )
+    return True
+
+
 def director_live_add_subgraph_agent_declarations_json_schema_text(
     action_target_domains: Mapping[str, Any],
     *,
@@ -1067,6 +1099,7 @@ def director_live_add_subgraph_agent_declarations_json_schema_text(
     domain = action_target_domains.get("add_subgraph")
     if not isinstance(domain, Mapping):
         raise ValueError("add_subgraph live target domain is missing")
+    _live_add_subgraph_isolated_boundary(domain)
     min_agents = domain.get("min_new_agents")
     max_agents = domain.get("max_new_agents")
     if (
@@ -1442,6 +1475,18 @@ def _live_add_subgraph_agents(
             label=f"{role_family}.contracts",
         ):
             raise ValueError("add_subgraph Agent contract violates its role")
+        artifact_type_domain = constraint.get("artifact_types")
+        if (
+            artifact_type_domain is not None
+            and agent.get("artifact_type")
+            not in _live_string_domain(
+                artifact_type_domain,
+                label=f"{role_family}.artifact_types",
+            )
+        ):
+            raise ValueError(
+                "add_subgraph Agent artifact_type violates its role"
+            )
         if (
             execution_mode not in constraint.get("execution_modes", ())
         ):
@@ -1502,6 +1547,8 @@ def director_live_add_subgraph_relation_candidates(
     )
     domain = action_target_domains["add_subgraph"]
     if not verified_qa_semantic_protocol(domain.get("semantic_protocol")):
+        return ()
+    if _live_add_subgraph_isolated_boundary(domain):
         return ()
     role_constraints = domain["role_constraints"]
     roles = _live_existing_agent_roles(domain, role_constraints)
@@ -1789,6 +1836,7 @@ def director_live_action_parameter_json_schema_text(
             action_target_domains,
             add_agents,
         )
+        isolated_boundary = _live_add_subgraph_isolated_boundary(domain)
         endpoint_ids = list(domain["existing_agent_ids"]) + [
             agent["agent_id"] for agent in normalized_agents
         ]
@@ -1857,7 +1905,7 @@ def director_live_action_parameter_json_schema_text(
             ]
             schema["properties"]["output_agent_id"] = (
                 {"type": "null"}
-                if current_output_agent_id is not None
+                if isolated_boundary or current_output_agent_id is not None
                 else
                 {
                     "anyOf": [

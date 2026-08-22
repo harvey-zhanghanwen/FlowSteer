@@ -1747,6 +1747,135 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
                 missing_output_receipt
             )
 
+    def test_replacement_add_schema_binds_artifact_and_isolated_execution(
+        self,
+    ) -> None:
+        domains = {
+            "add_subgraph": {
+                "min_new_agents": 1,
+                "max_new_agents": 1,
+                "existing_agent_ids": [
+                    "failed_reader",
+                    "reasoner",
+                    "verifier",
+                    "formatter",
+                ],
+                "existing_agents": [
+                    {
+                        "agent_id": "failed_reader",
+                        "role_family": "evidence_retriever",
+                    },
+                    {"agent_id": "reasoner", "role_family": "reasoner"},
+                    {"agent_id": "verifier", "role_family": "verifier"},
+                    {"agent_id": "formatter", "role_family": "format"},
+                ],
+                "current_output_agent_id": "formatter",
+                "output_role_family": "format",
+                "semantic_protocol": HOTPOTQA_SEMANTIC_PROTOCOL,
+                "required_agent_fields": [
+                    "agent_id",
+                    "model_id",
+                    "contract",
+                    "role_family",
+                    "allowed_tools",
+                    "execution_mode",
+                    "artifact_type",
+                ],
+                "model_ids": ["qwen"],
+                "role_constraints": {
+                    "evidence_retriever": {
+                        "execution_modes": ["react"],
+                        "allowed_tools": [["qa-retrieval"]],
+                        "artifact_types": ["retrieval_evidence"],
+                    },
+                    "reasoner": {
+                        "execution_modes": ["react"],
+                        "allowed_tools": [["qa-retrieval"]],
+                    },
+                    "verifier": {
+                        "execution_modes": ["reasoning"],
+                        "allowed_tools": [[]],
+                    },
+                    "format": {
+                        "execution_modes": ["reasoning"],
+                        "allowed_tools": [[]],
+                    },
+                },
+                "admitted_new_role_families": ["evidence_retriever"],
+                "endpoint_scope": {
+                    "relation_endpoint_sources": [
+                        "existing_agent_ids",
+                        "same_action_agent_ids",
+                    ],
+                    "output_agent_id_sources": [
+                        "existing_agent_ids",
+                        "same_action_agent_ids",
+                    ],
+                },
+                "relations": [],
+                "output_agent_id": None,
+            }
+        }
+        declarations_schema = json.loads(
+            director_live_add_subgraph_agent_declarations_json_schema_text(
+                domains
+            )
+        )
+        agent_schema = declarations_schema["properties"]["agents"]["oneOf"][
+            0
+        ]["prefixItems"][0]["anyOf"][0]
+        self.assertEqual(
+            {"enum": ["retrieval_evidence"]},
+            agent_schema["properties"]["artifact_type"],
+        )
+
+        agent = {
+            "agent_id": "node_1",
+            "model_id": "qwen",
+            "contract": "continue evidence retrieval",
+            "role_family": "evidence_retriever",
+            "allowed_tools": ["qa-retrieval"],
+            "execution_mode": "react",
+            "artifact_type": "retrieval_evidence",
+        }
+        wrong_artifact = {**agent, "artifact_type": "repair_evidence"}
+        with self.assertRaisesRegex(
+            ValueError,
+            "artifact_type violates its role",
+        ):
+            director_live_add_subgraph_agent_declarations_from_text(
+                json.dumps(
+                    {"action": "add_subgraph", "agents": [wrong_artifact]}
+                ),
+                domains,
+            )
+        self.assertEqual(
+            (agent,),
+            director_live_add_subgraph_agent_declarations_from_text(
+                json.dumps({"action": "add_subgraph", "agents": [agent]}),
+                domains,
+            ),
+        )
+        self.assertEqual(
+            (),
+            director_live_add_subgraph_relation_candidates(domains, [agent]),
+        )
+        final_schema = json.loads(
+            director_live_action_parameter_json_schema_text(
+                "add_subgraph",
+                domains,
+                add_agents=[agent],
+            )
+        )
+        self.assertEqual(
+            {"type": "array", "maxItems": 0},
+            final_schema["properties"]["relations"],
+        )
+        self.assertEqual(
+            {"type": "null"},
+            final_schema["properties"]["output_agent_id"],
+        )
+
     async def test_model_admissible_v1_receipts_remain_replayable(self) -> None:
         model_registry = registry()
         client = ScriptedDirector(

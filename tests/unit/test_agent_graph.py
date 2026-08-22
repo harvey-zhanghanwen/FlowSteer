@@ -3493,6 +3493,7 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             "execution_phase": "single",
             "tool_receipts": [_test_read_receipt("p1")],
         }
+        env._progressive_outputs["repair_evidence"] = "retrieved evidence"
 
         self.assertEqual(("set_relation",), env.model_admissible_action_types())
         candidate = env.model_admissible_action_targets()["set_relation"][
@@ -4177,6 +4178,89 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             env._model_admissible_modify_agent_ids(),
         )
 
+    async def test_max_agents_dirty_replacement_excludes_downstream_modify(
+        self,
+    ) -> None:
+        graph = _hotpot_semantic_graph()
+        for agent_id in ("failed_reader", "replacement_reader"):
+            graph.add_agent(
+                AgentNode(
+                    agent_id,
+                    "cheap",
+                    "retrieve replacement evidence",
+                    role_family="evidence_retriever",
+                    allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                    execution_mode="react",
+                    artifact_type="retrieval_evidence",
+                )
+            )
+        graph.set_relation("failed_reader", "reasoner", True, False)
+        registry = make_registry()
+        gateway = _ImmediateGateway()
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_hotpot_semantic_runtime(registry, gateway),
+            graph=graph,
+            problem="What is the capital of France?",
+            execute_on_edit=False,
+            max_agents=6,
+            semantic_protocol="hotpotqa_verified_answer_slot_v1",
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+        )
+        env._failed_agent_ids.update({"failed_reader", "reasoner"})
+        env._repair_exhausted_agent_ids.update({"failed_reader", "reasoner"})
+        env._unresolved_dirty_agents.update(
+            {"replacement_reader", "reasoner", "verifier", "formatter"}
+        )
+
+        self.assertEqual(("modify_agent",), env.model_admissible_action_types())
+        modify_domain = env.model_admissible_action_targets()["modify_agent"]
+        self.assertEqual(
+            ["replacement_reader"],
+            modify_domain["agent_ids"],
+        )
+        self.assertEqual(
+            ["contract", "completion_condition"],
+            modify_domain["mutable_fields"],
+        )
+        self.assertEqual(
+            ["contract", "completion_condition"],
+            modify_domain["per_agent_candidates"][0]["mutable_fields"],
+        )
+        original_artifact_type = env.graph.get_node(
+            "replacement_reader"
+        ).artifact_type
+        rejected_artifact = await env.step(
+            '{"action":"modify_agent","agent_id":"replacement_reader",'
+            '"artifact_type":"repair_evidence"}'
+        )
+        self.assertFalse(rejected_artifact.accepted)
+        self.assertIn(
+            "mutable_fields=['contract', 'completion_condition']",
+            rejected_artifact.feedback,
+        )
+        self.assertEqual(
+            original_artifact_type,
+            env.graph.get_node("replacement_reader").artifact_type,
+        )
+        rejected = await env.step(
+            '{"action":"modify_agent","agent_id":"verifier",'
+            '"contract":"verify the replacement artifact"}'
+        )
+        self.assertFalse(rejected.accepted)
+        self.assertIn("before modifying blocked downstream Agents", rejected.feedback)
+        self.assertEqual([], gateway.requests)
+        accepted = await env.step(
+            '{"action":"modify_agent","agent_id":"replacement_reader",'
+            '"contract":"retry retrieval while preserving the artifact type"}'
+        )
+        self.assertTrue(accepted.accepted, accepted.feedback)
+        self.assertEqual(
+            "retry retrieval while preserving the artifact type",
+            env.graph.get_node("replacement_reader").contract,
+        )
+
     async def test_tc10_reader_replacement_continues_public_tool_state_then_deletes(
         self,
     ) -> None:
@@ -4253,6 +4337,20 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             current_agent_ids={node.id for node in graph.nodes},
         )
         env._repair_exhausted_agent_ids.add("failed_reader")
+        env._failed_agent_ids.add("reasoner")
+        env._repair_exhausted_agent_ids.add("reasoner")
+
+        replacement_domain = env.model_admissible_action_targets()[
+            "add_subgraph"
+        ]
+        self.assertEqual([], replacement_domain["relations"])
+        self.assertIsNone(replacement_domain["output_agent_id"])
+        self.assertEqual(
+            ["retrieval_evidence"],
+            replacement_domain["role_constraints"]["evidence_retriever"][
+                "artifact_types"
+            ],
+        )
 
         action_payload = json.dumps(
             {
@@ -4268,14 +4366,7 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
                         "artifact_type": "retrieval_evidence",
                     }
                 ],
-                "relations": [
-                    {
-                        "source_id": "replacement_reader",
-                        "target_id": "reasoner",
-                        "source_to_target": True,
-                        "target_to_source": False,
-                    }
-                ],
+                "relations": [],
             }
         )
         observed_failure_metadata: dict[str, object] = {}
@@ -4300,6 +4391,19 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
                 deferred_agent_ids=("reasoner", "verifier", "formatter"),
             )
 
+        inline_payload = json.loads(action_payload)
+        inline_payload["relations"] = [
+            {
+                "source_id": "replacement_reader",
+                "target_id": "reasoner",
+                "source_to_target": True,
+                "target_to_source": False,
+            }
+        ]
+        rejected_inline = await env.step(json.dumps(inline_payload))
+        self.assertFalse(rejected_inline.accepted)
+        self.assertIn("isolated executable prefix", rejected_inline.feedback)
+
         self.assertIn("add_subgraph", env.model_admissible_action_types())
         with patch.object(runtime, "execute", side_effect=replacement_success):
             result = await env.step(action_payload)
@@ -4318,8 +4422,38 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             env.graph.directed_predecessors("replacement_reader"),
         )
         self.assertEqual(
+            (),
+            env._directed_successors(env.graph, "replacement_reader"),
+        )
+        self.assertEqual(("set_relation",), env.model_admissible_action_types())
+        route_candidates = env.model_admissible_action_targets()["set_relation"][
+            "candidates"
+        ]
+        self.assertEqual(
+            [
+                {
+                    "source_id": "replacement_reader",
+                    "target_id": "reasoner",
+                    "source_to_target": True,
+                    "target_to_source": False,
+                }
+            ],
+            route_candidates,
+        )
+        with patch.object(runtime, "execute", side_effect=replacement_success):
+            routed = await env.step(
+                json.dumps({"action": "set_relation", **route_candidates[0]})
+            )
+        self.assertTrue(routed.accepted, routed.feedback)
+        self.assertEqual(
             ("reasoner",),
             env._directed_successors(env.graph, "replacement_reader"),
+        )
+        recovery = env.recovery_state()
+        self.assertIn("failed_reader", recovery["deletable_agent_ids"])
+        self.assertIn(
+            "failed_reader",
+            recovery["repair_exhausted_auxiliary_takeover_delete_agent_ids"],
         )
         self.assertEqual(("delete_agent",), env.model_admissible_action_types())
         self.assertEqual(

@@ -836,6 +836,21 @@ exact receipt is retained, the rejected sample is represented as `action={}`
 with zero executed prefix, and public parse feedback is returned for the next
 Director turn.  The parser is not loosened, and no partial `ADD` is executed.
 
+Recovery r15 retains those boundaries and changes only two existing gates.
+First, Tool v7 uses the same SkillFlow StructuredAction/public-observation
+continuation while treating a same-read question-surface (with at most one
+leading linguistic honorific removed), passage-title and exact-span alias chain
+as a structured `entity_identity` repair.  The Retriever still does not own
+relation direction, answer-slot binding or answer selection, and contextual
+event anchors remain legal.  Second, the FlowSteer-derived execute-on-edit
+transaction runs a replacement Evidence Retriever as an isolated functional
+unit before the live relation domain exposes one successful
+replacement-to-exhausted-Reasoner edge.  Failed ingress candidates may only
+remove an existing directed edge; ordinary ADD remains unchanged and the
+existing takeover/deletability receipt remains authoritative.  Cross-Canvas
+continuation, arbitrary AgentGraph relations and takeover are project
+adaptations, not claimed as native SkillFlow or FlowSteer features.
+
 The r12 main Stable Zero evidence is `2/2` explicit-FINISH lineages:
 `triviaqa:tc_1` EM/F1 `1.0/1.0` and `triviaqa:tc_3` EM/F1 `0.0/0.5`.
 The isolated r12 `triviaqa:tc_9`/`triviaqa:tc_10` regression is `0/2`, with
@@ -847,11 +862,15 @@ declaration sampled text was not complete JSON.  The old failure path did not
 persist the raw receipt, so no narrower decoding-failure classification is
 supported.  The r13 fixed-128 run was not started.
 
-Recovery r14 is prepared under distinct main/isolated condition IDs, artifact
-roots and report paths; it has no live result.  Tool version v6, the ordered
-fixed-128 selection, isolated task IDs and reused question-only Direct
-predictions are unchanged.  Training, GRPO, policy synchronization, Skills and
-exploration remain disabled.
+Recovery r14 failed its main live gate `1/2`: `tc_1` recovered the malformed
+declaration and explicitly finished at EM/F1 `1.0/1.0`, while `tc_3` reached
+`max_rounds` with `final_answer=null` despite a correct public read receipt.
+The r14 isolated and fixed-128 runs were not started.  Recovery r15 uses
+distinct main/isolated condition IDs, Tool v7 and new artifact/report roots;
+its complete unit suite passed `808` tests and `144` subtests, and both
+prepare-only freezes passed.  Its live gates and fixed-128 result remain
+pending.  Training, GRPO, policy synchronization, Skills and exploration
+remain disabled.
 
 The five retrieval strategies are an execution-policy implementation inside
 the Tool adapter, not five Director roles and not an injected Skill.  The

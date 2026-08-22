@@ -455,7 +455,7 @@ not persist the raw sampled text or its phase receipt, so that artifact cannot
 support a more specific decoding-failure diagnosis.  The fixed-128 run was not
 started.
 
-Recovery revision r14 is prepared under new main and isolated condition IDs,
+Recovery revision r14 was prepared under new main and isolated condition IDs,
 artifact roots and report paths.  It reuses the existing strict malformed
 final-parameter boundary: an exact receipt is retained, the rejected sample is
 represented as `action={}`, zero action prefix is executed, and public parse
@@ -464,7 +464,7 @@ loosened and a partial `ADD` is never executed.  Tool version v6, the ordered
 fixed-128 selection, isolated `triviaqa:tc_9`/`triviaqa:tc_10` IDs and the
 question-only Direct reuse source remain unchanged.  Training, GRPO, backward,
 optimizer updates, policy synchronization, Skills and exploration remain
-disabled.  Revision r14 is **prepared but not live-validated**.
+disabled.
 
 Static integration for r14 passed the complete unit suite (`803 passed`,
 `142 subtests passed`) and both prepare-only freezes.  The main freeze retains
@@ -472,9 +472,40 @@ the same ordered 128 tasks, while the isolated freeze retains exactly
 `triviaqa:tc_9` then `triviaqa:tc_10`; both continue to use the frozen
 question-only Direct prediction source.
 
+The r14 main Stable Zero run collected both frozen tasks but passed only `1/2`
+legal terminal lineages.  `triviaqa:tc_1` recovered from a receipt-preserved
+malformed declaration, explicitly finished with `Harry Sinclair Lewis`, and
+scored official EM/F1 `1.0/1.0`.  `triviaqa:tc_3` ended at `max_rounds` with
+`final_answer=null`.  Its public Tool receipts included the exact read passage
+stating that Dench was born in Heworth, North Riding of Yorkshire, so this is
+not a retrieval-recall or database-coverage failure.  The retrieved fact was
+lost at the structured identity/alias boundary; repeated failed Retriever
+ingress then formed an AND-join that prevented later replacements from
+executing.  Because the main gate failed, the r14 isolated regression and
+fixed-128 run were not started.
+
+Recovery revision r15 is a minimal correction on the same shared architecture.
+The Tool v7 adapter admits a completion-only `entity_identity` repair when one
+successful read receipt itself establishes the question surface (optionally
+after removing one leading linguistic honorific), passage title and exact-span
+evidence surface.  It does not choose relation direction or the answer slot,
+and it preserves r13 contextual event anchors.  The Canvas recovery path now
+executes a same-role Evidence Retriever replacement as an isolated accepted
+`ADD_SUBGRAPH` before exposing one directed replacement-to-Reasoner relation.
+Only a successful replacement artifact may enter that relation domain; failed
+ingress edits must strictly remove edges, and takeover/deletion still uses the
+existing receipt-gated path.
+
+Static r15 integration passed the complete unit suite (`808 passed`, `144
+subtests passed`).  The main prepare-only freeze retains the ordered 128 tasks
+from `triviaqa:tc_1` through `triviaqa:tc_223`, and the isolated freeze retains
+exactly `triviaqa:tc_9` then `triviaqa:tc_10`.  Both retain the frozen 128-row
+question-only Direct source.  Training, optimizer updates, Skills and policy
+synchronization remain disabled.  r15 has not yet produced a live score.
+
 ### Stable Zero status
 
-Static architecture, 782 unit tests, 142 subtests and both frozen data-selection
+Static architecture, 808 unit tests, 144 subtests and both frozen data-selection
 preconditions are complete.  The initial, r2, r3 and r4 canaries failed for
 the documented causes; r5 **passed Stable Zero** but its incomplete fixed-128
 run was stopped after measured recovery defects appeared.  Recovery revision
@@ -499,8 +530,11 @@ The r12 fixed-128 run was not started.  Recovery revision r13 passed its live
 main canary `2/2`; its isolated regression produced `1/2`, with `tc_10`
 explicitly finishing at EM/F1 `1.0/1.0` and `tc_9` recorded as
 `collection_failed` after incomplete declaration JSON.  The r13 fixed-128 run
-was not started.  Recovery revision r14 is prepared under new condition,
-artifact and report paths but has no live result.  Formal fixed-128 v2 EM/F1
+was not started.  Recovery revision r14 failed its live main canary `1/2`:
+`tc_1` explicitly finished at EM/F1 `1.0/1.0`, while `tc_3` ended at
+`max_rounds` with a null answer despite a correct public read receipt.  Its
+isolated and fixed-128 runs were not started.  Recovery revision r15 has passed
+static and prepare-only gates; its live gates and formal fixed-128 v2 EM/F1
 remain pending.  No score is inferred from
 unit tests, a two-task canary, an incomplete run, or the previous architecture.
 

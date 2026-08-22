@@ -2539,8 +2539,19 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("question-side entity/event anchor", completion_contract)
         self.assertIn("never a wh-word/wh-phrase", completion_contract)
-        self.assertIn("Reasoner owns answer-slot binding", completion_contract)
         self.assertIn("passage title for explicit alias binding", completion_contract)
+        self.assertIn(
+            "question_surface and evidence_surface differ",
+            completion_contract,
+        )
+        self.assertIn(
+            "evidence_surface must be a coreferential identity surface",
+            completion_contract,
+        )
+        self.assertIn(
+            "may occupy the subject, the object, or neither",
+            completion_contract,
+        )
 
     def test_evidence_retriever_accepts_david_soul_title_alias_binding(
         self,
@@ -2604,6 +2615,243 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(detail)
         assert detail is not None
         self.assertIn("not a wh-word or wh-phrase", detail)
+
+    def test_factual_evidence_retriever_honorific_title_alias_chain_is_exact(
+        self,
+    ) -> None:
+        question = "Where in England was Dame Judi Dench born?"
+        evidence = "Dench was born in Heworth, North Riding of Yorkshire."
+        artifact = {
+            "question_scope": question,
+            "entity_identity": {
+                "question_surface": "Dame Judi Dench",
+                "evidence_surface": "Dench",
+            },
+            "target_relation": "was born in",
+            "answer_type_constraint": "location",
+            "evidence_proposition": {
+                "subject": "Dench",
+                "predicate": "was born in",
+                "object_or_attribute_value": (
+                    "Heworth, North Riding of Yorkshire"
+                ),
+            },
+            "evidence_span": evidence,
+            "passage_id": "dench-birthplace",
+        }
+
+        def receipt(title: str | None) -> dict[str, object]:
+            passage = {
+                "passage_id": "dench-birthplace",
+                "text": evidence,
+            }
+            if title is not None:
+                passage["title"] = title
+            return {
+                "tool_id": QA_RETRIEVAL_TOOL_ID,
+                "tool_version": "frozen-index-v1",
+                "request": {
+                    "action": "read",
+                    "arguments": {"passage_id": "dench-birthplace"},
+                },
+                "result": {
+                    "value": {
+                        "operation": "read",
+                        "passage_id": "dench-birthplace",
+                        "passage": passage,
+                    },
+                    "completed": True,
+                },
+                "error_type": None,
+            }
+
+        issue = QARetrievalReactExecutionAdapter._evidence_retriever_completion_issue
+        self.assertIsNone(
+            issue(
+                original_question=question,
+                artifact=json.dumps(artifact),
+                tool_receipts=[receipt("Judi Dench")],
+            )
+        )
+
+        for title in (None, "Judy Dench"):
+            with self.subTest(title=title):
+                detail = issue(
+                    original_question=question,
+                    artifact=json.dumps(artifact),
+                    tool_receipts=[receipt(title)],
+                )
+                self.assertIsNotNone(detail)
+                assert detail is not None
+                self.assertIn("alias identity lacks an explicit binding", detail)
+
+        answer_in_identity = json.loads(json.dumps(artifact))
+        answer_in_identity["entity_identity"]["evidence_surface"] = (
+            "Heworth, North Riding of Yorkshire"
+        )
+        detail = issue(
+            original_question=question,
+            artifact=json.dumps(answer_in_identity),
+            tool_receipts=[receipt("Judi Dench")],
+        )
+        self.assertIsNotNone(detail)
+        assert detail is not None
+        self.assertIn("passage title identity chain", detail)
+
+    def test_title_bound_identity_may_bind_reverse_relation_object(self) -> None:
+        question = "Who was represented by Dr Alice Carter?"
+        evidence = "Morgan Reed was represented by Carter."
+        artifact = {
+            "question_scope": question,
+            "entity_identity": {
+                "question_surface": "Dr Alice Carter",
+                "evidence_surface": "Carter",
+            },
+            "target_relation": "was represented by",
+            "answer_type_constraint": "entity",
+            "evidence_proposition": {
+                "subject": "Morgan Reed",
+                "predicate": "was represented by",
+                "object_or_attribute_value": "Carter",
+            },
+            "evidence_span": evidence,
+            "passage_id": "alice-carter",
+        }
+        receipt = {
+            "tool_id": QA_RETRIEVAL_TOOL_ID,
+            "tool_version": "frozen-index-v1",
+            "request": {
+                "action": "read",
+                "arguments": {"passage_id": "alice-carter"},
+            },
+            "result": {
+                "value": {
+                    "operation": "read",
+                    "passage_id": "alice-carter",
+                    "passage": {
+                        "passage_id": "alice-carter",
+                        "title": "Alice Carter",
+                        "text": evidence,
+                    },
+                },
+                "completed": True,
+            },
+            "error_type": None,
+        }
+
+        self.assertIsNone(
+            QARetrievalReactExecutionAdapter._evidence_retriever_completion_issue(
+                original_question=question,
+                artifact=json.dumps(artifact),
+                tool_receipts=[receipt],
+            )
+        )
+
+    async def test_factual_identity_repair_stays_completion_only_at_tool_budget(
+        self,
+    ) -> None:
+        question = "Where in England was Dame Judi Dench born?"
+        evidence = "Dench was born in Heworth, North Riding of Yorkshire."
+        valid_artifact = {
+            "question_scope": question,
+            "entity_identity": {
+                "question_surface": "Dame Judi Dench",
+                "evidence_surface": "Dench",
+            },
+            "target_relation": "was born in",
+            "answer_type_constraint": "location",
+            "evidence_proposition": {
+                "subject": "Dench",
+                "predicate": "was born in",
+                "object_or_attribute_value": (
+                    "Heworth, North Riding of Yorkshire"
+                ),
+            },
+            "evidence_span": evidence,
+            "passage_id": "p1",
+        }
+        invalid_artifact = json.loads(json.dumps(valid_artifact))
+        invalid_artifact["entity_identity"]["evidence_surface"] = (
+            "Heworth, North Riding of Yorkshire"
+        )
+
+        def action(name: str, arguments: object) -> str:
+            return json.dumps(
+                {
+                    "arguments": arguments,
+                    "kind": "complete" if name == "complete" else "tool",
+                    "name": name,
+                    "resource_id": (
+                        None if name == "complete" else QA_RETRIEVAL_TOOL_ID
+                    ),
+                    "skill_id": None,
+                }
+            )
+
+        class DenchIndex(FakeIndex):
+            def read(self, passage_id: str) -> FakePassage:
+                self.read_calls.append(passage_id)
+                return FakePassage(passage_id, "d1", "Judi Dench", evidence)
+
+        class SequenceGateway:
+            def __init__(self) -> None:
+                self.requests: list[AgentRequest] = []
+                self.outputs = [
+                    action(
+                        "search",
+                        {"query": "Dame Judi Dench birthplace", "limit": 5},
+                    ),
+                    action("read", {"passage_id": "p1"}),
+                    action("complete", {"value": invalid_artifact}),
+                    action("complete", {"value": valid_artifact}),
+                ]
+
+            async def generate(self, request: AgentRequest) -> AgentResponse:
+                self.requests.append(request)
+                return AgentResponse(self.outputs.pop(0))
+
+        index = DenchIndex()
+        gateway = SequenceGateway()
+        response = await QARetrievalReactExecutionAdapter(
+            gateway=gateway,
+            tool_registry=build_qa_tool_registry(index),
+            max_turns=4,
+            max_tool_calls=2,
+            task_type="factual_qa",
+            completion_policy="required_evidence",
+        ).execute(
+            AgentRequest(
+                request_id="trivia:honorific-identity-repair",
+                run_id="trivia",
+                graph_revision=1,
+                problem=question,
+                agent=AgentNode(
+                    "evidence_retriever",
+                    "model",
+                    "retrieve receipt-grounded identity and birthplace evidence",
+                    role_family="evidence_retriever",
+                    allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                    execution_mode="react",
+                ),
+                model=ModelSpec("model", "provider"),
+                provider=ProviderSpec("provider", kind="test"),
+                phase=ExecutionPhase.SINGLE,
+                semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            )
+        )
+
+        self.assertEqual([("Dame Judi Dench birthplace", 5)], index.search_calls)
+        self.assertEqual(["p1"], index.read_calls)
+        self.assertEqual(2, response.metadata["tool_calls"])
+        feedback = response.metadata["react_trace"][2]["public_error_code"]
+        self.assertTrue(feedback.startswith("qa_semantic_artifact_invalid:"))
+        self.assertNotIn("knowledge_base_coverage_failure", feedback)
+        repair_contract = gateway.requests[3].agent.contract
+        self.assertIn("Emit a complete action; do not search or read again", repair_contract)
+        self.assertIn(
+            "- none\nCurrently admissible completion schema",
+            repair_contract,
+        )
 
     def test_evidence_retriever_allows_open_super_bowl_event_anchor(
         self,

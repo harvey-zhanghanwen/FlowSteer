@@ -498,6 +498,7 @@ class AgentWorkflowEnv:
         takeover_delete_ids = (
             self._repair_exhausted_auxiliary_takeover_delete_ids()
         )
+        dirty_replacement_ids = self._dirty_auxiliary_replacement_agent_ids()
         if (
             takeover_delete_ids
             and AgentActionType.DELETE_AGENT.value
@@ -531,6 +532,17 @@ class AgentWorkflowEnv:
                 in self._allowed_action_type_set
             ):
                 return (AgentActionType.SET_RELATION.value,)
+
+        if (
+            dirty_replacement_ids
+            and AgentActionType.MODIFY_AGENT.value
+            in self._allowed_action_type_set
+        ):
+            # At the Agent limit an isolated same-responsibility replacement
+            # which has not materialized its prefix is the only executable
+            # recovery responsibility.  Do not spend the next FlowSteer edit on
+            # a blocked downstream Agent which merely lacks that artifact.
+            return (AgentActionType.MODIFY_AGENT.value,)
 
         terminal_reachability_candidates = (
             self._terminal_reachability_relation_candidates()
@@ -844,7 +856,7 @@ class AgentWorkflowEnv:
         self,
         candidates: Optional[Sequence[Mapping[str, object]]] = None,
     ) -> list[dict[str, object]]:
-        """Route one auxiliary artifact into a Tool-plan-exhausted Reasoner."""
+        """Route one successful auxiliary artifact into an exhausted Reasoner."""
 
         exhausted_reasoner_ids = self._repair_exhausted_reasoner_ids()
         auxiliary_ids = tuple(
@@ -853,14 +865,12 @@ class AgentWorkflowEnv:
             if auxiliary_id not in self._failed_agent_ids
             and auxiliary_id not in self._repair_exhausted_agent_ids
             and auxiliary_id not in self._unresolved_dirty_agents
-            and (
-                not self._has_successful_artifact(auxiliary_id)
-                or self._semantic_replacement_has_valid_artifact(
-                    auxiliary_id,
-                    (
-                        self._graph.get_node(auxiliary_id).role_family or ""
-                    ).casefold(),
-                )
+            and self._has_successful_artifact(auxiliary_id)
+            and self._semantic_replacement_has_valid_artifact(
+                auxiliary_id,
+                (
+                    self._graph.get_node(auxiliary_id).role_family or ""
+                ).casefold(),
             )
         )
         unrouted_auxiliary_ids = tuple(
@@ -884,22 +894,35 @@ class AgentWorkflowEnv:
             if candidates is None
             else [dict(item) for item in candidates]
         )
+        current_unreachable = set(self._terminal_unreachable_agent_ids())
         result: list[dict[str, object]] = []
         for item in source_candidates:
+            source_id = str(item["source_id"])
+            target_id = str(item["target_id"])
+            if (
+                source_id not in unrouted_auxiliary_ids
+                or target_id not in exhausted_reasoner_ids
+                or item["source_to_target"] is not True
+                or item["target_to_source"] is not False
+            ):
+                continue
             candidate = self._graph.fork()
             candidate.set_relation(
-                str(item["source_id"]),
-                str(item["target_id"]),
+                source_id,
+                target_id,
                 bool(item["source_to_target"]),
                 bool(item["target_to_source"]),
             )
-            if any(
-                reasoner_id in self._directed_successors(candidate, auxiliary_id)
-                and auxiliary_id
-                not in self._directed_successors(candidate, reasoner_id)
-                for auxiliary_id in unrouted_auxiliary_ids
-                for reasoner_id in exhausted_reasoner_ids
-            ):
+            candidate_unreachable = {
+                agent_id
+                for issue in candidate.validate(
+                    self.model_registry,
+                    require_complete=True,
+                ).issues
+                if issue.code == "cannot_reach_output"
+                for agent_id in issue.agent_ids
+            }
+            if candidate_unreachable < current_unreachable:
                 result.append(dict(item))
         return result
 
@@ -911,6 +934,13 @@ class AgentWorkflowEnv:
 
         current_unreachable = set(self._terminal_unreachable_agent_ids())
         if not current_unreachable:
+            return []
+        if self._repair_exhausted_reasoner_ids():
+            # Exhausted-Reasoner recovery has a narrower relation projection:
+            # detach measured unavailable ingress, or route one already
+            # materialized auxiliary through `_repair_exhausted_relation_candidates`.
+            # The generic reachability domain must not introduce a peer edge or
+            # reciprocal cycle around that measured failure.
             return []
         source_candidates = (
             self._all_model_admissible_relation_candidates()
@@ -974,11 +1004,15 @@ class AgentWorkflowEnv:
             and auxiliary_id
             not in self._directed_successors(self._graph, reasoner_id)
         }
-        failed_ids = self._failed_agent_ids | self._repair_exhausted_agent_ids
+        unavailable_ids = (
+            self._failed_agent_ids
+            | self._repair_exhausted_agent_ids
+            | self._unresolved_dirty_agents
+        )
         failed_ingress = {
             (auxiliary_id, reasoner_id)
             for auxiliary_id in self._recovery_auxiliary_agent_ids()
-            if auxiliary_id in failed_ids
+            if auxiliary_id in unavailable_ids
             for reasoner_id in exhausted_reasoner_ids
             if reasoner_id
             in self._directed_successors(self._graph, auxiliary_id)
@@ -992,10 +1026,13 @@ class AgentWorkflowEnv:
         )
         result: list[dict[str, object]] = []
         for item in source_candidates:
+            source_id = str(item["source_id"])
+            target_id = str(item["target_id"])
+            previous = self._graph.relation_bits(source_id, target_id)
             candidate = self._graph.fork()
             candidate.set_relation(
-                str(item["source_id"]),
-                str(item["target_id"]),
+                source_id,
+                target_id,
                 bool(item["source_to_target"]),
                 bool(item["target_to_source"]),
             )
@@ -1019,7 +1056,27 @@ class AgentWorkflowEnv:
                 for edge in failed_ingress
                 if edge[1] in self._directed_successors(candidate, edge[0])
             }
-            if candidate_failed_ingress < failed_ingress:
+            previous_edges = {
+                edge
+                for edge, present in (
+                    ((source_id, target_id), previous.source_to_target),
+                    ((target_id, source_id), previous.target_to_source),
+                )
+                if present
+            }
+            candidate_bits = candidate.relation_bits(source_id, target_id)
+            candidate_edges = {
+                edge
+                for edge, present in (
+                    ((source_id, target_id), candidate_bits.source_to_target),
+                    ((target_id, source_id), candidate_bits.target_to_source),
+                )
+                if present
+            }
+            if (
+                candidate_failed_ingress < failed_ingress
+                and candidate_edges < previous_edges
+            ):
                 result.append(dict(item))
         return result
 
@@ -1102,6 +1159,9 @@ class AgentWorkflowEnv:
         mandatory_repair_ids = self._mandatory_repair_agent_ids()
         if mandatory_repair_ids:
             return mandatory_repair_ids
+        dirty_replacement_ids = self._dirty_auxiliary_replacement_agent_ids()
+        if dirty_replacement_ids:
+            return dirty_replacement_ids
         measured_failed = (
             self._failed_agent_ids - self._repair_exhausted_agent_ids
         ).intersection(node_ids)
@@ -1370,6 +1430,28 @@ class AgentWorkflowEnv:
             for role_family, artifact_types in domains.items()
         }
 
+    def _dirty_auxiliary_replacement_agent_ids(self) -> Tuple[str, ...]:
+        """Return max-capacity Retriever replacements awaiting an artifact."""
+
+        if self.max_agents is None or len(self._graph.nodes) < self.max_agents:
+            return ()
+        replacement_domains = (
+            self._repair_exhausted_auxiliary_replacement_domains()
+        )
+        evidence_artifact_types = set(
+            replacement_domains.get("evidence_retriever", ())
+        )
+        if not evidence_artifact_types:
+            return ()
+        return tuple(
+            node.id
+            for node in self._graph.nodes
+            if (node.role_family or "").casefold() == "evidence_retriever"
+            and node.artifact_type.casefold() in evidence_artifact_types
+            and node.id in self._unresolved_dirty_agents
+            and node.id not in self._repair_exhausted_agent_ids
+        )
+
     def _provider_repair_catalog_domain(
         self,
         current_model_id: str,
@@ -1560,6 +1642,14 @@ class AgentWorkflowEnv:
                                 "same_action_agent_ids",
                             ],
                         },
+                        **(
+                            {
+                                "relations": [],
+                                "output_agent_id": None,
+                            }
+                            if replacement_domains
+                            else {}
+                        ),
                     }
                     if self._uses_semantic_lineage_protocol()
                     else {}
@@ -1585,6 +1675,9 @@ class AgentWorkflowEnv:
                 for agent_id in modifiable_node_ids
                 if self._provider_repair_model_ids(agent_id)
             }
+            dirty_replacement_ids = set(
+                self._dirty_auxiliary_replacement_agent_ids()
+            )
             responsible_ids = set(measured_failed_ids)
             if not measured_failed_ids:
                 responsible_ids.update(self._unresolved_dirty_agents)
@@ -1610,6 +1703,8 @@ class AgentWorkflowEnv:
                     for field in (
                         ["model_id"]
                         if agent_id in provider_failure_agent_ids
+                        else ["contract", "completion_condition"]
+                        if agent_id in dirty_replacement_ids
                         else ["contract", "completion_condition"]
                         if (
                             self._uses_semantic_lineage_protocol()
@@ -4871,6 +4966,29 @@ class AgentWorkflowEnv:
                 f"{list(takeover_delete_ids)!r}"
             )
 
+        replacement_domains = (
+            self._repair_exhausted_auxiliary_replacement_domains()
+        )
+        if (
+            action.action_type is AgentActionType.ADD_SUBGRAPH
+            and len(action.agents) == 1
+            and (
+                replacement_role := (
+                    action.agents[0].role_family or ""
+                ).casefold()
+            )
+            in replacement_domains
+            and (action.agents[0].artifact_type or "text").casefold()
+            in replacement_domains[replacement_role]
+            and (action.relations or action.output_agent_id is not None)
+        ):
+            return (
+                "add the same-role/same-artifact auxiliary replacement "
+                "as an isolated executable prefix with relations=[] and no "
+                "output_agent_id. The accepted ADD executes immediately; route "
+                "its artifact to the Reasoner only after that execution succeeds"
+            )
+
         exhausted_reasoner_ids = self._repair_exhausted_reasoner_ids()
         if exhausted_reasoner_ids:
             failed_ingress_candidates = (
@@ -4899,6 +5017,36 @@ class AgentWorkflowEnv:
                     "into the ReAct-repair-exhausted Reasoner before other Canvas "
                     "edits; use an exact admitted set_relation candidate"
                 )
+
+        dirty_replacement_ids = self._dirty_auxiliary_replacement_agent_ids()
+        if dirty_replacement_ids:
+            mutable_fields = {
+                field
+                for field in (
+                    "model_id",
+                    "contract",
+                    "role_family",
+                    "allowed_tools",
+                    "execution_mode",
+                    "artifact_type",
+                    "completion_condition",
+                )
+                if getattr(action, field) is not None
+            }
+            if (
+                action.action_type is AgentActionType.MODIFY_AGENT
+                and action.agent_id in dirty_replacement_ids
+                and len(mutable_fields) == 1
+                and mutable_fields <= {"contract", "completion_condition"}
+            ):
+                return None
+            return (
+                "repair or execute only the unresolved same-role Evidence "
+                "Retriever replacement at max_agents before modifying blocked "
+                "downstream Agents; admissible_modify_agent_ids="
+                f"{list(dirty_replacement_ids)!r}; mutable_fields="
+                "['contract', 'completion_condition']"
+            )
 
         terminal_reachability_candidates = (
             self._terminal_reachability_relation_candidates()

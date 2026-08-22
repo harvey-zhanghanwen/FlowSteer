@@ -691,6 +691,20 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         for observation in visible:
             public_error_code = observation.get("public_error_code")
             if isinstance(public_error_code, str) and (
+                "entity_identity.evidence_surface is not supported by the "
+                "cited passage title identity chain"
+            ) in public_error_code:
+                observation["repair_instruction"] = (
+                    "Preserve the same successful read receipt, passage_id, passage "
+                    "title, target_relation, evidence_span, and proposition. Repair "
+                    "only entity_identity: keep question_surface on the original "
+                    "question entity and copy its coreferential evidence_surface from "
+                    "both that same passage title and exact evidence_span. Do not "
+                    "change the proposition. Emit a complete action; do not search "
+                    "or read again."
+                )
+                continue
+            if isinstance(public_error_code, str) and (
                 "Evidence Retriever evidence_span has no typography-canonical "
                 "lexical match"
             ) in public_error_code:
@@ -1098,6 +1112,16 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                                             "question. It must not be a wh-word or "
                                             "wh-phrase, the whole question, or a "
                                             "candidate/final answer."
+                                            + (
+                                                " For factual QA, an exact cited "
+                                                "passage-title binding may normalize "
+                                                "only one leading honorific and must "
+                                                "come from the same successful read "
+                                                "receipt."
+                                                if semantic_protocol
+                                                == QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL
+                                                else ""
+                                            )
                                         ),
                                     },
                                     "evidence_surface": {
@@ -1107,6 +1131,16 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                                             "question-side entity or event anchor, "
                                             "copied from the receipt-grounded exact "
                                             "evidence_span, not the whole span."
+                                            + (
+                                                " For factual QA, when a distinct "
+                                                "question_surface is exactly bound to "
+                                                "the cited passage title, this same-"
+                                                "entity surface must occur in both "
+                                                "that title and the exact evidence_span."
+                                                if semantic_protocol
+                                                == QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL
+                                                else ""
+                                            )
                                         ),
                                     },
                                 },
@@ -1713,14 +1747,32 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     "proposition surfaces. A different question/evidence surface may "
                     "use the same read receipt's passage title for explicit alias "
                     "binding, but both surfaces must be supported by that receipt's "
-                    "title/evidence_span. The anchor need not occupy a binary "
-                    "proposition argument; the Reasoner owns answer-slot binding. If "
-                    "the anchor occupies exactly one argument, the other argument must "
-                    "match the question-only answer_type_constraint; it must not occupy "
-                    "both arguments. "
-                    "evidence_proposition records only receipt-grounded subject, "
-                    "predicate, and object_or_attribute_value surfaces. Do not "
-                    "select or emit candidate_answer, answer_slot, or final_answer."
+                    "title/evidence_span."
+                )
+                if request.semantic_protocol == QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL:
+                    terminal_wire += (
+                        " For factual QA, when question_surface and evidence_surface "
+                        "differ and question_surface, verbatim or after removing one "
+                        "leading honorific, exactly equals that same read receipt's "
+                        "passage title, evidence_surface must be a coreferential "
+                        "identity surface present in both that title and the exact "
+                        "evidence_span. The entity/event anchor may occupy the subject, "
+                        "the object, or neither binary proposition argument. The "
+                        "Reasoner alone owns relation binding, answer-slot binding, and "
+                        "semantic answer selection."
+                    )
+                else:
+                    terminal_wire += (
+                        " The anchor need not occupy a binary proposition argument; "
+                        "the Reasoner owns answer-slot binding. If the anchor occupies "
+                        "exactly one argument, the other argument must match the "
+                        "question-only answer_type_constraint; it must not occupy both "
+                        "arguments."
+                    )
+                terminal_wire += (
+                    " evidence_proposition records only receipt-grounded subject, "
+                    "predicate, and object_or_attribute_value surfaces. Do not select "
+                    "or emit candidate_answer, answer_slot, or final_answer."
                 )
             else:
                 terminal_wire += (
@@ -1868,10 +1920,15 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         artifact: str,
         tool_receipts: Sequence[Mapping[str, object]],
     ) -> str | None:
-        """Validate one answer-free Retriever artifact against one read receipt."""
+        """Validate one answer-free Retriever artifact against one read receipt.
+
+        An exact same-receipt title binding can ground a distinct question and
+        evidence entity surface without weakening the contextual-anchor path.
+        """
 
         from .agent_workflow_env import (
             AgentWorkflowEnv,
+            _PERSON_TITLE_PATTERN,
             _canonical_evidence_text,
             _evidence_span_matches_read,
         )
@@ -2037,6 +2094,23 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         canonical_subject = _canonical_evidence_text(proposition_subject)
         canonical_predicate = _canonical_evidence_text(proposition_predicate)
         canonical_object = _canonical_evidence_text(proposition_object)
+        honorific_normalized_question = re.sub(
+            rf"^(?:{_PERSON_TITLE_PATTERN})\s+",
+            "",
+            canonical_question_surface,
+            count=1,
+            flags=re.IGNORECASE,
+        ).strip()
+        question_title_binding = bool(
+            canonical_title
+            and (
+                canonical_question_surface == canonical_title
+                or (
+                    honorific_normalized_question != canonical_question_surface
+                    and honorific_normalized_question == canonical_title
+                )
+            )
+        )
         if canonical_question_surface not in canonical_question:
             return (
                 "Evidence Retriever entity_identity.question_surface does not "
@@ -2095,6 +2169,16 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 "target_relation"
             )
 
+        if (
+            question_title_binding
+            and canonical_question_surface != canonical_evidence_surface
+            and canonical_evidence_surface not in canonical_title
+        ):
+            return (
+                "Evidence Retriever entity_identity.evidence_surface is not "
+                "supported by the cited passage title identity chain"
+            )
+
         entity_in_subject = canonical_evidence_surface in canonical_subject
         entity_in_object = canonical_evidence_surface in canonical_object
         if entity_in_subject and entity_in_object:
@@ -2102,7 +2186,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 "Evidence Retriever evidence proposition must not bind "
                 "entity_identity.evidence_surface to both relation arguments"
             )
-        if entity_in_subject != entity_in_object:
+        elif entity_in_subject != entity_in_object:
             open_argument = (
                 proposition_object if entity_in_subject else proposition_subject
             )
@@ -2120,12 +2204,20 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             canonical_receipt_identity_surface = " ".join(
                 part for part in (canonical_title, canonical_span) if part
             )
-            if (
+            explicit_receipt_binding = not (
                 canonical_question_surface
                 not in canonical_receipt_identity_surface
-                or canonical_evidence_surface
-                not in canonical_receipt_identity_surface
-            ):
+                or canonical_evidence_surface not in canonical_receipt_identity_surface
+            )
+
+            # PROJECT_NECESSARY_ADAPTATION: preserve SkillFlow's exact read-
+            # receipt boundary while normalizing only one leading linguistic
+            # honorific already enumerated by the shared semantic validator.
+            title_identity_binding = bool(
+                question_title_binding
+                and canonical_evidence_surface in canonical_title
+            )
+            if not explicit_receipt_binding and not title_identity_binding:
                 return (
                     "Evidence Retriever alias identity lacks an explicit binding "
                     "between question_surface and evidence_surface in the cited "
@@ -2255,6 +2347,10 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     "Evidence Retriever evidence_proposition.",
                     "Evidence Retriever evidence_proposition.predicate",
                     "Evidence Retriever evidence proposition must not bind",
+                    (
+                        "Evidence Retriever entity_identity.evidence_surface is not "
+                        "supported by the cited passage title identity chain"
+                    ),
                 )
             )
             if retriever_protocol == "hotpotqa_verified_answer_slot_v1":
