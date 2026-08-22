@@ -39,7 +39,7 @@ with HTTP 403; no existing branch was overwritten.
 
 ### Verified without a live model
 
-- The complete unit suite passes: 766 tests passed across AgentGraph, Runtime,
+- The complete unit suite passes: 767 tests passed across AgentGraph, Runtime,
   Tool adapter, gateway prompts, Director action domains, configuration,
   records, collector, evaluator and reporting.  The only warning is the
   existing Pydantic class-config deprecation in `scripts/formatter.py`.
@@ -135,20 +135,42 @@ that adds a receipt remains in repair so new evidence can be bound.  This does
 not convert the failure to database coverage, consume accepted answers, or
 change the evaluator.
 
-### Known issues before r4 live validation
+The isolated r4 canary collected both tasks without collection failure but
+failed Stable Zero at `0/2`.  It proved that the no-progress transition opened,
+then exposed an action-domain inconsistency.  On `triviaqa:tc_1`, the Canvas
+already contained Reasoner, Verifier and Formatter but lacked the final
+semantic relation.  Constrained decoding exposed only `add_subgraph`, while
+authoritative admission required the exact `set_relation`; 26 successive
+sampled ADD actions were therefore rejected.  On `triviaqa:tc_3`, recovery
+decoding exposed `min_new_agents=1,max_new_agents=3` while admission required
+exactly one recovery Agent.  After a Formatter was added, the same ADD-versus-
+relation conflict persisted through `max_rounds`.  The artifacts remain
+isolated under `artifacts/unified_architecture_v2/triviaqa_recovery_r4`.
+
+Recovery revision r5 makes the model action mask, live target domain and
+authoritative admission use one state projection.  Existing recovery ingress
+is routed first; an exact missing Reasoner -> Verifier -> Formatter edge is
+closed next; a missing semantic responsibility is then added progressively;
+the prospectively valid Formatter becomes Output; only then is another
+recovery branch admitted.  Recovery ADD is constrained to exactly one
+Evidence Retriever or Repair Agent, and partial semantic construction exposes
+only its missing role family.  This is an inference-wire repair of the existing
+FlowSteer Canvas boundary, not a topology template or training change.
+
+### Known issues before r5 live validation
 
 - The external Wikipedia index has only been exercised by the two-task failed
   canary; its operational coverage on the fixed 128 tasks is not yet measured.
 - Live SGLang constrained decoding and exact receipts must pass the isolated
-  r4 GPU0 Stable Zero canary before the 128-task run is allowed.
+  r5 GPU0 Stable Zero canary before the 128-task run is allowed.
 - The last-valid-lineage fallback intentionally remains a terminal failure and
   is excluded from training, even when its evaluator answer is correct.
 
 ### Stable Zero status
 
 Static architecture, recovery tests and data-selection preconditions are
-complete.  The initial, r2 and r3 canaries **failed Stable Zero** for the
-documented causes; recovery revision r4 is **pending live Stable Zero**.
+complete.  The initial, r2, r3 and r4 canaries **failed Stable Zero** for the
+documented causes; recovery revision r5 is **pending live Stable Zero**.
 Formal v2 EM/F1 remain pending.  No score is inferred from unit tests, a
 two-task canary, or the previous architecture.
 

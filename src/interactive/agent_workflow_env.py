@@ -507,13 +507,6 @@ class AgentWorkflowEnv:
                 in self._allowed_action_type_set
             ):
                 return (AgentActionType.SET_RELATION.value,)
-            if (
-                self._admissible_augmentation_role_families()
-                and can_add
-                and AgentActionType.ADD_SUBGRAPH.value
-                in self._allowed_action_type_set
-            ):
-                return (AgentActionType.ADD_SUBGRAPH.value,)
 
         required_relation_candidates = (
             self._required_semantic_relation_candidates()
@@ -523,11 +516,24 @@ class AgentWorkflowEnv:
             and AgentActionType.SET_RELATION.value
             in self._allowed_action_type_set
         ):
-            # Once the three semantic responsibilities have been declared,
-            # close the existing Reasoner -> Verifier -> Formatter dataflow
-            # before opening unrelated topology edits.  The Director still
-            # samples the exact Canvas relation action.
+            # Canvas admission requires the same exact edge before any recovery
+            # augmentation, so expose that edge rather than an ADD action which
+            # the authoritative gate would reject.
             return (AgentActionType.SET_RELATION.value,)
+
+        missing_role_families = self._missing_semantic_role_families()
+        if (
+            exhausted_reasoner_ids
+            and node_count
+            and missing_role_families
+            and can_add
+            and AgentActionType.ADD_SUBGRAPH.value
+            in self._allowed_action_type_set
+        ):
+            # Progressively complete a partially declared semantic spine before
+            # adding another recovery branch.  The live ADD role domain below
+            # exposes only the missing semantic responsibilities.
+            return (AgentActionType.ADD_SUBGRAPH.value,)
 
         output_target_ids = self._model_admissible_output_agent_ids()
         if (
@@ -538,6 +544,15 @@ class AgentWorkflowEnv:
             # A Formatter is exposed only after the prospective Canvas passes
             # the same Format-lineage checks used by authoritative admission.
             return (AgentActionType.SET_OUTPUT.value,)
+
+        if exhausted_reasoner_ids:
+            if (
+                self._model_admissible_add_role_families()
+                and can_add
+                and AgentActionType.ADD_SUBGRAPH.value
+                in self._allowed_action_type_set
+            ):
+                return (AgentActionType.ADD_SUBGRAPH.value,)
 
         deletable_ids = tuple(
             node_id
@@ -1044,6 +1059,36 @@ class AgentWorkflowEnv:
                 admitted.append(role_family)
         return tuple(admitted)
 
+    def _missing_semantic_role_families(self) -> Tuple[str, ...]:
+        """Return semantic responsibilities not owned by a usable Agent."""
+
+        if not self._uses_semantic_lineage_protocol():
+            return ()
+        return tuple(
+            role_family
+            for role_family in ("reasoner", "verifier", "format")
+            if not self._semantic_role_agent_ids(role_family)
+        )
+
+    def _model_admissible_add_role_families(self) -> Tuple[str, ...]:
+        """Project the exact live ADD role domain used by Canvas admission."""
+
+        admitted = self._admissible_augmentation_role_families()
+        missing = self._missing_semantic_role_families()
+        if (
+            self._repair_exhausted_reasoner_ids()
+            and self._graph.nodes
+            and missing
+        ):
+            return tuple(role for role in admitted if role in missing)
+        if self._repair_exhausted_reasoner_ids():
+            return tuple(
+                role
+                for role in admitted
+                if role in {"evidence_retriever", "repair"}
+            )
+        return admitted
+
     def _provider_repair_catalog_domain(
         self,
         current_model_id: str,
@@ -1128,13 +1173,16 @@ class AgentWorkflowEnv:
                     max(self.max_agents - len(node_ids), 0),
                 )
             )
+            missing_role_families = self._missing_semantic_role_families()
             if (
                 self._repair_exhausted_reasoner_ids()
-                and not self._recovery_auxiliary_agent_ids()
+                and self._graph.nodes
+                and missing_role_families
             ):
-                # The staged ADD schema currently carries at most one relation.
-                # Add one auxiliary execution unit so it can be attached to the
-                # measured Reasoner without filling the Canvas with orphan nodes.
+                remaining = min(remaining, len(missing_role_families))
+            elif self._repair_exhausted_reasoner_ids():
+                # Recovery augmentation is one executable unit.  Keep the live
+                # schema on the same one-Agent boundary enforced by admission.
                 remaining = min(remaining, 1)
             targets[AgentActionType.ADD_SUBGRAPH.value] = {
                 "min_new_agents": 1,
@@ -1189,7 +1237,7 @@ class AgentWorkflowEnv:
                             },
                         },
                         "admitted_new_role_families": list(
-                            self._admissible_augmentation_role_families()
+                            self._model_admissible_add_role_families()
                         ),
                         "endpoint_scope": {
                             "relation_endpoint_sources": [
@@ -3927,16 +3975,29 @@ class AgentWorkflowEnv:
                 if mandatory_repair
                 else ["set_relation"]
                 if repair_routing_candidates
+                else ["set_relation"]
+                if required_relation_candidates
                 else ["add_subgraph"]
                 if (
                     repair_exhausted
-                    and self._admissible_augmentation_role_families()
-                    and (self.max_agents is None or len(self._graph.nodes) < self.max_agents)
+                    and self._graph.nodes
+                    and self._missing_semantic_role_families()
+                    and (
+                        self.max_agents is None
+                        or len(self._graph.nodes) < self.max_agents
+                    )
                 )
-                else ["set_relation"]
-                if required_relation_candidates
                 else ["set_output"]
                 if self._uses_semantic_lineage_protocol() and output_target_ids
+                else ["add_subgraph"]
+                if (
+                    repair_exhausted
+                    and self._model_admissible_add_role_families()
+                    and (
+                        self.max_agents is None
+                        or len(self._graph.nodes) < self.max_agents
+                    )
+                )
                 else ["set_relation", "modify_agent", "add_subgraph"]
                 if repair_exhausted
                 else ["delete_agent", "set_relation", "modify_agent"]
@@ -4174,55 +4235,91 @@ class AgentWorkflowEnv:
         exhausted_reasoner_ids = self._repair_exhausted_reasoner_ids()
         if exhausted_reasoner_ids:
             routing_candidates = self._repair_exhausted_relation_candidates()
-            if routing_candidates and not any(
-                self._relation_action_matches_candidate(action, candidate)
-                for candidate in routing_candidates
-            ):
+            if routing_candidates:
+                if any(
+                    self._relation_action_matches_candidate(action, candidate)
+                    for candidate in routing_candidates
+                ):
+                    return None
                 return (
                     "route one existing Evidence Retriever or Repair artifact "
-                    "into the Tool-plan-exhausted Reasoner before other Canvas "
+                    "into the ReAct-repair-exhausted Reasoner before other Canvas "
                     "edits; use an exact admitted set_relation candidate"
                 )
-            if (
-                not routing_candidates
-                and self._admissible_augmentation_role_families()
-                and (self.max_agents is None or len(self._graph.nodes) < self.max_agents)
-            ):
-                if action.action_type is not AgentActionType.ADD_SUBGRAPH:
-                    return (
-                        "augment the Tool-plan-exhausted Reasoner with one "
-                        "Evidence Retriever or Repair execution unit before other "
-                        "Canvas edits"
-                    )
-                if len(action.agents) != 1:
-                    return (
-                        "Tool-plan-exhausted augmentation admits exactly one new "
-                        "Evidence Retriever or Repair Agent so the staged relation "
-                        "can attach it without creating orphan Agents"
-                    )
 
         required_relation_candidates = (
             self._required_semantic_relation_candidates()
         )
-        if required_relation_candidates and not any(
-            self._relation_action_matches_candidate(action, candidate)
-            for candidate in required_relation_candidates
-        ):
+        if required_relation_candidates:
+            if any(
+                self._relation_action_matches_candidate(action, candidate)
+                for candidate in required_relation_candidates
+            ):
+                return None
             return (
                 "close the declared Reasoner -> Verifier -> Formatter semantic "
                 "dataflow before other Canvas edits; use an exact admitted "
                 "set_relation candidate"
             )
 
-        output_target_ids = self._model_admissible_output_agent_ids()
-        if output_target_ids and (
-            action.action_type is not AgentActionType.SET_OUTPUT
-            or action.agent_id not in output_target_ids
+        missing_role_families = self._missing_semantic_role_families()
+        if (
+            exhausted_reasoner_ids
+            and self._graph.nodes
+            and missing_role_families
         ):
+            sampled_role_families = tuple(
+                (spec.role_family or "").casefold() for spec in action.agents
+            )
+            if (
+                action.action_type is AgentActionType.ADD_SUBGRAPH
+                and 1 <= len(action.agents) <= len(missing_role_families)
+                and len(sampled_role_families) == len(set(sampled_role_families))
+                and set(sampled_role_families) <= set(missing_role_families)
+            ):
+                return None
+            return (
+                "complete the missing semantic responsibilities before recovery "
+                "augmentation; add only roles from admitted_new_role_families="
+                f"{list(missing_role_families)!r}"
+            )
+
+        output_target_ids = self._model_admissible_output_agent_ids()
+        if output_target_ids:
+            if (
+                action.action_type is AgentActionType.SET_OUTPUT
+                and action.agent_id in output_target_ids
+            ):
+                return None
             return (
                 "select the prospectively valid Formatter Output Agent before "
                 "other Canvas edits; admissible_output_agent_ids="
                 f"{list(output_target_ids)!r}"
+            )
+
+        if (
+            exhausted_reasoner_ids
+            and self._model_admissible_add_role_families()
+            and (
+                self.max_agents is None
+                or len(self._graph.nodes) < self.max_agents
+            )
+        ):
+            sampled_role_families = tuple(
+                (spec.role_family or "").casefold() for spec in action.agents
+            )
+            if (
+                action.action_type is AgentActionType.ADD_SUBGRAPH
+                and len(action.agents) == 1
+                and sampled_role_families
+                and sampled_role_families[0]
+                in self._model_admissible_add_role_families()
+            ):
+                return None
+            return (
+                "ReAct-repair-exhausted augmentation admits exactly one new "
+                "Evidence Retriever or Repair Agent so the staged relation can "
+                "attach it without creating orphan Agents"
             )
 
         if action.action_type is AgentActionType.SET_RELATION:

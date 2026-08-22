@@ -2367,6 +2367,12 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("add_subgraph", recovery["preferred_actions"])
         self.assertNotEqual(("modify_agent",), env.model_admissible_action_types())
         add_domain = env.model_admissible_action_targets()["add_subgraph"]
+        self.assertEqual(1, add_domain["min_new_agents"])
+        self.assertEqual(1, add_domain["max_new_agents"])
+        self.assertEqual(
+            ["evidence_retriever", "repair"],
+            add_domain["admitted_new_role_families"],
+        )
         self.assertIn(
             "evidence_retriever",
             add_domain["admitted_new_role_families"],
@@ -2874,6 +2880,7 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             recovery_policy="preserve_diagnose_repair_augment",
             required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
         )
+        env._repair_exhausted_agent_ids.add("reasoner")
 
         self.assertEqual(("set_relation",), env.model_admissible_action_types())
         relation_candidates = env.model_admissible_action_targets()[
@@ -2911,6 +2918,7 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             '{"action":"set_output","agent_id":"formatter"}'
         )
         self.assertTrue(selected.accepted)
+        env._repair_exhausted_agent_ids.discard("reasoner")
 
         removed_spine = await env.step(
             '{"action":"set_relation","source_id":"reasoner",'
@@ -2919,6 +2927,79 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(removed_spine.accepted)
         self.assertIn("semantic-lineage relation", removed_spine.feedback)
+
+    async def test_hotpot_live_domain_completes_missing_semantic_role_before_augmentation(
+        self,
+    ) -> None:
+        complete = _hotpot_semantic_graph()
+        graph = AgentGraph(
+            [node for node in complete.nodes if node.id != "formatter"],
+            [
+                relation
+                for relation in complete.relations
+                if "formatter" not in {relation.source_id, relation.target_id}
+            ],
+        )
+        registry = make_registry()
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_hotpot_semantic_runtime(registry, _ImmediateGateway()),
+            graph=graph,
+            problem="What is the capital of France?",
+            execute_on_edit=False,
+            semantic_protocol="hotpotqa_verified_answer_slot_v1",
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+        )
+        env._repair_exhausted_agent_ids.add("reasoner")
+
+        self.assertEqual(("add_subgraph",), env.model_admissible_action_types())
+        add_domain = env.model_admissible_action_targets()["add_subgraph"]
+        self.assertEqual(1, add_domain["min_new_agents"])
+        self.assertEqual(1, add_domain["max_new_agents"])
+        self.assertEqual(["format"], add_domain["admitted_new_role_families"])
+
+        wrong_role = await env.step(
+            json.dumps(
+                {
+                    "action": "add_subgraph",
+                    "agents": [
+                        {
+                            "agent_id": "repair_reader",
+                            "model_id": "cheap",
+                            "contract": "retrieve supplementary evidence",
+                            "role_family": "evidence_retriever",
+                            "allowed_tools": [QA_RETRIEVAL_TOOL_ID],
+                            "execution_mode": "react",
+                        }
+                    ],
+                    "relations": [],
+                }
+            )
+        )
+        self.assertFalse(wrong_role.accepted)
+        self.assertIn("missing semantic responsibilities", wrong_role.feedback)
+
+        formatter = await env.step(
+            json.dumps(
+                {
+                    "action": "add_subgraph",
+                    "agents": [
+                        {
+                            "agent_id": "formatter",
+                            "model_id": "fast",
+                            "contract": _HOTPOTQA_FORMAT_CONTRACT,
+                            "role_family": "format",
+                            "allowed_tools": [],
+                            "execution_mode": "reasoning",
+                        }
+                    ],
+                    "relations": [],
+                }
+            )
+        )
+        self.assertTrue(formatter.accepted)
+        self.assertEqual(("set_relation",), env.model_admissible_action_types())
 
     async def test_hotpot_partial_auxiliary_success_preserves_reasoner_recovery(
         self,
