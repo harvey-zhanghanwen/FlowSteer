@@ -9,8 +9,8 @@ provided-context retrieval runtime, and concise
 or merge the r4 trajectories; r4 metrics are comparison references only.
 
 The current condition is configured in
-`config/evaluation_hotpotqa_role_conditional_v1_r14.yaml`. Its artifacts and
-reports use the independent `hotpotqa_role_conditional_v1_r14` namespace.
+`config/evaluation_hotpotqa_role_conditional_v1_r15.yaml`. Its artifacts and
+reports use the independent `hotpotqa_role_conditional_v1_r15` namespace.
 
 ## Directly reused from FlowSteer
 
@@ -298,6 +298,45 @@ observations are preserved. A pure Formatter is never used as a multi-branch
 aggregator. This is a necessary AgentGraph adaptation of FlowSteer's existing
 fan-in boundary, not an automatic topology, role template, answer selection,
 or FINISH operation.
+
+The r14 formal run remains preserved as an incomplete six-task diagnostic; it
+is not a 128-task metric. Two tasks reached `max_rounds`. In one, a
+receipt-grounded semantic artifact had an independent route to the selected
+Output while a failed upstream dependency still blocked that Output. In the
+other, one member of a reciprocal block produced a useful public artifact
+before its peer failed, but the block-level exception discarded that
+artifact. These are measured Runtime/Canvas recovery faults, not evidence for
+adding a mandatory semantic-role sequence.
+
+The independent r15 condition repairs only those measured boundaries. It
+continues to reuse FlowSteer's edit--execute--feedback transaction
+(`src/interactive/workflow_env.py::_step_internal` and `_execute_workflow`),
+its progressive execution cache
+(`src/vllm_workflow_generator.py::_execute_workflow`), and its bounded
+parallel/Aggregate execution. It also continues to reuse SkillFlow's public
+bounded Action--Observation and failure receipts from
+`src/skillev/runtime/bounded_agent.py::BoundedAgent.execute_turn` and
+`src/skillev/rollout/engine.py`. AgentRuntime now retains a successful peer's
+public artifact and Tool receipts as a non-terminal partial result when the
+other reciprocal peer fails; that partial result remains dirty, cannot enter
+the execution cache, and cannot satisfy FINISH. When a revision-live,
+receipt-grounded artifact already reaches the selected Output independently,
+the next Canvas domain may admit one exact directed
+`SET_RELATION(source, failed ancestor)` repair before rerunning the affected
+dirty closure. This one-edge projection and reciprocal partial retention are
+necessary AgentGraph adapters because neither upstream implementation exposes
+this project's selected-Output failure state. They do not select an answer,
+execute FINISH, delete an edge, reverse an edge, or prescribe a topology.
+
+Deletion remains the final recovery operation. A node must be explicitly
+diagnosed unusable, and a same-role/same-artifact replacement must already own
+all downstream responsibilities while preserving any previous-revision
+semantic candidate and successful Tool evidence (or its explicit public
+continuation handoff). If no configured action can perform a mandatory repair,
+the Director action mask exposes an empty domain instead of advertising an
+edit that the preservation gate must reject. Reasoner, Verifier, Formatter,
+generic Output, retrieval, and repair remain optional capabilities; r15 adds
+no fixed role set, role ordering, ancestor chain, or FINISH prerequisite.
 
 ## Not implemented or enabled in this condition
 
