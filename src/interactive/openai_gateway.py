@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import socket
 import time
 from typing import Any, Dict, Mapping, Optional, Sequence
@@ -129,6 +130,24 @@ _HOTPOTQA_SEMANTIC_PROTOCOLS = {
 }
 
 
+def _normalized_semantic_json_object(artifact: str) -> Optional[dict[str, object]]:
+    """Parse one semantic JSON object using the Runtime's field normalization."""
+
+    try:
+        parsed = json.loads(artifact)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(parsed, Mapping):
+        return None
+    fields: dict[str, object] = {}
+    for raw_key, value in parsed.items():
+        key = re.sub(r"[ -]+", "_", str(raw_key).strip().casefold())
+        if key in fields:
+            return None
+        fields[key] = value
+    return fields
+
+
 def _single_labeled_value(artifact: str, label: str) -> Optional[str]:
     """Return one non-empty line value from a structured semantic artifact."""
 
@@ -146,10 +165,7 @@ def _single_labeled_value(artifact: str, label: str) -> Optional[str]:
 def _hotpotqa_supported_verifier_candidate(artifact: str) -> Optional[str]:
     """Return a supported candidate, ``None`` for auxiliary, or ``""`` if invalid."""
 
-    try:
-        fields = json.loads(artifact)
-    except (TypeError, ValueError, json.JSONDecodeError):
-        fields = None
+    fields = _normalized_semantic_json_object(artifact)
     verifier_keys = {
         "verification_status",
         "evidence_supported",
@@ -205,10 +221,7 @@ def _hotpotqa_role_conditional_semantic_candidate(
     checks and attributes their repair.
     """
 
-    try:
-        fields = json.loads(artifact)
-    except (TypeError, ValueError, json.JSONDecodeError):
-        fields = None
+    fields = _normalized_semantic_json_object(artifact)
     if isinstance(fields, Mapping):
         raw_candidate = fields.get("candidate_answer")
         if raw_candidate is None:

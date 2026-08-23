@@ -2610,6 +2610,10 @@ class AgentWorkflowEnv:
         if attribution is None:
             return ()
         if self._uses_role_conditional_capabilities():
+            format_serialization_repair = (
+                attribution.get("responsible_constraint")
+                == "format_serialization"
+            )
             raw_responsible_ids = attribution.get("responsible_agent_ids", ())
             responsible_ids = tuple(
                 dict.fromkeys(
@@ -2617,7 +2621,10 @@ class AgentWorkflowEnv:
                     for agent_id in raw_responsible_ids
                     if isinstance(agent_id, str)
                     and self._graph.has_node(agent_id)
-                    and agent_id != self._graph.output_agent_id
+                    and (
+                        agent_id != self._graph.output_agent_id
+                        or format_serialization_repair
+                    )
                 )
             )
             if responsible_ids:
@@ -2626,7 +2633,10 @@ class AgentWorkflowEnv:
             if (
                 isinstance(agent_id, str)
                 and self._graph.has_node(agent_id)
-                and agent_id != self._graph.output_agent_id
+                and (
+                    agent_id != self._graph.output_agent_id
+                    or format_serialization_repair
+                )
             ):
                 return (agent_id,)
             return ()
@@ -7426,7 +7436,13 @@ class AgentWorkflowEnv:
         except (TypeError, ValueError, json.JSONDecodeError):
             parsed = None
         if isinstance(parsed, Mapping):
-            candidate = parsed.get("candidate_answer")
+            normalized = {
+                re.sub(r"[ -]+", "_", str(raw_key).strip().casefold()): value
+                for raw_key, value in parsed.items()
+            }
+            if len(normalized) != len(parsed):
+                return None, "semantic candidate wire contains duplicate fields"
+            candidate = normalized.get("candidate_answer")
             if (
                 isinstance(candidate, str)
                 and candidate

@@ -2716,8 +2716,11 @@ class RoleConditionalTerminalTests(unittest.TestCase):
                 UpstreamMessage(
                     "semantic_producer",
                     "output",
-                    f"Candidate answer: {SYNTHETIC_CANDIDATE}",
-                    artifact_type="semantic_candidate",
+                    json.dumps(
+                        {"Candidate answer": SYNTHETIC_CANDIDATE},
+                        sort_keys=True,
+                    ),
+                    artifact_type="verification_report",
                 ),
             ),
         )
@@ -2796,15 +2799,15 @@ class RoleConditionalTerminalTests(unittest.TestCase):
         registry = _registry()
         repair_required = json.dumps(
             {
-                "candidate_answer": SYNTHETIC_CANDIDATE,
-                "evidence_supported": False,
-                "entity_attribute_binding_correct": True,
-                "alias_binding_correct": True,
-                "answer_type_cardinality_correct": True,
-                "multi_hop_complete": True,
-                "minimal_answer_surface": True,
-                "scope_preserved": True,
-                "verification_status": "repair_required",
+                "Candidate answer": SYNTHETIC_CANDIDATE,
+                "Evidence supported": False,
+                "Entity attribute binding correct": True,
+                "Alias binding correct": True,
+                "Answer type cardinality correct": True,
+                "Multi-hop complete": True,
+                "Minimal answer surface": True,
+                "Scope preserved": True,
+                "Verification status": "repair_required",
             },
             sort_keys=True,
         )
@@ -2847,6 +2850,55 @@ class RoleConditionalTerminalTests(unittest.TestCase):
             messages[1]["content"],
         )
         self.assertNotIn("Candidate answer: repair_required", messages[1]["content"])
+
+    def test_formatter_accepts_live_title_case_supported_verifier_wire(self) -> None:
+        registry = _registry()
+        supported = json.dumps(
+            {
+                "Alias binding correct": True,
+                "Answer type cardinality correct": True,
+                "Candidate answer": SYNTHETIC_CANDIDATE,
+                "Entity attribute binding correct": True,
+                "Evidence supported": True,
+                "Minimal answer surface": True,
+                "Multi-hop complete": True,
+                "Scope preserved": True,
+                "Verification status": "supported",
+            },
+            sort_keys=True,
+        )
+        request = AgentRequest(
+            request_id="hotpot:formatter-live-verifier-wire",
+            run_id="hotpot",
+            graph_revision=1,
+            problem=SYNTHETIC_QUESTION,
+            agent=AgentNode(
+                "formatter",
+                "model-b",
+                _HOTPOTQA_ROLE_CONDITIONAL_FORMAT_CONTRACT,
+                role_family="format",
+                execution_mode="reasoning",
+            ),
+            model=registry.require_model("model-b"),
+            provider=registry.provider_for("model-b"),
+            phase=ExecutionPhase.SINGLE,
+            is_output_agent=True,
+            is_format_agent=True,
+            require_exact_answer_tag=True,
+            semantic_protocol=SEMANTIC_PROTOCOL,
+            upstream=(
+                UpstreamMessage(
+                    "verifier",
+                    "formatter",
+                    supported,
+                    artifact_type="verification_report",
+                ),
+            ),
+        )
+
+        user = build_agent_messages(request)[1]["content"]
+        self.assertIn(f"Candidate answer: {SYNTHETIC_CANDIDATE}", user)
+        self.assertNotIn(SYNTHETIC_QUESTION, user)
 
     def test_reasoner_cross_field_failure_preserves_routed_retriever(
         self,
@@ -3536,6 +3588,68 @@ class RoleConditionalTerminalTests(unittest.TestCase):
         issue = env._semantic_protocol_issue(changed)
         self.assertIsNotNone(issue)
         self.assertIn("character-for-character", issue or "")
+
+    def test_format_serialization_repair_preserves_upstream_agents(self) -> None:
+        registry = _registry()
+        graph = AgentGraph(
+            [
+                _evidence_agent(),
+                AgentNode(
+                    "candidate_source",
+                    "model-a",
+                    "determine one semantic candidate from routed evidence",
+                    role_family="repair",
+                    execution_mode="reasoning",
+                    artifact_type="semantic_candidate",
+                ),
+                AgentNode(
+                    "formatter",
+                    "model-b",
+                    _HOTPOTQA_ROLE_CONDITIONAL_FORMAT_CONTRACT,
+                    role_family="format",
+                    execution_mode="reasoning",
+                    artifact_type="answer_wrapper",
+                ),
+            ],
+            [
+                AgentRelation("retriever", "candidate_source", True, False),
+                AgentRelation("candidate_source", "formatter", True, False),
+            ],
+            output_agent_id="formatter",
+        )
+        env = _env(registry, graph=graph)
+        outputs = {
+            "retriever": _retrieval_artifact(),
+            "candidate_source": json.dumps(
+                {"Candidate answer": SYNTHETIC_CANDIDATE},
+                sort_keys=True,
+            ),
+            "formatter": "<answer></answer>",
+        }
+        execution = _execution(
+            graph,
+            outputs=outputs,
+            final_answer=outputs["formatter"],
+            receipt_agent_ids=("retriever",),
+        )
+        env._progressive_execution = execution
+        env._progressive_execution_revision = graph.revision
+        env._progressive_outputs = dict(outputs)
+        env._progressive_output_metadata = {
+            "retriever": {"tool_receipts": [_read_receipt()]},
+        }
+
+        finish = env.finish_admissibility()
+        self.assertIs(finish["admissible"], False)
+        attribution = finish["failure_attribution"]
+        self.assertEqual("format_serialization", attribution["responsible_constraint"])
+        self.assertEqual(["formatter"], attribution["responsible_agent_ids"])
+        self.assertIn("retriever", attribution["preserve_agent_ids"])
+        self.assertIn("candidate_source", attribution["preserve_agent_ids"])
+        self.assertEqual(("modify_agent",), env.model_admissible_action_types())
+        targets = env.model_admissible_action_targets()
+        self.assertEqual(["formatter"], targets["modify_agent"]["agent_ids"])
+        self.assertNotIn("add_subgraph", targets)
 
     def test_formatter_rejects_raw_retrieval_as_its_semantic_candidate(self) -> None:
         registry = _registry()

@@ -657,7 +657,7 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
                 UpstreamMessage(
                     "semantic",
                     "output",
-                    "Candidate answer: Target Gamma",
+                    json.dumps({"Candidate answer": "Target Gamma"}),
                     artifact_type="semantic_candidate",
                 ),
             ),
