@@ -990,10 +990,10 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             completion: bool,
         ) -> tuple[Optional[frozenset[tuple[str, str]]], bool]:
             # A direct Retriever predecessor may satisfy semantic provenance,
-            # but its receipts remain outside this Reasoner's own Tool budget.
+            # but its receipts remain outside this semantic Agent's Tool budget.
             # Completion validation below still checks every cited span.  Once
             # that exact upstream evidence has produced an evidence/provenance
-            # rejection, preserve it but revoke completion until this Reasoner
+            # rejection, preserve it but revoke completion until this Agent
             # obtains a new successful read through the public SkillFlow
             # Action--Observation continuation.  Otherwise one irrelevant
             # predecessor read permanently masks the search/read recovery
@@ -1094,8 +1094,8 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             # SkillFlow's retrieval environment owns public search/read
             # observations.  In the role-conditional AgentGraph, the selected
             # Retriever therefore exports only receipt-grounded evidence;
-            # predicate--argument and answer-slot alignment remain Reasoner
-            # responsibilities.
+            # predicate--argument and answer-slot alignment remain downstream
+            # semantic-producer responsibilities.
             return {
                 "type": "object",
                 "required": ["value"],
@@ -1814,7 +1814,8 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                         "one successful qa-retrieval read receipt. Do not add "
                         "entity_identity, target_relation, answer_type_constraint, "
                         "evidence_proposition, answer_slot, candidate_answer, or "
-                        "final_answer; the Reasoner owns semantic alignment."
+                        "final_answer; a downstream semantic producer owns "
+                        "semantic alignment."
                     )
                 else:
                     terminal_wire += (
@@ -1890,8 +1891,13 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 "question with a possessive construction, reject a candidate that "
                 "drops part of the possessor entity mention before the possessive "
                 "marker, including a source title, honorific, or name suffix. Do not "
-                "replace the Reasoner's candidate. Return "
-                "Candidate answer, the seven explicit boolean check fields, and "
+                + (
+                    "replace the routed semantic producer's candidate. Return "
+                    if request.semantic_protocol
+                    == HOTPOTQA_ROLE_CONDITIONAL_PROTOCOL
+                    else "replace the Reasoner's candidate. Return "
+                )
+                + "Candidate answer, the seven explicit boolean check fields, and "
                 "Verification status. Every check field must be the literal boolean "
                 "true or false, never the candidate text or an explanation. Set "
                 "supported only when all checks pass; "

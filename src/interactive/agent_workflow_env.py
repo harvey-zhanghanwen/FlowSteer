@@ -3874,15 +3874,72 @@ class AgentWorkflowEnv:
                         "scope_preserved",
                     )
                 )
+                semantic_producer_ids: Tuple[str, ...] = ()
                 if (
                     self._uses_role_conditional_capabilities()
                     and verifier_check_failure
-                    and routed_reasoner_ids
+                    and target_id is not None
+                    and (
+                        self._graph.get_node(target_id).role_family or ""
+                    ).casefold()
+                    == "verifier"
                 ):
-                    target_id = routed_reasoner_ids[0]
-                    role_family = "reasoner"
-                    responsible_ids = routed_reasoner_ids
-                    constraint = "reasoner_semantic_artifact"
+                    verifier_candidate, _ = self._semantic_candidate_from_artifact(
+                        self._progressive_outputs.get(target_id, "")
+                    )
+                    routed_producers: list[tuple[int, str]] = []
+                    for ancestor_id in self._directed_ancestor_ids(
+                        self._graph,
+                        target_id,
+                    ):
+                        ancestor_role = (
+                            self._graph.get_node(ancestor_id).role_family or ""
+                        ).casefold()
+                        if ancestor_role in {
+                            "evidence_retriever",
+                            "verifier",
+                            "format",
+                            "output",
+                        }:
+                            continue
+                        producer_candidate, producer_issue = (
+                            self._semantic_candidate_from_artifact(
+                                self._progressive_outputs.get(ancestor_id, "")
+                            )
+                        )
+                        path = self._directed_shortest_path(
+                            self._graph,
+                            ancestor_id,
+                            target_id,
+                        )
+                        if (
+                            producer_issue is None
+                            and producer_candidate is not None
+                            and (
+                                verifier_candidate is None
+                                or producer_candidate == verifier_candidate
+                            )
+                            and path
+                        ):
+                            routed_producers.append((len(path), ancestor_id))
+                    if routed_producers:
+                        minimum_path_length = min(
+                            length for length, _ in routed_producers
+                        )
+                        semantic_producer_ids = tuple(
+                            agent_id
+                            for length, agent_id in routed_producers
+                            if length == minimum_path_length
+                        )
+                if (
+                    self._uses_role_conditional_capabilities()
+                    and verifier_check_failure
+                    and semantic_producer_ids
+                ):
+                    target_id = semantic_producer_ids[0]
+                    role_family = self._graph.get_node(target_id).role_family
+                    responsible_ids = semantic_producer_ids
+                    constraint = "semantic_candidate_artifact"
                 else:
                     role_family = "verifier"
                     constraint = "verifier_semantic_artifact"

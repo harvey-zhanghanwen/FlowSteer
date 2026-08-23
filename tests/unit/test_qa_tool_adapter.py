@@ -2736,6 +2736,73 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             completion_contract,
         )
 
+    def test_role_conditional_retriever_and_verifier_do_not_require_reasoner(
+        self,
+    ) -> None:
+        adapter = QARetrievalReactExecutionAdapter(
+            gateway=SimpleNamespace(generate=lambda request: None),
+            tool_registry=build_qa_tool_registry(FakeIndex()),
+            max_turns=5,
+            max_tool_calls=4,
+            task_type="multi_hop_qa",
+            completion_policy="required_evidence",
+        )
+        request = AgentRequest(
+            request_id="hotpot:open-retriever",
+            run_id="hotpot",
+            graph_revision=1,
+            problem="Which target is reached through Bridge Beta?",
+            agent=AgentNode(
+                "retriever",
+                "model",
+                "retrieve receipt-grounded evidence",
+                role_family="evidence_retriever",
+                allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                execution_mode="react",
+            ),
+            model=ModelSpec("model", "provider"),
+            provider=ProviderSpec("provider", kind="test"),
+            phase=ExecutionPhase.SINGLE,
+            semantic_protocol="hotpotqa_role_conditional_capabilities_v1",
+        )
+        observations = [
+            {
+                "observation_status": "success",
+                "result": {
+                    "operation": "read",
+                    "passage_id": passage_id,
+                    "passage": {"text": f"Evidence from {passage_id}."},
+                },
+            }
+            for passage_id in ("p1", "p2")
+        ]
+
+        retriever_contract = adapter._contract(request, observations)
+        self.assertIn(
+            "a downstream semantic producer owns semantic alignment",
+            retriever_contract,
+        )
+        self.assertNotIn("the Reasoner owns semantic alignment", retriever_contract)
+
+        verifier_contract = adapter._contract(
+            replace(
+                request,
+                request_id="hotpot:open-verifier",
+                agent=replace(
+                    request.agent,
+                    id="verifier",
+                    role_family="verifier",
+                    contract="verify the routed semantic candidate",
+                ),
+            ),
+            observations,
+        )
+        self.assertIn(
+            "Do not replace the routed semantic producer's candidate",
+            verifier_contract,
+        )
+        self.assertNotIn("Reasoner's candidate", verifier_contract)
+
     def test_evidence_retriever_accepts_david_soul_title_alias_binding(
         self,
     ) -> None:

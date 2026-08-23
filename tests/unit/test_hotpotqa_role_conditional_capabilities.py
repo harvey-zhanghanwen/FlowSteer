@@ -274,6 +274,59 @@ def _output_agent(agent_id: str = "output") -> AgentNode:
     )
 
 
+def _generic_verifier_failure_attribution(
+    verifier_artifact: str,
+) -> dict[str, object]:
+    registry = _registry()
+    graph = AgentGraph(
+        [
+            _evidence_agent(),
+            AgentNode(
+                "semantic_producer",
+                "model-a",
+                "determine one semantic candidate from routed evidence",
+                role_family="repair",
+                execution_mode="reasoning",
+                artifact_type="semantic_candidate",
+            ),
+            AgentNode(
+                "verifier",
+                "model-b",
+                "verify the routed semantic candidate",
+                role_family="verifier",
+                execution_mode="reasoning",
+                artifact_type="verification_report",
+            ),
+            _output_agent(),
+        ],
+        [
+            AgentRelation("retriever", "semantic_producer", True, False),
+            AgentRelation("semantic_producer", "verifier", True, False),
+            AgentRelation("verifier", "output", True, False),
+        ],
+        output_agent_id="output",
+    )
+    outputs = {
+        "retriever": _retrieval_artifact(),
+        "semantic_producer": f"Candidate answer: {SYNTHETIC_CANDIDATE}",
+        "verifier": verifier_artifact,
+        "output": f"<answer>{SYNTHETIC_CANDIDATE}</answer>",
+    }
+    env = _env(registry, graph=graph)
+    execution = _execution(
+        graph,
+        outputs=outputs,
+        final_answer=outputs["output"],
+        receipt_agent_ids=("retriever",),
+    )
+    env._progressive_execution = execution
+    env._progressive_execution_revision = graph.revision
+    env._progressive_outputs = dict(outputs)
+    attribution = env.finish_admissibility()["failure_attribution"]
+    assert isinstance(attribution, dict)
+    return attribution
+
+
 class RoleConditionalSearchSpaceTests(unittest.TestCase):
     def test_semantic_roles_are_optional_and_react_is_not_a_role(self) -> None:
         registry = _registry()
@@ -1621,6 +1674,46 @@ class RoleConditionalTerminalTests(unittest.TestCase):
         )
         self.assertIn("do not choose among them", system)
 
+    def test_react_verifier_consumes_a_generic_semantic_producer(self) -> None:
+        registry = _registry()
+        producer_artifact = f"Candidate answer: {SYNTHETIC_CANDIDATE}"
+        request = AgentRequest(
+            request_id="hotpot:react-verifier",
+            run_id="hotpot",
+            graph_revision=1,
+            problem=SYNTHETIC_QUESTION,
+            agent=AgentNode(
+                "verifier",
+                "model-b",
+                "verify the routed semantic candidate",
+                role_family="verifier",
+                execution_mode="react",
+            ),
+            model=registry.require_model("model-b"),
+            provider=registry.provider_for("model-b"),
+            phase=ExecutionPhase.SINGLE,
+            semantic_protocol=SEMANTIC_PROTOCOL,
+            upstream=(
+                UpstreamMessage(
+                    "semantic_producer",
+                    "verifier",
+                    producer_artifact,
+                    artifact_type="semantic_candidate",
+                ),
+            ),
+        )
+
+        messages = build_agent_messages(request)
+        system = messages[0]["content"]
+        self.assertIn("Inspect the routed semantic candidate", system)
+        self.assertIn(
+            "Copy the routed Candidate answer character-for-character",
+            system,
+        )
+        self.assertNotIn("routed Reasoner candidate", system)
+        self.assertNotIn("Reasoner's Candidate answer", system)
+        self.assertIn(producer_artifact, messages[1]["content"])
+
     def test_formatter_preserves_candidate_when_verifier_requests_repair(self) -> None:
         registry = _registry()
         repair_required = json.dumps(
@@ -2018,6 +2111,36 @@ class RoleConditionalTerminalTests(unittest.TestCase):
         self.assertIn(
             "Verifier changed a routed semantic candidate_answer",
             issue or "",
+        )
+
+    def test_false_verifier_check_targets_actual_generic_semantic_producer(
+        self,
+    ) -> None:
+        verifier_fields = json.loads(_verifier_artifact())
+        verifier_fields["evidence_supported"] = False
+        attribution = _generic_verifier_failure_attribution(
+            json.dumps(verifier_fields, sort_keys=True)
+        )
+        self.assertEqual("semantic_producer", attribution["responsible_agent_id"])
+        self.assertEqual("repair", attribution["responsible_role_family"])
+        self.assertEqual(
+            ["semantic_producer"],
+            attribution["responsible_agent_ids"],
+        )
+        self.assertEqual(
+            "semantic_candidate_artifact",
+            attribution["responsible_constraint"],
+        )
+
+    def test_malformed_verifier_artifact_targets_verifier(self) -> None:
+        attribution = _generic_verifier_failure_attribution(
+            "malformed verifier artifact"
+        )
+        self.assertEqual("verifier", attribution["responsible_agent_id"])
+        self.assertEqual("verifier", attribution["responsible_role_family"])
+        self.assertEqual(
+            "verifier_semantic_artifact",
+            attribution["responsible_constraint"],
         )
 
     def test_reciprocal_verifiers_cannot_bootstrap_a_candidate(self) -> None:

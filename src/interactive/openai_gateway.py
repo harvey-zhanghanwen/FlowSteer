@@ -222,12 +222,11 @@ def _hotpotqa_supported_consensus(
     *,
     allow_role_conditional_sources: bool = False,
 ) -> str:
-    """Build a formatting-only transfer from agreeing Verifier artifacts.
+    """Build a formatting-only transfer from agreeing semantic artifacts.
 
-    Auxiliary evidence and Reasoner artifacts may share a flexible fan-in with
-    one or more Verifier artifacts. Only Verifier-shaped artifacts participate
-    in consensus; every such artifact must be supported and must copy the same
-    already-determined semantic candidate.
+    In the role-conditional protocol, any routed semantic producer may own the
+    candidate; legacy protocols continue to require supported Verifier output.
+    This boundary never infers or votes on an answer.
     """
 
     verifier_candidates: list[str] = []
@@ -493,7 +492,11 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
                 "When completing, put the full labeled Verifier artifact required "
                 "below in arguments.value. "
                 + (
-                    _HOTPOTQA_VERIFIER_PROTOCOL
+                    (
+                        _HOTPOTQA_ROLE_CONDITIONAL_VERIFIER_PROTOCOL
+                        if role_conditional_hotpot
+                        else _HOTPOTQA_VERIFIER_PROTOCOL
+                    )
                     if hotpot_semantic
                     else _QA_VERIFIER_PROTOCOL
                 )
