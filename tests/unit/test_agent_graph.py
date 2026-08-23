@@ -2152,6 +2152,167 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("fast", env.graph.get_node("reasoner").model_id)
         self.assertEqual(("set_relation",), env.model_admissible_action_types())
 
+    async def test_provider_repair_precedes_neutral_topology_edits(self) -> None:
+        registry = make_multi_provider_registry()
+        graph = AgentGraph(
+            [
+                AgentNode("source", "balanced", "produce an artifact"),
+                AgentNode("output", "fast", "return the answer"),
+            ],
+            [AgentRelation("source", "output", True, False)],
+            output_agent_id="output",
+        )
+        env = AgentWorkflowEnv(
+            registry,
+            _ImmediateGateway(),
+            graph=graph,
+            problem="question",
+            execute_on_edit=False,
+            semantic_protocol="none",
+            recovery_policy="default",
+        )
+        env._record_failure_state(
+            (
+                AgentFailureRecord(
+                    request_id="request-neutral-403",
+                    agent_id="source",
+                    phase=ExecutionPhase.SINGLE,
+                    graph_revision=graph.revision,
+                    error_type="OpenAICompatibleGatewayError",
+                    message="provider request failed with HTTP status 403",
+                ),
+            ),
+            current_agent_ids={node.id for node in graph.nodes},
+        )
+
+        self.assertEqual(("modify_agent",), env.model_admissible_action_types())
+        targets = env.model_admissible_action_targets()["modify_agent"]
+        self.assertEqual(["source"], targets["agent_ids"])
+        self.assertEqual(
+            ["model_id"],
+            targets["per_agent_candidates"][0]["mutable_fields"],
+        )
+        self.assertEqual(
+            ["alternate", "fast"],
+            targets["per_agent_candidates"][0]["discrete_value_domains"][
+                "model_id"
+            ],
+        )
+
+        unrelated = await env.step(
+            '{"action":"set_relation","source_id":"source",'
+            '"target_id":"output","source_to_target":false,'
+            '"target_to_source":true}'
+        )
+        self.assertFalse(unrelated.accepted)
+        self.assertIn("provider_repair_agent_ids", unrelated.feedback)
+        contract_change = await env.step(
+            '{"action":"modify_agent","agent_id":"source",'
+            '"contract":"replace the contract"}'
+        )
+        self.assertFalse(contract_change.accepted)
+        self.assertIn("must modify only model_id", contract_change.feedback)
+
+        repaired = await env.step(
+            '{"action":"modify_agent","agent_id":"source",'
+            '"model_id":"fast"}'
+        )
+        self.assertTrue(repaired.accepted)
+        self.assertEqual("fast", env.graph.get_node("source").model_id)
+        self.assertNotEqual(("modify_agent",), env.model_admissible_action_types())
+
+    async def test_neutral_output_assignment_keeps_quotient_sink(self) -> None:
+        graph = AgentGraph(
+            [
+                AgentNode("agent-1", "cheap", "first"),
+                AgentNode("agent-2", "cheap", "second"),
+                AgentNode("output", "fast", "candidate output"),
+            ],
+            [
+                AgentRelation("agent-1", "output", False, True),
+                AgentRelation("agent-2", "output", False, True),
+                AgentRelation("agent-1", "agent-2", False, True),
+            ],
+        )
+        env = AgentWorkflowEnv(
+            make_registry(),
+            _ImmediateGateway(),
+            graph=graph,
+            problem="question",
+            execute_on_edit=False,
+            semantic_protocol="none",
+            recovery_policy="default",
+        )
+
+        self.assertEqual(
+            ["agent-1"],
+            env.model_admissible_action_targets()["set_output"]["agent_ids"],
+        )
+        root_output = await env.step(
+            '{"action":"set_output","agent_id":"output"}'
+        )
+        self.assertFalse(root_output.accepted)
+        self.assertIn("quotient-graph sink", root_output.feedback)
+        self.assertIsNone(env.graph.output_agent_id)
+
+        sink_output = await env.step(
+            '{"action":"set_output","agent_id":"agent-1"}'
+        )
+        self.assertTrue(sink_output.accepted)
+        self.assertEqual("agent-1", env.graph.output_agent_id)
+
+        reverse_output_edge = await env.step(
+            '{"action":"set_relation","source_id":"agent-1",'
+            '"target_id":"agent-2","source_to_target":true,'
+            '"target_to_source":false}'
+        )
+        self.assertFalse(reverse_output_edge.accepted)
+        self.assertIn("quotient-graph sink", reverse_output_edge.feedback)
+
+    async def test_neutral_terminal_reachability_requires_exact_progress(self) -> None:
+        graph = AgentGraph(
+            [
+                AgentNode("a", "cheap", "first source"),
+                AgentNode("b", "cheap", "second source"),
+                AgentNode("orphan", "cheap", "unrouted source"),
+                AgentNode("out", "fast", "terminal answer"),
+            ],
+            [
+                AgentRelation("a", "out", True, False),
+                AgentRelation("b", "out", True, False),
+            ],
+            output_agent_id="out",
+        )
+        env = AgentWorkflowEnv(
+            make_registry(),
+            _ImmediateGateway(),
+            graph=graph,
+            problem="question",
+            execute_on_edit=False,
+            semantic_protocol="none",
+            recovery_policy="default",
+        )
+
+        self.assertEqual(("set_relation",), env.model_admissible_action_types())
+        candidates = env.model_admissible_action_targets()["set_relation"][
+            "candidates"
+        ]
+        self.assertTrue(candidates)
+        unrelated = await env.step(
+            '{"action":"set_relation","source_id":"a",'
+            '"target_id":"b","source_to_target":true,'
+            '"target_to_source":false}'
+        )
+        self.assertFalse(unrelated.accepted)
+        self.assertIn("admissible_relation_candidates", unrelated.feedback)
+
+        exact = await env.step(json.dumps({"action": "set_relation", **candidates[0]}))
+        self.assertTrue(exact.accepted)
+        self.assertNotEqual(
+            "graph_validation",
+            env.finish_admissibility().get("stage"),
+        )
+
     async def test_react_exhaustion_feedback_preserves_compact_public_diagnosis(
         self,
     ) -> None:

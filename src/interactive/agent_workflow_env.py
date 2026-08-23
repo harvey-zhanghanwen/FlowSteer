@@ -482,6 +482,20 @@ class AgentWorkflowEnv:
             # automatically.
             return (AgentActionType.FINISH.value,)
 
+        provider_repair_ids = self._provider_repair_agent_ids()
+        if (
+            provider_repair_ids
+            and self.recovery_policy != _PRESERVE_REPAIR_RECOVERY_POLICY
+            and AgentActionType.MODIFY_AGENT.value
+            in self._allowed_action_type_set
+        ):
+            # A measured provider failure is an operational repair boundary,
+            # independent of any dataset-specific semantic recovery protocol.
+            # Keep the next progressive Canvas edit on the failed Agent's
+            # model field so a dead provider cannot be routed around by
+            # unrelated topology edits while it still blocks execution.
+            return (AgentActionType.MODIFY_AGENT.value,)
+
         mandatory_repair_ids = self._mandatory_repair_agent_ids()
         if (
             mandatory_repair_ids
@@ -674,6 +688,8 @@ class AgentWorkflowEnv:
                         require_complete=False,
                     )
                     if not validation.valid:
+                        continue
+                    if self._output_sink_issue_for(candidate) is not None:
                         continue
                     if self._semantic_edit_issue_for(candidate) is not None:
                         continue
@@ -972,6 +988,32 @@ class AgentWorkflowEnv:
                 result.append(dict(item))
         return result
 
+    def _terminal_reachability_admission_issue(
+        self,
+        action: AgentAction,
+    ) -> Optional[str]:
+        """Align authoritative Canvas admission with its live repair domain."""
+
+        candidates = self._terminal_reachability_relation_candidates()
+        if not candidates:
+            return None
+        if any(
+            self._relation_action_matches_candidate(action, candidate)
+            for candidate in candidates
+        ):
+            return None
+        return (
+            "repair terminal reachability with an exact relation that strictly "
+            "reduces terminal_unreachable_agent_ids before other Canvas edits; "
+            "admissible_relation_candidates="
+            + json.dumps(
+                candidates,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+
     def _failed_auxiliary_ingress_relation_candidates(
         self,
         candidates: Optional[Sequence[Mapping[str, object]]] = None,
@@ -1140,6 +1182,8 @@ class AgentWorkflowEnv:
             )
             if not validation.valid:
                 continue
+            if self._output_sink_issue_for(candidate) is not None:
+                continue
             if self._semantic_edit_issue_for(candidate) is not None:
                 continue
             if (
@@ -1150,10 +1194,40 @@ class AgentWorkflowEnv:
             admitted.append(node.id)
         return tuple(admitted)
 
+    def _output_sink_issue_for(self, graph: AgentGraph) -> Optional[str]:
+        """Keep an assigned Output Agent in a terminal quotient-graph block."""
+
+        if graph.output_agent_id is None:
+            return None
+        validation = graph.validate(
+            self.model_registry,
+            require_complete=True,
+        )
+        output_issue = next(
+            (
+                issue
+                for issue in validation.issues
+                if issue.code == "output_not_sink"
+            ),
+            None,
+        )
+        if output_issue is None:
+            return None
+        return (
+            f"Output Agent {graph.output_agent_id!r} must remain in a "
+            "quotient-graph sink block"
+        )
+
     def _model_admissible_modify_agent_ids(self) -> Tuple[str, ...]:
         """Exclude an already verified semantic lineage from repair targets."""
 
         node_ids = tuple(node.id for node in self._graph.nodes)
+        provider_repair_ids = self._provider_repair_agent_ids()
+        if (
+            provider_repair_ids
+            and self.recovery_policy != _PRESERVE_REPAIR_RECOVERY_POLICY
+        ):
+            return provider_repair_ids
         if self.recovery_policy != _PRESERVE_REPAIR_RECOVERY_POLICY:
             return node_ids
         mandatory_repair_ids = self._mandatory_repair_agent_ids()
@@ -1496,6 +1570,15 @@ class AgentWorkflowEnv:
             return ()
         current_model_id = self._graph.get_node(agent_id).model_id
         return self._provider_repair_catalog_domain(current_model_id)
+
+    def _provider_repair_agent_ids(self) -> Tuple[str, ...]:
+        """Return measured provider failures with a live model replacement."""
+
+        return tuple(
+            node.id
+            for node in self._graph.nodes
+            if self._provider_repair_model_ids(node.id)
+        )
 
     def _provider_repair_avoid_provider_id(
         self,
@@ -1904,6 +1987,37 @@ class AgentWorkflowEnv:
                 "action rejected: action type is outside the configured Canvas "
                 f"action set {list(self.allowed_action_types)!r}",
             )
+        provider_repair_ids = self._provider_repair_agent_ids()
+        if (
+            provider_repair_ids
+            and self.recovery_policy != _PRESERVE_REPAIR_RECOVERY_POLICY
+            and (
+                action.action_type is not AgentActionType.MODIFY_AGENT
+                or action.agent_id not in provider_repair_ids
+            )
+        ):
+            return self._reject_after_count(
+                action,
+                "edit rejected: repair the measured provider failure before "
+                "other Canvas edits; provider_repair_agent_ids="
+                f"{list(provider_repair_ids)!r}",
+            )
+        provider_repair_issue = self._provider_repair_admission_issue(action)
+        if provider_repair_issue is not None:
+            return self._reject_after_count(
+                action,
+                "edit rejected: " + provider_repair_issue,
+            )
+        terminal_reachability_issue = (
+            self._terminal_reachability_admission_issue(action)
+            if self.recovery_policy != _PRESERVE_REPAIR_RECOVERY_POLICY
+            else None
+        )
+        if terminal_reachability_issue is not None:
+            return self._reject_after_count(
+                action,
+                "edit rejected: " + terminal_reachability_issue,
+            )
         preservation_issue = self._preservation_admission_issue(action)
         if preservation_issue is not None:
             return self._reject_after_count(
@@ -2063,6 +2177,17 @@ class AgentWorkflowEnv:
                 f"edit rejected: {self._format_issues(validation)}",
                 validation.issues,
             )
+        if action.action_type in {
+            AgentActionType.ADD_SUBGRAPH,
+            AgentActionType.SET_RELATION,
+            AgentActionType.SET_OUTPUT,
+        }:
+            output_sink_issue = self._output_sink_issue_for(candidate)
+            if output_sink_issue is not None:
+                return self._reject_after_count(
+                    action,
+                    "edit rejected: " + output_sink_issue,
+                )
         semantic_edit_issue = self._semantic_edit_issue_for(candidate)
         if semantic_edit_issue is not None:
             return self._reject_after_count(

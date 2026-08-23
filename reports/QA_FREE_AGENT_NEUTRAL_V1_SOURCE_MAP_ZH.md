@@ -69,3 +69,28 @@ Agent 的执行请求，`finish` 始终不可接受。该批次保存为
 提供 `complete.arguments.value` 的终局提交语义。这是必要的通用 terminal
 contract 接线，不是固定 Format Agent，也不规定 Reasoner、Verifier 或 Formatter
 拓扑。
+
+## HotpotQA operational recovery 与 terminal topology r2/r3
+
+`terminal_wire_r1` 的 15 条 canary 中 14 条显式 `finish`，唯一失败题在远端
+Executor 返回 HTTP 403 后没有进入 `modify_agent(model_id)`，而是继续扩展和修改
+relation；正确 `<answer>alcohol</answer>` 已产生但最终在 `max_rounds` 结束。r2 将
+可替代的 provider failure 设为独立于 QA semantic protocol 的 operational repair
+boundary：只允许修改实测失败 Agent 的 `model_id`，成功后恢复普通 Canvas action
+space。
+
+`terminal_wire_r2` 再次得到 14/15 显式 `finish`。唯一失败图先把一个 root 节点
+指定为 Output Agent，虽然 Runtime 已产生 `<answer>El-P</answer>`，完整图校验仍正确
+报告 `output_not_sink` 与 `cannot_reach_output`；v2 action mask 随后只约束 action
+type，域外 relation 参数在 default recovery 下仍可被接受并发生振荡。
+
+r3 复用已有 AgentGraph validator 和 live relation projection，增加两个通用 Canvas
+不变量：
+
+- 已指定的 Output Agent 必须位于 quotient-graph sink block；
+- default recovery 存在 terminal-unreachable Agent 时，只接受严格减少该集合的
+  exact relation candidate。
+
+两项均不指定 Agent role、Agent 数量或固定 topology；内部 Agent 仍可形成并行、
+fan-in、fan-out 或有界双向通信。它们只对齐 FlowSteer 的 progressive
+execute-and-feedback boundary 与 AgentGraph 的权威 terminal validation。
