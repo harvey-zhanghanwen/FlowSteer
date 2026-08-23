@@ -2518,6 +2518,41 @@ class AgentWorkflowEnv:
                 for node_id in node_ids
                 if node_id in selected_output_recovery
             )
+        if (
+            self.max_agents is not None
+            and len(self._graph.nodes) >= self.max_agents
+        ):
+            replacement_domains = (
+                self._repair_exhausted_auxiliary_replacement_domains()
+            )
+            existing_recovery_is_live = bool(
+                self._dirty_auxiliary_replacement_agent_ids()
+                or self._failed_auxiliary_ingress_relation_candidates()
+                or self._repair_exhausted_relation_candidates()
+            )
+            capacity_blocked_repairs = (
+                ()
+                if existing_recovery_is_live
+                else tuple(
+                    node.id
+                    for node in self._graph.nodes
+                    if node.id in self._failed_agent_ids
+                    and node.id in self._repair_exhausted_agent_ids
+                    and node.id not in self._diagnosed_unusable_agent_ids
+                    and (node.role_family or "").casefold()
+                    in replacement_domains
+                    and node.artifact_type.casefold()
+                    in replacement_domains[
+                        (node.role_family or "").casefold()
+                    ]
+                )
+            )
+            if capacity_blocked_repairs:
+                # FlowSteer's progressive Canvas cannot augment beyond its
+                # configured Agent bound. Preserve the failed node and reopen
+                # its existing execution contract instead of deleting it or
+                # exposing an impossible ADD_SUBGRAPH action.
+                return capacity_blocked_repairs
         repairable_failed = (
             self._failed_agent_ids - self._diagnosed_unusable_agent_ids
             - self._repair_exhausted_agent_ids

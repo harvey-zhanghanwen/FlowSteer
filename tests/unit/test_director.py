@@ -1068,6 +1068,33 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("max_rounds", result.termination_reason)
         self.assertEqual(1, len(result.turns))
 
+    async def test_empty_live_action_domain_is_a_terminal_failure(self) -> None:
+        class EmptyActionEnv(AgentWorkflowEnv):
+            def model_admissible_action_types(self) -> tuple[str, ...]:
+                return ()
+
+        model_registry = registry()
+        client = ScriptedDirector([])
+        env = EmptyActionEnv(model_registry, gateway=FakeGateway())
+
+        result = await AgentGraphOrchestrator(
+            model_registry,
+            client,
+            max_rounds=2,
+            sampling_action_profile=(
+                DIRECTOR_MODEL_ADMISSIBLE_ACTION_MASK_PROFILE
+            ),
+            sampling_action_schema_version=(
+                DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3
+            ),
+        ).run(env, "task")
+
+        self.assertIsNone(result.final_answer)
+        self.assertFalse(result.explicit_finish)
+        self.assertEqual("no_admissible_action", result.termination_reason)
+        self.assertEqual((), result.turns)
+        self.assertEqual([], client.prompts)
+
     async def test_progressive_action_mask_switches_only_after_finish_admission(
         self,
     ) -> None:

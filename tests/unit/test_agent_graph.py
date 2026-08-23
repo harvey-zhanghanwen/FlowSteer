@@ -4342,6 +4342,51 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             env._model_admissible_modify_agent_ids(),
         )
 
+    def test_agent_limit_reopens_repair_exhausted_auxiliary(self) -> None:
+        graph = _hotpot_semantic_graph()
+        graph.add_agent(
+            AgentNode(
+                "failed_reader",
+                "cheap",
+                "retrieve replacement evidence",
+                role_family="evidence_retriever",
+                allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                execution_mode="react",
+                artifact_type="retrieval_evidence",
+            )
+        )
+        graph.set_relation("failed_reader", "reasoner", True, False)
+        registry = make_registry()
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_hotpot_semantic_runtime(registry, _ImmediateGateway()),
+            graph=graph,
+            problem="What is the capital of France?",
+            execute_on_edit=False,
+            max_agents=len(graph.nodes),
+            semantic_protocol="hotpotqa_verified_answer_slot_v1",
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+        )
+        env._failed_agent_ids.add("failed_reader")
+        env._react_exhausted_agent_ids.add("failed_reader")
+        env._repair_exhausted_agent_ids.add("failed_reader")
+        env._unresolved_dirty_agents.add("failed_reader")
+
+        self.assertEqual(
+            ("failed_reader",),
+            env._mandatory_repair_agent_ids(),
+        )
+        self.assertEqual(("modify_agent",), env.model_admissible_action_types())
+        self.assertEqual(
+            ["failed_reader"],
+            env.model_admissible_action_targets()["modify_agent"]["agent_ids"],
+        )
+        self.assertEqual(
+            ["modify_agent"],
+            env.recovery_state()["preferred_actions"],
+        )
+
     async def test_max_agents_dirty_replacement_excludes_downstream_modify(
         self,
     ) -> None:

@@ -3700,6 +3700,22 @@ class AgentGraphOrchestrator:
         turns: list[DirectorTurn] = []
         prompt = self.build_prompt(env, 0, skills)
         for index in range(self.max_rounds):
+            if (
+                self.sampling_action_profile
+                == DIRECTOR_MODEL_ADMISSIBLE_ACTION_MASK_PROFILE
+                and not env.model_admissible_action_types()
+            ):
+                # Constrained decoding cannot encode an empty JSON-schema
+                # branch. Treat a measured empty Canvas domain as an explicit
+                # orchestration terminal state rather than a collection error;
+                # no action is invented and no model request is issued.
+                return OrchestrationResult(
+                    final_answer=None,
+                    turns=tuple(turns),
+                    final_graph=env.graph.to_dict(),
+                    termination_reason="no_admissible_action",
+                    explicit_finish=False,
+                )
             schema_request = self.action_schema_request(env)
             response = await self.client.propose(
                 prompt,
