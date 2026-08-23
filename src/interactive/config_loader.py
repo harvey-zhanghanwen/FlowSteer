@@ -145,6 +145,11 @@ def validate_agent_graph_config(value: Mapping[str, Any]) -> None:
             )
     if graph.get("contract_type") != "free_text" or graph.get("relation_encoding") != "two_bit":
         raise ConfigurationError("AgentGraph requires free-text contracts and two-bit relations")
+    require_format_agent = graph.get("require_format_agent")
+    if require_format_agent is not None and type(require_format_agent) is not bool:
+        raise ConfigurationError(
+            "agent_graph.require_format_agent must be boolean when configured"
+        )
     max_agents = graph.get("max_agents")
     if isinstance(max_agents, bool) or not isinstance(max_agents, int) or max_agents < 1:
         raise ConfigurationError("agent_graph.max_agents must be a positive integer")

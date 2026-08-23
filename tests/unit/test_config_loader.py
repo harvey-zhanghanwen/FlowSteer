@@ -54,6 +54,7 @@ class ConfigLoaderTests(unittest.TestCase):
             ("max_bidirectional_block_size", 3),
             ("require_unique_output", False),
             ("require_all_agents_reach_output", False),
+            ("require_format_agent", "false"),
         )
         for field, value in invalid_values:
             with self.subTest(field=field):
@@ -192,49 +193,55 @@ class ConfigLoaderTests(unittest.TestCase):
         with self.assertRaises(ConfigurationError):
             validate_agent_graph_config(config)
 
-    def test_hotpot_unified_semantic_protocol_is_explicit_and_inference_only(self) -> None:
-        config = load_yaml("config/evaluation_hotpotqa_unified_architecture_v1.yaml")
-        validate_agent_graph_config(config)
+    def test_hotpot_and_trivia_use_shared_free_agent_canvas_policy(self) -> None:
+        cases = (
+            (
+                "config/evaluation_hotpotqa_unified_architecture_v1.yaml",
+                "hotpotqa",
+                "hotpotqa_evaluation",
+            ),
+            (
+                "config/evaluation_triviaqa_unified_architecture_v2.yaml",
+                "triviaqa",
+                "triviaqa_evaluation",
+            ),
+        )
+        protocols = {}
+        for path, dataset, evaluation_section in cases:
+            with self.subTest(dataset=dataset):
+                config = load_yaml(path)
+                validate_agent_graph_config(config)
+                graph = config["agent_graph"]
+
+                self.assertEqual(
+                    "agentgraph.director.minimal-neutral.v10",
+                    config["experiment"]["prompt_version"],
+                )
+                self.assertEqual("free_text", graph["contract_type"])
+                self.assertEqual("two_bit", graph["relation_encoding"])
+                self.assertEqual({dataset: "none"}, graph["semantic_protocol_by_source"])
+                self.assertEqual("default", graph["recovery_policy"])
+                self.assertNotIn("required_evidence_tool_id", graph)
+                self.assertFalse(graph["require_format_agent"])
+                self.assertEqual(
+                    "agentgraph.model-admissible-action-mask.v2",
+                    config["director"]["sampling_schema_version"],
+                )
+                self.assertEqual(128, config[evaluation_section]["sample_count"])
+                self.assertFalse(config["experiment"]["training_enabled"])
+                self.assertFalse(config["grpo"]["enabled"])
+                self.assertFalse(config["skills"]["enabled"])
+                protocols[dataset] = config[evaluation_section]["agentgraph_protocol"]
 
         self.assertEqual(
-            config["experiment"]["prompt_version"],
-            "agentgraph.director.hotpotqa-semantic-recovery.v22",
+            {
+                "hotpotqa": (
+                    "full_10_passages_plus_model_driven_skillflow_search_read_v1"
+                ),
+                "triviaqa": "question_plus_model_driven_skillflow_search_read_v1",
+            },
+            protocols,
         )
-        self.assertEqual(
-            config["experiment"]["tool_version"],
-            "skillflow.qa-retrieval.multihop-semantic-repair.v15",
-        )
-        self.assertEqual(config["director"]["action_decoding"], "json_schema")
-        self.assertEqual(
-            config["director"]["sampling_action_profile"],
-            "model_admissible_canvas_actions",
-        )
-        self.assertEqual(
-            config["director"]["sampling_schema_version"],
-            "agentgraph.model-admissible-action-mask.v3",
-        )
-        self.assertEqual(config["qa_tool_runtime"]["max_turns_per_agent_call"], 9)
-        self.assertEqual(config["qa_tool_runtime"]["max_tool_calls_per_agent_call"], 6)
-        self.assertEqual(
-            config["agent_graph"]["semantic_protocol_by_source"],
-            {"hotpotqa": "hotpotqa_verified_answer_slot_v1"},
-        )
-        self.assertEqual(
-            config["agent_graph"]["recovery_policy"],
-            "preserve_diagnose_repair_augment",
-        )
-        self.assertEqual(
-            config["agent_graph"]["required_evidence_tool_id"],
-            "qa-retrieval",
-        )
-        self.assertEqual(config["hotpotqa_evaluation"]["sample_count"], 128)
-        self.assertEqual(
-            config["hotpotqa_evaluation"]["required_partition"],
-            "development",
-        )
-        self.assertEqual(config["gpu"]["rollout_physical"], 0)
-        self.assertFalse(config["experiment"]["training_enabled"])
-        self.assertFalse(config["grpo"]["enabled"])
 
     def test_hotpot_semantic_protocol_combination_is_fail_closed(self) -> None:
         mutations = (
@@ -249,6 +256,16 @@ class ConfigLoaderTests(unittest.TestCase):
                 config = load_yaml(
                     "config/evaluation_hotpotqa_unified_architecture_v1.yaml"
                 )
+                config["experiment"]["prompt_version"] = (
+                    "agentgraph.director.hotpotqa-semantic-recovery.v22"
+                )
+                config["agent_graph"]["semantic_protocol_by_source"] = {
+                    "hotpotqa": "hotpotqa_verified_answer_slot_v1"
+                }
+                config["agent_graph"]["recovery_policy"] = (
+                    "preserve_diagnose_repair_augment"
+                )
+                config["agent_graph"]["required_evidence_tool_id"] = "qa-retrieval"
                 if field == "prompt_version":
                     config["experiment"][field] = value
                 elif field == "terminal_protocol":
@@ -271,32 +288,6 @@ class ConfigLoaderTests(unittest.TestCase):
         with self.assertRaises(ConfigurationError):
             validate_agent_graph_config(wrong_dataset)
 
-    def test_trivia_unified_v2_uses_shared_semantic_recovery_contract(self) -> None:
-        config = load_yaml("config/evaluation_triviaqa_unified_architecture_v2.yaml")
-        validate_agent_graph_config(config)
-
-        self.assertEqual(
-            config["experiment"]["prompt_version"],
-            "agentgraph.director.qa-semantic-recovery.v1",
-        )
-        self.assertEqual(
-            config["agent_graph"]["semantic_protocol_by_source"],
-            {"triviaqa": "qa_verified_answer_lineage_v2"},
-        )
-        self.assertEqual(
-            config["agent_graph"]["recovery_policy"],
-            "preserve_diagnose_repair_augment",
-        )
-        self.assertEqual(
-            config["director"]["sampling_schema_version"],
-            "agentgraph.model-admissible-action-mask.v3",
-        )
-        self.assertEqual(config["triviaqa_evaluation"]["sample_count"], 128)
-        self.assertEqual(config["gpu"]["rollout_physical"], 0)
-        self.assertFalse(config["experiment"]["training_enabled"])
-        self.assertFalse(config["grpo"]["enabled"])
-        self.assertFalse(config["skills"]["enabled"])
-
     def test_shared_qa_semantic_protocol_combination_is_fail_closed(self) -> None:
         mutations = (
             ("prompt_version", "agentgraph.director.minimal-neutral.v10"),
@@ -310,6 +301,16 @@ class ConfigLoaderTests(unittest.TestCase):
                 config = load_yaml(
                     "config/evaluation_triviaqa_unified_architecture_v2.yaml"
                 )
+                config["experiment"]["prompt_version"] = (
+                    "agentgraph.director.qa-semantic-recovery.v1"
+                )
+                config["agent_graph"]["semantic_protocol_by_source"] = {
+                    "triviaqa": "qa_verified_answer_lineage_v2"
+                }
+                config["agent_graph"]["recovery_policy"] = (
+                    "preserve_diagnose_repair_augment"
+                )
+                config["agent_graph"]["required_evidence_tool_id"] = "qa-retrieval"
                 if field == "prompt_version":
                     config["experiment"][field] = value
                 elif field == "terminal_protocol":

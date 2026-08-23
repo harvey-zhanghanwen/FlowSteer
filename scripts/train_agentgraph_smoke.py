@@ -396,6 +396,28 @@ def _dataset_key(task: TaskRecord) -> str:
     return value.strip()
 
 
+def _requires_format_agent(
+    graph_config: Mapping[str, Any],
+    *,
+    terminal_protocol: str,
+) -> bool:
+    """Resolve graph topology independently from terminal answer syntax.
+
+    Historical configurations coupled ``exact_single_answer_tag`` to a
+    dedicated Format Agent. A free AgentGraph may require the same output
+    syntax while allowing any Director-selected terminal Agent to emit it.
+    """
+
+    configured = graph_config.get("require_format_agent")
+    if configured is None:
+        return terminal_protocol == "exact_single_answer_tag"
+    if type(configured) is not bool:
+        raise ConfigurationError(
+            "agent_graph.require_format_agent must be boolean when configured"
+        )
+    return configured
+
+
 def _workflow_problem(
     task: TaskRecord,
     config: Mapping[str, Any],
@@ -3183,8 +3205,9 @@ class LiveSmokeBackend:
                 require_exact_answer_tag=(
                     terminal_protocol == "exact_single_answer_tag"
                 ),
-                require_format_agent=(
-                    terminal_protocol == "exact_single_answer_tag"
+                require_format_agent=_requires_format_agent(
+                    graph_config,
+                    terminal_protocol=terminal_protocol,
                 ),
                 required_tool_id=(
                     f"{_dataset_key(task)}.environment"

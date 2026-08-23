@@ -151,12 +151,17 @@ class ToolRegistryTests(unittest.IsolatedAsyncioTestCase):
             [ModelSpec("m", "fake")],
         )
 
-        class UnusedGateway:
+        reasoning_requests = []
+        react_requests = []
+
+        class Gateway:
             async def generate(self, request):  # type: ignore[no-untyped-def]
-                raise AssertionError("react node must not use reasoning gateway")
+                reasoning_requests.append(request)
+                return AgentResponse("<answer>Ada Lovelace</answer>")
 
         class ReactAdapter:
             async def execute(self, request):  # type: ignore[no-untyped-def]
+                react_requests.append(request)
                 result, receipt = await registry.ainvoke_with_receipt(
                     "wiki.search",
                     ToolRequest("search", {"query": "Ada Lovelace"}),
@@ -171,31 +176,44 @@ class ToolRegistryTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         graph = AgentGraph(
-            [
+            (
                 AgentNode(
-                    "retriever",
+                    "tool_user",
                     "m",
-                    "retrieve evidence",
+                    "find public evidence relevant to the question",
+                    role_family="evidence_hunter",
                     allowed_tools=("wiki.search",),
                     execution_mode="react",
                     artifact_type="retrieved_document",
-                )
-            ],
-            output_agent_id="retriever",
+                ),
+                AgentNode(
+                    "answer_writer",
+                    "m",
+                    "use upstream evidence to return one concise answer",
+                    role_family="answer_synthesizer",
+                    execution_mode="reasoning",
+                ),
+            ),
+            output_agent_id="answer_writer",
         )
+        graph.set_relation("tool_user", "answer_writer", True, False)
         runtime = AgentRuntime(
             catalog,
-            UnusedGateway(),
+            Gateway(),
             execution_adapters={"react": ReactAdapter()},
             tool_registry=registry,
             dataset_id="triviaqa",
         )
         execution = await runtime.execute(graph, "Who was Ada Lovelace?")
 
-        self.assertEqual("retrieved Ada Lovelace evidence", execution.final_answer)
+        self.assertEqual("<answer>Ada Lovelace</answer>", execution.final_answer)
+        self.assertEqual(1, len(react_requests))
+        self.assertEqual("tool_user", react_requests[0].agent.id)
+        self.assertEqual(1, len(reasoning_requests))
+        self.assertEqual("answer_writer", reasoning_requests[0].agent.id)
         self.assertEqual(
             "wiki.search",
-            execution.output_metadata["retriever"]["tool_receipts"][0]["tool_id"],
+            execution.output_metadata["tool_user"]["tool_receipts"][0]["tool_id"],
         )
 
     async def test_runtime_rejects_unregistered_react_adapter(self) -> None:

@@ -98,6 +98,7 @@ swe_coding_runtime_settings = _MODULE._swe_coding_runtime_settings
 environment_replay_trace_from_runtime = (
     _MODULE._environment_replay_trace_from_runtime
 )
+requires_format_agent = _MODULE._requires_format_agent
 
 
 SOURCE_NAMES = {
@@ -429,6 +430,25 @@ class QAToolRuntimeWiringTests(unittest.TestCase):
                 "max_tool_calls_per_agent_call": 3,
             }
         return config
+
+    def test_exact_answer_syntax_does_not_require_a_format_agent(self) -> None:
+        self.assertFalse(
+            requires_format_agent(
+                {"require_format_agent": False},
+                terminal_protocol="exact_single_answer_tag",
+            )
+        )
+        self.assertTrue(
+            requires_format_agent(
+                {},
+                terminal_protocol="exact_single_answer_tag",
+            )
+        )
+        with self.assertRaises(ConfigurationError):
+            requires_format_agent(
+                {"require_format_agent": "false"},
+                terminal_protocol="exact_single_answer_tag",
+            )
 
     def test_closed_context_condition_keeps_original_runtime(self) -> None:
         task = make_task("hotpotqa", 0)

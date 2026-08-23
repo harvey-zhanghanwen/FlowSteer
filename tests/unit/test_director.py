@@ -828,6 +828,7 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
     async def test_director_terminal_policy_is_issue_driven_without_role_template(
         self,
     ) -> None:
+        self.assertLessEqual(len(DIRECTOR_SYSTEM_PROMPT), 1200)
         self.assertIn("exactly one valid JSON action each turn", DIRECTOR_SYSTEM_PROMPT)
         self.assertIn(
             "action types listed in admissible_action_types",
@@ -853,6 +854,10 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
             "Do not assume a fixed workflow topology or an unlisted Skill",
             DIRECTOR_SYSTEM_PROMPT,
         )
+        self.assertIn(
+            "execution_mode is reasoning, react, or coding",
+            DIRECTOR_SYSTEM_PROMPT,
+        )
         for prohibited in (
             "answer span",
             "answer type",
@@ -864,8 +869,53 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
             "Critic",
             "must use three",
             "singleton",
+            "Exactly one Reasoner",
+            "Verifier consumes only",
+            "Formatter consumes only",
+            "required_direct_role_edges",
         ):
             self.assertNotIn(prohibited.casefold(), DIRECTOR_SYSTEM_PROMPT.casefold())
+
+        env = AgentWorkflowEnv(
+            registry(),
+            gateway=FakeGateway(),
+            require_exact_answer_tag=True,
+            require_format_agent=False,
+            semantic_protocol="none",
+        )
+        add_domain = env.model_admissible_action_targets()["add_subgraph"]
+        self.assertNotIn("role_constraints", add_domain)
+        self.assertNotIn("admitted_new_role_families", add_domain)
+        self.assertNotIn("output_role_family", add_domain)
+        self.assertFalse(env.require_format_agent)
+
+    async def test_exact_answer_tag_accepts_a_free_terminal_agent(self) -> None:
+        class TaggedGateway:
+            async def generate(self, request):  # type: ignore[no-untyped-def]
+                return AgentResponse("<answer>Ada Lovelace</answer>")
+
+        env = AgentWorkflowEnv(
+            registry(),
+            gateway=TaggedGateway(),
+            problem="Who was Ada Lovelace?",
+            execute_on_edit=True,
+            require_exact_answer_tag=True,
+            require_format_agent=False,
+            semantic_protocol="none",
+        )
+        await env.step(
+            '{"action":"add_subgraph","agents":['
+            '{"agent_id":"answer","model_id":"qwen",'
+            '"contract":"return one concise evidence-supported answer",'
+            '"role_family":"answer_synthesizer","allowed_tools":[],'
+            '"execution_mode":"reasoning"}],"relations":[],'
+            '"output_agent_id":"answer"}'
+        )
+
+        self.assertTrue(env.finish_admissibility()["admissible"])
+        result = await env.step('{"action":"finish"}')
+        self.assertTrue(result.done)
+        self.assertEqual("<answer>Ada Lovelace</answer>", result.final_answer)
 
     async def test_history_window_keeps_real_recent_message_pairs(self) -> None:
         model_registry = registry()
