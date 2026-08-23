@@ -39,8 +39,9 @@ LoRA publication, or an active Skill library.
   relations. No direct Reasoner-to-Verifier or Verifier-to-Formatter edge is
   synthesized by the semantic protocol.
 - The live constrained action domain binds Runtime declarations by semantic
-  capability: a Reasoner is either ReAct with `qa-retrieval` or Tool-free
-  reasoning over routed evidence; Verifier and Formatter are Tool-free
+  capability: a newly sampled Reasoner uses ReAct with `qa-retrieval`, while
+  the Canvas validator remains compatible with a pre-existing Tool-free
+  Reasoner over routed evidence; Verifier and Formatter are Tool-free
   reasoning Agents. One `add_subgraph` edit may contain a bounded two-edge
   functional block, so FlowSteer's edit--execute--feedback boundary is not
   reduced to one newly sampled edge or one fixed role template.
@@ -80,6 +81,17 @@ LoRA publication, or an active Skill library.
   The role-first declaration, relation, Output, and MODIFY schemas are derived
   from the current Canvas target domains; the failed r1 trajectories remain in
   their original namespace and are not resumed as r2 results.
+- The r4 condition closes three project adaptation gaps exposed by the r3
+  canary and local counterexamples. During missing-capability construction,
+  the role-first domain samples distinct missing responsibilities, executes
+  that accepted `add_subgraph` transaction, and defers Output ownership to a
+  later `set_output` transaction. Free-text contract admission rejects an
+  unrequested scope restriction using only the original question. FINISH
+  enumerates the actual directed paths and requires intermediate public
+  artifacts, and current Runtime call receipts when present, to preserve the
+  Reasoner's candidate through the corresponding CommunicationEnvelopes.
+  These gates do not impose direct semantic-role adjacency or a fixed number
+  of Reasoners, Verifiers, auxiliary Agents, branches, or reciprocal blocks.
 
 ## Intentionally not implemented in this condition
 

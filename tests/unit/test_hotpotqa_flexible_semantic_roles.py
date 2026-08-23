@@ -30,6 +30,7 @@ from src.interactive.director import (
     DIRECTOR_PROMPT_VERSION,
     DIRECTOR_SYSTEM_PROMPT,
     AgentGraphOrchestrator,
+    director_live_action_parameter_json_schema_text,
 )
 from src.interactive.model_registry import (
     ModelRegistry,
@@ -517,6 +518,114 @@ class RoleConditionalPromptTests(unittest.TestCase):
 
 
 class FlexibleSemanticGraphTests(unittest.TestCase):
+    def test_new_reasoner_live_domain_requires_react_retrieval(self) -> None:
+        registry = _registry()
+        env = _semantic_env(registry)
+
+        add_domain = env.model_admissible_action_targets()["add_subgraph"]
+        reasoner = add_domain["role_constraints"]["reasoner"]
+        self.assertEqual(["react"], reasoner["execution_modes"])
+        self.assertEqual(
+            [[QA_RETRIEVAL_TOOL_ID]],
+            reasoner["allowed_tools"],
+        )
+
+    def test_missing_format_add_executes_before_output_assignment(self) -> None:
+        registry = _registry()
+        graph = AgentGraph(
+            [
+                AgentNode(
+                    "reasoner",
+                    "model-a",
+                    "align retrieved evidence to the answer slot",
+                    role_family="reasoner",
+                    allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                    execution_mode="react",
+                ),
+                AgentNode(
+                    "verifier",
+                    "model-b",
+                    "verify evidence, binding, hops, and scope",
+                    role_family="verifier",
+                ),
+            ],
+            [AgentRelation("reasoner", "verifier", True, False)],
+        )
+        env = _semantic_env(registry, graph=graph)
+        add_domain = env.model_admissible_action_targets()["add_subgraph"]
+
+        self.assertEqual(1, add_domain["max_new_agents"])
+        self.assertEqual(["format"], add_domain["admitted_new_role_families"])
+        self.assertIs(add_domain["distinct_new_role_families"], True)
+        self.assertIs(add_domain["defer_output_assignment"], True)
+
+        formatter_declaration = {
+            "agent_id": "node_1",
+            "model_id": "model-a",
+            "contract": _HOTPOTQA_FORMAT_CONTRACT,
+            "role_family": "format",
+            "allowed_tools": [],
+            "execution_mode": "reasoning",
+        }
+        parameter_schema = json.loads(
+            director_live_action_parameter_json_schema_text(
+                "add_subgraph",
+                {"add_subgraph": add_domain},
+                add_agents=[formatter_declaration],
+            )
+        )
+        self.assertEqual(
+            {"type": "null"},
+            parameter_schema["properties"]["output_agent_id"],
+        )
+
+        deferred = parse_first_agent_action(
+            json.dumps(
+                {
+                    "action": "add_subgraph",
+                    "agents": [formatter_declaration],
+                    "relations": [
+                        {
+                            "source_id": "verifier",
+                            "target_id": "node_1",
+                            "source_to_target": True,
+                            "target_to_source": False,
+                        }
+                    ],
+                    "output_agent_id": None,
+                }
+            )
+        )
+        self.assertIsNone(env._preservation_admission_issue(deferred))
+
+        premature_output = parse_first_agent_action(
+            json.dumps(
+                {
+                    **deferred.to_dict(),
+                    "output_agent_id": "node_1",
+                }
+            )
+        )
+        issue = env._preservation_admission_issue(premature_output)
+        self.assertIsNotNone(issue)
+        self.assertIn("defer Output assignment", issue or "")
+
+    def test_contract_rejects_unrequested_scope_restriction(self) -> None:
+        registry = _registry()
+        env = _semantic_env(registry)
+        action = parse_first_agent_action(
+            '{"action":"add_subgraph","agents":[{'
+            '"agent_id":"node_1","model_id":"model-a",'
+            '"contract":"Restrict the original comparison to singles only.",'
+            '"role_family":"reasoner","allowed_tools":["qa-retrieval"],'
+            '"execution_mode":"react"}],"relations":[]}'
+        )
+
+        issue = env._contract_obligation_issue(action)
+        self.assertIsNotNone(issue)
+        self.assertIn("unauthorized_scope_tokens", issue or "")
+        self.assertIn("singles", issue or "")
+
     def test_semantic_protocol_does_not_synthesize_required_role_edges(self) -> None:
         registry = _registry()
         env = _semantic_env(registry, graph=_single_terminal_graph())
@@ -796,6 +905,93 @@ class FlexibleSemanticGraphTests(unittest.TestCase):
         formatter_issue = env._semantic_protocol_issue(formatter_mismatch)
         self.assertIsNotNone(formatter_issue)
         self.assertIn("Formatter must only wrap", formatter_issue or "")
+
+    def test_terminal_gate_requires_semantic_artifact_continuity(self) -> None:
+        registry = _registry()
+        graph = AgentGraph(
+            [
+                AgentNode(
+                    "reasoner",
+                    "model-a",
+                    "determine the evidence-grounded semantic answer",
+                    role_family="reasoner",
+                    allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                    execution_mode="react",
+                ),
+                AgentNode(
+                    "bridge",
+                    "model-a-spare",
+                    "route a public semantic artifact",
+                    role_family="repair",
+                ),
+                AgentNode(
+                    "verifier",
+                    "model-b",
+                    "verify evidence, binding, hops, and scope",
+                    role_family="verifier",
+                ),
+                AgentNode(
+                    "relay",
+                    "model-b-spare",
+                    "route a verified semantic artifact",
+                    role_family="repair",
+                ),
+                AgentNode(
+                    "formatter",
+                    "model-a-spare",
+                    _HOTPOTQA_FORMAT_CONTRACT,
+                    role_family="format",
+                ),
+            ],
+            [
+                AgentRelation("reasoner", "bridge", True, False),
+                AgentRelation("bridge", "verifier", True, False),
+                AgentRelation("verifier", "relay", True, False),
+                AgentRelation("relay", "formatter", True, False),
+            ],
+            output_agent_id="formatter",
+        )
+        env = _semantic_env(registry, graph=graph)
+        outputs = {
+            "reasoner": _reasoner_artifact(),
+            "bridge": "UNRELATED BRIDGE ARTIFACT",
+            "verifier": _verifier_artifact(),
+            "relay": "UNRELATED RELAY ARTIFACT",
+            "formatter": f"<answer>{SYNTHETIC_CANDIDATE}</answer>",
+        }
+        execution = AgentRuntimeResult(
+            run_id="semantic-continuity-negative",
+            graph_revision=graph.revision,
+            output_agent_id="formatter",
+            final_answer=outputs["formatter"],
+            outputs=outputs,
+            calls=(),
+            block_completion_order=(),
+            output_metadata={
+                "reasoner": {"tool_receipts": [_read_receipt()]}
+            },
+        )
+
+        issue = env._semantic_protocol_issue(execution)
+        self.assertIsNotNone(issue)
+        self.assertIn("semantic artifact continuity failed", issue or "")
+
+        preserving_outputs = {
+            **outputs,
+            "bridge": f"candidate_answer: {SYNTHETIC_CANDIDATE}",
+            "relay": f"supported candidate_answer: {SYNTHETIC_CANDIDATE}",
+        }
+        preserving_execution = AgentRuntimeResult(
+            run_id="semantic-continuity-positive",
+            graph_revision=graph.revision,
+            output_agent_id="formatter",
+            final_answer=preserving_outputs["formatter"],
+            outputs=preserving_outputs,
+            calls=(),
+            block_completion_order=(),
+            output_metadata=execution.output_metadata,
+        )
+        self.assertIsNone(env._semantic_protocol_issue(preserving_execution))
 
 
 class PreserveRecoveryTests(unittest.TestCase):

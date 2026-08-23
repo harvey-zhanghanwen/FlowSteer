@@ -1693,6 +1693,19 @@ class AgentWorkflowEnv:
                 )
             )
             missing_role_families = self._missing_semantic_role_families()
+            admitted_new_role_families = (
+                self._model_admissible_add_role_families()
+            )
+            if (
+                self.semantic_protocol
+                == _HOTPOTQA_SEMANTIC_LINEAGE_PROTOCOL
+                and missing_role_families
+            ):
+                # Missing semantic responsibilities are sampled without
+                # duplicates at this construction boundary. Multiple
+                # Reasoners/Verifiers remain available after the minimum
+                # capabilities exist, so this does not prescribe topology.
+                remaining = min(remaining, len(missing_role_families))
             if (
                 self._repair_exhausted_reasoner_ids()
                 and self._graph.nodes
@@ -1735,20 +1748,15 @@ class AgentWorkflowEnv:
                         "model_ids": list(self.model_registry.model_ids),
                         "role_constraints": {
                             "reasoner": {
-                                "execution_modes": (
-                                    ["react", "reasoning"]
-                                    if self.semantic_protocol
-                                    == _HOTPOTQA_SEMANTIC_LINEAGE_PROTOCOL
-                                    else ["react"]
-                                ),
+                                # SkillFlow ReAct is an execution mode, never
+                                # a role. New v2 Reasoners materialize their own
+                                # evidence so every sampled construction state
+                                # has a reachable terminal capability. The
+                                # Canvas validator still accepts a pre-existing
+                                # reasoning Reasoner with routed retrieval.
+                                "execution_modes": ["react"],
                                 "allowed_tools": [
                                     [self.required_evidence_tool_id],
-                                    *(
-                                        [[]]
-                                        if self.semantic_protocol
-                                        == _HOTPOTQA_SEMANTIC_LINEAGE_PROTOCOL
-                                        else []
-                                    ),
                                 ],
                             },
                             "verifier": {
@@ -1793,7 +1801,17 @@ class AgentWorkflowEnv:
                             },
                         },
                         "admitted_new_role_families": list(
-                            self._model_admissible_add_role_families()
+                            admitted_new_role_families
+                        ),
+                        "distinct_new_role_families": bool(
+                            self.semantic_protocol
+                            == _HOTPOTQA_SEMANTIC_LINEAGE_PROTOCOL
+                            and missing_role_families
+                        ),
+                        "defer_output_assignment": bool(
+                            self.semantic_protocol
+                            == _HOTPOTQA_SEMANTIC_LINEAGE_PROTOCOL
+                            and missing_role_families
                         ),
                         "endpoint_scope": {
                             "relation_endpoint_sources": [
@@ -4095,6 +4113,7 @@ class AgentWorkflowEnv:
         if not self._uses_semantic_lineage_protocol():
             return None
         obligations: Tuple[str, ...]
+        scoped_obligations: Tuple[Tuple[str, str], ...]
         if action.action_type is AgentActionType.ADD_SUBGRAPH:
             obligations = tuple(
                 value
@@ -4102,9 +4121,29 @@ class AgentWorkflowEnv:
                 for value in (spec.contract, spec.completion_condition)
                 if value is not None
             )
+            scoped_obligations = tuple(
+                ((spec.role_family or "").casefold(), value)
+                for spec in action.agents
+                for value in (spec.contract, spec.completion_condition)
+                if value is not None
+            )
         elif action.action_type is AgentActionType.MODIFY_AGENT:
             obligations = tuple(
                 value
+                for value in (action.contract, action.completion_condition)
+                if value is not None
+            )
+            existing_role = (
+                (
+                    self._graph.get_node(action.agent_id).role_family
+                    if action.agent_id is not None
+                    and self._graph.has_node(action.agent_id)
+                    else None
+                )
+                or ""
+            ).casefold()
+            scoped_obligations = tuple(
+                ((action.role_family or existing_role).casefold(), value)
                 for value in (action.contract, action.completion_condition)
                 if value is not None
             )
@@ -4205,6 +4244,93 @@ class AgentWorkflowEnv:
                 "The Runtime state-conditioned action schema selects the exact query, "
                 "top-k, and passage_id from current public observations"
             )
+
+        # PROJECT_NECESSARY_ADAPTATION: the original FlowSteer Canvas admits
+        # free-text contracts, so the HotpotQA semantic protocol must reject a
+        # Director-authored scope restriction before it becomes an executable
+        # Agent obligation. This check is question-only and never reads the
+        # answer key, evaluator, or a task-specific allowed-value list.
+        scope_narrowing_verb = re.compile(
+            r"\b(?:restrict|limit|narrow|constrain|filter|exclude|omit|ignore|"
+            r"disregard)\b",
+            flags=re.IGNORECASE,
+        )
+        scope_neutral_tokens = {
+            "a",
+            "an",
+            "and",
+            "answer",
+            "answerfield",
+            "answerslot",
+            "artifact",
+            "candidate",
+            "comparison",
+            "contract",
+            "database",
+            "evidence",
+            "exact",
+            "explicit",
+            "format",
+            "from",
+            "in",
+            "input",
+            "multi",
+            "of",
+            "one",
+            "only",
+            "original",
+            "output",
+            "passage",
+            "passages",
+            "question",
+            "reasoning",
+            "relation",
+            "retrieval",
+            "scope",
+            "semantic",
+            "slot",
+            "source",
+            "sources",
+            "the",
+            "to",
+            "tool",
+            "using",
+            "verified",
+            "wrapper",
+        }
+        question_token_set = set(question_tokens)
+        narrowing_tokens = {
+            "restrict",
+            "limit",
+            "narrow",
+            "constrain",
+            "filter",
+            "exclude",
+            "omit",
+            "ignore",
+            "disregard",
+        }
+        for role_family, obligation in scoped_obligations:
+            if role_family == "format" or scope_narrowing_verb.search(
+                obligation
+            ) is None:
+                continue
+            unauthorized_qualifier_tokens = tuple(
+                token
+                for token in self._lexical_tokens(obligation)
+                if token not in question_token_set
+                and token not in scope_neutral_tokens
+                and token not in allowed_protocol_literals
+                and token not in narrowing_tokens
+            )
+            if unauthorized_qualifier_tokens:
+                return (
+                    f"{self._semantic_protocol_label()} Agent contract must "
+                    "preserve the exact original question scope and may not add "
+                    "an unrequested category, qualifier, subset, exclusion, or "
+                    "comparison restriction; unauthorized_scope_tokens="
+                    f"{list(dict.fromkeys(unauthorized_qualifier_tokens))!r}"
+                )
 
         concrete_entity_mapping = re.compile(
             r"\b(?:resolve|map|link|normalize|disambiguate)\b"
@@ -5278,27 +5404,63 @@ class AgentWorkflowEnv:
                         f"verifier={verifier_candidate!r}"
                     )
                     continue
-                reasoner_to_verifier = self._directed_shortest_path(
+                reasoner_to_verifier_paths = self._directed_simple_paths(
                     self._graph,
                     reasoner_id,
                     verifier_id,
                 )
-                verifier_to_formatter = self._directed_shortest_path(
+                verifier_to_formatter_paths = self._directed_simple_paths(
                     self._graph,
                     verifier_id,
                     formatter_id,
                 )
-                if not reasoner_to_verifier or not verifier_to_formatter:
+                if (
+                    not reasoner_to_verifier_paths
+                    or not verifier_to_formatter_paths
+                ):
                     diagnostics.append(
                         f"Reasoner {reasoner_id!r} and Verifier {verifier_id!r} "
                         "do not form one routed path to the selected Formatter"
                     )
                     continue
-                path = (
-                    *reasoner_to_verifier,
-                    *verifier_to_formatter[1:],
-                )
-                lineages.append((reasoner_candidate, path))
+                continuity_issues: list[str] = []
+                accepted_path: Optional[Tuple[str, ...]] = None
+                for reasoner_to_verifier in reasoner_to_verifier_paths:
+                    for verifier_to_formatter in verifier_to_formatter_paths:
+                        path = (
+                            *reasoner_to_verifier,
+                            *verifier_to_formatter[1:],
+                        )
+                        continuity_issue = (
+                            self._semantic_artifact_continuity_issue(
+                                execution,
+                                path,
+                                reasoner_candidate,
+                                semantic_endpoint_ids={
+                                    reasoner_id,
+                                    verifier_id,
+                                    formatter_id,
+                                },
+                            )
+                        )
+                        if continuity_issue is None:
+                            accepted_path = path
+                            break
+                        continuity_issues.append(continuity_issue)
+                    if accepted_path is not None:
+                        break
+                if accepted_path is None:
+                    diagnostics.append(
+                        continuity_issues[0]
+                        if continuity_issues
+                        else (
+                            f"Reasoner {reasoner_id!r} semantic artifact did not "
+                            "reach Verifier and Formatter through a continuous "
+                            "CommunicationEnvelope path"
+                        )
+                    )
+                    continue
+                lineages.append((reasoner_candidate, accepted_path))
         return tuple(lineages), tuple(diagnostics)
 
     def _hotpotqa_semantic_lineage_issue(
@@ -5381,6 +5543,99 @@ class AgentWorkflowEnv:
                 seen.add(successor_id)
                 pending.append((*path, successor_id))
         return ()
+
+    @classmethod
+    def _directed_simple_paths(
+        cls,
+        graph: AgentGraph,
+        source_id: str,
+        target_id: str,
+    ) -> Tuple[Tuple[str, ...], ...]:
+        """Return every deterministic simple directed path between two Agents."""
+
+        if source_id == target_id:
+            return ((source_id,),)
+        paths: list[Tuple[str, ...]] = []
+        pending: list[Tuple[str, ...]] = [(source_id,)]
+        while pending:
+            path = pending.pop(0)
+            for successor_id in cls._directed_successors(graph, path[-1]):
+                if successor_id in path:
+                    continue
+                candidate = (*path, successor_id)
+                if successor_id == target_id:
+                    paths.append(candidate)
+                else:
+                    pending.append(candidate)
+        return tuple(paths)
+
+    def _semantic_artifact_continuity_issue(
+        self,
+        execution: AgentRuntimeResult,
+        path: Tuple[str, ...],
+        candidate_answer: str,
+        *,
+        semantic_endpoint_ids: set[str],
+    ) -> Optional[str]:
+        """Validate candidate preservation across routed communication.
+
+        FlowSteer's directed path records topology, while AgentRuntime passes
+        only each direct predecessor's artifact in a CommunicationEnvelope.
+        Every intermediate Agent on a semantic path must therefore preserve
+        the Reasoner's exact candidate in its public artifact. This accepts
+        arbitrary bridges, fan-in, repair nodes, and reciprocal blocks, but
+        rejects a graph path whose actual messages have lost semantic lineage.
+        """
+
+        for agent_id in path[1:-1]:
+            if agent_id in semantic_endpoint_ids:
+                continue
+            artifact = execution.outputs.get(agent_id)
+            if not isinstance(artifact, str) or not self._contains_lexical_span(
+                artifact,
+                candidate_answer,
+            ):
+                return (
+                    "HotpotQA semantic artifact continuity failed: intermediate "
+                    f"Agent {agent_id!r} did not preserve candidate_answer "
+                    f"{candidate_answer!r} in its routed artifact"
+                )
+
+        # When the current runtime result contains the target invocation, also
+        # verify that its request receipt carried the exact predecessor output.
+        # Reused Agents may have no current-revision call record; their public
+        # output continuity is still checked above.
+        for source_id, target_id in zip(path, path[1:]):
+            target_calls = tuple(
+                call
+                for call in execution.calls
+                if call.request.agent.id == target_id
+            )
+            if not target_calls:
+                continue
+            source_artifact = execution.outputs.get(source_id)
+            envelope_seen = any(
+                any(
+                    message.source_agent_id == source_id
+                    and message.target_agent_id == target_id
+                    and message.content == source_artifact
+                    for message in call.request.upstream
+                )
+                or (
+                    call.request.peer_draft is not None
+                    and call.request.peer_draft.source_agent_id == source_id
+                    and call.request.peer_draft.target_agent_id == target_id
+                    and call.request.peer_draft.content == source_artifact
+                )
+                for call in target_calls
+            )
+            if not envelope_seen:
+                return (
+                    "HotpotQA semantic artifact continuity failed: no exact "
+                    f"CommunicationEnvelope carried {source_id!r} to "
+                    f"{target_id!r} in the current Runtime receipt"
+                )
+        return None
 
     @staticmethod
     def _directed_successors(graph: AgentGraph, agent_id: str) -> Tuple[str, ...]:
@@ -5939,14 +6194,18 @@ class AgentWorkflowEnv:
             if (
                 action.action_type is AgentActionType.ADD_SUBGRAPH
                 and sampled_role_families
+                and len(sampled_role_families)
+                == len(set(sampled_role_families))
                 and set(sampled_role_families) <= set(missing_role_families)
                 and sampled_role_families.count("format") <= 1
+                and action.output_agent_id is None
             ):
                 return None
             return (
                 "complete the missing HotpotQA semantic responsibilities with "
-                "one add_subgraph transaction before SET_OUTPUT, MODIFY_AGENT, "
-                "or other Canvas edits; add only roles from "
+                "one add_subgraph transaction, execute that capability block, "
+                "and defer Output assignment to a later SET_OUTPUT action; "
+                "new roles must be distinct and come only from "
                 "admitted_new_role_families="
                 f"{list(missing_role_families)!r}"
             )

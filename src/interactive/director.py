@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from itertools import permutations
 import json
 import os
 import random
@@ -1174,6 +1175,28 @@ def _live_hotpotqa_output_domain(
     return current_output
 
 
+def _live_defer_output_assignment(domain: Mapping[str, Any]) -> bool:
+    """Return the Canvas-authored progressive Output-assignment boundary."""
+
+    value = domain.get("defer_output_assignment", False)
+    if type(value) is not bool:
+        raise ValueError(
+            "add_subgraph defer_output_assignment must be boolean"
+        )
+    return value
+
+
+def _live_distinct_new_roles(domain: Mapping[str, Any]) -> bool:
+    """Return whether this capability-construction edit forbids duplicates."""
+
+    value = domain.get("distinct_new_role_families", False)
+    if type(value) is not bool:
+        raise ValueError(
+            "add_subgraph distinct_new_role_families must be boolean"
+        )
+    return value
+
+
 def _hotpotqa_directed_role_relation_allowed(
     source_role: str,
     target_role: str,
@@ -1421,16 +1444,40 @@ def director_live_add_subgraph_role_selection_json_schema_text(
         }
         for agent_id in new_agent_ids
     ]
-    count_branches = [
-        {
-            "type": "array",
-            "minItems": count,
-            "maxItems": count,
-            "prefixItems": positional_roles[:count],
-            "items": False,
-        }
-        for count in range(min_agents, max_agents + 1)
-    ]
+    if _live_distinct_new_roles(domain):
+        count_branches = [
+            {
+                "type": "array",
+                "minItems": count,
+                "maxItems": count,
+                "prefixItems": [
+                    {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["agent_id", "role_family"],
+                        "properties": {
+                            "agent_id": {"const": new_agent_ids[position]},
+                            "role_family": {"const": role_family},
+                        },
+                    }
+                    for position, role_family in enumerate(role_sequence)
+                ],
+                "items": False,
+            }
+            for count in range(min_agents, max_agents + 1)
+            for role_sequence in permutations(role_families, count)
+        ]
+    else:
+        count_branches = [
+            {
+                "type": "array",
+                "minItems": count,
+                "maxItems": count,
+                "prefixItems": positional_roles[:count],
+                "items": False,
+            }
+            for count in range(min_agents, max_agents + 1)
+        ]
     # The declaration render above is intentionally evaluated first so this
     # smaller selector cannot accept a malformed live domain that the complete
     # role-conditioned phase would later reject.
@@ -1521,6 +1568,13 @@ def director_live_add_subgraph_role_selection_from_text(
             )
         normalized.append(
             {"agent_id": agent_id, "role_family": role_family}
+        )
+    if _live_distinct_new_roles(domain) and len(
+        {item["role_family"] for item in normalized}
+    ) != len(normalized):
+        raise ValueError(
+            "add_subgraph selected Agent roles must be distinct at the "
+            "current capability-construction boundary"
         )
     return tuple(normalized)
 
@@ -1654,6 +1708,13 @@ def _live_add_subgraph_agents(
                 )
         new_ids.add(agent_id)
         normalized.append(agent)
+    if _live_distinct_new_roles(domain) and len(
+        {item["role_family"] for item in normalized}
+    ) != len(normalized):
+        raise ValueError(
+            "add_subgraph Agent declarations must use distinct roles at the "
+            "current capability-construction boundary"
+        )
     if selected_agent_roles is not None:
         expected_roles = tuple(
             (value["agent_id"], value["role_family"])
@@ -2093,7 +2154,11 @@ def director_live_action_parameter_json_schema_text(
             ]
             schema["properties"]["output_agent_id"] = (
                 {"type": "null"}
-                if isolated_boundary or current_output_agent_id is not None
+                if (
+                    isolated_boundary
+                    or current_output_agent_id is not None
+                    or _live_defer_output_assignment(domain)
+                )
                 else
                 {
                     "anyOf": [

@@ -1929,6 +1929,11 @@ def _validate_v3_hierarchical_action_receipt(
                 add_domain.get("semantic_protocol")
             )
         ):
+            if add_domain.get("defer_output_assignment", False) is True:
+                raise ReceiptValidationError(
+                    "v3 verified-QA capability construction must defer Output "
+                    "assignment to a later SET_OUTPUT action"
+                )
             existing_roles = {
                 item["agent_id"]: item["role_family"]
                 for item in add_domain.get("existing_agents", ())
