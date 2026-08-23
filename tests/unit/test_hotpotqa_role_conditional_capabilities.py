@@ -1524,6 +1524,77 @@ class RoleConditionalSearchSpaceTests(unittest.TestCase):
         env._progressive_output_metadata.pop("reader")
         self.assertIsNone(env._delete_admission_issue("reader"))
 
+    def test_agent_limit_repairs_live_dirty_replacement_before_another_add(
+        self,
+    ) -> None:
+        registry = _registry()
+        nodes = [
+            _evidence_agent("reader"),
+            _evidence_agent("replacement"),
+            AgentNode(
+                "consumer",
+                "model-b",
+                "consume routed evidence",
+                role_family="repair",
+                artifact_type="semantic_candidate",
+            ),
+            _output_agent(),
+            *(
+                AgentNode(
+                    f"filler_{index}",
+                    "model-c",
+                    f"preserved auxiliary branch {index}",
+                    role_family="repair",
+                )
+                for index in range(4)
+            ),
+        ]
+        graph = AgentGraph(
+            nodes,
+            [
+                AgentRelation("reader", "consumer", True, False),
+                AgentRelation("replacement", "consumer", True, False),
+                AgentRelation("consumer", "output", True, False),
+                *(
+                    AgentRelation(
+                        f"filler_{index}",
+                        "consumer",
+                        True,
+                        False,
+                    )
+                    for index in range(4)
+                ),
+            ],
+            output_agent_id="output",
+        )
+        env = _env(registry, graph=graph, max_agents=8)
+        env._failed_agent_ids.add("reader")
+        env._react_exhausted_agent_ids.add("reader")
+        env._repair_exhausted_agent_ids.add("reader")
+        env._unresolved_dirty_agents.add("replacement")
+
+        self.assertEqual(
+            {"evidence_retriever": ("retrieval_evidence",)},
+            env._repair_exhausted_auxiliary_replacement_domains(),
+        )
+        self.assertEqual(
+            ("replacement",),
+            env._dirty_auxiliary_replacement_agent_ids(),
+        )
+        self.assertEqual((), env._mandatory_repair_agent_ids())
+        self.assertEqual(("modify_agent",), env.model_admissible_action_types())
+        modify_domain = env.model_admissible_action_targets()["modify_agent"]
+        self.assertEqual(["replacement"], modify_domain["agent_ids"])
+        self.assertEqual(
+            ["contract", "completion_condition"],
+            modify_domain["mutable_fields"],
+        )
+        action = env.parser.parse(
+            '{"action":"modify_agent","agent_id":"replacement",'
+            '"contract":"retry retrieval without discarding prior evidence"}'
+        )
+        self.assertIsNone(env._preservation_admission_issue(action))
+
     def test_delete_takeover_preserves_previous_semantic_candidate(self) -> None:
         registry = _registry()
         graph = AgentGraph(

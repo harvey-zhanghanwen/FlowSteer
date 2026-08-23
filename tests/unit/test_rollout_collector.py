@@ -1875,6 +1875,124 @@ def test_collector_materializes_exact_finish_trajectory_and_evidence(tmp_path):
     assert len(evidence.trajectories) == 1
 
 
+def test_collector_persists_initial_empty_action_domain_without_director_request(
+    tmp_path,
+):
+    class EmptyActionEnv(AgentWorkflowEnv):
+        def model_admissible_action_types(self) -> tuple[str, ...]:
+            return ()
+
+    registry = _registry()
+    client = ScriptedSGLangClient(
+        [],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+    )
+    evidence = EvidenceStore(tmp_path)
+    collector = AgentGraphRolloutCollector(
+        _orchestrator(
+            registry,
+            client,
+            max_rounds=2,
+            sampling_action_profile=DIRECTOR_MODEL_ADMISSIBLE_ACTION_MASK_PROFILE,
+            sampling_action_schema_version=(
+                DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3
+            ),
+        ),
+        EmptyActionEnv(registry, gateway=FakeGateway()),
+        _versions(),
+        evidence,
+    )
+    observed = {}
+
+    def evaluator(task, final_answer, final_graph, runtime):
+        observed.update(
+            final_answer=final_answer,
+            final_graph=final_graph,
+            runtime=runtime,
+        )
+        return {
+            "evaluator_version": EVALUATOR_VERSION,
+            "valid": True,
+            "reward": 0.0,
+            "metrics": {"f1": 0.0},
+        }
+
+    trajectory = asyncio.run(collector.collect(_task(), 0, evaluator))
+
+    assert trajectory.termination_reason == "no_admissible_action"
+    assert trajectory.explicit_finish is False
+    assert trajectory.final_answer is None
+    assert trajectory.turns == ()
+    assert trajectory.terminal_failure is True
+    assert trajectory.grpo_eligible is False
+    assert client.payloads == []
+    assert observed["runtime"] is None
+    assert observed["final_answer"] is None
+    assert observed["final_graph"]["nodes"] == []
+    assert len(evidence.trajectories) == 1
+
+
+def test_collector_preserves_turn_before_action_domain_becomes_empty():
+    class EmptyAfterFirstEditEnv(AgentWorkflowEnv):
+        def model_admissible_action_types(self) -> tuple[str, ...]:
+            if self.graph.revision > 0:
+                return ()
+            return super().model_admissible_action_types()
+
+    registry = _registry()
+    client = ScriptedSGLangClient(
+        [
+            (
+                '{"action":"add_subgraph","agents":['
+                '{"agent_id":"solver","model_id":"cheap-model",'
+                '"contract":"solve directly"}],"relations":[],'
+                '"output_agent_id":"solver"}'
+            ),
+        ],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+    )
+    collector = AgentGraphRolloutCollector(
+        _orchestrator(
+            registry,
+            client,
+            max_rounds=2,
+            sampling_action_profile=DIRECTOR_MODEL_ADMISSIBLE_ACTION_MASK_PROFILE,
+            sampling_action_schema_version=(
+                DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION
+            ),
+        ),
+        EmptyAfterFirstEditEnv(
+            registry,
+            gateway=FakeGateway(),
+            execute_on_edit=True,
+        ),
+        _versions(),
+    )
+
+    def evaluator(task, final_answer, final_graph, runtime):
+        assert final_answer is None
+        assert runtime is None
+        assert final_graph["nodes"][0]["id"] == "solver"
+        return {
+            "evaluator_version": EVALUATOR_VERSION,
+            "valid": True,
+            "reward": 0.0,
+            "metrics": {"f1": 0.0},
+        }
+
+    trajectory = asyncio.run(collector.collect(_task(), 0, evaluator))
+
+    assert trajectory.termination_reason == "no_admissible_action"
+    assert trajectory.explicit_finish is False
+    assert trajectory.final_answer is None
+    assert len(trajectory.turns) == 1
+    assert len(client.payloads) == 1
+    assert trajectory.terminal_failure is True
+    assert trajectory.grpo_eligible is True
+
+
 def test_collector_uses_state_conditioned_schema_on_every_progressive_turn():
     registry = _registry()
     client = ScriptedSGLangClient(

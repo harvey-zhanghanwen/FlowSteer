@@ -586,11 +586,11 @@ class TrajectoryRecord:
 
     @property
     def terminal_failure(self) -> bool:
-        """Whether the natural policy exhausted its edit budget without finish."""
+        """Whether the natural policy terminated without an admitted FINISH."""
 
         return bool(
             not self.explicit_finish
-            and self.termination_reason == "max_rounds"
+            and self.termination_reason in {"max_rounds", "no_admissible_action"}
             and (
                 self.final_answer in (None, "")
                 or self.valid_lineage_fallback_used

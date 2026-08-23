@@ -36,6 +36,7 @@ from .agent_workflow_env import AgentWorkflowEnv
 from .director import (
     AgentGraphOrchestrator,
     DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION,
+    DIRECTOR_MODEL_ADMISSIBLE_ACTION_MASK_PROFILE,
     DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION,
     DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V1,
     DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3,
@@ -2895,6 +2896,7 @@ class AgentGraphRolloutCollector:
         valid_lineage_fallback_used = False
         valid_lineage_fallback_receipt: Mapping[str, Any] = {}
         explicit_finish = False
+        no_admissible_action = False
 
         group_id = f"{task.task_id}:{self.condition_id}:{self.versions.policy}"
         rollout_id = f"{group_id}:rollout:{rollout_index:04d}"
@@ -2939,6 +2941,18 @@ class AgentGraphRolloutCollector:
             )
         prompt = self.orchestrator.build_prompt(env, 0, current_skills)
         for round_index in range(self.orchestrator.max_rounds):
+            if (
+                self.orchestrator.sampling_action_profile
+                == DIRECTOR_MODEL_ADMISSIBLE_ACTION_MASK_PROFILE
+                and not env.model_admissible_action_types()
+            ):
+                # Keep exact-receipt collection aligned with
+                # AgentGraphOrchestrator.run(): constrained decoding cannot
+                # encode an empty Canvas action domain, so this is a natural
+                # non-FINISH terminal state rather than a Director/API error.
+                # No action or model request is invented at this boundary.
+                no_admissible_action = True
+                break
             generation_seed = self.orchestrator.generation_seed(round_index)
             schema_request = self.orchestrator.action_schema_request(env)
             response = await self.orchestrator.client.propose(
@@ -3329,7 +3343,12 @@ class AgentGraphRolloutCollector:
                 current_skills,
             )
 
-        termination_reason = "finish" if explicit_finish else "max_rounds"
+        if explicit_finish:
+            termination_reason = "finish"
+        elif no_admissible_action:
+            termination_reason = "no_admissible_action"
+        else:
+            termination_reason = "max_rounds"
         if termination_reason == "max_rounds":
             # Progressive execution remains Canvas feedback, never an implicit
             # FINISH.  The Env is the sole semantic-lineage admission authority;

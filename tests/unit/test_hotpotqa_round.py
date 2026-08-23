@@ -825,3 +825,55 @@ def test_report_counts_terminal_failure_without_dropping_evaluator_result():
     assert report["agentgraph"]["completed"] == 1
     assert report["agentgraph"]["evaluator_valid"] == 1
     assert report["agentgraph"]["strict_exact_match"] == 0.0
+
+
+def test_report_counts_and_classifies_empty_action_domain_terminal():
+    trajectory = {
+        "explicit_finish": False,
+        "termination_reason": "no_admissible_action",
+        "turns": [],
+    }
+    assert (
+        _MODULE._failure_type(
+            {"available": True},
+            trajectory,
+            direct_em=1.0,
+            graph_em=0.0,
+            graph_f1=0.0,
+        )
+        == "director_no_admissible_action"
+    )
+
+    rows = [
+        {
+            "task_id": "hotpotqa:empty-domain",
+            "direct": {
+                "available": True,
+                "valid": True,
+                "exact_match": 1.0,
+                "token_f1": 1.0,
+            },
+            "agentgraph": {
+                "available": True,
+                "valid": True,
+                "exact_match": 0.0,
+                "token_f1": 0.0,
+                "explicit_finish": False,
+                "termination_reason": "no_admissible_action",
+            },
+            "failure_type": "director_no_admissible_action",
+        }
+    ]
+    config = {
+        "experiment": {"name": "empty-domain-terminal"},
+        "director": {
+            "behavior_policy_version": "policy",
+            "behavior_adapter_name": "adapter",
+        },
+        "agent_graph": {"model_catalog_path": "catalog.yaml"},
+    }
+
+    report = _MODULE._report(rows, config)
+
+    assert report["terminal_failure_count"] == 1
+    assert report["operational_failure_count"] == 0

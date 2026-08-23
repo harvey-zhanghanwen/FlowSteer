@@ -219,6 +219,21 @@ class RecordTests(unittest.TestCase):
         self.assertFalse(replace(failure, manual_repair_used=True).grpo_eligible)
         self.assertFalse(replace(failure, forced_probe=True).grpo_eligible)
 
+    def test_no_admissible_action_is_a_natural_terminal_failure(self) -> None:
+        failure = trajectory(
+            explicit_finish=False,
+            termination_reason="no_admissible_action",
+            final_answer=None,
+            evaluation=EvaluationReceipt("eval-v1", True, 0.0),
+        )
+
+        self.assertTrue(failure.terminal_failure)
+        self.assertTrue(failure.natural_policy_terminal)
+        self.assertTrue(failure.grpo_eligible)
+        restored = TrajectoryRecord.from_dict(failure.to_dict())
+        self.assertEqual("no_admissible_action", restored.termination_reason)
+        self.assertTrue(restored.terminal_failure)
+
     def test_valid_lineage_fallback_round_trips_and_is_never_grpo_eligible(self) -> None:
         fallback = trajectory(
             explicit_finish=False,

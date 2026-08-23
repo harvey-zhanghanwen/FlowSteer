@@ -661,6 +661,36 @@ class AgentWorkflowEnv:
             # another recovery branch.
             return (AgentActionType.DELETE_AGENT.value,)
 
+        exhausted_reasoner_ids = self._repair_exhausted_reasoner_ids()
+        if exhausted_reasoner_ids:
+            failed_ingress_candidates = (
+                self._failed_auxiliary_ingress_relation_candidates()
+            )
+            if (
+                failed_ingress_candidates
+                and AgentActionType.SET_RELATION.value
+                in self._allowed_action_type_set
+            ):
+                return (AgentActionType.SET_RELATION.value,)
+            routing_candidates = self._repair_exhausted_relation_candidates()
+            if (
+                routing_candidates
+                and AgentActionType.SET_RELATION.value
+                in self._allowed_action_type_set
+            ):
+                return (AgentActionType.SET_RELATION.value,)
+
+        if (
+            dirty_replacement_ids
+            and AgentActionType.MODIFY_AGENT.value
+            in self._allowed_action_type_set
+        ):
+            # A replacement which already exists on the Canvas but has not
+            # materialized its executable prefix is a live repair target, even
+            # when another replacement ADD would exceed max_agents. Preserve
+            # the measured node and repair it before considering augmentation.
+            return (AgentActionType.MODIFY_AGENT.value,)
+
         node_count = len(self._graph.nodes)
         node_ids = tuple(node.id for node in self._graph.nodes)
         can_add = self.max_agents is None or node_count < self.max_agents
@@ -719,36 +749,6 @@ class AgentWorkflowEnv:
             ):
                 return (AgentActionType.ADD_SUBGRAPH.value,)
             return ()
-        exhausted_reasoner_ids = self._repair_exhausted_reasoner_ids()
-        if exhausted_reasoner_ids:
-            failed_ingress_candidates = (
-                self._failed_auxiliary_ingress_relation_candidates()
-            )
-            if (
-                failed_ingress_candidates
-                and AgentActionType.SET_RELATION.value
-                in self._allowed_action_type_set
-            ):
-                return (AgentActionType.SET_RELATION.value,)
-            routing_candidates = self._repair_exhausted_relation_candidates()
-            if (
-                routing_candidates
-                and AgentActionType.SET_RELATION.value
-                in self._allowed_action_type_set
-            ):
-                return (AgentActionType.SET_RELATION.value,)
-
-        if (
-            dirty_replacement_ids
-            and AgentActionType.MODIFY_AGENT.value
-            in self._allowed_action_type_set
-        ):
-            # At the Agent limit an isolated same-responsibility replacement
-            # which has not materialized its prefix is the only executable
-            # recovery responsibility.  Do not spend the next FlowSteer edit on
-            # a blocked downstream Agent which merely lacks that artifact.
-            return (AgentActionType.MODIFY_AGENT.value,)
-
         missing_role_families = self._missing_semantic_role_families()
         if (
             self.semantic_protocol == _HOTPOTQA_SEMANTIC_LINEAGE_PROTOCOL
@@ -9018,6 +9018,65 @@ class AgentWorkflowEnv:
                 f"{list(takeover_delete_ids)!r}"
             )
 
+        exhausted_reasoner_ids = self._repair_exhausted_reasoner_ids()
+        if exhausted_reasoner_ids:
+            failed_ingress_candidates = (
+                self._failed_auxiliary_ingress_relation_candidates()
+            )
+            if failed_ingress_candidates:
+                if any(
+                    self._relation_action_matches_candidate(action, candidate)
+                    for candidate in failed_ingress_candidates
+                ):
+                    return None
+                return (
+                    "close only the failed auxiliary ingress while preserving "
+                    "the successful ingress and complete semantic dataflow; use "
+                    "an exact admitted set_relation candidate"
+                )
+            routing_candidates = self._repair_exhausted_relation_candidates()
+            if routing_candidates:
+                if any(
+                    self._relation_action_matches_candidate(action, candidate)
+                    for candidate in routing_candidates
+                ):
+                    return None
+                return (
+                    "route one existing Evidence Retriever or Repair artifact "
+                    "into the ReAct-repair-exhausted Reasoner before other Canvas "
+                    "edits; use an exact admitted set_relation candidate"
+                )
+
+        dirty_replacement_ids = self._dirty_auxiliary_replacement_agent_ids()
+        if dirty_replacement_ids:
+            mutable_fields = {
+                field
+                for field in (
+                    "model_id",
+                    "contract",
+                    "role_family",
+                    "allowed_tools",
+                    "execution_mode",
+                    "artifact_type",
+                    "completion_condition",
+                )
+                if getattr(action, field) is not None
+            }
+            if (
+                action.action_type is AgentActionType.MODIFY_AGENT
+                and action.agent_id in dirty_replacement_ids
+                and len(mutable_fields) == 1
+                and mutable_fields <= {"contract", "completion_condition"}
+            ):
+                return None
+            return (
+                "repair or execute only the unresolved same-role Evidence "
+                "Retriever replacement at max_agents before modifying blocked "
+                "downstream Agents; admissible_modify_agent_ids="
+                f"{list(dirty_replacement_ids)!r}; mutable_fields="
+                "['contract', 'completion_condition']"
+            )
+
         replacement_domains = (
             self._repair_exhausted_auxiliary_replacement_domains()
         )
@@ -9089,65 +9148,6 @@ class AgentWorkflowEnv:
                 "output_agent_id. The accepted ADD executes immediately; route "
                 "its artifact to the original downstream consumer only after "
                 "that execution succeeds"
-            )
-
-        exhausted_reasoner_ids = self._repair_exhausted_reasoner_ids()
-        if exhausted_reasoner_ids:
-            failed_ingress_candidates = (
-                self._failed_auxiliary_ingress_relation_candidates()
-            )
-            if failed_ingress_candidates:
-                if any(
-                    self._relation_action_matches_candidate(action, candidate)
-                    for candidate in failed_ingress_candidates
-                ):
-                    return None
-                return (
-                    "close only the failed auxiliary ingress while preserving "
-                    "the successful ingress and complete semantic dataflow; use "
-                    "an exact admitted set_relation candidate"
-                )
-            routing_candidates = self._repair_exhausted_relation_candidates()
-            if routing_candidates:
-                if any(
-                    self._relation_action_matches_candidate(action, candidate)
-                    for candidate in routing_candidates
-                ):
-                    return None
-                return (
-                    "route one existing Evidence Retriever or Repair artifact "
-                    "into the ReAct-repair-exhausted Reasoner before other Canvas "
-                    "edits; use an exact admitted set_relation candidate"
-                )
-
-        dirty_replacement_ids = self._dirty_auxiliary_replacement_agent_ids()
-        if dirty_replacement_ids:
-            mutable_fields = {
-                field
-                for field in (
-                    "model_id",
-                    "contract",
-                    "role_family",
-                    "allowed_tools",
-                    "execution_mode",
-                    "artifact_type",
-                    "completion_condition",
-                )
-                if getattr(action, field) is not None
-            }
-            if (
-                action.action_type is AgentActionType.MODIFY_AGENT
-                and action.agent_id in dirty_replacement_ids
-                and len(mutable_fields) == 1
-                and mutable_fields <= {"contract", "completion_condition"}
-            ):
-                return None
-            return (
-                "repair or execute only the unresolved same-role Evidence "
-                "Retriever replacement at max_agents before modifying blocked "
-                "downstream Agents; admissible_modify_agent_ids="
-                f"{list(dirty_replacement_ids)!r}; mutable_fields="
-                "['contract', 'completion_condition']"
             )
 
         terminal_reachability_candidates = (

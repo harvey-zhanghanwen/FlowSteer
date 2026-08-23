@@ -1068,6 +1068,8 @@ def _failure_type(
     if trajectory is None:
         return "agentgraph_operational_failure"
     if trajectory.get("explicit_finish") is not True:
+        if trajectory.get("termination_reason") == "no_admissible_action":
+            return "director_no_admissible_action"
         return "director_max_rounds"
     turns = trajectory.get("turns", ())
     feedback = " ".join(
@@ -1225,7 +1227,8 @@ def _report(
     )
     terminal_failures = sum(
         row["agentgraph"].get("available") is True
-        and row["agentgraph"].get("termination_reason") == "max_rounds"
+        and row["agentgraph"].get("termination_reason")
+        in {"max_rounds", "no_admissible_action"}
         for row in rows
     )
     operational_failures = sum(
@@ -1314,7 +1317,7 @@ Evaluation split: **{split}**; {sample_role}: **{report['sample_count']}**. The 
 
 Metric scope: **official-compatible answer-only EM/F1**. Supporting-fact and joint metrics are unavailable because this run does not emit formal supporting-fact predictions.
 
-AgentGraph explicit FINISH: **{report['explicit_finished_count']}/{report['sample_count']}**; natural max-round terminal failures: **{report['terminal_failure_count']}**; operational/evaluator failures: **{report['operational_failure_count']}**.
+AgentGraph explicit FINISH: **{report['explicit_finished_count']}/{report['sample_count']}**; natural non-FINISH terminal failures: **{report['terminal_failure_count']}**; operational/evaluator failures: **{report['operational_failure_count']}**.
 
 | Condition | Completed | Valid | Strict EM | Strict F1 |
 |---|---:|---:|---:|---:|
