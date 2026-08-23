@@ -4685,6 +4685,45 @@ class AgentWorkflowEnv:
             and agent_id not in self._unresolved_dirty_agents
         )
 
+    def _allows_grounded_terminal_reachability_ingress(
+        self,
+        candidate: AgentGraph,
+        agent_id: str,
+        before: Sequence[str],
+        after: Sequence[str],
+    ) -> bool:
+        """Allow one grounded Retriever edge into the active Reasoner.
+
+        FlowSteer's relation edit invalidates and re-executes the changed
+        downstream closure.  When a valid semantic lineage already exists but
+        one successful public-evidence Retriever is terminal-unreachable, the
+        non-destructive repair is therefore the exact one-way
+        Retriever -> Reasoner handoff: the Retriever artifact remains live and
+        the prior Reasoner/Verifier/Formatter artifacts are retained in the
+        previous-revision preservation store before being recomputed.  No
+        arbitrary predecessor change is admitted here.
+        """
+
+        active_lineage = self._active_semantic_lineage_ids()
+        if not active_lineage or agent_id != active_lineage[0]:
+            return False
+        before_ids = set(before)
+        after_ids = set(after)
+        if not before_ids < after_ids or len(after_ids - before_ids) != 1:
+            return False
+        source_id = next(iter(after_ids - before_ids))
+        if source_id not in self._terminal_unreachable_agent_ids():
+            return False
+        if not self._graph.has_node(source_id) or not candidate.has_node(source_id):
+            return False
+        source = self._graph.get_node(source_id)
+        if (source.role_family or "").casefold() != "evidence_retriever":
+            return False
+        return self._semantic_replacement_has_valid_artifact(
+            source_id,
+            "evidence_retriever",
+        )
+
     def _preserved_input_change_issue_for(
         self,
         candidate: AgentGraph,
@@ -4704,6 +4743,13 @@ class AgentWorkflowEnv:
             before = tuple(self._graph.directed_predecessors(node.id))
             after = tuple(candidate.directed_predecessors(node.id))
             if before != after:
+                if self._allows_grounded_terminal_reachability_ingress(
+                    candidate,
+                    node.id,
+                    before,
+                    after,
+                ):
+                    continue
                 return (
                     f"preserve successful Agent {node.id!r} input dependencies; "
                     f"current_predecessors={list(before)!r}, "

@@ -3955,6 +3955,72 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(unrelated.accepted)
         self.assertIn("strictly reduces terminal_unreachable_agent_ids", unrelated.feedback)
 
+    async def test_grounded_orphan_retriever_routes_into_active_reasoner(
+        self,
+    ) -> None:
+        complete = _hotpot_semantic_graph()
+        registry = make_registry()
+        gateway = _HotpotSemanticGateway()
+        runtime = _hotpot_semantic_runtime(registry, gateway)
+        initial = await runtime.execute(
+            complete,
+            "What is the capital of France?",
+            require_complete=True,
+            format_output_agent=True,
+        )
+        graph = complete.fork()
+        graph.set_relation("reader", "reasoner", False, False)
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=runtime,
+            graph=graph,
+            problem="What is the capital of France?",
+            execute_on_edit=True,
+            semantic_protocol="hotpotqa_verified_answer_slot_v1",
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+        )
+        env._progressive_outputs = dict(initial.outputs)
+        env._progressive_output_metadata = {
+            agent_id: dict(metadata)
+            for agent_id, metadata in initial.output_metadata.items()
+        }
+        # The active Reasoner obtained its own public read in the tc1 shape;
+        # keep that receipt while the detached Retriever remains independently
+        # grounded and terminal-unreachable.
+        env._progressive_output_metadata["reasoner"] = {
+            "tool_receipts": list(
+                env._progressive_output_metadata["reader"]["tool_receipts"]
+            )
+        }
+
+        self.assertEqual(
+            ("reasoner", "verifier", "formatter"),
+            env._active_semantic_lineage_ids(),
+        )
+        self.assertEqual(("reader",), env._terminal_unreachable_agent_ids())
+        self.assertEqual(("set_relation",), env.model_admissible_action_types())
+        route = {
+            "source_id": "reader",
+            "target_id": "reasoner",
+            "source_to_target": True,
+            "target_to_source": False,
+        }
+        self.assertEqual(
+            [route],
+            env.model_admissible_action_targets()["set_relation"]["candidates"],
+        )
+
+        result = await env.step(json.dumps({"action": "set_relation", **route}))
+
+        self.assertTrue(result.accepted, result.feedback)
+        self.assertEqual("<answer>Paris</answer>", result.execution.final_answer)
+        self.assertEqual(("finish",), env.model_admissible_action_types())
+        self.assertIn("reasoner", env._previous_revision_outputs)
+        self.assertIn("verifier", env._previous_revision_outputs)
+        self.assertIn("formatter", env._previous_revision_outputs)
+        self.assertEqual("retrieved passage p1", env._progressive_outputs["reader"])
+
     async def test_failed_reader_replacement_domain_excludes_cross_role_artifact(
         self,
     ) -> None:
