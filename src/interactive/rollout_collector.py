@@ -60,6 +60,7 @@ from .director import (
     director_modify_agent_field_sampling_json_schema_text,
     director_modify_agent_field_selector_json_schema_text,
     director_state_conditioned_sampling_json_schema_text,
+    flexible_hotpotqa_semantic_protocol,
     verified_qa_semantic_protocol,
 )
 from .openai_gateway import build_agent_messages
@@ -1867,12 +1868,19 @@ def _validate_v3_hierarchical_action_receipt(
                 )
         add_domain = domains["add_subgraph"]
         if verified_qa_semantic_protocol(add_domain.get("semantic_protocol")):
+            max_relations = (
+                2
+                if flexible_hotpotqa_semantic_protocol(
+                    add_domain.get("semantic_protocol")
+                )
+                else 1
+            )
             if (
                 action_value is not None
-                and len(action_value.get("relations", ())) > 1
+                and len(action_value.get("relations", ())) > max_relations
             ):
                 raise ReceiptValidationError(
-                    "v3 verified-QA add_subgraph exceeds its one-relation edit boundary"
+                    "v3 verified-QA add_subgraph exceeds its live relation edit boundary"
                 )
             allowed_relations = {
                 json.dumps(

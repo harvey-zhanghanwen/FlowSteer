@@ -13,6 +13,7 @@ from src.interactive.agent_runtime import AgentResponse
 from src.interactive.agent_workflow_env import (
     AgentWorkflowEnv,
     AgentWorkflowEvidenceLineageSnapshot,
+    _HOTPOTQA_FORMAT_CONTRACT,
 )
 from src.interactive.director import (
     AgentGraphOrchestrator,
@@ -35,6 +36,7 @@ from src.interactive.director import (
     director_model_admissible_schema_branch,
     director_model_admissible_schema_branch_v1,
     director_model_admissible_schema_branch_v3,
+    director_live_add_subgraph_agent_declarations_from_text,
     director_live_add_subgraph_agent_declarations_json_schema_text,
     director_live_add_subgraph_role_selection_json_schema_text,
     director_live_action_parameter_json_schema_text,
@@ -817,6 +819,165 @@ def test_native_sglang_v3_samples_add_declarations_then_complete_exact_action():
         "role": "user",
         "content": _ADD_DECLARATION_CONTINUATION,
     }
+
+
+def test_hotpotqa_v2_receipt_accepts_one_complete_two_relation_unit():
+    actions = ("add_subgraph",)
+    domains = {
+        "add_subgraph": {
+            "min_new_agents": 1,
+            "max_new_agents": 3,
+            "existing_agent_ids": [],
+            "existing_agents": [],
+            "current_output_agent_id": None,
+            "output_role_family": "format",
+            "semantic_protocol": "hotpotqa_semantic_lineage_v2",
+            "admitted_new_role_families": ["reasoner", "verifier", "format"],
+            "required_agent_fields": [
+                "agent_id",
+                "model_id",
+                "contract",
+                "role_family",
+                "allowed_tools",
+                "execution_mode",
+            ],
+            "model_ids": ["cheap-model"],
+            "role_constraints": {
+                "reasoner": {
+                    "execution_modes": ["react", "reasoning"],
+                    "allowed_tools": [["qa-retrieval"], []],
+                },
+                "verifier": {
+                    "execution_modes": ["reasoning"],
+                    "allowed_tools": [[]],
+                },
+                "format": {
+                    "execution_modes": ["reasoning"],
+                    "allowed_tools": [[]],
+                    "contracts": [_HOTPOTQA_FORMAT_CONTRACT],
+                },
+            },
+            "endpoint_scope": {
+                "relation_endpoint_sources": [
+                    "existing_agent_ids",
+                    "same_action_agent_ids",
+                ],
+                "output_agent_id_sources": [
+                    "existing_agent_ids",
+                    "same_action_agent_ids",
+                ],
+            },
+        }
+    }
+    role_selection = {
+        "action": "add_subgraph",
+        "agents": [
+            {"agent_id": "node_1", "role_family": "reasoner"},
+            {"agent_id": "node_2", "role_family": "verifier"},
+            {"agent_id": "node_3", "role_family": "format"},
+        ],
+    }
+    declarations = {
+        "action": "add_subgraph",
+        "agents": [
+            {
+                "agent_id": "node_1",
+                "model_id": "cheap-model",
+                "contract": "align evidence propositions to the requested answer slot",
+                "role_family": "reasoner",
+                "allowed_tools": ["qa-retrieval"],
+                "execution_mode": "react",
+            },
+            {
+                "agent_id": "node_2",
+                "model_id": "cheap-model",
+                "contract": "verify evidence, binding, hops, and scope",
+                "role_family": "verifier",
+                "allowed_tools": [],
+                "execution_mode": "reasoning",
+            },
+            {
+                "agent_id": "node_3",
+                "model_id": "cheap-model",
+                "contract": _HOTPOTQA_FORMAT_CONTRACT,
+                "role_family": "format",
+                "allowed_tools": [],
+                "execution_mode": "reasoning",
+            },
+        ],
+    }
+    final_action = {
+        **declarations,
+        "relations": [
+            {
+                "source_id": "node_1",
+                "target_id": "node_2",
+                "source_to_target": True,
+                "target_to_source": False,
+            },
+            {
+                "source_id": "node_2",
+                "target_id": "node_3",
+                "source_to_target": True,
+                "target_to_source": False,
+            },
+        ],
+        "output_agent_id": "node_3",
+    }
+    domains_json = director_live_action_target_domains_json(actions, domains)
+    schema_request = {
+        "action_json_schema": director_model_admissible_sampling_json_schema_text_v3(
+            actions
+        ),
+        "action_json_schema_version": (
+            DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3
+        ),
+        "action_schema_branch": director_model_admissible_schema_branch_v3(
+            actions
+        ),
+        "action_target_domains_json": domains_json,
+        "action_target_domain_version": DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION,
+    }
+    client = ScriptedSGLangClient(
+        [
+            json.dumps(role_selection, separators=(",", ":")),
+            json.dumps(declarations, separators=(",", ":")),
+            json.dumps(final_action, separators=(",", ":")),
+        ],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+    )
+
+    response = asyncio.run(client.propose("current Canvas", **schema_request))
+    action = AgentActionParser().parse(response.text)
+
+    assert len(action.relations) == 2
+    assert _validate_v3_hierarchical_action_receipt(
+        action,
+        response.metadata,
+        schema_request,
+    ) == {"add_agent_role_selection", "add_agent_declarations"}
+
+    invalid_declarations = {
+        **declarations,
+        "agents": [
+            {
+                **declarations["agents"][0],
+                "execution_mode": "reasoning",
+                "allowed_tools": ["qa-retrieval"],
+            },
+            *declarations["agents"][1:],
+        ],
+    }
+    with pytest.raises(
+        ValueError,
+        match="execution mode and Tool set violate its role",
+    ):
+        director_live_add_subgraph_agent_declarations_from_text(
+            json.dumps(invalid_declarations, separators=(",", ":")),
+            domains,
+            selected_agent_roles=role_selection["agents"],
+        )
 
 
 def test_native_sglang_empty_text_cannot_form_an_exact_behavior_receipt():

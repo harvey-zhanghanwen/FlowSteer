@@ -548,6 +548,63 @@ class FlexibleSemanticGraphTests(unittest.TestCase):
         self.assertIn("fan_in", motifs)
         self.assertIn("reciprocal", motifs)
 
+    def test_output_is_not_exposed_while_a_branch_cannot_reach_it(self) -> None:
+        registry = _registry()
+        graph = _single_terminal_graph()
+        graph = AgentGraph(graph.nodes, graph.relations)
+        graph.add_agent(
+            AgentNode(
+                "orphan_reasoner",
+                "model-a-spare",
+                "independently check one semantic interpretation",
+                role_family="reasoner",
+                execution_mode="reasoning",
+                artifact_type="semantic_candidate",
+            )
+        )
+        env = _semantic_env(registry, graph=graph)
+
+        self.assertEqual((), env._model_admissible_output_agent_ids())
+        candidate = graph.fork()
+        candidate.set_output("formatter")
+        issue = env._semantic_edit_issue_for(candidate)
+        self.assertIsNotNone(issue)
+        self.assertIn("terminal_unreachable_agent_ids=['orphan_reasoner']", issue or "")
+
+    def test_output_is_exposed_after_all_branches_are_routed(self) -> None:
+        registry = _registry()
+        complete = _flexible_semantic_graph()
+        graph = AgentGraph(complete.nodes, complete.relations)
+        env = _semantic_env(registry, graph=graph)
+
+        self.assertEqual(("formatter",), env._model_admissible_output_agent_ids())
+        candidate = graph.fork()
+        candidate.set_output("formatter")
+        self.assertIsNone(env._semantic_edit_issue_for(candidate))
+
+    def test_output_revision_rejects_a_later_isolated_branch(self) -> None:
+        registry = _registry()
+        graph = _single_terminal_graph()
+        env = _semantic_env(registry, graph=graph)
+        candidate = graph.fork()
+        candidate.add_agent(
+            AgentNode(
+                "late_orphan",
+                "model-a-spare",
+                "check an additional interpretation",
+                role_family="reasoner",
+                execution_mode="reasoning",
+                artifact_type="semantic_candidate",
+            )
+        )
+
+        issue = env._semantic_edit_issue_for(candidate)
+        self.assertIsNotNone(issue)
+        self.assertIn("terminal_unreachable_agent_ids=['late_orphan']", issue or "")
+
+        candidate.set_relation("late_orphan", "verifier", True, False)
+        self.assertIsNone(env._semantic_edit_issue_for(candidate))
+
     def test_terminal_gate_compares_actual_routed_artifacts(self) -> None:
         registry = _registry()
         graph = _flexible_semantic_graph()

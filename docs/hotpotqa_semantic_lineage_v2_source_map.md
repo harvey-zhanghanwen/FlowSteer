@@ -38,6 +38,18 @@ LoRA publication, or an active Skill library.
   intermediate retrieval/repair branches, and directed or reciprocal
   relations. No direct Reasoner-to-Verifier or Verifier-to-Formatter edge is
   synthesized by the semantic protocol.
+- The live constrained action domain binds Runtime declarations by semantic
+  capability: a Reasoner is either ReAct with `qa-retrieval` or Tool-free
+  reasoning over routed evidence; Verifier and Formatter are Tool-free
+  reasoning Agents. One `add_subgraph` edit may contain a bounded two-edge
+  functional block, so FlowSteer's edit--execute--feedback boundary is not
+  reduced to one newly sampled edge or one fixed role template.
+- FlowSteer's complete-graph validation is applied prospectively when Output
+  is assigned or retained. A Canvas revision with an Agent that cannot reach
+  Output is rejected before execution, preventing a later conflict between
+  terminal reachability repair and preservation of successful dependencies;
+  this check does not prescribe a path or exclude fan-in and reciprocal
+  topology.
 - FINISH validates the actually routed artifacts and Tool receipts. A valid
   terminal path must contain an evidence-grounded Reasoner candidate and a
   supported Verifier artifact with the identical candidate. Multiple valid
@@ -50,10 +62,15 @@ LoRA publication, or an active Skill library.
   dependencies, working relations, and Output identity are preserved. Delete
   admission still requires a typed unusable diagnosis and a successful
   same-responsibility replacement takeover.
+- The `hotpotqa_semantic_lineage_v2_r1` evaluation condition changes only the
+  Executor catalog namespace after the preceding canary recorded remote
+  provider request failures. It reuses the already running local
+  Qwen3.5-9B-compatible SkillFlow/SGLang entry and preserves the frozen task
+  order, seed, evaluator, Director, retrieval protocol, and training-disabled
+  boundary.
 
 ## Intentionally not implemented in this condition
 
 - Skill retrieval/injection and MACE/Bayesian posterior updates.
 - GRPO/LoRA training, backward, optimizer steps, and adapter synchronization.
 - Benchmark-specific answer, evidence, Ground Truth, or evaluator hard-coding.
-

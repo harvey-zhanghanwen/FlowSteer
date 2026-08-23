@@ -864,6 +864,8 @@ def _live_role_agent_schema(
     model_ids: Sequence[str],
     *,
     agent_id: Optional[str] = None,
+    execution_mode: Optional[str] = None,
+    allowed_tools: Optional[Sequence[str]] = None,
 ) -> Mapping[str, Any]:
     execution_modes = _live_string_domain(
         constraint.get("execution_modes"),
@@ -871,18 +873,18 @@ def _live_role_agent_schema(
     )
     if any(mode not in {"reasoning", "react", "coding"} for mode in execution_modes):
         raise ValueError("live role constraint contains an unknown execution mode")
-    allowed_tools = constraint.get("allowed_tools")
+    raw_allowed_tool_sets = constraint.get("allowed_tools")
     if (
-        not isinstance(allowed_tools, (list, tuple))
-        or not allowed_tools
+        not isinstance(raw_allowed_tool_sets, (list, tuple))
+        or not raw_allowed_tool_sets
         or any(
             not isinstance(tool_set, (list, tuple))
             or any(not isinstance(tool_id, str) or not tool_id for tool_id in tool_set)
-            for tool_set in allowed_tools
+            for tool_set in raw_allowed_tool_sets
         )
     ):
         raise ValueError(f"{role_family}.allowed_tools must contain Tool-ID lists")
-    normalized_tool_sets = [list(tool_set) for tool_set in allowed_tools]
+    normalized_tool_sets = [list(tool_set) for tool_set in raw_allowed_tool_sets]
     if len({json.dumps(item, separators=(",", ":")) for item in normalized_tool_sets}) != len(
         normalized_tool_sets
     ):
@@ -894,8 +896,21 @@ def _live_role_agent_schema(
         properties["agent_id"] = {"const": agent_id}
     properties["model_id"] = {"enum": list(model_ids)}
     properties["role_family"] = {"const": role_family}
-    properties["execution_mode"] = {"enum": list(execution_modes)}
-    properties["allowed_tools"] = {"enum": normalized_tool_sets}
+    if (execution_mode is None) != (allowed_tools is None):
+        raise ValueError(
+            "live role execution_mode and allowed_tools must be conditioned together"
+        )
+    if execution_mode is None:
+        properties["execution_mode"] = {"enum": list(execution_modes)}
+        properties["allowed_tools"] = {"enum": normalized_tool_sets}
+    else:
+        normalized_tools = list(allowed_tools or ())
+        if execution_mode not in execution_modes:
+            raise ValueError("live conditioned execution mode is outside its role")
+        if normalized_tools not in normalized_tool_sets:
+            raise ValueError("live conditioned Tool set is outside its role")
+        properties["execution_mode"] = {"const": execution_mode}
+        properties["allowed_tools"] = {"const": normalized_tools}
     raw_contracts = constraint.get("contracts")
     if raw_contracts is not None:
         properties["contract"] = {
@@ -922,6 +937,109 @@ def _live_role_agent_schema(
         "required": list(required_fields),
         "properties": properties,
     }
+
+
+def _live_role_execution_tool_pairs(
+    semantic_protocol: object,
+    role_family: str,
+    constraint: Mapping[str, Any],
+) -> Optional[tuple[tuple[str, tuple[str, ...]], ...]]:
+    """Project v2 semantic capabilities as correlated runtime declarations.
+
+    ``execution_modes`` and ``allowed_tools`` are independent JSON domains in
+    the Canvas receipt.  Taking their Cartesian product would admit invalid
+    declarations such as a tool-free ReAct Reasoner or a reasoning-only
+    Reasoner that still owns ``qa-retrieval``.  The topology-neutral HotpotQA
+    protocol therefore conditions these two fields together while leaving the
+    number of Agents and all communication edges policy-selected.
+
+    ``None`` retains the historical independent domains for every legacy
+    protocol and for auxiliary roles whose Canvas domain already has one mode
+    and one Tool set.
+    """
+
+    if not flexible_hotpotqa_semantic_protocol(semantic_protocol):
+        return None
+    expected_by_role: dict[str, tuple[tuple[str, tuple[str, ...]], ...]] = {
+        "reasoner": (
+            ("react", ("qa-retrieval",)),
+            ("reasoning", ()),
+        ),
+        "verifier": (("reasoning", ()),),
+        "format": (("reasoning", ()),),
+    }
+    expected = expected_by_role.get(role_family)
+    if expected is None:
+        return None
+    execution_modes = _live_string_domain(
+        constraint.get("execution_modes"),
+        label=f"{role_family}.execution_modes",
+    )
+    raw_tool_sets = constraint.get("allowed_tools")
+    if (
+        not isinstance(raw_tool_sets, (list, tuple))
+        or not raw_tool_sets
+        or any(not isinstance(tool_set, (list, tuple)) for tool_set in raw_tool_sets)
+    ):
+        raise ValueError(f"{role_family}.allowed_tools must contain Tool-ID lists")
+    tool_sets = tuple(tuple(tool_set) for tool_set in raw_tool_sets)
+    admitted = tuple(
+        (mode, tools)
+        for mode, tools in expected
+        if mode in execution_modes and tools in tool_sets
+    )
+    if not admitted:
+        raise ValueError(
+            f"{role_family} has no protocol-valid execution_mode/allowed_tools pair"
+        )
+    if role_family == "format":
+        contracts = _live_string_domain(
+            constraint.get("contracts"),
+            label="format.contracts",
+        )
+        if len(contracts) != 1:
+            raise ValueError(
+                "format contract domain must contain one exact pure contract"
+            )
+    return admitted
+
+
+def _live_role_agent_schema_branches(
+    required_fields: Sequence[str],
+    semantic_protocol: object,
+    role_family: str,
+    constraint: Mapping[str, Any],
+    model_ids: Sequence[str],
+    *,
+    agent_id: str,
+) -> tuple[Mapping[str, Any], ...]:
+    conditioned_pairs = _live_role_execution_tool_pairs(
+        semantic_protocol,
+        role_family,
+        constraint,
+    )
+    if conditioned_pairs is None:
+        return (
+            _live_role_agent_schema(
+                required_fields,
+                role_family,
+                constraint,
+                model_ids,
+                agent_id=agent_id,
+            ),
+        )
+    return tuple(
+        _live_role_agent_schema(
+            required_fields,
+            role_family,
+            constraint,
+            model_ids,
+            agent_id=agent_id,
+            execution_mode=execution_mode,
+            allowed_tools=allowed_tools,
+        )
+        for execution_mode, allowed_tools in conditioned_pairs
+    )
 
 
 def _live_new_agent_ids(
@@ -1209,21 +1327,25 @@ def director_live_add_subgraph_agent_declarations_json_schema_text(
                 for role_family in admitted_new_roles
             )
         )
+        if any(
+            not isinstance(role_family, str)
+            or not role_family
+            or not isinstance(constraint, Mapping)
+            for role_family, constraint in admitted_roles
+        ):
+            raise ValueError("add_subgraph role constraints are malformed")
         role_branches = [
-            _live_role_agent_schema(
+            schema
+            for role_family, constraint in admitted_roles
+            for schema in _live_role_agent_schema_branches(
                 required_fields,
+                domain.get("semantic_protocol"),
                 role_family,
                 constraint,
                 model_ids,
                 agent_id=agent_id,
             )
-            for role_family, constraint in admitted_roles
-            if isinstance(role_family, str)
-            and role_family
-            and isinstance(constraint, Mapping)
         ]
-        if len(role_branches) != len(admitted_roles):
-            raise ValueError("add_subgraph role constraints are malformed")
         positional_agent_schemas.append({"anyOf": role_branches})
     admitted_counts = (
         (len(selected_roles),)
@@ -1508,6 +1630,18 @@ def _live_add_subgraph_agents(
             raise ValueError("add_subgraph Agent Tool set violates its role")
         if any(tool_id != tool_id.strip() for tool_id in allowed_tools):
             raise ValueError("add_subgraph Agent Tool IDs must be canonical")
+        conditioned_pairs = _live_role_execution_tool_pairs(
+            domain.get("semantic_protocol"),
+            role_family,
+            constraint,
+        )
+        if conditioned_pairs is not None and (
+            execution_mode,
+            tuple(allowed_tools),
+        ) not in conditioned_pairs:
+            raise ValueError(
+                "add_subgraph Agent execution mode and Tool set violate its role"
+            )
         for optional_text in ("artifact_type", "completion_condition"):
             value = agent.get(optional_text)
             if value is not None and (
@@ -1897,14 +2031,21 @@ def director_live_action_parameter_json_schema_text(
                 normalized_agents,
             )
             if relation_candidates:
+                max_relations = (
+                    2
+                    if flexible_hotpotqa_semantic_protocol(
+                        domain.get("semantic_protocol")
+                    )
+                    else 1
+                )
                 schema["properties"]["relations"] = {
                     "type": "array",
                     # xgrammar supports exact candidate branches but JSON
                     # Schema has no portable unique-by-unordered-endpoint-pair
-                    # constraint.  Keep ADD as one executable relation edit;
-                    # FlowSteer's subsequent set_relation turns grow or make
-                    # that relation reciprocal after execution feedback.
-                    "maxItems": 1,
+                    # constraint.  The topology-neutral HotpotQA protocol
+                    # admits one bounded two-edge functional block; receipt
+                    # validation still rejects a repeated unordered pair.
+                    "maxItems": max_relations,
                     "uniqueItems": True,
                     "items": {
                         "anyOf": [

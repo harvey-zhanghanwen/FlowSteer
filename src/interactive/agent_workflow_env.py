@@ -1697,9 +1697,20 @@ class AgentWorkflowEnv:
                         "model_ids": list(self.model_registry.model_ids),
                         "role_constraints": {
                             "reasoner": {
-                                "execution_modes": ["react"],
+                                "execution_modes": (
+                                    ["react", "reasoning"]
+                                    if self.semantic_protocol
+                                    == _HOTPOTQA_SEMANTIC_LINEAGE_PROTOCOL
+                                    else ["react"]
+                                ),
                                 "allowed_tools": [
-                                    [self.required_evidence_tool_id]
+                                    [self.required_evidence_tool_id],
+                                    *(
+                                        [[]]
+                                        if self.semantic_protocol
+                                        == _HOTPOTQA_SEMANTIC_LINEAGE_PROTOCOL
+                                        else []
+                                    ),
                                 ],
                             },
                             "verifier": {
@@ -3827,6 +3838,40 @@ class AgentWorkflowEnv:
                         f"HotpotQA Formatter Agent {node.id!r} must be a terminal "
                         f"sink; remove outgoing directed edges to {list(successors)!r}"
                     )
+        if graph.output_agent_id is not None:
+            # FlowSteer's complete-Canvas validator is the authority for
+            # terminal reachability.  Once Output is assigned, accepting an
+            # orphan branch would execute downstream Agents and materialize
+            # artifacts which the preservation policy must then protect.  The
+            # Director could no longer attach that orphan without invalidating
+            # an already successful dependency, producing a terminal deadlock.
+            # Require the entire current Canvas to reach Output at the same
+            # progressive edit boundary which assigns (or retains) Output.
+            # This constrains only completeness, not the topology: fan-in,
+            # reciprocal blocks, intermediate Agents, and multiple semantic
+            # paths remain admissible.
+            unreachable_agent_ids = tuple(
+                sorted(
+                    {
+                        agent_id
+                        for issue in graph.validate(
+                            self.model_registry,
+                            require_complete=True,
+                        ).issues
+                        if issue.code == "cannot_reach_output"
+                        for agent_id in issue.agent_ids
+                    }
+                )
+            )
+            if unreachable_agent_ids:
+                return (
+                    "HotpotQA Output may be assigned only when every current "
+                    "Agent can reach that Output in the same Canvas revision; "
+                    "route the unresolved branch before SET_OUTPUT or include "
+                    "its relation in the same ADD_SUBGRAPH edit. "
+                    "terminal_unreachable_agent_ids="
+                    f"{list(unreachable_agent_ids)!r}"
+                )
         return None
 
     @staticmethod
