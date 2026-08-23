@@ -1985,12 +1985,14 @@ def director_live_add_subgraph_relation_candidates(
                 source_to_target = source_role != "format" and not (
                     role_conditional
                     and target_role in {"verifier", "format"}
-                    and source_role not in {"reasoner", "verifier", "repair"}
+                    and source_role
+                    in {"evidence_retriever", "format", "output"}
                 )
                 target_to_source = target_role != "format" and not (
                     role_conditional
                     and source_role in {"verifier", "format"}
-                    and target_role not in {"reasoner", "verifier", "repair"}
+                    and target_role
+                    in {"evidence_retriever", "format", "output"}
                 )
                 if source_to_target:
                     candidates.append(
@@ -2316,6 +2318,29 @@ def _live_modify_agent_candidates(
             raise ValueError("modify_agent discrete value domain has an invalid field")
         for discrete_field in raw_discrete:
             _live_discrete_values(candidate, discrete_field)
+        raw_profiles = candidate.get("execution_profiles")
+        if raw_profiles is not None:
+            profiles = _live_execution_profiles(
+                raw_profiles,
+                label=f"modify_agent.{agent_id}.execution_profiles",
+            )
+            if "execution_mode" not in fields:
+                raise ValueError(
+                    "modify_agent execution profiles require execution_mode "
+                    "in the mutable field domain"
+                )
+            if any(
+                profile_field in raw_discrete
+                for profile_field in ("execution_mode", "allowed_tools")
+            ):
+                raise ValueError(
+                    "modify_agent correlated execution profiles must not be "
+                    "split into independent discrete value domains"
+                )
+            if not profiles:
+                raise ValueError(
+                    "modify_agent execution profile domain must be non-empty"
+                )
         if field_name in fields:
             admitted.append(candidate)
     if not admitted:
@@ -2553,16 +2578,72 @@ def director_live_action_parameter_json_schema_text(
             raise ValueError(
                 "modify_agent v3 parameter phase requires a live Agent target"
             )
-        schema = json.loads(
-            director_modify_agent_field_sampling_json_schema_text(modify_field)
-        )
-        schema["properties"]["agent_id"] = {"const": modify_agent_id}
-        discrete_values = _live_discrete_values(
-            by_id[modify_agent_id],
-            modify_field,
-        )
-        if discrete_values is not None:
-            schema["properties"][modify_field] = {"enum": list(discrete_values)}
+        selected_candidate = by_id[modify_agent_id]
+        raw_profiles = selected_candidate.get("execution_profiles")
+        if modify_field == "execution_mode" and raw_profiles is not None:
+            profiles = _live_execution_profiles(
+                raw_profiles,
+                label=(
+                    f"modify_agent.{modify_agent_id}.execution_profiles"
+                ),
+            )
+            schema = {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [
+                    "action",
+                    "agent_id",
+                    "execution_mode",
+                    "allowed_tools",
+                ],
+                "properties": {
+                    "action": {"const": "modify_agent"},
+                    "agent_id": {"const": modify_agent_id},
+                    "execution_mode": (
+                        {"const": profiles[0][0]}
+                        if len(profiles) == 1
+                        else {
+                            "enum": list(
+                                dict.fromkeys(mode for mode, _ in profiles)
+                            )
+                        }
+                    ),
+                    "allowed_tools": (
+                        {"const": list(profiles[0][1])}
+                        if len(profiles) == 1
+                        else {
+                            "enum": [
+                                list(tool_ids) for _, tool_ids in profiles
+                            ]
+                        }
+                    ),
+                },
+            }
+            if len(profiles) > 1:
+                schema["oneOf"] = [
+                    {
+                        "properties": {
+                            "execution_mode": {"const": execution_mode},
+                            "allowed_tools": {"const": list(allowed_tools)},
+                        }
+                    }
+                    for execution_mode, allowed_tools in profiles
+                ]
+        else:
+            schema = json.loads(
+                director_modify_agent_field_sampling_json_schema_text(
+                    modify_field
+                )
+            )
+            schema["properties"]["agent_id"] = {"const": modify_agent_id}
+            discrete_values = _live_discrete_values(
+                selected_candidate,
+                modify_field,
+            )
+            if discrete_values is not None:
+                schema["properties"][modify_field] = {
+                    "enum": list(discrete_values)
+                }
     elif action in {"delete_agent", "set_output"}:
         agent_ids = _live_string_domain(
             domain.get("agent_ids"),

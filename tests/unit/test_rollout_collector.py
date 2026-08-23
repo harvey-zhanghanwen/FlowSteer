@@ -1114,6 +1114,72 @@ def test_native_sglang_v3_binds_modify_agent_and_discrete_value():
     }
 
 
+def test_native_sglang_v3_binds_correlated_execution_profile_patch():
+    actions = ("modify_agent",)
+    domains = {
+        "modify_agent": {
+            "mutable_fields": ["execution_mode"],
+            "per_agent_candidates": [
+                {
+                    "agent_id": "reader",
+                    "mutable_fields": ["execution_mode"],
+                    "discrete_value_domains": {},
+                    "execution_profiles": [
+                        {
+                            "execution_mode": "reasoning",
+                            "allowed_tools": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    }
+    domains_json = director_live_action_target_domains_json(actions, domains)
+    final_action = {
+        "action": "modify_agent",
+        "agent_id": "reader",
+        "execution_mode": "reasoning",
+        "allowed_tools": [],
+    }
+    client = ScriptedSGLangClient(
+        [
+            '{"action":"modify_agent","field":"execution_mode"}',
+            json.dumps(final_action, separators=(",", ":")),
+        ],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+    )
+
+    response = asyncio.run(
+        client.propose(
+            "repair Canvas",
+            action_json_schema=(
+                director_model_admissible_sampling_json_schema_text_v3(actions)
+            ),
+            action_json_schema_version=(
+                DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3
+            ),
+            action_schema_branch=director_model_admissible_schema_branch_v3(actions),
+            action_target_domains_json=domains_json,
+            action_target_domain_version=(
+                DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION
+            ),
+        )
+    )
+
+    expected_schema = director_live_action_parameter_json_schema_text(
+        "modify_agent",
+        domains,
+        modify_field="execution_mode",
+        modify_agent_id="reader",
+    )
+    assert client.payloads[1]["sampling_params"]["json_schema"] == expected_schema
+    assert response.metadata["selected_modify_agent_id"] == "reader"
+    assert response.metadata["selected_modify_field"] == "execution_mode"
+    assert response.metadata["request_count"] == 2
+    assert response.text == json.dumps(final_action, separators=(",", ":"))
+
+
 def test_v3_receipt_validation_fails_closed_on_phase_and_final_action_mismatch():
     actions = ("add_subgraph",)
     domains = {

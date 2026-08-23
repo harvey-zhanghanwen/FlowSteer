@@ -2311,6 +2311,132 @@ class RoleConditionalSearchSpaceTests(unittest.TestCase):
                 add_agents=(declaration,),
             )
 
+    def test_successful_replacement_reopens_atomic_execution_profile_repair(
+        self,
+    ) -> None:
+        registry = _registry()
+        graph = AgentGraph(
+            [
+                _evidence_agent("reader"),
+                AgentNode(
+                    "replacement",
+                    "model-c",
+                    "materialize the same evidence responsibility",
+                    role_family="evidence_retriever",
+                    execution_mode="reasoning",
+                    artifact_type="retrieval_evidence",
+                ),
+            ]
+        )
+        env = _env(registry, graph=graph)
+        env._failed_agent_ids.add("reader")
+        env._repair_exhausted_agent_ids.add("reader")
+        env._react_exhausted_agent_ids.add("reader")
+        env._unresolved_dirty_agents.add("reader")
+        env._progressive_outputs["replacement"] = "receipt-grounded evidence"
+
+        self.assertEqual(
+            {"reader": (("reasoning", ()),)},
+            env._repair_exhausted_auxiliary_profile_domains(),
+        )
+        self.assertEqual(
+            {},
+            env._repair_exhausted_auxiliary_replacement_domains(),
+            "a materialized same-responsibility profile must stop duplicate ADD",
+        )
+        self.assertEqual(("modify_agent",), env.model_admissible_action_types())
+        domain = env.model_admissible_action_targets()["modify_agent"]
+        self.assertEqual(["execution_mode"], domain["mutable_fields"])
+        self.assertEqual(
+            [
+                {
+                    "execution_mode": "reasoning",
+                    "allowed_tools": [],
+                }
+            ],
+            domain["per_agent_candidates"][0]["execution_profiles"],
+        )
+        schema = json.loads(
+            director_live_action_parameter_json_schema_text(
+                "modify_agent",
+                {"modify_agent": domain},
+                modify_field="execution_mode",
+                modify_agent_id="reader",
+            )
+        )
+        self.assertEqual(
+            ["action", "agent_id", "execution_mode", "allowed_tools"],
+            schema["required"],
+        )
+        self.assertEqual(
+            {"const": "reasoning"},
+            schema["properties"]["execution_mode"],
+        )
+        self.assertEqual(
+            {"const": []},
+            schema["properties"]["allowed_tools"],
+        )
+
+        action = env.parser.parse(
+            json.dumps(
+                {
+                    "action": "modify_agent",
+                    "agent_id": "reader",
+                    "execution_mode": "reasoning",
+                    "allowed_tools": [],
+                }
+            )
+        )
+        self.assertIsNone(env._react_repair_admission_issue(action))
+        self.assertIsNone(env._preservation_admission_issue(action))
+        incomplete = env.parser.parse(
+            json.dumps(
+                {
+                    "action": "modify_agent",
+                    "agent_id": "reader",
+                    "execution_mode": "reasoning",
+                }
+            )
+        )
+        self.assertIn(
+            "atomically modify execution_mode and allowed_tools",
+            env._react_repair_admission_issue(incomplete) or "",
+        )
+
+    def test_selected_verifier_accepts_a_generic_semantic_producer(self) -> None:
+        registry = _registry()
+        graph = AgentGraph(
+            [
+                AgentNode(
+                    "producer",
+                    "model-a",
+                    "determine one semantic candidate from routed evidence",
+                    role_family="answerer",
+                    execution_mode="reasoning",
+                ),
+                AgentNode(
+                    "verifier",
+                    "model-b",
+                    "check one already determined semantic candidate",
+                    role_family="verifier",
+                    execution_mode="reasoning",
+                ),
+            ],
+            [AgentRelation("producer", "verifier", True, False)],
+        )
+        env = _env(registry, graph=graph)
+
+        self.assertIsNone(env._semantic_edit_issue_for(graph))
+
+        raw_retrieval = graph.fork()
+        raw_retrieval.delete_agent("producer")
+        raw_retrieval.add_agent(_evidence_agent("producer"))
+        raw_retrieval.set_relation("producer", "verifier", True, False)
+        self.assertIn(
+            "not raw retrieval evidence",
+            env._semantic_edit_issue_for(raw_retrieval) or "",
+        )
+
 
 class RoleConditionalTerminalTests(unittest.TestCase):
     def test_explicit_question_head_is_a_valid_answer_type_subtype(self) -> None:

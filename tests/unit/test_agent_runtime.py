@@ -157,7 +157,7 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
             ],
             output_agent_id="reasoner",
         )
-        await runtime.execute(
+        repaired = await runtime.execute(
             graph,
             "question",
             prior_failure_metadata={
@@ -190,6 +190,18 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             "failed_reasoner",
             adapter.requests[0].continuation_source_agent_id,
+        )
+        self.assertEqual(
+            "qa-retrieval",
+            repaired.output_metadata["reasoner"]["tool_receipts"][0][
+                "tool_id"
+            ],
+        )
+        self.assertEqual(
+            "failed_reasoner",
+            repaired.output_metadata["reasoner"][
+                "continuation_source_agent_id"
+            ],
         )
 
         await runtime.execute(

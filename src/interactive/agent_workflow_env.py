@@ -2394,6 +2394,27 @@ class AgentWorkflowEnv:
             )
             if getattr(action, field_name) is not None
         )
+        execution_profile_domains = (
+            self._repair_exhausted_auxiliary_profile_domains()
+        )
+        admitted_profiles = execution_profile_domains.get(action.agent_id, ())
+        if admitted_profiles:
+            sampled_profile = (
+                action.execution_mode,
+                tuple(action.allowed_tools or ()),
+            )
+            if (
+                mutable_fields == ("allowed_tools", "execution_mode")
+                and action.allowed_tools is not None
+                and sampled_profile in admitted_profiles
+            ):
+                return None
+            return (
+                "a measured execution-profile repair must atomically modify "
+                "execution_mode and allowed_tools to one profile that already "
+                "materialized the same role/artifact responsibility; "
+                f"admitted_execution_profiles={list(admitted_profiles)!r}"
+            )
         if (
             len(mutable_fields) != 1
             or mutable_fields[0] not in {"contract", "completion_condition"}
@@ -2496,6 +2517,17 @@ class AgentWorkflowEnv:
         if self.recovery_policy != _PRESERVE_REPAIR_RECOVERY_POLICY:
             return ()
         node_ids = tuple(node.id for node in self._graph.nodes)
+        profile_repair_ids = set(
+            self._repair_exhausted_auxiliary_profile_domains()
+        )
+        if profile_repair_ids:
+            # An alternate registered execution profile has already completed
+            # the same role/artifact responsibility.  Repair the existing node
+            # in place before adding another replacement, preserving its
+            # relations and public continuation.
+            return tuple(
+                node_id for node_id in node_ids if node_id in profile_repair_ids
+            )
         selected_output_recovery = (
             self._selected_output_artifact_recovery_sources_by_target()
         )
@@ -2700,6 +2732,9 @@ class AgentWorkflowEnv:
     ) -> dict[str, Tuple[str, ...]]:
         """Return same-role/artifact domains still awaiting valid takeover."""
 
+        profile_repair_ids = set(
+            self._repair_exhausted_auxiliary_profile_domains()
+        )
         domains: dict[str, list[str]] = {}
         for node in self._graph.nodes:
             role_family = (node.role_family or "").casefold()
@@ -2707,6 +2742,7 @@ class AgentWorkflowEnv:
                 role_family not in {"evidence_retriever", "repair"}
                 or node.id not in self._failed_agent_ids
                 or node.id not in self._repair_exhausted_agent_ids
+                or node.id in profile_repair_ids
                 or self._delete_admission_issue(node.id) is None
             ):
                 continue
@@ -2718,6 +2754,72 @@ class AgentWorkflowEnv:
             role_family: tuple(artifact_types)
             for role_family, artifact_types in domains.items()
         }
+
+    def _repair_exhausted_auxiliary_profile_domains(
+        self,
+    ) -> dict[str, Tuple[Tuple[str, Tuple[str, ...]], ...]]:
+        """Return measured same-responsibility execution-profile repairs.
+
+        SkillFlow registers execution as a correlated ``execution_mode`` and
+        Tool-set profile.  Once an isolated same-role/same-artifact replacement
+        has actually materialized a valid artifact under a different registered
+        profile, FlowSteer's next edit repairs the existing failed node with
+        that exact profile instead of adding another duplicate.  The failed
+        node, its relations, public continuation, and semantic lineage remain
+        in place; no answer or evaluator state participates in this domain.
+        """
+
+        if (
+            not self._uses_role_conditional_capabilities()
+            or self.recovery_policy != _PRESERVE_REPAIR_RECOVERY_POLICY
+        ):
+            return {}
+        result: dict[str, Tuple[Tuple[str, Tuple[str, ...]], ...]] = {}
+        for source in self._graph.nodes:
+            source_role = (source.role_family or "").casefold()
+            if (
+                source_role not in {"evidence_retriever", "repair"}
+                or source.id not in self._failed_agent_ids
+                or source.id not in self._repair_exhausted_agent_ids
+                or source.id in self._diagnosed_unusable_agent_ids
+            ):
+                continue
+            current_profile = (
+                source.execution_mode.value,
+                tuple(source.allowed_tools),
+            )
+            registered_profiles = set(
+                self._role_conditional_execution_profiles_for(source_role)
+            )
+            profiles: list[Tuple[str, Tuple[str, ...]]] = []
+            for replacement in self._graph.nodes:
+                replacement_profile = (
+                    replacement.execution_mode.value,
+                    tuple(replacement.allowed_tools),
+                )
+                if (
+                    replacement.id == source.id
+                    or (replacement.role_family or "").casefold()
+                    != source_role
+                    or replacement.artifact_type.casefold()
+                    != source.artifact_type.casefold()
+                    or replacement.id in self._failed_agent_ids
+                    or replacement.id in self._repair_exhausted_agent_ids
+                    or replacement.id in self._unresolved_dirty_agents
+                    or not self._has_successful_artifact(replacement.id)
+                    or not self._semantic_replacement_has_valid_artifact(
+                        replacement.id,
+                        source_role,
+                    )
+                    or replacement_profile == current_profile
+                    or replacement_profile not in registered_profiles
+                ):
+                    continue
+                if replacement_profile not in profiles:
+                    profiles.append(replacement_profile)
+            if profiles:
+                result[source.id] = tuple(profiles)
+        return result
 
     def _dirty_auxiliary_replacement_agent_ids(self) -> Tuple[str, ...]:
         """Return max-capacity Retriever replacements awaiting an artifact."""
@@ -3135,6 +3237,9 @@ class AgentWorkflowEnv:
             }
         if AgentActionType.MODIFY_AGENT.value in admitted:
             modifiable_node_ids = list(self._model_admissible_modify_agent_ids())
+            profile_repair_domains = (
+                self._repair_exhausted_auxiliary_profile_domains()
+            )
             base_mutable_fields = [
                 "model_id",
                 "contract",
@@ -3194,6 +3299,8 @@ class AgentWorkflowEnv:
                     for field in (
                         ["model_id"]
                         if agent_id in provider_failure_agent_ids
+                        else ["execution_mode"]
+                        if agent_id in profile_repair_domains
                         else ["contract", "completion_condition"]
                         if agent_id in dirty_replacement_ids
                         else ["contract", "completion_condition"]
@@ -3220,7 +3327,15 @@ class AgentWorkflowEnv:
             }
             mutable_fields = [
                 field
-                for field in base_mutable_fields
+                for field in (
+                    "model_id",
+                    "contract",
+                    "role_family",
+                    "allowed_tools",
+                    "execution_mode",
+                    "artifact_type",
+                    "completion_condition",
+                )
                 if any(
                     field in fields
                     for fields in per_agent_mutable_fields.values()
@@ -3244,6 +3359,21 @@ class AgentWorkflowEnv:
                                 ]
                             }
                             if "model_id" in per_agent_mutable_fields[agent_id]
+                            else {}
+                        ),
+                        **(
+                            {
+                                "execution_profiles": [
+                                    {
+                                        "execution_mode": execution_mode,
+                                        "allowed_tools": list(allowed_tools),
+                                    }
+                                    for execution_mode, allowed_tools in (
+                                        profile_repair_domains[agent_id]
+                                    )
+                                ]
+                            }
+                            if agent_id in profile_repair_domains
                             else {}
                         ),
                         **(
@@ -5719,13 +5849,15 @@ class AgentWorkflowEnv:
                     if (
                         graph.get_node(predecessor_id).role_family or ""
                     ).casefold()
-                    not in {"reasoner", "verifier", "repair"}
+                    in {"evidence_retriever", "format", "output"}
                 )
                 if invalid_predecessors:
                     return (
                         f"HotpotQA Verifier Agent {node.id!r} must consume an "
                         "already determined semantic-candidate artifact, not raw "
-                        "retrieval evidence or a terminal wrapper; invalid "
+                        "retrieval evidence or a terminal wrapper. A named "
+                        "Reasoner is optional; any routed non-terminal semantic "
+                        "producer is validated from its artifact at FINISH. invalid "
                         f"predecessors={list(invalid_predecessors)!r}"
                     )
             if role == "format":
@@ -5746,13 +5878,15 @@ class AgentWorkflowEnv:
                         if (
                             graph.get_node(predecessor_id).role_family or ""
                         ).casefold()
-                        not in {"reasoner", "verifier", "repair"}
+                        in {"evidence_retriever", "format", "output"}
                     )
                     if invalid_predecessors:
                         return (
                             f"HotpotQA Formatter Agent {node.id!r} must consume "
                             "an already determined semantic-candidate artifact, "
-                            "not raw retrieval evidence or another terminal wrapper; "
+                            "not raw retrieval evidence or another terminal wrapper. "
+                            "No named Reasoner or Verifier ancestor is required; "
+                            "the routed artifact is authoritative at FINISH. "
                             "invalid predecessors="
                             f"{list(invalid_predecessors)!r}"
                         )

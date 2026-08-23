@@ -1307,7 +1307,34 @@ class AgentRuntime:
                 calls,
                 cancelled_failure_records,
             )
-            output_metadata[agent_id] = response.metadata
+            response_metadata = dict(response.metadata)
+            if request.prior_tool_receipts:
+                # A FlowSteer MODIFY edit may repair a failed ReAct Agent with
+                # another SkillFlow-registered execution profile.  The new
+                # artifact must retain the public Tool evidence collected by
+                # that same Agent before repair; otherwise a successful repair
+                # would sever evidence provenance at the next FINISH gate.
+                existing_receipts = response_metadata.get("tool_receipts", ())
+                merged_receipts = (
+                    [
+                        dict(item)
+                        for item in existing_receipts
+                        if isinstance(item, Mapping)
+                    ]
+                    if isinstance(existing_receipts, (list, tuple))
+                    else []
+                )
+                for receipt in request.prior_tool_receipts:
+                    serialized = dict(receipt)
+                    if serialized not in merged_receipts:
+                        merged_receipts.append(serialized)
+                response_metadata["tool_receipts"] = merged_receipts
+            if request.continuation_source_agent_id is not None:
+                response_metadata.setdefault(
+                    "continuation_source_agent_id",
+                    request.continuation_source_agent_id,
+                )
+            output_metadata[agent_id] = MappingProxyType(response_metadata)
             return {agent_id: response.text}
 
         if len(component) != 2:
