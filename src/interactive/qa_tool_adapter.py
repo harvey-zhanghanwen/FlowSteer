@@ -673,6 +673,56 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         raise ValueError(f"unsupported semantic repair kind {repair_kind!r}")
 
     @classmethod
+    def _public_semantic_repair_instruction(
+        cls,
+        public_error_code: object,
+    ) -> str | None:
+        """Return the exact public repair attached to one QA Observation.
+
+        SkillFlow carries the same public Action--Observation record into the
+        next bounded turn and into an exhausted continuation receipt. Keep the
+        diagnosis in one helper so the model-visible continuation and the
+        outer FlowSteer Canvas cannot disagree about the required repair.
+        """
+
+        if isinstance(public_error_code, str) and (
+            "entity_identity.evidence_surface is not supported by the "
+            "cited passage title identity chain"
+        ) in public_error_code:
+            return (
+                "Preserve the same successful read receipt, passage_id, passage "
+                "title, target_relation, evidence_span, and proposition. Repair "
+                "only entity_identity: keep question_surface on the original "
+                "question entity and copy its coreferential evidence_surface from "
+                "both that same passage title and exact evidence_span. Do not "
+                "change the proposition. Emit a complete action; do not search "
+                "or read again."
+            )
+        if isinstance(public_error_code, str) and (
+            "Evidence Retriever evidence_span has no typography-canonical "
+            "lexical match"
+        ) in public_error_code:
+            return (
+                "Preserve the cited passage_id and all successful Tool receipts. "
+                "Copy one contiguous exact evidence_span from that same public "
+                "qa-retrieval read receipt, allowing only typography/whitespace "
+                "canonicalization; do not paraphrase, concatenate spans, search, "
+                "or read again."
+            )
+        if public_error_code == "qa_retrieval_duplicate_normalized_query":
+            return (
+                "Preserve all successful Tool receipts. Either use a "
+                "semantically distinct entity-and-relation query for the current "
+                "retrieval strategy, or repeat the same normalized query only "
+                "with the strictly larger top_k required by the current action "
+                "schema. Do not repeat a prior (query, top_k) pair."
+            )
+        repair_kind = cls._semantic_rejection_kind(public_error_code)
+        if repair_kind is not None:
+            return cls._semantic_repair_instruction(repair_kind)
+        return None
+
+    @classmethod
     def _model_visible_observations(
         cls,
         observations: list[Mapping[str, object]],
@@ -690,45 +740,11 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         )
         for observation in visible:
             public_error_code = observation.get("public_error_code")
-            if isinstance(public_error_code, str) and (
-                "entity_identity.evidence_surface is not supported by the "
-                "cited passage title identity chain"
-            ) in public_error_code:
-                observation["repair_instruction"] = (
-                    "Preserve the same successful read receipt, passage_id, passage "
-                    "title, target_relation, evidence_span, and proposition. Repair "
-                    "only entity_identity: keep question_surface on the original "
-                    "question entity and copy its coreferential evidence_surface from "
-                    "both that same passage title and exact evidence_span. Do not "
-                    "change the proposition. Emit a complete action; do not search "
-                    "or read again."
-                )
-                continue
-            if isinstance(public_error_code, str) and (
-                "Evidence Retriever evidence_span has no typography-canonical "
-                "lexical match"
-            ) in public_error_code:
-                observation["repair_instruction"] = (
-                    "Preserve the cited passage_id and all successful Tool receipts. "
-                    "Copy one contiguous exact evidence_span from that same public "
-                    "qa-retrieval read receipt, allowing only typography/whitespace "
-                    "canonicalization; do not paraphrase, concatenate spans, search, "
-                    "or read again."
-                )
-                continue
-            if public_error_code == "qa_retrieval_duplicate_normalized_query":
-                observation["repair_instruction"] = (
-                    "Preserve all successful Tool receipts and issue a "
-                    "semantically distinct entity-and-relation query using the "
-                    "current retrieval strategy; do not repeat a prior query "
-                    "after Unicode normalization and case folding."
-                )
-                continue
-            repair_kind = cls._semantic_rejection_kind(public_error_code)
-            if repair_kind is not None:
-                observation["repair_instruction"] = (
-                    cls._semantic_repair_instruction(repair_kind)
-                )
+            repair_instruction = cls._public_semantic_repair_instruction(
+                public_error_code
+            )
+            if repair_instruction is not None:
+                observation["repair_instruction"] = repair_instruction
 
         # SkillFlow persists every sampled Action--Observation turn in the
         # trajectory, but the next model input need not replay an unbounded run
@@ -1450,9 +1466,10 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 "type": "string",
                 "minLength": 1,
                 "description": (
-                    "A new focused entity-and-relation query for retrieval "
-                    f"strategy {strategy}; it must not repeat any prior query "
-                    "after Unicode normalization and case folding."
+                    "A focused entity-and-relation query for retrieval strategy "
+                    f"{strategy}. It may preserve a prior normalized query only "
+                    "when this action uses a strictly larger top_k; otherwise it "
+                    "must be a semantic rewrite."
                 ),
             }
             argument_properties["limit"] = {
@@ -1607,11 +1624,16 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                         raise
                     trace = [dict(item) for item in exc.react_trace]
                     if trace:
-                        trace[-1]["repair_instruction"] = (
-                            self._semantic_repair_instruction(
-                                state.semantic_repair_kind
+                        repair_instruction = (
+                            self._public_semantic_repair_instruction(
+                                state.semantic_repair_error_code
                             )
                         )
+                        if repair_instruction is None:
+                            repair_instruction = self._semantic_repair_instruction(
+                                state.semantic_repair_kind
+                            )
+                        trace[-1]["repair_instruction"] = repair_instruction
                     raise ReactExecutionError(
                         str(exc),
                         react_trace=tuple(trace),
@@ -1625,11 +1647,12 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     "public_error_code": _KNOWLEDGE_BASE_COVERAGE_FAILURE,
                     "tool_plan_exhausted": True,
                     "retrieval_attempt_count": state.search_attempt_count,
-                    "retrieval_strategies_attempted": list(
+                    "retrieval_strategy_schedule_prefix": list(
                         _FACTUAL_QA_RETRIEVAL_STRATEGIES[
                             : state.search_attempt_count
                         ]
                     ),
+                    "strategy_semantics_verified": False,
                     "search_queries": list(state.search_queries),
                     "search_top_ks": list(state.search_top_ks),
                 }
@@ -1845,11 +1868,14 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     "The next action must be qa-retrieval read using one exact "
                     "passage_id returned by the successful search observation: "
                     + json.dumps(searched_passage_ids, ensure_ascii=False)
-                    + ". Its arguments object contains only passage_id; never put "
+                    + ". Inspect every returned title and snippet, then select the "
+                    "passage whose entity identity and target relation best match "
+                    "the unchanged question; rank alone is not sufficient. Its "
+                    "arguments object contains only passage_id; never put "
                     "Question scope, Answer slot, Evidence propositions, Multi-hop "
                     "chain, Candidate answer, Evidence, JSON-Schema properties, or "
-                    "additionalProperties into read arguments. One valid exact wire "
-                    "using the first ranked returned passage is: "
+                    "additionalProperties into read arguments. One syntactically "
+                    "valid exact wire using a returned passage_id is: "
                     + json.dumps(
                         read_wire,
                         ensure_ascii=False,
@@ -1877,8 +1903,10 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                         "evidence-supported alias; for entity_disambiguation, add "
                         "a relation or identifying qualifier; for query_rewriting, "
                         "rewrite the entity-and-relation query without narrowing "
-                        "the question scope. The normalized query must differ from "
-                        "all prior search queries: "
+                        "the question scope. The query may repeat a prior normalized "
+                        "query only when this attempt's required top_k is strictly "
+                        "larger; otherwise it must differ from all prior normalized "
+                        "queries. Prior normalized queries are: "
                         + json.dumps(
                             list(evidence_state.normalized_search_queries),
                             ensure_ascii=False,
@@ -2169,16 +2197,6 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 "target_relation"
             )
 
-        if (
-            question_title_binding
-            and canonical_question_surface != canonical_evidence_surface
-            and canonical_evidence_surface not in canonical_title
-        ):
-            return (
-                "Evidence Retriever entity_identity.evidence_surface is not "
-                "supported by the cited passage title identity chain"
-            )
-
         entity_in_subject = canonical_evidence_surface in canonical_subject
         entity_in_object = canonical_evidence_surface in canonical_object
         if entity_in_subject and entity_in_object:
@@ -2196,6 +2214,22 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             )
             if answer_type_issue is not None:
                 return answer_type_issue
+
+        # A strong answer-slot mismatch cannot be repaired by rewriting only
+        # identity fields. Diagnose it before the title-chain repair so the
+        # bounded factual-QA retrieval policy can augment evidence instead of
+        # looping over an irrelevant passage. If the same receipt otherwise
+        # supplies the requested answer type, identity repair remains the
+        # non-destructive completion-only path below.
+        if (
+            question_title_binding
+            and canonical_question_surface != canonical_evidence_surface
+            and canonical_evidence_surface not in canonical_title
+        ):
+            return (
+                "Evidence Retriever entity_identity.evidence_surface is not "
+                "supported by the cited passage title identity chain"
+            )
 
         if (
             canonical_question_surface != canonical_evidence_surface
@@ -2473,7 +2507,19 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 limit = arguments.get("limit")
                 if isinstance(query, str) and query.strip():
                     normalized_query = _normalized_retrieval_query(query)
-                    if normalized_query in state.normalized_search_queries:
+                    prior_limits = tuple(
+                        top_k
+                        for prior_query, top_k in zip(
+                            state.normalized_search_queries,
+                            state.search_top_ks,
+                        )
+                        if prior_query == normalized_query
+                    )
+                    if (
+                        prior_limits
+                        and type(limit) is int
+                        and limit <= max(prior_limits)
+                    ):
                         return "qa_retrieval_duplicate_normalized_query"
                 expected_limit = self._factual_search_limit(
                     state.search_attempt_count

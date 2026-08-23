@@ -120,7 +120,8 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             "semantically distinct entity-and-relation query",
             visible[0]["repair_instruction"],
         )
-        self.assertIn("do not repeat", visible[0]["repair_instruction"])
+        self.assertIn("strictly larger top_k", visible[0]["repair_instruction"])
+        self.assertIn("(query, top_k) pair", visible[0]["repair_instruction"])
 
     async def test_search_receipt_preserves_frozen_identity_query_top_k_and_ids(self) -> None:
         index = FakeIndex()
@@ -745,17 +746,30 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("`spelling_normalization`", retry_contract)
         self.assertIn('"novel author"', retry_contract)
 
-        repeated = StructuredAction(
+        expanded_same_query = StructuredAction(
             ActionKind.TOOL,
             "search",
             {"query": "  NOVEL   AUTHOR ", "limit": 10},
+            resource_id=QA_RETRIEVAL_TOOL_ID,
+        )
+        self.assertIsNone(
+            adapter._tool_action_error(
+                request=request,
+                action=expanded_same_query,
+                observations=observations,
+            ),
+        )
+        repeated_pair = StructuredAction(
+            ActionKind.TOOL,
+            "search",
+            {"query": "  NOVEL   AUTHOR ", "limit": 5},
             resource_id=QA_RETRIEVAL_TOOL_ID,
         )
         self.assertEqual(
             "qa_retrieval_duplicate_normalized_query",
             adapter._tool_action_error(
                 request=request,
-                action=repeated,
+                action=repeated_pair,
                 observations=observations,
             ),
         )
@@ -995,6 +1009,21 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [5, 10, 15, 20, 25],
             terminal_diagnosis["search_top_ks"],
+        )
+        self.assertEqual(
+            [
+                "initial_retrieval",
+                "spelling_normalization",
+                "alias_expansion",
+                "entity_disambiguation",
+                "query_rewriting",
+            ],
+            terminal_diagnosis["retrieval_strategy_schedule_prefix"],
+        )
+        self.assertFalse(terminal_diagnosis["strategy_semantics_verified"])
+        self.assertNotIn(
+            "retrieval_strategies_attempted",
+            terminal_diagnosis,
         )
 
     async def test_unified_factual_exhaustion_after_reads_keeps_coverage_receipt(
@@ -2853,6 +2882,55 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             repair_contract,
         )
 
+        exhausted_gateway = SequenceGateway()
+        exhausted_gateway.outputs[-1] = action(
+            "complete",
+            {"value": invalid_artifact},
+        )
+        with self.assertRaises(ReactExecutionError) as exhausted:
+            await QARetrievalReactExecutionAdapter(
+                gateway=exhausted_gateway,
+                tool_registry=build_qa_tool_registry(DenchIndex()),
+                max_turns=4,
+                max_tool_calls=2,
+                task_type="factual_qa",
+                completion_policy="required_evidence",
+            ).execute(
+                AgentRequest(
+                    request_id="trivia:honorific-identity-repair-exhausted",
+                    run_id="trivia",
+                    graph_revision=1,
+                    problem=question,
+                    agent=AgentNode(
+                        "evidence_retriever",
+                        "model",
+                        "retrieve receipt-grounded identity and birthplace evidence",
+                        role_family="evidence_retriever",
+                        allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                        execution_mode="react",
+                    ),
+                    model=ModelSpec("model", "provider"),
+                    provider=ProviderSpec("provider", kind="test"),
+                    phase=ExecutionPhase.SINGLE,
+                    semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+                )
+            )
+        exact_repair = (
+            QARetrievalReactExecutionAdapter._public_semantic_repair_instruction(
+                exhausted.exception.react_trace[-1]["public_error_code"]
+            )
+        )
+        self.assertIsNotNone(exact_repair)
+        self.assertEqual(
+            exact_repair,
+            exhausted.exception.react_trace[-1]["repair_instruction"],
+        )
+        assert exact_repair is not None
+        self.assertIn(
+            exact_repair,
+            exhausted_gateway.requests[-1].agent.contract,
+        )
+
     def test_evidence_retriever_allows_open_super_bowl_event_anchor(
         self,
     ) -> None:
@@ -3466,7 +3544,11 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
                     "value": {
                         "operation": "read",
                         "passage_id": passage_id,
-                        "passage": {"passage_id": passage_id, "text": text},
+                        "passage": {
+                            "passage_id": passage_id,
+                            "title": "Judi Dench",
+                            "text": text,
+                        },
                     },
                     "completed": True,
                 },
@@ -3501,6 +3583,32 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         assert detail is not None
         self.assertIn("supplies a date relation argument", detail)
         self.assertIn("requested location relation argument", detail)
+
+        identity_and_type_mismatch = json.loads(json.dumps(date_artifact))
+        identity_and_type_mismatch["entity_identity"] = {
+            "question_surface": "Dame Judi Dench",
+            "evidence_surface": "Dame Judith Olivia Dench",
+        }
+        identity_and_type_mismatch["evidence_proposition"]["subject"] = (
+            "Dame Judith Olivia Dench"
+        )
+        identity_and_type_mismatch["evidence_span"] = (
+            "Dame Judith Olivia Dench was born 9 December 1934."
+        )
+        detail = issue(
+            original_question=question,
+            artifact=json.dumps(identity_and_type_mismatch),
+            tool_receipts=[
+                receipt(
+                    "date",
+                    identity_and_type_mismatch["evidence_span"],
+                )
+            ],
+        )
+        self.assertIsNotNone(detail)
+        assert detail is not None
+        self.assertIn("supplies a date relation argument", detail)
+        self.assertNotIn("passage title identity chain", detail)
 
         predicate_as_entity = json.loads(json.dumps(date_artifact))
         predicate_as_entity["entity_identity"] = {

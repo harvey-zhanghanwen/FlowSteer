@@ -538,10 +538,11 @@ class AgentWorkflowEnv:
             and AgentActionType.MODIFY_AGENT.value
             in self._allowed_action_type_set
         ):
-            # At the Agent limit an isolated same-responsibility replacement
-            # which has not materialized its prefix is the only executable
-            # recovery responsibility.  Do not spend the next FlowSteer edit on
-            # a blocked downstream Agent which merely lacks that artifact.
+            # An isolated same-responsibility replacement which has not yet
+            # materialized its prefix is the only executable recovery
+            # responsibility, regardless of spare Agent capacity. Do not spend
+            # the next FlowSteer edit on another augmentation or on a blocked
+            # downstream Agent which merely lacks that artifact.
             return (AgentActionType.MODIFY_AGENT.value,)
 
         terminal_reachability_candidates = (
@@ -1431,25 +1432,98 @@ class AgentWorkflowEnv:
         }
 
     def _dirty_auxiliary_replacement_agent_ids(self) -> Tuple[str, ...]:
-        """Return max-capacity Retriever replacements awaiting an artifact."""
+        """Return isolated Retriever replacements awaiting an artifact.
 
-        if self.max_agents is None or len(self._graph.nodes) < self.max_agents:
-            return ()
+        The replacement is an active SkillFlow-style bounded Agent execution,
+        not spare AgentGraph capacity.  It therefore blocks another recovery
+        augmentation as soon as it is admitted, independently of max_agents.
+        """
+
         replacement_domains = (
             self._repair_exhausted_auxiliary_replacement_domains()
         )
-        evidence_artifact_types = set(
-            replacement_domains.get("evidence_retriever", ())
-        )
-        if not evidence_artifact_types:
+        if not replacement_domains:
             return ()
         return tuple(
             node.id
             for node in self._graph.nodes
-            if (node.role_family or "").casefold() == "evidence_retriever"
-            and node.artifact_type.casefold() in evidence_artifact_types
+            for continuation_source in (
+                self._failure_continuations.get(node.id, {}).get(
+                    "continuation_source_agent_id"
+                ),
+            )
+            if (node.role_family or "").casefold() in replacement_domains
+            and node.artifact_type.casefold()
+            in replacement_domains[(node.role_family or "").casefold()]
             and node.id in self._unresolved_dirty_agents
-            and node.id not in self._repair_exhausted_agent_ids
+            and not self._graph.directed_predecessors(node.id)
+            and not self._directed_successors(self._graph, node.id)
+            and (
+                node.id not in self._repair_exhausted_agent_ids
+                or (
+                    isinstance(continuation_source, str)
+                    and continuation_source in self._repair_exhausted_agent_ids
+                )
+            )
+        )
+
+    def _isolated_auxiliary_execution_scope(
+        self,
+        candidate: AgentGraph,
+        action: AgentAction,
+    ) -> Tuple[str, ...]:
+        """Return the edit-local bounded replacement execution, if any.
+
+        FlowSteer executes every accepted Canvas edit before the next policy
+        turn. SkillFlow executes one bounded Agent from its own public
+        Action--Observation continuation. A same-role auxiliary replacement is
+        deliberately admitted with no edges or Output identity, so execute
+        that one functional unit without rescheduling unrelated historical
+        failed roots. Ordinary ADD/MODIFY and all routed graph edits retain the
+        full AgentGraph Runtime path.
+        """
+
+        replacement_domains = (
+            self._repair_exhausted_auxiliary_replacement_domains()
+        )
+        if not replacement_domains:
+            return ()
+        target_id: Optional[str] = None
+        if (
+            action.action_type is AgentActionType.ADD_SUBGRAPH
+            and len(action.agents) == 1
+            and not action.relations
+            and action.output_agent_id is None
+        ):
+            declaration = action.agents[0]
+            role_family = (declaration.role_family or "").casefold()
+            artifact_type = (declaration.artifact_type or "text").casefold()
+            if artifact_type in replacement_domains.get(role_family, ()):
+                target_id = declaration.agent_id
+        elif (
+            action.action_type is AgentActionType.MODIFY_AGENT
+            and action.agent_id in self._dirty_auxiliary_replacement_agent_ids()
+        ):
+            target_id = action.agent_id
+        if target_id is None or not candidate.has_node(target_id):
+            return ()
+        if candidate.directed_predecessors(target_id) or self._directed_successors(
+            candidate,
+            target_id,
+        ):
+            return ()
+        return (target_id,)
+
+    @staticmethod
+    def _single_agent_execution_graph(
+        graph: AgentGraph,
+        agent_id: str,
+    ) -> AgentGraph:
+        """Project one isolated Canvas node through the existing Runtime."""
+
+        return AgentGraph(
+            nodes=(graph.get_node(agent_id),),
+            revision=graph.revision,
         )
 
     def _provider_repair_catalog_domain(
@@ -1723,6 +1797,16 @@ class AgentWorkflowEnv:
                 ]
                 for agent_id in modifiable_node_ids
             }
+            per_agent_current_values: dict[str, dict[str, object]] = {}
+            for agent_id, fields in per_agent_mutable_fields.items():
+                node = self._graph.get_node(agent_id)
+                current_values: dict[str, object] = {}
+                for field in fields:
+                    value = getattr(node, field)
+                    current_values[field] = (
+                        list(value) if isinstance(value, tuple) else value
+                    )
+                per_agent_current_values[agent_id] = current_values
             mutable_fields = [
                 field
                 for field in base_mutable_fields
@@ -1742,6 +1826,12 @@ class AgentWorkflowEnv:
                     {
                         "agent_id": agent_id,
                         "mutable_fields": per_agent_mutable_fields[agent_id],
+                        # Neutral current-state receipt for the hierarchical
+                        # parameter phase.  The Env still authoritatively
+                        # rejects no-op edits; this simply makes the measured
+                        # value explicit instead of asking the Director to
+                        # rediscover it from the full graph serialization.
+                        "current_values": per_agent_current_values[agent_id],
                         "discrete_value_domains": (
                             {
                                 "model_id": [
@@ -2111,6 +2201,10 @@ class AgentWorkflowEnv:
         recovery_continuation_handoff = (
             self._recovery_continuation_handoff(action)
         )
+        isolated_execution_scope = self._isolated_auxiliary_execution_scope(
+            candidate,
+            action,
+        )
         self._graph = candidate
         current_agent_ids = {node.id for node in self._graph.nodes}
         self._retain_current_failure_state(current_agent_ids)
@@ -2149,18 +2243,55 @@ class AgentWorkflowEnv:
         execution_error: Optional[AgentRuntimeError] = None
         if self.execute_on_edit:
             if self._graph.nodes:
+                execution_graph = (
+                    self._single_agent_execution_graph(
+                        self._graph,
+                        isolated_execution_scope[0],
+                    )
+                    if isolated_execution_scope
+                    else self._graph
+                )
+                execution_scope_set = set(isolated_execution_scope)
+                prior_outputs = (
+                    {
+                        agent_id: output
+                        for agent_id, output in self._progressive_outputs.items()
+                        if agent_id in execution_scope_set
+                    }
+                    if isolated_execution_scope
+                    else self._progressive_outputs
+                )
+                prior_output_metadata = (
+                    {
+                        agent_id: metadata
+                        for agent_id, metadata in (
+                            self._progressive_output_metadata.items()
+                        )
+                        if agent_id in execution_scope_set
+                    }
+                    if isolated_execution_scope
+                    else self._progressive_output_metadata
+                )
                 try:
                     prior_failure_metadata = dict(self._failure_continuations)
                     prior_failure_metadata.update(recovery_continuation_handoff)
                     execution = await self.runtime.execute(
-                        self._graph,
+                        execution_graph,
                         self._problem,
                         require_complete=False,
-                        prior_outputs=self._progressive_outputs,
-                        prior_output_metadata=self._progressive_output_metadata,
+                        prior_outputs=prior_outputs,
+                        prior_output_metadata=prior_output_metadata,
                         prior_failure_metadata=prior_failure_metadata,
-                        dirty_agents=self._unresolved_dirty_agents,
-                        format_output_agent=self._uses_format_agent_protocol(),
+                        dirty_agents=(
+                            execution_scope_set
+                            if isolated_execution_scope
+                            else self._unresolved_dirty_agents
+                        ),
+                        format_output_agent=(
+                            False
+                            if isolated_execution_scope
+                            else self._uses_format_agent_protocol()
+                        ),
                     )
                 except AgentRuntimeError as exc:
                     # FlowSteer's progressive Canvas treats execution as edit
@@ -2169,13 +2300,21 @@ class AgentWorkflowEnv:
                     execution_error = exc
                     partial_execution = exc.partial_result
                     if partial_execution is not None:
-                        self._progressive_outputs = dict(partial_execution.outputs)
-                        self._progressive_output_metadata = {
+                        partial_outputs = dict(partial_execution.outputs)
+                        partial_metadata = {
                             agent_id: dict(metadata)
                             for agent_id, metadata in (
                                 partial_execution.output_metadata.items()
                             )
                         }
+                        if isolated_execution_scope:
+                            self._progressive_outputs.update(partial_outputs)
+                            self._progressive_output_metadata.update(
+                                partial_metadata
+                            )
+                        else:
+                            self._progressive_outputs = partial_outputs
+                            self._progressive_output_metadata = partial_metadata
                         self._unresolved_dirty_agents.difference_update(
                             partial_execution.outputs
                             if self.recovery_policy
@@ -2186,6 +2325,10 @@ class AgentWorkflowEnv:
                         agent_id
                         for agent_id in exc.pending_agent_ids
                         if agent_id in current_agent_ids
+                        and (
+                            not isolated_execution_scope
+                            or agent_id in execution_scope_set
+                        )
                     )
                     self._failed_agent_ids.difference_update(
                         ()
@@ -2207,20 +2350,35 @@ class AgentWorkflowEnv:
                         current_agent_ids=current_agent_ids,
                     )
                 else:
-                    self._progressive_outputs = dict(execution.outputs)
-                    self._progressive_output_metadata = {
+                    execution_outputs = dict(execution.outputs)
+                    execution_metadata = {
                         agent_id: dict(metadata)
                         for agent_id, metadata in execution.output_metadata.items()
                     }
-                    self._progressive_execution = execution
-                    self._progressive_execution_revision = self._graph.revision
+                    if isolated_execution_scope:
+                        self._progressive_outputs.update(execution_outputs)
+                        self._progressive_output_metadata.update(
+                            execution_metadata
+                        )
+                        self._unresolved_dirty_agents.difference_update(
+                            execution.outputs
+                        )
+                        self._unresolved_dirty_agents.update(
+                            execution_scope_set - set(execution.outputs)
+                        )
+                    else:
+                        self._progressive_outputs = execution_outputs
+                        self._progressive_output_metadata = execution_metadata
+                        self._progressive_execution = execution
+                        self._progressive_execution_revision = self._graph.revision
                     # A semantic QA Verifier/Formatter can be structurally present
                     # while its semantic input is not yet routable.  Runtime
                     # deferral is successful progressive execution, not Agent
                     # failure; keep only those unmaterialized nodes unresolved.
-                    self._unresolved_dirty_agents = (
-                        current_agent_ids - set(execution.outputs)
-                    )
+                    if not isolated_execution_scope:
+                        self._unresolved_dirty_agents = (
+                            current_agent_ids - set(execution.outputs)
+                        )
                     if (
                         self.recovery_policy
                         == _PRESERVE_REPAIR_RECOVERY_POLICY
@@ -2232,11 +2390,22 @@ class AgentWorkflowEnv:
                         # the remaining continuation/Tool receipts revision-live.
                         self._mark_agents_recovered(execution.outputs)
                         self._retain_current_failure_state(current_agent_ids)
-                        if not self._unresolved_dirty_agents:
+                        # A singleton replacement execution only proves that
+                        # this isolated functional unit materialized.  It must
+                        # not erase the still-live failure diagnosis of the
+                        # historical graph (for example the exhausted
+                        # Reasoner that now needs the replacement artifact
+                        # routed into it).  Full-graph execution retains the
+                        # existing clear-on-complete behavior.
+                        if (
+                            not isolated_execution_scope
+                            and not self._unresolved_dirty_agents
+                        ):
                             self._clear_failure_state()
                     else:
                         self._clear_failure_state()
-                    self._capture_last_valid_evidence_lineage(execution)
+                    if not isolated_execution_scope:
+                        self._capture_last_valid_evidence_lineage(execution)
             else:
                 self._clear_progressive_execution()
         self._last_feedback = self._accepted_feedback(
@@ -4588,6 +4757,9 @@ class AgentWorkflowEnv:
             sorted(self._repair_exhausted_agent_ids & current_ids)
         )
         mandatory_repair = self._mandatory_repair_agent_ids()
+        active_auxiliary_replacements = (
+            self._dirty_auxiliary_replacement_agent_ids()
+        )
         diagnosed_unusable = tuple(
             sorted(self._diagnosed_unusable_agent_ids & current_ids)
         )
@@ -4642,7 +4814,9 @@ class AgentWorkflowEnv:
             "policy": self.recovery_policy,
             "strategy": "preserve -> diagnose -> repair -> augment",
             "phase": (
-                "augment"
+                "diagnose_repair"
+                if active_auxiliary_replacements
+                else "augment"
                 if repair_exhausted
                 else "diagnose_repair"
                 if (
@@ -4660,6 +4834,9 @@ class AgentWorkflowEnv:
             "react_turn_exhausted_agent_ids": list(react_exhausted),
             "repair_exhausted_agent_ids": list(repair_exhausted),
             "mandatory_repair_agent_ids": list(mandatory_repair),
+            "active_auxiliary_replacement_agent_ids": list(
+                active_auxiliary_replacements
+            ),
             "diagnosed_unusable_agent_ids": list(diagnosed_unusable),
             "unresolved_dirty_agent_ids": list(self.unresolved_dirty_agent_ids),
             "terminal_unreachable_agent_ids": list(terminal_unreachable),
@@ -4674,7 +4851,7 @@ class AgentWorkflowEnv:
             "deletion_protected": protected,
             "preferred_actions": (
                 ["modify_agent"]
-                if mandatory_repair
+                if mandatory_repair or active_auxiliary_replacements
                 else ["delete_agent"]
                 if takeover_delete_ids
                 else ["set_relation"]
@@ -4765,6 +4942,23 @@ class AgentWorkflowEnv:
         artifact = self._progressive_outputs.get(agent_id)
         if not isinstance(artifact, str) or not artifact.strip():
             return False
+        if role_family == "evidence_retriever":
+            metadata = self._progressive_output_metadata.get(agent_id)
+            if not isinstance(metadata, Mapping):
+                return False
+            receipts = metadata.get("tool_receipts", ())
+            if not isinstance(receipts, (list, tuple)):
+                return False
+            assert self.required_evidence_tool_id is not None
+            return any(
+                isinstance(receipt, Mapping)
+                and self._successful_read_text(
+                    receipt,
+                    self.required_evidence_tool_id,
+                )
+                is not None
+                for receipt in receipts
+            )
         if role_family == "reasoner":
             candidate, issue = self._reasoner_candidate_for_current_dataset(
                 artifact
@@ -5041,8 +5235,8 @@ class AgentWorkflowEnv:
             ):
                 return None
             return (
-                "repair or execute only the unresolved same-role Evidence "
-                "Retriever replacement at max_agents before modifying blocked "
+                "repair or execute only the unresolved same-role auxiliary "
+                "replacement before augmentation or modification of blocked "
                 "downstream Agents; admissible_modify_agent_ids="
                 f"{list(dirty_replacement_ids)!r}; mutable_fields="
                 "['contract', 'completion_condition']"

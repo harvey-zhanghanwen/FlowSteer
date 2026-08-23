@@ -2972,6 +2972,15 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             ["contract", "completion_condition"],
             modify_domain["per_agent_candidates"][0]["mutable_fields"],
         )
+        self.assertEqual(
+            {
+                "contract": (
+                    "align facts to answer slot and select semantic answer"
+                ),
+                "completion_condition": None,
+            },
+            modify_domain["per_agent_candidates"][0]["current_values"],
+        )
 
     async def test_hotpot_augmentation_excludes_healthy_semantic_role_duplicates(
         self,
@@ -3494,6 +3503,9 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             "tool_receipts": [_test_read_receipt("p1")],
         }
         env._progressive_outputs["repair_evidence"] = "retrieved evidence"
+        env._progressive_output_metadata["repair_evidence"] = {
+            "tool_receipts": [_test_read_receipt("p1")]
+        }
 
         self.assertEqual(("set_relation",), env.model_admissible_action_types())
         candidate = env.model_admissible_action_targets()["set_relation"][
@@ -3561,6 +3573,9 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
         )
         env._progressive_outputs["reader"] = "grounded replacement evidence"
+        env._progressive_output_metadata["reader"] = {
+            "tool_receipts": [_test_read_receipt("reader-public")]
+        }
         env._failed_agent_ids.update({"failed_reader", "reasoner"})
         env._repair_exhausted_agent_ids.update({"failed_reader", "reasoner"})
         env._latest_failure_record_by_agent["failed_reader"] = AgentFailureRecord(
@@ -3691,6 +3706,9 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
         )
         env._progressive_outputs["reader"] = "grounded replacement evidence"
+        env._progressive_output_metadata["reader"] = {
+            "tool_receipts": [_test_read_receipt("reader-public")]
+        }
         env._record_failure_state(
             (
                 AgentFailureRecord(
@@ -4052,6 +4070,21 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
         )
         env._progressive_outputs["replacement_reader"] = "replacement evidence"
+        self.assertFalse(
+            env._semantic_replacement_has_valid_artifact(
+                "replacement_reader",
+                "evidence_retriever",
+            )
+        )
+        env._progressive_output_metadata["replacement_reader"] = {
+            "tool_receipts": [_test_read_receipt("replacement-public")]
+        }
+        self.assertTrue(
+            env._semantic_replacement_has_valid_artifact(
+                "replacement_reader",
+                "evidence_retriever",
+            )
+        )
         env._failed_agent_ids.update({"failed_reader", "reasoner"})
         env._repair_exhausted_agent_ids.update({"failed_reader", "reasoner"})
         env._latest_failure_record_by_agent["failed_reader"] = AgentFailureRecord(
@@ -4178,7 +4211,7 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             env._model_admissible_modify_agent_ids(),
         )
 
-    async def test_max_agents_dirty_replacement_excludes_downstream_modify(
+    async def test_dirty_replacement_excludes_repeat_add_below_agent_capacity(
         self,
     ) -> None:
         graph = _hotpot_semantic_graph()
@@ -4203,7 +4236,10 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             graph=graph,
             problem="What is the capital of France?",
             execute_on_edit=False,
-            max_agents=6,
+            # Six Agents are present, so capacity remains.  An active isolated
+            # replacement must still own the next recovery edit instead of
+            # admitting another replacement branch.
+            max_agents=8,
             semantic_protocol="hotpotqa_verified_answer_slot_v1",
             recovery_policy="preserve_diagnose_repair_augment",
             required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
@@ -4215,6 +4251,13 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(("modify_agent",), env.model_admissible_action_types())
+        recovery = env.recovery_state()
+        self.assertEqual("diagnose_repair", recovery["phase"])
+        self.assertEqual(
+            ["replacement_reader"],
+            recovery["active_auxiliary_replacement_agent_ids"],
+        )
+        self.assertEqual(["modify_agent"], recovery["preferred_actions"])
         modify_domain = env.model_admissible_action_targets()["modify_agent"]
         self.assertEqual(
             ["replacement_reader"],
@@ -4227,6 +4270,13 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             ["contract", "completion_condition"],
             modify_domain["per_agent_candidates"][0]["mutable_fields"],
+        )
+        self.assertEqual(
+            {
+                "contract": "retrieve replacement evidence",
+                "completion_condition": None,
+            },
+            modify_domain["per_agent_candidates"][0]["current_values"],
         )
         original_artifact_type = env.graph.get_node(
             "replacement_reader"
@@ -4249,7 +4299,10 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             '"contract":"verify the replacement artifact"}'
         )
         self.assertFalse(rejected.accepted)
-        self.assertIn("before modifying blocked downstream Agents", rejected.feedback)
+        self.assertIn(
+            "before augmentation or modification of blocked downstream Agents",
+            rejected.feedback,
+        )
         self.assertEqual([], gateway.requests)
         accepted = await env.step(
             '{"action":"modify_agent","agent_id":"replacement_reader",'
@@ -4370,6 +4423,46 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             }
         )
         observed_failure_metadata: dict[str, object] = {}
+        observed_execution_graphs: list[
+            tuple[tuple[str, ...], str | None, int]
+        ] = []
+        observed_execution_kwargs: list[dict[str, object]] = []
+
+        async def replacement_failure(
+            candidate_graph: AgentGraph,
+            *args: object,
+            **kwargs: object,
+        ) -> AgentRuntimeResult:
+            del args
+            observed_execution_graphs.append(
+                (
+                    tuple(node.id for node in candidate_graph.nodes),
+                    candidate_graph.output_agent_id,
+                    candidate_graph.revision,
+                )
+            )
+            observed_execution_kwargs.append(dict(kwargs))
+            raise AgentRuntimeError(
+                "replacement Retriever exhausted its bounded ReAct execution",
+                failure_records=(
+                    AgentFailureRecord(
+                        request_id="tc10-replacement-exhausted",
+                        agent_id="replacement_reader",
+                        phase=ExecutionPhase.SINGLE,
+                        graph_revision=candidate_graph.revision,
+                        error_type="ReactExecutionError",
+                        message=(
+                            "react agent 'replacement_reader' exhausted 8 turns"
+                        ),
+                        metadata={
+                            "continuation_source_agent_id": "failed_reader",
+                            "react_trace": [tool_trace],
+                            "tool_receipts": [receipt],
+                        },
+                    ),
+                ),
+                pending_agent_ids=("replacement_reader",),
+            )
 
         async def replacement_success(
             candidate_graph: AgentGraph,
@@ -4377,6 +4470,14 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             **kwargs: object,
         ) -> AgentRuntimeResult:
             del args
+            observed_execution_graphs.append(
+                (
+                    tuple(node.id for node in candidate_graph.nodes),
+                    candidate_graph.output_agent_id,
+                    candidate_graph.revision,
+                )
+            )
+            observed_execution_kwargs.append(dict(kwargs))
             observed_failure_metadata.update(kwargs["prior_failure_metadata"])
             return AgentRuntimeResult(
                 run_id="tc10-replacement",
@@ -4384,7 +4485,9 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
                 output_agent_id=candidate_graph.output_agent_id,
                 final_answer=None,
                 outputs={"replacement_reader": "replacement evidence"},
-                output_metadata={"replacement_reader": {}},
+                output_metadata={
+                    "replacement_reader": {"tool_receipts": [receipt]}
+                },
                 calls=(),
                 block_completion_order=(("replacement_reader",),),
                 executed_agent_ids=("replacement_reader",),
@@ -4405,10 +4508,51 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("isolated executable prefix", rejected_inline.feedback)
 
         self.assertIn("add_subgraph", env.model_admissible_action_types())
+        with patch.object(runtime, "execute", side_effect=replacement_failure):
+            failed_add = await env.step(action_payload)
+        self.assertTrue(failed_add.accepted, failed_add.feedback)
+        self.assertEqual(1, len(failed_add.execution_failure_records))
+        self.assertIn("failed_reader", env._failed_agent_ids)
+        self.assertIn("failed_reader", env._repair_exhausted_agent_ids)
+        self.assertEqual(
+            "tc10-reader-exhausted",
+            env._latest_failure_record_by_agent["failed_reader"].request_id,
+        )
+        self.assertIn("replacement_reader", env._unresolved_dirty_agents)
+        self.assertEqual(("modify_agent",), env.model_admissible_action_types())
+
         with patch.object(runtime, "execute", side_effect=replacement_success):
-            result = await env.step(action_payload)
+            result = await env.step(
+                json.dumps(
+                    {
+                        "action": "modify_agent",
+                        "agent_id": "replacement_reader",
+                        "contract": (
+                            "continue public grounded evidence retrieval with "
+                            "the preserved Tool receipts"
+                        ),
+                    }
+                )
+            )
 
         self.assertTrue(result.accepted, result.feedback)
+        self.assertEqual(("replacement_reader",), observed_execution_graphs[0][0])
+        self.assertIsNone(observed_execution_graphs[0][1])
+        self.assertEqual(
+            {"replacement_reader"},
+            observed_execution_kwargs[0]["dirty_agents"],
+        )
+        self.assertEqual({}, observed_execution_kwargs[0]["prior_outputs"])
+        self.assertFalse(observed_execution_kwargs[0]["format_output_agent"])
+        self.assertEqual(("replacement_reader",), observed_execution_graphs[1][0])
+        self.assertIsNone(observed_execution_graphs[1][1])
+        self.assertEqual(env.graph.revision, observed_execution_graphs[1][2])
+        self.assertEqual(
+            {"replacement_reader"},
+            observed_execution_kwargs[1]["dirty_agents"],
+        )
+        self.assertEqual({}, observed_execution_kwargs[1]["prior_outputs"])
+        self.assertFalse(observed_execution_kwargs[1]["format_output_agent"])
         projected = observed_failure_metadata["replacement_reader"]
         self.assertEqual(
             "failed_reader",
@@ -4445,6 +4589,12 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
                 json.dumps({"action": "set_relation", **route_candidates[0]})
             )
         self.assertTrue(routed.accepted, routed.feedback)
+        self.assertEqual(
+            {node.id for node in env.graph.nodes},
+            set(observed_execution_graphs[2][0]),
+        )
+        self.assertEqual("formatter", observed_execution_graphs[2][1])
+        self.assertTrue(observed_execution_kwargs[2]["format_output_agent"])
         self.assertEqual(
             ("reasoner",),
             env._directed_successors(env.graph, "replacement_reader"),
