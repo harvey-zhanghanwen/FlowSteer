@@ -9,10 +9,10 @@ provided-context retrieval runtime, and concise
 or merge the r4 trajectories; r4 metrics are comparison references only.
 
 The next evaluation condition is configured in
-`config/evaluation_hotpotqa_role_conditional_v1_r18.yaml`. Its artifacts and
-reports use the independent `hotpotqa_role_conditional_v1_r18` namespace.
+`config/evaluation_hotpotqa_role_conditional_v1_r19.yaml`. Its artifacts and
+reports use the independent `hotpotqa_role_conditional_v1_r19` namespace.
 The in-progress r17 formal run remains isolated in its original namespace and
-is not resumed or relabeled as r18.
+is not resumed or relabeled as r19.
 
 ## Directly reused from FlowSteer
 
@@ -455,6 +455,33 @@ receives a clean candidate transfer rather than the original question and raw
 evidence, and the request-scoped completion schema requires the exact terminal
 wrapper. This conditional serialization rule does not turn generic Output into
 a mandatory Formatter or add a Formatter prerequisite.
+
+The r18 Stable Zero canary remains preserved in
+`artifacts/hotpotqa_role_conditional_v1_r18/hotpotqa`; it is a two-task
+diagnostic, not a 128-task metric. Arthur's Magazine completed by explicit
+FINISH. On Delhi, the Director independently selected a
+Reasoner--Verifier--Formatter path, and every executed Reasoner and Verifier
+artifact from the first complete revision onward retained the correct
+candidate `Delhi` and successful Tool receipts. The Formatter nevertheless
+received an empty computed solution because its live Verifier JSON used the
+field name `"Candidate answer"`, while the Gateway transfer recognized only
+`candidate_answer`. The FINISH gate used the Runtime's normalized structured
+field representation, correctly identified `Delhi`, and attributed the empty
+wrapper to `format_serialization`; the inconsistent parsing boundaries caused
+the trajectory to reach `max_rounds`.
+
+The independent r19 condition unifies that wire boundary with the Runtime's
+existing case-insensitive space/hyphen-to-underscore field normalization and
+duplicate-field rejection. It changes neither the Verifier schema nor
+FlowSteer's Format Operator: a selected Formatter still receives only one
+already determined candidate and cannot select or transform it. When a
+selected Formatter nevertheless produces a serialization mismatch, the
+state-conditioned recovery target is now exactly that Output Formatter; the
+successful retrieval and semantic-producer artifacts are preserved and
+unrelated `MODIFY_AGENT` or `ADD_SUBGRAPH` actions are withheld. This is a
+measured `preserve -> diagnose -> repair -> augment` recovery projection, not
+a requirement to select a Formatter. A generic Output and every topology that
+does not select the optional Formatter retain the prior open search space.
 
 ## Not implemented or enabled in this condition
 
