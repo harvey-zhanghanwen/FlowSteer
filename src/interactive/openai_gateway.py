@@ -259,6 +259,9 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
     hotpot_semantic = request.semantic_protocol == "hotpotqa_verified_answer_slot_v1"
     unified_qa_semantic = request.semantic_protocol == "qa_verified_answer_lineage_v2"
     semantic_lineage = hotpot_semantic or unified_qa_semantic
+    exact_answer_output = (
+        request.is_output_agent and request.require_exact_answer_tag
+    )
     if execution_mode in {"react", "coding"}:
         # SkillFlow's BoundedAgent asks the policy for one StructuredAction per
         # model turn.  The execution adapter, not this provider boundary,
@@ -277,7 +280,7 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
             "as currently admissible, and put only its declared keys in "
             "arguments. If completion is not currently admissible, do not put "
             "the eventual artifact or answer fields into a Tool action. Do not "
-            "emit <answer> tags in this internal action."
+            "put terminal syntax outside the StructuredAction JSON object."
         )
         if semantic_lineage and semantic_role == "reasoner":
             protocol += (
@@ -392,6 +395,23 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
             "restating the upstream artifact. "
             "Do not present a task-level final answer and "
             "do not use <answer> tags."
+        )
+    if execution_mode in {"react", "coding"}:
+        if exact_answer_output:
+            protocol += (
+                " When completion is admissible, set only complete.arguments.value "
+                "to exactly one non-empty <answer>...</answer> wrapper and put no "
+                "text outside that wrapper value. This is terminal serialization "
+                "only; it does not assign an Agent role or workflow topology."
+            )
+        else:
+            protocol += " Do not emit <answer> tags in this internal action."
+    elif exact_answer_output:
+        protocol += (
+            " Serialize the final artifact as exactly one non-empty "
+            "<answer>...</answer> wrapper with no text outside it. This is only "
+            "the terminal output syntax; preserve the answer determined from the "
+            "task and routed artifacts, and do not infer a workflow role from it."
         )
     if request.is_format_agent:
         # FlowSteer's Format Operator normally receives the problem and the

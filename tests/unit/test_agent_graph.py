@@ -5000,6 +5000,39 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((), env.graph.nodes)
         self.assertIn("ReAct is an execution_mode", rejected.feedback)
 
+    async def test_neutral_canvas_rejects_react_role_but_admits_react_execution_mode(
+        self,
+    ) -> None:
+        registry = make_registry()
+        gateway = _ImmediateGateway()
+        runtime = AgentRuntime(
+            registry,
+            gateway,
+            execution_adapters={"react": ReasoningExecutionAdapter(gateway)},
+        )
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=runtime,
+            problem="question",
+            semantic_protocol="none",
+        )
+
+        rejected = await env.step(
+            '{"action":"add_agent","agent_id":"bad","model_id":"balanced",'
+            '"contract":"retrieve","role_family":"ReAct",'
+            '"execution_mode":"reasoning"}'
+        )
+        accepted = await env.step(
+            '{"action":"add_agent","agent_id":"reader","model_id":"balanced",'
+            '"contract":"retrieve evidence","role_family":"evidence_hunter",'
+            '"execution_mode":"react"}'
+        )
+
+        self.assertFalse(rejected.accepted)
+        self.assertIn("ReAct is an execution_mode", rejected.feedback)
+        self.assertTrue(accepted.accepted)
+        self.assertEqual("react", env.graph.get_node("reader").execution_mode.value)
+
     async def test_hotpot_semantic_edits_require_roles_and_exact_reasoner_tool_mode(
         self,
     ) -> None:

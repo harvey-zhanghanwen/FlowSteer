@@ -2357,6 +2357,7 @@ def _request_record(call: AgentCallRecord) -> Mapping[str, Any]:
         "execution_role": "format" if request.is_format_agent else "worker",
         "is_format_agent": request.is_format_agent,
         "is_format_predecessor": request.is_format_predecessor,
+        "require_exact_answer_tag": request.require_exact_answer_tag,
         "semantic_protocol": request.semantic_protocol,
         "continuation_source_agent_id": request.continuation_source_agent_id,
         "communication_condition": request.communication_condition.value,

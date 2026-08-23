@@ -33,6 +33,7 @@ def request(
     problem: str = "Solve the task",
     upstream_artifact: str = "evidence",
     semantic_protocol: str = "none",
+    require_exact_answer_tag: bool = False,
     communication_condition: CommunicationCondition = CommunicationCondition.NORMAL,
 ) -> AgentRequest:
     provider = ProviderSpec(
@@ -65,6 +66,7 @@ def request(
         is_output_agent=is_output_agent,
         is_format_agent=is_format_agent,
         is_format_predecessor=is_format_predecessor,
+        require_exact_answer_tag=require_exact_answer_tag,
         communication_condition=communication_condition,
         semantic_protocol=semantic_protocol,
         upstream=(
@@ -170,6 +172,52 @@ class MessageTests(unittest.TestCase):
         self.assertIn("only its declared keys in arguments", system)
         self.assertIn("Do not emit <answer> tags", system)
         self.assertNotIn("unique Output Agent", system)
+
+    def test_reasoning_exact_answer_wrapper_is_injected_only_for_output(self) -> None:
+        output_system = build_agent_messages(
+            request(require_exact_answer_tag=True)
+        )[0]["content"]
+        intermediate_system = build_agent_messages(
+            request(
+                is_output_agent=False,
+                require_exact_answer_tag=True,
+            )
+        )[0]["content"]
+
+        self.assertIn(
+            "exactly one non-empty <answer>...</answer> wrapper",
+            output_system,
+        )
+        self.assertIn("terminal output syntax", output_system)
+        self.assertNotIn(
+            "exactly one non-empty <answer>...</answer> wrapper",
+            intermediate_system,
+        )
+        self.assertIn("do not use <answer> tags", intermediate_system)
+
+    def test_react_exact_answer_wrapper_is_only_complete_value(self) -> None:
+        output_system = build_agent_messages(
+            request(
+                execution_mode="react",
+                require_exact_answer_tag=True,
+            )
+        )[0]["content"]
+        intermediate_system = build_agent_messages(
+            request(
+                is_output_agent=False,
+                execution_mode="react",
+                require_exact_answer_tag=True,
+            )
+        )[0]["content"]
+
+        self.assertIn("only complete.arguments.value", output_system)
+        self.assertIn(
+            "exactly one non-empty <answer>...</answer> wrapper",
+            output_system,
+        )
+        self.assertNotIn("Do not emit <answer> tags", output_system)
+        self.assertNotIn("complete.arguments.value", intermediate_system)
+        self.assertIn("Do not emit <answer> tags", intermediate_system)
 
     def test_reasoner_aligns_fact_propositions_to_answer_slot(self) -> None:
         messages = build_agent_messages(

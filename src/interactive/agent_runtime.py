@@ -153,6 +153,7 @@ class AgentRequest:
     is_output_agent: bool = False
     is_format_agent: bool = False
     is_format_predecessor: bool = False
+    require_exact_answer_tag: bool = False
     communication_condition: CommunicationCondition = CommunicationCondition.NORMAL
     upstream: Tuple[UpstreamMessage, ...] = ()
     own_draft: Optional[str] = None
@@ -173,6 +174,8 @@ class AgentRequest:
             raise TypeError("is_format_agent must be bool")
         if type(self.is_format_predecessor) is not bool:
             raise TypeError("is_format_predecessor must be bool")
+        if type(self.require_exact_answer_tag) is not bool:
+            raise TypeError("require_exact_answer_tag must be bool")
         if self.is_format_agent and not self.is_output_agent:
             raise ValueError("Format Agent must be the Output Agent")
         if self.is_format_agent and self.is_format_predecessor:
@@ -516,6 +519,7 @@ class AgentRuntime:
         ] = None,
         dirty_agents: Optional[Collection[str]] = None,
         format_output_agent: bool = False,
+        require_exact_answer_tag: bool = False,
         communication_condition: Union[
             CommunicationCondition, str
         ] = CommunicationCondition.NORMAL,
@@ -524,6 +528,8 @@ class AgentRuntime:
             raise ValueError("problem must be a non-empty string")
         if type(format_output_agent) is not bool:
             raise TypeError("format_output_agent must be bool")
+        if type(require_exact_answer_tag) is not bool:
+            raise TypeError("require_exact_answer_tag must be bool")
         snapshot = graph.snapshot()
         execution_graph = AgentGraph.from_snapshot(snapshot)
         validation = execution_graph.validate(
@@ -657,6 +663,7 @@ class AgentRuntime:
                     failure_metadata,
                     output_agent_id=execution_graph.output_agent_id,
                     format_output_agent=format_output_agent,
+                    require_exact_answer_tag=require_exact_answer_tag,
                     communication_condition=resolved_condition,
                 ),
                 False,
@@ -879,6 +886,11 @@ class AgentRuntime:
         """
 
         for node in nodes:
+            if (node.role_family or "").casefold() == "react":
+                raise AgentRuntimeError(
+                    f"agent {node.id!r} cannot use role_family='react'; "
+                    "ReAct is an execution_mode, not an Agent role"
+                )
             mode_value = getattr(node.execution_mode, "value", node.execution_mode)
             if mode_value not in self.execution_adapters:
                 raise AgentRuntimeError(
@@ -1010,6 +1022,7 @@ class AgentRuntime:
         *,
         output_agent_id: Optional[str],
         format_output_agent: bool,
+        require_exact_answer_tag: bool,
         communication_condition: CommunicationCondition,
     ) -> Dict[str, str]:
         format_predecessor_ids = {
@@ -1038,6 +1051,7 @@ class AgentRuntime:
                 graph_revision=graph_revision,
                 output_agent_id=output_agent_id,
                 format_output_agent=format_output_agent,
+                require_exact_answer_tag=require_exact_answer_tag,
                 is_format_predecessor=agent_id in format_predecessor_ids,
                 communication_condition=communication_condition,
                 continuation_metadata=failure_metadata.get(agent_id),
@@ -1078,6 +1092,7 @@ class AgentRuntime:
             graph_revision=graph_revision,
             output_agent_id=output_agent_id,
             format_output_agent=format_output_agent,
+            require_exact_answer_tag=require_exact_answer_tag,
             is_format_predecessor=left_id in format_predecessor_ids,
             communication_condition=communication_condition,
             continuation_metadata=failure_metadata.get(left_id),
@@ -1091,6 +1106,7 @@ class AgentRuntime:
             graph_revision=graph_revision,
             output_agent_id=output_agent_id,
             format_output_agent=format_output_agent,
+            require_exact_answer_tag=require_exact_answer_tag,
             is_format_predecessor=right_id in format_predecessor_ids,
             communication_condition=communication_condition,
             continuation_metadata=failure_metadata.get(right_id),
@@ -1123,6 +1139,7 @@ class AgentRuntime:
             graph_revision=graph_revision,
             output_agent_id=output_agent_id,
             format_output_agent=format_output_agent,
+            require_exact_answer_tag=require_exact_answer_tag,
             is_format_predecessor=left_id in format_predecessor_ids,
             communication_condition=communication_condition,
             continuation_metadata=failure_metadata.get(left_id),
@@ -1150,6 +1167,7 @@ class AgentRuntime:
             graph_revision=graph_revision,
             output_agent_id=output_agent_id,
             format_output_agent=format_output_agent,
+            require_exact_answer_tag=require_exact_answer_tag,
             is_format_predecessor=right_id in format_predecessor_ids,
             communication_condition=communication_condition,
             continuation_metadata=failure_metadata.get(right_id),
@@ -1223,6 +1241,7 @@ class AgentRuntime:
         peer_draft: Optional[UpstreamMessage] = None,
         output_agent_id: Optional[str],
         format_output_agent: bool,
+        require_exact_answer_tag: bool,
         is_format_predecessor: bool,
         communication_condition: CommunicationCondition,
         continuation_metadata: Optional[Mapping[str, object]] = None,
@@ -1275,6 +1294,9 @@ class AgentRuntime:
                 format_output_agent and agent.id == output_agent_id
             ),
             is_format_predecessor=is_format_predecessor,
+            require_exact_answer_tag=(
+                require_exact_answer_tag and agent.id == output_agent_id
+            ),
             communication_condition=communication_condition,
             upstream=upstream,
             own_draft=own_draft,

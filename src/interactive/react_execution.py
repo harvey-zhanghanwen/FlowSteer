@@ -133,16 +133,25 @@ class ToolReactExecutionAdapter:
     ) -> Mapping[str, object]:
         """Return the JSON Schema for an admitted completion's arguments."""
 
-        del request
+        value_schema: dict[str, object] = {
+            "description": "The completed artifact required by the Agent contract"
+        }
+        if request.is_output_agent and request.require_exact_answer_tag:
+            value_schema.update(
+                {
+                    "type": "string",
+                    "minLength": len("<answer></answer>") + 1,
+                    "description": (
+                        "Exactly one non-empty <answer>...</answer> wrapper with "
+                        "no text outside it; this is terminal output syntax only"
+                    ),
+                }
+            )
         return {
             "type": "object",
             "required": ["value"],
             "properties": {
-                "value": {
-                    "description": (
-                        "The completed artifact required by the Agent contract"
-                    )
-                }
+                "value": value_schema
             },
             "additionalProperties": False,
         }

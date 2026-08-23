@@ -352,6 +352,94 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Candidate answer:", rendered_predecessor)
         self.assertIn("Evidence:", rendered_predecessor)
 
+    def test_free_agent_exact_answer_schema_is_terminal_output_only(self) -> None:
+        class CompletionOnlyAdapter(QARetrievalReactExecutionAdapter):
+            def _state_conditioned_action_domain(
+                self,
+                request: AgentRequest,
+                observations: list[dict[str, object]],
+            ) -> tuple[frozenset[tuple[str, str]], bool]:
+                del request, observations
+                return frozenset(), True
+
+        adapter = CompletionOnlyAdapter(
+            gateway=SimpleNamespace(generate=lambda request: None),
+            tool_registry=build_qa_tool_registry(FakeIndex()),
+            max_turns=3,
+            max_tool_calls=2,
+            task_type="multi_hop_qa",
+        )
+        output_request = AgentRequest(
+            request_id="qa:free-output",
+            run_id="qa",
+            graph_revision=1,
+            problem="What book contains Widsith?",
+            agent=AgentNode(
+                "synthesis",
+                "model",
+                "answer from the available evidence",
+                role_family="synthesis",
+                allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                execution_mode="react",
+            ),
+            model=ModelSpec("model", "provider"),
+            provider=ProviderSpec("provider", kind="test"),
+            phase=ExecutionPhase.SINGLE,
+            is_output_agent=True,
+            require_exact_answer_tag=True,
+        )
+
+        response_schema = adapter._state_conditioned_response_schema(
+            output_request,
+            [],
+        )
+        self.assertIsNotNone(response_schema)
+        assert response_schema is not None
+        value_schema = response_schema["properties"]["arguments"]["properties"][
+            "value"
+        ]
+        self.assertEqual("string", value_schema["type"])
+        self.assertIn(
+            "Exactly one non-empty <answer>...</answer> wrapper",
+            value_schema["description"],
+        )
+        self.assertEqual(
+            {"value"},
+            set(response_schema["properties"]["arguments"]["properties"]),
+        )
+        self.assertNotIn(
+            "<answer>",
+            json.dumps(
+                {
+                    key: value
+                    for key, value in response_schema["properties"].items()
+                    if key != "arguments"
+                },
+                sort_keys=True,
+            ),
+        )
+
+        output_contract = adapter._contract(output_request, [])
+        self.assertIn('arguments={"value": ...}', output_contract)
+        self.assertIn(
+            "Exactly one non-empty <answer>...</answer> wrapper",
+            output_contract,
+        )
+
+        intermediate_request = replace(
+            output_request,
+            request_id="qa:free-intermediate",
+            is_output_agent=False,
+        )
+        intermediate_schema = adapter._completion_arguments_schema(
+            intermediate_request
+        )
+        self.assertNotIn("<answer>", json.dumps(intermediate_schema, sort_keys=True))
+        self.assertNotIn(
+            "<answer>",
+            adapter._contract(intermediate_request, []),
+        )
+
     def test_reasoner_and_verifier_receive_distinct_completion_guidance(self) -> None:
         adapter = QARetrievalReactExecutionAdapter(
             gateway=SimpleNamespace(generate=lambda request: None),

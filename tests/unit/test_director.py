@@ -760,7 +760,7 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("terminal_format_issue", state)
         self.assertIn("distinct Format Agent", state["terminal_format_issue"])
 
-    async def test_canvas_exposes_only_positive_finish_admission_without_semantic_protocol(
+    async def test_canvas_exposes_finish_admission_diagnosis_without_semantic_protocol(
         self,
     ) -> None:
         model_registry = registry()
@@ -788,9 +788,9 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         initial = observation_payload(
             transcript_messages(orchestrator.build_prompt(env, 0, ()))[-1]
         )
-        self.assertNotIn("finish_admissibility", initial)
+        self.assertFalse(initial["finish_admissibility"]["admissible"])
         self.assertEqual(
-            list(env.allowed_action_types),
+            list(env.model_admissible_action_types()),
             initial["admissible_action_types"],
         )
 

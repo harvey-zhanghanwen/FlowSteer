@@ -1948,6 +1948,7 @@ class AgentWorkflowEnv:
                         prior_output_metadata=self._progressive_output_metadata,
                         prior_failure_metadata=self._failure_continuations,
                         format_output_agent=self._uses_format_agent_protocol(),
+                        require_exact_answer_tag=self.require_exact_answer_tag,
                     )
                 except AgentRuntimeError as exc:
                     if exc.partial_result is not None:
@@ -2161,6 +2162,7 @@ class AgentWorkflowEnv:
                         prior_failure_metadata=prior_failure_metadata,
                         dirty_agents=self._unresolved_dirty_agents,
                         format_output_agent=self._uses_format_agent_protocol(),
+                        require_exact_answer_tag=self.require_exact_answer_tag,
                     )
                 except AgentRuntimeError as exc:
                     # FlowSteer's progressive Canvas treats execution as edit
@@ -5572,6 +5574,7 @@ class AgentWorkflowEnv:
             run_id=run_id,
             prior_failure_metadata=self._failure_continuations,
             format_output_agent=self._uses_format_agent_protocol(),
+            require_exact_answer_tag=self.require_exact_answer_tag,
         )
 
     def _apply_mutation(self, graph: AgentGraph, action: AgentAction) -> set[str]:

@@ -2714,8 +2714,6 @@ class AgentGraphOrchestrator:
             "canvas_feedback": snapshot.last_feedback,
             "admissible_action_types": list(
                 env.model_admissible_action_types()
-                if verified_qa_semantic_protocol(self.semantic_protocol)
-                else env.allowed_action_types
             ),
             # These are existing admission constraints enforced by
             # AgentWorkflowEnv, not a role or topology template.  Surfacing
@@ -2814,12 +2812,7 @@ class AgentGraphOrchestrator:
         # revision-local gate and its first measured failure stage so the
         # Director repairs the responsible semantic node instead of probing
         # FINISH or repeatedly modifying the Formatter.
-        if verified_qa_semantic_protocol(self.semantic_protocol):
-            payload["finish_admissibility"] = env.finish_admissibility()
-        else:
-            finish_admissibility = env.finish_admissibility()
-            if finish_admissibility.get("admissible") is True:
-                payload["finish_admissibility"] = finish_admissibility
+        payload["finish_admissibility"] = env.finish_admissibility()
         if include_task_context:
             payload.update(
                 {

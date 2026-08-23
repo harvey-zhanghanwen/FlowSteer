@@ -13,6 +13,7 @@ from src.interactive.agent_runtime import (
     ExecutionPhase,
     ReasoningExecutionAdapter,
 )
+from src.interactive.agent_workflow_env import AgentWorkflowEnv
 from src.interactive.environment_execution import (
     build_environment_execution_resources,
 )
@@ -99,6 +100,32 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("answer", routed.request_or_dependency)
         self.assertEqual(routed.content, routed.artifact)
         self.assertEqual(snapshot.to_dict(), graph.snapshot().to_dict())
+
+    async def test_environment_routes_exact_answer_contract_only_to_output_request(
+        self,
+    ) -> None:
+        catalog = registry()
+        gateway = RecordingGateway()
+        graph = AgentGraph(
+            [AgentNode("a", "m1", "collect"), AgentNode("b", "m2", "answer")],
+            [AgentRelation("a", "b", True, False)],
+            output_agent_id="b",
+        )
+        env = AgentWorkflowEnv(
+            catalog,
+            gateway,
+            problem="question",
+            graph=graph,
+            require_exact_answer_tag=True,
+        )
+
+        await env.execute(run_id="exact-answer-wire")
+
+        self.assertEqual(["a", "b"], [item.agent.id for item in gateway.requests])
+        self.assertFalse(gateway.requests[0].require_exact_answer_tag)
+        self.assertTrue(gateway.requests[1].require_exact_answer_tag)
+        self.assertFalse(gateway.requests[0].is_output_agent)
+        self.assertTrue(gateway.requests[1].is_output_agent)
 
     async def test_runtime_routes_target_keyed_public_failure_continuation(
         self,
