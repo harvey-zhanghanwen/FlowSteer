@@ -9,8 +9,8 @@ provided-context retrieval runtime, and concise
 or merge the r4 trajectories; r4 metrics are comparison references only.
 
 The current condition is configured in
-`config/evaluation_hotpotqa_role_conditional_v1_r11.yaml`. Its artifacts and
-reports use the independent `hotpotqa_role_conditional_v1_r11` namespace.
+`config/evaluation_hotpotqa_role_conditional_v1_r13.yaml`. Its artifacts and
+reports use the independent `hotpotqa_role_conditional_v1_r13` namespace.
 
 ## Directly reused from FlowSteer
 
@@ -255,6 +255,22 @@ aborted response. Retry exhaustion becomes the existing Runtime failure path;
 the previous-revision preservation record remains intact but is not silently
 restored into a graph revision whose dependencies changed. This transport
 repair is role- and topology-independent.
+
+The first r11 diagnostic was launched with the new config path but imported
+the main worktree's older `src.interactive` package. Its empty-action failure
+is therefore not evidence about the r11 source tree. The independent r12
+condition makes the shared dataset root explicit while requiring the committed
+condition worktree to be the Python source root. The run records remain in a
+separate namespace and are not reused as r13 results.
+
+The r12 source review found that Agent execution prompts already required an
+unexpected-equal comparison to recheck question scope, entity--attribute
+binding, explicit evidence, and upstream contract narrowing, while the
+role-conditional Director observation omitted that existing capability. The
+independent r13 condition exposes the same four checks to the Director's open
+search space. It does not require a Reasoner, Verifier, Formatter, fixed edge,
+or serial ordering; the check applies only when the Director selects a
+semantic reasoning capability for a comparison task.
 
 ## Not implemented or enabled in this condition
 
