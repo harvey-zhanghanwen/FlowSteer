@@ -95,9 +95,14 @@ LEGACY_HOTPOTQA_DIRECTOR_PROMPT_VERSION_V11 = (
     "agentgraph.director.hotpotqa-semantic-recovery.v11"
 )
 HOTPOTQA_SEMANTIC_PROTOCOL = "hotpotqa_verified_answer_slot_v1"
+HOTPOTQA_SEMANTIC_LINEAGE_PROTOCOL = "hotpotqa_semantic_lineage_v2"
 QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL = "qa_verified_answer_lineage_v2"
 _VERIFIED_QA_SEMANTIC_PROTOCOLS = frozenset(
-    {HOTPOTQA_SEMANTIC_PROTOCOL, QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL}
+    {
+        HOTPOTQA_SEMANTIC_PROTOCOL,
+        HOTPOTQA_SEMANTIC_LINEAGE_PROTOCOL,
+        QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+    }
 )
 PRESERVE_DIAGNOSE_REPAIR_AUGMENT_POLICY = (
     "preserve_diagnose_repair_augment"
@@ -315,6 +320,12 @@ def verified_qa_semantic_protocol(value: object) -> bool:
     """Return whether the shared evidence-lineage Canvas policy is active."""
 
     return value in _VERIFIED_QA_SEMANTIC_PROTOCOLS
+
+
+def flexible_hotpotqa_semantic_protocol(value: object) -> bool:
+    """Return whether HotpotQA terminal lineage is topology-neutral."""
+
+    return value == HOTPOTQA_SEMANTIC_LINEAGE_PROTOCOL
 
 
 def director_system_prompt_for_version(prompt_version: str) -> str:
@@ -1531,14 +1542,15 @@ def director_live_add_subgraph_relation_candidates(
 ) -> tuple[dict[str, Any], ...]:
     """Project exact role-valid relation encodings for one sampled subgraph.
 
-    The HotpotQA Canvas remains authoritative.  This projection applies its
-    incremental role-edge validator and the user-required semantic dataflow
-    order (Retriever/Repair -> Reasoner -> Verifier -> Formatter).  A reverse
-    feedback edge remains available through a reciprocal relation when both
-    directed edges are legal.  A one-way relation is always encoded as its
-    actual sender ``source_id`` to receiver ``target_id`` with ``(true,false)``
-    instead of the directionally equivalent but ambiguous ``(false,true)``.
-    No relation is required, so the Director still selects the graph topology.
+    The Canvas remains authoritative.  Legacy semantic protocols retain their
+    exact role-edge ordering.  The topology-neutral HotpotQA lineage protocol
+    admits every directed or reciprocal communication edge allowed by the
+    terminal Formatter-sink invariant; its semantic order is validated from
+    actual routed artifacts at FINISH, rather than imposed as a graph template.
+    A one-way relation is always encoded as its actual sender ``source_id`` to
+    receiver ``target_id`` with ``(true,false)`` instead of the directionally
+    equivalent but ambiguous ``(false,true)``.  No relation is required, so
+    the Director still selects the graph topology.
     """
 
     normalized_agents = _live_add_subgraph_agents(
@@ -1557,6 +1569,41 @@ def director_live_add_subgraph_relation_candidates(
     endpoint_ids = [*domain["existing_agent_ids"]]
     endpoint_ids.extend(agent["agent_id"] for agent in normalized_agents)
     candidates: list[dict[str, Any]] = []
+    if flexible_hotpotqa_semantic_protocol(domain.get("semantic_protocol")):
+        for source_index, source_id in enumerate(endpoint_ids):
+            for target_id in endpoint_ids[source_index + 1 :]:
+                source_role = roles[source_id]
+                target_role = roles[target_id]
+                source_to_target = source_role != "format"
+                target_to_source = target_role != "format"
+                if source_to_target:
+                    candidates.append(
+                        {
+                            "source_id": source_id,
+                            "target_id": target_id,
+                            "source_to_target": True,
+                            "target_to_source": False,
+                        }
+                    )
+                if target_to_source:
+                    candidates.append(
+                        {
+                            "source_id": target_id,
+                            "target_id": source_id,
+                            "source_to_target": True,
+                            "target_to_source": False,
+                        }
+                    )
+                if source_to_target and target_to_source:
+                    candidates.append(
+                        {
+                            "source_id": source_id,
+                            "target_id": target_id,
+                            "source_to_target": True,
+                            "target_to_source": True,
+                        }
+                    )
+        return tuple(candidates)
     semantic_dataflow_pairs = {
         ("evidence_retriever", "reasoner"),
         ("repair", "reasoner"),
@@ -2768,26 +2815,87 @@ class AgentGraphOrchestrator:
             )
         if self.semantic_protocol != "none":
             payload["semantic_protocol"] = self.semantic_protocol
-            payload["semantic_lineage_constraints"] = {
-                "semantic_answer_owner_role_family": "reasoner",
-                "required_evidence_tool_id": env.required_evidence_tool_id,
-                "required_evidence_tool_owner": (
-                    "reasoner_or_direct_reasoner_predecessor"
-                ),
-                "required_evidence_execution_mode": "react",
-                "verifier_execution_mode": "reasoning",
-                "formatter_execution_mode": "reasoning",
-                "required_direct_role_edges": [
-                    ["reasoner", "verifier"],
-                    ["verifier", "format"],
-                ],
-                "output_role_family": "format",
-                "formatter_original_question_visible": False,
-                "formatter_answer_reselection_allowed": False,
-                "semantic_answer_owner_count": 1,
-                "max_agents_per_add_subgraph": env.max_agents_per_subgraph,
-                "output_agent_id_optional_until_lineage_complete": True,
-            }
+            if flexible_hotpotqa_semantic_protocol(self.semantic_protocol):
+                # Keep SkillFlow's Supervisor instruction neutral and expose
+                # the task contract through the progressive FlowSteer Canvas.
+                # These are terminal artifact capabilities, not a prescribed
+                # role count, direct edge list, or workflow template.
+                payload["semantic_lineage_constraints"] = {
+                    "question_scope": {
+                        "preserve_original": True,
+                        "unrequested_qualifier_allowed": False,
+                    },
+                    "reasoner_capability": {
+                        "determines_semantic_answer": True,
+                        "aligns_fact_predicate_arguments_to_answer_slot": True,
+                        "unexpected_equal_comparison_recheck": [
+                            "original_question_scope",
+                            "entity_attribute_binding",
+                            "explicit_evidence",
+                            "upstream_contract_scope",
+                        ],
+                    },
+                    "verifier_capability": {
+                        "checks": [
+                            "explicit_evidence",
+                            "entity_attribute_binding",
+                            "multi_hop_completeness",
+                            "question_scope_preservation",
+                        ],
+                        "candidate_reselection_allowed": False,
+                    },
+                    "formatter_capability": {
+                        "operation": "serialize_verified_semantic_answer",
+                        "original_question_visible": False,
+                        "reasoning_allowed": False,
+                        "candidate_reselection_allowed": False,
+                    },
+                    "react": {
+                        "kind": "execution_mode",
+                        "schedule": (
+                            "Thought -> Action(tool) -> Observation -> "
+                            "Thought -> Final"
+                        ),
+                    },
+                    "terminal_artifact_constraints": {
+                        "required_evidence_tool_id": (
+                            env.required_evidence_tool_id
+                        ),
+                        "supported_verifier_artifact_required": True,
+                        "formatter_exact_copy_required": True,
+                    },
+                    "topology_and_role_multiplicity_source": (
+                        "action_target_domains"
+                    ),
+                    "max_agents_per_add_subgraph": (
+                        env.max_agents_per_subgraph
+                    ),
+                }
+            else:
+                # Persist the legacy exact-lineage receipt for old protocol
+                # versions and their replay/evaluation artifacts.
+                payload["semantic_lineage_constraints"] = {
+                    "semantic_answer_owner_role_family": "reasoner",
+                    "required_evidence_tool_id": env.required_evidence_tool_id,
+                    "required_evidence_tool_owner": (
+                        "reasoner_or_direct_reasoner_predecessor"
+                    ),
+                    "required_evidence_execution_mode": "react",
+                    "verifier_execution_mode": "reasoning",
+                    "formatter_execution_mode": "reasoning",
+                    "required_direct_role_edges": [
+                        ["reasoner", "verifier"],
+                        ["verifier", "format"],
+                    ],
+                    "output_role_family": "format",
+                    "formatter_original_question_visible": False,
+                    "formatter_answer_reselection_allowed": False,
+                    "semantic_answer_owner_count": 1,
+                    "max_agents_per_add_subgraph": (
+                        env.max_agents_per_subgraph
+                    ),
+                    "output_agent_id_optional_until_lineage_complete": True,
+                }
         if self.recovery_policy != "default":
             payload["recovery_policy"] = self.recovery_policy
         if directed_edges:
@@ -3033,6 +3141,7 @@ __all__ = [
     "HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V22",
     "HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V11",
     "HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V13",
+    "HOTPOTQA_SEMANTIC_LINEAGE_PROTOCOL",
     "HOTPOTQA_SEMANTIC_PROTOCOL",
     "QA_DIRECTOR_PROMPT_VERSION",
     "QA_DIRECTOR_SYSTEM_PROMPT_V1",
@@ -3074,5 +3183,6 @@ __all__ = [
     "director_sglang_sampling_json_schema_text",
     "director_state_conditioned_sampling_json_schema_text",
     "verified_qa_semantic_protocol",
+    "flexible_hotpotqa_semantic_protocol",
     "encode_director_transcript",
 ]

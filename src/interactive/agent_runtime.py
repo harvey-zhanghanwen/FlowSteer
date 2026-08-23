@@ -183,6 +183,7 @@ class AgentRequest:
         if self.semantic_protocol not in {
             "none",
             "hotpotqa_verified_answer_slot_v1",
+            "hotpotqa_semantic_lineage_v2",
             "qa_verified_answer_lineage_v2",
         }:
             raise ValueError("unsupported AgentRequest semantic_protocol")
@@ -469,6 +470,7 @@ class AgentRuntime:
         if semantic_protocol not in {
             "none",
             "hotpotqa_verified_answer_slot_v1",
+            "hotpotqa_semantic_lineage_v2",
             "qa_verified_answer_lineage_v2",
         }:
             raise ValueError("unsupported AgentRuntime semantic_protocol")
@@ -826,13 +828,45 @@ class AgentRuntime:
 
         FlowSteer's incomplete Canvas is executable after every accepted edit,
         while SkillFlow invokes a bounded Agent only with its current public
-        input.  For an evidence-grounded QA semantic protocol, a disconnected
-        Verifier has no Reasoner candidate to check and a disconnected or
-        unselected Formatter has no verified answer to serialize.  Defer those
-        components and their descendants without deleting nodes or artifacts;
-        the next relation or Output edit makes them schedulable under the same
-        Canvas revision semantics.
+        input. For the legacy QA protocols, a disconnected Verifier has no
+        Reasoner candidate to check and a disconnected or unselected Formatter
+        has no verified answer to serialize. The flexible HotpotQA protocol
+        instead asks only whether an actual upstream artifact route exists; it
+        does not infer a required producer role, role count, or direct semantic
+        chain. Defer unavailable consumers and their descendants without
+        deleting nodes or artifacts; the next relation or Output edit makes
+        them schedulable under the same Canvas revision semantics.
         """
+
+        if self.semantic_protocol == "hotpotqa_semantic_lineage_v2":
+            seeds: Set[Tuple[str, ...]] = set()
+            output_agent_id = graph.output_agent_id
+            for agent_id, node in nodes.items():
+                role = (node.role_family or "").casefold()
+                # A flexible semantic consumer is schedulable whenever the
+                # Canvas contains a route that will supply a public upstream
+                # artifact. The producer's role and the number of producers
+                # are deliberately not topology constraints.
+                has_routed_upstream = bool(
+                    graph.directed_predecessors(agent_id)
+                )
+                if role == "verifier" and not has_routed_upstream:
+                    seeds.add(plan.component_for[agent_id])
+                elif role == "format" and (
+                    not format_output_agent
+                    or agent_id != output_agent_id
+                    or not has_routed_upstream
+                ):
+                    seeds.add(plan.component_for[agent_id])
+            deferred = set(seeds)
+            frontier = list(seeds)
+            while frontier:
+                component = frontier.pop()
+                for successor in plan.successors[component]:
+                    if successor not in deferred:
+                        deferred.add(successor)
+                        frontier.append(successor)
+            return deferred
 
         if self.semantic_protocol not in {
             "hotpotqa_verified_answer_slot_v1",

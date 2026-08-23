@@ -187,6 +187,7 @@ def validate_agent_graph_config(value: Mapping[str, Any]) -> None:
         not in {
             "none",
             "hotpotqa_verified_answer_slot_v1",
+            "hotpotqa_semantic_lineage_v2",
             "qa_verified_answer_lineage_v2",
         }
     }
@@ -194,6 +195,7 @@ def validate_agent_graph_config(value: Mapping[str, Any]) -> None:
         raise ConfigurationError(
             "semantic protocols must be none, "
             "hotpotqa_verified_answer_slot_v1, or "
+            "hotpotqa_semantic_lineage_v2, or "
             "qa_verified_answer_lineage_v2"
         )
     recovery_policy = graph.get("recovery_policy", "default")
@@ -221,6 +223,14 @@ def validate_agent_graph_config(value: Mapping[str, Any]) -> None:
     ):
         raise ConfigurationError(
             "hotpotqa_verified_answer_slot_v1 is scoped only to hotpotqa"
+        )
+    if any(
+        source != "hotpotqa"
+        and protocol == "hotpotqa_semantic_lineage_v2"
+        for source, protocol in semantic_protocols.items()
+    ):
+        raise ConfigurationError(
+            "hotpotqa_semantic_lineage_v2 is scoped only to hotpotqa"
         )
     invalid_shared_qa_sources = {
         str(source): protocol
@@ -265,6 +275,41 @@ def validate_agent_graph_config(value: Mapping[str, Any]) -> None:
         ):
             raise ConfigurationError(
                 "HotpotQA verified answer-slot protocol requires the enabled "
+                "qa_tool_runtime with required_evidence completion"
+            )
+    if hotpot_semantic_protocol == "hotpotqa_semantic_lineage_v2":
+        if (
+            value["experiment"].get("prompt_version")
+            != "agentgraph.director.minimal-neutral.v10"
+        ):
+            raise ConfigurationError(
+                "hotpotqa_semantic_lineage_v2 requires the short neutral "
+                "Director v10 prompt"
+            )
+        if recovery_policy != "preserve_diagnose_repair_augment":
+            raise ConfigurationError(
+                "hotpotqa_semantic_lineage_v2 requires "
+                "preserve_diagnose_repair_augment recovery"
+            )
+        if required_evidence_tool_id != "qa-retrieval":
+            raise ConfigurationError(
+                "hotpotqa_semantic_lineage_v2 requires the qa-retrieval "
+                "evidence tool"
+            )
+        if terminal_protocols.get("hotpotqa") != "exact_single_answer_tag":
+            raise ConfigurationError(
+                "hotpotqa_semantic_lineage_v2 requires the exact "
+                "single-answer terminal protocol"
+            )
+        qa_runtime = value.get("qa_tool_runtime")
+        if (
+            not isinstance(qa_runtime, Mapping)
+            or qa_runtime.get("enabled") is not True
+            or qa_runtime.get("completion_policy") != "required_evidence"
+            or "hotpotqa" not in qa_runtime.get("dataset_scope", ())
+        ):
+            raise ConfigurationError(
+                "hotpotqa_semantic_lineage_v2 requires the enabled "
                 "qa_tool_runtime with required_evidence completion"
             )
     shared_qa_sources = tuple(

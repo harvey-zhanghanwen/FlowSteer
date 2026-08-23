@@ -113,6 +113,97 @@ def _semantic_role(request: AgentRequest) -> str:
     return role_family.casefold() if isinstance(role_family, str) else ""
 
 
+_HOTPOTQA_SEMANTIC_PROTOCOLS = {
+    "hotpotqa_verified_answer_slot_v1",
+    "hotpotqa_semantic_lineage_v2",
+}
+
+
+def _single_labeled_value(artifact: str, label: str) -> Optional[str]:
+    """Return one non-empty line value from a structured semantic artifact."""
+
+    prefix = f"{label}:"
+    values = [
+        line.strip()[len(prefix) :].strip()
+        for line in artifact.splitlines()
+        if line.strip().startswith(prefix)
+    ]
+    if len(values) != 1 or not values[0]:
+        return None
+    return values[0]
+
+
+def _hotpotqa_supported_verifier_candidate(artifact: str) -> Optional[str]:
+    """Return a supported candidate, ``None`` for auxiliary, or ``""`` if invalid."""
+
+    try:
+        fields = json.loads(artifact)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        fields = None
+    if isinstance(fields, Mapping) and (
+        "candidate_answer" in fields or "verification_status" in fields
+    ):
+        candidate = fields.get("candidate_answer")
+        status = fields.get("verification_status")
+        checks = (
+            "evidence_supported",
+            "entity_attribute_binding_correct",
+            "multi_hop_complete",
+            "scope_preserved",
+            "answer_type_cardinality_correct",
+            "minimal_answer_surface",
+            "alias_binding_correct",
+        )
+        if (
+            not isinstance(candidate, str)
+            or not candidate
+            or candidate != candidate.strip()
+            or "\n" in candidate
+            or not isinstance(status, str)
+            or status.strip().casefold() != "supported"
+            or any(fields.get(check) is not True for check in checks)
+        ):
+            return ""
+        return candidate
+
+    candidate = _single_labeled_value(artifact, "Candidate answer")
+    status = _single_labeled_value(artifact, "Verification status")
+    if candidate is None and status is None:
+        return None
+    if candidate is None or status is None or status.casefold() != "supported":
+        return ""
+    return candidate
+
+
+def _hotpotqa_supported_consensus(
+    messages: Sequence[UpstreamMessage],
+    condition: CommunicationCondition,
+) -> str:
+    """Build a formatting-only transfer from agreeing Verifier artifacts.
+
+    Auxiliary evidence and Reasoner artifacts may share a flexible fan-in with
+    one or more Verifier artifacts. Only Verifier-shaped artifacts participate
+    in consensus; every such artifact must be supported and must copy the same
+    already-determined semantic candidate.
+    """
+
+    verifier_candidates: list[str] = []
+    for message in messages:
+        artifact = _visible_message_content(message.artifact, condition)
+        candidate = _hotpotqa_supported_verifier_candidate(artifact)
+        if candidate is None:
+            continue
+        if not candidate:
+            return ""
+        verifier_candidates.append(candidate)
+    if not verifier_candidates:
+        return ""
+    candidate = verifier_candidates[0]
+    if any(other_candidate != candidate for other_candidate in verifier_candidates):
+        return ""
+    return f"Candidate answer: {candidate}\nVerification status: supported"
+
+
 _HOTPOTQA_COMPLETE_ENTITY_SURFACE_RULE = (
     "A single-entity answer surface is one complete, evidence-aligned referential "
     "surface. Minimality removes only alias lists, explanations, redundant "
@@ -132,8 +223,10 @@ _HOTPOTQA_COMPLETE_ENTITY_SURFACE_RULE = (
 _HOTPOTQA_REASONER_PROTOCOL = (
     "You are the semantic Reasoner, not a formatter or verifier. Preserve the "
     "question's original scope, relation, qualifiers, comparison criterion, and "
-    "answer type and answer cardinality. Align every database or retrieved fact "
-    "to a proposition with "
+    "answer type and answer cardinality. First align every database or retrieved "
+    "fact's sentence-level syntactic predicate-argument structure (grammatical "
+    "subject, predicate, complements, modifiers, and comparison operands) with "
+    "its semantic proposition. Represent that proposition with "
     "subject/entity, predicate/relation, object or attribute value, and qualifiers; "
     "preserve the sentence's asserted semantic roles instead of placing the desired "
     "candidate into an unrelated field. For a comparison fact, the compared entity "
@@ -143,8 +236,10 @@ _HOTPOTQA_REASONER_PROTOCOL = (
     "question's wh-word answer-type constraint: a Which-comparison returns the "
     "compared entity rather than the comparison value, and a who-question returns "
     "the evidence-supported answer-bearing entity, which may be a person or "
-    "organization, rather than a possessive attribute phrase. You alone "
-    "determine the semantic candidate. Return exactly the six structured fields "
+    "organization, rather than a possessive attribute phrase. You alone determine "
+    "the semantic candidate and own the final semantic answer; no downstream "
+    "Formatter may reselect it. "
+    "Return exactly the six structured fields "
     "question_scope, answer_slot, evidence_propositions, multi_hop_chain, "
     "candidate_answer, and evidence. Copy question_scope exactly from the original "
     "question. answer_slot contains exactly answer_type, answer_cardinality, qualifiers, "
@@ -169,7 +264,10 @@ _HOTPOTQA_VERIFIER_PROTOCOL = (
     "question-head noun, or text outside the selected entity mention; "
     "and every canonical-name or alias choice has an explicit identity binding in the "
     "evidence propositions. In a Which-comparison, reject a numeric/date comparison "
-    "value as the candidate. "
+    "value as the candidate. If both comparison sides have unexpectedly equal "
+    "values, do not accept a tie until the original question scope, both "
+    "entity-attribute bindings, explicit evidence, and any upstream contract "
+    "narrowing have all been rechecked. "
     + _HOTPOTQA_COMPLETE_ENTITY_SURFACE_RULE
     + "In that possessive construction, reject the possessed attribute, an incomplete "
     "possessor entity mention, or any candidate that shortens the full possessor mention. "
@@ -256,7 +354,10 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
         request.agent.execution_mode,
     )
     semantic_role = _semantic_role(request)
-    hotpot_semantic = request.semantic_protocol == "hotpotqa_verified_answer_slot_v1"
+    hotpot_semantic = request.semantic_protocol in _HOTPOTQA_SEMANTIC_PROTOCOLS
+    flexible_hotpot_semantic = (
+        request.semantic_protocol == "hotpotqa_semantic_lineage_v2"
+    )
     unified_qa_semantic = request.semantic_protocol == "qa_verified_answer_lineage_v2"
     semantic_lineage = hotpot_semantic or unified_qa_semantic
     exact_answer_output = (
@@ -290,7 +391,7 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
                 "admissible, put the structured semantic Reasoner artifact defined "
                 "there in arguments.value. "
                 + (
-                    _HOTPOTQA_COMPLETE_ENTITY_SURFACE_RULE
+                    _HOTPOTQA_REASONER_PROTOCOL
                     if hotpot_semantic
                     else (
                         _QA_COMPLETE_ENTITY_SURFACE_RULE
@@ -335,13 +436,23 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
                 "in the Candidate answer field."
             )
     elif request.is_format_agent and semantic_lineage:
-        protocol = (
-            "You are the terminal FlowSteer Format Operator. The solution has already "
-            "been computed and passed by a Verifier in exactly one routed upstream "
-            "artifact. You will not receive the original question. Follow the copying "
-            "instructions in the user message; do not solve, verify, or extend the "
-            "answer; do not canonicalize or reselect it."
-        )
+        if flexible_hotpot_semantic:
+            protocol = (
+                "You are the terminal FlowSteer Format Operator. The semantic answer "
+                "has already been determined by a Reasoner and supported by one or "
+                "more agreeing Verifier artifacts routed through the current graph. "
+                "You will receive only their consensus transfer, never the original "
+                "question. Serialize that candidate character-for-character; do not "
+                "solve, reason, verify, canonicalize, or reselect it."
+            )
+        else:
+            protocol = (
+                "You are the terminal FlowSteer Format Operator. The solution has "
+                "already been computed and passed by a Verifier in exactly one routed "
+                "upstream artifact. You will not receive the original question. Follow "
+                "the copying instructions in the user message; do not solve, verify, "
+                "or extend the answer; do not canonicalize or reselect it."
+            )
     elif semantic_lineage and semantic_role == "reasoner":
         protocol = (
             _HOTPOTQA_REASONER_PROTOCOL
@@ -443,14 +554,20 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
         # adaptation changes only the terminal wrapper; typed communication
         # envelopes remain intact in trajectory receipts but do not burden the
         # extraction-only model input.
-        solution = (
-            _visible_message_content(
-                request.upstream[0].artifact,
+        if flexible_hotpot_semantic:
+            solution = _hotpotqa_supported_consensus(
+                request.upstream,
                 request.communication_condition,
             )
-            if len(request.upstream) == 1
-            else ""
-        )
+        else:
+            solution = (
+                _visible_message_content(
+                    request.upstream[0].artifact,
+                    request.communication_condition,
+                )
+                if len(request.upstream) == 1
+                else ""
+            )
         if semantic_lineage:
             common = FORMAT_PROMPT.format(
                 problem_description=(

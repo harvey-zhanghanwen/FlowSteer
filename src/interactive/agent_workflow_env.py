@@ -43,10 +43,15 @@ class AgentWorkflowStateError(RuntimeError):
 
 
 _HOTPOTQA_SEMANTIC_PROTOCOL = "hotpotqa_verified_answer_slot_v1"
+_HOTPOTQA_SEMANTIC_LINEAGE_PROTOCOL = "hotpotqa_semantic_lineage_v2"
 _QA_SEMANTIC_PROTOCOL = "qa_verified_answer_lineage_v2"
 _PRESERVE_REPAIR_RECOVERY_POLICY = "preserve_diagnose_repair_augment"
 _SEMANTIC_LINEAGE_PROTOCOLS = frozenset(
-    {_HOTPOTQA_SEMANTIC_PROTOCOL, _QA_SEMANTIC_PROTOCOL}
+    {
+        _HOTPOTQA_SEMANTIC_PROTOCOL,
+        _HOTPOTQA_SEMANTIC_LINEAGE_PROTOCOL,
+        _QA_SEMANTIC_PROTOCOL,
+    }
 )
 _SUPPORTED_SEMANTIC_PROTOCOLS = frozenset(
     {"none", *_SEMANTIC_LINEAGE_PROTOCOLS}
@@ -444,7 +449,11 @@ class AgentWorkflowEnv:
     def _semantic_protocol_label(self) -> str:
         return (
             "HotpotQA"
-            if self.semantic_protocol == _HOTPOTQA_SEMANTIC_PROTOCOL
+            if self.semantic_protocol
+            in {
+                _HOTPOTQA_SEMANTIC_PROTOCOL,
+                _HOTPOTQA_SEMANTIC_LINEAGE_PROTOCOL,
+            }
             else "Evidence-grounded QA"
         )
 
@@ -791,6 +800,12 @@ class AgentWorkflowEnv:
         """Return the declared semantic terminal dataflow when unambiguous."""
 
         if not self._uses_semantic_lineage_protocol():
+            return ()
+        if self.semantic_protocol == _HOTPOTQA_SEMANTIC_LINEAGE_PROTOCOL:
+            # The v2 terminal contract is expressed over routed artifacts and
+            # provenance.  It intentionally does not prescribe direct role
+            # adjacency: retrieval/repair fan-in, intermediate reasoning, and
+            # reciprocal two-Agent blocks remain in FlowSteer's search space.
             return ()
         reasoner_ids = self._semantic_role_agent_ids("reasoner")
         verifier_ids = self._semantic_role_agent_ids("verifier")
@@ -1426,6 +1441,16 @@ class AgentWorkflowEnv:
         )
         if not self._uses_semantic_lineage_protocol():
             return role_families
+        if self.semantic_protocol == _HOTPOTQA_SEMANTIC_LINEAGE_PROTOCOL:
+            # Multiple Reasoners and Verifiers are legal in the v2 search
+            # space.  Candidate agreement is checked over the executed lineage
+            # at FINISH instead of being encoded as a role-count template.
+            return tuple(
+                role_family
+                for role_family in role_families
+                if role_family != "format"
+                or not self._semantic_role_agent_ids("format")
+            )
         admitted: list[str] = []
         for role_family in role_families:
             if role_family not in {"reasoner", "verifier", "format"}:
@@ -1448,6 +1473,12 @@ class AgentWorkflowEnv:
 
         if not self._uses_semantic_lineage_protocol():
             return ()
+        if self.semantic_protocol == _HOTPOTQA_SEMANTIC_LINEAGE_PROTOCOL:
+            return tuple(
+                role_family
+                for role_family in ("reasoner", "verifier", "format")
+                if not self._semantic_role_agent_ids(role_family)
+            )
         return tuple(
             role_family
             for role_family in ("reasoner", "verifier", "format")
@@ -2668,6 +2699,12 @@ class AgentWorkflowEnv:
 
         if not self._uses_semantic_lineage_protocol():
             return None
+        if self.semantic_protocol == _HOTPOTQA_SEMANTIC_LINEAGE_PROTOCOL:
+            return self._hotpotqa_semantic_repair_attribution(
+                reason,
+                stage=stage,
+                validation=validation,
+            )
         formatter_ids = tuple(
             node.id
             for node in self._graph.nodes
@@ -2833,6 +2870,192 @@ class AgentWorkflowEnv:
             result["corpus_level_oracle_claim"] = False
         if target_id is not None:
             result["responsible_agent_id"] = target_id
+        return result
+
+    def _hotpotqa_semantic_repair_attribution(
+        self,
+        reason: str,
+        *,
+        stage: Optional[str],
+        validation: Optional[GraphValidationResult],
+    ) -> Optional[dict[str, object]]:
+        """Attribute v2 failures without assuming direct role adjacency."""
+
+        formatter_ids = tuple(
+            node.id
+            for node in self._graph.nodes
+            if (node.role_family or "").casefold() == "format"
+        )
+        formatter_id = self._graph.output_agent_id
+        output_ancestors = (
+            ()
+            if formatter_id is None or not self._graph.has_node(formatter_id)
+            else self._directed_ancestor_ids(self._graph, formatter_id)
+        )
+        verifier_ids = tuple(
+            sorted(
+                (
+                    node.id
+                    for node in self._graph.nodes
+                    if node.id in output_ancestors
+                    and (node.role_family or "").casefold() == "verifier"
+                ),
+                key=lambda verifier_id: (
+                    len(
+                        self._directed_shortest_path(
+                            self._graph,
+                            verifier_id,
+                            formatter_id,
+                        )
+                    ),
+                    verifier_id,
+                ),
+            )
+        )
+        reasoner_ids = tuple(
+            node.id
+            for node in self._graph.nodes
+            if (node.role_family or "").casefold() == "reasoner"
+            and any(
+                node.id
+                in self._directed_ancestor_ids(self._graph, verifier_id)
+                for verifier_id in verifier_ids
+            )
+        )
+        issue_codes = (
+            frozenset()
+            if validation is None
+            else frozenset(issue.code for issue in validation.issues)
+        )
+        unreachable_ids = (
+            ()
+            if validation is None
+            else tuple(
+                sorted(
+                    {
+                        agent_id
+                        for issue in validation.issues
+                        if issue.code == "cannot_reach_output"
+                        for agent_id in issue.agent_ids
+                    }
+                )
+            )
+        )
+        graph_ids = {node.id for node in self._graph.nodes}
+        failed_ids = tuple(sorted(self._failed_agent_ids & graph_ids))
+
+        target_id: Optional[str] = None
+        role_family: Optional[str] = None
+        responsible_constraint = "semantic_lineage_construction"
+        preferred_actions = ["set_relation", "add_subgraph", "modify_agent"]
+        responsible_ids: Tuple[str, ...] = ()
+        if unreachable_ids:
+            target_id = unreachable_ids[0]
+            role_family = self._graph.get_node(target_id).role_family
+            responsible_ids = unreachable_ids
+            responsible_constraint = "terminal_reachability"
+            preferred_actions = ["set_relation", "modify_agent", "add_subgraph"]
+        elif stage == "execution" and failed_ids:
+            target_id = failed_ids[0]
+            role_family = self._graph.get_node(target_id).role_family
+            responsible_ids = failed_ids
+            responsible_constraint = "execution_contract_or_runtime_failure"
+            preferred_actions = ["modify_agent", "set_relation", "add_subgraph"]
+        elif (
+            formatter_id is None
+            or "output_agent_count" in issue_codes
+            or "unknown_output_agent" in issue_codes
+        ):
+            target_id = formatter_ids[0] if formatter_ids else None
+            role_family = "format" if formatter_ids else None
+            responsible_constraint = "format_output_assignment"
+            preferred_actions = ["set_output", "set_relation", "add_subgraph"]
+        else:
+            quoted_id = re.search(r"(?:Reasoner|Verifier) '([^']+)'", reason)
+            quoted_target = (
+                None
+                if quoted_id is None or quoted_id.group(1) not in graph_ids
+                else quoted_id.group(1)
+            )
+            reason_folded = reason.casefold()
+            verifier_verdict_failure = reason.startswith("Verifier") and any(
+                f"{field_name!r} must be true" in reason
+                for field_name in (
+                    "evidence_supported",
+                    "entity_attribute_binding_correct",
+                    "alias_binding_correct",
+                    "answer_type_cardinality_correct",
+                    "multi_hop_complete",
+                    "minimal_answer_surface",
+                    "scope_preserved",
+                )
+            )
+            if (
+                "knowledge_base_coverage_failure" in reason_folded
+                or reason.startswith("Reasoner")
+                or verifier_verdict_failure
+                or "no successful 'qa-retrieval' read receipt" in reason
+                or "evidence provenance is invalid" in reason
+            ):
+                target_id = (
+                    quoted_target
+                    if quoted_target in reasoner_ids
+                    else reasoner_ids[0]
+                    if reasoner_ids
+                    else None
+                )
+                role_family = "reasoner"
+                responsible_constraint = "reasoner_semantic_artifact"
+                preferred_actions = ["modify_agent", "set_relation", "add_subgraph"]
+            elif reason.startswith("Verifier") or "Verifier changed" in reason:
+                target_id = (
+                    quoted_target
+                    if quoted_target in verifier_ids
+                    else verifier_ids[0]
+                    if verifier_ids
+                    else None
+                )
+                role_family = "verifier"
+                responsible_constraint = "verifier_semantic_artifact"
+                preferred_actions = ["modify_agent", "set_relation", "add_subgraph"]
+            elif reason.startswith(("Format", "Formatter")):
+                target_id = formatter_id
+                role_family = "format"
+                responsible_constraint = "format_lineage"
+                preferred_actions = ["modify_agent", "set_relation", "set_output"]
+            elif "no routed Verifier" in reason:
+                target_id = formatter_id
+                role_family = "format"
+                responsible_constraint = "semantic_lineage_relation"
+                preferred_actions = ["set_relation", "add_subgraph", "modify_agent"]
+            elif "disagree on candidate_answer" in reason:
+                target_id = verifier_ids[0] if verifier_ids else None
+                role_family = "verifier"
+                responsible_constraint = "candidate_consistency"
+                preferred_actions = ["modify_agent", "set_relation", "add_subgraph"]
+            elif stage not in {"execution", "format_lineage"}:
+                return None
+
+        preserved = tuple(
+            node.id
+            for node in self._graph.nodes
+            if self._has_successful_artifact(node.id)
+            and node.id != target_id
+        )
+        result: dict[str, object] = {
+            "responsible_constraint": responsible_constraint,
+            "responsible_role_family": role_family,
+            "responsible_agent_ids": list(responsible_ids),
+            "format_target_agent_ids": list(formatter_ids),
+            "preserve_agent_ids": list(preserved),
+            "preferred_action_order": preferred_actions,
+            "delete_allowed_before_replacement_takeover": False,
+        }
+        if target_id is not None:
+            result["responsible_agent_id"] = target_id
+        if "knowledge_base_coverage_failure" in reason.casefold():
+            result["operational_diagnosis"] = "knowledge_base_coverage_failure"
+            result["corpus_level_oracle_claim"] = False
         return result
 
     def _cached_progressive_execution(self) -> Optional[AgentRuntimeResult]:
@@ -3330,6 +3553,13 @@ class AgentWorkflowEnv:
                 "semantic-answer artifact to the Format Agent"
             )
         predecessors = graph.directed_predecessors(output_agent_id)
+        if self.semantic_protocol == _HOTPOTQA_SEMANTIC_LINEAGE_PROTOCOL:
+            if not predecessors:
+                return (
+                    "Format Agent must consume at least one routed upstream "
+                    "artifact containing an already verified semantic answer"
+                )
+            return None
         if len(predecessors) != 1:
             return (
                 "Format Agent must consume exactly one upstream semantic-answer "
@@ -3390,6 +3620,8 @@ class AgentWorkflowEnv:
 
         if not self._uses_semantic_lineage_protocol():
             return None
+        if self.semantic_protocol == _HOTPOTQA_SEMANTIC_LINEAGE_PROTOCOL:
+            return self._hotpotqa_semantic_lineage_edit_issue_for(graph)
         protocol_label = self._semantic_protocol_label()
         missing_role_ids = tuple(
             node.id
@@ -3503,6 +3735,97 @@ class AgentWorkflowEnv:
                         f"{protocol_label} Formatter {node.id!r} must be a "
                         "terminal sink; "
                         f"remove outgoing directed edges to {list(successors)!r}"
+                    )
+        return None
+
+    def _hotpotqa_semantic_lineage_edit_issue_for(
+        self,
+        graph: AgentGraph,
+    ) -> Optional[str]:
+        """Validate semantic capabilities without prescribing graph topology.
+
+        FlowSteer remains authoritative for graph structure and progressive
+        edit--execute--feedback.  These checks only separate semantic roles
+        from SkillFlow execution modes and keep the Formatter a pure terminal
+        serializer.  Actual Reasoner--Verifier lineage is validated from routed
+        artifacts and Tool receipts at FINISH.
+        """
+
+        missing_role_ids = tuple(
+            node.id
+            for node in graph.nodes
+            if not (node.role_family or "").strip()
+        )
+        if missing_role_ids:
+            return (
+                "HotpotQA semantic protocol requires a non-empty role_family "
+                f"for every Agent; missing role_family for {list(missing_role_ids)!r}"
+            )
+        invalid_role_ids = tuple(
+            node.id
+            for node in graph.nodes
+            if (node.role_family or "").casefold() == "react"
+        )
+        if invalid_role_ids:
+            return (
+                "HotpotQA semantic protocol rejects role_family='react' for "
+                f"Agents {list(invalid_role_ids)!r}; ReAct is execution_mode='react' "
+                "(Thought -> Action(tool) -> Observation -> Thought -> Final), "
+                "not an Agent role"
+            )
+
+        formatting_only_contract = " ".join(
+            _HOTPOTQA_FORMAT_CONTRACT.casefold().split()
+        ).rstrip(".")
+        for node in graph.nodes:
+            role = (node.role_family or "").casefold()
+            normalized_contract = " ".join(
+                node.contract.casefold().split()
+            ).rstrip(".")
+            if (
+                role in {"reasoner", "verifier"}
+                and normalized_contract == formatting_only_contract
+            ):
+                return (
+                    f"HotpotQA {role.title()} Agent {node.id!r} has a "
+                    "formatting-only contract; the Reasoner owns the semantic "
+                    "answer and the Verifier checks evidence, binding, hops, and scope"
+                )
+            if role == "reasoner":
+                react_with_evidence = (
+                    node.execution_mode.value == "react"
+                    and node.allowed_tools == (self.required_evidence_tool_id,)
+                )
+                routed_reasoning = (
+                    node.execution_mode.value == "reasoning"
+                    and not node.allowed_tools
+                )
+                if not (react_with_evidence or routed_reasoning):
+                    return (
+                        f"HotpotQA Reasoner Agent {node.id!r} must either use "
+                        "execution_mode='react' with exactly "
+                        f"allowed_tools=['{self.required_evidence_tool_id}'] or "
+                        "execution_mode='reasoning' without Tools and consume "
+                        "routed evidence; role_family remains 'reasoner'"
+                    )
+            if role in {"verifier", "format"} and (
+                node.execution_mode.value != "reasoning" or node.allowed_tools
+            ):
+                return (
+                    f"HotpotQA {role.title()} Agent {node.id!r} must use "
+                    "execution_mode='reasoning' without Tools"
+                )
+            if role == "format":
+                if node.contract != _HOTPOTQA_FORMAT_CONTRACT:
+                    return (
+                        f"HotpotQA Formatter Agent {node.id!r} must use the "
+                        "formatting-only contract and must not select or infer an answer"
+                    )
+                successors = self._directed_successors(graph, node.id)
+                if successors:
+                    return (
+                        f"HotpotQA Formatter Agent {node.id!r} must be a terminal "
+                        f"sink; remove outgoing directed edges to {list(successors)!r}"
                     )
         return None
 
@@ -4480,6 +4803,8 @@ class AgentWorkflowEnv:
 
         if not self._uses_semantic_lineage_protocol():
             return None
+        if self.semantic_protocol == _HOTPOTQA_SEMANTIC_LINEAGE_PROTOCOL:
+            return self._hotpotqa_semantic_lineage_issue(execution)
         protocol_label = self._semantic_protocol_label()
         structure_issue = self._format_agent_issue_for(self._graph)
         if structure_issue is not None:
@@ -4621,6 +4946,280 @@ class AgentWorkflowEnv:
                 f"wrapper_content={formatter_value!r}"
             )
         return None
+
+    def _hotpotqa_semantic_lineages(
+        self,
+        execution: AgentRuntimeResult,
+    ) -> tuple[Tuple[Tuple[str, Tuple[str, ...]], ...], Tuple[str, ...]]:
+        """Resolve valid routed Reasoner--Verifier artifact lineages.
+
+        This is an executed-artifact query, not a topology template.  A lineage
+        may contain retrieval, repair, intermediate reasoning, fan-in, or one
+        bounded reciprocal block.  Its endpoints are recognized by semantic
+        role and its validity comes from the actual artifacts and Tool receipts.
+        """
+
+        formatter_id = self._graph.output_agent_id
+        if formatter_id is None or not self._graph.has_node(formatter_id):
+            return (), ("HotpotQA semantic lineage has no selected Output Agent",)
+        output_ancestors = set(
+            self._directed_ancestor_ids(self._graph, formatter_id)
+        )
+        verifier_ids = tuple(
+            sorted(
+                (
+                    node.id
+                    for node in self._graph.nodes
+                    if node.id in output_ancestors
+                    and (node.role_family or "").casefold() == "verifier"
+                ),
+                key=lambda verifier_id: (
+                    len(
+                        self._directed_shortest_path(
+                            self._graph,
+                            verifier_id,
+                            formatter_id,
+                        )
+                    ),
+                    verifier_id,
+                ),
+            )
+        )
+        if not verifier_ids:
+            return (), (
+                "HotpotQA Output has no routed Verifier artifact in its directed lineage",
+            )
+
+        lineages: list[Tuple[str, Tuple[str, ...]]] = []
+        diagnostics: list[str] = []
+        for verifier_id in verifier_ids:
+            verifier_artifact = execution.outputs.get(verifier_id)
+            if verifier_artifact is None:
+                diagnostics.append(
+                    f"Verifier {verifier_id!r} has no current verification artifact"
+                )
+                continue
+            verifier_candidate, verifier_issue = self._verifier_candidate(
+                verifier_artifact
+            )
+            if verifier_issue is not None or verifier_candidate is None:
+                diagnostics.append(
+                    f"Verifier {verifier_id!r} semantic artifact is invalid: "
+                    f"{verifier_issue}"
+                )
+                continue
+            reasoner_ancestors = set(
+                self._directed_ancestor_ids(self._graph, verifier_id)
+            )
+            reasoner_ids = tuple(
+                sorted(
+                    (
+                        node.id
+                        for node in self._graph.nodes
+                        if node.id in reasoner_ancestors
+                        and (node.role_family or "").casefold() == "reasoner"
+                    ),
+                    key=lambda reasoner_id: (
+                        len(
+                            self._directed_shortest_path(
+                                self._graph,
+                                reasoner_id,
+                                verifier_id,
+                            )
+                        ),
+                        reasoner_id,
+                    ),
+                )
+            )
+            if not reasoner_ids:
+                diagnostics.append(
+                    f"Verifier {verifier_id!r} has no routed Reasoner semantic artifact"
+                )
+                continue
+            for reasoner_id in reasoner_ids:
+                reasoner_artifact = execution.outputs.get(reasoner_id)
+                if reasoner_artifact is None:
+                    diagnostics.append(
+                        f"Reasoner {reasoner_id!r} has no current semantic artifact"
+                    )
+                    continue
+                reasoner_candidate, reasoner_issue = (
+                    self._reasoner_candidate_for_current_dataset(reasoner_artifact)
+                )
+                if reasoner_issue is not None or reasoner_candidate is None:
+                    diagnostics.append(
+                        f"Reasoner {reasoner_id!r} semantic artifact is invalid: "
+                        f"{reasoner_issue}"
+                    )
+                    continue
+                evidence_owner_ids = (
+                    reasoner_id,
+                    *self._directed_ancestor_ids(self._graph, reasoner_id),
+                )
+                coverage_failure_ids = tuple(
+                    owner_id
+                    for owner_id in evidence_owner_ids
+                    if self._reports_knowledge_base_coverage_failure(
+                        execution.outputs.get(owner_id)
+                    )
+                    or self._reports_knowledge_base_coverage_failure(
+                        execution.output_metadata.get(owner_id)
+                    )
+                )
+                if coverage_failure_ids:
+                    diagnostics.append(
+                        "Reasoner lineage reported "
+                        "knowledge_base_coverage_failure from Agents "
+                        f"{list(coverage_failure_ids)!r}; preserve valid receipts "
+                        "and repair or augment retrieval before FINISH"
+                    )
+                    continue
+                read_evidence_texts: list[str] = []
+                assert self.required_evidence_tool_id is not None
+                for owner_id in evidence_owner_ids:
+                    metadata = execution.output_metadata.get(owner_id)
+                    if not isinstance(metadata, Mapping):
+                        continue
+                    receipts = metadata.get("tool_receipts", ())
+                    if not isinstance(receipts, (list, tuple)):
+                        continue
+                    for receipt in receipts:
+                        if not isinstance(receipt, Mapping):
+                            continue
+                        evidence_text = self._successful_read_text(
+                            receipt,
+                            self.required_evidence_tool_id,
+                        )
+                        if evidence_text is not None:
+                            read_evidence_texts.append(evidence_text)
+                if not read_evidence_texts:
+                    diagnostics.append(
+                        f"Reasoner {reasoner_id!r} lineage has no successful "
+                        f"{self.required_evidence_tool_id!r} read receipt"
+                    )
+                    continue
+                provenance_issue = self._reasoner_evidence_provenance_issue(
+                    reasoner_artifact,
+                    read_evidence_texts,
+                    require_answer_binding=True,
+                )
+                if provenance_issue is not None:
+                    diagnostics.append(
+                        f"Reasoner {reasoner_id!r} evidence provenance is invalid: "
+                        f"{provenance_issue}"
+                    )
+                    continue
+                if verifier_candidate != reasoner_candidate:
+                    diagnostics.append(
+                        "Verifier changed the Reasoner's candidate_answer: "
+                        f"verifier_id={verifier_id!r}, reasoner_id={reasoner_id!r}, "
+                        f"reasoner={reasoner_candidate!r}, "
+                        f"verifier={verifier_candidate!r}"
+                    )
+                    continue
+                reasoner_to_verifier = self._directed_shortest_path(
+                    self._graph,
+                    reasoner_id,
+                    verifier_id,
+                )
+                verifier_to_formatter = self._directed_shortest_path(
+                    self._graph,
+                    verifier_id,
+                    formatter_id,
+                )
+                if not reasoner_to_verifier or not verifier_to_formatter:
+                    diagnostics.append(
+                        f"Reasoner {reasoner_id!r} and Verifier {verifier_id!r} "
+                        "do not form one routed path to the selected Formatter"
+                    )
+                    continue
+                path = (
+                    *reasoner_to_verifier,
+                    *verifier_to_formatter[1:],
+                )
+                lineages.append((reasoner_candidate, path))
+        return tuple(lineages), tuple(diagnostics)
+
+    def _hotpotqa_semantic_lineage_issue(
+        self,
+        execution: AgentRuntimeResult,
+    ) -> Optional[str]:
+        """Validate HotpotQA semantics over the actually executed free graph."""
+
+        structure_issue = self._format_agent_issue_for(self._graph)
+        if structure_issue is not None:
+            return structure_issue
+        lineages, diagnostics = self._hotpotqa_semantic_lineages(execution)
+        if not lineages:
+            if diagnostics:
+                return diagnostics[0]
+            return "HotpotQA has no valid routed Reasoner--Verifier semantic lineage"
+        candidates = tuple(dict.fromkeys(candidate for candidate, _ in lineages))
+        if len(candidates) != 1:
+            return (
+                "HotpotQA routed semantic lineages disagree on candidate_answer: "
+                f"{list(candidates)!r}; preserve evidence and diagnose entity binding, "
+                "question scope, and relation routing before FINISH"
+            )
+        candidate = candidates[0]
+        answer = execution.final_answer
+        if answer is None:
+            return "Format Agent produced no terminal wrapper"
+        wrapper = re.fullmatch(
+            r"\s*<answer>(.*?)</answer>\s*",
+            answer,
+            flags=re.DOTALL,
+        )
+        if wrapper is None or wrapper.group(1) != candidate:
+            formatter_value = None if wrapper is None else wrapper.group(1)
+            return (
+                "Formatter must only wrap the supported semantic candidate "
+                "character-for-character without reselecting or reasoning: "
+                f"candidate_answer={candidate!r}, "
+                f"wrapper_content={formatter_value!r}"
+            )
+        return None
+
+    @staticmethod
+    def _directed_ancestor_ids(
+        graph: AgentGraph,
+        agent_id: str,
+    ) -> Tuple[str, ...]:
+        """Return all routed ancestors in deterministic graph order."""
+
+        pending = list(graph.directed_predecessors(agent_id))
+        seen: set[str] = set()
+        while pending:
+            current = pending.pop(0)
+            if current in seen:
+                continue
+            seen.add(current)
+            pending.extend(graph.directed_predecessors(current))
+        return tuple(node.id for node in graph.nodes if node.id in seen)
+
+    @classmethod
+    def _directed_shortest_path(
+        cls,
+        graph: AgentGraph,
+        source_id: str,
+        target_id: str,
+    ) -> Tuple[str, ...]:
+        """Return one deterministic routed path, including both endpoints."""
+
+        if source_id == target_id:
+            return (source_id,)
+        pending: list[Tuple[str, ...]] = [(source_id,)]
+        seen = {source_id}
+        while pending:
+            path = pending.pop(0)
+            for successor_id in cls._directed_successors(graph, path[-1]):
+                if successor_id == target_id:
+                    return (*path, successor_id)
+                if successor_id in seen:
+                    continue
+                seen.add(successor_id)
+                pending.append((*path, successor_id))
+        return ()
 
     @staticmethod
     def _directed_successors(graph: AgentGraph, agent_id: str) -> Tuple[str, ...]:
@@ -4846,6 +5445,24 @@ class AgentWorkflowEnv:
 
         if not self._uses_semantic_lineage_protocol():
             return ()
+        if self.semantic_protocol == _HOTPOTQA_SEMANTIC_LINEAGE_PROTOCOL:
+            execution = self._cached_progressive_execution()
+            if execution is None or execution.final_answer is None:
+                return ()
+            lineages, _ = self._hotpotqa_semantic_lineages(execution)
+            candidates = tuple(
+                dict.fromkeys(candidate for candidate, _ in lineages)
+            )
+            if len(candidates) != 1:
+                return ()
+            wrapper = re.fullmatch(
+                r"\s*<answer>(.*?)</answer>\s*",
+                execution.final_answer,
+                flags=re.DOTALL,
+            )
+            if wrapper is None or wrapper.group(1) != candidates[0]:
+                return ()
+            return lineages[0][1]
         formatter_id = self._graph.output_agent_id
         if formatter_id is None or not self._graph.has_node(formatter_id):
             return ()
@@ -4889,6 +5506,11 @@ class AgentWorkflowEnv:
 
         if not self._uses_semantic_lineage_protocol():
             return True
+        if self.semantic_protocol == _HOTPOTQA_SEMANTIC_LINEAGE_PROTOCOL:
+            return self._hotpotqa_semantic_replacement_has_valid_artifact(
+                agent_id,
+                role_family,
+            )
         artifact = self._progressive_outputs.get(agent_id)
         if not isinstance(artifact, str) or not artifact.strip():
             return False
@@ -4968,6 +5590,73 @@ class AgentWorkflowEnv:
                 and wrapper is not None
                 and wrapper.group(1) == verifier_candidate
             )
+        return True
+
+    def _hotpotqa_semantic_replacement_has_valid_artifact(
+        self,
+        agent_id: str,
+        role_family: str,
+    ) -> bool:
+        """Validate replacement takeover against routed v2 artifacts."""
+
+        artifact = self._progressive_outputs.get(agent_id)
+        if not isinstance(artifact, str) or not artifact.strip():
+            return False
+        if role_family == "reasoner":
+            candidate, issue = self._reasoner_candidate_for_current_dataset(
+                artifact
+            )
+            if issue is not None or candidate is None:
+                return False
+            evidence_texts: list[str] = []
+            assert self.required_evidence_tool_id is not None
+            for owner_id in (
+                agent_id,
+                *self._directed_ancestor_ids(self._graph, agent_id),
+            ):
+                metadata = self._progressive_output_metadata.get(owner_id)
+                if not isinstance(metadata, Mapping):
+                    continue
+                receipts = metadata.get("tool_receipts", ())
+                if not isinstance(receipts, (list, tuple)):
+                    continue
+                for receipt in receipts:
+                    if not isinstance(receipt, Mapping):
+                        continue
+                    evidence_text = self._successful_read_text(
+                        receipt,
+                        self.required_evidence_tool_id,
+                    )
+                    if evidence_text is not None:
+                        evidence_texts.append(evidence_text)
+            return bool(evidence_texts) and self._reasoner_evidence_provenance_issue(
+                artifact,
+                evidence_texts,
+                require_answer_binding=True,
+            ) is None
+        if role_family == "verifier":
+            verifier_candidate, verifier_issue = self._verifier_candidate(artifact)
+            if verifier_issue is not None or verifier_candidate is None:
+                return False
+            return any(
+                reasoner_issue is None
+                and reasoner_candidate == verifier_candidate
+                for reasoner_id in self._directed_ancestor_ids(
+                    self._graph,
+                    agent_id,
+                )
+                if (
+                    self._graph.get_node(reasoner_id).role_family or ""
+                ).casefold()
+                == "reasoner"
+                for reasoner_candidate, reasoner_issue in (
+                    self._reasoner_candidate_for_current_dataset(
+                        self._progressive_outputs.get(reasoner_id, "")
+                    ),
+                )
+            )
+        if role_family == "format":
+            return agent_id in self._active_semantic_lineage_ids()
         return True
 
     def _delete_admission_issue(self, agent_id: Optional[str]) -> Optional[str]:
@@ -5334,7 +6023,11 @@ class AgentWorkflowEnv:
                             "the declared semantic-lineage relation "
                             f"{source_id!r} -> {target_id!r} must be preserved"
                         )
-        if action.action_type is AgentActionType.ADD_SUBGRAPH:
+        if (
+            action.action_type is AgentActionType.ADD_SUBGRAPH
+            and self.semantic_protocol
+            != _HOTPOTQA_SEMANTIC_LINEAGE_PROTOCOL
+        ):
             admitted_roles = set(self._admissible_augmentation_role_families())
             sampled_roles = [
                 (spec.role_family or "").casefold() for spec in action.agents
