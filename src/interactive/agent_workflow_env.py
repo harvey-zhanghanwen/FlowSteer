@@ -35,6 +35,7 @@ from .task_dataset import (
     hotpotqa_answer_cardinality_constraint,
     hotpotqa_answer_type_constraint,
     hotpotqa_question_scope,
+    qa_answer_type_constraint_accepts,
 )
 
 
@@ -2390,13 +2391,7 @@ class AgentWorkflowEnv:
                             if evidence_ingress_consumer_ids
                             else {}
                         ),
-                        "explicit_output_assignment_required": bool(
-                                    not replacement_domains
-                                    and not evidence_ingress_consumer_ids
-                                    and self._graph.output_agent_id is not None
-                                    and self._graph.output_agent_id
-                                    not in self._active_semantic_lineage_ids()
-                                ),
+                        "explicit_output_assignment_required": False,
                             }
                             if self._uses_role_conditional_capabilities()
                             else {}
@@ -5467,11 +5462,16 @@ class AgentWorkflowEnv:
         )
         if (
             expected_answer_type is not None
-            and answer_slot["answer_type"] != expected_answer_type
+            and original_question is not None
+            and not qa_answer_type_constraint_accepts(
+                original_question,
+                answer_slot["answer_type"],
+            )
         ):
             return None, (
-                "Reasoner answer_slot.answer_type must equal the original "
-                f"question's answer-type constraint {expected_answer_type!r}"
+                "Reasoner answer_slot.answer_type must be compatible with the "
+                "original question's answer-type constraint "
+                f"{expected_answer_type!r}"
             )
         expected_answer_cardinality = (
             None

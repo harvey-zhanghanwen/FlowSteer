@@ -128,6 +128,53 @@ def hotpotqa_answer_type_constraint(rendered_question: str) -> str:
     return qa_answer_type_constraint(rendered_question)
 
 
+def qa_answer_type_constraint_accepts(
+    rendered_question: str,
+    observed_answer_type: str,
+) -> bool:
+    """Return whether a declared answer-slot type satisfies the question.
+
+    The shared classifier intentionally uses broad canonical types such as
+    ``location`` and ``entity``.  A Reasoner may instead repeat the explicit
+    interrogative head from the unchanged question (for example, ``city`` in
+    ``what city`` or ``magazine`` in ``which magazine``).  Treat that lexical
+    subtype as satisfying its canonical superclass without consulting context,
+    a candidate answer, Ground Truth, or evaluator state.  A ``where`` question
+    has no explicit narrower head, so it continues to require ``location``.
+    """
+
+    if not isinstance(observed_answer_type, str):
+        return False
+    observed = "_".join(observed_answer_type.casefold().strip().split())
+    if not observed:
+        return False
+    expected = qa_answer_type_constraint(rendered_question)
+    if observed == expected:
+        return True
+
+    question = " ".join(qa_question_scope(rendered_question).casefold().split())
+    if expected == "location":
+        explicit_location_head = re.search(
+            r"\bwhat (country|city|place|location)\b",
+            question,
+        )
+        return bool(
+            explicit_location_head
+            and observed == explicit_location_head.group(1)
+        )
+
+    if expected == "entity":
+        explicit_entity_head = re.search(
+            r"\b(?:which|what)\s+(?:of\s+the\s+)?([a-z][a-z-]*)\b",
+            question,
+        )
+        return bool(
+            explicit_entity_head
+            and observed == explicit_entity_head.group(1).replace("-", "_")
+        )
+    return False
+
+
 def qa_answer_cardinality_constraint(rendered_question: str) -> str:
     """Return a question-only single-value or multiple-value answer constraint."""
 
@@ -270,6 +317,7 @@ __all__ = [
     "iter_task_records",
     "load_task_records",
     "qa_answer_cardinality_constraint",
+    "qa_answer_type_constraint_accepts",
     "qa_answer_type_constraint",
     "qa_question_scope",
     "task_record_from_mapping",

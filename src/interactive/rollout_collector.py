@@ -1979,7 +1979,8 @@ def _validate_v3_hierarchical_action_receipt(
                     "and Output unassigned"
                 )
         if (
-            add_domain.get("explicit_output_assignment_required", False)
+            action_value is not None
+            and add_domain.get("explicit_output_assignment_required", False)
             is True
             and output_agent_id is None
         ):

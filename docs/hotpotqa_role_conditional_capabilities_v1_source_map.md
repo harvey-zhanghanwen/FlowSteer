@@ -142,6 +142,32 @@ formatting-only capabilities, and requires a generic Output to preserve any
 routed semantic-candidate consensus character-for-character. These are local
 action-admission and terminal-artifact contracts, not a workflow template.
 
+The failed r4 canary remains preserved in
+`artifacts/hotpotqa_role_conditional_v1_r4/hotpotqa`. One trajectory already
+materialized the correct evidence-grounded `<answer>Delhi</answer>` artifact,
+but the canonical question classifier's broad `location` type was compared by
+raw string equality with the Reasoner's explicit `city` subtype. The Director
+therefore exhausted its edit budget while attempting unrelated metadata
+changes. The other canary failed receipt validation because a later
+`ADD_SUBGRAPH` was made to repeat the already assigned Output even though the
+Canvas mutation semantics preserve Output ownership when that optional field
+is omitted.
+
+The independent r5 condition in
+`config/evaluation_hotpotqa_role_conditional_v1_r5.yaml` changes only these
+measured boundaries. It reuses the question-only classifier and admits an
+explicit interrogative head as a lexical subtype of its canonical answer type
+(for example, `city` under `location` for an unchanged `what city` question,
+or `magazine` under `entity` for an unchanged `which magazine` question).
+This compatibility check reads neither passages nor candidate answers,
+Ground Truth, or evaluator state. A `where` question has no narrower lexical
+head and continues to require `location`. r5 also preserves the current Output
+across later `ADD_SUBGRAPH` edits; Output handoff remains an explicit
+`SET_OUTPUT` operation. Finally, a malformed final parameter remains an exact
+behavior receipt and reaches FlowSteer's invalid-action continuation instead
+of being reclassified as a missing Output assignment. None of these changes
+requires a role, role order, or serial topology.
+
 ## Not implemented or enabled in this condition
 
 - Skill retrieval, Skill injection, SkillFlow training, or an ACTIVE Skill

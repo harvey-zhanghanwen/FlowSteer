@@ -1197,6 +1197,40 @@ def test_v3_receipt_validation_fails_closed_on_phase_and_final_action_mismatch()
         schema_request,
     ) == {"add_agent_role_selection", "add_agent_declarations"}
 
+    explicit_output_domains = {
+        "add_subgraph": {
+            **domains["add_subgraph"],
+            "explicit_output_assignment_required": True,
+        }
+    }
+    explicit_output_schema_request = {
+        **schema_request,
+        "action_target_domains_json": director_live_action_target_domains_json(
+            actions,
+            explicit_output_domains,
+        ),
+    }
+    assert _validate_v3_hierarchical_action_receipt(
+        None,
+        metadata,
+        explicit_output_schema_request,
+    ) == {"add_agent_role_selection", "add_agent_declarations"}
+    parsed_without_output = AgentActionParser().parse(
+        json.dumps(
+            {**declaration, "relations": []},
+            separators=(",", ":"),
+        )
+    )
+    with pytest.raises(
+        ReceiptValidationError,
+        match="omitted the required explicit Output assignment",
+    ):
+        _validate_v3_hierarchical_action_receipt(
+            parsed_without_output,
+            metadata,
+            explicit_output_schema_request,
+        )
+
     declaration_parse_failure_metadata = {
         **metadata,
         "prompt_text": declaration_prompt,

@@ -7,6 +7,7 @@ from src.interactive.task_dataset import (
     hotpotqa_answer_cardinality_constraint,
     hotpotqa_answer_type_constraint,
     hotpotqa_question_scope,
+    qa_answer_type_constraint_accepts,
     iter_task_records,
     task_record_from_mapping,
 )
@@ -86,6 +87,27 @@ def test_hotpot_answer_type_constraint_uses_question_surface_only(
     answer_type: str,
 ) -> None:
     assert hotpotqa_answer_type_constraint(question) == answer_type
+
+
+@pytest.mark.parametrize(
+    ("question", "observed_type", "accepted"),
+    [
+        ("The company has a head office in what city?", "location", True),
+        ("The company has a head office in what city?", "city", True),
+        ("The company has a head office in what city?", "date", False),
+        ("Where is the company headquartered?", "location", True),
+        ("Where is the company headquartered?", "city", False),
+        ("Which magazine was started first, A or B?", "entity", True),
+        ("Which magazine was started first, A or B?", "magazine", True),
+        ("Which magazine was started first, A or B?", "date", False),
+    ],
+)
+def test_qa_answer_type_constraint_accepts_explicit_lexical_subtypes(
+    question: str,
+    observed_type: str,
+    accepted: bool,
+) -> None:
+    assert qa_answer_type_constraint_accepts(question, observed_type) is accepted
 
 
 @pytest.mark.parametrize(

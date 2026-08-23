@@ -165,12 +165,17 @@ def _retrieval_artifact() -> str:
     )
 
 
-def _reasoner_artifact(candidate: str = SYNTHETIC_CANDIDATE) -> str:
+def _reasoner_artifact(
+    candidate: str = SYNTHETIC_CANDIDATE,
+    *,
+    question: str = SYNTHETIC_QUESTION,
+    answer_type: str = "entity",
+) -> str:
     return json.dumps(
         {
-            "question_scope": SYNTHETIC_QUESTION,
+            "question_scope": question,
             "answer_slot": {
-                "answer_type": "entity",
+                "answer_type": answer_type,
                 "answer_cardinality": "single",
                 "qualifiers": ["through Bridge Beta"],
                 "proposition_index": 1,
@@ -613,6 +618,65 @@ class RoleConditionalSearchSpaceTests(unittest.TestCase):
             domain["admitted_new_role_families"],
         )
         self.assertIs(domain["explicit_output_assignment_required"], False)
+
+    def test_open_add_preserves_an_existing_output_without_reassignment(self) -> None:
+        registry = _registry()
+        graph = AgentGraph(
+            [
+                _evidence_agent(),
+                AgentNode(
+                    "reasoner",
+                    "model-b",
+                    "align routed evidence to the requested answer slot",
+                    role_family="reasoner",
+                    execution_mode="reasoning",
+                ),
+                _output_agent(),
+            ],
+            [
+                AgentRelation("retriever", "reasoner", True, False),
+                AgentRelation("reasoner", "output", True, False),
+            ],
+            output_agent_id="output",
+        )
+        env = _env(registry, graph=graph)
+        outputs = {
+            "retriever": _retrieval_artifact(),
+            "reasoner": "malformed semantic artifact",
+            "output": f"<answer>{SYNTHETIC_CANDIDATE}</answer>",
+        }
+        env._progressive_execution = _execution(
+            graph,
+            outputs=outputs,
+            final_answer=outputs["output"],
+            receipt_agent_ids=("retriever",),
+        )
+        env._progressive_execution_revision = graph.revision
+        env._progressive_outputs = dict(outputs)
+
+        domain = env.model_admissible_action_targets()["add_subgraph"]
+        self.assertEqual("output", domain["current_output_agent_id"])
+        self.assertIs(domain["explicit_output_assignment_required"], False)
+        declaration = {
+            "agent_id": "node_1",
+            "model_id": "model-c",
+            "contract": "repair the malformed semantic artifact",
+            "role_family": "repair",
+            "allowed_tools": [],
+            "execution_mode": "reasoning",
+        }
+        schema = json.loads(
+            director_live_action_parameter_json_schema_text(
+                "add_subgraph",
+                {"add_subgraph": domain},
+                add_agents=(declaration,),
+            )
+        )
+        self.assertNotIn("output_agent_id", schema["required"])
+        self.assertEqual(
+            {"type": "null"},
+            schema["properties"]["output_agent_id"],
+        )
 
     def test_each_reasoner_requires_evidence_on_its_own_routed_path(self) -> None:
         registry = _registry()
@@ -1226,6 +1290,71 @@ class RoleConditionalSearchSpaceTests(unittest.TestCase):
 
 
 class RoleConditionalTerminalTests(unittest.TestCase):
+    def test_explicit_question_head_is_a_valid_answer_type_subtype(self) -> None:
+        registry = _registry()
+        question = "The hotel company has its head office in what city?"
+        candidate = SYNTHETIC_CANDIDATE
+        graph = AgentGraph(
+            [
+                _evidence_agent(),
+                AgentNode(
+                    "reasoner",
+                    "model-b",
+                    "align routed evidence to the requested answer slot",
+                    role_family="reasoner",
+                    execution_mode="reasoning",
+                ),
+                _output_agent(),
+            ],
+            [
+                AgentRelation("retriever", "reasoner", True, False),
+                AgentRelation("reasoner", "output", True, False),
+            ],
+            output_agent_id="output",
+        )
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_runtime(registry),
+            graph=graph,
+            problem=question,
+            require_exact_answer_tag=True,
+            require_format_agent=False,
+            semantic_protocol=SEMANTIC_PROTOCOL,
+            recovery_policy=RECOVERY_POLICY,
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+        )
+        outputs = {
+            "retriever": _retrieval_artifact(),
+            "reasoner": _reasoner_artifact(
+                candidate,
+                question=question,
+                answer_type="city",
+            ),
+            "output": f"<answer>{candidate}</answer>",
+        }
+        execution = _execution(
+            graph,
+            outputs=outputs,
+            final_answer=outputs["output"],
+            receipt_agent_ids=("retriever",),
+        )
+        self.assertIsNone(env._semantic_protocol_issue(execution))
+
+        outputs["reasoner"] = _reasoner_artifact(
+            candidate,
+            question=question,
+            answer_type="date",
+        )
+        incompatible = _execution(
+            graph,
+            outputs=outputs,
+            final_answer=outputs["output"],
+            receipt_agent_ids=("retriever",),
+        )
+        issue = env._semantic_protocol_issue(incompatible)
+        self.assertIsNotNone(issue)
+        self.assertIn("answer-type constraint", issue or "")
+
     def test_generic_output_prompt_preserves_routed_candidate_consensus(
         self,
     ) -> None:
