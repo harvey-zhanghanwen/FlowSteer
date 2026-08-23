@@ -18,6 +18,7 @@ from src.interactive.agent_runtime import (
     AgentRuntimeResult,
     ExecutionPhase,
     ReasoningExecutionAdapter,
+    UpstreamMessage,
 )
 from src.interactive.agent_workflow_env import (
     AgentWorkflowEnv,
@@ -347,6 +348,102 @@ class RoleConditionalSearchSpaceTests(unittest.TestCase):
         self.assertIsNone(env._semantic_edit_issue_for(routed_reasoner))
         self.assertIsNone(env._semantic_edit_issue_for(react_reasoner))
 
+    def test_live_domains_publish_only_runtime_registered_execution_profiles(
+        self,
+    ) -> None:
+        registry = _registry()
+        env = _env(registry)
+        add_domain = env.model_admissible_action_targets()["add_subgraph"]
+        registered = [
+            {"execution_mode": "reasoning", "allowed_tools": []},
+            {"execution_mode": "react", "allowed_tools": []},
+            {
+                "execution_mode": "react",
+                "allowed_tools": [QA_RETRIEVAL_TOOL_ID],
+            },
+        ]
+        self.assertEqual(registered, add_domain["registered_execution_profiles"])
+        constraints = add_domain["role_constraints"]
+        for role_family in ("reasoner", "verifier", "repair", "output"):
+            self.assertEqual(
+                registered,
+                constraints[role_family]["execution_profiles"],
+            )
+        self.assertEqual(
+            registered[:2],
+            constraints["format"]["execution_profiles"],
+        )
+        self.assertEqual(
+            [registered[0], registered[2]],
+            constraints["evidence_retriever"]["execution_profiles"],
+        )
+
+    def test_runtime_profiles_reject_unregistered_or_incompatible_pairs(self) -> None:
+        registry = _registry()
+        runtime = _runtime(registry)
+        with self.assertRaisesRegex(Exception, "reasoning agent"):
+            runtime.validate_execution_contracts(
+                (
+                    AgentNode(
+                        "reasoning_tool",
+                        "model-a",
+                        "invalid",
+                        allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                        execution_mode="reasoning",
+                    ),
+                )
+            )
+        with self.assertRaisesRegex(Exception, "unknown tool"):
+            runtime.validate_execution_contracts(
+                (
+                    AgentNode(
+                        "unknown_tool",
+                        "model-a",
+                        "invalid",
+                        allowed_tools=("unknown-tool",),
+                        execution_mode="react",
+                    ),
+                )
+            )
+        with self.assertRaisesRegex(Exception, "unregistered execution adapter"):
+            runtime.validate_execution_contracts(
+                (
+                    AgentNode(
+                        "coding",
+                        "model-a",
+                        "invalid",
+                        execution_mode="coding",
+                    ),
+                )
+            )
+
+    def test_formatter_allows_tool_free_reasoning_or_react_profiles(self) -> None:
+        registry = _registry()
+        for execution_mode in ("reasoning", "react"):
+            graph = AgentGraph(
+                [
+                    AgentNode(
+                        "reasoner",
+                        "model-a",
+                        "determine one semantic candidate",
+                        role_family="reasoner",
+                        execution_mode="reasoning",
+                    ),
+                    AgentNode(
+                        "format",
+                        "model-b",
+                        _HOTPOTQA_ROLE_CONDITIONAL_FORMAT_CONTRACT,
+                        role_family="format",
+                        execution_mode=execution_mode,
+                    ),
+                ],
+                [AgentRelation("reasoner", "format", True, False)],
+                output_agent_id="format",
+            )
+            env = _env(registry, graph=graph)
+            self.assertIsNone(env._semantic_edit_issue_for(graph))
+            self.assertIsNone(env._format_agent_issue_for(graph))
+
     def test_react_reasoner_reuses_hotpot_structured_completion_and_two_reads(
         self,
     ) -> None:
@@ -657,6 +754,34 @@ class RoleConditionalSearchSpaceTests(unittest.TestCase):
         domain = env.model_admissible_action_targets()["add_subgraph"]
         self.assertEqual("output", domain["current_output_agent_id"])
         self.assertIs(domain["explicit_output_assignment_required"], False)
+        self.assertEqual(
+            "output",
+            domain["required_reachability_output_agent_id"],
+        )
+        self.assertEqual(1, domain["exact_relation_count"])
+        self.assertNotIn("verifier", domain["admitted_new_role_families"])
+        self.assertNotIn("format", domain["admitted_new_role_families"])
+        for role_family in domain["admitted_new_role_families"]:
+            for profile in domain["role_constraints"][role_family][
+                "execution_profiles"
+            ]:
+                candidate = graph.fork()
+                candidate.add_agent(
+                    AgentNode(
+                        "candidate",
+                        "model-c",
+                        "augment the current routed answer artifact",
+                        role_family=role_family,
+                        execution_mode=profile["execution_mode"],
+                        allowed_tools=tuple(profile["allowed_tools"]),
+                    )
+                )
+                candidate.set_relation("candidate", "output", True, False)
+                self.assertTrue(
+                    candidate.validate(registry, require_complete=True).valid,
+                    (role_family, profile),
+                )
+                self.assertIsNone(env._semantic_edit_issue_for(candidate))
         declaration = {
             "agent_id": "node_1",
             "model_id": "model-c",
@@ -677,6 +802,22 @@ class RoleConditionalSearchSpaceTests(unittest.TestCase):
             {"type": "null"},
             schema["properties"]["output_agent_id"],
         )
+        self.assertEqual(1, schema["properties"]["relations"]["minItems"])
+        self.assertEqual(1, schema["properties"]["relations"]["maxItems"])
+        for branch in schema["properties"]["relations"]["items"]["anyOf"]:
+            relation = {
+                key: value["const"]
+                for key, value in branch["properties"].items()
+            }
+            self.assertEqual(
+                {
+                    "source_id": "node_1",
+                    "target_id": "output",
+                    "source_to_target": True,
+                    "target_to_source": False,
+                },
+                relation,
+            )
 
     def test_each_reasoner_requires_evidence_on_its_own_routed_path(self) -> None:
         registry = _registry()
@@ -1378,6 +1519,146 @@ class RoleConditionalTerminalTests(unittest.TestCase):
             system,
         )
         self.assertIn("do not choose among them", system)
+
+    def test_formatter_preserves_candidate_when_verifier_requests_repair(self) -> None:
+        registry = _registry()
+        repair_required = json.dumps(
+            {
+                "candidate_answer": SYNTHETIC_CANDIDATE,
+                "evidence_supported": False,
+                "entity_attribute_binding_correct": True,
+                "alias_binding_correct": True,
+                "answer_type_cardinality_correct": True,
+                "multi_hop_complete": True,
+                "minimal_answer_surface": True,
+                "scope_preserved": True,
+                "verification_status": "repair_required",
+            },
+            sort_keys=True,
+        )
+        request = AgentRequest(
+            request_id="hotpot:react-formatter",
+            run_id="hotpot",
+            graph_revision=1,
+            problem=SYNTHETIC_QUESTION,
+            agent=AgentNode(
+                "formatter",
+                "model-b",
+                _HOTPOTQA_ROLE_CONDITIONAL_FORMAT_CONTRACT
+                + "\nExecution mode: react. Currently admissible completion schema.",
+                role_family="format",
+                execution_mode="react",
+            ),
+            model=registry.require_model("model-b"),
+            provider=registry.provider_for("model-b"),
+            phase=ExecutionPhase.SINGLE,
+            is_output_agent=True,
+            is_format_agent=True,
+            require_exact_answer_tag=True,
+            semantic_protocol=SEMANTIC_PROTOCOL,
+            upstream=(
+                UpstreamMessage(
+                    "verifier",
+                    "formatter",
+                    repair_required,
+                    artifact_type="verification_report",
+                ),
+            ),
+        )
+        messages = build_agent_messages(request)
+        self.assertIn(
+            f"Candidate answer: {SYNTHETIC_CANDIDATE}",
+            messages[1]["content"],
+        )
+        self.assertIn(
+            "Currently admissible completion schema",
+            messages[1]["content"],
+        )
+        self.assertNotIn("Candidate answer: repair_required", messages[1]["content"])
+
+    def test_reasoner_cross_field_failure_targets_reasoner_and_routed_retriever(
+        self,
+    ) -> None:
+        registry = _registry()
+        graph = AgentGraph(
+            [
+                _evidence_agent(),
+                _evidence_agent("healthy_retriever"),
+                AgentNode(
+                    "reasoner",
+                    "model-b",
+                    "align routed evidence to the requested answer slot",
+                    role_family="reasoner",
+                    execution_mode="reasoning",
+                    artifact_type="semantic_candidate",
+                ),
+                AgentNode(
+                    "healthy_reasoner",
+                    "model-c",
+                    "independently align evidence to the requested answer slot",
+                    role_family="reasoner",
+                    execution_mode="reasoning",
+                    artifact_type="semantic_candidate",
+                ),
+                _output_agent(),
+            ],
+            [
+                AgentRelation("retriever", "reasoner", True, False),
+                AgentRelation(
+                    "healthy_retriever",
+                    "healthy_reasoner",
+                    True,
+                    False,
+                ),
+                AgentRelation("reasoner", "output", True, False),
+                AgentRelation("healthy_reasoner", "output", True, False),
+            ],
+            output_agent_id="output",
+        )
+        env = _env(registry, graph=graph)
+        inconsistent = json.loads(_reasoner_artifact())
+        inconsistent["answer_slot"]["answer_field"] = "subject"
+        outputs = {
+            "retriever": _retrieval_artifact(),
+            "healthy_retriever": _retrieval_artifact(),
+            "reasoner": json.dumps(inconsistent, sort_keys=True),
+            "healthy_reasoner": _reasoner_artifact(),
+            "output": f"<answer>{SYNTHETIC_CANDIDATE}</answer>",
+        }
+        execution = _execution(
+            graph,
+            outputs=outputs,
+            final_answer=outputs["output"],
+            receipt_agent_ids=("retriever", "healthy_retriever"),
+        )
+        env._progressive_execution = execution
+        env._progressive_execution_revision = graph.revision
+        env._progressive_outputs = dict(outputs)
+        env._progressive_output_metadata = {
+            "retriever": {"tool_receipts": [_read_receipt()]},
+            "healthy_retriever": {"tool_receipts": [_read_receipt()]},
+        }
+
+        finish = env.finish_admissibility()
+        self.assertIs(finish["admissible"], False)
+        self.assertEqual("semantic_protocol", finish["stage"])
+        self.assertIn("answer_slot.answer_field", finish["reason"])
+        attribution = finish["failure_attribution"]
+        self.assertEqual("reasoner", attribution["responsible_agent_id"])
+        self.assertEqual(
+            ["reasoner", "retriever"],
+            attribution["responsible_agent_ids"],
+        )
+        self.assertIn("output", attribution["preserve_agent_ids"])
+        self.assertIn("healthy_reasoner", attribution["preserve_agent_ids"])
+        self.assertIn("healthy_retriever", attribution["preserve_agent_ids"])
+        self.assertEqual(("modify_agent",), env.model_admissible_action_types())
+        modify = env.model_admissible_action_targets()["modify_agent"]
+        self.assertEqual(
+            {"reasoner", "retriever"},
+            set(modify["agent_ids"]),
+        )
+        self.assertNotIn("output", modify["agent_ids"])
 
     def test_finish_uses_actual_routed_evidence_without_required_roles(self) -> None:
         registry = _registry()

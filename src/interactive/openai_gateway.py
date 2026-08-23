@@ -184,6 +184,38 @@ def _hotpotqa_supported_verifier_candidate(artifact: str) -> Optional[str]:
     return candidate
 
 
+def _hotpotqa_role_conditional_semantic_candidate(
+    artifact: str,
+) -> Optional[str]:
+    """Extract one determined candidate without treating a verdict as it.
+
+    A ``repair_required`` Verifier result is public diagnostic feedback, not a
+    replacement semantic answer.  Preserve the candidate it checked so a
+    later Formatter execution does not sever the already materialized answer
+    artifact; the independent FINISH gate still rejects the failed Verifier
+    checks and attributes their repair.
+    """
+
+    try:
+        fields = json.loads(artifact)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        fields = None
+    if isinstance(fields, Mapping):
+        raw_candidate = fields.get("candidate_answer")
+        if raw_candidate is None:
+            return None
+        return (
+            raw_candidate
+            if isinstance(raw_candidate, str)
+            and raw_candidate
+            and raw_candidate == raw_candidate.strip()
+            and "\n" not in raw_candidate
+            else ""
+        )
+    candidate = _single_labeled_value(artifact, "Candidate answer")
+    return candidate
+
+
 def _hotpotqa_supported_consensus(
     messages: Sequence[UpstreamMessage],
     condition: CommunicationCondition,
@@ -201,31 +233,11 @@ def _hotpotqa_supported_consensus(
     verifier_candidates: list[str] = []
     for message in messages:
         artifact = _visible_message_content(message.artifact, condition)
-        candidate = _hotpotqa_supported_verifier_candidate(artifact)
-        if candidate is None and allow_role_conditional_sources:
-            try:
-                fields = json.loads(artifact)
-            except (TypeError, ValueError, json.JSONDecodeError):
-                fields = None
-            if isinstance(fields, Mapping) and {
-                "question_scope",
-                "answer_slot",
-                "evidence_propositions",
-                "multi_hop_chain",
-                "candidate_answer",
-                "evidence",
-            } <= set(fields):
-                raw_candidate = fields.get("candidate_answer")
-                candidate = (
-                    raw_candidate
-                    if isinstance(raw_candidate, str)
-                    and raw_candidate
-                    and raw_candidate == raw_candidate.strip()
-                    and "\n" not in raw_candidate
-                    else ""
-                )
-            elif _single_labeled_value(artifact, "Verification status") is None:
-                candidate = _single_labeled_value(artifact, "Candidate answer")
+        candidate = (
+            _hotpotqa_role_conditional_semantic_candidate(artifact)
+            if allow_role_conditional_sources
+            else _hotpotqa_supported_verifier_candidate(artifact)
+        )
         if candidate is None:
             continue
         if not candidate:
@@ -236,7 +248,11 @@ def _hotpotqa_supported_consensus(
     candidate = verifier_candidates[0]
     if any(other_candidate != candidate for other_candidate in verifier_candidates):
         return ""
-    return f"Candidate answer: {candidate}\nVerification status: supported"
+    return (
+        f"Candidate answer: {candidate}"
+        if allow_role_conditional_sources
+        else f"Candidate answer: {candidate}\nVerification status: supported"
+    )
 
 
 _HOTPOTQA_COMPLETE_ENTITY_SURFACE_RULE = (
@@ -683,6 +699,17 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
                 "answer value in exactly one <answer>...</answer> wrapper. Do not put a "
                 "sentence or explanation inside the wrapper. If the computed solution "
                 "does not contain one answer candidate, return exactly <answer></answer>."
+            )
+        if execution_mode == "react":
+            # SkillFlow's bounded executor replaces the Agent contract with
+            # the current StructuredAction domain before this provider call.
+            # A Tool-free ReAct Formatter still needs that public completion
+            # schema, even though the graph-authored Formatter contract is not
+            # otherwise injected into FlowSteer's extraction-only prompt.
+            common = (
+                request.agent.contract
+                + "\n\nFormatting-only source and serialization rule:\n"
+                + common
             )
     else:
         common = (

@@ -188,6 +188,22 @@ semantic protocol; every other role, execution mode, dataset runtime, and
 topology keeps its prior path. This is a necessary execution-boundary adapter,
 not a mandatory Reasoner, Verifier, Formatter, or serial workflow template.
 
+The independent r7 condition in
+`config/evaluation_hotpotqa_role_conditional_v1_r7.yaml` keeps every frozen
+evaluation field from r6 and projects only execution profiles registered by
+the current Runtime into FlowSteer's live Canvas action domain. It reuses
+SkillFlow's bounded reasoning/ReAct execution and task-scoped Tool registry:
+reasoning is Tool-free, ReAct is Tool-free or uses the registered
+`qa-retrieval` resource, and unregistered coding/Tool combinations are absent.
+Formatter remains a serialization responsibility under either Tool-free
+reasoning or Tool-free ReAct. FlowSteer's atomic `ADD_SUBGRAPH` mutation is
+also reused to route a recovery augmentation into an existing generic Output
+in the same execute-on-edit unit. Verifier diagnostic status remains separate
+from the preserved semantic candidate; FINISH validation still rejects an
+unsupported candidate and attributes the routed Reasoner/Retriever for repair.
+None of these boundaries requires a role to exist, fixes role order, or fixes
+a serial topology.
+
 ## Not implemented or enabled in this condition
 
 - Skill retrieval, Skill injection, SkillFlow training, or an ACTIVE Skill

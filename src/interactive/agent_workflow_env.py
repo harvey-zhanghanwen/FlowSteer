@@ -467,6 +467,76 @@ class AgentWorkflowEnv:
 
         return self.semantic_protocol == _HOTPOTQA_ROLE_CONDITIONAL_PROTOCOL
 
+    def _role_conditional_registered_execution_profiles(
+        self,
+    ) -> Tuple[Tuple[str, Tuple[str, ...]], ...]:
+        """Project the task Runtime's registered HotpotQA profiles.
+
+        FlowSteer's action mask must describe the same executable domain that
+        the Runtime validates after a Canvas edit.  SkillFlow supplies the
+        bounded reasoning/ReAct executors and the task-scoped Tool registry;
+        neither semantic role names nor graph topology create an executor.
+        """
+
+        if not self._uses_role_conditional_capabilities():
+            return ()
+        required_tool_id = self.required_evidence_tool_id
+        return tuple(
+            (execution_mode, allowed_tools)
+            for execution_mode, allowed_tools in (
+                self.runtime.registered_execution_profiles()
+            )
+            if execution_mode in {"reasoning", "react"}
+            and allowed_tools in {(), (required_tool_id,)}
+        )
+
+    def _role_conditional_execution_profiles_for(
+        self,
+        role_family: str,
+    ) -> Tuple[Tuple[str, Tuple[str, ...]], ...]:
+        """Return role-compatible profiles without prescribing role order."""
+
+        registered = self._role_conditional_registered_execution_profiles()
+        role = role_family.casefold()
+        if role == "format":
+            return tuple(profile for profile in registered if not profile[1])
+        if role == "evidence_retriever":
+            return tuple(
+                profile
+                for profile in registered
+                if profile == ("reasoning", ())
+                or profile == (
+                    "react",
+                    (self.required_evidence_tool_id,),
+                )
+            )
+        return registered
+
+    def _role_conditional_execution_constraint(
+        self,
+        role_family: str,
+    ) -> dict[str, object]:
+        """Render one correlated execution-profile domain for the Director."""
+
+        profiles = self._role_conditional_execution_profiles_for(role_family)
+        execution_modes = tuple(
+            dict.fromkeys(execution_mode for execution_mode, _ in profiles)
+        )
+        allowed_tool_sets = tuple(
+            dict.fromkeys(allowed_tools for _, allowed_tools in profiles)
+        )
+        return {
+            "execution_modes": list(execution_modes),
+            "allowed_tools": [list(tool_ids) for tool_ids in allowed_tool_sets],
+            "execution_profiles": [
+                {
+                    "execution_mode": execution_mode,
+                    "allowed_tools": list(allowed_tools),
+                }
+                for execution_mode, allowed_tools in profiles
+            ],
+        }
+
     def _semantic_protocol_label(self) -> str:
         return (
             "HotpotQA"
@@ -1900,7 +1970,6 @@ class AgentWorkflowEnv:
         if (
             not self._uses_semantic_lineage_protocol()
             or self.recovery_policy != _PRESERVE_REPAIR_RECOVERY_POLICY
-            or self._uses_role_conditional_capabilities()
         ):
             return ()
         validation = self._graph.validate(
@@ -1915,8 +1984,44 @@ class AgentWorkflowEnv:
         semantic_issue = self._semantic_protocol_issue(execution)
         if semantic_issue is None:
             return ()
+        if self._uses_role_conditional_capabilities() and not any(
+            marker in semantic_issue
+            for marker in (
+                "answer_slot",
+                "candidate_answer",
+                "evidence_propositions[",
+                "question_scope",
+                "entity_identity",
+            )
+        ):
+            # Missing ingress, terminal reachability, and generic malformed
+            # artifacts retain FlowSteer's relation/augmentation search space.
+            # Only a measured semantic cross-field inconsistency becomes a
+            # repair-first Agent target under the open role-conditional policy.
+            return ()
         attribution = self._semantic_repair_attribution(semantic_issue)
         if attribution is None:
+            return ()
+        if self._uses_role_conditional_capabilities():
+            raw_responsible_ids = attribution.get("responsible_agent_ids", ())
+            responsible_ids = tuple(
+                dict.fromkeys(
+                    agent_id
+                    for agent_id in raw_responsible_ids
+                    if isinstance(agent_id, str)
+                    and self._graph.has_node(agent_id)
+                    and agent_id != self._graph.output_agent_id
+                )
+            )
+            if responsible_ids:
+                return responsible_ids
+            agent_id = attribution.get("responsible_agent_id")
+            if (
+                isinstance(agent_id, str)
+                and self._graph.has_node(agent_id)
+                and agent_id != self._graph.output_agent_id
+            ):
+                return (agent_id,)
             return ()
         if (
             self.semantic_protocol == _HOTPOTQA_SEMANTIC_LINEAGE_PROTOCOL
@@ -2252,6 +2357,34 @@ class AgentWorkflowEnv:
                     )
                 )
             )
+            current_output_agent_id = self._graph.output_agent_id
+            current_execution = self._cached_progressive_execution()
+            atomic_output_ingress = bool(
+                self._uses_role_conditional_capabilities()
+                and current_output_agent_id is not None
+                and self._graph.has_node(current_output_agent_id)
+                and (
+                    self._graph.get_node(current_output_agent_id).role_family
+                    or ""
+                ).casefold()
+                == "output"
+                and not replacement_domains
+                and not required_ingress_consumer_ids
+                and current_execution is not None
+                and self._semantic_protocol_issue(current_execution) is not None
+            )
+            if atomic_output_ingress:
+                # FlowSteer's ADD_SUBGRAPH is one atomic Canvas edit followed
+                # by one execution.  When Output already exists, a one-Agent
+                # augmentation must route its artifact into that existing sink
+                # in the same edit; an orphan prefix would be rejected by the
+                # unchanged all-Agents-reach-Output invariant.
+                remaining = min(remaining, 1)
+                admitted_new_role_families = tuple(
+                    role_family
+                    for role_family in admitted_new_role_families
+                    if role_family not in {"format", "verifier"}
+                )
             if (
                 self.semantic_protocol
                 == _HOTPOTQA_SEMANTIC_LINEAGE_PROTOCOL
@@ -2310,32 +2443,59 @@ class AgentWorkflowEnv:
                             ),
                         ],
                         "model_ids": list(self.model_registry.model_ids),
+                        **(
+                            {
+                                "registered_execution_profiles": [
+                                    {
+                                        "execution_mode": execution_mode,
+                                        "allowed_tools": list(allowed_tools),
+                                    }
+                                    for execution_mode, allowed_tools in (
+                                        self._role_conditional_registered_execution_profiles()
+                                    )
+                                ]
+                            }
+                            if self._uses_role_conditional_capabilities()
+                            else {}
+                        ),
                         "role_constraints": {
                             "reasoner": {
-                                # SkillFlow ReAct is an execution mode, never
-                                # a role. New v2 Reasoners materialize their own
-                                # evidence so every sampled construction state
-                                # has a reachable terminal capability. The
-                                # Canvas validator still accepts a pre-existing
-                                # reasoning Reasoner with routed retrieval.
-                                "execution_modes": (
-                                    ["reasoning", "react"]
+                                **(
+                                    self._role_conditional_execution_constraint(
+                                        "reasoner"
+                                    )
                                     if self._uses_role_conditional_capabilities()
-                                    else ["react"]
-                                ),
-                                "allowed_tools": (
-                                    [[], [self.required_evidence_tool_id]]
-                                    if self._uses_role_conditional_capabilities()
-                                    else [[self.required_evidence_tool_id]]
+                                    else {
+                                        "execution_modes": ["react"],
+                                        "allowed_tools": [
+                                            [self.required_evidence_tool_id]
+                                        ],
+                                    }
                                 ),
                             },
                             "verifier": {
-                                "execution_modes": ["reasoning"],
-                                "allowed_tools": [[]],
+                                **(
+                                    self._role_conditional_execution_constraint(
+                                        "verifier"
+                                    )
+                                    if self._uses_role_conditional_capabilities()
+                                    else {
+                                        "execution_modes": ["reasoning"],
+                                        "allowed_tools": [[]],
+                                    }
+                                ),
                             },
                             "format": {
-                                "execution_modes": ["reasoning"],
-                                "allowed_tools": [[]],
+                                **(
+                                    self._role_conditional_execution_constraint(
+                                        "format"
+                                    )
+                                    if self._uses_role_conditional_capabilities()
+                                    else {
+                                        "execution_modes": ["reasoning"],
+                                        "allowed_tools": [[]],
+                                    }
+                                ),
                                 "contracts": [
                                     _HOTPOTQA_ROLE_CONDITIONAL_FORMAT_CONTRACT
                                     if self._uses_role_conditional_capabilities()
@@ -2343,10 +2503,18 @@ class AgentWorkflowEnv:
                                 ],
                             },
                             "evidence_retriever": {
-                                "execution_modes": ["react"],
-                                "allowed_tools": [
-                                    [self.required_evidence_tool_id]
-                                ],
+                                **(
+                                    self._role_conditional_execution_constraint(
+                                        "evidence_retriever"
+                                    )
+                                    if self._uses_role_conditional_capabilities()
+                                    else {
+                                        "execution_modes": ["react"],
+                                        "allowed_tools": [
+                                            [self.required_evidence_tool_id]
+                                        ],
+                                    }
+                                ),
                                 **(
                                     {
                                         "artifact_types": list(
@@ -2361,8 +2529,16 @@ class AgentWorkflowEnv:
                                 ),
                             },
                             "repair": {
-                                "execution_modes": ["reasoning"],
-                                "allowed_tools": [[]],
+                                **(
+                                    self._role_conditional_execution_constraint(
+                                        "repair"
+                                    )
+                                    if self._uses_role_conditional_capabilities()
+                                    else {
+                                        "execution_modes": ["reasoning"],
+                                        "allowed_tools": [[]],
+                                    }
+                                ),
                                 **(
                                     {
                                         "artifact_types": list(
@@ -2374,8 +2550,16 @@ class AgentWorkflowEnv:
                                 ),
                             },
                             "output": {
-                                "execution_modes": ["reasoning"],
-                                "allowed_tools": [[]],
+                                **(
+                                    self._role_conditional_execution_constraint(
+                                        "output"
+                                    )
+                                    if self._uses_role_conditional_capabilities()
+                                    else {
+                                        "execution_modes": ["reasoning"],
+                                        "allowed_tools": [[]],
+                                    }
+                                ),
                             },
                         },
                         "admitted_new_role_families": list(
@@ -2389,6 +2573,16 @@ class AgentWorkflowEnv:
                         **(
                             {"exact_relation_count": 1}
                             if evidence_ingress_consumer_ids
+                            else {}
+                        ),
+                        **(
+                            {
+                                "required_reachability_output_agent_id": (
+                                    current_output_agent_id
+                                ),
+                                "exact_relation_count": 1,
+                            }
+                            if atomic_output_ingress
                             else {}
                         ),
                         "explicit_output_assignment_required": False,
@@ -3575,6 +3769,21 @@ class AgentWorkflowEnv:
             )
         )
         graph_ids = {node.id for node in self._graph.nodes}
+        output_id = self._graph.output_agent_id
+        routed_ids = (
+            ()
+            if output_id is None or not self._graph.has_node(output_id)
+            else (
+                *self._directed_ancestor_ids(self._graph, output_id),
+                output_id,
+            )
+        )
+        routed_reasoner_ids = tuple(
+            agent_id
+            for agent_id in routed_ids
+            if (self._graph.get_node(agent_id).role_family or "").casefold()
+            == "reasoner"
+        )
         failed_ids = tuple(sorted(self._failed_agent_ids & graph_ids))
         target_id: Optional[str] = None
         role_family: Optional[str] = None
@@ -3608,9 +3817,70 @@ class AgentWorkflowEnv:
             if reason.startswith("Reasoner"):
                 role_family = "reasoner"
                 constraint = "reasoner_semantic_artifact"
+                if target_id is None and routed_reasoner_ids:
+                    target_id = routed_reasoner_ids[0]
+                diagnosed_reasoner_ids = (
+                    (target_id,)
+                    if target_id is not None
+                    and (
+                        self._graph.get_node(target_id).role_family or ""
+                    ).casefold()
+                    == "reasoner"
+                    else routed_reasoner_ids
+                )
+                responsible_ids = diagnosed_reasoner_ids
+                if any(
+                    marker in reason.casefold()
+                    for marker in (
+                        "evidence",
+                        "qa-retrieval",
+                        "proposition",
+                        "answer_slot",
+                        "candidate_answer",
+                    )
+                ):
+                    routed_retriever_ids = tuple(
+                        agent_id
+                        for reasoner_id in diagnosed_reasoner_ids
+                        for agent_id in self._directed_ancestor_ids(
+                            self._graph,
+                            reasoner_id,
+                        )
+                        if (
+                            self._graph.get_node(agent_id).role_family or ""
+                        ).casefold()
+                        == "evidence_retriever"
+                    )
+                    responsible_ids = tuple(
+                        dict.fromkeys(
+                            (*diagnosed_reasoner_ids, *routed_retriever_ids)
+                        )
+                    )
             elif reason.startswith("Verifier"):
-                role_family = "verifier"
-                constraint = "verifier_semantic_artifact"
+                verifier_check_failure = any(
+                    f"{field_name!r} must be true" in reason
+                    for field_name in (
+                        "evidence_supported",
+                        "entity_attribute_binding_correct",
+                        "alias_binding_correct",
+                        "answer_type_cardinality_correct",
+                        "multi_hop_complete",
+                        "minimal_answer_surface",
+                        "scope_preserved",
+                    )
+                )
+                if (
+                    self._uses_role_conditional_capabilities()
+                    and verifier_check_failure
+                    and routed_reasoner_ids
+                ):
+                    target_id = routed_reasoner_ids[0]
+                    role_family = "reasoner"
+                    responsible_ids = routed_reasoner_ids
+                    constraint = "reasoner_semantic_artifact"
+                else:
+                    role_family = "verifier"
+                    constraint = "verifier_semantic_artifact"
             elif reason.startswith(("Format", "Formatter")):
                 target_id = self._graph.output_agent_id
                 role_family = "format"
@@ -3630,6 +3900,11 @@ class AgentWorkflowEnv:
                 )
                 constraint = "evidence_retrieval"
                 preferred_actions = ["modify_agent", "add_subgraph", "set_relation"]
+                responsible_ids = tuple(
+                    dict.fromkeys((*responsible_ids, *evidence_agents))
+                )
+        if target_id is not None and target_id not in responsible_ids:
+            responsible_ids = (*responsible_ids, target_id)
         preserved = [
             node.id
             for node in self._graph.nodes
@@ -4306,11 +4581,20 @@ class AgentWorkflowEnv:
                 "role_family='format'; keep semantic-answer computation in "
                 "its upstream Agent"
             )
-        if output_node.execution_mode.value != "reasoning" or output_node.allowed_tools:
+        admitted_format_modes = (
+            {"reasoning", "react"}
+            if self._uses_role_conditional_capabilities()
+            else {"reasoning"}
+        )
+        if (
+            output_node.execution_mode.value not in admitted_format_modes
+            or output_node.allowed_tools
+        ):
             return (
-                "Format Agent must use reasoning execution without tools; it only "
-                "formats the verified semantic answer and must not invoke a Tool, "
-                "reselect the answer, or participate in reasoning"
+                "Format Agent must use a registered reasoning or ReAct execution "
+                "profile without tools; it only serializes the determined semantic "
+                "answer character-for-character and must not invoke a Tool, reselect "
+                "the answer, or participate in reasoning"
             )
         validation = graph.validate(
             self.model_registry,
@@ -4678,7 +4962,30 @@ class AgentWorkflowEnv:
                     "formatting-only contract; the Reasoner owns the semantic "
                     "answer and the Verifier checks evidence, binding, hops, and scope"
                 )
-            if role == "reasoner":
+            if self._uses_role_conditional_capabilities() and role in {
+                "reasoner",
+                "verifier",
+                "format",
+                "evidence_retriever",
+                "repair",
+                "output",
+            }:
+                profile = (
+                    node.execution_mode.value,
+                    tuple(node.allowed_tools),
+                )
+                admitted_profiles = (
+                    self._role_conditional_execution_profiles_for(role)
+                )
+                if profile not in admitted_profiles:
+                    return (
+                        f"HotpotQA {role.replace('_', ' ').title()} Agent "
+                        f"{node.id!r} execution profile is not registered or "
+                        "is incompatible with that semantic responsibility; "
+                        "execution_mode and allowed_tools must match one "
+                        f"published profile {list(admitted_profiles)!r}"
+                    )
+            elif role == "reasoner":
                 react_with_evidence = (
                     node.execution_mode.value == "react"
                     and node.allowed_tools == (self.required_evidence_tool_id,)
@@ -4695,8 +5002,12 @@ class AgentWorkflowEnv:
                         "execution_mode='reasoning' without Tools and consume "
                         "routed evidence; role_family remains 'reasoner'"
                     )
-            if role in {"verifier", "format"} and (
+            if (
+                not self._uses_role_conditional_capabilities()
+                and role in {"verifier", "format"}
+                and (
                 node.execution_mode.value != "reasoning" or node.allowed_tools
+                )
             ):
                 return (
                     f"HotpotQA {role.title()} Agent {node.id!r} must use "
@@ -6155,7 +6466,10 @@ class AgentWorkflowEnv:
                     require_answer_binding=False,
                 )
                 if provenance_issue is not None:
-                    return provenance_issue
+                    return (
+                        f"Reasoner {agent_id!r} evidence provenance is invalid: "
+                        f"{provenance_issue}"
+                    )
                 routed_semantic_candidates[agent_id] = candidate
             elif role == "verifier" and agent_id != output_id:
                 candidate, issue = self._verifier_candidate(artifact or "")

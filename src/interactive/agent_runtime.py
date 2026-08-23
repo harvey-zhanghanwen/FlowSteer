@@ -507,6 +507,42 @@ class AgentRuntime:
             if self.model_registry.require_provider(provider_id).max_concurrency is not None
         }
 
+    def registered_execution_profiles(
+        self,
+    ) -> Tuple[Tuple[str, Tuple[str, ...]], ...]:
+        """Return the executable mode/Tool profiles of this Runtime.
+
+        SkillFlow binds a bounded executor to the resources registered for the
+        current task, while FlowSteer's Canvas exposes only edits that the
+        current executor can run.  Keep those two boundaries correlated here:
+        reasoning is Tool-free, ReAct may complete without a Tool or use one
+        currently available dataset-compatible resource, and coding is
+        exposed only when its adapter is actually registered.  The profile is
+        a Runtime capability receipt, not an Agent role or topology template.
+        """
+
+        profiles: list[Tuple[str, Tuple[str, ...]]] = []
+        for mode_value in ("reasoning", "react", "coding"):
+            if mode_value not in self.execution_adapters:
+                continue
+            if mode_value != "coding":
+                profiles.append((mode_value, ()))
+            if mode_value == "reasoning" or self.tool_registry is None:
+                continue
+            for tool_id in self.tool_registry.resource_ids:
+                try:
+                    capability = self.tool_registry.require_capability(tool_id)
+                except KeyError:
+                    continue
+                if not capability.availability:
+                    continue
+                if self.dataset_id is not None and not capability.supports_dataset(
+                    self.dataset_id
+                ):
+                    continue
+                profiles.append((mode_value, (tool_id,)))
+        return tuple(profiles)
+
     async def execute(
         self,
         graph: AgentGraph,
@@ -565,9 +601,21 @@ class AgentRuntime:
                 "value",
                 format_node.execution_mode,
             )
-            if format_mode != "reasoning" or format_node.allowed_tools:
+            format_modes = (
+                {"reasoning", "react"}
+                if self.semantic_protocol
+                == "hotpotqa_role_conditional_capabilities_v1"
+                else {"reasoning"}
+            )
+            if format_mode not in format_modes or format_node.allowed_tools:
                 raise AgentRuntimeError(
-                    "Format Agent must use reasoning execution without tools"
+                    (
+                        "Format Agent must use a registered Tool-free reasoning "
+                        "or ReAct formatting execution profile"
+                        if self.semantic_protocol
+                        == "hotpotqa_role_conditional_capabilities_v1"
+                        else "Format Agent must use reasoning execution without tools"
+                    )
                 )
         outputs: Dict[str, str] = {}
         output_metadata: Dict[str, Mapping[str, object]] = {}

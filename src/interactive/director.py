@@ -953,6 +953,44 @@ def _live_role_agent_schema(
     }
 
 
+def _live_execution_profiles(
+    value: Any,
+    *,
+    label: str,
+) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    """Validate correlated Runtime execution profiles from the live Canvas."""
+
+    if not isinstance(value, (list, tuple)) or not value:
+        raise ValueError(f"{label} must be a non-empty profile domain")
+    profiles: list[tuple[str, tuple[str, ...]]] = []
+    for raw_profile in value:
+        if not isinstance(raw_profile, Mapping) or set(raw_profile) != {
+            "execution_mode",
+            "allowed_tools",
+        }:
+            raise ValueError(f"{label} contains a malformed execution profile")
+        execution_mode = raw_profile.get("execution_mode")
+        allowed_tools = raw_profile.get("allowed_tools")
+        if execution_mode not in {"reasoning", "react", "coding"}:
+            raise ValueError(f"{label} contains an unknown execution mode")
+        if (
+            not isinstance(allowed_tools, (list, tuple))
+            or any(
+                not isinstance(tool_id, str)
+                or not tool_id
+                or tool_id != tool_id.strip()
+                for tool_id in allowed_tools
+            )
+            or len(allowed_tools) != len(set(allowed_tools))
+        ):
+            raise ValueError(f"{label} contains an invalid Tool-ID set")
+        profile = (execution_mode, tuple(allowed_tools))
+        if profile in profiles:
+            raise ValueError(f"{label} contains duplicate execution profiles")
+        profiles.append(profile)
+    return tuple(profiles)
+
+
 def _live_role_execution_tool_pairs(
     semantic_protocol: object,
     role_family: str,
@@ -960,31 +998,68 @@ def _live_role_execution_tool_pairs(
 ) -> Optional[tuple[tuple[str, tuple[str, ...]], ...]]:
     """Project v2 semantic capabilities as correlated runtime declarations.
 
-    ``execution_modes`` and ``allowed_tools`` are independent JSON domains in
-    the Canvas receipt.  Taking their Cartesian product would admit invalid
-    declarations such as a tool-free ReAct Reasoner or a reasoning-only
-    Reasoner that still owns ``qa-retrieval``.  The topology-neutral HotpotQA
-    protocol therefore conditions these two fields together while leaving the
-    number of Agents and all communication edges policy-selected.
+    ``execution_modes`` and ``allowed_tools`` remain readable marginal domains
+    in the Canvas receipt.  Their Runtime-published ``execution_profiles`` are
+    the correlated authority, so constrained decoding cannot create a
+    reasoning+Tool pair, an unknown Tool, or an unregistered coding profile.
+    Semantic roles remain independent of execution mode and graph topology.
 
-    ``None`` retains the historical independent domains for every legacy
-    protocol and for auxiliary roles whose Canvas domain already has one mode
-    and one Tool set.
+    The earlier flexible HotpotQA protocol retains its historical correlated
+    role table; non-flexible protocols and unconstrained auxiliary roles keep
+    their prior independent domains.
     """
 
     if not flexible_hotpotqa_semantic_protocol(semantic_protocol):
         return None
-    expected_by_role: dict[str, tuple[tuple[str, tuple[str, ...]], ...]] = {
-        "reasoner": (
-            ("react", ("qa-retrieval",)),
-            ("reasoning", ()),
-        ),
-        "verifier": (("reasoning", ()),),
-        "format": (("reasoning", ()),),
-    }
-    expected = expected_by_role.get(role_family)
-    if expected is None:
-        return None
+    if not role_conditional_hotpotqa_protocol(semantic_protocol):
+        expected_by_role: dict[
+            str, tuple[tuple[str, tuple[str, ...]], ...]
+        ] = {
+            "reasoner": (
+                ("react", ("qa-retrieval",)),
+                ("reasoning", ()),
+            ),
+            "verifier": (("reasoning", ()),),
+            "format": (("reasoning", ()),),
+        }
+        expected = expected_by_role.get(role_family)
+        if expected is None:
+            return None
+        execution_modes = _live_string_domain(
+            constraint.get("execution_modes"),
+            label=f"{role_family}.execution_modes",
+        )
+        raw_tool_sets = constraint.get("allowed_tools")
+        if not isinstance(raw_tool_sets, (list, tuple)) or any(
+            not isinstance(tool_set, (list, tuple)) for tool_set in raw_tool_sets
+        ):
+            raise ValueError(
+                f"{role_family}.allowed_tools must contain Tool-ID lists"
+            )
+        admitted = tuple(
+            (mode, tools)
+            for mode, tools in expected
+            if mode in execution_modes
+            and tools in tuple(tuple(tool_set) for tool_set in raw_tool_sets)
+        )
+        if not admitted:
+            raise ValueError(
+                f"{role_family} has no protocol-valid execution_mode/allowed_tools pair"
+            )
+        if role_family == "format":
+            contracts = _live_string_domain(
+                constraint.get("contracts"),
+                label="format.contracts",
+            )
+            if len(contracts) != 1:
+                raise ValueError(
+                    "format contract domain must contain one exact pure contract"
+                )
+        return admitted
+    profiles = _live_execution_profiles(
+        constraint.get("execution_profiles"),
+        label=f"{role_family}.execution_profiles",
+    )
     execution_modes = _live_string_domain(
         constraint.get("execution_modes"),
         label=f"{role_family}.execution_modes",
@@ -997,14 +1072,20 @@ def _live_role_execution_tool_pairs(
     ):
         raise ValueError(f"{role_family}.allowed_tools must contain Tool-ID lists")
     tool_sets = tuple(tuple(tool_set) for tool_set in raw_tool_sets)
-    admitted = tuple(
-        (mode, tools)
-        for mode, tools in expected
-        if mode in execution_modes and tools in tool_sets
-    )
-    if not admitted:
+    if any(
+        mode not in execution_modes or tools not in tool_sets
+        for mode, tools in profiles
+    ):
         raise ValueError(
-            f"{role_family} has no protocol-valid execution_mode/allowed_tools pair"
+            f"{role_family} execution profile is outside its marginal domains"
+        )
+    if set(execution_modes) != {mode for mode, _ in profiles}:
+        raise ValueError(
+            f"{role_family}.execution_modes does not match execution_profiles"
+        )
+    if set(tool_sets) != {tools for _, tools in profiles}:
+        raise ValueError(
+            f"{role_family}.allowed_tools does not match execution_profiles"
         )
     if role_family == "format":
         contracts = _live_string_domain(
@@ -1015,7 +1096,7 @@ def _live_role_execution_tool_pairs(
             raise ValueError(
                 "format contract domain must contain one exact pure contract"
             )
-    return admitted
+    return profiles
 
 
 def _live_role_agent_schema_branches(
@@ -1343,6 +1424,30 @@ def director_live_add_subgraph_agent_declarations_json_schema_text(
     role_constraints = domain.get("role_constraints")
     if not isinstance(role_constraints, Mapping) or not role_constraints:
         raise ValueError("add_subgraph role constraints are missing")
+    if role_conditional_hotpotqa_protocol(domain.get("semantic_protocol")):
+        registered_profiles = set(
+            _live_execution_profiles(
+                domain.get("registered_execution_profiles"),
+                label="add_subgraph.registered_execution_profiles",
+            )
+        )
+        for role_family, constraint in role_constraints.items():
+            if not isinstance(role_family, str) or not isinstance(
+                constraint,
+                Mapping,
+            ):
+                raise ValueError("add_subgraph role constraints are malformed")
+            role_profiles = set(
+                _live_execution_profiles(
+                    constraint.get("execution_profiles"),
+                    label=f"{role_family}.execution_profiles",
+                )
+            )
+            if not role_profiles <= registered_profiles:
+                raise ValueError(
+                    f"{role_family} exposes an execution profile not registered "
+                    "by the current Runtime"
+                )
     admitted_new_roles = _live_admitted_new_role_families(
         domain,
         role_constraints,
@@ -1901,6 +2006,36 @@ def director_live_add_subgraph_relation_candidates(
                     and candidate["source_to_target"] is True
                     and candidate["target_to_source"] is False
                 ]
+        required_reachability_output = domain.get(
+            "required_reachability_output_agent_id"
+        )
+        if required_reachability_output is not None:
+            if required_ingress_ids:
+                raise ValueError(
+                    "add_subgraph cannot combine required ingress and atomic "
+                    "Output-reachability domains"
+                )
+            if (
+                not isinstance(required_reachability_output, str)
+                or required_reachability_output
+                != domain.get("current_output_agent_id")
+                or required_reachability_output
+                not in domain.get("existing_agent_ids", ())
+                or roles.get(required_reachability_output) != "output"
+                or domain.get("exact_relation_count") != 1
+            ):
+                raise ValueError(
+                    "add_subgraph atomic Output-reachability domain is invalid"
+                )
+            new_agent_ids = {agent["agent_id"] for agent in normalized_agents}
+            candidates = [
+                candidate
+                for candidate in candidates
+                if candidate["source_id"] in new_agent_ids
+                and candidate["target_id"] == required_reachability_output
+                and candidate["source_to_target"] is True
+                and candidate["target_to_source"] is False
+            ]
         return tuple(candidates)
     semantic_dataflow_pairs = {
         ("evidence_retriever", "reasoner"),
