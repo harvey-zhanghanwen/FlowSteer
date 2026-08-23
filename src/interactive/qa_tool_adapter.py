@@ -56,6 +56,17 @@ from .tool_runtime import (
 # search action that produces its opaque passage_id.
 QA_RETRIEVAL_TOOL_ID = "qa-retrieval"
 QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL = "qa_verified_answer_lineage_v2"
+HOTPOTQA_SEMANTIC_LINEAGE_PROTOCOL = "hotpotqa_semantic_lineage_v2"
+HOTPOTQA_ROLE_CONDITIONAL_PROTOCOL = (
+    "hotpotqa_role_conditional_capabilities_v1"
+)
+_HOTPOTQA_STRUCTURED_REASONER_PROTOCOLS = frozenset(
+    {
+        "hotpotqa_verified_answer_slot_v1",
+        HOTPOTQA_SEMANTIC_LINEAGE_PROTOCOL,
+        HOTPOTQA_ROLE_CONDITIONAL_PROTOCOL,
+    }
+)
 DEFAULT_QA_DATASET_SCOPE = ("hotpotqa", "triviaqa")
 _PROVIDED_PASSAGE = re.compile(
     r"^\[(?P<title>[^\]]+)\]\s*(?P<text>.+)$",
@@ -590,7 +601,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         """Return a typed bounded-retrieval diagnosis, never a task oracle."""
 
         if (
-            request.semantic_protocol != "hotpotqa_verified_answer_slot_v1"
+            request.semantic_protocol not in _HOTPOTQA_STRUCTURED_REASONER_PROTOCOLS
             or (request.agent.role_family or "").casefold() != "reasoner"
             or state.semantic_repair_kind != "evidence"
         ):
@@ -982,12 +993,12 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         minimum_reads = (
             2
             if self._task_type == "multi_hop_qa"
-            and request.semantic_protocol == "hotpotqa_verified_answer_slot_v1"
+            and request.semantic_protocol in _HOTPOTQA_STRUCTURED_REASONER_PROTOCOLS
             else 1
         )
         hotpot_multi_hop = (
             self._task_type == "multi_hop_qa"
-            and request.semantic_protocol == "hotpotqa_verified_answer_slot_v1"
+            and request.semantic_protocol in _HOTPOTQA_STRUCTURED_REASONER_PROTOCOLS
         )
 
         # SkillFlow's public Action--Observation continuation distinguishes a
@@ -1055,18 +1066,18 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         semantic_protocol = request.semantic_protocol
         semantic_role = (request.agent.role_family or "").casefold()
         if semantic_role == "evidence_retriever" and semantic_protocol in {
-            "hotpotqa_verified_answer_slot_v1",
+            *_HOTPOTQA_STRUCTURED_REASONER_PROTOCOLS,
             QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
         }:
             non_empty_text = {"type": "string", "minLength": 1}
             question_scope = (
                 hotpotqa_question_scope(request.problem)
-                if semantic_protocol == "hotpotqa_verified_answer_slot_v1"
+                if semantic_protocol in _HOTPOTQA_STRUCTURED_REASONER_PROTOCOLS
                 else qa_question_scope(request.problem)
             )
             answer_type = (
                 hotpotqa_answer_type_constraint(request.problem)
-                if semantic_protocol == "hotpotqa_verified_answer_slot_v1"
+                if semantic_protocol in _HOTPOTQA_STRUCTURED_REASONER_PROTOCOLS
                 else qa_answer_type_constraint(request.problem)
             )
             # PROJECT_NECESSARY_ADAPTATION: SkillFlow constrains every public
@@ -1218,7 +1229,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         if semantic_role != "reasoner" or (
             semantic_protocol
             not in {
-                "hotpotqa_verified_answer_slot_v1",
+                *_HOTPOTQA_STRUCTURED_REASONER_PROTOCOLS,
                 QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
             }
         ):
@@ -1235,7 +1246,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             "type": "array",
             "items": dict(non_empty_text),
         }
-        if semantic_protocol == "hotpotqa_verified_answer_slot_v1":
+        if semantic_protocol in _HOTPOTQA_STRUCTURED_REASONER_PROTOCOLS:
             entity_surface_description = (
                 "When this field supplies an entity answer, copy one minimal but "
                 "complete evidence-aligned referential surface. Do not truncate a "
@@ -1265,7 +1276,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     "const": (
                         hotpotqa_answer_type_constraint(request.problem)
                         if semantic_protocol
-                        == "hotpotqa_verified_answer_slot_v1"
+                        in _HOTPOTQA_STRUCTURED_REASONER_PROTOCOLS
                         else qa_answer_type_constraint(request.problem)
                     ),
                     "description": "The answer type requested by the original question.",
@@ -1274,7 +1285,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     "const": (
                         hotpotqa_answer_cardinality_constraint(request.problem)
                         if semantic_protocol
-                        == "hotpotqa_verified_answer_slot_v1"
+                        in _HOTPOTQA_STRUCTURED_REASONER_PROTOCOLS
                         else qa_answer_cardinality_constraint(request.problem)
                     ),
                     "description": (
@@ -1366,7 +1377,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                             "const": (
                                 hotpotqa_question_scope(request.problem)
                                 if semantic_protocol
-                                == "hotpotqa_verified_answer_slot_v1"
+                                in _HOTPOTQA_STRUCTURED_REASONER_PROTOCOLS
                                 else qa_question_scope(request.problem)
                             ),
                             "description": (
@@ -1437,7 +1448,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             return schema
         if (
             action_name == "search"
-            and request.semantic_protocol == "hotpotqa_verified_answer_slot_v1"
+            and request.semantic_protocol in _HOTPOTQA_STRUCTURED_REASONER_PROTOCOLS
         ):
             argument_properties["limit"] = {"const": 10}
             return schema
@@ -1487,7 +1498,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             request.semantic_protocol
             if request.semantic_protocol
             in {
-                "hotpotqa_verified_answer_slot_v1",
+                *_HOTPOTQA_STRUCTURED_REASONER_PROTOCOLS,
                 QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
             }
             and (request.agent.role_family or "").casefold() == "reasoner"
@@ -1497,7 +1508,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             request.semantic_protocol
             if request.semantic_protocol
             in {
-                "hotpotqa_verified_answer_slot_v1",
+                *_HOTPOTQA_STRUCTURED_REASONER_PROTOCOLS,
                 QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
             }
             and (request.agent.role_family or "").casefold()
@@ -1508,7 +1519,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             (
                 hotpotqa_question_scope(request.problem)
                 if semantic_reasoner_protocol
-                == "hotpotqa_verified_answer_slot_v1"
+                in _HOTPOTQA_STRUCTURED_REASONER_PROTOCOLS
                 else qa_question_scope(request.problem)
             )
             if semantic_reasoner_protocol is not None
@@ -1518,7 +1529,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             (
                 hotpotqa_question_scope(request.problem)
                 if semantic_evidence_retriever_protocol
-                == "hotpotqa_verified_answer_slot_v1"
+                in _HOTPOTQA_STRUCTURED_REASONER_PROTOCOLS
                 else qa_question_scope(request.problem)
             )
             if semantic_evidence_retriever_protocol is not None
@@ -1675,7 +1686,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         searched_passage_ids = evidence_state.latest_unread_passage_ids
         if self._task_type == "multi_hop_qa":
             guidance = SKILLFLOW_MULTI_HOP_QA_GUIDANCE
-            if request.semantic_protocol == "hotpotqa_verified_answer_slot_v1":
+            if request.semantic_protocol in _HOTPOTQA_STRUCTURED_REASONER_PROTOCOLS:
                 guidance += " " + HOTPOTQA_VERIFIED_ANSWER_SLOT_GUIDANCE
             elif request.semantic_protocol == QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL:
                 guidance += " " + QA_VERIFIED_ANSWER_LINEAGE_GUIDANCE
@@ -1700,7 +1711,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         )
         semantic_role = (request.agent.role_family or "").casefold()
         if request.semantic_protocol in {
-            "hotpotqa_verified_answer_slot_v1",
+            *_HOTPOTQA_STRUCTURED_REASONER_PROTOCOLS,
             QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
         } and semantic_role == "reasoner":
             if completion_admitted:
@@ -1728,7 +1739,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     "current Tool arguments."
                 )
         elif request.semantic_protocol in {
-            "hotpotqa_verified_answer_slot_v1",
+            *_HOTPOTQA_STRUCTURED_REASONER_PROTOCOLS,
             QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
         } and semantic_role == "evidence_retriever":
             if completion_admitted:
@@ -1781,7 +1792,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     "in the current Tool arguments."
                 )
         elif request.semantic_protocol in {
-            "hotpotqa_verified_answer_slot_v1",
+            *_HOTPOTQA_STRUCTURED_REASONER_PROTOCOLS,
             QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
         } and semantic_role == "verifier":
             terminal_wire += (
@@ -2353,7 +2364,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     ),
                 )
             )
-            if retriever_protocol == "hotpotqa_verified_answer_slot_v1":
+            if retriever_protocol in _HOTPOTQA_STRUCTURED_REASONER_PROTOCOLS:
                 prefix = (
                     _HOTPOTQA_SEMANTIC_STRUCTURE_ERROR_PREFIX
                     if structured_repair

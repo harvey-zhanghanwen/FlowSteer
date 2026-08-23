@@ -97,11 +97,15 @@ LEGACY_HOTPOTQA_DIRECTOR_PROMPT_VERSION_V11 = (
 )
 HOTPOTQA_SEMANTIC_PROTOCOL = "hotpotqa_verified_answer_slot_v1"
 HOTPOTQA_SEMANTIC_LINEAGE_PROTOCOL = "hotpotqa_semantic_lineage_v2"
+HOTPOTQA_ROLE_CONDITIONAL_PROTOCOL = (
+    "hotpotqa_role_conditional_capabilities_v1"
+)
 QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL = "qa_verified_answer_lineage_v2"
 _VERIFIED_QA_SEMANTIC_PROTOCOLS = frozenset(
     {
         HOTPOTQA_SEMANTIC_PROTOCOL,
         HOTPOTQA_SEMANTIC_LINEAGE_PROTOCOL,
+        HOTPOTQA_ROLE_CONDITIONAL_PROTOCOL,
         QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
     }
 )
@@ -326,7 +330,16 @@ def verified_qa_semantic_protocol(value: object) -> bool:
 def flexible_hotpotqa_semantic_protocol(value: object) -> bool:
     """Return whether HotpotQA terminal lineage is topology-neutral."""
 
-    return value == HOTPOTQA_SEMANTIC_LINEAGE_PROTOCOL
+    return value in {
+        HOTPOTQA_SEMANTIC_LINEAGE_PROTOCOL,
+        HOTPOTQA_ROLE_CONDITIONAL_PROTOCOL,
+    }
+
+
+def role_conditional_hotpotqa_protocol(value: object) -> bool:
+    """Return whether semantic roles are optional per-Agent capabilities."""
+
+    return value == HOTPOTQA_ROLE_CONDITIONAL_PROTOCOL
 
 
 def director_system_prompt_for_version(prompt_version: str) -> str:
@@ -1159,8 +1172,15 @@ def _live_hotpotqa_output_domain(
 ) -> Optional[str]:
     """Validate the revision-local HotpotQA Output ownership receipt."""
 
-    if domain.get("output_role_family") != "format":
-        raise ValueError("add_subgraph HotpotQA Output role domain is invalid")
+    if role_conditional_hotpotqa_protocol(domain.get("semantic_protocol")):
+        allowed_output_roles = _live_string_domain(
+            domain.get("output_role_families"),
+            label="add_subgraph.output_role_families",
+        )
+    else:
+        if domain.get("output_role_family") != "format":
+            raise ValueError("add_subgraph HotpotQA Output role domain is invalid")
+        allowed_output_roles = ("format",)
     if "current_output_agent_id" not in domain:
         raise ValueError("add_subgraph HotpotQA current Output receipt is missing")
     current_output = domain.get("current_output_agent_id")
@@ -1169,10 +1189,21 @@ def _live_hotpotqa_output_domain(
     if (
         not isinstance(current_output, str)
         or current_output not in roles
-        or roles[current_output] != "format"
+        or roles[current_output] not in allowed_output_roles
     ):
         raise ValueError("add_subgraph HotpotQA current Output receipt is invalid")
     return current_output
+
+
+def _live_hotpotqa_output_role_families(
+    domain: Mapping[str, Any],
+) -> tuple[str, ...]:
+    if role_conditional_hotpotqa_protocol(domain.get("semantic_protocol")):
+        return _live_string_domain(
+            domain.get("output_role_families"),
+            label="add_subgraph.output_role_families",
+        )
+    return ("format",)
 
 
 def _live_defer_output_assignment(domain: Mapping[str, Any]) -> bool:
@@ -2147,10 +2178,13 @@ def director_live_action_parameter_json_schema_text(
                     for agent in normalized_agents
                 }
             )
-            format_ids = [
+            allowed_output_roles = set(
+                _live_hotpotqa_output_role_families(domain)
+            )
+            output_ids = [
                 agent_id
                 for agent_id in endpoint_ids
-                if roles[agent_id] == "format"
+                if roles[agent_id] in allowed_output_roles
             ]
             schema["properties"]["output_agent_id"] = (
                 {"type": "null"}
@@ -2162,11 +2196,11 @@ def director_live_action_parameter_json_schema_text(
                 else
                 {
                     "anyOf": [
-                        {"enum": format_ids},
+                        {"enum": output_ids},
                         {"type": "null"},
                     ]
                 }
-                if format_ids
+                if output_ids
                 else {"type": "null"}
             )
         else:
@@ -3021,7 +3055,60 @@ class AgentGraphOrchestrator:
             )
         if self.semantic_protocol != "none":
             payload["semantic_protocol"] = self.semantic_protocol
-            if flexible_hotpotqa_semantic_protocol(self.semantic_protocol):
+            if role_conditional_hotpotqa_protocol(self.semantic_protocol):
+                # Role families remain part of the Director's open search
+                # space.  These receipts describe capability-specific
+                # validation only; none is an existence, ordering, or FINISH
+                # prerequisite.
+                payload["optional_role_capabilities"] = {
+                    "question_scope": {
+                        "preserve_original": True,
+                        "unrequested_qualifier_allowed": False,
+                    },
+                    "reasoner": {
+                        "aligns_fact_predicate_arguments_to_answer_slot": True,
+                        "determines_semantic_answer_when_selected": True,
+                    },
+                    "verifier": {
+                        "checks_when_selected": [
+                            "explicit_evidence",
+                            "entity_attribute_binding",
+                            "multi_hop_completeness",
+                            "question_scope_preservation",
+                        ],
+                        "candidate_reselection_allowed": False,
+                    },
+                    "format": {
+                        "operation_when_selected": (
+                            "serialize_routed_semantic_answer"
+                        ),
+                        "original_question_visible": False,
+                        "reasoning_allowed": False,
+                        "candidate_reselection_allowed": False,
+                    },
+                    "react": {
+                        "kind": "execution_mode",
+                        "schedule": (
+                            "Thought -> Action(tool) -> Observation -> "
+                            "Thought -> Final"
+                        ),
+                    },
+                    "terminal_artifact_constraints": {
+                        "required_evidence_tool_id": (
+                            env.required_evidence_tool_id
+                        ),
+                        "exact_output_syntax_required": (
+                            env.require_exact_answer_tag
+                        ),
+                    },
+                    "topology_and_role_multiplicity_source": (
+                        "action_target_domains"
+                    ),
+                    "max_agents_per_add_subgraph": (
+                        env.max_agents_per_subgraph
+                    ),
+                }
+            elif flexible_hotpotqa_semantic_protocol(self.semantic_protocol):
                 # Keep SkillFlow's Supervisor instruction neutral and expose
                 # the task contract through the progressive FlowSteer Canvas.
                 # These are terminal artifact capabilities, not a prescribed
@@ -3390,5 +3477,6 @@ __all__ = [
     "director_state_conditioned_sampling_json_schema_text",
     "verified_qa_semantic_protocol",
     "flexible_hotpotqa_semantic_protocol",
+    "role_conditional_hotpotqa_protocol",
     "encode_director_transcript",
 ]

@@ -116,6 +116,7 @@ def _semantic_role(request: AgentRequest) -> str:
 _HOTPOTQA_SEMANTIC_PROTOCOLS = {
     "hotpotqa_verified_answer_slot_v1",
     "hotpotqa_semantic_lineage_v2",
+    "hotpotqa_role_conditional_capabilities_v1",
 }
 
 
@@ -140,9 +141,17 @@ def _hotpotqa_supported_verifier_candidate(artifact: str) -> Optional[str]:
         fields = json.loads(artifact)
     except (TypeError, ValueError, json.JSONDecodeError):
         fields = None
-    if isinstance(fields, Mapping) and (
-        "candidate_answer" in fields or "verification_status" in fields
-    ):
+    verifier_keys = {
+        "verification_status",
+        "evidence_supported",
+        "entity_attribute_binding_correct",
+        "multi_hop_complete",
+        "scope_preserved",
+        "answer_type_cardinality_correct",
+        "minimal_answer_surface",
+        "alias_binding_correct",
+    }
+    if isinstance(fields, Mapping) and verifier_keys.intersection(fields):
         candidate = fields.get("candidate_answer")
         status = fields.get("verification_status")
         checks = (
@@ -168,7 +177,7 @@ def _hotpotqa_supported_verifier_candidate(artifact: str) -> Optional[str]:
 
     candidate = _single_labeled_value(artifact, "Candidate answer")
     status = _single_labeled_value(artifact, "Verification status")
-    if candidate is None and status is None:
+    if status is None:
         return None
     if candidate is None or status is None or status.casefold() != "supported":
         return ""
@@ -178,6 +187,8 @@ def _hotpotqa_supported_verifier_candidate(artifact: str) -> Optional[str]:
 def _hotpotqa_supported_consensus(
     messages: Sequence[UpstreamMessage],
     condition: CommunicationCondition,
+    *,
+    allow_role_conditional_sources: bool = False,
 ) -> str:
     """Build a formatting-only transfer from agreeing Verifier artifacts.
 
@@ -191,6 +202,30 @@ def _hotpotqa_supported_consensus(
     for message in messages:
         artifact = _visible_message_content(message.artifact, condition)
         candidate = _hotpotqa_supported_verifier_candidate(artifact)
+        if candidate is None and allow_role_conditional_sources:
+            try:
+                fields = json.loads(artifact)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                fields = None
+            if isinstance(fields, Mapping) and {
+                "question_scope",
+                "answer_slot",
+                "evidence_propositions",
+                "multi_hop_chain",
+                "candidate_answer",
+                "evidence",
+            } <= set(fields):
+                raw_candidate = fields.get("candidate_answer")
+                candidate = (
+                    raw_candidate
+                    if isinstance(raw_candidate, str)
+                    and raw_candidate
+                    and raw_candidate == raw_candidate.strip()
+                    and "\n" not in raw_candidate
+                    else ""
+                )
+            elif _single_labeled_value(artifact, "Verification status") is None:
+                candidate = _single_labeled_value(artifact, "Candidate answer")
         if candidate is None:
             continue
         if not candidate:
@@ -356,7 +391,15 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
     semantic_role = _semantic_role(request)
     hotpot_semantic = request.semantic_protocol in _HOTPOTQA_SEMANTIC_PROTOCOLS
     flexible_hotpot_semantic = (
-        request.semantic_protocol == "hotpotqa_semantic_lineage_v2"
+        request.semantic_protocol
+        in {
+            "hotpotqa_semantic_lineage_v2",
+            "hotpotqa_role_conditional_capabilities_v1",
+        }
+    )
+    role_conditional_hotpot = (
+        request.semantic_protocol
+        == "hotpotqa_role_conditional_capabilities_v1"
     )
     unified_qa_semantic = request.semantic_protocol == "qa_verified_answer_lineage_v2"
     semantic_lineage = hotpot_semantic or unified_qa_semantic
@@ -439,9 +482,17 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
         if flexible_hotpot_semantic:
             protocol = (
                 "You are the terminal FlowSteer Format Operator. The semantic answer "
-                "has already been determined by a Reasoner and supported by one or "
-                "more agreeing Verifier artifacts routed through the current graph. "
-                "You will receive only their consensus transfer, never the original "
+                + (
+                    "has already been determined in an explicit routed semantic "
+                    "candidate artifact. "
+                    if role_conditional_hotpot
+                    else (
+                        "has already been determined by a Reasoner and supported by "
+                        "one or more agreeing Verifier artifacts routed through the "
+                        "current graph. "
+                    )
+                )
+                + "You will receive only the candidate transfer, never the original "
                 "question. Serialize that candidate character-for-character; do not "
                 "solve, reason, verify, canonicalize, or reselect it."
             )
@@ -558,6 +609,10 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
             solution = _hotpotqa_supported_consensus(
                 request.upstream,
                 request.communication_condition,
+                allow_role_conditional_sources=(
+                    request.semantic_protocol
+                    == "hotpotqa_role_conditional_capabilities_v1"
+                ),
             )
         else:
             solution = (
@@ -569,6 +624,14 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
                 else ""
             )
         if semantic_lineage:
+            semantic_transfer_requirement = (
+                "must contain exactly one explicit routed `Candidate answer:` value. "
+                if role_conditional_hotpot
+                else (
+                    "must be a Verifier artifact whose `Verification status:` is "
+                    "exactly `supported`. "
+                )
+            )
             common = FORMAT_PROMPT.format(
                 problem_description=(
                     "the formatting-only transfer of one verified Candidate answer"
@@ -577,13 +640,13 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
             ) + (
                 "\nFor this AgentGraph terminal protocol, the rules below take precedence "
                 "over every normalization or transformation example above. The solution "
-                "must be a Verifier artifact whose `Verification status:` is exactly "
-                "`supported`. Copy character-for-character only the value following its "
+                + semantic_transfer_requirement
+                + "Copy character-for-character only the value following its "
                 "single `Candidate answer:` label; never select another name or value, "
                 "and never change an alias, abbreviation, "
                 "unit, date, spelling, or symbolic form. Enclose that exact copied value "
                 "in exactly one <answer>...</answer> wrapper, with no explanation. If the "
-                "supported status or exactly one Candidate answer is absent, return "
+                "required semantic candidate or exactly one Candidate answer is absent, return "
                 "exactly <answer></answer>."
             )
         else:

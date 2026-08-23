@@ -61,6 +61,7 @@ from .director import (
     director_modify_agent_field_selector_json_schema_text,
     director_state_conditioned_sampling_json_schema_text,
     flexible_hotpotqa_semantic_protocol,
+    role_conditional_hotpotqa_protocol,
     verified_qa_semantic_protocol,
 )
 from .openai_gateway import build_agent_messages
@@ -1929,7 +1930,13 @@ def _validate_v3_hierarchical_action_receipt(
                 add_domain.get("semantic_protocol")
             )
         ):
-            if add_domain.get("defer_output_assignment", False) is True:
+            role_conditional = role_conditional_hotpotqa_protocol(
+                add_domain.get("semantic_protocol")
+            )
+            if (
+                not role_conditional
+                and add_domain.get("defer_output_assignment", False) is True
+            ):
                 raise ReceiptValidationError(
                     "v3 verified-QA capability construction must defer Output "
                     "assignment to a later SET_OUTPUT action"
@@ -1944,9 +1951,15 @@ def _validate_v3_hierarchical_action_receipt(
             existing_roles.update(
                 {agent["agent_id"]: agent["role_family"] for agent in declarations}
             )
-            if existing_roles.get(output_agent_id) != "format":
+            allowed_output_roles = (
+                set(add_domain.get("output_role_families", ()))
+                if role_conditional
+                else {"format"}
+            )
+            if existing_roles.get(output_agent_id) not in allowed_output_roles:
                 raise ReceiptValidationError(
-                    "v3 verified-QA add_subgraph Output Agent is not a Formatter"
+                    "v3 verified-QA add_subgraph Output Agent role is outside "
+                    "the live output domain"
                 )
             current_output_agent_id = add_domain.get("current_output_agent_id")
             if current_output_agent_id is not None:

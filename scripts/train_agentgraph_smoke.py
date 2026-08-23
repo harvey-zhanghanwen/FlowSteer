@@ -3079,6 +3079,7 @@ class LiveSmokeBackend:
             "none",
             "hotpotqa_verified_answer_slot_v1",
             "hotpotqa_semantic_lineage_v2",
+            "hotpotqa_role_conditional_capabilities_v1",
             "qa_verified_answer_lineage_v2",
         }:
             raise ConfigurationError("unsupported AgentGraph semantic protocol")
@@ -3110,11 +3111,15 @@ class LiveSmokeBackend:
                 f"Director prompt {HOTPOTQA_DIRECTOR_PROMPT_VERSION}"
             )
         if (
-            semantic_protocol == "hotpotqa_semantic_lineage_v2"
+            semantic_protocol
+            in {
+                "hotpotqa_semantic_lineage_v2",
+                "hotpotqa_role_conditional_capabilities_v1",
+            }
             and prompt_version != DIRECTOR_PROMPT_VERSION
         ):
             raise ConfigurationError(
-                "hotpotqa_semantic_lineage_v2 requires the short neutral "
+                f"{semantic_protocol} requires the short neutral "
                 f"Director prompt {DIRECTOR_PROMPT_VERSION}"
             )
         if (

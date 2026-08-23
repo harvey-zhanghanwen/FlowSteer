@@ -184,6 +184,7 @@ class AgentRequest:
             "none",
             "hotpotqa_verified_answer_slot_v1",
             "hotpotqa_semantic_lineage_v2",
+            "hotpotqa_role_conditional_capabilities_v1",
             "qa_verified_answer_lineage_v2",
         }:
             raise ValueError("unsupported AgentRequest semantic_protocol")
@@ -471,6 +472,7 @@ class AgentRuntime:
             "none",
             "hotpotqa_verified_answer_slot_v1",
             "hotpotqa_semantic_lineage_v2",
+            "hotpotqa_role_conditional_capabilities_v1",
             "qa_verified_answer_lineage_v2",
         }:
             raise ValueError("unsupported AgentRuntime semantic_protocol")
@@ -838,7 +840,10 @@ class AgentRuntime:
         them schedulable under the same Canvas revision semantics.
         """
 
-        if self.semantic_protocol == "hotpotqa_semantic_lineage_v2":
+        if self.semantic_protocol in {
+            "hotpotqa_semantic_lineage_v2",
+            "hotpotqa_role_conditional_capabilities_v1",
+        }:
             seeds: Set[Tuple[str, ...]] = set()
             output_agent_id = graph.output_agent_id
             for agent_id, node in nodes.items():
