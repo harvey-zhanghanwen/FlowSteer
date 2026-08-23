@@ -1841,6 +1841,19 @@ class AgentWorkflowEnv:
             dirty_replacement_ids = set(
                 self._dirty_auxiliary_replacement_agent_ids()
             )
+            model_repair_domains = {
+                agent_id: (
+                    self._provider_repair_model_ids(agent_id)
+                    if agent_id in provider_failure_agent_ids
+                    else tuple(
+                        model_id
+                        for model_id in self.model_registry.model_ids
+                        if model_id
+                        != self._graph.get_node(agent_id).model_id
+                    )
+                )
+                for agent_id in modifiable_node_ids
+            }
             responsible_ids = set(measured_failed_ids)
             if not measured_failed_ids:
                 responsible_ids.update(self._unresolved_dirty_agents)
@@ -1883,6 +1896,10 @@ class AgentWorkflowEnv:
                         == "format"
                         and field == "contract"
                     )
+                    and (
+                        field != "model_id"
+                        or bool(model_repair_domains[agent_id])
+                    )
                 ]
                 for agent_id in modifiable_node_ids
             }
@@ -1908,16 +1925,7 @@ class AgentWorkflowEnv:
                         "discrete_value_domains": (
                             {
                                 "model_id": [
-                                    *(
-                                        self._provider_repair_model_ids(agent_id)
-                                        if agent_id in provider_failure_agent_ids
-                                        else tuple(
-                                            model_id
-                                            for model_id in self.model_registry.model_ids
-                                            if model_id
-                                            != self._graph.get_node(agent_id).model_id
-                                        )
-                                    )
+                                    *model_repair_domains[agent_id]
                                 ]
                             }
                             if "model_id" in per_agent_mutable_fields[agent_id]

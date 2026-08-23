@@ -612,6 +612,46 @@ class FlexibleSemanticGraphTests(unittest.TestCase):
         self.assertIsNotNone(issue)
         self.assertIn("routed Reasoner ancestor", issue or "")
 
+    def test_single_model_catalog_omits_empty_model_repair_domains(self) -> None:
+        registry = ModelRegistry(
+            [ProviderSpec("local", kind="test")],
+            [ModelSpec("only-model", "local")],
+        )
+        graph = AgentGraph(
+            [
+                AgentNode(
+                    "reasoner",
+                    "only-model",
+                    "determine a semantic candidate",
+                    role_family="reasoner",
+                    allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                    execution_mode="react",
+                ),
+                AgentNode(
+                    "verifier",
+                    "only-model",
+                    "verify the semantic candidate",
+                    role_family="verifier",
+                ),
+                AgentNode(
+                    "formatter",
+                    "only-model",
+                    _HOTPOTQA_FORMAT_CONTRACT,
+                    role_family="format",
+                ),
+            ]
+        )
+        env = _semantic_env(registry, graph=graph)
+
+        targets = env.model_admissible_action_targets()
+        modify = targets["modify_agent"]
+        for candidate in modify["per_agent_candidates"]:
+            self.assertNotIn("model_id", candidate["mutable_fields"])
+            self.assertNotIn(
+                "model_id",
+                candidate["discrete_value_domains"],
+            )
+
     def test_multiple_semantic_roles_fanin_and_reciprocity_are_admissible(
         self,
     ) -> None:
