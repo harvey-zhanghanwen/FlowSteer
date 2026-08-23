@@ -1,0 +1,206 @@
+# HotpotQA role-conditional capability evaluation condition r8. This is a new,
+# independent namespace derived from r7 after its canary exposed the deployed
+# SGLang deterministic scheduler's signed-int64 seed boundary. The frozen 128 development tasks,
+# evaluator, seed, concurrency, Qwen3.5-9B Director, Direct comparator,
+# retrieval runtime, minimal-neutral.v10 prompt, execute-on-edit boundary,
+# preserve recovery policy, and local-only Executor catalog are unchanged.
+# Relative to r7, only the native SGLang wire representation of SkillFlow's
+# uint64 generation seed changes; its original value and 64-bit pattern remain
+# exact in the behavior receipt. Role selection, topology, evaluator, and
+# scientific sampling coordinates stay frozen. Earlier artifacts are
+# reference-only and are neither overwritten nor resumed by this condition.
+
+schema_version: "flowsteer.agentgraph.config.v1"
+experiment:
+  name: "hotpotqa_role_conditional_v1_r8"
+  phase: "hotpotqa_evaluation"
+  baseline_id: "hotpotqa_role_conditional_v1_r8"
+  step_id: "stable_zero_role_conditional_v1_r8"
+  training_enabled: false
+  seed: 20260815
+  condition_id: "hotpotqa_role_conditional_v1_r8"
+  sampling_schedule_purpose: "hotpotqa_fixed_development_role_conditional_v1_r8"
+  catalog_order_namespace: "hotpotqa_role_conditional_v1_r8"
+  prompt_version: "agentgraph.director.minimal-neutral.v10"
+  tool_version: "skillflow.qa-retrieval.multihop-semantic-repair.v15"
+  output_dir: "artifacts/hotpotqa_role_conditional_v1_r8/hotpotqa"
+
+data:
+  catalog_path: "config/joint_qa_partitions_v2.yaml"
+  registry_path: "config/datasets_runtime_v2.yaml"
+  registry_dataset_key: "hotpotqa"
+  train_path: "data/joint_qa_v2/train.jsonl"
+  validation_path: "data/joint_qa_v2/development.jsonl"
+  test_path: "data/joint_qa_v2/test.jsonl"
+  enforce_split_isolation: true
+  task_schema_version: "flowsteer.agentgraph.task.v1"
+
+hotpotqa_evaluation:
+  dataset_key: "hotpotqa"
+  stage: "development"
+  required_partition: "development"
+  split: "validation"
+  selection: "sequential"
+  sample_count: 128
+  stable_zero_sample_count: 15
+  rollouts_per_task: 1
+  concurrency: 2
+  direct_model_id: "qwen3.5-9b-local"
+  direct_protocol: "agent_runtime_single_call_skillflow_multihop_prompt_v1"
+  direct_contract: "Chain evidence across the ten supplied passages and return one concise answer inside a single <answer>...</answer> tag."
+  direct_generation_seed: 20260815
+  direct_reused_from: "artifacts/qa_tool_react_exact_wire_v4_development/hotpotqa/direct_closed_context_predictions.jsonl"
+  direct_context_mode: "closed_context_full_10_passages"
+  agentgraph_protocol: "full_10_passages_plus_model_driven_skillflow_search_read_v1"
+  protocol_equivalent_to_direct: false
+
+qa_tool_runtime:
+  enabled: true
+  condition_id: "hotpotqa_role_conditional_v1_r8"
+  mode: "model_driven_search_read"
+  passage_source: "provided_context"
+  dataset_scope: ["hotpotqa"]
+  skillflow_source: "/home/test/SKILLEV/skillflow-bayesian-improve-deploy/src"
+  index_path: "/ssd1/iclr/SKILLEV/skillev-new-b2-temp/data/datasets/dpr-wikipedia/atlas-retrieval.sqlite3"
+  max_turns_per_agent_call: 9
+  max_tool_calls_per_agent_call: 6
+  tool_timeout_seconds: 30.0
+  completion_policy: "required_evidence"
+
+storage:
+  schema_version: "flowsteer.completion_benchmark.round.v1"
+  root: "artifacts/hotpotqa_role_conditional_v1_r8/hotpotqa/evidence"
+  selected_tasks_path: "artifacts/hotpotqa_role_conditional_v1_r8/hotpotqa/selected_tasks.jsonl"
+  direct_predictions_path: "artifacts/hotpotqa_role_conditional_v1_r8/hotpotqa/direct_closed_context_predictions.jsonl"
+  trajectories_path: "artifacts/hotpotqa_role_conditional_v1_r8/hotpotqa/agentgraph_trajectories.jsonl"
+  failures_path: "artifacts/hotpotqa_role_conditional_v1_r8/hotpotqa/collection_failures.jsonl"
+  paired_results_path: "artifacts/hotpotqa_role_conditional_v1_r8/hotpotqa/paired_results.jsonl"
+  wrong_demos_path: "artifacts/hotpotqa_role_conditional_v1_r8/hotpotqa/wrong_demos.jsonl"
+  manifest_path: "artifacts/hotpotqa_role_conditional_v1_r8/hotpotqa/run_manifest.json"
+  preflight_receipt_path: "artifacts/hotpotqa_role_conditional_v1_r8/hotpotqa/preflight_receipt.json"
+  report_json_path: "reports/hotpotqa_role_conditional_v1_r8/hotpotqa_report.json"
+  report_markdown_path: "reports/hotpotqa_role_conditional_v1_r8/hotpotqa_report.md"
+
+director:
+  base_model: "${QWEN35_9B_MODEL_PATH:-/home/test/SKILLEV/skillev-new-b2-temp/model/Qwen3.5-9B-modelscope}"
+  tokenizer_path: "${QWEN35_9B_TOKENIZER_PATH:-/home/test/SKILLEV/skillev-new-b2-temp/tokenizer/Qwen3.5-9B}"
+  backend: "sglang"
+  api_base: "http://127.0.0.1:${FLOWSTEER_SUPERVISOR_PORT:-8015}/v1"
+  served_model_name: "supervisor_theta"
+  behavior_policy_version: "qwen35-9b-qa-free-agent-neutral-step-000000"
+  behavior_adapter_name: "theta_jointqa_progressive_step_000000"
+  behavior_adapter_checkpoint: "artifacts/hotpotqa_multiagent_skill/policy_step_000000/theta"
+  updated_policy_version: "unused-evaluation-only"
+  expected_server_weight_version: "default"
+  prompt_profile: "minimal"
+  dtype: "bfloat16"
+  max_context_tokens: 32768
+  max_action_tokens: 1024
+  action_decoding: "json_schema"
+  action_schema_version: "agentgraph.canvas-action-json-schema.v1"
+  sampling_schema_version: "agentgraph.model-admissible-action-mask.v3"
+  sampling_action_profile: "model_admissible_canvas_actions"
+  temperature: 1.0
+  top_p: 1.0
+  top_k: -1
+  max_rounds: 28
+  execute_on_edit: true
+  history_window: 4
+  lora:
+    enabled: true
+    rank: 64
+    alpha: 128
+    dropout: 0.0
+    target_modules: [q_proj, k_proj, v_proj, o_proj]
+
+agent_graph:
+  max_agents: 8
+  max_agents_per_subgraph: 3
+  contract_type: "free_text"
+  relation_encoding: "two_bit"
+  actions: [add_subgraph, modify_agent, delete_agent, set_relation, set_output, finish]
+  executor_selection: "director_catalog_choice"
+  max_bidirectional_block_size: 2
+  require_unique_output: true
+  require_all_agents_reach_output: true
+  require_format_agent: false
+  semantic_protocol_by_source:
+    hotpotqa: "hotpotqa_role_conditional_capabilities_v1"
+  recovery_policy: "preserve_diagnose_repair_augment"
+  required_evidence_tool_id: "qa-retrieval"
+  terminal_protocol_by_source:
+    hotpotqa: "exact_single_answer_tag"
+  model_catalog_path: "${HOTPOTQA_SEMANTIC_LINEAGE_MODEL_CATALOG:-config/model_catalog_hotpotqa_semantic_lineage_v2_local.yaml}"
+
+evaluation:
+  healthbench_judge_model: ""
+  max_environment_steps: 20
+  swebench_harness_enabled: false
+  invalid_evaluator_action: "persist_and_exclude"
+
+grpo:
+  enabled: false
+  objective: "action_masked_one_pass"
+  group_key: [task_id, condition_id, policy_version]
+  samples_per_problem: 1
+  advantage_epsilon: 1.0e-8
+  equal_weight_per_problem: true
+  terminal_task_reward_only: true
+  structural_reward: 0.0
+  exploration_reward: 0.0
+  skill_usage_reward: 0.0
+  require_valid_evaluator: true
+  reject_forced_probes: true
+  reject_fallback_or_manual_repair: true
+  reject_reconstructed_context: true
+  require_exact_behavior_receipt: true
+  optimization_passes_per_rollout_batch: 0
+  max_optimizer_updates: 0
+  learning_rate: 0.0
+  gradient_checkpointing: false
+  max_grad_norm: 0.0
+
+policy_sync:
+  enabled: false
+  api_base: "http://127.0.0.1:${FLOWSTEER_SUPERVISOR_PORT:-8015}"
+  adapter_name_prefix: "theta_hotpotqa_role_conditional_v1_r8_unused_"
+  request_timeout_seconds: 120
+  max_retries: 0
+  retry_backoff_seconds: 1
+
+exploration:
+  enabled: false
+  strategy: "none"
+  forced_probe_rollouts: 0
+
+skills:
+  enabled: false
+  initial_library: []
+  retrieval_top_k: 0
+  library_version: "none"
+
+gpu:
+  learner_physical: 3
+  rollout_physical: 0
+  gradient_replica_physical: 5
+  learner_device: "cuda:3"
+  rollout_engine: "sglang"
+  gradient_replica_device: "cuda:5"
+  supervisor_gpu_id: 0
+  supervisor_api_base: "http://127.0.0.1:8015/v1"
+  training_enabled: false
+  oom_policy:
+    status: "inactive_evaluation_only"
+    micro_batch_size: 1
+    minimum_micro_batch_size: 1
+    micro_batch_schedule: [1]
+    retry_on_cuda_oom: false
+    split_items_across_learner_and_replica: false
+    gradient_accumulation_steps: 1
+    gradient_checkpointing: false
+
+deployment:
+  exploration_beta: 0.0
+  allow_forced_probes: false
+  active_skills_only: false
+  require_version_compatible_skills: true

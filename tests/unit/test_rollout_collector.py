@@ -362,6 +362,7 @@ def test_native_sglang_receipt_uses_real_input_ids_and_separates_versions():
     assert response.metadata["latency_ms"] >= 0.0
     assert response.metadata["attempt_count"] == 1
     assert response.metadata["generation_seed"] == 23
+    assert response.metadata["wire_sampling_seed"] == 23
     assert response.metadata["action_json_schema_version"] == (
         "agentgraph.canvas-action-json-schema.v1"
     )
@@ -373,6 +374,54 @@ def test_native_sglang_receipt_uses_real_input_ids_and_separates_versions():
     consumed = client.executed_prefix_tokens(response, action)
     assert consumed == action.consumed_end
     assert consumed < len(response.metadata["output_token_ids"])
+
+
+@pytest.mark.parametrize(
+    ("logical_seed", "expected_wire_seed"),
+    (
+        (0, 0),
+        (2**63 - 1, 2**63 - 1),
+        (2**63, -(2**63)),
+        (2**63 + 23, -(2**63) + 23),
+        (2**64 - 1, -1),
+    ),
+)
+def test_native_sglang_projects_uint64_seed_only_at_signed_int64_wire_boundary(
+    logical_seed,
+    expected_wire_seed,
+):
+    text = '{"action":"finish"}'
+    client = ScriptedSGLangClient(
+        [text],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+        action_json_schema=DIRECTOR_ACTION_JSON_SCHEMA_TEXT,
+        action_json_schema_version="agentgraph.canvas-action-json-schema.v1",
+    )
+    response = asyncio.run(client.propose("ordinary prompt", seed=logical_seed))
+
+    wire_seed = client.payloads[0]["sampling_params"]["sampling_seed"]
+    assert wire_seed == expected_wire_seed
+    assert wire_seed % 2**64 == logical_seed
+    assert response.metadata["generation_seed"] == logical_seed
+    assert response.metadata["wire_sampling_seed"] == wire_seed
+    assert response.metadata["sampling_seed_adapter"] == (
+        "sglang.uint64-to-signed-int64-twos-complement.v1"
+    )
+
+
+@pytest.mark.parametrize("invalid_seed", (-1, 2**64, True))
+def test_native_sglang_rejects_seed_outside_skillflow_uint64(invalid_seed):
+    client = ScriptedSGLangClient(
+        ['{"action":"finish"}'],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+        action_json_schema=DIRECTOR_ACTION_JSON_SCHEMA_TEXT,
+        action_json_schema_version="agentgraph.canvas-action-json-schema.v1",
+    )
+
+    with pytest.raises(ValueError, match="unsigned 64-bit"):
+        asyncio.run(client.propose("ordinary prompt", seed=invalid_seed))
 
 
 def test_native_sglang_per_request_schema_does_not_mutate_client_default():

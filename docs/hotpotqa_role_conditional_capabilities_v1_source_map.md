@@ -8,9 +8,9 @@ provided-context retrieval runtime, and concise
 `agentgraph.director.minimal-neutral.v10` prompt. It does not resume, overwrite,
 or merge the r4 trajectories; r4 metrics are comparison references only.
 
-The condition is configured in
-`config/evaluation_hotpotqa_role_conditional_v1_r1.yaml`. Its artifacts and
-reports use the independent `hotpotqa_role_conditional_v1_r1` namespace.
+The current condition is configured in
+`config/evaluation_hotpotqa_role_conditional_v1_r8.yaml`. Its artifacts and
+reports use the independent `hotpotqa_role_conditional_v1_r8` namespace.
 
 ## Directly reused from FlowSteer
 
@@ -203,6 +203,17 @@ from the preserved semantic candidate; FINISH validation still rejects an
 unsupported candidate and attributes the routed Reasoner/Retriever for repair.
 None of these boundaries requires a role to exist, fixes role order, or fixes
 a serial topology.
+
+The r7 canary exposed one deployment incompatibility before its first missing
+task could produce a Canvas turn: SkillFlow's scientific sampling protocol
+derives a full uint64 seed, while SGLang 0.5.15 deterministic inference first
+materializes the native `sampling_seed` as `torch.int64` and subsequently
+casts it to `torch.uint64` in its sampler. The independent r8 condition keeps
+the original SkillFlow uint64 seed in the behavior receipt and sends the
+bit-equivalent signed two's-complement representation only at the native
+SGLang request boundary. This is a wire-type compatibility adapter; sampling
+coordinates, 64-bit random state, policy, search space, topology, prompts,
+tasks, and evaluator are unchanged.
 
 ## Not implemented or enabled in this condition
 

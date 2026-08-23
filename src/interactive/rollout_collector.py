@@ -95,6 +95,11 @@ HIERARCHICAL_JSON_SCHEMA_STRATEGY = "hierarchical_json_schema"
 ROLE_FIRST_ADD_DECODING_STRATEGY = (
     "hierarchical_json_schema_role_first_add_v1"
 )
+SGLANG_UINT64_TO_INT64_SEED_ADAPTER = (
+    "sglang.uint64-to-signed-int64-twos-complement.v1"
+)
+_UINT64_MODULUS = 2**64
+_SIGNED_INT64_LIMIT = 2**63
 _ADD_DECLARATION_PARSE_FAILURE_PHASE = "add_agent_declarations"
 
 _ADD_DECLARATION_CONTINUATION = (
@@ -107,6 +112,21 @@ _ADD_ACTION_CONTINUATION = (
     "agents unchanged. Select only relations and output_agent_id allowed by "
     "the current schema. Return only the JSON object."
 )
+
+
+def _sglang_wire_sampling_seed(seed: int) -> int:
+    """Project SkillFlow's uint64 seed onto SGLang's signed int64 wire type.
+
+    SkillFlow derives generation seeds over the full unsigned 64-bit domain.
+    The deployed SGLang deterministic scheduler materializes
+    ``sampling_seed`` as ``torch.int64``.  Preserve the SkillFlow seed in the
+    behavior receipt and apply this compatibility projection only at the
+    native SGLang request boundary.
+    """
+
+    if isinstance(seed, bool) or not isinstance(seed, int) or not 0 <= seed < 2**64:
+        raise ValueError("Director seed must be an unsigned 64-bit integer")
+    return seed if seed < _SIGNED_INT64_LIMIT else seed - _UINT64_MODULUS
 
 
 def _hierarchical_continuation_prompt(
@@ -507,10 +527,8 @@ class SGLangReceiptDirectorClient:
         action_target_domains_json: Optional[str] = None,
         action_target_domain_version: Optional[str] = None,
     ) -> Mapping[str, Any]:
-        if seed is not None and (
-            isinstance(seed, bool) or not isinstance(seed, int) or seed < 0
-        ):
-            raise ValueError("Director seed must be a non-negative integer or None")
+        if seed is not None:
+            _sglang_wire_sampling_seed(seed)
         prompt_ids = self.prompt_token_ids(prompt)
         payload: dict[str, Any] = {
             "input_ids": list(prompt_ids),
@@ -532,8 +550,12 @@ class SGLangReceiptDirectorClient:
         if seed is not None:
             # SkillFlow's OpenAI boundary calls this field ``seed``.  The
             # deployed SGLang 0.5.15 native /generate SamplingParams exposes
-            # the equivalent field as ``sampling_seed``.
-            payload["sampling_params"]["sampling_seed"] = seed
+            # the equivalent field as ``sampling_seed`` backed by signed
+            # ``torch.int64``.  Keep the original uint64 value in the receipt
+            # and project only the SGLang wire value.
+            payload["sampling_params"]["sampling_seed"] = (
+                _sglang_wire_sampling_seed(seed)
+            )
         (
             resolved_action_schema,
             _,
@@ -811,6 +833,7 @@ class SGLangReceiptDirectorClient:
                 prompt,
                 payload,
                 value,
+                generation_seed=seed,
                 policy_version=policy_version,
                 adapter_name=adapter_name,
                 expected_server_weight_version=expected_server_weight_version,
@@ -944,6 +967,8 @@ class SGLangReceiptDirectorClient:
             "latency_ms": metadata.get("latency_ms"),
             "attempt_count": metadata.get("attempt_count"),
             "generation_seed": metadata.get("generation_seed"),
+            "wire_sampling_seed": metadata.get("wire_sampling_seed"),
+            "sampling_seed_adapter": metadata.get("sampling_seed_adapter"),
             "server_weight_version": metadata.get("server_weight_version"),
             "receipt_verified": metadata.get("receipt_verified"),
         }
@@ -996,6 +1021,7 @@ class SGLangReceiptDirectorClient:
                 prompt,
                 selector_payload,
                 value,
+                generation_seed=seed,
                 policy_version=policy_version,
                 adapter_name=adapter_name,
                 expected_server_weight_version=expected_server_weight_version,
@@ -1044,6 +1070,7 @@ class SGLangReceiptDirectorClient:
                 prompt,
                 role_selection_payload,
                 value,
+                generation_seed=seed,
                 policy_version=policy_version,
                 adapter_name=adapter_name,
                 expected_server_weight_version=expected_server_weight_version,
@@ -1104,6 +1131,7 @@ class SGLangReceiptDirectorClient:
                 declaration_prompt,
                 declaration_payload,
                 value,
+                generation_seed=seed,
                 policy_version=policy_version,
                 adapter_name=adapter_name,
                 expected_server_weight_version=expected_server_weight_version,
@@ -1220,6 +1248,7 @@ class SGLangReceiptDirectorClient:
                 prompt,
                 field_payload,
                 value,
+                generation_seed=seed,
                 policy_version=policy_version,
                 adapter_name=adapter_name,
                 expected_server_weight_version=expected_server_weight_version,
@@ -1273,6 +1302,7 @@ class SGLangReceiptDirectorClient:
                         prompt,
                         agent_payload,
                         value,
+                        generation_seed=seed,
                         policy_version=policy_version,
                         adapter_name=adapter_name,
                         expected_server_weight_version=(
@@ -1319,6 +1349,7 @@ class SGLangReceiptDirectorClient:
                 prompt,
                 candidate_payload,
                 value,
+                generation_seed=seed,
                 policy_version=policy_version,
                 adapter_name=adapter_name,
                 expected_server_weight_version=expected_server_weight_version,
@@ -1371,6 +1402,7 @@ class SGLangReceiptDirectorClient:
             parameter_prompt,
             parameter_payload,
             value,
+            generation_seed=seed,
             policy_version=policy_version,
             adapter_name=adapter_name,
             expected_server_weight_version=expected_server_weight_version,
@@ -1463,6 +1495,7 @@ class SGLangReceiptDirectorClient:
         payload: Mapping[str, Any],
         value: Mapping[str, Any],
         *,
+        generation_seed: Optional[int],
         policy_version: str,
         adapter_name: Optional[str],
         expected_server_weight_version: Optional[str],
@@ -1535,9 +1568,11 @@ class SGLangReceiptDirectorClient:
                 "completion_tokens": len(output_ids),
                 "latency_ms": latency_ms,
                 "attempt_count": attempt_count,
-                "generation_seed": payload.get("sampling_params", {}).get(
+                "generation_seed": generation_seed,
+                "wire_sampling_seed": payload.get("sampling_params", {}).get(
                     "sampling_seed"
                 ),
+                "sampling_seed_adapter": SGLANG_UINT64_TO_INT64_SEED_ADAPTER,
                 "action_json_schema_version": action_json_schema_version,
                 "action_schema_branch": action_schema_branch,
                 "receipt_verified": True,
@@ -3122,6 +3157,12 @@ class AgentGraphRolloutCollector:
                 else ()
             )
             runtime_summary = dict(_runtime_summary(receipt_execution))
+            runtime_summary["director_wire_sampling_seed"] = metadata.get(
+                "wire_sampling_seed"
+            )
+            runtime_summary["director_sampling_seed_adapter"] = metadata.get(
+                "sampling_seed_adapter"
+            )
             if (
                 canvas.partial_execution is not None
                 or canvas.execution_failure_records
