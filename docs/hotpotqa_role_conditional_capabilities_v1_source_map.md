@@ -9,10 +9,10 @@ provided-context retrieval runtime, and concise
 or merge the r4 trajectories; r4 metrics are comparison references only.
 
 The next evaluation condition is configured in
-`config/evaluation_hotpotqa_role_conditional_v1_r19.yaml`. Its artifacts and
-reports use the independent `hotpotqa_role_conditional_v1_r19` namespace.
+`config/evaluation_hotpotqa_role_conditional_v1_r20.yaml`. Its artifacts and
+reports use the independent `hotpotqa_role_conditional_v1_r20` namespace.
 The in-progress r17 formal run remains isolated in its original namespace and
-is not resumed or relabeled as r19.
+is not resumed or relabeled as r20.
 
 ## Directly reused from FlowSteer
 
@@ -482,6 +482,36 @@ unrelated `MODIFY_AGENT` or `ADD_SUBGRAPH` actions are withheld. This is a
 measured `preserve -> diagnose -> repair -> augment` recovery projection, not
 a requirement to select a Formatter. A generic Output and every topology that
 does not select the optional Formatter retain the prior open search space.
+
+The r19 Stable Zero canary completed both frozen tasks with explicit FINISH
+and exact answers, but its formal run remains an incomplete two-task
+diagnostic and is not a 128-task metric. On the third frozen task, the Canvas
+reached the eight-Agent boundary with a failed, repair-exhausted auxiliary and
+an already declared dirty replacement. `_mandatory_repair_agent_ids`
+correctly recognized that live recovery existed, but
+`model_admissible_action_types` evaluated the impossible replacement-ADD
+branch before the available replacement MODIFY / exact relation-repair
+branches. This produced an empty model-admissible domain. The inference loop
+already represented that state as `no_admissible_action`, while the exact
+trajectory collector still attempted to render an empty constrained JSON
+schema and raised a collection failure.
+
+The independent r20 condition changes only those two measured controller
+boundaries. Live failed-ingress or routed-recovery `SET_RELATION` candidates
+and an existing dirty replacement `MODIFY_AGENT` are projected before a new
+replacement `ADD_SUBGRAPH`; the authoritative preservation admission gate uses
+the same order. Existing evidence, continuation receipts, semantic artifacts,
+relations, and Output identity remain preserved. If the Canvas still has no
+legal action, `AgentGraphRolloutCollector` now mirrors
+`AgentGraphOrchestrator.run`: it issues no Director request, persists the
+trajectory as `no_admissible_action`, evaluates it as a natural non-FINISH
+terminal failure, and does not use the max-round semantic-lineage fallback.
+This is a necessary exact-receipt adapter for FlowSteer's progressive
+edit--execute--feedback boundary and SkillFlow's terminal outcome handling; it
+does not invent an action, synthesize a role, add an edge, select an answer, or
+change FINISH admission. Reasoner, Verifier, Formatter, retrieval, repair, and
+generic Output remain optional capabilities in the open search space; no role
+set, serial ancestry, or fixed topology is introduced.
 
 ## Not implemented or enabled in this condition
 
