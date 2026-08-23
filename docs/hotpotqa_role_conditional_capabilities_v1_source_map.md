@@ -9,8 +9,8 @@ provided-context retrieval runtime, and concise
 or merge the r4 trajectories; r4 metrics are comparison references only.
 
 The current condition is configured in
-`config/evaluation_hotpotqa_role_conditional_v1_r13.yaml`. Its artifacts and
-reports use the independent `hotpotqa_role_conditional_v1_r13` namespace.
+`config/evaluation_hotpotqa_role_conditional_v1_r14.yaml`. Its artifacts and
+reports use the independent `hotpotqa_role_conditional_v1_r14` namespace.
 
 ## Directly reused from FlowSteer
 
@@ -271,6 +271,33 @@ independent r13 condition exposes the same four checks to the Director's open
 search space. It does not require a Reasoner, Verifier, Formatter, fixed edge,
 or serial ordering; the check applies only when the Director selects a
 semantic reasoning capability for a comparison task.
+
+The r13 canary remains preserved in
+`artifacts/hotpotqa_role_conditional_v1_r13/hotpotqa`. The Delhi task completed
+through a selected Reasoner and generic Output without either Verifier or
+Formatter. The comparison task materialized the correct semantic candidate,
+generic Output artifact, and an independently successful Verifier branch in
+its first Canvas revision, but no Output had been assigned. The preservation
+gate then removed every relation that could converge the parallel branch into
+the existing Output, while the complete-Canvas gate removed every Output
+target until that convergence existed. The Director therefore received only
+unrelated add/modify actions and reached `max_rounds` with its correct
+artifacts still preserved.
+
+The independent r14 condition maps FlowSteer's downstream `Aggregate` boundary
+onto the existing AgentGraph relation vocabulary. When successful parallel
+branches are the only reason an existing generic Output cannot be selected,
+the live action mask admits only a directed, monotonic
+`SET_RELATION(branch, Output)` that strictly reduces the current
+`cannot_reach_output` set. Each accepted edge is an ordinary FlowSteer
+edit--execute--feedback turn and reruns the affected Output through the
+existing Runtime dirty closure. Multiple branches converge one edge per turn;
+only after all current Agents reach the Output does the next live domain expose
+`SET_OUTPUT`. Existing edges, source artifacts, Tool receipts, and failure
+observations are preserved. A pure Formatter is never used as a multi-branch
+aggregator. This is a necessary AgentGraph adaptation of FlowSteer's existing
+fan-in boundary, not an automatic topology, role template, answer selection,
+or FINISH operation.
 
 ## Not implemented or enabled in this condition
 
