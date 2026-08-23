@@ -320,6 +320,18 @@ _HOTPOTQA_VERIFIER_PROTOCOL = (
     "diagnosis; do not supply a substitute candidate for the Formatter."
 )
 
+_HOTPOTQA_ROLE_CONDITIONAL_VERIFIER_PROTOCOL = (
+    _HOTPOTQA_VERIFIER_PROTOCOL.replace(
+        "Inspect the routed Reasoner candidate",
+        "Inspect the routed semantic candidate",
+        1,
+    ).replace(
+        "Copy the Reasoner's Candidate answer character-for-character.",
+        "Copy the routed Candidate answer character-for-character.",
+        1,
+    )
+)
+
 _QA_COMPLETE_ENTITY_SURFACE_RULE = (
     "A semantic answer must use one concise evidence-grounded surface form. "
     "Preserve the entity identity, requested relation, answer type, cardinality, "
@@ -512,7 +524,11 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
         ) + " Do not use <answer> tags."
     elif semantic_lineage and semantic_role == "verifier":
         protocol = (
-            _HOTPOTQA_VERIFIER_PROTOCOL
+            (
+                _HOTPOTQA_ROLE_CONDITIONAL_VERIFIER_PROTOCOL
+                if role_conditional_hotpot
+                else _HOTPOTQA_VERIFIER_PROTOCOL
+            )
             if hotpot_semantic
             else _QA_VERIFIER_PROTOCOL
         ) + " Do not use <answer> tags."
@@ -543,6 +559,15 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
             "to a short answer span. If the task supplies legal or admissible actions and asks "
             "for one action, return exactly one listed executable action with no explanation."
         )
+        if role_conditional_hotpot:
+            protocol += (
+                " If routed inputs contain one or more explicit semantic-candidate "
+                "artifacts, copy their agreeing candidate character-for-character "
+                "into the terminal answer. Never reselect, canonicalize, or rewrite "
+                "that candidate. If routed candidates disagree, do not choose among "
+                "them; the upstream semantic conflict must be repaired before this "
+                "completion is admissible."
+            )
     else:
         protocol = (
             "You are an intermediate AgentGraph node. Follow your assigned contract and "

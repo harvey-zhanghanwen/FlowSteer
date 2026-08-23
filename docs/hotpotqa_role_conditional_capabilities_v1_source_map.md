@@ -112,6 +112,36 @@ reciprocal topology, or FINISH. The new independent evaluation namespace is
 configured in
 `config/evaluation_hotpotqa_role_conditional_v1_r3.yaml`.
 
+The failed r3 canary remains preserved in
+`artifacts/hotpotqa_role_conditional_v1_r3/hotpotqa`. Both canary tasks
+materialized the correct terminal answer, but `FINISH` remained inadmissible
+because the selected semantic consumer had no successful `qa-retrieval` read
+receipt on its own directed ancestor path. The generic preservation gate then
+rejected a Retriever ingress edit because it would change a successful
+consumer's input dependency, so both trajectories ended at `max_rounds`.
+
+The independent r4 condition in
+`config/evaluation_hotpotqa_role_conditional_v1_r4.yaml` closes only that
+measured execution boundary. When the actual routed semantic consumer lacks
+Tool evidence, the live FlowSteer action domain first reuses an existing
+receipt-bearing artifact through one `SET_RELATION` edit. If none exists and
+capacity remains, it admits one canonical
+`ADD_SUBGRAPH(Evidence Retriever -> selected semantic consumer)` transaction.
+Both paths preserve the existing Output identity and unrelated successful
+dependencies, then reuse the Runtime dirty-closure execution to rerun that
+consumer and its downstream nodes. The repair target is inferred from actual
+routed semantic artifacts and receipts: it may be a selected Reasoner, a
+generic Output capability, or another semantic producer. An already declared
+reverse edge may be completed into FlowSteer's bounded reciprocal block; no
+serial topology is required. A selected Verifier or Formatter must consume an
+explicit routed semantic-candidate artifact, but that producer may be a
+Reasoner, another Verifier, or a repair capability, so neither role is a global
+prerequisite and no three-role spine is imposed. r4 also limits newly selected
+Output ownership to terminal-compatible generic Output or optional
+formatting-only capabilities, and requires a generic Output to preserve any
+routed semantic-candidate consensus character-for-character. These are local
+action-admission and terminal-artifact contracts, not a workflow template.
+
 ## Not implemented or enabled in this condition
 
 - Skill retrieval, Skill injection, SkillFlow training, or an ACTIVE Skill

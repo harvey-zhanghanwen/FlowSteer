@@ -1869,12 +1869,25 @@ def _validate_v3_hierarchical_action_receipt(
                 )
         add_domain = domains["add_subgraph"]
         if verified_qa_semantic_protocol(add_domain.get("semantic_protocol")):
-            max_relations = (
-                2
-                if flexible_hotpotqa_semantic_protocol(
-                    add_domain.get("semantic_protocol")
+            exact_relation_count = add_domain.get("exact_relation_count")
+            if exact_relation_count is not None and (
+                isinstance(exact_relation_count, bool)
+                or not isinstance(exact_relation_count, int)
+                or exact_relation_count < 1
+            ):
+                raise ReceiptValidationError(
+                    "v3 add_subgraph exact_relation_count is invalid"
                 )
-                else 1
+            max_relations = (
+                exact_relation_count
+                if exact_relation_count is not None
+                else (
+                    2
+                    if flexible_hotpotqa_semantic_protocol(
+                        add_domain.get("semantic_protocol")
+                    )
+                    else 1
+                )
             )
             if (
                 action_value is not None
@@ -1882,6 +1895,16 @@ def _validate_v3_hierarchical_action_receipt(
             ):
                 raise ReceiptValidationError(
                     "v3 verified-QA add_subgraph exceeds its live relation edit boundary"
+                )
+            if (
+                exact_relation_count is not None
+                and action_value is not None
+                and len(action_value.get("relations", ()))
+                != exact_relation_count
+            ):
+                raise ReceiptValidationError(
+                    "v3 verified-QA add_subgraph does not match its exact live "
+                    "relation edit boundary"
                 )
             allowed_relations = {
                 json.dumps(
@@ -2002,9 +2025,17 @@ def _validate_v3_hierarchical_action_receipt(
                     "the live output domain"
                 )
             current_output_agent_id = add_domain.get("current_output_agent_id")
-            if current_output_agent_id is not None and not role_conditional:
+            if (
+                current_output_agent_id is not None
+                and add_domain.get(
+                    "explicit_output_assignment_required", False
+                )
+                is not True
+            ):
                 raise ReceiptValidationError(
-                    "v3 verified-QA add_subgraph cannot replace the current Output Agent"
+                    "v3 verified-QA add_subgraph must preserve the current "
+                    "Output Agent unless the live domain explicitly requires "
+                    "an Output handoff"
                 )
         if metadata.get("selected_modify_agent_id") is not None:
             raise ReceiptValidationError(

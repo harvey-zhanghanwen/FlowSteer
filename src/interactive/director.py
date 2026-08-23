@@ -1807,12 +1807,23 @@ def director_live_add_subgraph_relation_candidates(
     endpoint_ids.extend(agent["agent_id"] for agent in normalized_agents)
     candidates: list[dict[str, Any]] = []
     if flexible_hotpotqa_semantic_protocol(domain.get("semantic_protocol")):
+        role_conditional = role_conditional_hotpotqa_protocol(
+            domain.get("semantic_protocol")
+        )
         for source_index, source_id in enumerate(endpoint_ids):
             for target_id in endpoint_ids[source_index + 1 :]:
                 source_role = roles[source_id]
                 target_role = roles[target_id]
-                source_to_target = source_role != "format"
-                target_to_source = target_role != "format"
+                source_to_target = source_role != "format" and not (
+                    role_conditional
+                    and target_role in {"verifier", "format"}
+                    and source_role not in {"reasoner", "verifier", "repair"}
+                )
+                target_to_source = target_role != "format" and not (
+                    role_conditional
+                    and source_role in {"verifier", "format"}
+                    and target_role not in {"reasoner", "verifier", "repair"}
+                )
                 if source_to_target:
                     candidates.append(
                         {
@@ -1877,6 +1888,19 @@ def director_live_add_subgraph_relation_candidates(
                 for candidate in candidates
                 if supplies_required_ingress(candidate)
             ]
+            if (
+                domain.get("exact_relation_count") == 1
+                and tuple(domain.get("admitted_new_role_families", ()))
+                == ("evidence_retriever",)
+            ):
+                candidates = [
+                    candidate
+                    for candidate in candidates
+                    if candidate["source_id"] in new_agent_ids
+                    and candidate["target_id"] in required_ingress_ids
+                    and candidate["source_to_target"] is True
+                    and candidate["target_to_source"] is False
+                ]
         return tuple(candidates)
     semantic_dataflow_pairs = {
         ("evidence_retriever", "reasoner"),
@@ -2171,12 +2195,25 @@ def director_live_action_parameter_json_schema_text(
                 normalized_agents,
             )
             if relation_candidates:
-                max_relations = (
-                    2
-                    if flexible_hotpotqa_semantic_protocol(
-                        domain.get("semantic_protocol")
+                exact_relation_count = domain.get("exact_relation_count")
+                if exact_relation_count is not None and (
+                    isinstance(exact_relation_count, bool)
+                    or not isinstance(exact_relation_count, int)
+                    or exact_relation_count < 1
+                ):
+                    raise ValueError(
+                        "add_subgraph exact_relation_count must be a positive integer"
                     )
-                    else 1
+                max_relations = (
+                    exact_relation_count
+                    if exact_relation_count is not None
+                    else (
+                        2
+                        if flexible_hotpotqa_semantic_protocol(
+                            domain.get("semantic_protocol")
+                        )
+                        else 1
+                    )
                 )
                 schema["properties"]["relations"] = {
                     "type": "array",
@@ -2187,11 +2224,15 @@ def director_live_action_parameter_json_schema_text(
                     # validation still rejects a repeated unordered pair.
                     "maxItems": max_relations,
                     "minItems": (
-                        1
-                        if domain.get(
-                            "required_ingress_consumer_agent_ids", ()
+                        exact_relation_count
+                        if exact_relation_count is not None
+                        else (
+                            1
+                            if domain.get(
+                                "required_ingress_consumer_agent_ids", ()
+                            )
+                            else 0
                         )
-                        else 0
                     ),
                     "uniqueItems": True,
                     "items": {
@@ -2266,9 +2307,6 @@ def director_live_action_parameter_json_schema_text(
                     isolated_boundary
                     or (
                         current_output_agent_id is not None
-                        and not role_conditional_hotpotqa_protocol(
-                            domain.get("semantic_protocol")
-                        )
                     )
                     or _live_defer_output_assignment(domain)
                 )

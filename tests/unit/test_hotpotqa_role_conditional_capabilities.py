@@ -21,6 +21,7 @@ from src.interactive.agent_runtime import (
 )
 from src.interactive.agent_workflow_env import (
     AgentWorkflowEnv,
+    AgentWorkflowStateError,
     _HOTPOTQA_ROLE_CONDITIONAL_FORMAT_CONTRACT,
 )
 from src.interactive.director import (
@@ -33,6 +34,7 @@ from src.interactive.model_registry import (
     ModelSpec,
     ProviderSpec,
 )
+from src.interactive.openai_gateway import build_agent_messages
 from src.interactive.qa_tool_adapter import (
     QARetrievalReactExecutionAdapter,
     QA_RETRIEVAL_TOOL_ID,
@@ -107,11 +109,13 @@ def _env(
     registry: ModelRegistry,
     *,
     graph: AgentGraph | None = None,
+    max_agents: int | None = None,
 ) -> AgentWorkflowEnv:
     return AgentWorkflowEnv(
         registry,
         runtime=_runtime(registry),
         graph=graph,
+        max_agents=max_agents,
         problem=SYNTHETIC_QUESTION,
         require_exact_answer_tag=True,
         require_format_agent=False,
@@ -144,6 +148,21 @@ def _read_receipt() -> dict[str, object]:
         },
         "error_type": None,
     }
+
+
+def _retrieval_artifact() -> str:
+    return json.dumps(
+        [
+            {
+                "passage_id": "synthetic-passage",
+                "evidence_span": (
+                    "Source Alpha links to Bridge Beta. "
+                    f"Bridge Beta identifies {SYNTHETIC_CANDIDATE}."
+                ),
+            }
+        ],
+        sort_keys=True,
+    )
 
 
 def _reasoner_artifact(candidate: str = SYNTHETIC_CANDIDATE) -> str:
@@ -504,7 +523,13 @@ class RoleConditionalSearchSpaceTests(unittest.TestCase):
         self.assertIsNone(env._format_agent_issue_for(candidate))
         self.assertEqual((), env._required_semantic_edges())
 
-    def test_add_subgraph_can_atomically_handoff_an_unfinished_output(self) -> None:
+        add_domain = env.model_admissible_action_targets()["add_subgraph"]
+        self.assertEqual(
+            ["format", "output"],
+            add_domain["output_role_families"],
+        )
+
+    def test_add_subgraph_can_select_a_terminal_output_after_a_reasoner(self) -> None:
         registry = _registry()
         graph = AgentGraph(
             [
@@ -517,7 +542,6 @@ class RoleConditionalSearchSpaceTests(unittest.TestCase):
                     execution_mode="react",
                 )
             ],
-            output_agent_id="reasoner",
         )
         env = _env(registry, graph=graph)
         domains = env.model_admissible_action_targets()
@@ -537,8 +561,12 @@ class RoleConditionalSearchSpaceTests(unittest.TestCase):
             )
         )
         output_schema = schema["properties"]["output_agent_id"]
-        self.assertIn("output_agent_id", schema["required"])
-        output_enums = set(output_schema["enum"])
+        self.assertNotIn("output_agent_id", schema["required"])
+        output_enums = {
+            item
+            for branch in output_schema["anyOf"]
+            for item in branch.get("enum", ())
+        }
         self.assertIn("node_1", output_enums)
 
         candidate = graph.fork()
@@ -555,6 +583,388 @@ class RoleConditionalSearchSpaceTests(unittest.TestCase):
         candidate.set_output("node_1")
         self.assertIsNone(env._output_sink_issue_for(candidate))
         self.assertIsNone(env._semantic_edit_issue_for(candidate))
+
+    def test_generic_output_without_reasoner_can_receive_evidence_ingress(
+        self,
+    ) -> None:
+        registry = _registry()
+        graph = AgentGraph([_output_agent()], output_agent_id="output")
+        env = _env(registry, graph=graph)
+        outputs = {"output": f"<answer>{SYNTHETIC_CANDIDATE}</answer>"}
+        env._progressive_execution = _execution(
+            graph,
+            outputs=outputs,
+            final_answer=outputs["output"],
+        )
+        env._progressive_execution_revision = graph.revision
+        env._progressive_outputs = dict(outputs)
+
+        self.assertEqual(
+            ("output",),
+            env._role_conditional_evidence_ingress_consumer_ids(),
+        )
+        domain = env.model_admissible_action_targets()["add_subgraph"]
+        self.assertEqual(
+            ["output"],
+            domain["required_ingress_consumer_agent_ids"],
+        )
+        self.assertEqual(
+            ["evidence_retriever"],
+            domain["admitted_new_role_families"],
+        )
+        self.assertIs(domain["explicit_output_assignment_required"], False)
+
+    def test_each_reasoner_requires_evidence_on_its_own_routed_path(self) -> None:
+        registry = _registry()
+        graph = AgentGraph(
+            [
+                _evidence_agent(),
+                AgentNode(
+                    "reasoner_a",
+                    "model-a",
+                    "align routed evidence to the requested answer slot",
+                    role_family="reasoner",
+                    execution_mode="reasoning",
+                    artifact_type="semantic_candidate",
+                ),
+                AgentNode(
+                    "reasoner_b",
+                    "model-b",
+                    "independently align evidence to the requested answer slot",
+                    role_family="reasoner",
+                    execution_mode="reasoning",
+                    artifact_type="semantic_candidate",
+                ),
+                _output_agent(),
+            ],
+            [
+                AgentRelation("retriever", "reasoner_a", True, False),
+                AgentRelation("reasoner_a", "output", True, False),
+                AgentRelation("reasoner_b", "output", True, False),
+            ],
+            output_agent_id="output",
+        )
+        env = _env(registry, graph=graph)
+        outputs = {
+            "retriever": "retrieved evidence",
+            "reasoner_a": _reasoner_artifact(),
+            "reasoner_b": _reasoner_artifact(),
+            "output": f"<answer>{SYNTHETIC_CANDIDATE}</answer>",
+        }
+        env._progressive_execution = _execution(
+            graph,
+            outputs=outputs,
+            final_answer=outputs["output"],
+            receipt_agent_ids=("retriever",),
+        )
+        env._progressive_execution_revision = graph.revision
+        env._progressive_outputs = dict(outputs)
+
+        self.assertEqual(
+            ("reasoner_b",),
+            env._role_conditional_evidence_ingress_consumer_ids(),
+        )
+        self.assertEqual(("set_relation",), env.model_admissible_action_types())
+        candidates = env._model_admissible_relation_candidates()
+        self.assertEqual(
+            [
+                {
+                    "source_id": "retriever",
+                    "target_id": "reasoner_b",
+                    "source_to_target": True,
+                    "target_to_source": False,
+                }
+            ],
+            candidates,
+        )
+        candidate = graph.fork()
+        candidate.set_relation("retriever", "reasoner_b", True, False)
+        self.assertTrue(
+            env._role_conditional_existing_evidence_ingress_candidate(
+                candidate
+            )
+        )
+        self.assertIsNone(env._preserved_input_change_issue_for(candidate))
+
+        finished_env = _env(registry, graph=candidate)
+        finished_execution = _execution(
+            candidate,
+            outputs=outputs,
+            final_answer=outputs["output"],
+            receipt_agent_ids=("retriever",),
+        )
+        finished_env._progressive_execution = finished_execution
+        finished_env._progressive_execution_revision = candidate.revision
+        finished_env._progressive_outputs = dict(outputs)
+        self.assertIsNone(
+            finished_env._semantic_protocol_issue(finished_execution)
+        )
+        self.assertIs(
+            finished_env.finish_admissibility()["admissible"],
+            True,
+        )
+
+    def test_receipt_bearing_reasoner_repairs_parallel_reasoner_at_capacity(
+        self,
+    ) -> None:
+        registry = _registry()
+        graph = AgentGraph(
+            [
+                AgentNode(
+                    "reasoner_a",
+                    "model-a",
+                    "retrieve evidence and determine one semantic candidate",
+                    role_family="reasoner",
+                    allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                    execution_mode="react",
+                    artifact_type="semantic_candidate",
+                ),
+                AgentNode(
+                    "reasoner_b",
+                    "model-b",
+                    "independently align evidence to the requested answer slot",
+                    role_family="reasoner",
+                    execution_mode="reasoning",
+                    artifact_type="semantic_candidate",
+                ),
+                _output_agent(),
+            ],
+            [
+                AgentRelation("reasoner_a", "output", True, False),
+                AgentRelation("reasoner_b", "output", True, False),
+            ],
+            output_agent_id="output",
+        )
+        env = _env(registry, graph=graph, max_agents=3)
+        outputs = {
+            "reasoner_a": _reasoner_artifact(),
+            "reasoner_b": _reasoner_artifact(),
+            "output": f"<answer>{SYNTHETIC_CANDIDATE}</answer>",
+        }
+        env._progressive_execution = _execution(
+            graph,
+            outputs=outputs,
+            final_answer=outputs["output"],
+            receipt_agent_ids=("reasoner_a",),
+        )
+        env._progressive_execution_revision = graph.revision
+        env._progressive_outputs = dict(outputs)
+
+        self.assertEqual(
+            ("reasoner_b",),
+            env._role_conditional_evidence_ingress_consumer_ids(),
+        )
+        self.assertEqual(("set_relation",), env.model_admissible_action_types())
+        self.assertEqual(
+            [
+                {
+                    "source_id": "reasoner_a",
+                    "target_id": "reasoner_b",
+                    "source_to_target": True,
+                    "target_to_source": False,
+                }
+            ],
+            env._model_admissible_relation_candidates(),
+        )
+
+    def test_existing_evidence_can_complete_a_bounded_reciprocal_block(
+        self,
+    ) -> None:
+        registry = _registry()
+        graph = AgentGraph(
+            [
+                AgentNode(
+                    "reasoner",
+                    "model-a",
+                    "align evidence to the requested answer slot",
+                    role_family="reasoner",
+                    execution_mode="reasoning",
+                    artifact_type="semantic_candidate",
+                ),
+                _evidence_agent(),
+                _output_agent(),
+            ],
+            [
+                AgentRelation("reasoner", "retriever", True, False),
+                AgentRelation("retriever", "output", True, False),
+            ],
+            output_agent_id="output",
+        )
+        env = _env(registry, graph=graph, max_agents=3)
+        outputs = {
+            "reasoner": _reasoner_artifact(),
+            "retriever": "retrieved evidence",
+            "output": f"<answer>{SYNTHETIC_CANDIDATE}</answer>",
+        }
+        env._progressive_execution = _execution(
+            graph,
+            outputs=outputs,
+            final_answer=outputs["output"],
+            receipt_agent_ids=("retriever",),
+        )
+        env._progressive_execution_revision = graph.revision
+        env._progressive_outputs = dict(outputs)
+
+        self.assertEqual(("reasoner",), env._role_conditional_evidence_ingress_consumer_ids())
+        self.assertEqual(("set_relation",), env.model_admissible_action_types())
+        candidates = env._model_admissible_relation_candidates()
+        self.assertEqual(1, len(candidates))
+        self.assertIs(candidates[0]["source_to_target"], True)
+        self.assertIs(candidates[0]["target_to_source"], True)
+        candidate = graph.fork()
+        candidate.set_relation("reasoner", "retriever", True, True)
+        self.assertTrue(
+            env._role_conditional_existing_evidence_ingress_candidate(
+                candidate
+            )
+        )
+        self.assertIsNone(env._preserved_input_change_issue_for(candidate))
+
+    def test_missing_evidence_projects_one_retriever_ingress_augmentation(
+        self,
+    ) -> None:
+        registry = _registry()
+        graph = AgentGraph(
+            [
+                AgentNode(
+                    "reasoner",
+                    "model-a",
+                    "align routed evidence to the requested answer slot",
+                    role_family="reasoner",
+                    execution_mode="reasoning",
+                    artifact_type="semantic_candidate",
+                ),
+                AgentNode(
+                    "verifier",
+                    "model-b",
+                    "verify the routed semantic candidate",
+                    role_family="verifier",
+                    execution_mode="reasoning",
+                    artifact_type="verification_report",
+                ),
+                _output_agent(),
+            ],
+            [
+                AgentRelation("reasoner", "verifier", True, False),
+                AgentRelation("verifier", "output", True, False),
+            ],
+            output_agent_id="output",
+        )
+        env = _env(registry, graph=graph)
+        outputs = {
+            "reasoner": _reasoner_artifact(),
+            "verifier": _verifier_artifact(),
+            "output": f"<answer>{SYNTHETIC_CANDIDATE}</answer>",
+        }
+        env._progressive_execution = _execution(
+            graph,
+            outputs=outputs,
+            final_answer=outputs["output"],
+        )
+        env._progressive_execution_revision = graph.revision
+        env._progressive_outputs = dict(outputs)
+
+        self.assertEqual(("add_subgraph",), env.model_admissible_action_types())
+        domain = env.model_admissible_action_targets()["add_subgraph"]
+        self.assertEqual(1, domain["max_new_agents"])
+        self.assertEqual(
+            ["evidence_retriever"],
+            domain["admitted_new_role_families"],
+        )
+        self.assertEqual(
+            ["reasoner"],
+            domain["required_ingress_consumer_agent_ids"],
+        )
+        self.assertEqual(1, domain["exact_relation_count"])
+        self.assertIs(domain["explicit_output_assignment_required"], False)
+        declaration = {
+            "agent_id": "node_1",
+            "model_id": "model-c",
+            "contract": "retrieve explicit evidence for the original question",
+            "role_family": "evidence_retriever",
+            "allowed_tools": [QA_RETRIEVAL_TOOL_ID],
+            "execution_mode": "react",
+        }
+        schema = json.loads(
+            director_live_action_parameter_json_schema_text(
+                "add_subgraph",
+                {"add_subgraph": domain},
+                add_agents=(declaration,),
+            )
+        )
+        self.assertEqual({"type": "null"}, schema["properties"]["output_agent_id"])
+        self.assertEqual(1, schema["properties"]["relations"]["minItems"])
+        self.assertEqual(1, schema["properties"]["relations"]["maxItems"])
+        for branch in schema["properties"]["relations"]["items"]["anyOf"]:
+            relation = {
+                key: value["const"]
+                for key, value in branch["properties"].items()
+            }
+            self.assertEqual(
+                {
+                    "source_id": "node_1",
+                    "target_id": "reasoner",
+                    "source_to_target": True,
+                    "target_to_source": False,
+                },
+                relation,
+            )
+
+        candidate = graph.fork()
+        candidate.add_agent(
+            AgentNode(
+                "node_1",
+                "model-c",
+                declaration["contract"],
+                role_family="evidence_retriever",
+                allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                execution_mode="react",
+            )
+        )
+        candidate.set_relation("node_1", "reasoner", True, False)
+        self.assertTrue(env._role_conditional_evidence_ingress_candidate(candidate))
+        self.assertIsNone(env._preserved_input_change_issue_for(candidate))
+        valid_payload = {
+            "action": "add_subgraph",
+            "agents": [declaration],
+            "relations": [
+                {
+                    "source_id": "node_1",
+                    "target_id": "reasoner",
+                    "source_to_target": True,
+                    "target_to_source": False,
+                }
+            ],
+            "output_agent_id": None,
+        }
+        valid_action = env.parser.parse(json.dumps(valid_payload))
+        self.assertIsNone(
+            env._role_conditional_evidence_ingress_admission_issue(
+                valid_action
+            )
+        )
+        for invalid_relations in (
+            [],
+            [
+                *valid_payload["relations"],
+                {
+                    "source_id": "node_1",
+                    "target_id": "verifier",
+                    "source_to_target": True,
+                    "target_to_source": False,
+                },
+            ],
+        ):
+            invalid_payload = {
+                **valid_payload,
+                "relations": invalid_relations,
+            }
+            invalid_action = env.parser.parse(json.dumps(invalid_payload))
+            self.assertIsNotNone(
+                env._role_conditional_evidence_ingress_admission_issue(
+                    invalid_action
+                )
+            )
 
     def test_selected_verifier_requires_routed_input_only_at_output_boundary(
         self,
@@ -578,7 +988,7 @@ class RoleConditionalSearchSpaceTests(unittest.TestCase):
         terminal.set_output("verifier")
         issue = env._semantic_edit_issue_for(terminal)
         self.assertIsNotNone(issue)
-        self.assertIn("routed semantic consumer", issue or "")
+        self.assertIn("terminal-compatible", issue or "")
 
     def test_deferred_consumer_projects_executable_ingress_repair(self) -> None:
         registry = _registry()
@@ -616,13 +1026,17 @@ class RoleConditionalSearchSpaceTests(unittest.TestCase):
             "verifier", add_domain["admitted_new_role_families"]
         )
         self.assertNotIn("format", add_domain["admitted_new_role_families"])
+        self.assertEqual(
+            ["reasoner", "repair"],
+            add_domain["admitted_new_role_families"],
+        )
         declaration = {
             "agent_id": "node_1",
             "model_id": "model-b",
-            "contract": "retrieve explicit evidence for the original question",
-            "role_family": "evidence_retriever",
-            "allowed_tools": [QA_RETRIEVAL_TOOL_ID],
-            "execution_mode": "react",
+            "contract": "determine one semantic candidate for verification",
+            "role_family": "repair",
+            "allowed_tools": [],
+            "execution_mode": "reasoning",
         }
         schema = json.loads(
             director_live_action_parameter_json_schema_text(
@@ -648,13 +1062,20 @@ class RoleConditionalSearchSpaceTests(unittest.TestCase):
             )
             self.assertTrue(supplies_verifier)
 
-    def test_materialized_existing_agent_repairs_deferred_consumer_by_relation(
+    def test_materialized_semantic_agent_repairs_deferred_consumer_by_relation(
         self,
     ) -> None:
         registry = _registry()
         graph = AgentGraph(
             [
-                _evidence_agent("retriever"),
+                AgentNode(
+                    "semantic_producer",
+                    "model-a",
+                    "determine one semantic candidate",
+                    role_family="repair",
+                    execution_mode="reasoning",
+                    artifact_type="semantic_candidate",
+                ),
                 AgentNode(
                     "verifier",
                     "model-b",
@@ -670,10 +1091,14 @@ class RoleConditionalSearchSpaceTests(unittest.TestCase):
             graph_revision=graph.revision,
             output_agent_id=None,
             final_answer=None,
-            outputs={"retriever": "retrieved evidence"},
+            outputs={
+                "semantic_producer": (
+                    f"Candidate answer: {SYNTHETIC_CANDIDATE}"
+                )
+            },
             calls=(),
             block_completion_order=(),
-            executed_agent_ids=("retriever",),
+            executed_agent_ids=("semantic_producer",),
             deferred_agent_ids=("verifier",),
         )
         env._progressive_execution_revision = graph.revision
@@ -684,9 +1109,46 @@ class RoleConditionalSearchSpaceTests(unittest.TestCase):
         ]
         self.assertTrue(candidates)
         for relation in candidates:
-            self.assertEqual("retriever", relation["source_id"])
+            self.assertEqual("semantic_producer", relation["source_id"])
             self.assertEqual("verifier", relation["target_id"])
             self.assertIs(relation["source_to_target"], True)
+
+    def test_raw_retrieval_does_not_satisfy_deferred_verifier_ingress(
+        self,
+    ) -> None:
+        registry = _registry()
+        graph = AgentGraph(
+            [
+                _evidence_agent(),
+                AgentNode(
+                    "verifier",
+                    "model-b",
+                    "verify one routed semantic candidate",
+                    role_family="verifier",
+                    execution_mode="reasoning",
+                ),
+            ]
+        )
+        env = _env(registry, graph=graph)
+        env._progressive_execution = AgentRuntimeResult(
+            run_id="deferred-raw-evidence",
+            graph_revision=graph.revision,
+            output_agent_id=None,
+            final_answer=None,
+            outputs={"retriever": "retrieved evidence"},
+            calls=(),
+            block_completion_order=(),
+            executed_agent_ids=("retriever",),
+            deferred_agent_ids=("verifier",),
+        )
+        env._progressive_execution_revision = graph.revision
+
+        self.assertEqual(("add_subgraph",), env.model_admissible_action_types())
+        domain = env.model_admissible_action_targets()["add_subgraph"]
+        self.assertEqual(
+            ["reasoner", "repair"],
+            domain["admitted_new_role_families"],
+        )
 
     def test_exhausted_auxiliary_replacement_is_an_isolated_add_boundary(
         self,
@@ -764,6 +1226,30 @@ class RoleConditionalSearchSpaceTests(unittest.TestCase):
 
 
 class RoleConditionalTerminalTests(unittest.TestCase):
+    def test_generic_output_prompt_preserves_routed_candidate_consensus(
+        self,
+    ) -> None:
+        registry = _registry()
+        request = AgentRequest(
+            request_id="hotpot:generic-output",
+            run_id="hotpot",
+            graph_revision=1,
+            problem=SYNTHETIC_QUESTION,
+            agent=_output_agent(),
+            model=registry.require_model("model-b"),
+            provider=registry.provider_for("model-b"),
+            phase=ExecutionPhase.SINGLE,
+            is_output_agent=True,
+            require_exact_answer_tag=True,
+            semantic_protocol=SEMANTIC_PROTOCOL,
+        )
+        system = build_agent_messages(request)[0]["content"]
+        self.assertIn(
+            "copy their agreeing candidate character-for-character",
+            system,
+        )
+        self.assertIn("do not choose among them", system)
+
     def test_finish_uses_actual_routed_evidence_without_required_roles(self) -> None:
         registry = _registry()
         graph = AgentGraph(
@@ -773,7 +1259,7 @@ class RoleConditionalTerminalTests(unittest.TestCase):
         )
         env = _env(registry, graph=graph)
         outputs = {
-            "retriever": f"Candidate answer: {SYNTHETIC_CANDIDATE}",
+            "retriever": _retrieval_artifact(),
             "output": f"<answer>{SYNTHETIC_CANDIDATE}</answer>",
         }
 
@@ -811,7 +1297,7 @@ class RoleConditionalTerminalTests(unittest.TestCase):
         )
         env = _env(registry, graph=graph)
         outputs = {
-            "retriever": f"Candidate answer: {SYNTHETIC_CANDIDATE}",
+            "retriever": _retrieval_artifact(),
             "output": _reasoner_artifact(),
         }
         unfinished = _execution(
@@ -889,9 +1375,207 @@ class RoleConditionalTerminalTests(unittest.TestCase):
             [
                 _evidence_agent(),
                 AgentNode(
+                    "semantic_producer",
+                    "model-a",
+                    "determine one semantic candidate from routed evidence",
+                    role_family="repair",
+                    execution_mode="reasoning",
+                    artifact_type="semantic_candidate",
+                ),
+                AgentNode(
                     "verifier",
                     "model-b",
                     "verify the routed semantic candidate",
+                    role_family="verifier",
+                    execution_mode="reasoning",
+                    artifact_type="verification_report",
+                ),
+                _output_agent(),
+            ],
+            [
+                AgentRelation("retriever", "semantic_producer", True, False),
+                AgentRelation("semantic_producer", "verifier", True, False),
+                AgentRelation("verifier", "output", True, False),
+            ],
+            output_agent_id="output",
+        )
+        verifier_env = _env(registry, graph=verifier_graph)
+        verifier_outputs = {
+            "retriever": "retrieved evidence",
+            "semantic_producer": (
+                f"Candidate answer: {SYNTHETIC_CANDIDATE}"
+            ),
+            "verifier": _verifier_artifact(),
+            "output": f"<answer>{SYNTHETIC_CANDIDATE}</answer>",
+        }
+        verifier_execution = _execution(
+            verifier_graph,
+            outputs=verifier_outputs,
+            final_answer=verifier_outputs["output"],
+            receipt_agent_ids=("retriever",),
+        )
+        self.assertIsNone(verifier_env._semantic_protocol_issue(verifier_execution))
+
+    def test_generic_output_preserves_routed_semantic_candidate(self) -> None:
+        registry = _registry()
+        graph = AgentGraph(
+            [
+                _evidence_agent(),
+                AgentNode(
+                    "reasoner",
+                    "model-b",
+                    "align routed evidence to the requested answer slot",
+                    role_family="reasoner",
+                    execution_mode="reasoning",
+                    artifact_type="semantic_candidate",
+                ),
+                _output_agent(),
+            ],
+            [
+                AgentRelation("retriever", "reasoner", True, False),
+                AgentRelation("reasoner", "output", True, False),
+            ],
+            output_agent_id="output",
+        )
+        env = _env(registry, graph=graph)
+        outputs = {
+            "retriever": "retrieved evidence",
+            "reasoner": _reasoner_artifact(),
+            "output": "<answer>Other Target</answer>",
+        }
+        execution = _execution(
+            graph,
+            outputs=outputs,
+            final_answer=outputs["output"],
+            receipt_agent_ids=("retriever",),
+        )
+        issue = env._semantic_protocol_issue(execution)
+        self.assertIsNotNone(issue)
+        self.assertIn(
+            "Generic Output Agent must preserve the routed semantic candidate",
+            issue or "",
+        )
+
+    def test_generic_producer_candidate_cannot_be_changed_by_verifier(self) -> None:
+        registry = _registry()
+        graph = AgentGraph(
+            [
+                _evidence_agent(),
+                AgentNode(
+                    "semantic_producer",
+                    "model-a",
+                    "determine one semantic candidate from routed evidence",
+                    role_family="repair",
+                    execution_mode="reasoning",
+                    artifact_type="semantic_candidate",
+                ),
+                AgentNode(
+                    "verifier",
+                    "model-b",
+                    "verify the routed semantic candidate",
+                    role_family="verifier",
+                    execution_mode="reasoning",
+                    artifact_type="verification_report",
+                ),
+                _output_agent(),
+            ],
+            [
+                AgentRelation("retriever", "semantic_producer", True, False),
+                AgentRelation("semantic_producer", "verifier", True, False),
+                AgentRelation("verifier", "output", True, False),
+            ],
+            output_agent_id="output",
+        )
+        env = _env(registry, graph=graph)
+        outputs = {
+            "retriever": "retrieved evidence",
+            "semantic_producer": (
+                f"Candidate answer: {SYNTHETIC_CANDIDATE}"
+            ),
+            "verifier": _verifier_artifact("Other Target"),
+            "output": "<answer>Other Target</answer>",
+        }
+        issue = env._semantic_protocol_issue(
+            _execution(
+                graph,
+                outputs=outputs,
+                final_answer=outputs["output"],
+                receipt_agent_ids=("retriever",),
+            )
+        )
+        self.assertIsNotNone(issue)
+        self.assertIn(
+            "Verifier changed a routed semantic candidate_answer",
+            issue or "",
+        )
+
+    def test_reciprocal_verifiers_cannot_bootstrap_a_candidate(self) -> None:
+        registry = _registry()
+        graph = AgentGraph(
+            [
+                _evidence_agent(),
+                AgentNode(
+                    "context_repair",
+                    "model-a",
+                    "pass routed context to the checking block",
+                    role_family="repair",
+                    execution_mode="reasoning",
+                    artifact_type="context",
+                ),
+                AgentNode(
+                    "verifier_a",
+                    "model-b",
+                    "check one routed semantic candidate",
+                    role_family="verifier",
+                    execution_mode="reasoning",
+                    artifact_type="verification_report",
+                ),
+                AgentNode(
+                    "verifier_b",
+                    "model-c",
+                    "independently check one routed semantic candidate",
+                    role_family="verifier",
+                    execution_mode="reasoning",
+                    artifact_type="verification_report",
+                ),
+                _output_agent(),
+            ],
+            [
+                AgentRelation("retriever", "context_repair", True, False),
+                AgentRelation("context_repair", "verifier_a", True, False),
+                AgentRelation("verifier_a", "verifier_b", True, True),
+                AgentRelation("verifier_b", "output", True, False),
+            ],
+            output_agent_id="output",
+        )
+        env = _env(registry, graph=graph)
+        outputs = {
+            "retriever": _retrieval_artifact(),
+            "context_repair": "routed context without a semantic candidate",
+            "verifier_a": _verifier_artifact(),
+            "verifier_b": _verifier_artifact(),
+            "output": f"<answer>{SYNTHETIC_CANDIDATE}</answer>",
+        }
+        issue = env._semantic_protocol_issue(
+            _execution(
+                graph,
+                outputs=outputs,
+                final_answer=outputs["output"],
+                receipt_agent_ids=("retriever",),
+            )
+        )
+        self.assertIsNotNone(issue)
+        self.assertIn("must not bootstrap or select one", issue or "")
+
+    def test_verifier_cannot_select_a_candidate_from_raw_retrieval(self) -> None:
+        registry = _registry()
+        graph = AgentGraph(
+            [
+                _evidence_agent(),
+                AgentNode(
+                    "verifier",
+                    "model-b",
+                    "verify one routed semantic candidate",
                     role_family="verifier",
                     execution_mode="reasoning",
                     artifact_type="verification_report",
@@ -904,25 +1588,203 @@ class RoleConditionalTerminalTests(unittest.TestCase):
             ],
             output_agent_id="output",
         )
-        verifier_env = _env(registry, graph=verifier_graph)
-        verifier_outputs = {
-            "retriever": f"Candidate answer: {SYNTHETIC_CANDIDATE}",
+        with self.assertRaisesRegex(
+            AgentWorkflowStateError,
+            "already determined semantic-candidate artifact",
+        ):
+            _env(registry, graph=graph)
+
+    def test_verifier_evidence_must_be_on_its_routed_ancestor_path(self) -> None:
+        registry = _registry()
+        graph = AgentGraph(
+            [
+                _evidence_agent(),
+                AgentNode(
+                    "semantic_producer",
+                    "model-a",
+                    "determine one semantic candidate",
+                    role_family="repair",
+                    execution_mode="reasoning",
+                    artifact_type="semantic_candidate",
+                ),
+                AgentNode(
+                    "verifier",
+                    "model-b",
+                    "verify one routed semantic candidate",
+                    role_family="verifier",
+                    execution_mode="reasoning",
+                    artifact_type="verification_report",
+                ),
+                _output_agent(),
+            ],
+            [
+                AgentRelation("retriever", "output", True, False),
+                AgentRelation("semantic_producer", "verifier", True, False),
+                AgentRelation("verifier", "output", True, False),
+            ],
+            output_agent_id="output",
+        )
+        env = _env(registry, graph=graph)
+        outputs = {
+            "retriever": "retrieved evidence",
+            "semantic_producer": (
+                f"Candidate answer: {SYNTHETIC_CANDIDATE}"
+            ),
             "verifier": _verifier_artifact(),
             "output": f"<answer>{SYNTHETIC_CANDIDATE}</answer>",
         }
-        verifier_execution = _execution(
-            verifier_graph,
-            outputs=verifier_outputs,
-            final_answer=verifier_outputs["output"],
+        execution = _execution(
+            graph,
+            outputs=outputs,
+            final_answer=outputs["output"],
             receipt_agent_ids=("retriever",),
         )
-        self.assertIsNone(verifier_env._semantic_protocol_issue(verifier_execution))
+        env._progressive_execution = execution
+        env._progressive_execution_revision = graph.revision
+        env._progressive_outputs = dict(outputs)
+
+        issue = env._semantic_protocol_issue(execution)
+        self.assertIsNotNone(issue)
+        self.assertIn("no routed successful qa-retrieval", issue or "")
+        self.assertEqual(
+            ("semantic_producer",),
+            env._role_conditional_evidence_ingress_consumer_ids(),
+        )
+        self.assertEqual(("set_relation",), env.model_admissible_action_types())
+        self.assertEqual(
+            [
+                {
+                    "source_id": "retriever",
+                    "target_id": "semantic_producer",
+                    "source_to_target": True,
+                    "target_to_source": False,
+                }
+            ],
+            env._model_admissible_relation_candidates(),
+        )
+        repaired_graph = graph.fork()
+        repaired_graph.set_relation(
+            "retriever",
+            "semantic_producer",
+            True,
+            False,
+        )
+        repaired_env = _env(registry, graph=repaired_graph)
+        repaired_execution = _execution(
+            repaired_graph,
+            outputs=outputs,
+            final_answer=outputs["output"],
+            receipt_agent_ids=("retriever",),
+        )
+        repaired_env._progressive_execution = repaired_execution
+        repaired_env._progressive_execution_revision = repaired_graph.revision
+        repaired_env._progressive_outputs = dict(outputs)
+        self.assertIsNone(
+            repaired_env._semantic_protocol_issue(repaired_execution)
+        )
+        self.assertIs(
+            repaired_env.finish_admissibility()["admissible"],
+            True,
+        )
+
+    def test_generic_output_preserves_a_generic_producer_candidate(self) -> None:
+        registry = _registry()
+        graph = AgentGraph(
+            [
+                _evidence_agent(),
+                AgentNode(
+                    "semantic_producer",
+                    "model-a",
+                    "determine one semantic candidate from routed evidence",
+                    role_family="repair",
+                    execution_mode="reasoning",
+                    artifact_type="semantic_candidate",
+                ),
+                _output_agent(),
+            ],
+            [
+                AgentRelation("retriever", "semantic_producer", True, False),
+                AgentRelation("semantic_producer", "output", True, False),
+            ],
+            output_agent_id="output",
+        )
+        env = _env(registry, graph=graph)
+        outputs = {
+            "retriever": "retrieved evidence",
+            "semantic_producer": (
+                f"Candidate answer: {SYNTHETIC_CANDIDATE}"
+            ),
+            "output": "<answer>Other Target</answer>",
+        }
+        issue = env._semantic_protocol_issue(
+            _execution(
+                graph,
+                outputs=outputs,
+                final_answer=outputs["output"],
+                receipt_agent_ids=("retriever",),
+            )
+        )
+        self.assertIsNotNone(issue)
+        self.assertIn(
+            "Generic Output Agent must preserve the routed semantic candidate",
+            issue or "",
+        )
+
+    def test_generic_output_rejects_an_ambiguous_semantic_candidate_wire(
+        self,
+    ) -> None:
+        registry = _registry()
+        graph = AgentGraph(
+            [
+                _evidence_agent(),
+                AgentNode(
+                    "semantic_producer",
+                    "model-a",
+                    "determine one semantic candidate from routed evidence",
+                    role_family="repair",
+                    execution_mode="reasoning",
+                    artifact_type="semantic_candidate",
+                ),
+                _output_agent(),
+            ],
+            [
+                AgentRelation("retriever", "semantic_producer", True, False),
+                AgentRelation("semantic_producer", "output", True, False),
+            ],
+            output_agent_id="output",
+        )
+        env = _env(registry, graph=graph)
+        outputs = {
+            "retriever": "retrieved evidence",
+            "semantic_producer": (
+                "Candidate answer: Target Gamma\nCandidate answer: Other Target"
+            ),
+            "output": f"<answer>{SYNTHETIC_CANDIDATE}</answer>",
+        }
+        issue = env._semantic_protocol_issue(
+            _execution(
+                graph,
+                outputs=outputs,
+                final_answer=outputs["output"],
+                receipt_agent_ids=("retriever",),
+            )
+        )
+        self.assertIsNotNone(issue)
+        self.assertIn("semantic candidate wire must contain one", issue or "")
 
     def test_formatter_only_copies_a_routed_semantic_candidate(self) -> None:
         registry = _registry()
         graph = AgentGraph(
             [
-                _evidence_agent("candidate_source"),
+                _evidence_agent(),
+                AgentNode(
+                    "candidate_source",
+                    "model-a",
+                    "determine one semantic candidate from routed evidence",
+                    role_family="repair",
+                    execution_mode="reasoning",
+                    artifact_type="semantic_candidate",
+                ),
                 AgentNode(
                     "formatter",
                     "model-b",
@@ -932,11 +1794,15 @@ class RoleConditionalTerminalTests(unittest.TestCase):
                     artifact_type="answer_wrapper",
                 ),
             ],
-            [AgentRelation("candidate_source", "formatter", True, False)],
+            [
+                AgentRelation("retriever", "candidate_source", True, False),
+                AgentRelation("candidate_source", "formatter", True, False),
+            ],
             output_agent_id="formatter",
         )
         env = _env(registry, graph=graph)
         outputs = {
+            "retriever": _retrieval_artifact(),
             "candidate_source": f"Candidate answer: {SYNTHETIC_CANDIDATE}",
             "formatter": f"<answer>{SYNTHETIC_CANDIDATE}</answer>",
         }
@@ -944,7 +1810,7 @@ class RoleConditionalTerminalTests(unittest.TestCase):
             graph,
             outputs=outputs,
             final_answer=outputs["formatter"],
-            receipt_agent_ids=("candidate_source",),
+            receipt_agent_ids=("retriever",),
         )
         self.assertIsNone(env._semantic_protocol_issue(valid))
 
@@ -952,11 +1818,34 @@ class RoleConditionalTerminalTests(unittest.TestCase):
             graph,
             outputs={**outputs, "formatter": "<answer>Other Target</answer>"},
             final_answer="<answer>Other Target</answer>",
-            receipt_agent_ids=("candidate_source",),
+            receipt_agent_ids=("retriever",),
         )
         issue = env._semantic_protocol_issue(changed)
         self.assertIsNotNone(issue)
         self.assertIn("character-for-character", issue or "")
+
+    def test_formatter_rejects_raw_retrieval_as_its_semantic_candidate(self) -> None:
+        registry = _registry()
+        graph = AgentGraph(
+            [
+                _evidence_agent(),
+                AgentNode(
+                    "formatter",
+                    "model-b",
+                    _HOTPOTQA_ROLE_CONDITIONAL_FORMAT_CONTRACT,
+                    role_family="format",
+                    execution_mode="reasoning",
+                    artifact_type="answer_wrapper",
+                ),
+            ],
+            [AgentRelation("retriever", "formatter", True, False)],
+            output_agent_id="formatter",
+        )
+        with self.assertRaisesRegex(
+            AgentWorkflowStateError,
+            "already determined semantic-candidate artifact",
+        ):
+            _env(registry, graph=graph)
 
 
 class RoleConditionalObservationTests(unittest.TestCase):

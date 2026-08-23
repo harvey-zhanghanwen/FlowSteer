@@ -593,6 +593,26 @@ class AgentWorkflowEnv:
             ):
                 return (AgentActionType.ADD_SUBGRAPH.value,)
             return ()
+        evidence_ingress_ids = (
+            self._role_conditional_evidence_ingress_consumer_ids()
+        )
+        if evidence_ingress_ids:
+            evidence_relation_candidates = (
+                self._role_conditional_evidence_ingress_relation_candidates()
+            )
+            if (
+                evidence_relation_candidates
+                and AgentActionType.SET_RELATION.value
+                in self._allowed_action_type_set
+            ):
+                return (AgentActionType.SET_RELATION.value,)
+            if (
+                can_add
+                and AgentActionType.ADD_SUBGRAPH.value
+                in self._allowed_action_type_set
+            ):
+                return (AgentActionType.ADD_SUBGRAPH.value,)
+            return ()
         exhausted_reasoner_ids = self._repair_exhausted_reasoner_ids()
         if exhausted_reasoner_ids:
             failed_ingress_candidates = (
@@ -829,6 +849,13 @@ class AgentWorkflowEnv:
             return self._role_conditional_ingress_relation_candidates(
                 all_candidates
             )
+        evidence_ingress_ids = (
+            self._role_conditional_evidence_ingress_consumer_ids()
+        )
+        if evidence_ingress_ids:
+            return self._role_conditional_evidence_ingress_relation_candidates(
+                all_candidates
+            )
         failed_ingress_candidates = (
             self._failed_auxiliary_ingress_relation_candidates(all_candidates)
         )
@@ -875,6 +902,280 @@ class AgentWorkflowEnv:
             and not self._graph.directed_predecessors(node.id)
         )
 
+    def _role_conditional_evidence_ingress_consumer_ids(
+        self,
+    ) -> Tuple[str, ...]:
+        """Return routed semantic consumers missing required Tool evidence.
+
+        This is a revision-local FlowSteer repair projection over the actual
+        SkillFlow execution receipt. It does not require a Reasoner in the
+        general search space; it checks only semantic-candidate and checking
+        capabilities that the Director has actually selected and executed.
+        """
+
+        if (
+            not self._uses_role_conditional_capabilities()
+            or self.required_evidence_tool_id is None
+        ):
+            return ()
+        execution = self._cached_progressive_execution()
+        output_id = self._graph.output_agent_id
+        if (
+            execution is None
+            or execution.final_answer is None
+            or output_id is None
+            or not self._graph.has_node(output_id)
+        ):
+            return ()
+        routed_ids = (
+            *self._directed_ancestor_ids(self._graph, output_id),
+            output_id,
+        )
+        missing_ids: list[str] = []
+        for agent_id in routed_ids:
+            node = self._graph.get_node(agent_id)
+            role = (node.role_family or "").casefold()
+            semantic_candidate, _ = self._semantic_candidate_from_artifact(
+                execution.outputs.get(agent_id)
+            )
+            selected_semantic_capability = role == "reasoner" or (
+                role
+                not in {"evidence_retriever", "verifier", "format", "output"}
+                and semantic_candidate is not None
+            )
+            if (
+                agent_id == output_id
+                or not selected_semantic_capability
+                or not self._has_successful_artifact(agent_id)
+            ):
+                continue
+            evidence_owner_ids = (
+                *self._directed_ancestor_ids(self._graph, agent_id),
+                agent_id,
+            )
+            if self._successful_read_texts_for_agents(
+                execution,
+                evidence_owner_ids,
+            ):
+                continue
+            if any(
+                self._graph.get_node(owner_id).execution_mode.value == "react"
+                and self.required_evidence_tool_id
+                in self._graph.get_node(owner_id).allowed_tools
+                for owner_id in evidence_owner_ids
+            ):
+                # A Tool-capable node already assigned to this semantic
+                # consumer is a repair target, not a reason to add a duplicate.
+                continue
+            missing_ids.append(agent_id)
+        if missing_ids:
+            return tuple(missing_ids)
+        if self._successful_read_texts_for_agents(execution, routed_ids):
+            return ()
+        output_node = self._graph.get_node(output_id)
+        if (
+            (output_node.role_family or "").casefold() == "output"
+            and self._has_successful_artifact(output_id)
+        ):
+            # Reasoner is optional. A generic Output capability may consume a
+            # newly materialized evidence artifact and rerun in place.
+            return (output_id,)
+        return ()
+
+    def _role_conditional_evidence_ingress_candidate(
+        self,
+        candidate: AgentGraph,
+    ) -> bool:
+        """Match one Retriever-to-selected-consumer augmentation transaction."""
+
+        consumer_ids = set(
+            self._role_conditional_evidence_ingress_consumer_ids()
+        )
+        if (
+            not consumer_ids
+            or candidate.output_agent_id != self._graph.output_agent_id
+        ):
+            return False
+        current_ids = {node.id for node in self._graph.nodes}
+        new_nodes = tuple(
+            node for node in candidate.nodes if node.id not in current_ids
+        )
+        if (
+            len(new_nodes) != 1
+            or len(candidate.nodes) != len(self._graph.nodes) + 1
+        ):
+            return False
+        retriever = new_nodes[0]
+        if (
+            (retriever.role_family or "").casefold() != "evidence_retriever"
+            or retriever.execution_mode.value != "react"
+            or retriever.allowed_tools != (self.required_evidence_tool_id,)
+        ):
+            return False
+        changed_consumer_ids: list[str] = []
+        for node in self._graph.nodes:
+            before = tuple(self._graph.directed_predecessors(node.id))
+            after = tuple(candidate.directed_predecessors(node.id))
+            if before == after:
+                continue
+            if (
+                node.id not in consumer_ids
+                or set(after) != {*before, retriever.id}
+            ):
+                return False
+            changed_consumer_ids.append(node.id)
+        return (
+            len(changed_consumer_ids) == 1
+            and candidate.relation_bits(
+                retriever.id,
+                changed_consumer_ids[0],
+            ).source_to_target
+            and not candidate.relation_bits(
+                retriever.id,
+                changed_consumer_ids[0],
+            ).target_to_source
+            and set(self._directed_successors(candidate, retriever.id))
+            == {changed_consumer_ids[0]}
+            and len(candidate.relations) == len(self._graph.relations) + 1
+        )
+
+    def _role_conditional_existing_evidence_ingress_candidate(
+        self,
+        candidate: AgentGraph,
+    ) -> bool:
+        """Match one existing receipt-bearing Agent ingress relation."""
+
+        consumer_ids = set(
+            self._role_conditional_evidence_ingress_consumer_ids()
+        )
+        execution = self._cached_progressive_execution()
+        if (
+            not consumer_ids
+            or execution is None
+            or candidate.output_agent_id != self._graph.output_agent_id
+            or tuple(node.id for node in candidate.nodes)
+            != tuple(node.id for node in self._graph.nodes)
+        ):
+            return False
+        source_ids = tuple(
+            node.id
+            for node in self._graph.nodes
+            if self._has_successful_artifact(node.id)
+            and self._successful_read_texts_for_agents(execution, (node.id,))
+        )
+        for source_id in source_ids:
+            before_successors = set(
+                self._directed_successors(self._graph, source_id)
+            )
+            after_successors = set(
+                self._directed_successors(candidate, source_id)
+            )
+            added_consumers = (
+                after_successors - before_successors
+            ).intersection(consumer_ids)
+            if len(added_consumers) != 1:
+                continue
+            consumer_id = next(iter(added_consumers))
+            before_bits = self._graph.relation_bits(source_id, consumer_id)
+            after_bits = candidate.relation_bits(source_id, consumer_id)
+            if (
+                before_bits.source_to_target
+                or not after_bits.source_to_target
+                or after_bits.target_to_source != before_bits.target_to_source
+            ):
+                continue
+            if all(
+                tuple(self._graph.directed_predecessors(node.id))
+                == tuple(candidate.directed_predecessors(node.id))
+                for node in self._graph.nodes
+                if node.id != consumer_id
+            ):
+                return True
+        return False
+
+    def _role_conditional_evidence_ingress_relation_candidates(
+        self,
+        candidates: Optional[Sequence[Mapping[str, object]]] = None,
+    ) -> list[dict[str, object]]:
+        """Route one existing receipt-bearing artifact to a missing consumer."""
+
+        if not self._role_conditional_evidence_ingress_consumer_ids():
+            return []
+        source_candidates = (
+            self._all_model_admissible_relation_candidates()
+            if candidates is None
+            else [dict(item) for item in candidates]
+        )
+        result: list[dict[str, object]] = []
+        for item in source_candidates:
+            candidate = self._graph.fork()
+            candidate.set_relation(
+                str(item["source_id"]),
+                str(item["target_id"]),
+                bool(item["source_to_target"]),
+                bool(item["target_to_source"]),
+            )
+            if self._role_conditional_existing_evidence_ingress_candidate(
+                candidate
+            ):
+                result.append(dict(item))
+        return result
+
+    def _role_conditional_evidence_ingress_admission_issue(
+        self,
+        action: AgentAction,
+    ) -> Optional[str]:
+        """Keep a measured missing-evidence turn on one executable ADD edit."""
+
+        consumer_ids = set(
+            self._role_conditional_evidence_ingress_consumer_ids()
+        )
+        if not consumer_ids:
+            return None
+        relation_candidates = (
+            self._role_conditional_evidence_ingress_relation_candidates()
+        )
+        if relation_candidates:
+            if any(
+                self._relation_action_matches_candidate(action, candidate)
+                for candidate in relation_candidates
+            ):
+                return None
+            return (
+                "route one existing successful qa-retrieval artifact into one "
+                "selected semantic consumer before adding another Retriever; "
+                "required_evidence_ingress_consumer_agent_ids="
+                f"{sorted(consumer_ids)!r}"
+            )
+        if (
+            action.action_type is AgentActionType.ADD_SUBGRAPH
+            and len(action.agents) == 1
+            and (action.agents[0].role_family or "").casefold()
+            == "evidence_retriever"
+            and action.agents[0].execution_mode == "react"
+            and action.agents[0].allowed_tools
+            == (self.required_evidence_tool_id,)
+            and action.output_agent_id is None
+            and len(action.relations) == 1
+        ):
+            relation = action.relations[0]
+            new_id = action.agents[0].agent_id
+            supplies_consumer = (
+                relation.source_id == new_id
+                and relation.target_id in consumer_ids
+                and relation.source_to_target is True
+                and relation.target_to_source is False
+            )
+            if supplies_consumer:
+                return None
+        return (
+            "add exactly one qa-retrieval ReAct Evidence Retriever and route "
+            "its receipt-grounded artifact into one selected tool-free "
+            "semantic consumer while preserving the current Output identity; "
+            "required_evidence_ingress_consumer_agent_ids="
+            f"{sorted(consumer_ids)!r}"
+        )
+
     def _role_conditional_ingress_relation_candidates(
         self,
         candidates: Optional[Sequence[Mapping[str, object]]] = None,
@@ -888,6 +1189,14 @@ class AgentWorkflowEnv:
         if not pending_ids or execution is None:
             return []
         materialized_ids = set(execution.outputs)
+        semantic_materialized_ids = {
+            agent_id
+            for agent_id in materialized_ids
+            if self._semantic_candidate_from_artifact(
+                execution.outputs.get(agent_id)
+            )[0]
+            is not None
+        }
         source_candidates = (
             self._all_model_admissible_relation_candidates()
             if candidates is None
@@ -906,6 +1215,13 @@ class AgentWorkflowEnv:
                 consumer_id in self._directed_successors(candidate, source_id)
                 and consumer_id
                 not in self._directed_successors(self._graph, source_id)
+                and (
+                    (
+                        self._graph.get_node(consumer_id).role_family or ""
+                    ).casefold()
+                    not in {"verifier", "format"}
+                    or source_id in semantic_materialized_ids
+                )
                 for source_id in materialized_ids
                 for consumer_id in pending_ids
             ):
@@ -1390,6 +1706,15 @@ class AgentWorkflowEnv:
                 and (node.role_family or "").casefold() != "format"
             ):
                 continue
+            if (
+                self._uses_role_conditional_capabilities()
+                and (node.role_family or "").casefold()
+                not in {"format", "output"}
+            ):
+                # ReAct and structured semantic completions are internal
+                # artifacts. Only the generic Output capability and the
+                # optional pure Formatter have a terminal-compatible wrapper.
+                continue
             candidate = self._graph.fork()
             try:
                 candidate.set_output(node.id)
@@ -1722,13 +2047,16 @@ class AgentWorkflowEnv:
 
         admitted = self._admissible_augmentation_role_families()
         missing = self._missing_semantic_role_families()
-        if self._pending_role_conditional_ingress_consumer_ids():
-            # A new upstream producer must be schedulable before the deferred
-            # consumer.  Verifier and Formatter are themselves routed
-            # consumers, so selecting either cannot repair this measured
-            # ingress gap.
+        if self._role_conditional_evidence_ingress_consumer_ids():
             return tuple(
-                role for role in admitted if role not in {"verifier", "format"}
+                role for role in admitted if role == "evidence_retriever"
+            )
+        if self._pending_role_conditional_ingress_consumer_ids():
+            # A new upstream semantic producer must be schedulable before the
+            # deferred consumer. Raw retrieval and terminal wrappers do not
+            # satisfy the Runtime semantic-artifact contract.
+            return tuple(
+                role for role in admitted if role in {"reasoner", "repair"}
             )
         if (
             self.semantic_protocol == _HOTPOTQA_SEMANTIC_LINEAGE_PROTOCOL
@@ -1903,12 +2231,25 @@ class AgentWorkflowEnv:
                 # The authoritative recovery admission accepts exactly one
                 # same-role/same-artifact executable prefix.
                 remaining = min(remaining, 1)
+            evidence_ingress_consumer_ids = (
+                self._role_conditional_evidence_ingress_consumer_ids()
+            )
+            if evidence_ingress_consumer_ids:
+                remaining = min(remaining, 1)
             missing_role_families = self._missing_semantic_role_families()
             admitted_new_role_families = (
                 self._model_admissible_add_role_families()
             )
             pending_ingress_consumer_ids = (
                 self._pending_role_conditional_ingress_consumer_ids()
+            )
+            required_ingress_consumer_ids = tuple(
+                dict.fromkeys(
+                    (
+                        *pending_ingress_consumer_ids,
+                        *evidence_ingress_consumer_ids,
+                    )
+                )
             )
             if (
                 self.semantic_protocol
@@ -1948,14 +2289,7 @@ class AgentWorkflowEnv:
                         **(
                             {
                                 "output_role_families": list(
-                                    (
-                                        "reasoner",
-                                        "verifier",
-                                        "format",
-                                        "evidence_retriever",
-                                        "repair",
-                                        "output",
-                                    )
+                                    ("format", "output")
                                 )
                             }
                             if self._uses_role_conditional_capabilities()
@@ -2048,13 +2382,18 @@ class AgentWorkflowEnv:
                         ),
                         **(
                             {
-                                "required_ingress_consumer_agent_ids": list(
-                                    pending_ingress_consumer_ids
-                                ),
-                                "explicit_output_assignment_required": bool(
+                        "required_ingress_consumer_agent_ids": list(
+                            required_ingress_consumer_ids
+                        ),
+                        **(
+                            {"exact_relation_count": 1}
+                            if evidence_ingress_consumer_ids
+                            else {}
+                        ),
+                        "explicit_output_assignment_required": bool(
                                     not replacement_domains
-                                    and
-                                    self._graph.output_agent_id is not None
+                                    and not evidence_ingress_consumer_ids
+                                    and self._graph.output_agent_id is not None
                                     and self._graph.output_agent_id
                                     not in self._active_semantic_lineage_ids()
                                 ),
@@ -4308,6 +4647,20 @@ class AgentWorkflowEnv:
                 "(Thought -> Action(tool) -> Observation -> Thought -> Final), "
                 "not an Agent role"
             )
+        if (
+            self._uses_role_conditional_capabilities()
+            and graph.output_agent_id is not None
+            and (
+                graph.get_node(graph.output_agent_id).role_family or ""
+            ).casefold()
+            not in {"format", "output"}
+        ):
+            return (
+                "HotpotQA selected Output Agent must use a terminal-compatible "
+                "role_family 'output' or the optional formatting-only "
+                "role_family 'format'; structured semantic and ReAct artifacts "
+                "remain internal capabilities"
+            )
 
         formatting_only_contract = " ".join(
             (
@@ -4354,6 +4707,22 @@ class AgentWorkflowEnv:
                     f"HotpotQA {role.title()} Agent {node.id!r} must use "
                     "execution_mode='reasoning' without Tools"
                 )
+            if role == "verifier" and self._uses_role_conditional_capabilities():
+                invalid_predecessors = tuple(
+                    predecessor_id
+                    for predecessor_id in graph.directed_predecessors(node.id)
+                    if (
+                        graph.get_node(predecessor_id).role_family or ""
+                    ).casefold()
+                    not in {"reasoner", "verifier", "repair"}
+                )
+                if invalid_predecessors:
+                    return (
+                        f"HotpotQA Verifier Agent {node.id!r} must consume an "
+                        "already determined semantic-candidate artifact, not raw "
+                        "retrieval evidence or a terminal wrapper; invalid "
+                        f"predecessors={list(invalid_predecessors)!r}"
+                    )
             if role == "format":
                 expected_format_contract = (
                     _HOTPOTQA_ROLE_CONDITIONAL_FORMAT_CONTRACT
@@ -4365,6 +4734,23 @@ class AgentWorkflowEnv:
                         f"HotpotQA Formatter Agent {node.id!r} must use the "
                         "formatting-only contract and must not select or infer an answer"
                     )
+                if self._uses_role_conditional_capabilities():
+                    invalid_predecessors = tuple(
+                        predecessor_id
+                        for predecessor_id in graph.directed_predecessors(node.id)
+                        if (
+                            graph.get_node(predecessor_id).role_family or ""
+                        ).casefold()
+                        not in {"reasoner", "verifier", "repair"}
+                    )
+                    if invalid_predecessors:
+                        return (
+                            f"HotpotQA Formatter Agent {node.id!r} must consume "
+                            "an already determined semantic-candidate artifact, "
+                            "not raw retrieval evidence or another terminal wrapper; "
+                            "invalid predecessors="
+                            f"{list(invalid_predecessors)!r}"
+                        )
                 successors = self._directed_successors(graph, node.id)
                 if successors:
                     return (
@@ -5737,8 +6123,7 @@ class AgentWorkflowEnv:
                 "receipt containing a non-empty passage"
             )
 
-        reasoner_candidates: dict[str, str] = {}
-        verifier_candidates: dict[str, str] = {}
+        routed_semantic_candidates: dict[str, str] = {}
         for agent_id in routed_ids:
             node = self._graph.get_node(agent_id)
             role = (node.role_family or "").casefold()
@@ -5771,34 +6156,139 @@ class AgentWorkflowEnv:
                 )
                 if provenance_issue is not None:
                     return provenance_issue
-                reasoner_candidates[agent_id] = candidate
+                routed_semantic_candidates[agent_id] = candidate
             elif role == "verifier" and agent_id != output_id:
                 candidate, issue = self._verifier_candidate(artifact or "")
                 if issue is not None or candidate is None:
                     return (
                         f"Verifier {agent_id!r} semantic artifact is invalid: {issue}"
                     )
-                upstream_candidates = tuple(
-                    reasoner_candidates[upstream_id]
+                verifier_component = set(
+                    next(
+                        (
+                            component
+                            for component in self._graph.validate(
+                                self.model_registry,
+                                require_complete=False,
+                            ).components
+                            if agent_id in component
+                        ),
+                        (agent_id,),
+                    )
+                )
+                ancestor_ids = tuple(
+                    upstream_id
                     for upstream_id in self._directed_ancestor_ids(
                         self._graph,
                         agent_id,
                     )
-                    if upstream_id in reasoner_candidates
+                    if upstream_id != agent_id
                 )
+                upstream_candidates = tuple(
+                    upstream_candidate
+                    for upstream_id in ancestor_ids
+                    for upstream_candidate, upstream_issue in (
+                        self._semantic_candidate_from_artifact(
+                            execution.outputs.get(upstream_id, "")
+                        ),
+                    )
+                    if upstream_issue is None
+                    and upstream_candidate is not None
+                )
+                producer_candidates = tuple(
+                    upstream_candidate
+                    for upstream_id in ancestor_ids
+                    if (
+                        self._graph.get_node(upstream_id).role_family or ""
+                    ).casefold()
+                    != "verifier"
+                    for upstream_candidate, upstream_issue in (
+                        self._semantic_candidate_from_artifact(
+                            execution.outputs.get(upstream_id, "")
+                        ),
+                    )
+                    if upstream_issue is None
+                    and upstream_candidate is not None
+                )
+                if not producer_candidates:
+                    return (
+                        f"Verifier {agent_id!r} has no routed semantic candidate "
+                        "from a non-Verifier producer; a Verifier or reciprocal "
+                        f"Verifier block {sorted(verifier_component)!r} checks and "
+                        "preserves a candidate but must not bootstrap or select one"
+                    )
+                verifier_evidence_owner_ids = (
+                    *self._directed_ancestor_ids(self._graph, agent_id),
+                    agent_id,
+                )
+                if not self._successful_read_texts_for_agents(
+                    execution,
+                    verifier_evidence_owner_ids,
+                ):
+                    return (
+                        f"Verifier {agent_id!r} has no routed successful "
+                        "qa-retrieval read receipt for checking its semantic "
+                        "candidate"
+                    )
                 if upstream_candidates and any(
                     upstream_candidate != candidate
                     for upstream_candidate in upstream_candidates
                 ):
                     return (
-                        "Verifier changed a routed Reasoner candidate_answer: "
+                        "Verifier changed a routed semantic candidate_answer: "
                         f"verifier={candidate!r}, "
-                        f"reasoners={list(upstream_candidates)!r}"
+                        f"upstream_candidates={list(upstream_candidates)!r}"
                     )
-                verifier_candidates[agent_id] = candidate
+                routed_semantic_candidates[agent_id] = candidate
+            elif role not in {"evidence_retriever", "format", "output"}:
+                candidate, issue = self._semantic_candidate_from_artifact(
+                    artifact or ""
+                )
+                if issue is not None:
+                    return (
+                        f"Semantic producer {agent_id!r} artifact is invalid: "
+                        f"{issue}"
+                    )
+                if candidate is not None:
+                    evidence_owner_ids = (
+                        *self._directed_ancestor_ids(self._graph, agent_id),
+                        agent_id,
+                    )
+                    if not self._successful_read_texts_for_agents(
+                        execution,
+                        evidence_owner_ids,
+                    ):
+                        return (
+                            f"Semantic producer {agent_id!r} has no routed "
+                            "successful qa-retrieval read receipt"
+                        )
+                    routed_semantic_candidates[agent_id] = candidate
 
         output_node = self._graph.get_node(output_id)
         if (output_node.role_family or "").casefold() != "format":
+            routed_candidates = tuple(routed_semantic_candidates.values())
+            if not routed_candidates:
+                return None
+            candidate = routed_candidates[0]
+            if any(item != candidate for item in routed_candidates):
+                return (
+                    "Generic Output Agent received disagreeing routed semantic "
+                    "candidates: "
+                    f"{list(dict.fromkeys(routed_candidates))!r}"
+                )
+            wrapper = re.fullmatch(
+                r"\s*<answer>(.*?)</answer>\s*",
+                execution.final_answer or "",
+                flags=re.DOTALL,
+            )
+            if wrapper is None or wrapper.group(1) != candidate:
+                output_value = None if wrapper is None else wrapper.group(1)
+                return (
+                    "Generic Output Agent must preserve the routed semantic "
+                    "candidate character-for-character: "
+                    f"candidate_answer={candidate!r}, "
+                    f"wrapper_content={output_value!r}"
+                )
             return None
         direct_candidates: list[str] = []
         for predecessor_id in self._graph.directed_predecessors(output_id):
@@ -6267,6 +6757,12 @@ class AgentWorkflowEnv:
 
         if self.recovery_policy != _PRESERVE_REPAIR_RECOVERY_POLICY:
             return None
+        evidence_ingress_candidate = (
+            self._role_conditional_evidence_ingress_candidate(candidate)
+            or self._role_conditional_existing_evidence_ingress_candidate(
+                candidate
+            )
+        )
         repairable_ids = self._failed_agent_ids | self._unresolved_dirty_agents
         for node in self._graph.nodes:
             if (
@@ -6278,6 +6774,10 @@ class AgentWorkflowEnv:
             before = tuple(self._graph.directed_predecessors(node.id))
             after = tuple(candidate.directed_predecessors(node.id))
             if before != after:
+                if evidence_ingress_candidate and node.id in set(
+                    self._role_conditional_evidence_ingress_consumer_ids()
+                ):
+                    continue
                 return (
                     f"preserve successful Agent {node.id!r} input dependencies; "
                     f"current_predecessors={list(before)!r}, "
@@ -6795,6 +7295,11 @@ class AgentWorkflowEnv:
             or action.action_type is AgentActionType.FINISH
         ):
             return None
+        evidence_ingress_issue = (
+            self._role_conditional_evidence_ingress_admission_issue(action)
+        )
+        if evidence_ingress_issue is not None:
+            return evidence_ingress_issue
         ingress_issue = self._role_conditional_ingress_admission_issue(action)
         if ingress_issue is not None:
             return ingress_issue
@@ -6894,7 +7399,8 @@ class AgentWorkflowEnv:
                 "add the same-role/same-artifact auxiliary replacement "
                 "as an isolated executable prefix with relations=[] and no "
                 "output_agent_id. The accepted ADD executes immediately; route "
-                "its artifact to the Reasoner only after that execution succeeds"
+                "its artifact to the original downstream consumer only after "
+                "that execution succeeds"
             )
         if (
             action.action_type is AgentActionType.ADD_SUBGRAPH
@@ -6913,7 +7419,8 @@ class AgentWorkflowEnv:
                 "add the same-role/same-artifact auxiliary replacement "
                 "as an isolated executable prefix with relations=[] and no "
                 "output_agent_id. The accepted ADD executes immediately; route "
-                "its artifact to the Reasoner only after that execution succeeds"
+                "its artifact to the original downstream consumer only after "
+                "that execution succeeds"
             )
 
         exhausted_reasoner_ids = self._repair_exhausted_reasoner_ids()
