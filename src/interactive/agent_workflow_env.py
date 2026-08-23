@@ -50,6 +50,7 @@ _HOTPOTQA_ROLE_CONDITIONAL_PROTOCOL = (
 )
 _QA_SEMANTIC_PROTOCOL = "qa_verified_answer_lineage_v2"
 _PRESERVE_REPAIR_RECOVERY_POLICY = "preserve_diagnose_repair_augment"
+_NON_TERMINAL_PARTIAL_ARTIFACT = "non_terminal_partial"
 _SEMANTIC_LINEAGE_PROTOCOLS = frozenset(
     {
         _HOTPOTQA_SEMANTIC_PROTOCOL,
@@ -597,18 +598,38 @@ class AgentWorkflowEnv:
             # unrelated topology edits while it still blocks execution.
             return (AgentActionType.MODIFY_AGENT.value,)
 
-        mandatory_repair_ids = self._mandatory_repair_agent_ids()
+        selected_output_recovery_relations = (
+            self._selected_output_artifact_recovery_relation_candidates()
+        )
         if (
-            mandatory_repair_ids
-            and AgentActionType.MODIFY_AGENT.value
+            selected_output_recovery_relations
+            and AgentActionType.SET_RELATION.value
             in self._allowed_action_type_set
         ):
-            # A typed Runtime failure or a revision-local semantic-artifact
-            # failure identifies an existing Agent that can still be repaired.
-            # Keep FlowSteer's action mask on that measured repair boundary;
-            # augmentation becomes available only after repair succeeds or a
-            # typed bounded-failure replacement takeover is established.
-            return (AgentActionType.MODIFY_AGENT.value,)
+            # A revision-live, receipt-grounded semantic artifact already has
+            # an independent route to the selected Output.  Route that exact
+            # artifact into the measured failed ancestor before exposing the
+            # generic relation/modify domains.  This is an ordinary FlowSteer
+            # edit--execute--feedback boundary: the existing dirty closure
+            # recomputes the repaired ancestor and terminal downstream.
+            return (AgentActionType.SET_RELATION.value,)
+
+        mandatory_repair_ids = self._mandatory_repair_agent_ids()
+        if mandatory_repair_ids:
+            if (
+                AgentActionType.MODIFY_AGENT.value
+                in self._allowed_action_type_set
+            ):
+                # A typed Runtime failure or a revision-local semantic-artifact
+                # failure identifies an existing Agent that can still be repaired.
+                # Keep FlowSteer's action mask on that measured repair boundary;
+                # augmentation becomes available only after repair succeeds or a
+                # typed bounded-failure replacement takeover is established.
+                return (AgentActionType.MODIFY_AGENT.value,)
+            # The authoritative preservation gate rejects every unrelated edit
+            # while this measured repair remains unresolved.  Do not expose a
+            # broader action which the same step boundary must reject.
+            return ()
 
         takeover_delete_ids = (
             self._repair_exhausted_auxiliary_takeover_delete_ids()
@@ -938,6 +959,13 @@ class AgentWorkflowEnv:
         """Return the exact state-conditioned FlowSteer relation domain."""
 
         all_candidates = self._all_model_admissible_relation_candidates()
+        selected_output_recovery = (
+            self._selected_output_artifact_recovery_relation_candidates(
+                all_candidates
+            )
+        )
+        if selected_output_recovery:
+            return selected_output_recovery
         pending_ingress_ids = (
             self._pending_role_conditional_ingress_consumer_ids()
         )
@@ -982,6 +1010,242 @@ class AgentWorkflowEnv:
             for item in all_candidates
             if not self._relation_reintroduces_failed_auxiliary_ingress(item)
         ]
+
+    def _selected_output_artifact_recovery_sources_by_target(
+        self,
+    ) -> dict[str, Tuple[str, ...]]:
+        """Map a blocked failed ancestor to independent grounded artifacts.
+
+        FlowSteer's cached branch result remains public after a sibling
+        failure, and SkillFlow keeps its successful Tool receipt.  AgentGraph
+        needs one thin projection of that state: after repair of an existing
+        failed ancestor has been exhausted, an independently routed semantic
+        artifact may be handed to that same ancestor as one ordinary directed
+        relation.  This method never changes Output identity, selects an
+        answer, or requires a named role.
+        """
+
+        output_id = self._graph.output_agent_id
+        if (
+            not self._uses_role_conditional_capabilities()
+            or self.recovery_policy != _PRESERVE_REPAIR_RECOVERY_POLICY
+            or output_id is None
+            or not self._graph.has_node(output_id)
+            or self.required_evidence_tool_id is None
+        ):
+            return {}
+
+        output_ancestors = set(
+            self._directed_ancestor_ids(self._graph, output_id)
+        )
+        failed_targets = tuple(
+            node.id
+            for node in self._graph.nodes
+            if node.id in output_ancestors
+            and node.id in self._failed_agent_ids
+            and node.id in self._repair_exhausted_agent_ids
+            and node.id not in self._diagnosed_unusable_agent_ids
+        )
+        if not failed_targets:
+            return {}
+
+        def reaches_output_without(source_id: str, excluded_id: str) -> bool:
+            frontier = [source_id]
+            visited: set[str] = set()
+            while frontier:
+                current = frontier.pop()
+                if current == excluded_id or current in visited:
+                    continue
+                if current == output_id:
+                    return True
+                visited.add(current)
+                frontier.extend(
+                    successor_id
+                    for successor_id in self._directed_successors(
+                        self._graph,
+                        current,
+                    )
+                    if successor_id != excluded_id
+                )
+            return False
+
+        candidates_by_source: dict[str, str] = {}
+        for source in self._graph.nodes:
+            source_id = source.id
+            source_role = (source.role_family or "").casefold()
+            if (
+                source_id == output_id
+                or source_id in self._failed_agent_ids
+                or source_id in self._repair_exhausted_agent_ids
+                or source_id in self._unresolved_dirty_agents
+                or not self._has_successful_artifact(source_id)
+            ):
+                continue
+            artifact = self._progressive_outputs.get(source_id)
+            owner_ids = (
+                *self._directed_ancestor_ids(self._graph, source_id),
+                source_id,
+            )
+            evidence_texts: list[str] = []
+            for owner_id in owner_ids:
+                metadata = self._progressive_output_metadata.get(owner_id)
+                if not isinstance(metadata, Mapping):
+                    continue
+                if (
+                    metadata.get("artifact_status")
+                    == _NON_TERMINAL_PARTIAL_ARTIFACT
+                ):
+                    continue
+                receipts = metadata.get("tool_receipts", ())
+                if not isinstance(receipts, (list, tuple)):
+                    continue
+                for receipt in receipts:
+                    if not isinstance(receipt, Mapping):
+                        continue
+                    evidence_text = self._successful_read_text(
+                        receipt,
+                        self.required_evidence_tool_id,
+                    )
+                    if evidence_text is not None:
+                        evidence_texts.append(evidence_text)
+            if not isinstance(artifact, str):
+                continue
+            if source_role == "reasoner":
+                candidate, issue = self._reasoner_candidate_for_current_dataset(
+                    artifact
+                )
+                if (
+                    issue is not None
+                    or candidate is None
+                    or self._reasoner_evidence_provenance_issue(
+                        artifact,
+                        evidence_texts,
+                        require_answer_binding=True,
+                    )
+                    is not None
+                ):
+                    continue
+            elif source_role == "verifier":
+                candidate, issue = self._verifier_candidate(artifact)
+                if issue is not None or candidate is None:
+                    continue
+                producer_candidates: list[str] = []
+                for producer_id in self._directed_ancestor_ids(
+                    self._graph,
+                    source_id,
+                ):
+                    producer = self._graph.get_node(producer_id)
+                    producer_role = (producer.role_family or "").casefold()
+                    if producer_role in {
+                        "evidence_retriever",
+                        "verifier",
+                        "format",
+                        "output",
+                    }:
+                        continue
+                    producer_artifact = self._progressive_outputs.get(
+                        producer_id
+                    )
+                    if producer_role == "reasoner":
+                        producer_candidate, producer_issue = (
+                            self._reasoner_candidate_for_current_dataset(
+                                producer_artifact or ""
+                            )
+                        )
+                    else:
+                        producer_candidate, producer_issue = (
+                            self._semantic_candidate_from_artifact(
+                                producer_artifact
+                            )
+                        )
+                    if (
+                        producer_issue is None
+                        and producer_candidate is not None
+                    ):
+                        producer_candidates.append(producer_candidate)
+                if candidate not in producer_candidates:
+                    continue
+            elif source_role in {"evidence_retriever", "format", "output"}:
+                continue
+            else:
+                candidate, issue = self._semantic_candidate_from_artifact(
+                    artifact
+                )
+                if issue is not None or candidate is None:
+                    continue
+            if not any(
+                self._contains_lexical_span(text, candidate)
+                for text in evidence_texts
+            ):
+                continue
+            candidates_by_source[source_id] = candidate
+
+        # Conflicting grounded candidates require diagnosis or verification;
+        # routing either one would make the action mask select the answer.
+        if not candidates_by_source or len(set(candidates_by_source.values())) != 1:
+            return {}
+        result: dict[str, Tuple[str, ...]] = {}
+        for target_id in failed_targets:
+            sources = tuple(
+                node.id
+                for node in self._graph.nodes
+                if node.id in candidates_by_source
+                and node.id != target_id
+                and target_id
+                not in self._directed_ancestor_ids(
+                    self._graph,
+                    node.id,
+                )
+                and reaches_output_without(node.id, target_id)
+            )
+            if sources:
+                result[target_id] = sources
+        return result
+
+    def _selected_output_artifact_recovery_relation_candidates(
+        self,
+        candidates: Optional[Sequence[Mapping[str, object]]] = None,
+    ) -> list[dict[str, object]]:
+        """Return exact ``artifact source -> failed ancestor`` Canvas edits."""
+
+        sources_by_target = (
+            self._selected_output_artifact_recovery_sources_by_target()
+        )
+        if not sources_by_target:
+            return []
+        source_candidates = (
+            self._all_model_admissible_relation_candidates()
+            if candidates is None
+            else [dict(item) for item in candidates]
+        )
+        result: list[dict[str, object]] = []
+        for item in source_candidates:
+            source_id = str(item["source_id"])
+            target_id = str(item["target_id"])
+            if (
+                source_id not in sources_by_target.get(target_id, ())
+                or item["source_to_target"] is not True
+                or item["target_to_source"] is not False
+            ):
+                continue
+            previous = self._graph.relation_bits(source_id, target_id)
+            if not previous.is_independent:
+                # Recovery adds one monotonic handoff.  It never removes or
+                # reverses an existing communication edge.
+                continue
+            candidate = self._graph.fork()
+            candidate.set_relation(source_id, target_id, True, False)
+            if not candidate.validate(
+                self.model_registry,
+                require_complete=True,
+            ).valid:
+                continue
+            if self._output_sink_issue_for(candidate) is not None:
+                continue
+            if self._semantic_edit_issue_for(candidate) is not None:
+                continue
+            result.append(dict(item))
+        return result
 
     def _pending_role_conditional_ingress_consumer_ids(self) -> Tuple[str, ...]:
         """Return selected semantic consumers deferred for lack of routed input."""
@@ -2232,6 +2496,28 @@ class AgentWorkflowEnv:
         if self.recovery_policy != _PRESERVE_REPAIR_RECOVERY_POLICY:
             return ()
         node_ids = tuple(node.id for node in self._graph.nodes)
+        selected_output_recovery = (
+            self._selected_output_artifact_recovery_sources_by_target()
+        )
+        selected_output_recovery_relations = (
+            self._selected_output_artifact_recovery_relation_candidates()
+            if selected_output_recovery
+            else []
+        )
+        if selected_output_recovery and (
+            AgentActionType.SET_RELATION.value
+            not in self._allowed_action_type_set
+            or not selected_output_recovery_relations
+        ):
+            # When the exact artifact handoff is already present (or no legal
+            # one-edge handoff remains), keep repair on the same failed
+            # ancestor.  ReAct exhaustion does not authorize deletion or a
+            # broad unrelated Canvas mutation.
+            return tuple(
+                node_id
+                for node_id in node_ids
+                if node_id in selected_output_recovery
+            )
         repairable_failed = (
             self._failed_agent_ids - self._diagnosed_unusable_agent_ids
             - self._repair_exhausted_agent_ids
@@ -2254,6 +2540,7 @@ class AgentWorkflowEnv:
             in {"evidence_retriever", "repair"}
             and node.id in self._failed_agent_ids
             and node.id in self._repair_exhausted_agent_ids
+            and node.id in self._diagnosed_unusable_agent_ids
             and (
                 record := self._latest_failure_record_by_agent.get(node.id)
             )
@@ -2941,6 +3228,20 @@ class AgentWorkflowEnv:
                     }
                     for agent_id in modifiable_node_ids
                 ],
+                **(
+                    {
+                        "purpose": "selected_output_artifact_recovery",
+                        "artifact_source_agent_ids_by_target": {
+                            agent_id: list(source_ids)
+                            for agent_id, source_ids in (
+                                self._selected_output_artifact_recovery_sources_by_target().items()
+                            )
+                            if agent_id in modifiable_node_ids
+                        },
+                    }
+                    if self._selected_output_artifact_recovery_sources_by_target()
+                    else {}
+                ),
             }
         if AgentActionType.DELETE_AGENT.value in admitted:
             targets[AgentActionType.DELETE_AGENT.value] = {
@@ -2952,6 +3253,9 @@ class AgentWorkflowEnv:
             }
         if AgentActionType.SET_RELATION.value in admitted:
             relation_candidates = self._model_admissible_relation_candidates()
+            selected_output_recovery_candidates = (
+                self._selected_output_artifact_recovery_relation_candidates()
+            )
             prospective_convergence_candidates = (
                 self._prospective_terminal_convergence_relation_candidates()
             )
@@ -2960,6 +3264,16 @@ class AgentWorkflowEnv:
                 "target_agent_ids": node_ids,
                 "endpoints_must_differ": True,
                 "candidates": relation_candidates,
+                **(
+                    {
+                        "purpose": "selected_output_artifact_recovery",
+                        "selected_output_agent_id": self._graph.output_agent_id,
+                    }
+                    if selected_output_recovery_candidates
+                    and relation_candidates
+                    == selected_output_recovery_candidates
+                    else {}
+                ),
                 **(
                     {
                         "purpose": "terminal_branch_convergence",
@@ -3188,7 +3502,9 @@ class AgentWorkflowEnv:
                         set()
                         if exc.partial_result is None
                         else (
-                            set(exc.partial_result.outputs)
+                            self._completed_partial_output_agent_ids(
+                                exc.partial_result
+                            )
                             if self.recovery_policy
                             == _PRESERVE_REPAIR_RECOVERY_POLICY
                             else set(exc.partial_result.executed_agent_ids)
@@ -3416,12 +3732,42 @@ class AgentWorkflowEnv:
                                 partial_execution.output_metadata.items()
                             )
                         }
-                        self._unresolved_dirty_agents.difference_update(
-                            partial_execution.outputs
+                        for agent_id, handoff in (
+                            recovery_continuation_handoff.items()
+                        ):
+                            source_agent_id = handoff.get(
+                                "continuation_source_agent_id"
+                            )
+                            if (
+                                agent_id in partial_execution.outputs
+                                and isinstance(source_agent_id, str)
+                            ):
+                                self._progressive_output_metadata.setdefault(
+                                    agent_id,
+                                    {},
+                                ).setdefault(
+                                    "continuation_source_agent_id",
+                                    source_agent_id,
+                                )
+                        completed_partial_ids = (
+                            self._completed_partial_output_agent_ids(
+                                partial_execution
+                            )
                             if self.recovery_policy
                             == _PRESERVE_REPAIR_RECOVERY_POLICY
-                            else partial_execution.executed_agent_ids
+                            else set(partial_execution.executed_agent_ids)
                         )
+                        self._unresolved_dirty_agents.difference_update(
+                            completed_partial_ids
+                        )
+                        if (
+                            self.recovery_policy
+                            == _PRESERVE_REPAIR_RECOVERY_POLICY
+                        ):
+                            self._unresolved_dirty_agents.update(
+                                set(partial_execution.outputs)
+                                - completed_partial_ids
+                            )
                     self._unresolved_dirty_agents.update(
                         agent_id
                         for agent_id in exc.pending_agent_ids
@@ -3430,17 +3776,23 @@ class AgentWorkflowEnv:
                     self._failed_agent_ids.difference_update(
                         ()
                         if partial_execution is None
-                        else partial_execution.outputs
+                        else self._completed_partial_output_agent_ids(
+                            partial_execution
+                        )
                     )
                     self._diagnosed_unusable_agent_ids.difference_update(
                         ()
                         if partial_execution is None
-                        else partial_execution.outputs
+                        else self._completed_partial_output_agent_ids(
+                            partial_execution
+                        )
                     )
                     self._mark_agents_recovered(
                         ()
                         if partial_execution is None
-                        else partial_execution.outputs
+                        else self._completed_partial_output_agent_ids(
+                            partial_execution
+                        )
                     )
                     self._record_failure_state(
                         exc.failure_records,
@@ -3452,6 +3804,23 @@ class AgentWorkflowEnv:
                         agent_id: dict(metadata)
                         for agent_id, metadata in execution.output_metadata.items()
                     }
+                    for agent_id, handoff in (
+                        recovery_continuation_handoff.items()
+                    ):
+                        source_agent_id = handoff.get(
+                            "continuation_source_agent_id"
+                        )
+                        if (
+                            agent_id in execution.outputs
+                            and isinstance(source_agent_id, str)
+                        ):
+                            self._progressive_output_metadata.setdefault(
+                                agent_id,
+                                {},
+                            ).setdefault(
+                                "continuation_source_agent_id",
+                                source_agent_id,
+                            )
                     self._progressive_execution = execution
                     self._progressive_execution_revision = self._graph.revision
                     # A semantic QA Verifier/Formatter can be structurally present
@@ -7352,11 +7721,29 @@ class AgentWorkflowEnv:
 
     def _has_successful_artifact(self, agent_id: str) -> bool:
         artifact = self._progressive_outputs.get(agent_id)
+        metadata = self._progressive_output_metadata.get(agent_id, {})
         return (
             isinstance(artifact, str)
             and bool(artifact.strip())
             and agent_id not in self._unresolved_dirty_agents
+            and metadata.get("artifact_status")
+            != _NON_TERMINAL_PARTIAL_ARTIFACT
         )
+
+    @staticmethod
+    def _completed_partial_output_agent_ids(
+        execution: AgentRuntimeResult,
+    ) -> set[str]:
+        """Exclude incomplete reciprocal peer artifacts from completion."""
+
+        return {
+            agent_id
+            for agent_id in execution.outputs
+            if execution.output_metadata.get(agent_id, {}).get(
+                "artifact_status"
+            )
+            != _NON_TERMINAL_PARTIAL_ARTIFACT
+        }
 
     def _preserved_input_change_issue_for(
         self,
@@ -7452,6 +7839,38 @@ class AgentWorkflowEnv:
                 if self._has_successful_artifact(agent_id)
             )
         )
+        non_terminal_partial = tuple(
+            sorted(
+                agent_id
+                for agent_id in current_ids
+                if self._progressive_output_metadata.get(agent_id, {}).get(
+                    "artifact_status"
+                )
+                == _NON_TERMINAL_PARTIAL_ARTIFACT
+            )
+        )
+        previous_preserved = tuple(
+            sorted(
+                agent_id
+                for agent_id in self._previous_revision_outputs
+                if self._previous_revision_output_metadata.get(
+                    agent_id,
+                    {},
+                ).get("artifact_status")
+                != _NON_TERMINAL_PARTIAL_ARTIFACT
+            )
+        )
+        previous_non_terminal_partial = tuple(
+            sorted(
+                agent_id
+                for agent_id in self._previous_revision_outputs
+                if self._previous_revision_output_metadata.get(
+                    agent_id,
+                    {},
+                ).get("artifact_status")
+                == _NON_TERMINAL_PARTIAL_ARTIFACT
+            )
+        )
         terminal_unreachable = self._terminal_unreachable_agent_ids()
         terminal_unreachable_set = set(terminal_unreachable)
         failed = tuple(sorted(self._failed_agent_ids & current_ids))
@@ -7481,6 +7900,12 @@ class AgentWorkflowEnv:
         )
         deletable_set = set(deletable)
         repair_routing_candidates = self._repair_exhausted_relation_candidates()
+        selected_output_recovery_candidates = (
+            self._selected_output_artifact_recovery_relation_candidates()
+            if AgentActionType.SET_RELATION.value
+            in self._allowed_action_type_set
+            else []
+        )
         failed_ingress_relation_candidates = (
             self._failed_auxiliary_ingress_relation_candidates()
         )
@@ -7527,8 +7952,12 @@ class AgentWorkflowEnv:
                 else "preserve"
             ),
             "preserved_agent_ids": list(preserved),
-            "previous_revision_preserved_agent_ids": sorted(
-                self._previous_revision_outputs
+            "non_terminal_partial_agent_ids": list(non_terminal_partial),
+            "previous_revision_preserved_agent_ids": list(
+                previous_preserved
+            ),
+            "previous_revision_non_terminal_partial_agent_ids": list(
+                previous_non_terminal_partial
             ),
             "failed_agent_ids": list(failed),
             "react_turn_exhausted_agent_ids": list(react_exhausted),
@@ -7545,9 +7974,21 @@ class AgentWorkflowEnv:
             "repair_exhausted_auxiliary_takeover_delete_agent_ids": list(
                 takeover_delete_ids
             ),
+            "selected_output_artifact_recovery_relation_candidates": [
+                dict(candidate)
+                for candidate in selected_output_recovery_candidates
+            ],
             "deletion_protected": protected,
             "preferred_actions": (
-                ["modify_agent"]
+                ["set_relation"]
+                if selected_output_recovery_candidates
+                else ["modify_agent"]
+                if (
+                    mandatory_repair
+                    and AgentActionType.MODIFY_AGENT.value
+                    in self._allowed_action_type_set
+                )
+                else []
                 if mandatory_repair
                 else ["delete_agent"]
                 if takeover_delete_ids
@@ -7843,6 +8284,120 @@ class AgentWorkflowEnv:
             return agent_id in self._active_semantic_lineage_ids()
         return True
 
+    def _successful_evidence_texts_from_metadata(
+        self,
+        metadata: object,
+    ) -> Tuple[str, ...]:
+        """Return successful public read evidence from one Runtime receipt."""
+
+        if self.required_evidence_tool_id is None or not isinstance(
+            metadata,
+            Mapping,
+        ):
+            return ()
+        receipts = metadata.get("tool_receipts", ())
+        if not isinstance(receipts, (list, tuple)):
+            return ()
+        texts: list[str] = []
+        for receipt in receipts:
+            if not isinstance(receipt, Mapping):
+                continue
+            text = self._successful_read_text(
+                receipt,
+                self.required_evidence_tool_id,
+            )
+            if text is not None:
+                texts.append(text)
+        return tuple(dict.fromkeys(texts))
+
+    def _protected_previous_artifact(self, agent_id: str) -> Optional[str]:
+        """Return the last complete artifact invalidated by a repair edit."""
+
+        artifact = self._previous_revision_outputs.get(agent_id)
+        metadata = self._previous_revision_output_metadata.get(agent_id, {})
+        if (
+            not isinstance(artifact, str)
+            or not artifact.strip()
+            or metadata.get("artifact_status")
+            == _NON_TERMINAL_PARTIAL_ARTIFACT
+        ):
+            return None
+        return artifact
+
+    def _replacement_preserves_protected_history(
+        self,
+        source_agent_id: str,
+        replacement_agent_id: str,
+    ) -> bool:
+        """Require replacement takeover to retain prior answer/evidence state."""
+
+        previous_artifact = self._protected_previous_artifact(source_agent_id)
+        source_evidence = tuple(
+            dict.fromkeys(
+                (
+                    *self._successful_evidence_texts_from_metadata(
+                        self._previous_revision_output_metadata.get(
+                            source_agent_id,
+                            {},
+                        )
+                    ),
+                    *self._successful_evidence_texts_from_metadata(
+                        self._failure_continuations.get(source_agent_id, {})
+                    ),
+                )
+            )
+        )
+        if previous_artifact is None and not source_evidence:
+            return True
+
+        replacement_artifact = self._progressive_outputs.get(
+            replacement_agent_id
+        )
+        if not isinstance(replacement_artifact, str) or not replacement_artifact.strip():
+            return False
+        if previous_artifact is not None:
+            previous_candidate, _ = self._semantic_candidate_from_artifact(
+                previous_artifact
+            )
+            replacement_candidate, _ = self._semantic_candidate_from_artifact(
+                replacement_artifact
+            )
+            if previous_candidate is not None:
+                if replacement_candidate != previous_candidate:
+                    return False
+            elif not source_evidence and (
+                replacement_artifact.strip() != previous_artifact.strip()
+            ):
+                return False
+
+        replacement_owner_ids = (
+            replacement_agent_id,
+            *self._directed_ancestor_ids(self._graph, replacement_agent_id),
+        )
+        replacement_evidence = tuple(
+            dict.fromkeys(
+                text
+                for owner_id in replacement_owner_ids
+                for text in self._successful_evidence_texts_from_metadata(
+                    self._progressive_output_metadata.get(owner_id, {})
+                )
+            )
+        )
+        replacement_metadata = self._progressive_output_metadata.get(
+            replacement_agent_id,
+            {},
+        )
+        explicit_handoff = (
+            isinstance(replacement_metadata, Mapping)
+            and replacement_metadata.get("continuation_source_agent_id")
+            == source_agent_id
+        )
+        return (
+            not source_evidence
+            or explicit_handoff
+            or set(source_evidence) <= set(replacement_evidence)
+        )
+
     def _delete_admission_issue(self, agent_id: Optional[str]) -> Optional[str]:
         if self.recovery_policy != _PRESERVE_REPAIR_RECOVERY_POLICY:
             return None
@@ -7850,15 +8405,21 @@ class AgentWorkflowEnv:
             return None
         node = self._graph.get_node(agent_id)
         terminal_unreachable_ids = set(self._terminal_unreachable_agent_ids())
-        # Topological disconnection is a relation fault, not evidence that the
-        # node itself is unusable.  Deletion therefore requires either the
-        # adapter's explicit unusable diagnosis or bounded ReAct exhaustion,
-        # plus a same-responsibility replacement takeover.
+        # Topological disconnection, provider failure, Tool failure, and
+        # bounded ReAct exhaustion are repair diagnoses, not evidence that the
+        # node itself is unusable.  Deletion requires the adapter's explicit
+        # unusable diagnosis plus a same-responsibility replacement takeover.
         diagnosed_unusable = agent_id in self._diagnosed_unusable_agent_ids
         downstream_ids = set(self._directed_successors(self._graph, agent_id))
         protected_reasons: list[str] = []
         if self._has_successful_artifact(agent_id):
             protected_reasons.append("successful artifact/evidence")
+        if self._protected_previous_artifact(agent_id) is not None:
+            protected_reasons.append("previous revision artifact")
+        if self._successful_evidence_texts_from_metadata(
+            self._failure_continuations.get(agent_id, {})
+        ):
+            protected_reasons.append("successful continuation evidence")
         if downstream_ids:
             protected_reasons.append("downstream responsibility")
         if self._graph.output_agent_id == agent_id:
@@ -7869,15 +8430,6 @@ class AgentWorkflowEnv:
 
         role = (node.role_family or "").casefold()
         artifact_type = node.artifact_type.casefold()
-        latest_failure = self._latest_failure_record_by_agent.get(agent_id)
-        bounded_auxiliary_exhaustion = (
-            role in {"evidence_retriever", "repair"}
-            and agent_id in self._failed_agent_ids
-            and agent_id in self._repair_exhausted_agent_ids
-            and latest_failure is not None
-            and self._execution_failure_diagnosis(latest_failure)[0]
-            == "react_turn_exhaustion"
-        )
         replacements: list[str] = []
         for candidate in self._graph.nodes:
             if candidate.id == agent_id:
@@ -7891,6 +8443,10 @@ class AgentWorkflowEnv:
                     candidate.id,
                     role,
                 )
+                or not self._replacement_preserves_protected_history(
+                    agent_id,
+                    candidate.id,
+                )
             ):
                 continue
             candidate_downstream = set(
@@ -7903,7 +8459,11 @@ class AgentWorkflowEnv:
             if self._graph.output_agent_id == agent_id:
                 continue
             replacements.append(candidate.id)
-        if (diagnosed_unusable or bounded_auxiliary_exhaustion) and replacements:
+        if (
+            diagnosed_unusable
+            and replacements
+            and not self._has_successful_artifact(agent_id)
+        ):
             return None
         return (
             f"recovery_policy={_PRESERVE_REPAIR_RECOVERY_POLICY} protects Agent "
@@ -7934,6 +8494,24 @@ class AgentWorkflowEnv:
         ingress_issue = self._role_conditional_ingress_admission_issue(action)
         if ingress_issue is not None:
             return ingress_issue
+        selected_output_recovery_candidates = (
+            self._selected_output_artifact_recovery_relation_candidates()
+        )
+        if (
+            selected_output_recovery_candidates
+            and AgentActionType.SET_RELATION.value
+            in self._allowed_action_type_set
+        ):
+            if any(
+                self._relation_action_matches_candidate(action, candidate)
+                for candidate in selected_output_recovery_candidates
+            ):
+                return None
+            return (
+                "route the revision-live receipt-grounded artifact into the "
+                "failed selected-Output ancestor with one exact admitted "
+                "set_relation action before other Canvas edits"
+            )
         mandatory_repair_ids = self._mandatory_repair_agent_ids()
         if mandatory_repair_ids and (
             action.action_type is not AgentActionType.MODIFY_AGENT
@@ -8623,6 +9201,16 @@ class AgentWorkflowEnv:
                         ],
                     }
             failed_agents.append(item)
+        completed_partial_agent_ids = (
+            set()
+            if exc.partial_result is None
+            else self._completed_partial_output_agent_ids(exc.partial_result)
+        )
+        non_terminal_partial_agent_ids = (
+            set()
+            if exc.partial_result is None
+            else set(exc.partial_result.outputs) - completed_partial_agent_ids
+        )
         payload = json.dumps(
             {
                 "type": type(exc).__name__,
@@ -8631,9 +9219,10 @@ class AgentWorkflowEnv:
                 "blocked_agent_ids": list(exc.blocked_agent_ids),
                 "pending_agent_ids": list(exc.pending_agent_ids),
                 "preserved_agent_ids": (
-                    []
-                    if exc.partial_result is None
-                    else sorted(exc.partial_result.outputs)
+                    sorted(completed_partial_agent_ids)
+                ),
+                "non_terminal_partial_agent_ids": sorted(
+                    non_terminal_partial_agent_ids
                 ),
                 **(
                     {"recovery_state": self.recovery_state()}

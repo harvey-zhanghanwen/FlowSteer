@@ -697,6 +697,204 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(2, phases.count(ExecutionPhase.DRAFT))
         self.assertEqual(2, phases.count(ExecutionPhase.REVISION))
 
+    async def test_reciprocal_draft_failure_preserves_successful_peer_as_non_terminal_partial(
+        self,
+    ) -> None:
+        catalog = registry()
+
+        class DraftFailureGateway:
+            def __init__(self) -> None:
+                self.left_completed = asyncio.Event()
+
+            async def generate(self, request: AgentRequest) -> AgentResponse:
+                if request.phase is not ExecutionPhase.DRAFT:
+                    raise AssertionError("revision must not start after draft failure")
+                if request.agent.id == "researcher":
+                    self.left_completed.set()
+                    return AgentResponse(
+                        "bounded public draft",
+                        {
+                            "provider_request_id": "draft-receipt",
+                            "tool_receipts": [
+                                {"tool_id": "public-retrieval", "success": True}
+                            ],
+                        },
+                    )
+                await self.left_completed.wait()
+                raise RuntimeError("peer draft failed")
+
+        graph = AgentGraph(
+            [
+                AgentNode(
+                    "researcher",
+                    "m1",
+                    "collect public evidence",
+                    role_family="researcher",
+                ),
+                AgentNode(
+                    "critic",
+                    "m2",
+                    "review the evidence",
+                    role_family="critic",
+                ),
+            ],
+            [AgentRelation("researcher", "critic", True, True)],
+            output_agent_id="critic",
+        )
+
+        with self.assertRaises(AgentRuntimeError) as caught:
+            await AgentRuntime(catalog, DraftFailureGateway()).execute(
+                graph,
+                "question",
+                run_id="reciprocal-draft-partial",
+            )
+
+        partial = caught.exception.partial_result
+        self.assertIsNotNone(partial)
+        assert partial is not None
+        self.assertIsNone(partial.final_answer)
+        self.assertEqual(
+            {"researcher": "bounded public draft"},
+            dict(partial.outputs),
+        )
+        self.assertEqual(("researcher",), partial.executed_agent_ids)
+        self.assertEqual((), partial.block_completion_order)
+        receipt = partial.output_metadata["researcher"]
+        self.assertEqual("draft-receipt", receipt["provider_request_id"])
+        self.assertEqual(
+            "public-retrieval",
+            receipt["tool_receipts"][0]["tool_id"],
+        )
+        self.assertEqual("draft", receipt["execution_phase"])
+        self.assertEqual("non_terminal_partial", receipt["artifact_status"])
+        self.assertFalse(receipt["reciprocal_block_complete"])
+        self.assertEqual(
+            ["researcher"],
+            [record.request.agent.id for record in partial.calls],
+        )
+        self.assertEqual("critic", caught.exception.failure_records[0].agent_id)
+        self.assertEqual(
+            ExecutionPhase.DRAFT,
+            caught.exception.failure_records[0].phase,
+        )
+        self.assertEqual(
+            ("critic", "researcher"),
+            caught.exception.pending_agent_ids,
+            "both members remain pending until the reciprocal block completes",
+        )
+        feedback_env = AgentWorkflowEnv(
+            catalog,
+            RecordingGateway(),
+            graph=graph,
+            problem="question",
+            recovery_policy="preserve_diagnose_repair_augment",
+        )
+        feedback = feedback_env._execution_error_feedback(caught.exception)
+        self.assertIn('"preserved_agent_ids":[]', feedback)
+        self.assertIn(
+            '"non_terminal_partial_agent_ids":["researcher"]',
+            feedback,
+        )
+
+        # Breaking the reciprocal block must not promote its retained draft to
+        # a completed single-Agent output.  The non-terminal receipt forces a
+        # bounded recomputation under the new directed communication contract.
+        graph.set_relation("researcher", "critic", True, False)
+        success_gateway = RecordingGateway()
+        result = await AgentRuntime(catalog, success_gateway).execute(
+            graph,
+            "question",
+            run_id="reciprocal-draft-repair",
+            prior_outputs=partial.outputs,
+            prior_output_metadata=partial.output_metadata,
+            dirty_agents=set(),
+        )
+        self.assertEqual(
+            ["researcher", "critic"],
+            [request.agent.id for request in success_gateway.requests],
+        )
+        self.assertNotEqual("bounded public draft", result.final_answer)
+
+    async def test_reciprocal_revision_failure_preserves_successful_arbitrary_role_without_finish(
+        self,
+    ) -> None:
+        catalog = registry()
+
+        class RevisionFailureGateway:
+            def __init__(self) -> None:
+                self.left_revision_completed = asyncio.Event()
+
+            async def generate(self, request: AgentRequest) -> AgentResponse:
+                if request.phase is ExecutionPhase.DRAFT:
+                    return AgentResponse(f"draft-{request.agent.id}")
+                if request.agent.id == "researcher":
+                    self.left_revision_completed.set()
+                    return AgentResponse(
+                        "revised public artifact",
+                        {"provider_request_id": "revision-receipt"},
+                    )
+                await self.left_revision_completed.wait()
+                raise RuntimeError("peer revision failed")
+
+        graph = AgentGraph(
+            [
+                AgentNode(
+                    "researcher",
+                    "m1",
+                    "produce an answer candidate",
+                    role_family="researcher",
+                ),
+                AgentNode(
+                    "critic",
+                    "m2",
+                    "review the answer candidate",
+                    role_family="critic",
+                ),
+            ],
+            [AgentRelation("researcher", "critic", True, True)],
+            output_agent_id="researcher",
+        )
+
+        with self.assertRaises(AgentRuntimeError) as caught:
+            await AgentRuntime(catalog, RevisionFailureGateway()).execute(
+                graph,
+                "question",
+                run_id="reciprocal-revision-partial",
+            )
+
+        partial = caught.exception.partial_result
+        self.assertIsNotNone(partial)
+        assert partial is not None
+        self.assertEqual("researcher", partial.output_agent_id)
+        self.assertIsNone(partial.final_answer)
+        self.assertEqual(
+            {"researcher": "revised public artifact"},
+            dict(partial.outputs),
+        )
+        self.assertEqual(
+            "revision",
+            partial.output_metadata["researcher"]["execution_phase"],
+        )
+        self.assertEqual(
+            "non_terminal_partial",
+            partial.output_metadata["researcher"]["artifact_status"],
+        )
+        self.assertEqual(
+            3,
+            len(partial.calls),
+            "both drafts and only the successful revision are committed",
+        )
+        self.assertEqual("critic", caught.exception.failure_records[0].agent_id)
+        self.assertEqual(
+            ExecutionPhase.REVISION,
+            caught.exception.failure_records[0].phase,
+        )
+        self.assertEqual(
+            ("critic", "researcher"),
+            caught.exception.pending_agent_ids,
+            "a successful revision is still non-terminal while its peer failed",
+        )
+
     async def test_bidirectional_members_receive_only_their_external_inputs(self) -> None:
         catalog = registry()
         gateway = RecordingGateway()

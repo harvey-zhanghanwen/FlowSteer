@@ -329,6 +329,50 @@ def _successful_fan_out_without_output(
     return env
 
 
+def _selected_output_recovery_env(
+    registry: ModelRegistry,
+) -> AgentWorkflowEnv:
+    graph = AgentGraph(
+        [
+            AgentNode(
+                "artifact_source",
+                "model-a",
+                "produce one evidence-grounded semantic candidate",
+                role_family="repair",
+                allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                execution_mode="react",
+                artifact_type="semantic_candidate",
+            ),
+            AgentNode(
+                "failed_worker",
+                "model-c",
+                "consume routed evidence and determine a semantic candidate",
+                role_family="repair",
+                allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                execution_mode="react",
+                artifact_type="semantic_candidate",
+            ),
+            _output_agent(),
+        ],
+        [
+            AgentRelation("artifact_source", "output", True, False),
+            AgentRelation("failed_worker", "output", True, False),
+        ],
+        output_agent_id="output",
+    )
+    env = _env(registry, graph=graph)
+    env._progressive_outputs = {
+        "artifact_source": f"Candidate answer: {SYNTHETIC_CANDIDATE}",
+    }
+    env._progressive_output_metadata = {
+        "artifact_source": {"tool_receipts": [_read_receipt()]},
+    }
+    env._failed_agent_ids.add("failed_worker")
+    env._repair_exhausted_agent_ids.add("failed_worker")
+    env._unresolved_dirty_agents.add("failed_worker")
+    return env
+
+
 def _generic_verifier_failure_attribution(
     verifier_artifact: str,
 ) -> dict[str, object]:
@@ -1046,6 +1090,428 @@ class RoleConditionalSearchSpaceTests(unittest.TestCase):
             [],
             reverse_edge._prospective_terminal_convergence_relation_candidates(),
         )
+
+    def test_grounded_artifact_repairs_a_failed_selected_output_ancestor(
+        self,
+    ) -> None:
+        registry = _registry()
+        env = _selected_output_recovery_env(registry)
+
+        expected = {
+            "source_id": "artifact_source",
+            "target_id": "failed_worker",
+            "source_to_target": True,
+            "target_to_source": False,
+        }
+        self.assertEqual(
+            {"failed_worker": ("artifact_source",)},
+            env._selected_output_artifact_recovery_sources_by_target(),
+        )
+        self.assertEqual(
+            [expected],
+            env._selected_output_artifact_recovery_relation_candidates(),
+        )
+        self.assertEqual(("set_relation",), env.model_admissible_action_types())
+        domain = env.model_admissible_action_targets()["set_relation"]
+        self.assertEqual("selected_output_artifact_recovery", domain["purpose"])
+        self.assertEqual([expected], domain["candidates"])
+        recovery = env.recovery_state()
+        self.assertEqual(["set_relation"], recovery["preferred_actions"])
+        self.assertEqual(
+            [expected],
+            recovery[
+                "selected_output_artifact_recovery_relation_candidates"
+            ],
+        )
+        self.assertEqual([], recovery["mandatory_repair_agent_ids"])
+        action = env.parser.parse(json.dumps({"action": "set_relation", **expected}))
+        self.assertIsNone(env._preservation_admission_issue(action))
+
+        routed = env.graph.fork()
+        routed.set_relation(
+            "artifact_source",
+            "failed_worker",
+            True,
+            False,
+        )
+        routed_env = _env(registry, graph=routed)
+        routed_env._progressive_outputs = dict(env._progressive_outputs)
+        routed_env._progressive_output_metadata = dict(
+            env._progressive_output_metadata
+        )
+        routed_env._failed_agent_ids.add("failed_worker")
+        routed_env._repair_exhausted_agent_ids.add("failed_worker")
+        routed_env._unresolved_dirty_agents.add("failed_worker")
+        self.assertEqual(
+            [],
+            routed_env._selected_output_artifact_recovery_relation_candidates(),
+        )
+        self.assertEqual(
+            ("modify_agent",),
+            routed_env.model_admissible_action_types(),
+        )
+        modify_domain = routed_env.model_admissible_action_targets()[
+            "modify_agent"
+        ]
+        self.assertEqual(["failed_worker"], modify_domain["agent_ids"])
+        self.assertEqual(
+            "selected_output_artifact_recovery",
+            modify_domain["purpose"],
+        )
+
+    def test_selected_output_recovery_rejects_unmeasured_or_conflicting_artifacts(
+        self,
+    ) -> None:
+        registry = _registry()
+
+        no_receipt = _selected_output_recovery_env(registry)
+        no_receipt._progressive_output_metadata.clear()
+        self.assertEqual(
+            {},
+            no_receipt._selected_output_artifact_recovery_sources_by_target(),
+        )
+
+        unsupported = _selected_output_recovery_env(registry)
+        unsupported._progressive_outputs["artifact_source"] = (
+            "Candidate answer: Unsupported Delta"
+        )
+        self.assertEqual(
+            {},
+            unsupported._selected_output_artifact_recovery_sources_by_target(),
+        )
+
+        partial = _selected_output_recovery_env(registry)
+        partial._progressive_output_metadata["artifact_source"][
+            "artifact_status"
+        ] = "non_terminal_partial"
+        partial._unresolved_dirty_agents.discard("artifact_source")
+        self.assertFalse(partial._has_successful_artifact("artifact_source"))
+        self.assertEqual(
+            {},
+            partial._selected_output_artifact_recovery_sources_by_target(),
+        )
+
+        with_output = _selected_output_recovery_env(registry)
+        no_output = _env(
+            registry,
+            graph=AgentGraph(
+                with_output.graph.nodes,
+                with_output.graph.relations,
+            ),
+        )
+        no_output._progressive_outputs = dict(with_output._progressive_outputs)
+        no_output._progressive_output_metadata = dict(
+            with_output._progressive_output_metadata
+        )
+        no_output._failed_agent_ids.add("failed_worker")
+        no_output._repair_exhausted_agent_ids.add("failed_worker")
+        self.assertEqual(
+            {},
+            no_output._selected_output_artifact_recovery_sources_by_target(),
+        )
+
+        dependent = _selected_output_recovery_env(registry)
+        dependent.graph.set_relation(
+            "artifact_source",
+            "output",
+            False,
+            False,
+        )
+        dependent.graph.set_relation(
+            "artifact_source",
+            "failed_worker",
+            True,
+            False,
+        )
+        self.assertEqual(
+            {},
+            dependent._selected_output_artifact_recovery_sources_by_target(),
+        )
+
+        reverse_edge = _selected_output_recovery_env(registry)
+        reverse_edge.graph.set_relation(
+            "artifact_source",
+            "failed_worker",
+            False,
+            True,
+        )
+        self.assertEqual(
+            {},
+            reverse_edge._selected_output_artifact_recovery_sources_by_target(),
+        )
+        self.assertEqual(
+            [],
+            reverse_edge._selected_output_artifact_recovery_relation_candidates(),
+        )
+
+        conflicting = _selected_output_recovery_env(registry)
+        conflicting.graph.add_agent(
+            AgentNode(
+                "other_source",
+                "model-b",
+                "produce an independently grounded semantic candidate",
+                role_family="repair",
+                execution_mode="reasoning",
+                artifact_type="semantic_candidate",
+            )
+        )
+        conflicting.graph.set_relation(
+            "other_source",
+            "output",
+            True,
+            False,
+        )
+        conflicting._progressive_outputs["other_source"] = (
+            "Candidate answer: Other Target"
+        )
+        conflicting_receipt = _read_receipt()
+        conflicting_receipt["result"]["value"]["passage"]["text"] += (
+            " Another source identifies Other Target."
+        )
+        conflicting._progressive_output_metadata["other_source"] = {
+            "tool_receipts": [conflicting_receipt]
+        }
+        self.assertEqual(
+            {},
+            conflicting._selected_output_artifact_recovery_sources_by_target(),
+        )
+
+    def test_selected_output_recovery_validates_selected_role_semantics(
+        self,
+    ) -> None:
+        registry = _registry()
+
+        malformed_reasoner = _selected_output_recovery_env(registry)
+        malformed_reasoner.graph.modify_agent(
+            "artifact_source",
+            role_family="reasoner",
+        )
+        malformed_reasoner._progressive_outputs["artifact_source"] = json.dumps(
+            {"candidate_answer": SYNTHETIC_CANDIDATE}
+        )
+        self.assertEqual(
+            {},
+            malformed_reasoner._selected_output_artifact_recovery_sources_by_target(),
+        )
+
+        changed_verifier = _selected_output_recovery_env(registry)
+        changed_verifier.graph.modify_agent(
+            "artifact_source",
+            role_family="verifier",
+        )
+        changed_verifier.graph.add_agent(
+            AgentNode(
+                "producer",
+                "model-b",
+                "determine a semantic candidate",
+                role_family="repair",
+                execution_mode="reasoning",
+                artifact_type="semantic_candidate",
+            )
+        )
+        changed_verifier.graph.set_relation(
+            "producer",
+            "artifact_source",
+            True,
+            False,
+        )
+        changed_verifier._progressive_outputs["producer"] = (
+            "Candidate answer: Other Target"
+        )
+        changed_verifier._progressive_outputs["artifact_source"] = (
+            _verifier_artifact(SYNTHETIC_CANDIDATE)
+        )
+        self.assertEqual(
+            {},
+            changed_verifier._selected_output_artifact_recovery_sources_by_target(),
+        )
+
+    def test_selected_output_recovery_falls_back_when_relation_action_is_disabled(
+        self,
+    ) -> None:
+        registry = _registry()
+        source = _selected_output_recovery_env(registry)
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_runtime(registry),
+            graph=source.graph,
+            problem=SYNTHETIC_QUESTION,
+            execute_on_edit=False,
+            require_exact_answer_tag=True,
+            require_format_agent=False,
+            allowed_actions=("modify_agent",),
+            semantic_protocol=SEMANTIC_PROTOCOL,
+            recovery_policy=RECOVERY_POLICY,
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+        )
+        env._progressive_outputs = dict(source._progressive_outputs)
+        env._progressive_output_metadata = dict(
+            source._progressive_output_metadata
+        )
+        env._failed_agent_ids.add("failed_worker")
+        env._repair_exhausted_agent_ids.add("failed_worker")
+        env._unresolved_dirty_agents.add("failed_worker")
+
+        self.assertEqual(("modify_agent",), env.model_admissible_action_types())
+        action = env.parser.parse(
+            json.dumps(
+                {
+                    "action": "modify_agent",
+                    "agent_id": "failed_worker",
+                    "contract": "consume the routed grounded semantic artifact",
+                }
+            )
+        )
+        self.assertIsNone(env._preservation_admission_issue(action))
+        self.assertEqual(
+            ["modify_agent"],
+            env.recovery_state()["preferred_actions"],
+        )
+
+    def test_selected_output_recovery_exposes_no_rejected_fallback_action(
+        self,
+    ) -> None:
+        registry = _registry()
+        source = _selected_output_recovery_env(registry)
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_runtime(registry),
+            graph=source.graph,
+            problem=SYNTHETIC_QUESTION,
+            execute_on_edit=False,
+            require_exact_answer_tag=True,
+            require_format_agent=False,
+            allowed_actions=("add_subgraph",),
+            semantic_protocol=SEMANTIC_PROTOCOL,
+            recovery_policy=RECOVERY_POLICY,
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+        )
+        env._progressive_outputs = dict(source._progressive_outputs)
+        env._progressive_output_metadata = dict(
+            source._progressive_output_metadata
+        )
+        env._failed_agent_ids.add("failed_worker")
+        env._repair_exhausted_agent_ids.add("failed_worker")
+        env._unresolved_dirty_agents.add("failed_worker")
+
+        self.assertEqual((), env.model_admissible_action_types())
+        self.assertEqual([], env.recovery_state()["preferred_actions"])
+
+    def test_delete_requires_explicit_unusable_and_completed_takeover(
+        self,
+    ) -> None:
+        registry = _registry()
+        graph = AgentGraph(
+            [
+                _evidence_agent("reader"),
+                _evidence_agent("replacement"),
+                AgentNode(
+                    "consumer",
+                    "model-b",
+                    "consume routed evidence",
+                    role_family="repair",
+                    execution_mode="reasoning",
+                ),
+                _output_agent(),
+            ],
+            [
+                AgentRelation("reader", "consumer", True, False),
+                AgentRelation("replacement", "consumer", True, False),
+                AgentRelation("consumer", "output", True, False),
+            ],
+            output_agent_id="output",
+        )
+        env = _env(registry, graph=graph)
+        env._failed_agent_ids.add("reader")
+        env._repair_exhausted_agent_ids.add("reader")
+        env._react_exhausted_agent_ids.add("reader")
+        env._progressive_outputs["replacement"] = _retrieval_artifact()
+        env._progressive_output_metadata["replacement"] = {
+            "tool_receipts": [_read_receipt()]
+        }
+
+        self.assertIsNotNone(env._delete_admission_issue("reader"))
+        env._diagnosed_unusable_agent_ids.add("reader")
+        env._progressive_outputs["reader"] = _retrieval_artifact()
+        env._progressive_output_metadata["reader"] = {
+            "tool_receipts": [_read_receipt()]
+        }
+        self.assertIsNotNone(
+            env._delete_admission_issue("reader"),
+            "an existing successful artifact remains protected",
+        )
+        env._progressive_outputs.pop("reader")
+        env._progressive_output_metadata.pop("reader")
+        self.assertIsNone(env._delete_admission_issue("reader"))
+
+    def test_delete_takeover_preserves_previous_semantic_candidate(self) -> None:
+        registry = _registry()
+        graph = AgentGraph(
+            [
+                AgentNode(
+                    "source",
+                    "model-a",
+                    "produce a semantic candidate",
+                    role_family="repair",
+                    artifact_type="semantic_candidate",
+                ),
+                AgentNode(
+                    "replacement",
+                    "model-b",
+                    "replace the semantic candidate producer",
+                    role_family="repair",
+                    artifact_type="semantic_candidate",
+                ),
+                _output_agent(),
+            ],
+            [
+                AgentRelation("source", "output", True, False),
+                AgentRelation("replacement", "output", True, False),
+            ],
+            output_agent_id="output",
+        )
+        env = _env(registry, graph=graph)
+        env._diagnosed_unusable_agent_ids.add("source")
+        env._failed_agent_ids.add("source")
+        env._previous_revision_outputs["source"] = "Candidate answer: Alpha"
+        env._previous_revision_output_metadata["source"] = {}
+        env._progressive_outputs["replacement"] = "Candidate answer: Beta"
+
+        self.assertIsNotNone(env._delete_admission_issue("source"))
+        env._progressive_outputs["replacement"] = "Candidate answer: Alpha"
+        self.assertIsNone(env._delete_admission_issue("source"))
+
+    def test_delete_takeover_preserves_successful_continuation_evidence(
+        self,
+    ) -> None:
+        registry = _registry()
+        graph = AgentGraph(
+            [
+                _evidence_agent("reader"),
+                _evidence_agent("replacement"),
+                _output_agent(),
+            ],
+            [
+                AgentRelation("reader", "output", True, False),
+                AgentRelation("replacement", "output", True, False),
+            ],
+            output_agent_id="output",
+        )
+        env = _env(registry, graph=graph)
+        env._diagnosed_unusable_agent_ids.add("reader")
+        env._failed_agent_ids.add("reader")
+        env._failure_continuations["reader"] = {
+            "execution_phase": "single",
+            "tool_receipts": [_read_receipt()],
+        }
+        env._progressive_outputs["replacement"] = _retrieval_artifact()
+        env._progressive_output_metadata["replacement"] = {}
+
+        self.assertIsNotNone(env._delete_admission_issue("reader"))
+        env._progressive_output_metadata["replacement"] = {
+            "tool_receipts": [_read_receipt()]
+        }
+        self.assertIsNone(env._delete_admission_issue("reader"))
 
     def test_add_subgraph_can_select_a_terminal_output_after_a_reasoner(self) -> None:
         registry = _registry()

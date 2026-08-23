@@ -32,6 +32,9 @@ class CommunicationCondition(str, Enum):
     UPSTREAM_MASKED = "upstream_masked"
 
 
+_NON_TERMINAL_PARTIAL_ARTIFACT = "non_terminal_partial"
+
+
 def _communication_condition(
     value: Union[CommunicationCondition, str],
 ) -> CommunicationCondition:
@@ -433,13 +436,43 @@ async def _cancel_and_wait(tasks: List["asyncio.Task[object]"]) -> None:
 async def _gather_pair(
     left: Awaitable[AgentResponse],
     right: Awaitable[AgentResponse],
-) -> Tuple[AgentResponse, AgentResponse]:
+) -> Tuple[
+    Union[AgentResponse, BaseException],
+    Union[AgentResponse, BaseException],
+]:
+    """Settle a reciprocal barrier without discarding a completed peer.
+
+    SkillFlow commits each completed Action--Observation step before a later
+    bounded failure is reported.  Apply the same boundary to FlowSteer's
+    finite reciprocal exchange: retain a response that completed before its
+    peer failed, while preserving fail-fast cancellation for a peer that is
+    still running.
+    """
+
     tasks = [asyncio.create_task(left), asyncio.create_task(right)]
     try:
-        results = await asyncio.gather(*tasks)
+        done, pending = await asyncio.wait(
+            tasks,
+            return_when=asyncio.FIRST_EXCEPTION,
+        )
+        if any(
+            task.cancelled() or task.exception() is not None
+            for task in done
+        ):
+            await _cancel_and_wait(list(pending))  # type: ignore[arg-type]
+        elif pending:
+            await asyncio.gather(*pending)
     except BaseException:
         await _cancel_and_wait(tasks)  # type: ignore[arg-type]
         raise
+
+    results: List[Union[AgentResponse, BaseException]] = []
+    for task in tasks:
+        if task.cancelled():
+            results.append(asyncio.CancelledError())
+            continue
+        failure = task.exception()
+        results.append(failure if failure is not None else task.result())
     return results[0], results[1]
 
 
@@ -651,6 +684,16 @@ class AgentRuntime:
         # only before adding missing IDs could otherwise reuse a stale cached
         # downstream artifact.
         dirty_seeds.update(agent_id for agent_id in nodes if agent_id not in outputs)
+        # A successful peer in an incomplete reciprocal block is retained for
+        # Canvas feedback and recovery evidence, but it is not a completed
+        # block output.  Force a bounded recomputation instead of letting a
+        # later topology edit reuse the draft/revision receipt as terminal.
+        dirty_seeds.update(
+            agent_id
+            for agent_id, metadata in output_metadata.items()
+            if metadata.get("artifact_status")
+            == _NON_TERMINAL_PARTIAL_ARTIFACT
+        )
         dirty = execution_graph.dirty_closure(dirty_seeds)
         # FlowSteer's executor cache is valid only for an unchanged input
         # identity.  A dirty Agent and every dependent successor therefore
@@ -760,6 +803,22 @@ class AgentRuntime:
                     failure_component, failure = failures[0]
                     if isinstance(failure, asyncio.CancelledError):
                         raise failure
+                    # A reciprocal block may have committed one peer response
+                    # before the other peer failed.  Preserve that measured
+                    # non-terminal artifact in the scheduler-level partial
+                    # result just as completed sibling blocks are preserved.
+                    for _, item in failures:
+                        if not isinstance(item, AgentRuntimeError):
+                            continue
+                        nested_partial = item.partial_result
+                        if nested_partial is None:
+                            continue
+                        outputs.update(nested_partial.outputs)
+                        output_metadata.update(nested_partial.output_metadata)
+                        executed_agents.update(
+                            nested_partial.executed_agent_ids
+                        )
+                        reused_agents.update(nested_partial.reused_agent_ids)
                     failed_component_ids = {
                         agent_id
                         for component, _ in failures
@@ -788,7 +847,17 @@ class AgentRuntime:
                         output_metadata=output_metadata,
                     )
                     pending_agent_ids = tuple(
-                        sorted(set(nodes) - set(partial_result.outputs))
+                        sorted(
+                            (set(nodes) - set(partial_result.outputs))
+                            | {
+                                agent_id
+                                for agent_id, metadata in (
+                                    partial_result.output_metadata.items()
+                                )
+                                if metadata.get("artifact_status")
+                                == _NON_TERMINAL_PARTIAL_ARTIFACT
+                            }
+                        )
                     )
                     failure_records = tuple(
                         sorted(
@@ -1093,6 +1162,96 @@ class AgentRuntime:
             relations=graph.relations,
         )
 
+    @staticmethod
+    def _reciprocal_responses_or_raise(
+        results: Tuple[
+            Union[AgentResponse, BaseException],
+            Union[AgentResponse, BaseException],
+        ],
+        *,
+        agent_ids: Tuple[str, str],
+        phase: ExecutionPhase,
+        run_id: str,
+        graph_revision: int,
+        output_agent_id: Optional[str],
+        calls: List[AgentCallRecord],
+        communication_condition: CommunicationCondition,
+    ) -> Tuple[AgentResponse, AgentResponse]:
+        """Raise with successful peer receipts when one reciprocal side fails."""
+
+        failures = tuple(
+            (agent_id, result)
+            for agent_id, result in zip(agent_ids, results)
+            if isinstance(result, BaseException)
+        )
+        if not failures:
+            left, right = results
+            assert isinstance(left, AgentResponse)
+            assert isinstance(right, AgentResponse)
+            return left, right
+
+        measured_failures = tuple(
+            item
+            for item in failures
+            if not isinstance(item[1], asyncio.CancelledError)
+        )
+        if not measured_failures:
+            raise failures[0][1]
+        for _, failure in measured_failures:
+            if not isinstance(failure, Exception):
+                raise failure
+
+        successful_responses = {
+            agent_id: result
+            for agent_id, result in zip(agent_ids, results)
+            if isinstance(result, AgentResponse)
+        }
+        partial_metadata = {
+            agent_id: MappingProxyType(
+                {
+                    **dict(response.metadata),
+                    "execution_phase": phase.value,
+                    "artifact_status": _NON_TERMINAL_PARTIAL_ARTIFACT,
+                    "reciprocal_block_complete": False,
+                }
+            )
+            for agent_id, response in successful_responses.items()
+        }
+        partial_result = AgentRuntimeResult(
+            run_id=run_id,
+            graph_revision=graph_revision,
+            output_agent_id=output_agent_id,
+            # A peer response is evidence from an incomplete reciprocal
+            # barrier.  It can inform repair, but cannot become FINISH.
+            final_answer=None,
+            outputs={
+                agent_id: response.text
+                for agent_id, response in successful_responses.items()
+            },
+            calls=tuple(
+                sorted(calls, key=lambda record: record.request.request_id)
+            ),
+            block_completion_order=(),
+            executed_agent_ids=tuple(sorted(successful_responses)),
+            communication_condition=communication_condition,
+            output_metadata=partial_metadata,
+        )
+        failure_records = tuple(
+            record
+            for _, failure in measured_failures
+            if isinstance(failure, AgentRuntimeError)
+            for record in failure.failure_records
+        )
+        failed_agent_ids = tuple(agent_id for agent_id, _ in failures)
+        first_agent_id, first_failure = measured_failures[0]
+        raise AgentRuntimeError(
+            "reciprocal Agent block failed for "
+            f"{first_agent_id!r} during {phase.value}: {first_failure}",
+            failure_records=failure_records,
+            partial_result=partial_result,
+            pending_agent_ids=failed_agent_ids,
+        ) from first_failure
+
     async def _execute_block(
         self,
         component: Tuple[str, ...],
@@ -1198,9 +1357,26 @@ class AgentRuntime:
             communication_condition=communication_condition,
             continuation_metadata=failure_metadata.get(right_id),
         )
-        left_draft, right_draft = await _gather_pair(
-            self._invoke(left_draft_request, calls, cancelled_failure_records),
-            self._invoke(right_draft_request, calls, cancelled_failure_records),
+        left_draft, right_draft = self._reciprocal_responses_or_raise(
+            await _gather_pair(
+                self._invoke(
+                    left_draft_request,
+                    calls,
+                    cancelled_failure_records,
+                ),
+                self._invoke(
+                    right_draft_request,
+                    calls,
+                    cancelled_failure_records,
+                ),
+            ),
+            agent_ids=(left_id, right_id),
+            phase=ExecutionPhase.DRAFT,
+            run_id=run_id,
+            graph_revision=graph_revision,
+            output_agent_id=output_agent_id,
+            calls=calls,
+            communication_condition=communication_condition,
         )
 
         left_revision_request = self._request(
@@ -1259,9 +1435,26 @@ class AgentRuntime:
             communication_condition=communication_condition,
             continuation_metadata=failure_metadata.get(right_id),
         )
-        left_revision, right_revision = await _gather_pair(
-            self._invoke(left_revision_request, calls, cancelled_failure_records),
-            self._invoke(right_revision_request, calls, cancelled_failure_records),
+        left_revision, right_revision = self._reciprocal_responses_or_raise(
+            await _gather_pair(
+                self._invoke(
+                    left_revision_request,
+                    calls,
+                    cancelled_failure_records,
+                ),
+                self._invoke(
+                    right_revision_request,
+                    calls,
+                    cancelled_failure_records,
+                ),
+            ),
+            agent_ids=(left_id, right_id),
+            phase=ExecutionPhase.REVISION,
+            run_id=run_id,
+            graph_revision=graph_revision,
+            output_agent_id=output_agent_id,
+            calls=calls,
+            communication_condition=communication_condition,
         )
         output_metadata[left_id] = left_revision.metadata
         output_metadata[right_id] = right_revision.metadata

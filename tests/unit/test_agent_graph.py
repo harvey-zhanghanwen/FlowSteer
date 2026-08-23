@@ -3724,6 +3724,7 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         env._progressive_outputs["reader"] = "grounded replacement evidence"
         env._failed_agent_ids.update({"failed_reader", "reasoner"})
         env._repair_exhausted_agent_ids.update({"failed_reader", "reasoner"})
+        env._diagnosed_unusable_agent_ids.add("failed_reader")
         env._latest_failure_record_by_agent["failed_reader"] = AgentFailureRecord(
             request_id="failed-reader-repair-exhausted",
             agent_id="failed_reader",
@@ -3808,6 +3809,7 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         )
         env._failed_agent_ids.update({"failed_reader", "reasoner"})
         env._repair_exhausted_agent_ids.update({"failed_reader", "reasoner"})
+        env._diagnosed_unusable_agent_ids.add("failed_reader")
         env._latest_failure_record_by_agent["failed_reader"] = AgentFailureRecord(
             request_id="failed-reader-no-takeover",
             agent_id="failed_reader",
@@ -4215,6 +4217,7 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         env._progressive_outputs["replacement_reader"] = "replacement evidence"
         env._failed_agent_ids.update({"failed_reader", "reasoner"})
         env._repair_exhausted_agent_ids.update({"failed_reader", "reasoner"})
+        env._diagnosed_unusable_agent_ids.add("failed_reader")
         env._latest_failure_record_by_agent["failed_reader"] = AgentFailureRecord(
             request_id="failed-reader-takeover",
             agent_id="failed_reader",
@@ -4491,6 +4494,7 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             metadata={
                 "react_trace": [tool_trace, rejected_completion],
                 "tool_receipts": [receipt],
+                "node_unusable": True,
             },
         )
         env._record_failure_state(
@@ -4545,7 +4549,12 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
                 output_agent_id=candidate_graph.output_agent_id,
                 final_answer=None,
                 outputs={"replacement_reader": "replacement evidence"},
-                output_metadata={"replacement_reader": {}},
+                output_metadata={
+                    "replacement_reader": {
+                        "continuation_source_agent_id": "failed_reader",
+                        "tool_receipts": [receipt],
+                    }
+                },
                 calls=(),
                 block_completion_order=(("replacement_reader",),),
                 executed_agent_ids=("replacement_reader",),
