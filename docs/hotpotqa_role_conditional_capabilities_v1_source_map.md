@@ -9,8 +9,8 @@ provided-context retrieval runtime, and concise
 or merge the r4 trajectories; r4 metrics are comparison references only.
 
 The current condition is configured in
-`config/evaluation_hotpotqa_role_conditional_v1_r8.yaml`. Its artifacts and
-reports use the independent `hotpotqa_role_conditional_v1_r8` namespace.
+`config/evaluation_hotpotqa_role_conditional_v1_r9.yaml`. Its artifacts and
+reports use the independent `hotpotqa_role_conditional_v1_r9` namespace.
 
 ## Directly reused from FlowSteer
 
@@ -214,6 +214,20 @@ bit-equivalent signed two's-complement representation only at the native
 SGLang request boundary. This is a wire-type compatibility adapter; sampling
 coordinates, 64-bit random state, policy, search space, topology, prompts,
 tasks, and evaluator are unchanged.
+
+The independent r8 canary then completed one task but exposed a Canvas/Runtime
+admission mismatch on the other. The Director selected a Formatter without
+assigning it as Output in the same `ADD_SUBGRAPH`; SkillFlow correctly deferred
+that terminal serializer, while another generic Output had already produced
+the correct semantic answer. Subsequent action targets focused on the deferred
+Formatter and exhausted the edit budget without `SET_OUTPUT`. In r9, Formatter
+remains absent from every required-role or FINISH prerequisite. If the Director
+does select it, however, the role-selection and parameter schemas allow at
+most one and require it to be assigned as Output in the same atomic FlowSteer
+Canvas edit. A generic Output path remains valid with no Formatter, Reasoner,
+or Verifier. This aligns the optional capability's action mask with the
+existing Runtime terminal-serializer contract without prescribing a serial
+topology.
 
 ## Not implemented or enabled in this condition
 

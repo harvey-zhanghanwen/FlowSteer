@@ -373,6 +373,7 @@ class RoleConditionalSearchSpaceTests(unittest.TestCase):
             registered[:2],
             constraints["format"]["execution_profiles"],
         )
+        self.assertIs(constraints["format"]["must_be_output_agent"], True)
         self.assertEqual(
             [registered[0], registered[2]],
             constraints["evidence_retriever"]["execution_profiles"],
@@ -443,6 +444,106 @@ class RoleConditionalSearchSpaceTests(unittest.TestCase):
             env = _env(registry, graph=graph)
             self.assertIsNone(env._semantic_edit_issue_for(graph))
             self.assertIsNone(env._format_agent_issue_for(graph))
+
+    def test_formatter_is_optional_but_cannot_be_a_deferred_non_output_node(
+        self,
+    ) -> None:
+        registry = _registry()
+        env = _env(registry)
+        graph_without_formatter = AgentGraph(
+            [
+                AgentNode(
+                    "output",
+                    "model-a",
+                    "return one routed semantic answer",
+                    role_family="output",
+                    execution_mode="reasoning",
+                )
+            ],
+            output_agent_id="output",
+        )
+        self.assertIsNone(env._semantic_edit_issue_for(graph_without_formatter))
+
+        deferred_formatter = AgentGraph(
+            [
+                AgentNode(
+                    "reasoner",
+                    "model-a",
+                    "determine one semantic candidate",
+                    role_family="reasoner",
+                    execution_mode="reasoning",
+                ),
+                AgentNode(
+                    "formatter",
+                    "model-b",
+                    _HOTPOTQA_ROLE_CONDITIONAL_FORMAT_CONTRACT,
+                    role_family="format",
+                    execution_mode="reasoning",
+                ),
+            ],
+            [AgentRelation("reasoner", "formatter", True, False)],
+        )
+        issue = env._semantic_edit_issue_for(deferred_formatter)
+        self.assertIsNotNone(issue)
+        self.assertIn("optional", issue or "")
+        self.assertIn("unique Output Agent", issue or "")
+
+    def test_selected_formatter_is_required_as_output_in_atomic_add_schema(
+        self,
+    ) -> None:
+        registry = _registry()
+        env = _env(registry)
+        targets = env.model_admissible_action_targets()
+        declarations = (
+            {
+                "agent_id": "node_1",
+                "model_id": "model-a",
+                "contract": "determine one semantic candidate",
+                "role_family": "reasoner",
+                "allowed_tools": [],
+                "execution_mode": "reasoning",
+            },
+            {
+                "agent_id": "node_2",
+                "model_id": "model-b",
+                "contract": _HOTPOTQA_ROLE_CONDITIONAL_FORMAT_CONTRACT,
+                "role_family": "format",
+                "allowed_tools": [],
+                "execution_mode": "reasoning",
+            },
+        )
+
+        schema = json.loads(
+            director_live_action_parameter_json_schema_text(
+                "add_subgraph",
+                targets,
+                add_agents=declarations,
+            )
+        )
+        self.assertIn("output_agent_id", schema["required"])
+        self.assertEqual(
+            ["node_2"],
+            schema["properties"]["output_agent_id"]["enum"],
+        )
+
+        duplicate_formatters = (
+            declarations[1],
+            {
+                **declarations[1],
+                "agent_id": "node_2",
+                "model_id": "model-c",
+            },
+        )
+        duplicate_formatters = (
+            {**duplicate_formatters[0], "agent_id": "node_1"},
+            duplicate_formatters[1],
+        )
+        with self.assertRaisesRegex(ValueError, "terminal-only role"):
+            director_live_action_parameter_json_schema_text(
+                "add_subgraph",
+                targets,
+                add_agents=duplicate_formatters,
+            )
 
     def test_react_reasoner_reuses_hotpot_structured_completion_and_two_reads(
         self,

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from itertools import permutations
+from itertools import permutations, product
 import json
 import os
 import random
@@ -1320,6 +1320,25 @@ def _live_explicit_output_assignment_required(
     return value
 
 
+def _live_terminal_only_role_families(
+    role_constraints: Mapping[str, Any],
+) -> tuple[str, ...]:
+    """Return optional roles that are valid only as the selected Output."""
+
+    terminal_only: list[str] = []
+    for role_family, constraint in role_constraints.items():
+        if not isinstance(role_family, str) or not isinstance(constraint, Mapping):
+            raise ValueError("add_subgraph role constraints are malformed")
+        value = constraint.get("must_be_output_agent", False)
+        if type(value) is not bool:
+            raise ValueError(
+                f"{role_family}.must_be_output_agent must be boolean"
+            )
+        if value:
+            terminal_only.append(role_family)
+    return tuple(terminal_only)
+
+
 def _hotpotqa_directed_role_relation_allowed(
     source_role: str,
     target_role: str,
@@ -1591,6 +1610,7 @@ def director_live_add_subgraph_role_selection_json_schema_text(
         }
         for agent_id in new_agent_ids
     ]
+    terminal_only_roles = _live_terminal_only_role_families(role_constraints)
     if _live_distinct_new_roles(domain):
         count_branches = [
             {
@@ -1613,6 +1633,33 @@ def director_live_add_subgraph_role_selection_json_schema_text(
             }
             for count in range(min_agents, max_agents + 1)
             for role_sequence in permutations(role_families, count)
+        ]
+    elif terminal_only_roles:
+        count_branches = [
+            {
+                "type": "array",
+                "minItems": count,
+                "maxItems": count,
+                "prefixItems": [
+                    {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["agent_id", "role_family"],
+                        "properties": {
+                            "agent_id": {"const": new_agent_ids[position]},
+                            "role_family": {"const": role_family},
+                        },
+                    }
+                    for position, role_family in enumerate(role_sequence)
+                ],
+                "items": False,
+            }
+            for count in range(min_agents, max_agents + 1)
+            for role_sequence in product(role_families, repeat=count)
+            if all(
+                role_sequence.count(role_family) <= 1
+                for role_family in terminal_only_roles
+            )
         ]
     else:
         count_branches = [
@@ -1722,6 +1769,14 @@ def director_live_add_subgraph_role_selection_from_text(
         raise ValueError(
             "add_subgraph selected Agent roles must be distinct at the "
             "current capability-construction boundary"
+        )
+    terminal_only_roles = _live_terminal_only_role_families(role_constraints)
+    if any(
+        sum(item["role_family"] == role_family for item in normalized) > 1
+        for role_family in terminal_only_roles
+    ):
+        raise ValueError(
+            "add_subgraph terminal-only role may be selected at most once"
         )
     return tuple(normalized)
 
@@ -1861,6 +1916,14 @@ def _live_add_subgraph_agents(
         raise ValueError(
             "add_subgraph Agent declarations must use distinct roles at the "
             "current capability-construction boundary"
+        )
+    terminal_only_roles = _live_terminal_only_role_families(role_constraints)
+    if any(
+        sum(item["role_family"] == role_family for item in normalized) > 1
+        for role_family in terminal_only_roles
+    ):
+        raise ValueError(
+            "add_subgraph terminal-only role may be declared at most once"
         )
     if selected_agent_roles is not None:
         expected_roles = tuple(
@@ -2412,6 +2475,18 @@ def director_live_action_parameter_json_schema_text(
             allowed_output_roles = set(
                 _live_hotpotqa_output_role_families(domain)
             )
+            terminal_only_roles = set(
+                _live_terminal_only_role_families(domain["role_constraints"])
+            )
+            selected_terminal_output_ids = [
+                agent["agent_id"]
+                for agent in normalized_agents
+                if agent["role_family"] in terminal_only_roles
+            ]
+            if len(selected_terminal_output_ids) > 1:
+                raise ValueError(
+                    "add_subgraph selected more than one terminal-only role"
+                )
             output_ids = [
                 agent_id
                 for agent_id in endpoint_ids
@@ -2419,7 +2494,10 @@ def director_live_action_parameter_json_schema_text(
             ]
             explicit_output_assignment = (
                 _live_explicit_output_assignment_required(domain)
+                or bool(selected_terminal_output_ids)
             )
+            if selected_terminal_output_ids:
+                output_ids = selected_terminal_output_ids
             if isolated_boundary and explicit_output_assignment:
                 raise ValueError(
                     "add_subgraph isolated replacement boundary cannot require "

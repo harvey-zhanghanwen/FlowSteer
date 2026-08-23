@@ -2501,6 +2501,11 @@ class AgentWorkflowEnv:
                                     if self._uses_role_conditional_capabilities()
                                     else _HOTPOTQA_FORMAT_CONTRACT
                                 ],
+                                **(
+                                    {"must_be_output_agent": True}
+                                    if self._uses_role_conditional_capabilities()
+                                    else {}
+                                ),
                             },
                             "evidence_retriever": {
                                 **(
@@ -4940,6 +4945,24 @@ class AgentWorkflowEnv:
                 "role_family 'format'; structured semantic and ReAct artifacts "
                 "remain internal capabilities"
             )
+        if self._uses_role_conditional_capabilities():
+            formatter_ids = tuple(
+                node.id
+                for node in graph.nodes
+                if (node.role_family or "").casefold() == "format"
+            )
+            if formatter_ids and (
+                len(formatter_ids) != 1
+                or graph.output_agent_id != formatter_ids[0]
+            ):
+                return (
+                    "A Formatter is optional, but when selected it must be the "
+                    "unique Output Agent in the same Canvas revision; it is a "
+                    "terminal serializer and cannot remain a deferred non-Output "
+                    "node. formatter_agent_ids="
+                    f"{list(formatter_ids)!r}, output_agent_id="
+                    f"{graph.output_agent_id!r}"
+                )
 
         formatting_only_contract = " ".join(
             (
