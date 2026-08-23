@@ -9,8 +9,8 @@ provided-context retrieval runtime, and concise
 or merge the r4 trajectories; r4 metrics are comparison references only.
 
 The current condition is configured in
-`config/evaluation_hotpotqa_role_conditional_v1_r16.yaml`. Its artifacts and
-reports use the independent `hotpotqa_role_conditional_v1_r16` namespace.
+`config/evaluation_hotpotqa_role_conditional_v1_r17.yaml`. Its artifacts and
+reports use the independent `hotpotqa_role_conditional_v1_r17` namespace.
 
 ## Directly reused from FlowSteer
 
@@ -362,6 +362,36 @@ mask is a training-token mask rather than a dynamic legal-Canvas mask, and
 SkillFlow distinguishes horizon exhaustion from an empty model submission, so
 this is a necessary AgentGraph constrained-decoding adapter. It does not emit
 an action, auto-FINISH, select an answer, or impose any role or topology.
+
+The r16 canary remains preserved as a two-task diagnostic and is not a
+128-task metric. Delhi completed with an explicit FINISH, while the Arthur's
+Magazine task reached `max_rounds` with no Output. Its selected Reasoner and
+Verifier had already materialized the correct semantic candidate. The failure
+was a recovery livelock: two ReAct Evidence Retrievers exhausted their bounded
+completion after successful reads, while later isolated same-role replacements
+materialized valid evidence artifacts under registered execution profiles.
+`_repair_exhausted_auxiliary_replacement_domains` nevertheless kept exposing
+only another replacement ADD until the eight-Agent limit, after which only
+contract/completion edits remained. Correct evidence could not transition into
+an existing-node repair or terminal graph construction.
+
+The independent r17 condition changes only that measured recovery boundary.
+It reuses `AgentAction.MODIFY_AGENT`, AgentRuntime's published
+`registered_execution_profiles()`, and the existing role/artifact validation;
+it adds no action, role, or topology. Once a different registered
+`execution_mode`/`allowed_tools` pair has actually completed the same
+role/artifact responsibility, the live action domain stops duplicate
+augmentation and exposes the original failed Agent as the exact MODIFY target.
+The two correlated fields are sampled and applied atomically, so no invalid
+intermediate execution contract can be committed. The original Agent ID,
+relations, semantic lineage, public Action--Observation continuation, and Tool
+receipts are preserved. Role-conditional Verifier and Formatter input checks
+remain artifact-based: raw retrieval and terminal wrappers are invalid inputs,
+but no named Reasoner or Verifier ancestor is required. Reasoner, Verifier,
+Formatter, generic Output, fan-in/fan-out, and bounded reciprocal communication
+remain optional search-space choices. The frozen task order, official
+evaluator, model catalog, Qwen3.5-9B Director, seed, concurrency, neutral v10
+prompt, and no-training boundary are unchanged.
 
 ## Not implemented or enabled in this condition
 
