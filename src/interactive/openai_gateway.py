@@ -225,6 +225,29 @@ def _hotpotqa_role_conditional_semantic_candidate(
     return candidate
 
 
+def _hotpotqa_role_conditional_candidate_consensus(
+    messages: Sequence[UpstreamMessage],
+    condition: CommunicationCondition,
+) -> tuple[bool, str]:
+    """Return whether a candidate wire exists and its exact consensus value."""
+
+    candidates: list[str] = []
+    for message in messages:
+        artifact = _visible_message_content(message.artifact, condition)
+        candidate = _hotpotqa_role_conditional_semantic_candidate(artifact)
+        if candidate is None:
+            continue
+        if not candidate:
+            return True, ""
+        candidates.append(candidate)
+    if not candidates:
+        return False, ""
+    candidate = candidates[0]
+    if any(item != candidate for item in candidates):
+        return True, ""
+    return True, candidate
+
+
 def _hotpotqa_supported_consensus(
     messages: Sequence[UpstreamMessage],
     condition: CommunicationCondition,
@@ -238,14 +261,20 @@ def _hotpotqa_supported_consensus(
     This boundary never infers or votes on an answer.
     """
 
+    if allow_role_conditional_sources:
+        candidate_seen, candidate = (
+            _hotpotqa_role_conditional_candidate_consensus(messages, condition)
+        )
+        return (
+            f"Candidate answer: {candidate}"
+            if candidate_seen and candidate
+            else ""
+        )
+
     verifier_candidates: list[str] = []
     for message in messages:
         artifact = _visible_message_content(message.artifact, condition)
-        candidate = (
-            _hotpotqa_role_conditional_semantic_candidate(artifact)
-            if allow_role_conditional_sources
-            else _hotpotqa_supported_verifier_candidate(artifact)
-        )
+        candidate = _hotpotqa_supported_verifier_candidate(artifact)
         if candidate is None:
             continue
         if not candidate:
@@ -256,11 +285,7 @@ def _hotpotqa_supported_consensus(
     candidate = verifier_candidates[0]
     if any(other_candidate != candidate for other_candidate in verifier_candidates):
         return ""
-    return (
-        f"Candidate answer: {candidate}"
-        if allow_role_conditional_sources
-        else f"Candidate answer: {candidate}\nVerification status: supported"
-    )
+    return f"Candidate answer: {candidate}\nVerification status: supported"
 
 
 _HOTPOTQA_COMPLETE_ENTITY_SURFACE_RULE = (
@@ -290,7 +315,15 @@ _HOTPOTQA_REASONER_PROTOCOL = (
     "preserve the sentence's asserted semantic roles instead of placing the desired "
     "candidate into an unrelated field. For a comparison fact, the compared entity "
     "is normally the proposition subject and its date, number, or other compared "
-    "attribute is the object_or_attribute_value. Then align that proposition to the "
+    "attribute is the object_or_attribute_value. Copy every entity surface exactly "
+    "as it occurs in that proposition's evidence span; never silently replace a "
+    "pronoun, surname, or shortened mention with the longer question entity. Bind "
+    "such coreference through an antecedent-bearing span or a separate identity "
+    "proposition supported by the same read receipt. For a quantitative comparison, "
+    "absence of explicit scope-matching count or event evidence is unknown, not zero. "
+    "Count only explicit distinct events in the original requested category, and do "
+    "not substitute a narrower subtype for an aggregate scope. Then align that "
+    "proposition to the "
     "answer slot actually requested. Apply the "
     "question's wh-word answer-type constraint: a Which-comparison returns the "
     "compared entity rather than the comparison value, and a who-question returns "
@@ -322,7 +355,12 @@ _HOTPOTQA_VERIFIER_PROTOCOL = (
     "evidence-aligned referential surface without an alias list, redundant "
     "question-head noun, or text outside the selected entity mention; "
     "and every canonical-name or alias choice has an explicit identity binding in the "
-    "evidence propositions. In a Which-comparison, reject a numeric/date comparison "
+    "evidence propositions. Reject a proposition that silently replaces a pronoun, "
+    "surname, or shortened mention without an antecedent-bearing span or an identity "
+    "proposition supported by the same read receipt. In a quantitative comparison, "
+    "treat missing scope-matching count or event evidence as unknown rather than zero, "
+    "and reject a narrower subtype substituted for the original aggregate scope. In "
+    "a Which-comparison, reject a numeric/date comparison "
     "value as the candidate. If both comparison sides have unexpectedly equal "
     "values, do not accept a tie until the original question scope, both "
     "entity-attribute bindings, explicit evidence, and any upstream contract "
@@ -437,6 +475,20 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
         request.semantic_protocol
         == "hotpotqa_role_conditional_capabilities_v1"
     )
+    role_conditional_output_candidate_seen = False
+    role_conditional_output_candidate = ""
+    if (
+        role_conditional_hotpot
+        and request.is_output_agent
+        and not request.is_format_agent
+    ):
+        (
+            role_conditional_output_candidate_seen,
+            role_conditional_output_candidate,
+        ) = _hotpotqa_role_conditional_candidate_consensus(
+            request.upstream,
+            request.communication_condition,
+        )
     unified_qa_semantic = request.semantic_protocol == "qa_verified_answer_lineage_v2"
     semantic_lineage = hotpot_semantic or unified_qa_semantic
     exact_answer_output = (
@@ -509,6 +561,20 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
                     if hotpot_semantic
                     else _QA_VERIFIER_PROTOCOL
                 )
+            )
+        elif (
+            role_conditional_hotpot
+            and request.is_output_agent
+            and role_conditional_output_candidate_seen
+        ):
+            protocol += (
+                " ReAct is only this node's execution schedule, not its role. "
+                "A routed semantic candidate has already been determined. When "
+                "completion is admitted, copy the single agreeing candidate "
+                "character-for-character into complete.arguments.value; do not "
+                "reselect, canonicalize, or rewrite it. If routed candidates "
+                "disagree or are malformed, do not choose among them; preserve "
+                "the conflict for AgentGraph repair."
             )
         elif request.is_format_predecessor:
             protocol += (
@@ -722,6 +788,21 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
                 request.agent.contract
                 + "\n\nFormatting-only source and serialization rule:\n"
                 + common
+            )
+    elif role_conditional_output_candidate_seen:
+        if role_conditional_output_candidate:
+            common = (
+                "Routed semantic candidate:\n"
+                f"Candidate answer: {role_conditional_output_candidate}\n\n"
+                "Copy the Candidate answer value character-for-character into "
+                "the required terminal answer syntax. Do not use the original "
+                "question or raw evidence to select a different answer."
+            )
+        else:
+            common = (
+                "Routed semantic candidates are missing, malformed, or disagree. "
+                "Do not select among them or produce a replacement semantic answer; "
+                "preserve this conflict for AgentGraph repair."
             )
     else:
         common = (

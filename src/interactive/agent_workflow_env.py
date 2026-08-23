@@ -2915,6 +2915,32 @@ class AgentWorkflowEnv:
             for role_family, artifact_types in domains.items()
         }
 
+    def _repair_exhausted_auxiliary_replacement_ingress_consumer_ids(
+        self,
+    ) -> Tuple[str, ...]:
+        """Return existing downstream duties for one atomic replacement ADD."""
+
+        if (
+            not self._uses_role_conditional_capabilities()
+            or self._graph.output_agent_id is None
+        ):
+            return ()
+        replacement_domains = (
+            self._repair_exhausted_auxiliary_replacement_domains()
+        )
+        source_ids = tuple(
+            node.id
+            for node in self._graph.nodes
+            if node.id in self._failed_agent_ids
+            and node.id in self._repair_exhausted_agent_ids
+            and (node.role_family or "").casefold() in replacement_domains
+            and node.artifact_type.casefold()
+            in replacement_domains[(node.role_family or "").casefold()]
+        )
+        if len(source_ids) != 1:
+            return ()
+        return self._directed_successors(self._graph, source_ids[0])
+
     def _repair_exhausted_auxiliary_profile_domains(
         self,
     ) -> dict[str, Tuple[Tuple[str, Tuple[str, ...]], ...]]:
@@ -3090,6 +3116,9 @@ class AgentWorkflowEnv:
         replacement_domains = (
             self._repair_exhausted_auxiliary_replacement_domains()
         )
+        replacement_ingress_consumer_ids = (
+            self._repair_exhausted_auxiliary_replacement_ingress_consumer_ids()
+        )
         targets: dict[str, object] = {}
         if AgentActionType.ADD_SUBGRAPH.value in admitted:
             remaining = (
@@ -3121,6 +3150,7 @@ class AgentWorkflowEnv:
                     (
                         *pending_ingress_consumer_ids,
                         *evidence_ingress_consumer_ids,
+                        *replacement_ingress_consumer_ids,
                     )
                 )
             )
@@ -3344,7 +3374,10 @@ class AgentWorkflowEnv:
                         ),
                         **(
                             {"exact_relation_count": 1}
-                            if evidence_ingress_consumer_ids
+                            if (
+                                evidence_ingress_consumer_ids
+                                or replacement_ingress_consumer_ids
+                            )
                             else {}
                         ),
                         **(
@@ -3385,9 +3418,19 @@ class AgentWorkflowEnv:
                         **(
                             {
                                 "relations": [],
-                                "output_agent_id": None,
                             }
-                            if replacement_domains
+                            if (
+                                replacement_domains
+                                and not replacement_ingress_consumer_ids
+                            )
+                            else {}
+                        ),
+                        **(
+                            {"output_agent_id": None}
+                            if (
+                                replacement_domains
+                                and not replacement_ingress_consumer_ids
+                            )
                             else {}
                         ),
                     }
@@ -4743,33 +4786,6 @@ class AgentWorkflowEnv:
                     else routed_reasoner_ids
                 )
                 responsible_ids = diagnosed_reasoner_ids
-                if any(
-                    marker in reason.casefold()
-                    for marker in (
-                        "evidence",
-                        "qa-retrieval",
-                        "proposition",
-                        "answer_slot",
-                        "candidate_answer",
-                    )
-                ):
-                    routed_retriever_ids = tuple(
-                        agent_id
-                        for reasoner_id in diagnosed_reasoner_ids
-                        for agent_id in self._directed_ancestor_ids(
-                            self._graph,
-                            reasoner_id,
-                        )
-                        if (
-                            self._graph.get_node(agent_id).role_family or ""
-                        ).casefold()
-                        == "evidence_retriever"
-                    )
-                    responsible_ids = tuple(
-                        dict.fromkeys(
-                            (*diagnosed_reasoner_ids, *routed_retriever_ids)
-                        )
-                    )
             elif reason.startswith("Verifier"):
                 verifier_check_failure = any(
                     f"{field_name!r} must be true" in reason
@@ -6357,6 +6373,12 @@ class AgentWorkflowEnv:
             r"disregard)\b",
             flags=re.IGNORECASE,
         )
+        implicit_scope_narrowing = re.compile(
+            r"\b(?:focus(?:ed)?\s+on|solely|exclusively)\b|"
+            r"\bonly\s+(?!(?:a|an|the|one|answer|candidate|evidence|output|"
+            r"result|semantic|value|wrapper)\b)",
+            flags=re.IGNORECASE,
+        )
         scope_neutral_tokens = {
             "a",
             "an",
@@ -6413,9 +6435,10 @@ class AgentWorkflowEnv:
             "disregard",
         }
         for role_family, obligation in scoped_obligations:
-            if role_family == "format" or scope_narrowing_verb.search(
-                obligation
-            ) is None:
+            if role_family == "format" or (
+                scope_narrowing_verb.search(obligation) is None
+                and implicit_scope_narrowing.search(obligation) is None
+            ):
                 continue
             unauthorized_qualifier_tokens = tuple(
                 token
@@ -6433,6 +6456,49 @@ class AgentWorkflowEnv:
                     "comparison restriction; unauthorized_scope_tokens="
                     f"{list(dict.fromkeys(unauthorized_qualifier_tokens))!r}"
                 )
+
+        # Comparison contracts may decompose retrieval across operands, but a
+        # semantic producer must not preselect one question-side operand before
+        # the evidence comparison executes.  This question-only admission is a
+        # narrow extension of the existing scope guard; it never consults a
+        # Ground Truth value or evaluator state.
+        comparison_tail = re.search(
+            r",\s*([^,?]+?)\s+or\s+([^,?]+?)\s*\?\s*$",
+            question,
+            flags=re.IGNORECASE,
+        )
+        comparison_marker = re.search(
+            r"\b(?:more|fewer|less|greater|larger|smaller|higher|lower|older|"
+            r"younger|earlier|later|longer|shorter|better|worse|closer|farther)\b",
+            question,
+            flags=re.IGNORECASE,
+        )
+        selection_directive = re.compile(
+            r"\b(?:extract|select|choose|return|emit|output|copy)\b",
+            flags=re.IGNORECASE,
+        )
+        if comparison_tail is not None and comparison_marker is not None:
+            operands = tuple(
+                item.strip(" \t\n\r\"'()")
+                for item in comparison_tail.groups()
+            )
+            for role_family, obligation in scoped_obligations:
+                if role_family in {"evidence_retriever", "format"} or not (
+                    selection_directive.search(obligation)
+                ):
+                    continue
+                mentioned_operands = tuple(
+                    operand
+                    for operand in operands
+                    if operand and self._contains_lexical_span(obligation, operand)
+                )
+                if len(mentioned_operands) == 1:
+                    return (
+                        f"{self._semantic_protocol_label()} comparison contract "
+                        "must preserve both question operands and the original "
+                        "comparison criterion; it may not preselect one operand "
+                        "as the answer before evidence execution"
+                    )
 
         concrete_entity_mapping = re.compile(
             r"\b(?:resolve|map|link|normalize|disambiguate)\b"
@@ -8940,6 +9006,9 @@ class AgentWorkflowEnv:
             self._repair_exhausted_auxiliary_replacement_domains()
         )
         if self._uses_role_conditional_capabilities() and replacement_domains:
+            replacement_ingress_ids = set(
+                self._repair_exhausted_auxiliary_replacement_ingress_consumer_ids()
+            )
             replacement_role = (
                 (action.agents[0].role_family or "").casefold()
                 if len(action.agents) == 1
@@ -8950,22 +9019,40 @@ class AgentWorkflowEnv:
                 if len(action.agents) == 1
                 else ""
             )
+            replacement_agent_id = (
+                action.agents[0].agent_id if len(action.agents) == 1 else ""
+            )
+            has_required_ingress = (
+                len(action.relations) == 1
+                and action.relations[0].source_id == replacement_agent_id
+                and action.relations[0].target_id in replacement_ingress_ids
+                and action.relations[0].source_to_target is True
+                and action.relations[0].target_to_source is False
+            )
+            relation_boundary_satisfied = (
+                has_required_ingress
+                if replacement_ingress_ids
+                else not action.relations
+            )
             if (
                 action.action_type is AgentActionType.ADD_SUBGRAPH
                 and len(action.agents) == 1
                 and replacement_role in replacement_domains
                 and replacement_artifact_type
                 in replacement_domains[replacement_role]
-                and not action.relations
+                and relation_boundary_satisfied
                 and action.output_agent_id is None
             ):
                 return None
             return (
                 "add the same-role/same-artifact auxiliary replacement "
-                "as an isolated executable prefix with relations=[] and no "
-                "output_agent_id. The accepted ADD executes immediately; route "
-                "its artifact to the original downstream consumer only after "
-                "that execution succeeds"
+                + (
+                    "and route it to exactly one existing downstream "
+                    "responsibility in the same edit"
+                    if replacement_ingress_ids
+                    else "as an isolated executable prefix with relations=[]"
+                )
+                + ". Do not assign Output in the replacement ADD"
             )
         if (
             action.action_type is AgentActionType.ADD_SUBGRAPH

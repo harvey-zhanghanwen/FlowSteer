@@ -571,6 +571,9 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("possessive marker", reasoner)
         self.assertIn("complete possessor entity mention", reasoner)
+        self.assertIn("antecedent-bearing span", reasoner)
+        self.assertIn("unknown, not zero", reasoner)
+        self.assertIn("narrower subtype", reasoner)
         self.assertIn("Do not replace the Reasoner's candidate", verifier)
         self.assertIn("seven explicit boolean check fields", verifier)
         self.assertIn("Set supported only when all checks pass", verifier)
@@ -613,6 +616,64 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         default_contract = adapter._contract(default_reasoner, [])
         self.assertNotIn("evidence_propositions", default_contract)
         self.assertNotIn("unexpectedly equal", default_contract)
+
+    def test_role_conditional_react_output_copies_routed_candidate(self) -> None:
+        class CompletionOnlyAdapter(QARetrievalReactExecutionAdapter):
+            def _state_conditioned_action_domain(
+                self,
+                request: AgentRequest,
+                observations: list[dict[str, object]],
+            ) -> tuple[frozenset[tuple[str, str]], bool]:
+                del request, observations
+                return frozenset(), True
+
+        adapter = CompletionOnlyAdapter(
+            gateway=SimpleNamespace(generate=lambda request: None),
+            tool_registry=build_qa_tool_registry(FakeIndex()),
+            max_turns=3,
+            max_tool_calls=2,
+            task_type="multi_hop_qa",
+        )
+        request = AgentRequest(
+            request_id="hotpot:react-output-candidate",
+            run_id="hotpot",
+            graph_revision=1,
+            problem="Which target is reached through Bridge Beta?",
+            agent=AgentNode(
+                "output",
+                "model",
+                "return the terminal task answer",
+                role_family="output",
+                allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                execution_mode="react",
+            ),
+            model=ModelSpec("model", "provider"),
+            provider=ProviderSpec("provider", kind="test"),
+            phase=ExecutionPhase.SINGLE,
+            is_output_agent=True,
+            require_exact_answer_tag=True,
+            semantic_protocol="hotpotqa_role_conditional_capabilities_v1",
+            upstream=(
+                UpstreamMessage(
+                    "semantic",
+                    "output",
+                    "Candidate answer: Target Gamma",
+                    artifact_type="semantic_candidate",
+                ),
+            ),
+        )
+
+        schema = adapter._completion_arguments_schema(request)
+        self.assertEqual(
+            "<answer>Target Gamma</answer>",
+            schema["properties"]["value"]["const"],
+        )
+        contract = adapter._contract(request, [])
+        self.assertIn(
+            "Set arguments.value to exactly <answer>Target Gamma</answer>",
+            contract,
+        )
+        self.assertIn("do not reselect, canonicalize, or rewrite", contract)
 
     def test_required_evidence_shows_reasoner_artifact_only_at_completion_state(
         self,

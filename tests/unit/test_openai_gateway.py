@@ -249,6 +249,10 @@ class MessageTests(unittest.TestCase):
         self.assertIn("multi_hop_chain", system)
         self.assertIn("candidate_answer", system)
         self.assertIn("unexpectedly equal values", system)
+        self.assertIn("antecedent-bearing span", system)
+        self.assertIn("separate identity proposition", system)
+        self.assertIn("unknown, not zero", system)
+        self.assertIn("do not substitute a narrower subtype", system)
 
     def test_verifier_checks_candidate_without_replacing_it(self) -> None:
         messages = build_agent_messages(
@@ -285,6 +289,9 @@ class MessageTests(unittest.TestCase):
         self.assertIn("Alias binding correct:", system)
         self.assertIn("Verification status:", system)
         self.assertIn("repair_required", system)
+        self.assertIn("antecedent-bearing span", system)
+        self.assertIn("unknown rather than zero", system)
+        self.assertIn("narrower subtype", system)
         self.assertNotIn("direct semantic predecessor", system)
 
     def test_react_is_execution_schedule_not_reasoner_role(self) -> None:

@@ -416,6 +416,44 @@ contract/completion repair. It is still deletable only after a typed
 projection derives endpoints from the current AgentGraph and does not require
 Reasoner, Verifier, Formatter, generic Output, or any fixed role order.
 
+The same measured failure also exposed the pre-execution form of that handoff:
+when Output was already selected, an isolated replacement ADD could never pass
+the complete-Canvas reachability gate. The next condition therefore reuses
+FlowSteer's atomic `ADD_SUBGRAPH` relation field and routes the newly declared
+same-role/same-artifact replacement to exactly one existing downstream
+responsibility in the same edit. If Output has not yet been selected, the
+existing isolated execute-then-route boundary is unchanged. This is limited to
+the role-conditional protocol and does not synthesize a role, edge, or topology
+outside the measured recovery state.
+
+The semantic changes in that condition are thin reuse of this project's
+existing shared QA protocol, not new FlowSteer or SkillFlow algorithms.
+HotpotQA Reasoner guidance now uses the same evidence-surface and coreference
+contract as `_QA_REASONER_PROTOCOL`: a pronoun, surname, or shortened mention
+cannot be silently rewritten as the question entity and instead requires an
+antecedent-bearing span or a same-receipt identity proposition. Quantitative
+comparison guidance follows open-world evidence semantics: missing explicit
+scope-matching count or event evidence is unknown rather than zero, and an
+aggregate category cannot be replaced by an unrequested subtype. The optional
+Verifier checks those properties without selecting a candidate.
+
+FlowSteer's free-text contract admission remains question-only. It now rejects
+an implicit unrequested subtype restriction and a comparison contract that
+preselects exactly one of the two question operands before execution. Neutral
+two-operand comparison, per-operand retrieval decomposition, Ground-Truth-free
+entity disambiguation, and every open topology remain admissible. A structured
+Reasoner artifact fault is attributed to the semantic producer while an
+already successful Retriever and its Tool receipts are preserved; missing
+evidence continues to use the existing retrieval-ingress recovery path.
+
+Finally, generic Output remains a semantic producer when no upstream candidate
+exists. If an explicit routed candidate does exist, both reasoning and ReAct
+execution reuse the existing exact candidate-consensus boundary: the model
+receives a clean candidate transfer rather than the original question and raw
+evidence, and the request-scoped completion schema requires the exact terminal
+wrapper. This conditional serialization rule does not turn generic Output into
+a mandatory Formatter or add a Formatter prerequisite.
+
 ## Not implemented or enabled in this condition
 
 - Skill retrieval, Skill injection, SkillFlow training, or an ACTIVE Skill

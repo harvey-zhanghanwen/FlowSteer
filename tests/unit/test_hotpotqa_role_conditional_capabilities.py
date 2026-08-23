@@ -112,13 +112,14 @@ def _env(
     *,
     graph: AgentGraph | None = None,
     max_agents: int | None = None,
+    problem: str = SYNTHETIC_QUESTION,
 ) -> AgentWorkflowEnv:
     return AgentWorkflowEnv(
         registry,
         runtime=_runtime(registry),
         graph=graph,
         max_agents=max_agents,
-        problem=SYNTHETIC_QUESTION,
+        problem=problem,
         require_exact_answer_tag=True,
         require_format_agent=False,
         semantic_protocol=SEMANTIC_PROTOCOL,
@@ -427,6 +428,85 @@ def _generic_verifier_failure_attribution(
 
 
 class RoleConditionalSearchSpaceTests(unittest.TestCase):
+    def test_comparison_contract_rejects_one_operand_preselection(self) -> None:
+        registry = _registry()
+        question = (
+            "Which player won more major titles, North Player or South Player?"
+        )
+        env = _env(registry, problem=question)
+        preselected = env.parser.parse(
+            json.dumps(
+                {
+                    "action": "add_subgraph",
+                    "agents": [
+                        {
+                            "agent_id": "semantic",
+                            "model_id": "model-a",
+                            "contract": "Select North Player as the answer.",
+                            "role_family": "reasoner",
+                            "execution_mode": "reasoning",
+                        }
+                    ],
+                    "relations": [],
+                }
+            )
+        )
+        issue = env._contract_obligation_issue(preselected)
+        self.assertIsNotNone(issue)
+        self.assertIn("preserve both question operands", issue or "")
+
+        neutral = env.parser.parse(
+            json.dumps(
+                {
+                    "action": "add_subgraph",
+                    "agents": [
+                        {
+                            "agent_id": "semantic",
+                            "model_id": "model-a",
+                            "contract": (
+                                "Compare both question operands under the original "
+                                "criterion and determine the requested entity."
+                            ),
+                            "role_family": "reasoner",
+                            "execution_mode": "reasoning",
+                        }
+                    ],
+                    "relations": [],
+                }
+            )
+        )
+        self.assertIsNone(env._contract_obligation_issue(neutral))
+
+    def test_contract_rejects_implicit_unrequested_subtype_scope(self) -> None:
+        registry = _registry()
+        env = _env(
+            registry,
+            problem=(
+                "Which player won more major titles, North Player or South Player?"
+            ),
+        )
+        narrowed = env.parser.parse(
+            json.dumps(
+                {
+                    "action": "add_subgraph",
+                    "agents": [
+                        {
+                            "agent_id": "semantic",
+                            "model_id": "model-a",
+                            "contract": "Focus on singles only.",
+                            "role_family": "reasoner",
+                            "execution_mode": "reasoning",
+                        }
+                    ],
+                    "relations": [],
+                }
+            )
+        )
+        issue = env._contract_obligation_issue(narrowed)
+        self.assertIsNotNone(issue)
+        self.assertIn("unauthorized_scope_tokens", issue or "")
+        self.assertIn("singles", issue or "")
+
     def test_semantic_roles_are_optional_and_react_is_not_a_role(self) -> None:
         registry = _registry()
         env = _env(registry)
@@ -2237,7 +2317,7 @@ class RoleConditionalSearchSpaceTests(unittest.TestCase):
             domain["admitted_new_role_families"],
         )
 
-    def test_exhausted_auxiliary_replacement_is_an_isolated_add_boundary(
+    def test_exhausted_auxiliary_replacement_routes_when_output_is_selected(
         self,
     ) -> None:
         registry = _registry()
@@ -2276,8 +2356,12 @@ class RoleConditionalSearchSpaceTests(unittest.TestCase):
         domain = env.model_admissible_action_targets()["add_subgraph"]
         self.assertEqual(1, domain["max_new_agents"])
         self.assertEqual(["evidence_retriever"], domain["admitted_new_role_families"])
-        self.assertEqual([], domain["relations"])
-        self.assertIsNone(domain["output_agent_id"])
+        self.assertEqual(
+            ["reasoner"],
+            domain["required_ingress_consumer_agent_ids"],
+        )
+        self.assertEqual(1, domain["exact_relation_count"])
+        self.assertNotIn("output_agent_id", domain)
         self.assertIs(domain["explicit_output_assignment_required"], False)
         declaration = {
             "agent_id": "node_1",
@@ -2296,20 +2380,35 @@ class RoleConditionalSearchSpaceTests(unittest.TestCase):
             )
         )
         self.assertEqual({"type": "null"}, schema["properties"]["output_agent_id"])
-        self.assertEqual({"type": "array", "maxItems": 0}, schema["properties"]["relations"])
-        contradictory_domain = {
-            **domain,
-            "explicit_output_assignment_required": True,
-        }
-        with self.assertRaisesRegex(
-            ValueError,
-            "isolated replacement boundary cannot require",
-        ):
-            director_live_action_parameter_json_schema_text(
-                "add_subgraph",
-                {"add_subgraph": contradictory_domain},
-                add_agents=(declaration,),
+        self.assertEqual(1, schema["properties"]["relations"]["minItems"])
+        self.assertEqual(1, schema["properties"]["relations"]["maxItems"])
+        relation_schema = schema["properties"]["relations"]["items"]["anyOf"][0]
+        self.assertEqual(
+            {"const": "node_1"},
+            relation_schema["properties"]["source_id"],
+        )
+        self.assertEqual(
+            {"const": "reasoner"},
+            relation_schema["properties"]["target_id"],
+        )
+        action = env.parser.parse(
+            json.dumps(
+                {
+                    "action": "add_subgraph",
+                    "agents": [declaration],
+                    "relations": [
+                        {
+                            "source_id": "node_1",
+                            "target_id": "reasoner",
+                            "source_to_target": True,
+                            "target_to_source": False,
+                        }
+                    ],
+                    "output_agent_id": None,
+                }
             )
+        )
+        self.assertIsNone(env._preservation_admission_issue(action))
 
     def test_successful_replacement_reopens_atomic_execution_profile_repair(
         self,
@@ -2613,13 +2712,45 @@ class RoleConditionalTerminalTests(unittest.TestCase):
             is_output_agent=True,
             require_exact_answer_tag=True,
             semantic_protocol=SEMANTIC_PROTOCOL,
+            upstream=(
+                UpstreamMessage(
+                    "semantic_producer",
+                    "output",
+                    f"Candidate answer: {SYNTHETIC_CANDIDATE}",
+                    artifact_type="semantic_candidate",
+                ),
+            ),
         )
-        system = build_agent_messages(request)[0]["content"]
+        messages = build_agent_messages(request)
+        system = messages[0]["content"]
+        user = messages[1]["content"]
         self.assertIn(
             "copy their agreeing candidate character-for-character",
             system,
         )
         self.assertIn("do not choose among them", system)
+        self.assertIn(
+            f"Candidate answer: {SYNTHETIC_CANDIDATE}",
+            user,
+        )
+        self.assertNotIn(SYNTHETIC_QUESTION, user)
+        self.assertNotIn("External upstream messages", user)
+
+        producer_request = AgentRequest(
+            request_id="hotpot:generic-output-producer",
+            run_id="hotpot",
+            graph_revision=1,
+            problem=SYNTHETIC_QUESTION,
+            agent=_output_agent(),
+            model=registry.require_model("model-b"),
+            provider=registry.provider_for("model-b"),
+            phase=ExecutionPhase.SINGLE,
+            is_output_agent=True,
+            require_exact_answer_tag=True,
+            semantic_protocol=SEMANTIC_PROTOCOL,
+        )
+        producer_user = build_agent_messages(producer_request)[1]["content"]
+        self.assertIn(SYNTHETIC_QUESTION, producer_user)
 
     def test_react_verifier_consumes_a_generic_semantic_producer(self) -> None:
         registry = _registry()
@@ -2717,7 +2848,7 @@ class RoleConditionalTerminalTests(unittest.TestCase):
         )
         self.assertNotIn("Candidate answer: repair_required", messages[1]["content"])
 
-    def test_reasoner_cross_field_failure_targets_reasoner_and_routed_retriever(
+    def test_reasoner_cross_field_failure_preserves_routed_retriever(
         self,
     ) -> None:
         registry = _registry()
@@ -2787,16 +2918,17 @@ class RoleConditionalTerminalTests(unittest.TestCase):
         attribution = finish["failure_attribution"]
         self.assertEqual("reasoner", attribution["responsible_agent_id"])
         self.assertEqual(
-            ["reasoner", "retriever"],
+            ["reasoner"],
             attribution["responsible_agent_ids"],
         )
+        self.assertIn("retriever", attribution["preserve_agent_ids"])
         self.assertIn("output", attribution["preserve_agent_ids"])
         self.assertIn("healthy_reasoner", attribution["preserve_agent_ids"])
         self.assertIn("healthy_retriever", attribution["preserve_agent_ids"])
         self.assertEqual(("modify_agent",), env.model_admissible_action_types())
         modify = env.model_admissible_action_targets()["modify_agent"]
         self.assertEqual(
-            {"reasoner", "retriever"},
+            {"reasoner"},
             set(modify["agent_ids"]),
         )
         self.assertNotIn("output", modify["agent_ids"])

@@ -97,7 +97,14 @@ HOTPOTQA_VERIFIED_ANSWER_SLOT_GUIDANCE = (
     "Preserve the sentence's asserted semantic roles instead of placing the desired "
     "candidate into an unrelated proposition field. In a comparison proposition, "
     "the compared entity is normally the subject and its compared date, number, or "
-    "attribute is object_or_attribute_value. "
+    "attribute is object_or_attribute_value. Copy entity surfaces exactly from each "
+    "proposition's evidence span; do not silently replace a pronoun, surname, or "
+    "shortened mention with the longer question entity. Use an antecedent-bearing "
+    "span or a separate identity proposition supported by the same read receipt. "
+    "For quantitative comparisons, missing explicit scope-matching count or event "
+    "evidence is unknown, not zero. Count only explicit distinct events in the "
+    "original requested category and do not replace an aggregate scope with a "
+    "narrower subtype. "
     "Bind candidate_answer to exactly one evidence_propositions item through "
     "answer_slot.proposition_index and answer_field; keep the entity-to-attribute "
     "binding explicit and show every bridge in the multi-hop chain. Return one "
@@ -551,6 +558,37 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             f"qa_semantic_upstream_tool_receipts_{id(self)}",
             default=(),
         )
+
+    @staticmethod
+    def _role_conditional_upstream_candidate(
+        request: AgentRequest,
+    ) -> tuple[bool, Optional[str]]:
+        """Return an exact routed candidate only for an unmasked Output call."""
+
+        if (
+            request.semantic_protocol != HOTPOTQA_ROLE_CONDITIONAL_PROTOCOL
+            or not request.is_output_agent
+            or (request.agent.role_family or "").casefold() != "output"
+            or request.communication_condition.value != "normal"
+        ):
+            return False, None
+        from .agent_workflow_env import AgentWorkflowEnv
+
+        candidates: list[str] = []
+        for message in request.upstream:
+            candidate, issue = AgentWorkflowEnv._semantic_candidate_from_artifact(
+                message.artifact
+            )
+            if issue is not None:
+                return True, None
+            if candidate is not None:
+                candidates.append(candidate)
+        if not candidates:
+            return False, None
+        candidate = candidates[0]
+        if any(item != candidate for item in candidates):
+            return True, None
+        return True, candidate
 
     def _unified_factual_protocol(self, request: AgentRequest) -> bool:
         return (
@@ -1087,6 +1125,25 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
     ) -> Mapping[str, object]:
         semantic_protocol = request.semantic_protocol
         semantic_role = (request.agent.role_family or "").casefold()
+        candidate_seen, routed_candidate = (
+            self._role_conditional_upstream_candidate(request)
+        )
+        if candidate_seen and routed_candidate is not None:
+            return {
+                "type": "object",
+                "required": ["value"],
+                "properties": {
+                    "value": {
+                        "const": f"<answer>{routed_candidate}</answer>",
+                        "description": (
+                            "Copy the single agreeing routed semantic candidate "
+                            "character-for-character into the terminal answer "
+                            "wrapper; do not reselect or rewrite it."
+                        ),
+                    }
+                },
+                "additionalProperties": False,
+            }
         if (
             semantic_role == "evidence_retriever"
             and semantic_protocol == HOTPOTQA_ROLE_CONDITIONAL_PROTOCOL
@@ -1770,7 +1827,25 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 "Tool action and its declared arguments."
             )
         )
-        if request.semantic_protocol in {
+        candidate_seen, routed_candidate = (
+            self._role_conditional_upstream_candidate(request)
+        )
+        if candidate_seen:
+            if completion_admitted and routed_candidate is not None:
+                terminal_wire += (
+                    " A routed semantic candidate has already been determined. "
+                    "Set arguments.value to exactly "
+                    f"<answer>{routed_candidate}</answer>; copy the candidate "
+                    "character-for-character and do not reselect, canonicalize, "
+                    "or rewrite it."
+                )
+            else:
+                terminal_wire += (
+                    " Routed semantic candidates are malformed or disagree, so do "
+                    "not choose among them or emit a replacement semantic answer; "
+                    "preserve the conflict for AgentGraph repair."
+                )
+        elif request.semantic_protocol in {
             *_HOTPOTQA_STRUCTURED_REASONER_PROTOCOLS,
             QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
         } and semantic_role == "reasoner":
