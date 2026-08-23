@@ -558,6 +558,21 @@ class AgentWorkflowEnv:
         node_count = len(self._graph.nodes)
         node_ids = tuple(node.id for node in self._graph.nodes)
         can_add = self.max_agents is None or node_count < self.max_agents
+        replacement_domains = (
+            self._repair_exhausted_auxiliary_replacement_domains()
+        )
+        if self._uses_role_conditional_capabilities() and replacement_domains:
+            # FlowSteer's next edit must agree with the authoritative
+            # preservation gate.  A repair-exhausted auxiliary is replaced by
+            # one isolated executable prefix before any relation, Output, or
+            # unrelated Canvas mutation can consume another round.
+            if (
+                can_add
+                and AgentActionType.ADD_SUBGRAPH.value
+                in self._allowed_action_type_set
+            ):
+                return (AgentActionType.ADD_SUBGRAPH.value,)
+            return ()
         pending_ingress_ids = (
             self._pending_role_conditional_ingress_consumer_ids()
         )
@@ -1884,6 +1899,10 @@ class AgentWorkflowEnv:
                     max(self.max_agents - len(node_ids), 0),
                 )
             )
+            if replacement_domains:
+                # The authoritative recovery admission accepts exactly one
+                # same-role/same-artifact executable prefix.
+                remaining = min(remaining, 1)
             missing_role_families = self._missing_semantic_role_families()
             admitted_new_role_families = (
                 self._model_admissible_add_role_families()
@@ -2033,6 +2052,8 @@ class AgentWorkflowEnv:
                                     pending_ingress_consumer_ids
                                 ),
                                 "explicit_output_assignment_required": bool(
+                                    not replacement_domains
+                                    and
                                     self._graph.output_agent_id is not None
                                     and self._graph.output_agent_id
                                     not in self._active_semantic_lineage_ids()
@@ -6848,6 +6869,33 @@ class AgentWorkflowEnv:
         replacement_domains = (
             self._repair_exhausted_auxiliary_replacement_domains()
         )
+        if self._uses_role_conditional_capabilities() and replacement_domains:
+            replacement_role = (
+                (action.agents[0].role_family or "").casefold()
+                if len(action.agents) == 1
+                else ""
+            )
+            replacement_artifact_type = (
+                (action.agents[0].artifact_type or "text").casefold()
+                if len(action.agents) == 1
+                else ""
+            )
+            if (
+                action.action_type is AgentActionType.ADD_SUBGRAPH
+                and len(action.agents) == 1
+                and replacement_role in replacement_domains
+                and replacement_artifact_type
+                in replacement_domains[replacement_role]
+                and not action.relations
+                and action.output_agent_id is None
+            ):
+                return None
+            return (
+                "add the same-role/same-artifact auxiliary replacement "
+                "as an isolated executable prefix with relations=[] and no "
+                "output_agent_id. The accepted ADD executes immediately; route "
+                "its artifact to the Reasoner only after that execution succeeds"
+            )
         if (
             action.action_type is AgentActionType.ADD_SUBGRAPH
             and len(action.agents) == 1

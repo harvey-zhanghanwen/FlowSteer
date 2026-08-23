@@ -2244,6 +2244,11 @@ def director_live_action_parameter_json_schema_text(
             explicit_output_assignment = (
                 _live_explicit_output_assignment_required(domain)
             )
+            if isolated_boundary and explicit_output_assignment:
+                raise ValueError(
+                    "add_subgraph isolated replacement boundary cannot require "
+                    "an explicit Output assignment"
+                )
             if explicit_output_assignment:
                 if not output_ids:
                     raise ValueError(

@@ -95,6 +95,23 @@ materialized producer or an `ADD_SUBGRAPH` containing a producer-to-consumer
 relation. Neither repair requires a Reasoner, Verifier, Formatter, or serial
 role order.
 
+The failed r2 canary remains preserved in
+`artifacts/hotpotqa_role_conditional_v1_r2/hotpotqa`. It exposed two additional
+execution-boundary faults. First, the selected Retriever inherited a legacy
+seven-field semantic completion contract even though SkillFlow retrieval owns
+only search/read observations and the Reasoner owns predicate--argument and
+answer-slot alignment. In r3, a role-conditional Retriever therefore exports
+only receipt-grounded `passage_id`/`evidence_span` citations; legacy protocol
+contracts are unchanged. Second, an exhausted auxiliary replacement received
+contradictory live domains for isolated execution and Output assignment. In r3,
+that measured recovery state admits exactly one isolated same-role,
+same-artifact `ADD_SUBGRAPH`; relation and Output edits become available only
+after the replacement artifact materializes. This bounded recovery rule does
+not constrain normal-state role choice, role multiplicity, directed or
+reciprocal topology, or FINISH. The new independent evaluation namespace is
+configured in
+`config/evaluation_hotpotqa_role_conditional_v1_r3.yaml`.
+
 ## Not implemented or enabled in this condition
 
 - Skill retrieval, Skill injection, SkillFlow training, or an ACTIVE Skill

@@ -12,6 +12,7 @@ import unittest
 
 from src.interactive.agent_graph import AgentGraph, AgentNode, AgentRelation
 from src.interactive.agent_runtime import (
+    AgentFailureRecord,
     AgentRequest,
     AgentRuntime,
     AgentRuntimeResult,
@@ -391,6 +392,103 @@ class RoleConditionalSearchSpaceTests(unittest.TestCase):
         self.assertIs(completion_after_one_read, False)
         self.assertIs(completion_after_two_reads, True)
 
+    def test_retriever_exports_only_receipt_grounded_evidence_citations(
+        self,
+    ) -> None:
+        adapter = QARetrievalReactExecutionAdapter(
+            gateway=_NoModelGateway(),
+            tool_registry=build_qa_tool_registry(_NoopRetrievalIndex()),
+            max_turns=9,
+            max_tool_calls=6,
+            task_type="multi_hop_qa",
+            completion_policy="required_evidence",
+        )
+        request = AgentRequest(
+            request_id="hotpot:role-conditional-retriever",
+            run_id="hotpot",
+            graph_revision=1,
+            problem=SYNTHETIC_QUESTION,
+            agent=_evidence_agent(),
+            model=_registry().require_model("model-a"),
+            provider=_registry().provider_for("model-a"),
+            phase=ExecutionPhase.SINGLE,
+            semantic_protocol=SEMANTIC_PROTOCOL,
+        )
+        schema = adapter._completion_arguments_schema(request)
+        citation_schema = schema["properties"]["value"]
+        self.assertEqual("array", citation_schema["type"])
+        self.assertEqual(1, citation_schema["minItems"])
+        self.assertEqual(
+            {"passage_id", "evidence_span"},
+            set(citation_schema["items"]["properties"]),
+        )
+        serialized_schema = json.dumps(schema, sort_keys=True)
+        for forbidden in (
+            "entity_identity",
+            "target_relation",
+            "answer_type_constraint",
+            "evidence_proposition",
+            "answer_slot",
+            "candidate_answer",
+            "final_answer",
+        ):
+            self.assertNotIn(forbidden, serialized_schema)
+
+        evidence_span = (
+            "Arthur's Magazine (1844–1846) was an American literary "
+            "periodical published in Philadelphia."
+        )
+        receipt = {
+            "tool_id": QA_RETRIEVAL_TOOL_ID,
+            "tool_version": "synthetic-v1",
+            "request": {
+                "action": "read",
+                "arguments": {"passage_id": "arthurs-magazine"},
+            },
+            "result": {
+                "value": {
+                    "operation": "read",
+                    "passage_id": "arthurs-magazine",
+                    "passage": {
+                        "passage_id": "arthurs-magazine",
+                        "text": evidence_span,
+                    },
+                },
+                "completed": True,
+            },
+            "error_type": None,
+        }
+        artifact = json.dumps(
+            [
+                {
+                    "passage_id": "arthurs-magazine",
+                    "evidence_span": evidence_span,
+                }
+            ]
+        )
+        self.assertIsNone(
+            adapter._role_conditional_evidence_completion_issue(
+                artifact=artifact,
+                tool_receipts=(receipt,),
+            )
+        )
+        bad_artifact = json.dumps(
+            [
+                {
+                    "passage_id": "arthurs-magazine",
+                    "evidence_span": "Arthur's Magazine started in 1844.",
+                }
+            ]
+        )
+        self.assertIn(
+            "no typography-canonical lexical match",
+            adapter._role_conditional_evidence_completion_issue(
+                artifact=bad_artifact,
+                tool_receipts=(receipt,),
+            )
+            or "",
+        )
+
     def test_non_formatter_is_a_legal_output(self) -> None:
         registry = _registry()
         graph = AgentGraph(
@@ -589,6 +687,80 @@ class RoleConditionalSearchSpaceTests(unittest.TestCase):
             self.assertEqual("retriever", relation["source_id"])
             self.assertEqual("verifier", relation["target_id"])
             self.assertIs(relation["source_to_target"], True)
+
+    def test_exhausted_auxiliary_replacement_is_an_isolated_add_boundary(
+        self,
+    ) -> None:
+        registry = _registry()
+        graph = AgentGraph(
+            [
+                _evidence_agent("reader"),
+                AgentNode(
+                    "reasoner",
+                    "model-b",
+                    "align routed evidence to the requested answer slot",
+                    role_family="reasoner",
+                    execution_mode="reasoning",
+                ),
+                _output_agent(),
+            ],
+            [
+                AgentRelation("reader", "reasoner", True, False),
+                AgentRelation("reasoner", "output", True, False),
+            ],
+            output_agent_id="output",
+        )
+        env = _env(registry, graph=graph)
+        env._failed_agent_ids.add("reader")
+        env._repair_exhausted_agent_ids.add("reader")
+        env._react_exhausted_agent_ids.add("reader")
+        env._latest_failure_record_by_agent["reader"] = AgentFailureRecord(
+            request_id="reader-exhausted",
+            agent_id="reader",
+            phase=ExecutionPhase.SINGLE,
+            graph_revision=graph.revision,
+            error_type="ReactExecutionError",
+            message="react agent 'reader' exhausted 9 turns",
+        )
+
+        self.assertEqual(("add_subgraph",), env.model_admissible_action_types())
+        domain = env.model_admissible_action_targets()["add_subgraph"]
+        self.assertEqual(1, domain["max_new_agents"])
+        self.assertEqual(["evidence_retriever"], domain["admitted_new_role_families"])
+        self.assertEqual([], domain["relations"])
+        self.assertIsNone(domain["output_agent_id"])
+        self.assertIs(domain["explicit_output_assignment_required"], False)
+        declaration = {
+            "agent_id": "node_1",
+            "model_id": "model-c",
+            "contract": "continue receipt-grounded evidence retrieval",
+            "role_family": "evidence_retriever",
+            "allowed_tools": [QA_RETRIEVAL_TOOL_ID],
+            "execution_mode": "react",
+            "artifact_type": "retrieval_evidence",
+        }
+        schema = json.loads(
+            director_live_action_parameter_json_schema_text(
+                "add_subgraph",
+                {"add_subgraph": domain},
+                add_agents=(declaration,),
+            )
+        )
+        self.assertEqual({"type": "null"}, schema["properties"]["output_agent_id"])
+        self.assertEqual({"type": "array", "maxItems": 0}, schema["properties"]["relations"])
+        contradictory_domain = {
+            **domain,
+            "explicit_output_assignment_required": True,
+        }
+        with self.assertRaisesRegex(
+            ValueError,
+            "isolated replacement boundary cannot require",
+        ):
+            director_live_action_parameter_json_schema_text(
+                "add_subgraph",
+                {"add_subgraph": contradictory_domain},
+                add_agents=(declaration,),
+            )
 
 
 class RoleConditionalTerminalTests(unittest.TestCase):

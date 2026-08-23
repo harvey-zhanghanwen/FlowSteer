@@ -701,6 +701,28 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         )
         for observation in visible:
             public_error_code = observation.get("public_error_code")
+            answer_field_mismatch = (
+                re.search(
+                    r"Reasoner answer_slot\.answer_field selects '([^']+)'"
+                    r".*candidate_answer exactly matches the selected "
+                    r"proposition field '([^']+)'",
+                    public_error_code,
+                )
+                if isinstance(public_error_code, str)
+                else None
+            )
+            if answer_field_mismatch is not None:
+                selected_field, evidence_field = answer_field_mismatch.groups()
+                observation["repair_instruction"] = (
+                    "Repair only the diagnosed structured semantic artifact "
+                    "fields. Preserve the successful read receipts, question_scope, "
+                    "evidence propositions, candidate_answer, and every valid "
+                    "answer-slot field. Change only answer_slot.answer_field "
+                    f"from {selected_field!r} to {evidence_field!r}, the unique "
+                    "proposition field already containing candidate_answer; do "
+                    "not add a search or read, and do not replace the candidate."
+                )
+                continue
             if isinstance(public_error_code, str) and (
                 "entity_identity.evidence_surface is not supported by the "
                 "cited passage title identity chain"
@@ -1065,6 +1087,41 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
     ) -> Mapping[str, object]:
         semantic_protocol = request.semantic_protocol
         semantic_role = (request.agent.role_family or "").casefold()
+        if (
+            semantic_role == "evidence_retriever"
+            and semantic_protocol == HOTPOTQA_ROLE_CONDITIONAL_PROTOCOL
+        ):
+            # SkillFlow's retrieval environment owns public search/read
+            # observations.  In the role-conditional AgentGraph, the selected
+            # Retriever therefore exports only receipt-grounded evidence;
+            # predicate--argument and answer-slot alignment remain Reasoner
+            # responsibilities.
+            return {
+                "type": "object",
+                "required": ["value"],
+                "properties": {
+                    "value": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {
+                            "type": "object",
+                            "required": ["passage_id", "evidence_span"],
+                            "properties": {
+                                "passage_id": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                },
+                                "evidence_span": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                },
+                            },
+                            "additionalProperties": False,
+                        },
+                    }
+                },
+                "additionalProperties": False,
+            }
         if semantic_role == "evidence_retriever" and semantic_protocol in {
             *_HOTPOTQA_STRUCTURED_REASONER_PROTOCOLS,
             QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
@@ -1679,6 +1736,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
     ) -> str:
         contract = super()._contract(request, observations)
         evidence_state = self._required_evidence_state(request, observations)
+        semantic_role = (request.agent.role_family or "").casefold()
         admitted_actions, completion_admitted = self._state_conditioned_action_domain(
             request,
             observations,
@@ -1686,7 +1744,10 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         searched_passage_ids = evidence_state.latest_unread_passage_ids
         if self._task_type == "multi_hop_qa":
             guidance = SKILLFLOW_MULTI_HOP_QA_GUIDANCE
-            if request.semantic_protocol in _HOTPOTQA_STRUCTURED_REASONER_PROTOCOLS:
+            if (
+                request.semantic_protocol in _HOTPOTQA_STRUCTURED_REASONER_PROTOCOLS
+                and semantic_role == "reasoner"
+            ):
                 guidance += " " + HOTPOTQA_VERIFIED_ANSWER_SLOT_GUIDANCE
             elif request.semantic_protocol == QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL:
                 guidance += " " + QA_VERIFIED_ANSWER_LINEAGE_GUIDANCE
@@ -1709,7 +1770,6 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 "Tool action and its declared arguments."
             )
         )
-        semantic_role = (request.agent.role_family or "").casefold()
         if request.semantic_protocol in {
             *_HOTPOTQA_STRUCTURED_REASONER_PROTOCOLS,
             QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
@@ -1743,50 +1803,77 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
         } and semantic_role == "evidence_retriever":
             if completion_admitted:
-                terminal_wire += (
-                    " As the Evidence Retriever, arguments.value must contain "
-                    "exactly question_scope, entity_identity, target_relation, "
-                    "answer_type_constraint, evidence_proposition, evidence_span, "
-                    "and passage_id. entity_identity contains exactly "
-                    "question_surface and evidence_surface. question_surface is "
-                    "the question-side entity/event anchor copied from the original "
-                    "question, never a wh-word/wh-phrase, the whole question, or an "
-                    "answer. evidence_surface is the coreferential surface of that "
-                    "same anchor copied from the receipt-grounded exact evidence_span. "
-                    "Cite one successful qa-retrieval read receipt and copy one exact "
-                    "evidence span containing the anchor surface, exact predicate, and "
-                    "proposition surfaces. A different question/evidence surface may "
-                    "use the same read receipt's passage title for explicit alias "
-                    "binding, but both surfaces must be supported by that receipt's "
-                    "title/evidence_span."
-                )
-                if request.semantic_protocol == QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL:
+                if (
+                    request.semantic_protocol
+                    == HOTPOTQA_ROLE_CONDITIONAL_PROTOCOL
+                ):
                     terminal_wire += (
-                        " For factual QA, when question_surface and evidence_surface "
-                        "differ and question_surface, verbatim or after removing one "
-                        "leading honorific, exactly equals that same read receipt's "
-                        "passage title, evidence_surface must be a coreferential "
-                        "identity surface present in both that title and the exact "
-                        "evidence_span. The entity/event anchor may occupy the subject, "
-                        "the object, or neither binary proposition argument. The "
-                        "Reasoner alone owns relation binding, answer-slot binding, and "
-                        "semantic answer selection."
+                        " As the Evidence Retriever, arguments.value must be a "
+                        "non-empty array of receipt-grounded citations. Each item "
+                        "contains exactly passage_id and evidence_span copied from "
+                        "one successful qa-retrieval read receipt. Do not add "
+                        "entity_identity, target_relation, answer_type_constraint, "
+                        "evidence_proposition, answer_slot, candidate_answer, or "
+                        "final_answer; the Reasoner owns semantic alignment."
                     )
                 else:
                     terminal_wire += (
-                        " The anchor need not occupy a binary proposition argument; "
-                        "the Reasoner owns answer-slot binding. If the anchor occupies "
-                        "exactly one argument, the other argument must match the "
-                        "question-only answer_type_constraint; it must not occupy both "
-                        "arguments."
+                        " As the Evidence Retriever, arguments.value must contain "
+                        "exactly question_scope, entity_identity, target_relation, "
+                        "answer_type_constraint, evidence_proposition, evidence_span, "
+                        "and passage_id. entity_identity contains exactly "
+                        "question_surface and evidence_surface. question_surface is "
+                        "the question-side entity/event anchor copied from the original "
+                        "question, never a wh-word/wh-phrase, the whole question, or an "
+                        "answer. evidence_surface is the coreferential surface of that "
+                        "same anchor copied from the receipt-grounded exact evidence_span. "
+                        "Cite one successful qa-retrieval read receipt and copy one exact "
+                        "evidence span containing the anchor surface, exact predicate, and "
+                        "proposition surfaces. A different question/evidence surface may "
+                        "use the same read receipt's passage title for explicit alias "
+                        "binding, but both surfaces must be supported by that receipt's "
+                        "title/evidence_span."
                     )
-                terminal_wire += (
-                    " evidence_proposition records only receipt-grounded subject, "
-                    "predicate, and object_or_attribute_value surfaces. Do not select "
-                    "or emit candidate_answer, answer_slot, or final_answer."
-                )
+                if (
+                    request.semantic_protocol
+                    != HOTPOTQA_ROLE_CONDITIONAL_PROTOCOL
+                ):
+                    if (
+                        request.semantic_protocol
+                        == QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL
+                    ):
+                        terminal_wire += (
+                            " For factual QA, when question_surface and evidence_surface "
+                            "differ and question_surface, verbatim or after removing one "
+                            "leading honorific, exactly equals that same read receipt's "
+                            "passage title, evidence_surface must be a coreferential "
+                            "identity surface present in both that title and the exact "
+                            "evidence_span. The entity/event anchor may occupy the subject, "
+                            "the object, or neither binary proposition argument. The "
+                            "Reasoner alone owns relation binding, answer-slot binding, and "
+                            "semantic answer selection."
+                        )
+                    else:
+                        terminal_wire += (
+                            " The anchor need not occupy a binary proposition argument; "
+                            "the Reasoner owns answer-slot binding. If the anchor occupies "
+                            "exactly one argument, the other argument must match the "
+                            "question-only answer_type_constraint; it must not occupy both "
+                            "arguments."
+                        )
+                    terminal_wire += (
+                        " evidence_proposition records only receipt-grounded subject, "
+                        "predicate, and object_or_attribute_value surfaces. Do not select "
+                        "or emit candidate_answer, answer_slot, or final_answer."
+                    )
             else:
                 terminal_wire += (
+                    " The Evidence Retriever owns only receipt-grounded evidence "
+                    "provenance; no semantic or answer field belongs in the current "
+                    "Tool arguments."
+                    if request.semantic_protocol
+                    == HOTPOTQA_ROLE_CONDITIONAL_PROTOCOL
+                    else
                     " The Evidence Retriever owns only receipt-grounded entity, "
                     "relation, and evidence provenance; no answer field belongs "
                     "in the current Tool arguments."
@@ -1833,15 +1920,29 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 "discard or replace it merely because completion was rejected. "
             )
             if completion_admitted:
-                evidence_continuation += (
-                    "The required successful non-empty qa-retrieval reads are present, "
-                    "so the next action must complete after aligning every required "
-                    "hop to the original answer slot. This turn use kind=complete, "
-                    "name=complete, resource_id=null, and skill_id=null; arguments "
-                    "must contain exactly one key, value, whose value is the full "
-                    "structured semantic artifact. Do not use kind=completion, "
-                    "name=answer, or resource_id=qa-retrieval."
-                )
+                if (
+                    request.semantic_protocol
+                    == HOTPOTQA_ROLE_CONDITIONAL_PROTOCOL
+                    and semantic_role == "evidence_retriever"
+                ):
+                    evidence_continuation += (
+                        "The required successful non-empty qa-retrieval reads are "
+                        "present, so the next action must complete with the "
+                        "receipt-grounded passage_id/evidence_span array. This turn "
+                        "use kind=complete, name=complete, resource_id=null, and "
+                        "skill_id=null; arguments must contain exactly one key, "
+                        "value."
+                    )
+                else:
+                    evidence_continuation += (
+                        "The required successful non-empty qa-retrieval reads are present, "
+                        "so the next action must complete after aligning every required "
+                        "hop to the original answer slot. This turn use kind=complete, "
+                        "name=complete, resource_id=null, and skill_id=null; arguments "
+                        "must contain exactly one key, value, whose value is the full "
+                        "structured semantic artifact. Do not use kind=completion, "
+                        "name=answer, or resource_id=qa-retrieval."
+                    )
             elif searched_passage_ids and admitted_actions == frozenset(
                 {(QA_RETRIEVAL_TOOL_ID, "read")}
             ):
@@ -1923,6 +2024,87 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             else ""
         )
         return contract + qa_guidance + evidence_continuation
+
+    @staticmethod
+    def _role_conditional_evidence_completion_issue(
+        *,
+        artifact: str,
+        tool_receipts: Sequence[Mapping[str, object]],
+    ) -> str | None:
+        """Validate receipt-grounded citations without semantic interpretation."""
+
+        from .agent_workflow_env import (
+            AgentWorkflowEnv,
+            _evidence_span_matches_read,
+        )
+
+        try:
+            citations = json.loads(artifact)
+        except (TypeError, ValueError):
+            return "Evidence Retriever citations must be one JSON array"
+        if not isinstance(citations, list) or not citations:
+            return "Evidence Retriever citations must be a non-empty JSON array"
+        for index, citation in enumerate(citations):
+            if not isinstance(citation, Mapping) or set(citation) != {
+                "passage_id",
+                "evidence_span",
+            }:
+                return (
+                    "Evidence Retriever citation must contain exactly "
+                    f"passage_id and evidence_span; citation_index={index}"
+                )
+            passage_id = citation.get("passage_id")
+            evidence_span = citation.get("evidence_span")
+            if any(
+                not isinstance(value, str)
+                or not value.strip()
+                or value != value.strip()
+                for value in (passage_id, evidence_span)
+            ):
+                return (
+                    "Evidence Retriever citation passage_id and evidence_span "
+                    f"must be non-empty trimmed text; citation_index={index}"
+                )
+            assert isinstance(passage_id, str)
+            assert isinstance(evidence_span, str)
+            matched_read_text: str | None = None
+            for receipt in tool_receipts:
+                if not AgentWorkflowEnv._successful_read_receipt(
+                    receipt,
+                    QA_RETRIEVAL_TOOL_ID,
+                ):
+                    continue
+                receipt_request = receipt.get("request")
+                if not isinstance(receipt_request, Mapping):
+                    continue
+                receipt_arguments = receipt_request.get("arguments")
+                if (
+                    not isinstance(receipt_arguments, Mapping)
+                    or receipt_arguments.get("passage_id") != passage_id
+                ):
+                    continue
+                matched_read_text = AgentWorkflowEnv._successful_read_text(
+                    receipt,
+                    QA_RETRIEVAL_TOOL_ID,
+                )
+                if matched_read_text is not None:
+                    break
+            if matched_read_text is None:
+                return (
+                    "Evidence Retriever citation passage_id has no matching "
+                    "successful qa-retrieval read receipt; "
+                    f"citation_index={index}"
+                )
+            if not _evidence_span_matches_read(
+                evidence_span,
+                matched_read_text,
+            ):
+                return (
+                    "Evidence Retriever citation evidence_span has no "
+                    "typography-canonical lexical match in its qa-retrieval "
+                    f"read receipt; citation_index={index}"
+                )
+        return None
 
     @staticmethod
     def _evidence_retriever_completion_issue(
@@ -2317,51 +2499,61 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             self._semantic_evidence_retriever_question.get()
         )
         if evidence_retriever_question is not None:
-            issue = self._evidence_retriever_completion_issue(
-                original_question=evidence_retriever_question,
-                artifact=artifact,
-                tool_receipts=tool_receipts,
+            retriever_protocol = self._semantic_evidence_retriever_protocol.get()
+            issue = (
+                self._role_conditional_evidence_completion_issue(
+                    artifact=artifact,
+                    tool_receipts=tool_receipts,
+                )
+                if retriever_protocol == HOTPOTQA_ROLE_CONDITIONAL_PROTOCOL
+                else self._evidence_retriever_completion_issue(
+                    original_question=evidence_retriever_question,
+                    artifact=artifact,
+                    tool_receipts=tool_receipts,
+                )
             )
             if issue is None:
                 return None
-            retriever_protocol = self._semantic_evidence_retriever_protocol.get()
             # A receipt/span/alias-lineage failure needs another search/read.
             # A malformed or lexically misaligned Retriever field can be
             # corrected against the already-successful read.  Route that case
             # through the existing structured-artifact repair branch so the
             # SkillFlow Action--Observation continuation does not mislabel a
             # usable passage as database coverage failure.
-            structured_repair = issue.startswith(
-                (
-                    "artifact is empty",
-                    "labelled artifact",
-                    "artifact must",
-                    "field ",
-                    "Evidence Retriever question_scope",
+            structured_repair = (
+                retriever_protocol == HOTPOTQA_ROLE_CONDITIONAL_PROTOCOL
+                or issue.startswith(
                     (
-                        "Evidence Retriever passage_id, target_relation, and "
-                        "evidence_span"
-                    ),
-                    "Evidence Retriever entity_identity must contain",
-                    "Evidence Retriever entity surfaces",
-                    (
-                        "Evidence Retriever evidence_span has no "
-                        "typography-canonical lexical match"
-                    ),
-                    "Evidence Retriever entity_identity.question_surface",
-                    "Evidence Retriever entity_identity.evidence_surface",
-                    "Evidence Retriever target_relation",
-                    "Evidence Retriever answer_type_constraint",
-                    "Evidence Retriever evidence_proposition must contain",
-                    "Evidence Retriever evidence proposition surfaces",
-                    "Evidence Retriever entity surface must not be",
-                    "Evidence Retriever evidence_proposition.",
-                    "Evidence Retriever evidence_proposition.predicate",
-                    "Evidence Retriever evidence proposition must not bind",
-                    (
-                        "Evidence Retriever entity_identity.evidence_surface is not "
-                        "supported by the cited passage title identity chain"
-                    ),
+                        "artifact is empty",
+                        "labelled artifact",
+                        "artifact must",
+                        "field ",
+                        "Evidence Retriever question_scope",
+                        (
+                            "Evidence Retriever passage_id, target_relation, and "
+                            "evidence_span"
+                        ),
+                        "Evidence Retriever entity_identity must contain",
+                        "Evidence Retriever entity surfaces",
+                        (
+                            "Evidence Retriever evidence_span has no "
+                            "typography-canonical lexical match"
+                        ),
+                        "Evidence Retriever entity_identity.question_surface",
+                        "Evidence Retriever entity_identity.evidence_surface",
+                        "Evidence Retriever target_relation",
+                        "Evidence Retriever answer_type_constraint",
+                        "Evidence Retriever evidence_proposition must contain",
+                        "Evidence Retriever evidence proposition surfaces",
+                        "Evidence Retriever entity surface must not be",
+                        "Evidence Retriever evidence_proposition.",
+                        "Evidence Retriever evidence_proposition.predicate",
+                        "Evidence Retriever evidence proposition must not bind",
+                        (
+                            "Evidence Retriever entity_identity.evidence_surface is not "
+                            "supported by the cited passage title identity chain"
+                        ),
+                    )
                 )
             )
             if retriever_protocol in _HOTPOTQA_STRUCTURED_REASONER_PROTOCOLS:

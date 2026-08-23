@@ -1936,6 +1936,34 @@ def _validate_v3_hierarchical_action_receipt(
             raise ReceiptValidationError(
                 "v3 add_subgraph Output Agent is outside the live domain"
             )
+        isolated_boundary = (
+            "relations" in add_domain and "output_agent_id" in add_domain
+        )
+        if isolated_boundary:
+            if (
+                add_domain.get("relations") != []
+                or add_domain.get("output_agent_id") is not None
+            ):
+                raise ReceiptValidationError(
+                    "v3 add_subgraph isolated live domain is malformed"
+                )
+            sampled_relations = (
+                () if action_value is None else action_value.get("relations", ())
+            )
+            if sampled_relations or output_agent_id is not None:
+                raise ReceiptValidationError(
+                    "v3 isolated replacement receipt must keep relations empty "
+                    "and Output unassigned"
+                )
+        if (
+            add_domain.get("explicit_output_assignment_required", False)
+            is True
+            and output_agent_id is None
+        ):
+            raise ReceiptValidationError(
+                "v3 role-conditional ADD receipt omitted the required "
+                "explicit Output assignment"
+            )
         if (
             output_agent_id is not None
             and verified_qa_semantic_protocol(
@@ -1977,15 +2005,6 @@ def _validate_v3_hierarchical_action_receipt(
             if current_output_agent_id is not None and not role_conditional:
                 raise ReceiptValidationError(
                     "v3 verified-QA add_subgraph cannot replace the current Output Agent"
-                )
-            if (
-                add_domain.get("explicit_output_assignment_required", False)
-                is True
-                and output_agent_id is None
-            ):
-                raise ReceiptValidationError(
-                    "v3 role-conditional ADD receipt omitted the required "
-                    "explicit Output assignment"
                 )
         if metadata.get("selected_modify_agent_id") is not None:
             raise ReceiptValidationError(

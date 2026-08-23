@@ -2258,6 +2258,11 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             repair_contract,
         )
         self.assertIn(
+            "Change only answer_slot.answer_field from 'subject' to "
+            "'object_or_attribute_value'",
+            repair_contract,
+        )
+        self.assertIn(
             "minimal but complete evidence-aligned referential surface",
             repair_contract,
         )
