@@ -8,9 +8,11 @@ provided-context retrieval runtime, and concise
 `agentgraph.director.minimal-neutral.v10` prompt. It does not resume, overwrite,
 or merge the r4 trajectories; r4 metrics are comparison references only.
 
-The current condition is configured in
-`config/evaluation_hotpotqa_role_conditional_v1_r17.yaml`. Its artifacts and
-reports use the independent `hotpotqa_role_conditional_v1_r17` namespace.
+The next evaluation condition is configured in
+`config/evaluation_hotpotqa_role_conditional_v1_r18.yaml`. Its artifacts and
+reports use the independent `hotpotqa_role_conditional_v1_r18` namespace.
+The in-progress r17 formal run remains isolated in its original namespace and
+is not resumed or relabeled as r18.
 
 ## Directly reused from FlowSteer
 
