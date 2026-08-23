@@ -9,8 +9,8 @@ provided-context retrieval runtime, and concise
 or merge the r4 trajectories; r4 metrics are comparison references only.
 
 The current condition is configured in
-`config/evaluation_hotpotqa_role_conditional_v1_r10.yaml`. Its artifacts and
-reports use the independent `hotpotqa_role_conditional_v1_r10` namespace.
+`config/evaluation_hotpotqa_role_conditional_v1_r11.yaml`. Its artifacts and
+reports use the independent `hotpotqa_role_conditional_v1_r11` namespace.
 
 ## Directly reused from FlowSteer
 
@@ -242,6 +242,19 @@ attributed to the Verifier itself. Legacy protocols are unchanged. This
 preserves optional Reasoner, Verifier, and Formatter capabilities, generic
 Output, arbitrary admissible directed or reciprocal topology, and the short
 neutral Director prompt.
+
+The r10 canary materialized a correct semantic answer and a correct Output,
+then a later dirty-closure execution received an SGLang response with
+`finish_reason=abort`. The incomplete content was incorrectly published as a
+successful Agent artifact and displaced the current-revision semantic
+artifact, preventing FINISH. The independent r11 condition fixes only the
+provider normalization boundary. It reuses SkillFlow's legal generation
+boundary vocabulary (`json-root`, `length`, `stop`), retries `abort` within the
+existing bounded retry loop, and never publishes partial content from an
+aborted response. Retry exhaustion becomes the existing Runtime failure path;
+the previous-revision preservation record remains intact but is not silently
+restored into a graph revision whose dependencies changed. This transport
+repair is role- and topology-independent.
 
 ## Not implemented or enabled in this condition
 
