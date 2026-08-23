@@ -9,8 +9,8 @@ provided-context retrieval runtime, and concise
 or merge the r4 trajectories; r4 metrics are comparison references only.
 
 The current condition is configured in
-`config/evaluation_hotpotqa_role_conditional_v1_r15.yaml`. Its artifacts and
-reports use the independent `hotpotqa_role_conditional_v1_r15` namespace.
+`config/evaluation_hotpotqa_role_conditional_v1_r16.yaml`. Its artifacts and
+reports use the independent `hotpotqa_role_conditional_v1_r16` namespace.
 
 ## Directly reused from FlowSteer
 
@@ -337,6 +337,31 @@ the Director action mask exposes an empty domain instead of advertising an
 edit that the preservation gate must reject. Reasoner, Verifier, Formatter,
 generic Output, retrieval, and repair remain optional capabilities; r15 adds
 no fixed role set, role ordering, ancestor chain, or FINISH prerequisite.
+
+The r15 Stable Zero canary completed, but the formal run was stopped after two
+completed trajectories and one collection failure; it is not a 128-task
+metric. The third frozen task reached the configured eight-Agent limit with a
+failed, repair-exhausted auxiliary. Preservation correctly prohibited deleting
+that node without a replacement takeover, while augmentation could not add a
+replacement at capacity. The resulting empty live action domain could not be
+encoded by the Director's constrained JSON schema and raised before a policy
+request. The r15 artifacts remain in their independent namespace as diagnostic
+evidence only.
+
+The independent r16 condition keeps all r15 sampling and evaluation fields and
+repairs only that measured controller boundary. At the Agent limit, after any
+existing replacement, failed-ingress relation repair, and routed auxiliary
+repair have been exhausted, a failed and repair-exhausted auxiliary that has
+not been diagnosed unusable becomes the exact `MODIFY_AGENT` target. This
+reopens its existing contract/completion condition while preserving the node,
+relations, previous semantic artifact, and Tool continuation. If any other
+state still has no admissible action, `AgentGraphOrchestrator` performs no
+Director request and records `no_admissible_action` as a non-explicit terminal
+failure instead of raising a collection exception. FlowSteer's upstream action
+mask is a training-token mask rather than a dynamic legal-Canvas mask, and
+SkillFlow distinguishes horizon exhaustion from an empty model submission, so
+this is a necessary AgentGraph constrained-decoding adapter. It does not emit
+an action, auto-FINISH, select an answer, or impose any role or topology.
 
 ## Not implemented or enabled in this condition
 
