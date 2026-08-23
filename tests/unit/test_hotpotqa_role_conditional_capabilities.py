@@ -2403,6 +2403,99 @@ class RoleConditionalSearchSpaceTests(unittest.TestCase):
             env._react_repair_admission_issue(incomplete) or "",
         )
 
+    def test_successful_same_profile_replacement_routes_before_another_add(
+        self,
+    ) -> None:
+        registry = _registry()
+        graph = AgentGraph(
+            [
+                _evidence_agent("reader"),
+                _evidence_agent("replacement"),
+                AgentNode(
+                    "consumer",
+                    "model-b",
+                    "align routed evidence to the requested answer slot",
+                    role_family="reasoner",
+                    execution_mode="reasoning",
+                ),
+                _output_agent(),
+            ],
+            [
+                AgentRelation("reader", "consumer", True, False),
+                AgentRelation("consumer", "output", True, False),
+            ],
+        )
+        env = _env(registry, graph=graph)
+        env._failed_agent_ids.add("reader")
+        env._repair_exhausted_agent_ids.add("reader")
+        env._react_exhausted_agent_ids.add("reader")
+        env._unresolved_dirty_agents.add("reader")
+        env._progressive_outputs["replacement"] = _retrieval_artifact()
+        env._progressive_output_metadata["replacement"] = {
+            "tool_receipts": [_read_receipt()],
+        }
+
+        self.assertEqual(
+            {},
+            env._repair_exhausted_auxiliary_same_profile_replacements(),
+            "a successful artifact without the Runtime continuation source "
+            "cannot claim replacement takeover",
+        )
+        self.assertEqual(
+            ("add_subgraph",),
+            env.model_admissible_action_types(),
+        )
+
+        env._progressive_output_metadata["replacement"] = {
+            "continuation_source_agent_id": "reader",
+            "tool_receipts": [_read_receipt()],
+        }
+        self.assertEqual(
+            {"reader": ("replacement",)},
+            env._repair_exhausted_auxiliary_same_profile_replacements(),
+        )
+        self.assertEqual(
+            {},
+            env._repair_exhausted_auxiliary_replacement_domains(),
+            "one materialized same-profile replacement must stop duplicate ADD",
+        )
+        self.assertEqual(("set_relation",), env.model_admissible_action_types())
+        domain = env.model_admissible_action_targets()["set_relation"]
+        self.assertEqual(
+            [
+                {
+                    "source_id": "replacement",
+                    "target_id": "consumer",
+                    "source_to_target": True,
+                    "target_to_source": False,
+                }
+            ],
+            domain["candidates"],
+        )
+        action = env.parser.parse(
+            json.dumps(
+                {
+                    "action": "set_relation",
+                    **domain["candidates"][0],
+                }
+            )
+        )
+        self.assertIsNone(env._preservation_admission_issue(action))
+
+        env._graph.set_relation("replacement", "consumer", True, False)
+        self.assertEqual(
+            [],
+            env._repair_exhausted_auxiliary_takeover_relation_candidates(),
+        )
+        self.assertEqual(("modify_agent",), env.model_admissible_action_types())
+        modify_domain = env.model_admissible_action_targets()["modify_agent"]
+        self.assertEqual(["reader"], modify_domain["agent_ids"])
+        self.assertEqual(
+            ["contract", "completion_condition"],
+            modify_domain["per_agent_candidates"][0]["mutable_fields"],
+        )
+        self.assertIsNotNone(env._delete_admission_issue("reader"))
+
     def test_selected_verifier_accepts_a_generic_semantic_producer(self) -> None:
         registry = _registry()
         graph = AgentGraph(

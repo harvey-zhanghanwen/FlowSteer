@@ -393,6 +393,29 @@ remain optional search-space choices. The frozen task order, official
 evaluator, model catalog, Qwen3.5-9B Director, seed, concurrency, neutral v10
 prompt, and no-training boundary are unchanged.
 
+The r17 formal trajectory for task `hotpotqa:5a8d7341554299441c6b9fe5`
+exposed the remaining same-profile branch of that recovery boundary. A
+replacement Evidence Retriever completed the exact same
+`react`/`qa-retrieval` responsibility, retained its Runtime-published
+`continuation_source_agent_id`, and materialized valid citation evidence with
+four Tool receipts. Because r17 recognized only a *different* successful
+execution profile, the live domain still added duplicate same-profile
+Retrievers before routing their artifacts.
+
+The subsequent independent condition reuses FlowSteer's existing
+`SET_RELATION` edit rather than adding a new action. A successful replacement
+must match the failed auxiliary's role, artifact type, and execution profile;
+it must identify that auxiliary as its public continuation source and, for a
+Tool-enabled profile, retain successful evidence receipts. The next Canvas
+edit routes that one replacement to one of the failed auxiliary's existing
+downstream responsibilities. Each downstream edge is transferred through a
+separate edit--execute--feedback step. Once all current downstream duties have
+the replacement artifact, the original failed node returns to bounded
+contract/completion repair. It is still deletable only after a typed
+`node_unusable` diagnosis and the pre-existing strict takeover checks. This
+projection derives endpoints from the current AgentGraph and does not require
+Reasoner, Verifier, Formatter, generic Output, or any fixed role order.
+
 ## Not implemented or enabled in this condition
 
 - Skill retrieval, Skill injection, SkillFlow training, or an ACTIVE Skill

@@ -614,6 +614,20 @@ class AgentWorkflowEnv:
             # recomputes the repaired ancestor and terminal downstream.
             return (AgentActionType.SET_RELATION.value,)
 
+        auxiliary_takeover_relations = (
+            self._repair_exhausted_auxiliary_takeover_relation_candidates()
+        )
+        if (
+            auxiliary_takeover_relations
+            and AgentActionType.SET_RELATION.value
+            in self._allowed_action_type_set
+        ):
+            # The isolated replacement has now materialized the failed
+            # auxiliary's exact public responsibility.  FlowSteer's next
+            # progressive edit transfers one existing downstream edge before
+            # any further augmentation.
+            return (AgentActionType.SET_RELATION.value,)
+
         mandatory_repair_ids = self._mandatory_repair_agent_ids()
         if mandatory_repair_ids:
             if (
@@ -966,6 +980,13 @@ class AgentWorkflowEnv:
         )
         if selected_output_recovery:
             return selected_output_recovery
+        auxiliary_takeover = (
+            self._repair_exhausted_auxiliary_takeover_relation_candidates(
+                all_candidates
+            )
+        )
+        if auxiliary_takeover:
+            return auxiliary_takeover
         pending_ingress_ids = (
             self._pending_role_conditional_ingress_consumer_ids()
         )
@@ -1779,6 +1800,124 @@ class AgentWorkflowEnv:
                 result.append(dict(item))
         return result
 
+    def _repair_exhausted_auxiliary_same_profile_replacements(
+        self,
+    ) -> dict[str, Tuple[str, ...]]:
+        """Map a failed auxiliary to its measured same-profile replacements.
+
+        SkillFlow exposes the continuation source and public Tool receipts on
+        the successful replacement artifact.  That receipt is the measured
+        handoff required by FlowSteer's next progressive Canvas edit; role,
+        artifact type, and execution profile must remain identical.
+        """
+
+        if (
+            not self._uses_role_conditional_capabilities()
+            or self.recovery_policy != _PRESERVE_REPAIR_RECOVERY_POLICY
+        ):
+            return {}
+        replacements_by_source: dict[str, Tuple[str, ...]] = {}
+        for source in self._graph.nodes:
+            source_role = (source.role_family or "").casefold()
+            if (
+                source_role not in {"evidence_retriever", "repair"}
+                or source.id not in self._failed_agent_ids
+                or source.id not in self._repair_exhausted_agent_ids
+            ):
+                continue
+            source_profile = (
+                source.execution_mode.value,
+                tuple(source.allowed_tools),
+            )
+            replacement_ids: list[str] = []
+            for replacement in self._graph.nodes:
+                metadata = self._progressive_output_metadata.get(
+                    replacement.id,
+                    {},
+                )
+                replacement_profile = (
+                    replacement.execution_mode.value,
+                    tuple(replacement.allowed_tools),
+                )
+                if (
+                    replacement.id == source.id
+                    or (replacement.role_family or "").casefold()
+                    != source_role
+                    or replacement.artifact_type.casefold()
+                    != source.artifact_type.casefold()
+                    or replacement_profile != source_profile
+                    or replacement.id in self._failed_agent_ids
+                    or replacement.id in self._repair_exhausted_agent_ids
+                    or replacement.id in self._unresolved_dirty_agents
+                    or not self._has_successful_artifact(replacement.id)
+                    or not self._semantic_replacement_has_valid_artifact(
+                        replacement.id,
+                        source_role,
+                    )
+                    or not isinstance(metadata, Mapping)
+                    or metadata.get("continuation_source_agent_id")
+                    != source.id
+                    or not self._replacement_preserves_protected_history(
+                        source.id,
+                        replacement.id,
+                    )
+                ):
+                    continue
+                if (
+                    self.required_evidence_tool_id is not None
+                    and self.required_evidence_tool_id
+                    in replacement.allowed_tools
+                    and not self._successful_evidence_texts_from_metadata(
+                        metadata
+                    )
+                ):
+                    continue
+                replacement_ids.append(replacement.id)
+                break
+            if replacement_ids:
+                replacements_by_source[source.id] = tuple(replacement_ids)
+        return replacements_by_source
+
+    def _repair_exhausted_auxiliary_takeover_relation_candidates(
+        self,
+        candidates: Optional[Sequence[Mapping[str, object]]] = None,
+    ) -> list[dict[str, object]]:
+        """Route one measured replacement to one existing downstream duty."""
+
+        replacements_by_source = (
+            self._repair_exhausted_auxiliary_same_profile_replacements()
+        )
+        if not replacements_by_source:
+            return []
+        source_candidates = (
+            self._all_model_admissible_relation_candidates()
+            if candidates is None
+            else [dict(item) for item in candidates]
+        )
+        required_edges = {
+            (replacement_id, successor_id)
+            for source_id, replacement_ids in replacements_by_source.items()
+            for successor_id in self._directed_successors(
+                self._graph,
+                source_id,
+            )
+            for replacement_id in replacement_ids
+            if successor_id
+            not in self._directed_successors(self._graph, replacement_id)
+        }
+        result: list[dict[str, object]] = []
+        for item in source_candidates:
+            edge = (str(item["source_id"]), str(item["target_id"]))
+            if (
+                edge not in required_edges
+                or item["source_to_target"] is not True
+                or item["target_to_source"] is not False
+                or not self._graph.relation_bits(*edge).is_independent
+            ):
+                continue
+            result.append(dict(item))
+        return result
+
     def _terminal_reachability_relation_candidates(
         self,
         candidates: Optional[Sequence[Mapping[str, object]]] = None,
@@ -2528,6 +2667,23 @@ class AgentWorkflowEnv:
             return tuple(
                 node_id for node_id in node_ids if node_id in profile_repair_ids
             )
+        same_profile_replacements = (
+            self._repair_exhausted_auxiliary_same_profile_replacements()
+        )
+        if (
+            same_profile_replacements
+            and not self._repair_exhausted_auxiliary_takeover_relation_candidates()
+        ):
+            # Once every existing downstream responsibility has received the
+            # measured same-profile replacement artifact, return to the failed
+            # node's bounded contract repair.  Deletion remains unavailable
+            # unless Runtime explicitly diagnosed the node as unusable.
+            return tuple(
+                node_id
+                for node_id in node_ids
+                if node_id in same_profile_replacements
+                and node_id not in self._diagnosed_unusable_agent_ids
+            )
         selected_output_recovery = (
             self._selected_output_artifact_recovery_sources_by_target()
         )
@@ -2735,6 +2891,9 @@ class AgentWorkflowEnv:
         profile_repair_ids = set(
             self._repair_exhausted_auxiliary_profile_domains()
         )
+        same_profile_replacement_ids = set(
+            self._repair_exhausted_auxiliary_same_profile_replacements()
+        )
         domains: dict[str, list[str]] = {}
         for node in self._graph.nodes:
             role_family = (node.role_family or "").casefold()
@@ -2743,6 +2902,7 @@ class AgentWorkflowEnv:
                 or node.id not in self._failed_agent_ids
                 or node.id not in self._repair_exhausted_agent_ids
                 or node.id in profile_repair_ids
+                or node.id in same_profile_replacement_ids
                 or self._delete_admission_issue(node.id) is None
             ):
                 continue
@@ -8069,6 +8229,9 @@ class AgentWorkflowEnv:
         )
         deletable_set = set(deletable)
         repair_routing_candidates = self._repair_exhausted_relation_candidates()
+        auxiliary_takeover_candidates = (
+            self._repair_exhausted_auxiliary_takeover_relation_candidates()
+        )
         selected_output_recovery_candidates = (
             self._selected_output_artifact_recovery_relation_candidates()
             if AgentActionType.SET_RELATION.value
@@ -8147,10 +8310,16 @@ class AgentWorkflowEnv:
                 dict(candidate)
                 for candidate in selected_output_recovery_candidates
             ],
+            "repair_exhausted_auxiliary_takeover_relation_candidates": [
+                dict(candidate)
+                for candidate in auxiliary_takeover_candidates
+            ],
             "deletion_protected": protected,
             "preferred_actions": (
                 ["set_relation"]
                 if selected_output_recovery_candidates
+                else ["set_relation"]
+                if auxiliary_takeover_candidates
                 else ["modify_agent"]
                 if (
                     mandatory_repair
@@ -8680,6 +8849,24 @@ class AgentWorkflowEnv:
                 "route the revision-live receipt-grounded artifact into the "
                 "failed selected-Output ancestor with one exact admitted "
                 "set_relation action before other Canvas edits"
+            )
+        auxiliary_takeover_candidates = (
+            self._repair_exhausted_auxiliary_takeover_relation_candidates()
+        )
+        if (
+            auxiliary_takeover_candidates
+            and AgentActionType.SET_RELATION.value
+            in self._allowed_action_type_set
+        ):
+            if any(
+                self._relation_action_matches_candidate(action, candidate)
+                for candidate in auxiliary_takeover_candidates
+            ):
+                return None
+            return (
+                "route one measured same-profile replacement artifact into "
+                "one existing downstream responsibility with the exact "
+                "admitted set_relation action before further augmentation"
             )
         mandatory_repair_ids = self._mandatory_repair_agent_ids()
         if mandatory_repair_ids and (
