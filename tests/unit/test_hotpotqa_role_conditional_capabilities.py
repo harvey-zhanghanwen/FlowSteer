@@ -7,6 +7,7 @@ or an external Tool.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import unittest
 
@@ -272,6 +273,60 @@ def _output_agent(agent_id: str = "output") -> AgentNode:
         execution_mode="reasoning",
         artifact_type="answer_wrapper",
     )
+
+
+def _successful_fan_out_without_output(
+    registry: ModelRegistry,
+    *,
+    producer_role: str = "reasoner",
+    branch_role: str = "verifier",
+) -> AgentWorkflowEnv:
+    branch_artifact = (
+        _verifier_artifact()
+        if branch_role == "verifier"
+        else f"Candidate answer: {SYNTHETIC_CANDIDATE}"
+    )
+    graph = AgentGraph(
+        [
+            AgentNode(
+                "semantic_producer",
+                "model-a",
+                "determine one semantic candidate from explicit evidence",
+                role_family=producer_role,
+                allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                execution_mode="react",
+                artifact_type="semantic_candidate",
+            ),
+            _output_agent(),
+            AgentNode(
+                "parallel_branch",
+                "model-c",
+                "check or augment the routed semantic candidate",
+                role_family=branch_role,
+                execution_mode="reasoning",
+                artifact_type="verification_report",
+            ),
+        ],
+        [
+            AgentRelation("semantic_producer", "output", True, False),
+            AgentRelation(
+                "semantic_producer",
+                "parallel_branch",
+                True,
+                False,
+            ),
+        ],
+    )
+    env = _env(registry, graph=graph)
+    env._progressive_outputs = {
+        "semantic_producer": _reasoner_artifact(),
+        "output": f"<answer>{SYNTHETIC_CANDIDATE}</answer>",
+        "parallel_branch": branch_artifact,
+    }
+    env._progressive_output_metadata = {
+        "semantic_producer": {"tool_receipts": [_read_receipt()]},
+    }
+    return env
 
 
 def _generic_verifier_failure_attribution(
@@ -779,10 +834,217 @@ class RoleConditionalSearchSpaceTests(unittest.TestCase):
         self.assertIsNone(env._format_agent_issue_for(candidate))
         self.assertEqual((), env._required_semantic_edges())
 
-        add_domain = env.model_admissible_action_targets()["add_subgraph"]
+        self.assertEqual(("set_output",), env.model_admissible_action_types())
+        self.assertEqual(
+            ["output"],
+            env.model_admissible_action_targets()["set_output"]["agent_ids"],
+        )
+
+        add_domain = _env(registry).model_admissible_action_targets()[
+            "add_subgraph"
+        ]
         self.assertEqual(
             ["format", "output"],
             add_domain["output_role_families"],
+        )
+
+    def test_successful_fan_out_converges_before_output_assignment(self) -> None:
+        registry = _registry()
+        env = _successful_fan_out_without_output(registry)
+
+        self.assertEqual(("set_relation",), env.model_admissible_action_types())
+        relation_domain = env.model_admissible_action_targets()["set_relation"]
+        self.assertEqual("terminal_branch_convergence", relation_domain["purpose"])
+        self.assertEqual(
+            ["output"],
+            relation_domain["prospective_output_agent_ids"],
+        )
+        self.assertEqual(
+            [
+                {
+                    "source_id": "parallel_branch",
+                    "target_id": "output",
+                    "source_to_target": True,
+                    "target_to_source": False,
+                }
+            ],
+            relation_domain["candidates"],
+        )
+        admitted_action = env.parser.parse(
+            json.dumps({"action": "set_relation", **relation_domain["candidates"][0]})
+        )
+        self.assertIsNone(env._preservation_admission_issue(admitted_action))
+        unrelated_action = env.parser.parse(
+            json.dumps(
+                {
+                    "action": "set_relation",
+                    "source_id": "output",
+                    "target_id": "parallel_branch",
+                    "source_to_target": True,
+                    "target_to_source": False,
+                }
+            )
+        )
+        self.assertIn(
+            "exact admitted monotonic set_relation candidate",
+            env._preservation_admission_issue(unrelated_action) or "",
+        )
+
+        converged = env.graph.fork()
+        converged.set_relation("parallel_branch", "output", True, False)
+        self.assertIsNotNone(env._preserved_input_change_issue_for(converged))
+        self.assertIsNone(
+            env._preserved_input_change_issue_for(
+                converged,
+                terminal_convergence_output_id="output",
+            )
+        )
+        env.execute_on_edit = False
+        accepted = asyncio.run(env.step(admitted_action))
+        self.assertTrue(accepted.accepted, accepted.feedback)
+        self.assertTrue(
+            env.graph.relation_bits(
+                "parallel_branch",
+                "output",
+            ).source_to_target
+        )
+        next_env = _env(registry, graph=converged)
+        next_env._progressive_outputs = dict(env._progressive_outputs)
+        next_env._progressive_output_metadata = dict(
+            env._progressive_output_metadata
+        )
+        self.assertEqual(("set_output",), next_env.model_admissible_action_types())
+        self.assertEqual(
+            ["output"],
+            next_env.model_admissible_action_targets()["set_output"]["agent_ids"],
+        )
+        terminal = converged.fork()
+        terminal.set_output("output")
+        self.assertTrue(
+            terminal.validate(registry, require_complete=True).valid
+        )
+        self.assertIsNone(next_env._semantic_edit_issue_for(terminal))
+
+    def test_terminal_convergence_does_not_require_named_semantic_roles(
+        self,
+    ) -> None:
+        registry = _registry()
+        env = _successful_fan_out_without_output(
+            registry,
+            producer_role="repair",
+            branch_role="repair",
+        )
+
+        candidates = env.model_admissible_action_targets()["set_relation"][
+            "candidates"
+        ]
+        self.assertEqual("parallel_branch", candidates[0]["source_id"])
+        self.assertEqual("output", candidates[0]["target_id"])
+        terminal = env.graph.fork()
+        terminal.set_relation("parallel_branch", "output", True, False)
+        terminal.set_output("output")
+        self.assertTrue(
+            terminal.validate(registry, require_complete=True).valid
+        )
+        self.assertIsNone(env._semantic_edit_issue_for(terminal))
+
+    def test_multiple_parallel_branches_converge_one_edit_at_a_time(self) -> None:
+        registry = _registry()
+        env = _successful_fan_out_without_output(
+            registry,
+            producer_role="repair",
+            branch_role="repair",
+        )
+        env.graph.add_agent(
+            AgentNode(
+                "parallel_branch_2",
+                "model-b",
+                "independently augment the routed candidate",
+                role_family="repair",
+                artifact_type="verification_report",
+            )
+        )
+        env.graph.set_relation(
+            "semantic_producer",
+            "parallel_branch_2",
+            True,
+            False,
+        )
+        env._progressive_outputs["parallel_branch_2"] = (
+            f"Candidate answer: {SYNTHETIC_CANDIDATE}"
+        )
+
+        first_candidates = env._prospective_terminal_convergence_relation_candidates()
+        self.assertEqual(
+            {"parallel_branch", "parallel_branch_2"},
+            {str(candidate["source_id"]) for candidate in first_candidates},
+        )
+        after_first = env.graph.fork()
+        after_first.set_relation("parallel_branch", "output", True, False)
+        after_first_env = _env(registry, graph=after_first)
+        after_first_env._progressive_outputs = dict(env._progressive_outputs)
+        after_first_env._progressive_output_metadata = dict(
+            env._progressive_output_metadata
+        )
+        self.assertEqual(
+            ["parallel_branch_2"],
+            [
+                str(candidate["source_id"])
+                for candidate in (
+                    after_first_env._prospective_terminal_convergence_relation_candidates()
+                )
+            ],
+        )
+
+        fully_converged = after_first.fork()
+        fully_converged.set_relation(
+            "parallel_branch_2",
+            "output",
+            True,
+            False,
+        )
+        complete_env = _env(registry, graph=fully_converged)
+        complete_env._progressive_outputs = dict(env._progressive_outputs)
+        complete_env._progressive_output_metadata = dict(
+            env._progressive_output_metadata
+        )
+        self.assertEqual(("set_output",), complete_env.model_admissible_action_types())
+
+    def test_terminal_convergence_rejects_non_monotonic_or_failed_sources(
+        self,
+    ) -> None:
+        registry = _registry()
+        env = _successful_fan_out_without_output(registry)
+        candidates = env._prospective_terminal_convergence_relation_candidates()
+        self.assertEqual(1, len(candidates))
+        candidate = candidates[0]
+        self.assertIs(candidate["source_to_target"], True)
+        self.assertIs(candidate["target_to_source"], False)
+
+        artifact_free = _successful_fan_out_without_output(registry)
+        artifact_free._progressive_outputs.pop("parallel_branch")
+        self.assertEqual(
+            [],
+            artifact_free._prospective_terminal_convergence_relation_candidates(),
+        )
+
+        failed = _successful_fan_out_without_output(registry)
+        failed._failed_agent_ids.add("parallel_branch")
+        self.assertEqual(
+            [],
+            failed._prospective_terminal_convergence_relation_candidates(),
+        )
+
+        reverse_edge = _successful_fan_out_without_output(registry)
+        reverse_edge.graph.set_relation(
+            "parallel_branch",
+            "output",
+            False,
+            True,
+        )
+        self.assertEqual(
+            [],
+            reverse_edge._prospective_terminal_convergence_relation_candidates(),
         )
 
     def test_add_subgraph_can_select_a_terminal_output_after_a_reasoner(self) -> None:

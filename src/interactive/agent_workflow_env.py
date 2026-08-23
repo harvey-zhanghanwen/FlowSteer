@@ -735,6 +735,20 @@ class AgentWorkflowEnv:
         terminal_reachability_candidates = (
             self._terminal_reachability_relation_candidates()
         )
+        prospective_convergence_candidates = (
+            self._prospective_terminal_convergence_relation_candidates()
+        )
+        if (
+            prospective_convergence_candidates
+            and AgentActionType.SET_RELATION.value
+            in self._allowed_action_type_set
+        ):
+            # FlowSteer's downstream Aggregate closes an already materialized
+            # parallel block before terminal selection.  AgentGraph represents
+            # that same progressive boundary as one exact monotonic relation,
+            # repeated only while terminal-unreachable branches remain, then
+            # followed by SET_OUTPUT after all branches have converged.
+            return (AgentActionType.SET_RELATION.value,)
         if (
             terminal_reachability_candidates
             and self._model_admissible_relation_candidates()
@@ -777,12 +791,13 @@ class AgentWorkflowEnv:
         output_target_ids = self._model_admissible_output_agent_ids()
         if (
             self._uses_semantic_lineage_protocol()
-            and not self._uses_role_conditional_capabilities()
             and output_target_ids
             and AgentActionType.SET_OUTPUT.value in self._allowed_action_type_set
         ):
-            # A Formatter is exposed only after the prospective Canvas passes
-            # the same Format-lineage checks used by authoritative admission.
+            # Select a terminal-compatible capability only after the
+            # prospective Canvas passes the same complete-graph and semantic
+            # checks used by authoritative admission.  This does not require
+            # a Formatter or any fixed role sequence.
             return (AgentActionType.SET_OUTPUT.value,)
 
         if exhausted_reasoner_ids:
@@ -821,6 +836,8 @@ class AgentWorkflowEnv:
 
     def _all_model_admissible_relation_candidates(
         self,
+        *,
+        terminal_convergence_output_id: Optional[str] = None,
     ) -> list[dict[str, object]]:
         """Return every non-self, non-no-op relation edit accepted by Canvas."""
 
@@ -868,7 +885,15 @@ class AgentWorkflowEnv:
                         continue
                     if self._semantic_edit_issue_for(candidate) is not None:
                         continue
-                    if self._preserved_input_change_issue_for(candidate) is not None:
+                    if (
+                        self._preserved_input_change_issue_for(
+                            candidate,
+                            terminal_convergence_output_id=(
+                                terminal_convergence_output_id
+                            ),
+                        )
+                        is not None
+                    ):
                         continue
                     if (
                         candidate.output_agent_id is not None
@@ -937,6 +962,11 @@ class AgentWorkflowEnv:
         )
         if routing_candidates:
             return routing_candidates
+        prospective_convergence_candidates = (
+            self._prospective_terminal_convergence_relation_candidates()
+        )
+        if prospective_convergence_candidates:
+            return prospective_convergence_candidates
         terminal_reachability_candidates = (
             self._terminal_reachability_relation_candidates(all_candidates)
         )
@@ -1529,6 +1559,159 @@ class AgentWorkflowEnv:
             }
             if candidate_unreachable < current_unreachable:
                 result.append(dict(item))
+        return result
+
+    def _prospective_terminal_output_agent_ids(self) -> Tuple[str, ...]:
+        """Return successful terminal capabilities blocked only by fan-in."""
+
+        if (
+            not self._uses_role_conditional_capabilities()
+            or self._graph.output_agent_id is not None
+        ):
+            return ()
+        return tuple(
+            node.id
+            for node in self._graph.nodes
+            if (node.role_family or "").casefold() in {"format", "output"}
+            and self._has_successful_artifact(node.id)
+            and node.id not in self._failed_agent_ids
+            and node.id not in self._repair_exhausted_agent_ids
+        )
+
+    def _prospective_terminal_convergence_relation_candidates(
+        self,
+    ) -> list[dict[str, object]]:
+        """Project one monotonic fan-in edge before Output assignment.
+
+        FlowSteer places an Aggregate after a parallel block and executes that
+        edit before terminal submission.  In AgentGraph, an already selected
+        generic Output or optional Formatter can serve as that downstream
+        convergence point.  Admit only a single new source-to-sink edge whose
+        source artifact is revision-live and which strictly reduces the
+        terminal-unreachable set.  The final edge must also pass the unchanged
+        complete-Canvas and semantic gates before SET_OUTPUT is exposed.
+        """
+
+        if self._graph.output_agent_id is not None:
+            return []
+        before_edges = {
+            edge
+            for relation in self._graph.relations
+            for edge in relation.directed_edges()
+        }
+        result: list[dict[str, object]] = []
+        seen: set[tuple[object, ...]] = set()
+        for output_id in self._prospective_terminal_output_agent_ids():
+            before_output = self._graph.fork()
+            try:
+                before_output.set_output(output_id)
+            except GraphMutationError:
+                continue
+            before_validation = before_output.validate(
+                self.model_registry,
+                require_complete=True,
+            )
+            if any(
+                issue.code != "cannot_reach_output"
+                for issue in before_validation.issues
+            ):
+                continue
+            before_unreachable = {
+                agent_id
+                for issue in before_validation.issues
+                if issue.code == "cannot_reach_output"
+                for agent_id in issue.agent_ids
+            }
+            if not before_unreachable:
+                continue
+            candidates = self._all_model_admissible_relation_candidates(
+                terminal_convergence_output_id=output_id,
+            )
+            for item in candidates:
+                if (
+                    item.get("source_to_target") is not True
+                    or item.get("target_to_source") is not False
+                ):
+                    # FlowSteer's downstream Aggregate is a directed fan-in.
+                    # Never turn an existing reverse edge into a reciprocal
+                    # block while projecting terminal convergence.
+                    continue
+                candidate = self._graph.fork()
+                try:
+                    candidate.set_relation(
+                        str(item["source_id"]),
+                        str(item["target_id"]),
+                        bool(item["source_to_target"]),
+                        bool(item["target_to_source"]),
+                    )
+                except GraphMutationError:
+                    continue
+                after_edges = {
+                    edge
+                    for relation in candidate.relations
+                    for edge in relation.directed_edges()
+                }
+                added_edges = after_edges - before_edges
+                if before_edges - after_edges or len(added_edges) != 1:
+                    continue
+                source_id, target_id = next(iter(added_edges))
+                if (
+                    target_id != output_id
+                    or source_id not in before_unreachable
+                    or not self._has_successful_artifact(source_id)
+                    or source_id in self._failed_agent_ids
+                    or source_id in self._repair_exhausted_agent_ids
+                ):
+                    continue
+                prospective = candidate.fork()
+                try:
+                    prospective.set_output(output_id)
+                except GraphMutationError:
+                    continue
+                validation = prospective.validate(
+                    self.model_registry,
+                    require_complete=True,
+                )
+                if any(
+                    issue.code != "cannot_reach_output"
+                    for issue in validation.issues
+                ):
+                    continue
+                after_unreachable = {
+                    agent_id
+                    for issue in validation.issues
+                    if issue.code == "cannot_reach_output"
+                    for agent_id in issue.agent_ids
+                }
+                if not after_unreachable < before_unreachable:
+                    continue
+                if self._output_sink_issue_for(prospective) is not None:
+                    continue
+                if after_unreachable:
+                    if (
+                        candidate.get_node(output_id).role_family or ""
+                    ).casefold() != "output":
+                        # A pure Formatter cannot aggregate multiple semantic
+                        # branches. Leave that optional capability unchanged
+                        # and require a generic Output convergence point.
+                        continue
+                else:
+                    if self._semantic_edit_issue_for(prospective) is not None:
+                        continue
+                    if (
+                        self._uses_format_agent_protocol(prospective)
+                        and self._format_agent_issue_for(prospective) is not None
+                    ):
+                        continue
+                key = (
+                    item["source_id"],
+                    item["target_id"],
+                    item["source_to_target"],
+                    item["target_to_source"],
+                )
+                if key not in seen:
+                    result.append(dict(item))
+                    seen.add(key)
         return result
 
     def _terminal_reachability_admission_issue(
@@ -2768,11 +2951,30 @@ class AgentWorkflowEnv:
                 ]
             }
         if AgentActionType.SET_RELATION.value in admitted:
+            relation_candidates = self._model_admissible_relation_candidates()
+            prospective_convergence_candidates = (
+                self._prospective_terminal_convergence_relation_candidates()
+            )
             targets[AgentActionType.SET_RELATION.value] = {
                 "source_agent_ids": node_ids,
                 "target_agent_ids": node_ids,
                 "endpoints_must_differ": True,
-                "candidates": self._model_admissible_relation_candidates(),
+                "candidates": relation_candidates,
+                **(
+                    {
+                        "purpose": "terminal_branch_convergence",
+                        "prospective_output_agent_ids": sorted(
+                            {
+                                str(candidate["target_id"])
+                                for candidate in prospective_convergence_candidates
+                            }
+                        ),
+                    }
+                    if prospective_convergence_candidates
+                    and relation_candidates
+                    == prospective_convergence_candidates
+                    else {}
+                ),
             }
         if AgentActionType.SET_OUTPUT.value in admitted:
             targets[AgentActionType.SET_OUTPUT.value] = {
@@ -2922,6 +3124,16 @@ class AgentWorkflowEnv:
                 action,
                 "edit rejected: " + preservation_issue,
             )
+        terminal_convergence_output_id = next(
+            (
+                str(candidate["target_id"])
+                for candidate in (
+                    self._prospective_terminal_convergence_relation_candidates()
+                )
+                if self._relation_action_matches_candidate(action, candidate)
+            ),
+            None,
+        )
         if action.action_type is AgentActionType.DELETE_AGENT:
             delete_issue = self._delete_admission_issue(action.agent_id)
             if delete_issue is not None:
@@ -3092,7 +3304,10 @@ class AgentWorkflowEnv:
                 action,
                 "edit rejected: " + semantic_edit_issue,
             )
-        preserved_input_issue = self._preserved_input_change_issue_for(candidate)
+        preserved_input_issue = self._preserved_input_change_issue_for(
+            candidate,
+            terminal_convergence_output_id=terminal_convergence_output_id,
+        )
         if preserved_input_issue is not None:
             return self._reject_after_count(
                 action,
@@ -7146,6 +7361,8 @@ class AgentWorkflowEnv:
     def _preserved_input_change_issue_for(
         self,
         candidate: AgentGraph,
+        *,
+        terminal_convergence_output_id: Optional[str] = None,
     ) -> Optional[str]:
         """Protect the dependency identity of revision-live successful artifacts."""
 
@@ -7171,6 +7388,26 @@ class AgentWorkflowEnv:
                 if evidence_ingress_candidate and node.id in set(
                     self._role_conditional_evidence_ingress_consumer_ids()
                 ):
+                    continue
+                added_predecessors = set(after) - set(before)
+                if (
+                    terminal_convergence_output_id == node.id
+                    and (node.role_family or "").casefold()
+                    in {"format", "output"}
+                    and set(before) < set(after)
+                    and len(added_predecessors) == 1
+                    and all(
+                        self._has_successful_artifact(source_id)
+                        and source_id not in self._failed_agent_ids
+                        and source_id not in self._repair_exhausted_agent_ids
+                        for source_id in added_predecessors
+                    )
+                ):
+                    # This narrow exception is consumed only by
+                    # `_prospective_terminal_convergence_relation_candidates`,
+                    # which subsequently requires the same prospective
+                    # SET_OUTPUT graph to pass complete and semantic admission.
+                    # Existing dependencies are never removed or reversed.
                     continue
                 return (
                     f"preserve successful Agent {node.id!r} input dependencies; "
@@ -7879,6 +8116,20 @@ class AgentWorkflowEnv:
         terminal_reachability_candidates = (
             self._terminal_reachability_relation_candidates()
         )
+        prospective_convergence_candidates = (
+            self._prospective_terminal_convergence_relation_candidates()
+        )
+        if prospective_convergence_candidates:
+            if any(
+                self._relation_action_matches_candidate(action, candidate)
+                for candidate in prospective_convergence_candidates
+            ):
+                return None
+            return (
+                "converge the successful parallel branches into an existing "
+                "terminal-compatible Agent before Output assignment; use an "
+                "exact admitted monotonic set_relation candidate"
+            )
         if terminal_reachability_candidates:
             all_relation_candidates = (
                 self._all_model_admissible_relation_candidates()
@@ -7953,14 +8204,14 @@ class AgentWorkflowEnv:
             )
 
         output_target_ids = self._model_admissible_output_agent_ids()
-        if output_target_ids and not self._uses_role_conditional_capabilities():
+        if output_target_ids:
             if (
                 action.action_type is AgentActionType.SET_OUTPUT
                 and action.agent_id in output_target_ids
             ):
                 return None
             return (
-                "select the prospectively valid Formatter Output Agent before "
+                "select a prospectively valid terminal-compatible Output Agent before "
                 "other Canvas edits; admissible_output_agent_ids="
                 f"{list(output_target_ids)!r}"
             )
