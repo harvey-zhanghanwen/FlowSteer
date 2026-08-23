@@ -50,6 +50,13 @@ LoRA publication, or an active Skill library.
   terminal reachability repair and preservation of successful dependencies;
   this check does not prescribe a path or exclude fan-in and reciprocal
   topology.
+- The r2 live action mask completes any missing Reasoner, Verifier, or
+  Formatter responsibility through `add_subgraph` before Output assignment or
+  unrelated edits. Once all responsibilities exist, Output admission requires
+  at least one routed Reasoner--Verifier--Formatter semantic lineage and a
+  routed ReAct `qa-retrieval` capability. Direct role adjacency is not
+  required: arbitrary intermediate Agents, fan-in, parallel verification, and
+  reciprocal non-Formatter blocks remain legal.
 - FINISH validates the actually routed artifacts and Tool receipts. A valid
   terminal path must contain an evidence-grounded Reasoner candidate and a
   supported Verifier artifact with the identical candidate. Multiple valid
@@ -68,6 +75,11 @@ LoRA publication, or an active Skill library.
   Qwen3.5-9B-compatible SkillFlow/SGLang entry and preserves the frozen task
   order, seed, evaluator, Director, retrieval protocol, and training-disabled
   boundary.
+- The separate r2 condition keeps those frozen fields and enables the existing
+  `agentgraph.model-admissible-action-mask.v3` hierarchical receipt boundary.
+  The role-first declaration, relation, Output, and MODIFY schemas are derived
+  from the current Canvas target domains; the failed r1 trajectories remain in
+  their original namespace and are not resumed as r2 results.
 
 ## Intentionally not implemented in this condition
 

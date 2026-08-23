@@ -524,6 +524,94 @@ class FlexibleSemanticGraphTests(unittest.TestCase):
         self.assertEqual((), env._required_semantic_edges())
         self.assertEqual([], env._required_semantic_relation_candidates())
 
+    def test_missing_verifier_is_an_add_capability_boundary_not_format_repair(
+        self,
+    ) -> None:
+        registry = _registry()
+        graph = AgentGraph(
+            [
+                AgentNode(
+                    "reasoner",
+                    "model-a",
+                    "align evidence to the answer slot",
+                    role_family="reasoner",
+                    allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                    execution_mode="react",
+                    artifact_type="semantic_candidate",
+                ),
+                AgentNode(
+                    "formatter",
+                    "model-b",
+                    _HOTPOTQA_FORMAT_CONTRACT,
+                    role_family="format",
+                    artifact_type="answer_wrapper",
+                ),
+            ],
+            [AgentRelation("reasoner", "formatter", True, False)],
+        )
+        env = _semantic_env(registry, graph=graph)
+
+        self.assertEqual(("add_subgraph",), env.model_admissible_action_types())
+        add_domain = env.model_admissible_action_targets()["add_subgraph"]
+        self.assertEqual(
+            ["verifier"],
+            add_domain["admitted_new_role_families"],
+        )
+        set_output = parse_first_agent_action(
+            '{"action":"set_output","agent_id":"formatter"}'
+        )
+        issue = env._preservation_admission_issue(set_output)
+        self.assertIsNotNone(issue)
+        self.assertIn("admitted_new_role_families=['verifier']", issue or "")
+
+    def test_output_requires_routed_roles_but_not_direct_role_adjacency(
+        self,
+    ) -> None:
+        registry = _registry()
+        flexible = _flexible_semantic_graph()
+        flexible_without_output = AgentGraph(flexible.nodes, flexible.relations)
+        flexible_env = _semantic_env(registry, graph=flexible_without_output)
+        self.assertEqual(
+            ("formatter",),
+            flexible_env._model_admissible_output_agent_ids(),
+        )
+
+        reversed_graph = AgentGraph(
+            [
+                AgentNode(
+                    "reasoner",
+                    "model-a",
+                    "determine the semantic candidate",
+                    role_family="reasoner",
+                    allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                    execution_mode="react",
+                ),
+                AgentNode(
+                    "verifier",
+                    "model-b",
+                    "verify the semantic candidate",
+                    role_family="verifier",
+                ),
+                AgentNode(
+                    "formatter",
+                    "model-b-spare",
+                    _HOTPOTQA_FORMAT_CONTRACT,
+                    role_family="format",
+                ),
+            ],
+            [
+                AgentRelation("verifier", "reasoner", True, False),
+                AgentRelation("reasoner", "formatter", True, False),
+            ],
+        )
+        reversed_env = _semantic_env(registry, graph=reversed_graph)
+        self.assertEqual((), reversed_env._model_admissible_output_agent_ids())
+        candidate = reversed_graph.fork()
+        candidate.set_output("formatter")
+        issue = reversed_env._format_agent_issue_for(candidate)
+        self.assertIsNotNone(issue)
+        self.assertIn("routed Reasoner ancestor", issue or "")
+
     def test_multiple_semantic_roles_fanin_and_reciprocity_are_admissible(
         self,
     ) -> None:

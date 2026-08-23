@@ -567,6 +567,24 @@ class AgentWorkflowEnv:
             # a blocked downstream Agent which merely lacks that artifact.
             return (AgentActionType.MODIFY_AGENT.value,)
 
+        missing_role_families = self._missing_semantic_role_families()
+        if (
+            self.semantic_protocol == _HOTPOTQA_SEMANTIC_LINEAGE_PROTOCOL
+            and missing_role_families
+        ):
+            # A missing semantic responsibility is a Canvas-construction
+            # boundary after any measured repair/takeover obligation. Complete
+            # only the absent capability before SET_OUTPUT or unrelated edits
+            # can materialize and protect an incomplete terminal lineage. This
+            # fixes neither Agent count nor communication edges.
+            if (
+                can_add
+                and AgentActionType.ADD_SUBGRAPH.value
+                in self._allowed_action_type_set
+            ):
+                return (AgentActionType.ADD_SUBGRAPH.value,)
+            return ()
+
         terminal_reachability_candidates = (
             self._terminal_reachability_relation_candidates()
         )
@@ -1387,6 +1405,21 @@ class AgentWorkflowEnv:
         attribution = self._semantic_repair_attribution(semantic_issue)
         if attribution is None:
             return ()
+        if (
+            self.semantic_protocol == _HOTPOTQA_SEMANTIC_LINEAGE_PROTOCOL
+            and attribution.get("responsible_constraint")
+            not in {
+                "reasoner_semantic_artifact",
+                "verifier_semantic_artifact",
+                "format_lineage",
+                "candidate_consistency",
+            }
+        ):
+            # Relation construction, missing semantic responsibilities,
+            # Output assignment, and terminal reachability are graph faults.
+            # Projecting any of them as a mandatory Agent modification traps
+            # the progressive Canvas on a healthy/no-op node.
+            return ()
         agent_id = attribution.get("responsible_agent_id")
         if not isinstance(agent_id, str) or not self._graph.has_node(agent_id):
             return ()
@@ -1489,6 +1522,12 @@ class AgentWorkflowEnv:
         """Project the exact live ADD role domain used by Canvas admission."""
 
         admitted = self._admissible_augmentation_role_families()
+        missing = self._missing_semantic_role_families()
+        if (
+            self.semantic_protocol == _HOTPOTQA_SEMANTIC_LINEAGE_PROTOCOL
+            and missing
+        ):
+            return tuple(role for role in admitted if role in missing)
         replacement_domains = (
             self._repair_exhausted_auxiliary_replacement_domains()
         )
@@ -1496,7 +1535,6 @@ class AgentWorkflowEnv:
             return tuple(
                 role for role in admitted if role in replacement_domains
             )
-        missing = self._missing_semantic_role_families()
         if (
             self._repair_exhausted_reasoner_ids()
             and self._graph.nodes
@@ -3001,7 +3039,15 @@ class AgentWorkflowEnv:
                     "scope_preserved",
                 )
             )
-            if (
+            if "no routed Verifier" in reason:
+                # This is a relation/capability construction fault, not a
+                # Formatter artifact fault.  Do not identify a healthy Format
+                # Agent as the mandatory MODIFY target.
+                target_id = None
+                role_family = "verifier"
+                responsible_constraint = "semantic_lineage_relation"
+                preferred_actions = ["set_relation", "add_subgraph"]
+            elif (
                 "knowledge_base_coverage_failure" in reason_folded
                 or reason.startswith("Reasoner")
                 or verifier_verdict_failure
@@ -3034,11 +3080,6 @@ class AgentWorkflowEnv:
                 role_family = "format"
                 responsible_constraint = "format_lineage"
                 preferred_actions = ["modify_agent", "set_relation", "set_output"]
-            elif "no routed Verifier" in reason:
-                target_id = formatter_id
-                role_family = "format"
-                responsible_constraint = "semantic_lineage_relation"
-                preferred_actions = ["set_relation", "add_subgraph", "modify_agent"]
             elif "disagree on candidate_answer" in reason:
                 target_id = verifier_ids[0] if verifier_ids else None
                 role_family = "verifier"
@@ -3570,6 +3611,57 @@ class AgentWorkflowEnv:
                     "Format Agent must consume at least one routed upstream "
                     "artifact containing an already verified semantic answer"
                 )
+            output_ancestors = set(
+                self._directed_ancestor_ids(graph, output_agent_id)
+            )
+            verifier_ids = tuple(
+                node.id
+                for node in graph.nodes
+                if node.id in output_ancestors
+                and (node.role_family or "").casefold() == "verifier"
+            )
+            if not verifier_ids:
+                return (
+                    "HotpotQA Format Agent must have at least one routed "
+                    "Verifier ancestor before Output is assigned; intermediate "
+                    "Agents and non-chain topology remain admissible"
+                )
+            routed_reasoner_ids = tuple(
+                node.id
+                for node in graph.nodes
+                if (node.role_family or "").casefold() == "reasoner"
+                and any(
+                    node.id in self._directed_ancestor_ids(graph, verifier_id)
+                    for verifier_id in verifier_ids
+                )
+            )
+            if not routed_reasoner_ids:
+                return (
+                    "HotpotQA Verifier lineage must have at least one routed "
+                    "Reasoner ancestor before Output is assigned; direct role "
+                    "adjacency is not required"
+                )
+            evidence_capable_reasoner_ids = tuple(
+                reasoner_id
+                for reasoner_id in routed_reasoner_ids
+                if (
+                    self._graph_agent_has_evidence_tool(graph, reasoner_id)
+                    or any(
+                        self._graph_agent_has_evidence_tool(graph, ancestor_id)
+                        for ancestor_id in self._directed_ancestor_ids(
+                            graph,
+                            reasoner_id,
+                        )
+                    )
+                )
+            )
+            if not evidence_capable_reasoner_ids:
+                return (
+                    "HotpotQA routed semantic lineage must give at least one "
+                    "Reasoner access to explicit retrieval evidence, either "
+                    "through its own ReAct qa-retrieval capability or through "
+                    "a routed upstream ReAct retrieval Agent"
+                )
             return None
         if len(predecessors) != 1:
             return (
@@ -3612,6 +3704,22 @@ class AgentWorkflowEnv:
                     "original answer slot before verification"
                 )
         return None
+
+    def _graph_agent_has_evidence_tool(
+        self,
+        graph: AgentGraph,
+        agent_id: str,
+    ) -> bool:
+        """Return whether one routed Agent can materialize QA evidence."""
+
+        if not graph.has_node(agent_id):
+            return False
+        node = graph.get_node(agent_id)
+        return (
+            node.execution_mode.value == "react"
+            and self.required_evidence_tool_id is not None
+            and node.allowed_tools == (self.required_evidence_tool_id,)
+        )
 
     def _uses_format_agent_protocol(self) -> bool:
         return (
@@ -5810,6 +5918,30 @@ class AgentWorkflowEnv:
             # not reject that same repair after constrained decoding selected
             # it; topology closure resumes after the repaired Agent executes.
             return None
+
+        missing_role_families = self._missing_semantic_role_families()
+        if (
+            self.semantic_protocol == _HOTPOTQA_SEMANTIC_LINEAGE_PROTOCOL
+            and missing_role_families
+        ):
+            sampled_role_families = tuple(
+                (spec.role_family or "").casefold()
+                for spec in action.agents
+            )
+            if (
+                action.action_type is AgentActionType.ADD_SUBGRAPH
+                and sampled_role_families
+                and set(sampled_role_families) <= set(missing_role_families)
+                and sampled_role_families.count("format") <= 1
+            ):
+                return None
+            return (
+                "complete the missing HotpotQA semantic responsibilities with "
+                "one add_subgraph transaction before SET_OUTPUT, MODIFY_AGENT, "
+                "or other Canvas edits; add only roles from "
+                "admitted_new_role_families="
+                f"{list(missing_role_families)!r}"
+            )
 
         takeover_delete_ids = (
             self._repair_exhausted_auxiliary_takeover_delete_ids()
