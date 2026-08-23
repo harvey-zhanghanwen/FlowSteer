@@ -81,6 +81,20 @@ plus the semantic protocol value
 fields remain unchanged. The old
 `artifacts/hotpotqa_semantic_lineage_v2_r4/hotpotqa` namespace is preserved.
 
+The first independent canary remains preserved in
+`artifacts/hotpotqa_role_conditional_v1_r1/hotpotqa`. It measured two Canvas
+continuation deadlocks rather than evaluator failures: an unfinished Output
+artifact could not be handed off atomically to a newly routed sink, and a
+selected semantic consumer with no routed input was deferred by the Runtime
+without an executable ingress repair in the next live action domain. The r2
+condition in `config/evaluation_hotpotqa_role_conditional_v1_r2.yaml` applies
+only those measured boundary repairs: incomplete Output handoff now requires
+an explicit Output assignment in the same `ADD_SUBGRAPH` transaction, and a
+deferred consumer projects either a legal `SET_RELATION` from an already
+materialized producer or an `ADD_SUBGRAPH` containing a producer-to-consumer
+relation. Neither repair requires a Reasoner, Verifier, Formatter, or serial
+role order.
+
 ## Not implemented or enabled in this condition
 
 - Skill retrieval, Skill injection, SkillFlow training, or an ACTIVE Skill

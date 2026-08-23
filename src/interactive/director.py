@@ -1228,6 +1228,17 @@ def _live_distinct_new_roles(domain: Mapping[str, Any]) -> bool:
     return value
 
 
+def _live_explicit_output_assignment_required(
+    domain: Mapping[str, Any],
+) -> bool:
+    value = domain.get("explicit_output_assignment_required", False)
+    if type(value) is not bool:
+        raise ValueError(
+            "add_subgraph explicit_output_assignment_required must be boolean"
+        )
+    return value
+
+
 def _hotpotqa_directed_role_relation_allowed(
     source_role: str,
     target_role: str,
@@ -1829,6 +1840,43 @@ def director_live_add_subgraph_relation_candidates(
                             "target_to_source": True,
                         }
                     )
+        required_ingress_ids = tuple(
+            domain.get("required_ingress_consumer_agent_ids", ())
+        )
+        if required_ingress_ids:
+            if (
+                len(required_ingress_ids) != len(set(required_ingress_ids))
+                or any(
+                    not isinstance(agent_id, str)
+                    or agent_id not in domain["existing_agent_ids"]
+                    for agent_id in required_ingress_ids
+                )
+            ):
+                raise ValueError(
+                    "add_subgraph required ingress consumer domain is invalid"
+                )
+            new_agent_ids = {agent["agent_id"] for agent in normalized_agents}
+
+            def supplies_required_ingress(candidate: Mapping[str, Any]) -> bool:
+                return any(
+                    (
+                        candidate["source_id"] in new_agent_ids
+                        and candidate["target_id"] == consumer_id
+                        and candidate["source_to_target"] is True
+                    )
+                    or (
+                        candidate["target_id"] in new_agent_ids
+                        and candidate["source_id"] == consumer_id
+                        and candidate["target_to_source"] is True
+                    )
+                    for consumer_id in required_ingress_ids
+                )
+
+            candidates = [
+                candidate
+                for candidate in candidates
+                if supplies_required_ingress(candidate)
+            ]
         return tuple(candidates)
     semantic_dataflow_pairs = {
         ("evidence_retriever", "reasoner"),
@@ -2138,6 +2186,13 @@ def director_live_action_parameter_json_schema_text(
                     # admits one bounded two-edge functional block; receipt
                     # validation still rejects a repeated unordered pair.
                     "maxItems": max_relations,
+                    "minItems": (
+                        1
+                        if domain.get(
+                            "required_ingress_consumer_agent_ids", ()
+                        )
+                        else 0
+                    ),
                     "uniqueItems": True,
                     "items": {
                         "anyOf": [
@@ -2186,11 +2241,30 @@ def director_live_action_parameter_json_schema_text(
                 for agent_id in endpoint_ids
                 if roles[agent_id] in allowed_output_roles
             ]
-            schema["properties"]["output_agent_id"] = (
+            explicit_output_assignment = (
+                _live_explicit_output_assignment_required(domain)
+            )
+            if explicit_output_assignment:
+                if not output_ids:
+                    raise ValueError(
+                        "add_subgraph explicit Output domain has no legal target"
+                    )
+                if "output_agent_id" not in schema["required"]:
+                    schema["required"].append("output_agent_id")
+                schema["properties"]["output_agent_id"] = {
+                    "enum": output_ids
+                }
+            else:
+                schema["properties"]["output_agent_id"] = (
                 {"type": "null"}
                 if (
                     isolated_boundary
-                    or current_output_agent_id is not None
+                    or (
+                        current_output_agent_id is not None
+                        and not role_conditional_hotpotqa_protocol(
+                            domain.get("semantic_protocol")
+                        )
+                    )
                     or _live_defer_output_assignment(domain)
                 )
                 else
@@ -2202,7 +2276,7 @@ def director_live_action_parameter_json_schema_text(
                 }
                 if output_ids
                 else {"type": "null"}
-            )
+                )
         else:
             relation_items = schema["properties"]["relations"]["items"]
             for branch in relation_items["anyOf"]:
@@ -3016,6 +3090,16 @@ class AgentGraphOrchestrator:
             payload["action_target_domains"] = (
                 env.model_admissible_action_targets()
             )
+            pending_ingress_ids = (
+                env._pending_role_conditional_ingress_consumer_ids()
+            )
+            if pending_ingress_ids:
+                payload["pending_routed_artifact_inputs"] = {
+                    "consumer_agent_ids": list(pending_ingress_ids),
+                    "repair_actions": list(
+                        env.model_admissible_action_types()
+                    ),
+                }
             recent_rejections: list[dict[str, Any]] = []
             for entry in reversed(env.history):
                 if entry.accepted:

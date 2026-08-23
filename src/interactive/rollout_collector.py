@@ -1917,6 +1917,18 @@ def _validate_v3_hierarchical_action_receipt(
                         "v3 verified-QA add_subgraph repeats an unordered relation pair"
                     )
                 relation_pairs.add(relation_pair)
+            if (
+                add_domain.get("required_ingress_consumer_agent_ids", ())
+                and not (
+                    ()
+                    if action_value is None
+                    else action_value.get("relations", ())
+                )
+            ):
+                raise ReceiptValidationError(
+                    "v3 role-conditional ADD receipt omitted the required "
+                    "routed-artifact ingress relation"
+                )
         output_agent_id = (
             None if action_value is None else action_value.get("output_agent_id")
         )
@@ -1962,9 +1974,18 @@ def _validate_v3_hierarchical_action_receipt(
                     "the live output domain"
                 )
             current_output_agent_id = add_domain.get("current_output_agent_id")
-            if current_output_agent_id is not None:
+            if current_output_agent_id is not None and not role_conditional:
                 raise ReceiptValidationError(
                     "v3 verified-QA add_subgraph cannot replace the current Output Agent"
+                )
+            if (
+                add_domain.get("explicit_output_assignment_required", False)
+                is True
+                and output_agent_id is None
+            ):
+                raise ReceiptValidationError(
+                    "v3 role-conditional ADD receipt omitted the required "
+                    "explicit Output assignment"
                 )
         if metadata.get("selected_modify_agent_id") is not None:
             raise ReceiptValidationError(

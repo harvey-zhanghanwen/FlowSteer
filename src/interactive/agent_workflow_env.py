@@ -558,6 +558,26 @@ class AgentWorkflowEnv:
         node_count = len(self._graph.nodes)
         node_ids = tuple(node.id for node in self._graph.nodes)
         can_add = self.max_agents is None or node_count < self.max_agents
+        pending_ingress_ids = (
+            self._pending_role_conditional_ingress_consumer_ids()
+        )
+        if pending_ingress_ids:
+            ingress_relation_candidates = (
+                self._role_conditional_ingress_relation_candidates()
+            )
+            if (
+                ingress_relation_candidates
+                and AgentActionType.SET_RELATION.value
+                in self._allowed_action_type_set
+            ):
+                return (AgentActionType.SET_RELATION.value,)
+            if (
+                can_add
+                and AgentActionType.ADD_SUBGRAPH.value
+                in self._allowed_action_type_set
+            ):
+                return (AgentActionType.ADD_SUBGRAPH.value,)
+            return ()
         exhausted_reasoner_ids = self._repair_exhausted_reasoner_ids()
         if exhausted_reasoner_ids:
             failed_ingress_candidates = (
@@ -787,6 +807,13 @@ class AgentWorkflowEnv:
         """Return the exact state-conditioned FlowSteer relation domain."""
 
         all_candidates = self._all_model_admissible_relation_candidates()
+        pending_ingress_ids = (
+            self._pending_role_conditional_ingress_consumer_ids()
+        )
+        if pending_ingress_ids:
+            return self._role_conditional_ingress_relation_candidates(
+                all_candidates
+            )
         failed_ingress_candidates = (
             self._failed_auxiliary_ingress_relation_candidates(all_candidates)
         )
@@ -812,6 +839,63 @@ class AgentWorkflowEnv:
             for item in all_candidates
             if not self._relation_reintroduces_failed_auxiliary_ingress(item)
         ]
+
+    def _pending_role_conditional_ingress_consumer_ids(self) -> Tuple[str, ...]:
+        """Return selected semantic consumers deferred for lack of routed input."""
+
+        if not self._uses_role_conditional_capabilities():
+            return ()
+        execution = self._progressive_execution
+        if (
+            execution is None
+            or self._progressive_execution_revision != self._graph.revision
+        ):
+            return ()
+        deferred_ids = set(execution.deferred_agent_ids)
+        return tuple(
+            node.id
+            for node in self._graph.nodes
+            if node.id in deferred_ids
+            and (node.role_family or "").casefold() in {"verifier", "format"}
+            and not self._graph.directed_predecessors(node.id)
+        )
+
+    def _role_conditional_ingress_relation_candidates(
+        self,
+        candidates: Optional[Sequence[Mapping[str, object]]] = None,
+    ) -> list[dict[str, object]]:
+        """Route one materialized existing artifact into a deferred consumer."""
+
+        pending_ids = set(
+            self._pending_role_conditional_ingress_consumer_ids()
+        )
+        execution = self._progressive_execution
+        if not pending_ids or execution is None:
+            return []
+        materialized_ids = set(execution.outputs)
+        source_candidates = (
+            self._all_model_admissible_relation_candidates()
+            if candidates is None
+            else [dict(item) for item in candidates]
+        )
+        result: list[dict[str, object]] = []
+        for item in source_candidates:
+            candidate = self._graph.fork()
+            candidate.set_relation(
+                str(item["source_id"]),
+                str(item["target_id"]),
+                bool(item["source_to_target"]),
+                bool(item["target_to_source"]),
+            )
+            if any(
+                consumer_id in self._directed_successors(candidate, source_id)
+                and consumer_id
+                not in self._directed_successors(self._graph, source_id)
+                for source_id in materialized_ids
+                for consumer_id in pending_ids
+            ):
+                result.append(dict(item))
+        return result
 
     @staticmethod
     def _relation_action_matches_candidate(
@@ -1069,6 +1153,67 @@ class AgentWorkflowEnv:
                 sort_keys=True,
                 separators=(",", ":"),
             )
+        )
+
+    def _role_conditional_ingress_admission_issue(
+        self,
+        action: AgentAction,
+    ) -> Optional[str]:
+        """Require one executable upstream handoff for a deferred consumer."""
+
+        pending_ids = set(
+            self._pending_role_conditional_ingress_consumer_ids()
+        )
+        if not pending_ids:
+            return None
+        relation_candidates = (
+            self._role_conditional_ingress_relation_candidates()
+        )
+        if relation_candidates:
+            if any(
+                self._relation_action_matches_candidate(action, candidate)
+                for candidate in relation_candidates
+            ):
+                return None
+            return (
+                "route one already materialized Agent artifact into a deferred "
+                "semantic consumer before other Canvas edits; "
+                "required_ingress_consumer_agent_ids="
+                f"{sorted(pending_ids)!r}"
+            )
+        if action.action_type is not AgentActionType.ADD_SUBGRAPH:
+            return (
+                "add one schedulable upstream producer and route its artifact "
+                "into a deferred semantic consumer; "
+                "required_ingress_consumer_agent_ids="
+                f"{sorted(pending_ids)!r}"
+            )
+        schedulable_new_ids = {
+            spec.agent_id
+            for spec in action.agents
+            if (spec.role_family or "").casefold() not in {"verifier", "format"}
+        }
+        has_ingress = any(
+            (
+                relation.source_id in schedulable_new_ids
+                and relation.target_id in pending_ids
+                and relation.source_to_target is True
+            )
+            or (
+                relation.target_id in schedulable_new_ids
+                and relation.source_id in pending_ids
+                and relation.target_to_source is True
+            )
+            for relation in action.relations
+        )
+        if has_ingress:
+            return None
+        return (
+            "ADD_SUBGRAPH must route at least one newly added schedulable "
+            "producer into a deferred semantic consumer; no producer role or "
+            "serial role order is prescribed. "
+            "required_ingress_consumer_agent_ids="
+            f"{sorted(pending_ids)!r}"
         )
 
     def _failed_auxiliary_ingress_relation_candidates(
@@ -1498,7 +1643,6 @@ class AgentWorkflowEnv:
             "format",
             "evidence_retriever",
             "repair",
-            "output",
         )
         if not self._uses_semantic_lineage_protocol():
             return role_families
@@ -1508,7 +1652,7 @@ class AgentWorkflowEnv:
             # available; only the specialized Formatter remains unique.
             return tuple(
                 role_family
-                for role_family in role_families
+                for role_family in (*role_families, "output")
                 if role_family != "format"
                 or not self._semantic_role_agent_ids("format")
             )
@@ -1563,6 +1707,14 @@ class AgentWorkflowEnv:
 
         admitted = self._admissible_augmentation_role_families()
         missing = self._missing_semantic_role_families()
+        if self._pending_role_conditional_ingress_consumer_ids():
+            # A new upstream producer must be schedulable before the deferred
+            # consumer.  Verifier and Formatter are themselves routed
+            # consumers, so selecting either cannot repair this measured
+            # ingress gap.
+            return tuple(
+                role for role in admitted if role not in {"verifier", "format"}
+            )
         if (
             self.semantic_protocol == _HOTPOTQA_SEMANTIC_LINEAGE_PROTOCOL
             and missing
@@ -1736,6 +1888,9 @@ class AgentWorkflowEnv:
             admitted_new_role_families = (
                 self._model_admissible_add_role_families()
             )
+            pending_ingress_consumer_ids = (
+                self._pending_role_conditional_ingress_consumer_ids()
+            )
             if (
                 self.semantic_protocol
                 == _HOTPOTQA_SEMANTIC_LINEAGE_PROTOCOL
@@ -1871,6 +2026,20 @@ class AgentWorkflowEnv:
                         },
                         "admitted_new_role_families": list(
                             admitted_new_role_families
+                        ),
+                        **(
+                            {
+                                "required_ingress_consumer_agent_ids": list(
+                                    pending_ingress_consumer_ids
+                                ),
+                                "explicit_output_assignment_required": bool(
+                                    self._graph.output_agent_id is not None
+                                    and self._graph.output_agent_id
+                                    not in self._active_semantic_lineage_ids()
+                                ),
+                            }
+                            if self._uses_role_conditional_capabilities()
+                            else {}
                         ),
                         "distinct_new_role_families": bool(
                             self.semantic_protocol
@@ -4181,6 +4350,24 @@ class AgentWorkflowEnv:
                         f"HotpotQA Formatter Agent {node.id!r} must be a terminal "
                         f"sink; remove outgoing directed edges to {list(successors)!r}"
                     )
+        if (
+            self._uses_role_conditional_capabilities()
+            and graph.output_agent_id is not None
+        ):
+            unrouted_verifier_ids = tuple(
+                node.id
+                for node in graph.nodes
+                if (node.role_family or "").casefold() == "verifier"
+                and not graph.directed_predecessors(node.id)
+            )
+            if unrouted_verifier_ids:
+                return (
+                    "A selected Verifier is a routed semantic consumer and must "
+                    "receive at least one upstream artifact before or atomically "
+                    "with Output assignment; no Reasoner role or serial topology "
+                    "is required. unrouted_verifier_agent_ids="
+                    f"{list(unrouted_verifier_ids)!r}"
+                )
         if graph.output_agent_id is not None:
             # FlowSteer's complete-Canvas validator is the authority for
             # terminal reachability.  Once Output is assigned, accepting an
@@ -6262,6 +6449,8 @@ class AgentWorkflowEnv:
                 or execution.final_answer is None
                 or output_id is None
                 or self._hotpotqa_role_conditional_issue(execution) is not None
+                or self._terminal_validation_error(execution.final_answer)
+                is not None
             ):
                 return ()
             routed = (
@@ -6585,6 +6774,9 @@ class AgentWorkflowEnv:
             or action.action_type is AgentActionType.FINISH
         ):
             return None
+        ingress_issue = self._role_conditional_ingress_admission_issue(action)
+        if ingress_issue is not None:
+            return ingress_issue
         mandatory_repair_ids = self._mandatory_repair_agent_ids()
         if mandatory_repair_ids and (
             action.action_type is not AgentActionType.MODIFY_AGENT
@@ -7297,6 +7489,12 @@ class AgentWorkflowEnv:
             # the complete structure, then executes once.  Reuse the existing
             # AgentGraph scalar mutations inside that transaction so their
             # validation and dirty-closure semantics remain unchanged.
+            previous_output_agent_id = graph.output_agent_id
+            previous_output_predecessors = (
+                ()
+                if previous_output_agent_id is None
+                else graph.directed_predecessors(previous_output_agent_id)
+            )
             dirty_agents: set[str] = set()
             for item in action.agents:
                 dirty_agents |= self._apply_mutation(
@@ -7325,13 +7523,30 @@ class AgentWorkflowEnv:
                     ),
                 )
             if action.output_agent_id is not None:
-                dirty_agents |= self._apply_mutation(
-                    graph,
-                    AgentAction(
-                        action_type=AgentActionType.SET_OUTPUT,
-                        agent_id=action.output_agent_id,
-                    ),
+                preserve_previous_output_artifact = bool(
+                    self._uses_role_conditional_capabilities()
+                    and previous_output_agent_id is not None
+                    and previous_output_agent_id != action.output_agent_id
+                    and self._has_successful_artifact(previous_output_agent_id)
+                    and graph.directed_predecessors(previous_output_agent_id)
+                    == previous_output_predecessors
                 )
+                if preserve_previous_output_artifact:
+                    # The existing artifact becomes an upstream dependency of
+                    # the new Output; transferring terminal ownership must not
+                    # re-run its already completed Tool interaction.
+                    graph.set_output(action.output_agent_id)
+                    dirty_agents |= graph.dirty_closure(
+                        {action.output_agent_id}
+                    )
+                else:
+                    dirty_agents |= self._apply_mutation(
+                        graph,
+                        AgentAction(
+                            action_type=AgentActionType.SET_OUTPUT,
+                            agent_id=action.output_agent_id,
+                        ),
+                    )
             return graph.dirty_closure(dirty_agents)
         if action.action_type is AgentActionType.ADD_AGENT:
             if action.agent_id is None or action.model_id is None or action.contract is None:
