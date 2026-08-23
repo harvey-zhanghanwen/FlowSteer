@@ -9,8 +9,8 @@ provided-context retrieval runtime, and concise
 or merge the r4 trajectories; r4 metrics are comparison references only.
 
 The current condition is configured in
-`config/evaluation_hotpotqa_role_conditional_v1_r9.yaml`. Its artifacts and
-reports use the independent `hotpotqa_role_conditional_v1_r9` namespace.
+`config/evaluation_hotpotqa_role_conditional_v1_r10.yaml`. Its artifacts and
+reports use the independent `hotpotqa_role_conditional_v1_r10` namespace.
 
 ## Directly reused from FlowSteer
 
@@ -228,6 +228,20 @@ Canvas edit. A generic Output path remains valid with no Formatter, Reasoner,
 or Verifier. This aligns the optional capability's action mask with the
 existing Runtime terminal-serializer contract without prescribing a serial
 topology.
+
+The r9 source review found three residual role-ownership assumptions even
+though Canvas admission and FINISH no longer required a fixed role sequence.
+The role-conditional ReAct Verifier and Evidence Retriever prompts still
+referred specifically to a Reasoner, and an unsupported Verifier verdict
+preferred Reasoner-role attribution instead of the actual routed semantic
+producer. The independent r10 condition removes only those assumptions. The
+Verifier consumes a routed semantic candidate, the Retriever hands evidence
+to a downstream semantic producer, and recovery attribution follows the
+actual routed artifact provenance. A malformed Verifier artifact remains
+attributed to the Verifier itself. Legacy protocols are unchanged. This
+preserves optional Reasoner, Verifier, and Formatter capabilities, generic
+Output, arbitrary admissible directed or reciprocal topology, and the short
+neutral Director prompt.
 
 ## Not implemented or enabled in this condition
 
