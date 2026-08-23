@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from src.interactive.agent_graph import AgentNode
 from src.interactive.agent_runtime import (
@@ -517,6 +517,122 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         gateway._post_json = lambda *_: {"choices": []}  # type: ignore[method-assign]
         with self.assertRaises(OpenAICompatibleGatewayError):
             await gateway.generate(request())
+
+    async def test_abort_retries_and_publishes_only_completed_attempt(self) -> None:
+        gateway = OpenAICompatibleGateway(max_retries=1)
+        responses = iter(
+            (
+                {
+                    "choices": [
+                        {
+                            "message": {"content": "partial must stay private"},
+                            "finish_reason": "abort",
+                        }
+                    ]
+                },
+                {
+                    "choices": [
+                        {
+                            "message": {"content": "completed artifact"},
+                            "finish_reason": "stop",
+                        }
+                    ]
+                },
+            )
+        )
+        gateway._post_json = lambda *_: next(responses)  # type: ignore[method-assign]
+
+        with patch(
+            "src.interactive.openai_gateway.asyncio.sleep",
+            new=AsyncMock(),
+        ):
+            response = await gateway.generate(request())
+
+        self.assertEqual("completed artifact", response.text)
+        self.assertEqual("stop", response.metadata["finish_reason"])
+        self.assertEqual(2, response.metadata["attempt_count"])
+
+    async def test_consecutive_abort_fails_without_publishing_partial(self) -> None:
+        gateway = OpenAICompatibleGateway(max_retries=1)
+        call_count = 0
+
+        def fake_post(*_):
+            nonlocal call_count
+            call_count += 1
+            return {
+                "choices": [
+                    {
+                        "message": {"content": f"private partial {call_count}"},
+                        "finish_reason": "abort",
+                    }
+                ]
+            }
+
+        gateway._post_json = fake_post  # type: ignore[method-assign]
+        with (
+            patch(
+                "src.interactive.openai_gateway.asyncio.sleep",
+                new=AsyncMock(),
+            ),
+            patch("src.interactive.openai_gateway.AgentResponse") as response_type,
+        ):
+            with self.assertRaisesRegex(
+                OpenAICompatibleGatewayError,
+                "incomplete generation",
+            ) as raised:
+                await gateway.generate(request())
+
+        self.assertEqual(2, call_count)
+        response_type.assert_not_called()
+        self.assertNotIn("private partial", str(raised.exception))
+
+    async def test_unknown_finish_reason_is_rejected_without_retry(self) -> None:
+        gateway = OpenAICompatibleGateway(max_retries=2)
+        call_count = 0
+
+        def fake_post(*_):
+            nonlocal call_count
+            call_count += 1
+            return {
+                "choices": [
+                    {
+                        "message": {"content": "must stay private"},
+                        "finish_reason": "provider-specific-state",
+                    }
+                ]
+            }
+
+        gateway._post_json = fake_post  # type: ignore[method-assign]
+        with patch("src.interactive.openai_gateway.AgentResponse") as response_type:
+            with self.assertRaisesRegex(
+                OpenAICompatibleGatewayError,
+                "unsupported finish reason",
+            ):
+                await gateway.generate(request())
+
+        self.assertEqual(1, call_count)
+        response_type.assert_not_called()
+
+    async def test_length_and_json_root_finish_reasons_are_compatible(self) -> None:
+        for finish_reason in ("length", "json-root"):
+            with self.subTest(finish_reason=finish_reason):
+                gateway = OpenAICompatibleGateway(max_retries=0)
+                gateway._post_json = (  # type: ignore[method-assign]
+                    lambda *_, reason=finish_reason: {
+                        "choices": [
+                            {
+                                "message": {"content": "candidate artifact"},
+                                "finish_reason": reason,
+                            }
+                        ]
+                    }
+                )
+
+                response = await gateway.generate(request())
+
+                self.assertEqual("candidate artifact", response.text)
+                self.assertEqual(finish_reason, response.metadata["finish_reason"])
+                self.assertEqual(1, response.metadata["attempt_count"])
 
     def test_qwen_chat_template_thinking_toggle_is_explicit(self) -> None:
         item = request()

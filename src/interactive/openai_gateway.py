@@ -26,7 +26,16 @@ class OpenAICompatibleGatewayError(RuntimeError):
     pass
 
 
+class _RetryableIncompleteGenerationError(OpenAICompatibleGatewayError):
+    """A provider-side incomplete generation that may be retried in-place."""
+
+
 MASKED_UPSTREAM_CONTENT = "[UPSTREAM CONTENT MASKED FOR COMMUNICATION DIAGNOSTIC]"
+
+# DIRECT_REUSE: SkillFlow policy/interface.py GenerationResult exposes this
+# closed finish-reason vocabulary.  Provider-specific incomplete states are
+# handled before an AgentResponse can cross the gateway boundary.
+_COMPATIBLE_FINISH_REASONS = frozenset({"json-root", "length", "stop"})
 
 
 def _number(metadata: Mapping[str, str], key: str, default: float) -> float:
@@ -915,11 +924,17 @@ class OpenAICompatibleGateway:
                 last_error = exc
                 if attempt >= self.max_retries:
                     break
+            except _RetryableIncompleteGenerationError as exc:
+                last_error = exc
+                if attempt >= self.max_retries:
+                    break
             if attempt < self.max_retries:
                 await asyncio.sleep(min(2.0**attempt, 4.0))
 
         if isinstance(last_error, HTTPError):
             detail = f"HTTP {last_error.code}"
+        elif isinstance(last_error, _RetryableIncompleteGenerationError):
+            detail = "incomplete generation"
         else:
             detail = type(last_error).__name__ if last_error is not None else "unknown error"
         raise OpenAICompatibleGatewayError(
@@ -950,7 +965,17 @@ class OpenAICompatibleGateway:
         choices = response.get("choices")
         if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
             raise OpenAICompatibleGatewayError("provider response has no completion choice")
-        message = choices[0].get("message")
+        choice = choices[0]
+        finish_reason = choice.get("finish_reason")
+        if finish_reason == "abort":
+            raise _RetryableIncompleteGenerationError(
+                "provider returned an incomplete generation"
+            )
+        if finish_reason not in _COMPATIBLE_FINISH_REASONS:
+            raise OpenAICompatibleGatewayError(
+                "provider response has an unsupported finish reason"
+            )
+        message = choice.get("message")
         if not isinstance(message, dict) or not isinstance(message.get("content"), str):
             raise OpenAICompatibleGatewayError("provider response has no text message content")
         usage = response.get("usage") if isinstance(response.get("usage"), dict) else {}
@@ -958,7 +983,7 @@ class OpenAICompatibleGateway:
             "provider_id": request.provider.provider_id,
             "model_id": request.model.model_id,
             "provider_model": response.get("model", request.model.model_name),
-            "finish_reason": choices[0].get("finish_reason"),
+            "finish_reason": finish_reason,
             "prompt_tokens": usage.get("prompt_tokens"),
             "completion_tokens": usage.get("completion_tokens"),
             "total_tokens": usage.get("total_tokens"),
