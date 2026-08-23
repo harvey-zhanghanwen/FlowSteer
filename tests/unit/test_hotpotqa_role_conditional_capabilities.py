@@ -2505,6 +2505,17 @@ class RoleConditionalObservationTests(unittest.TestCase):
         serialized = json.dumps(observation, sort_keys=True)
 
         self.assertIn("optional_role_capabilities", observation)
+        self.assertEqual(
+            [
+                "original_question_scope",
+                "entity_attribute_binding",
+                "explicit_evidence",
+                "upstream_contract_scope",
+            ],
+            observation["optional_role_capabilities"]["reasoner"][
+                "unexpected_equal_comparison_recheck"
+            ],
+        )
         for forbidden in (
             "required_direct_role_edges",
             "supported_verifier_artifact_required",

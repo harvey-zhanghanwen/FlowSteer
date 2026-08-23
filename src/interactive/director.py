@@ -3408,6 +3408,12 @@ class AgentGraphOrchestrator:
                     "reasoner": {
                         "aligns_fact_predicate_arguments_to_answer_slot": True,
                         "determines_semantic_answer_when_selected": True,
+                        "unexpected_equal_comparison_recheck": [
+                            "original_question_scope",
+                            "entity_attribute_binding",
+                            "explicit_evidence",
+                            "upstream_contract_scope",
+                        ],
                     },
                     "verifier": {
                         "checks_when_selected": [

@@ -7352,7 +7352,7 @@ class AgentWorkflowEnv:
         }
 
     def _active_semantic_lineage_ids(self) -> Tuple[str, ...]:
-        """Return the current verified Reasoner→Verifier→Formatter lineage."""
+        """Return IDs in the current terminal-admissible semantic lineage."""
 
         if not self._uses_semantic_lineage_protocol():
             return ()
