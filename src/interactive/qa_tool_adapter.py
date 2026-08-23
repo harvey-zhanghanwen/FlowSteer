@@ -13,7 +13,7 @@ import asyncio
 from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor
 from contextvars import ContextVar
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import inspect
 import json
 from pathlib import Path
@@ -2728,6 +2728,67 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         return None
 
 
+@dataclass(frozen=True)
+class QAStructuredReasoningExecutionAdapter:
+    """Apply SkillFlow's existing semantic completion schema to QA reasoning.
+
+    A reasoning-mode Reasoner consumes routed Retriever evidence without
+    executing another Tool loop. Its semantic artifact nevertheless has the
+    same public contract as a ReAct Reasoner's completion. Reuse the exact
+    request-scoped completion schema already owned by
+    :class:`QARetrievalReactExecutionAdapter` and send it through SkillFlow's
+    strict ``response_schema`` provider boundary. Other roles and protocols
+    retain the unchanged reasoning gateway path.
+    """
+
+    gateway: AgentGateway
+    schema_source: QARetrievalReactExecutionAdapter
+
+    async def execute(self, request: AgentRequest) -> GatewayResponse:
+        mode = getattr(
+            request.agent.execution_mode,
+            "value",
+            request.agent.execution_mode,
+        )
+        if mode != "reasoning":
+            raise ValueError(
+                "structured QA reasoning adapter requires execution_mode reasoning"
+            )
+        semantic_role = (request.agent.role_family or "").casefold()
+        if semantic_role != "reasoner" or request.semantic_protocol not in {
+            *_HOTPOTQA_STRUCTURED_REASONER_PROTOCOLS,
+            QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+        }:
+            return await self.gateway.generate(request)
+
+        completion_arguments = self.schema_source._completion_arguments_schema(
+            request
+        )
+        value_schema = completion_arguments.get("properties", {}).get("value")
+        if not isinstance(value_schema, Mapping):
+            raise ValueError(
+                "QA semantic completion schema has no arguments.value object"
+            )
+        # DIRECT_REUSE: SkillFlow ``skillev/runtime/openai_provider.py`` sends
+        # each request's response_schema through strict OpenAI JSON Schema.
+        # The project Gateway already mirrors that boundary; only the existing
+        # QA completion value schema is projected from ReAct to reasoning here.
+        model_metadata = {
+            **dict(request.model.metadata),
+            "response_json_schema": json.dumps(
+                value_schema,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        }
+        constrained_request = replace(
+            request,
+            model=replace(request.model, metadata=model_metadata),
+        )
+        return await self.gateway.generate(constrained_request)
+
+
 def build_qa_tool_registry(
     index: _RetrievalIndex,
     *,
@@ -3021,6 +3082,7 @@ __all__ = [
     "DEFAULT_QA_DATASET_SCOPE",
     "OpenQAToolRegistry",
     "QARetrievalReactExecutionAdapter",
+    "QAStructuredReasoningExecutionAdapter",
     "QARetrievalToolBackend",
     "QAReadToolBackend",
     "QA_RETRIEVAL_TOOL_ID",

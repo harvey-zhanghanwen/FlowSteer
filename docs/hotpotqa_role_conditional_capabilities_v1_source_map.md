@@ -168,6 +168,26 @@ behavior receipt and reaches FlowSteer's invalid-action continuation instead
 of being reclassified as a missing Output assignment. None of these changes
 requires a role, role order, or serial topology.
 
+The failed r5 canary remains preserved in
+`artifacts/hotpotqa_role_conditional_v1_r5/hotpotqa`. Both trajectories kept
+the correct terminal answer artifact (`Arthur's Magazine` and `Delhi`) but
+exhausted 28 rounds because a reasoning-mode Reasoner used the unconstrained
+text completion path. Its artifacts were semantically correct but repeatedly
+violated the already defined wire contract through values such as numeric
+cardinality, alternate proposition keys, and object-valued reasoning steps.
+
+The independent r6 condition in
+`config/evaluation_hotpotqa_role_conditional_v1_r6.yaml` directly reuses
+SkillFlow's request-scoped strict response-schema boundary from
+`skillev/runtime/openai_provider.py` and the existing
+`QARetrievalReactExecutionAdapter` Reasoner completion schema. A QA-specific
+reasoning execution adapter projects that existing `arguments.value` schema
+as the reasoning Agent's top-level response schema. It activates only when the
+Canvas actually selected a reasoning-mode Reasoner under a verified QA
+semantic protocol; every other role, execution mode, dataset runtime, and
+topology keeps its prior path. This is a necessary execution-boundary adapter,
+not a mandatory Reasoner, Verifier, Formatter, or serial workflow template.
+
 ## Not implemented or enabled in this condition
 
 - Skill retrieval, Skill injection, SkillFlow training, or an ACTIVE Skill

@@ -71,6 +71,7 @@ from src.interactive.openai_gateway import OpenAICompatibleGateway
 from src.interactive.persistence import EvidenceStore, GraphSnapshotEvent
 from src.interactive.qa_tool_adapter import (
     QARetrievalReactExecutionAdapter,
+    QAStructuredReasoningExecutionAdapter,
     open_qa_tool_registry,
     open_provided_context_qa_tool_registry,
 )
@@ -2272,7 +2273,13 @@ class LiveSmokeBackend:
             runtime = AgentRuntime(
                 self.registry,
                 self.runtime.gateway,
-                execution_adapters={"react": adapter},
+                execution_adapters={
+                    "reasoning": QAStructuredReasoningExecutionAdapter(
+                        gateway=self.runtime.gateway,
+                        schema_source=adapter,
+                    ),
+                    "react": adapter,
+                },
                 tool_registry=opened.registry,
                 dataset_id=source_key,
                 semantic_protocol=semantic_protocol,

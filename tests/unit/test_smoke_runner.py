@@ -44,7 +44,10 @@ from src.interactive.joint_qa_training_schedule import (
     freeze_joint_qa_training_schedule,
 )
 from src.interactive.qa_retrieval import QARetrievalReceipt, build_keyword_query
-from src.interactive.qa_tool_adapter import build_qa_tool_registry
+from src.interactive.qa_tool_adapter import (
+    QAStructuredReasoningExecutionAdapter,
+    build_qa_tool_registry,
+)
 from src.interactive.records import (
     EvaluationReceipt,
     TaskRecord,
@@ -522,6 +525,14 @@ class QAToolRuntimeWiringTests(unittest.TestCase):
             tool_registry,
             runtime.execution_adapters["react"]._tool_registry,
         )
+        self.assertIsInstance(
+            runtime.execution_adapters["reasoning"],
+            QAStructuredReasoningExecutionAdapter,
+        )
+        self.assertIs(
+            runtime.execution_adapters["react"],
+            runtime.execution_adapters["reasoning"].schema_source,
+        )
         self.assertEqual("hotpotqa", runtime.dataset_id)
         self.assertEqual(
             "hotpotqa_verified_answer_slot_v1",
@@ -616,6 +627,10 @@ class QAToolRuntimeWiringTests(unittest.TestCase):
         self.assertEqual(
             "multi_hop_qa",
             runtime.execution_adapters["react"]._task_type,
+        )
+        self.assertIsInstance(
+            runtime.execution_adapters["reasoning"],
+            QAStructuredReasoningExecutionAdapter,
         )
         close_runtime()
 
@@ -803,6 +818,10 @@ class AIMEComputationRuntimeWiringTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(
             shared_registry,
             runtime.execution_adapters["react"]._tool_registry,
+        )
+        self.assertNotIsInstance(
+            runtime.execution_adapters["reasoning"],
+            QAStructuredReasoningExecutionAdapter,
         )
         self.assertEqual("aime_2026", runtime.dataset_id)
 

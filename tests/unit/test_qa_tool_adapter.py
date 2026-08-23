@@ -18,6 +18,7 @@ from src.interactive.model_registry import ModelSpec, ProviderSpec
 from src.interactive.react_execution import ReactExecutionError
 from src.interactive.qa_tool_adapter import (
     QARetrievalReactExecutionAdapter,
+    QAStructuredReasoningExecutionAdapter,
     QA_RETRIEVAL_TOOL_ID,
     QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
     build_qa_tool_registry,
@@ -76,6 +77,95 @@ class FakeIndex:
 
 
 class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
+    async def test_reasoning_reasoner_reuses_skillflow_completion_schema(self) -> None:
+        class CaptureGateway:
+            def __init__(self) -> None:
+                self.requests: list[AgentRequest] = []
+
+            async def generate(self, request: AgentRequest) -> AgentResponse:
+                self.requests.append(request)
+                return AgentResponse("{}")
+
+        gateway = CaptureGateway()
+        schema_source = QARetrievalReactExecutionAdapter(
+            gateway=gateway,
+            tool_registry=build_qa_tool_registry(FakeIndex()),
+            max_turns=3,
+            max_tool_calls=2,
+            task_type="multi_hop_qa",
+        )
+        adapter = QAStructuredReasoningExecutionAdapter(
+            gateway=gateway,
+            schema_source=schema_source,
+        )
+        request = AgentRequest(
+            request_id="qa:structured-reasoning",
+            run_id="qa",
+            graph_revision=1,
+            problem="Which magazine was started first, A or B?",
+            agent=AgentNode(
+                "reasoner",
+                "model",
+                "align routed evidence to the requested answer slot",
+                role_family="reasoner",
+                execution_mode="reasoning",
+            ),
+            model=ModelSpec("model", "provider"),
+            provider=ProviderSpec("provider", kind="test"),
+            phase=ExecutionPhase.SINGLE,
+            semantic_protocol="hotpotqa_role_conditional_capabilities_v1",
+        )
+
+        await adapter.execute(request)
+
+        schema = json.loads(
+            gateway.requests[0].model.metadata["response_json_schema"]
+        )
+        self.assertEqual(
+            {
+                "question_scope",
+                "answer_slot",
+                "evidence_propositions",
+                "multi_hop_chain",
+                "candidate_answer",
+                "evidence",
+            },
+            set(schema["required"]),
+        )
+        self.assertEqual(
+            "entity",
+            schema["properties"]["answer_slot"]["properties"]
+            ["answer_type"]["const"],
+        )
+        self.assertEqual(
+            "single",
+            schema["properties"]["answer_slot"]["properties"]
+            ["answer_cardinality"]["const"],
+        )
+        self.assertEqual(
+            2,
+            schema["properties"]["evidence_propositions"]["minItems"],
+        )
+        self.assertEqual(
+            2,
+            schema["properties"]["multi_hop_chain"]["minItems"],
+        )
+
+        await adapter.execute(
+            replace(
+                request,
+                agent=replace(
+                    request.agent,
+                    id="output",
+                    role_family="output",
+                ),
+            )
+        )
+        self.assertNotIn(
+            "response_json_schema",
+            gateway.requests[1].model.metadata,
+        )
+
     async def test_model_visible_continuation_collapses_only_duplicate_errors(
         self,
     ) -> None:

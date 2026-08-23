@@ -125,6 +125,7 @@ from .environment_execution import (
 from .qa_tool_adapter import (
     OpenQAToolRegistry,
     QARetrievalReactExecutionAdapter,
+    QAStructuredReasoningExecutionAdapter,
     QA_RETRIEVAL_TOOL_ID,
     build_qa_tool_registry,
     open_qa_tool_registry,
@@ -241,6 +242,7 @@ __all__ = [
     'RAGENEnvironmentSessionFactory',
     'OpenQAToolRegistry',
     'QARetrievalReactExecutionAdapter',
+    'QAStructuredReasoningExecutionAdapter',
     'QA_RETRIEVAL_TOOL_ID',
     'build_qa_tool_registry',
     'open_qa_tool_registry',
