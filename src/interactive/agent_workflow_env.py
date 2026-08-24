@@ -88,6 +88,71 @@ _QA_EVIDENCE_RETRIEVER_RECOVERY_COMPLETION = (
     "complete only when entity identity and the requested relation are "
     "supported by a matching successful read Tool receipt"
 )
+_QA_ROLE_CONTRACT_RESPONSIBILITIES = {
+    "evidence_retriever": (
+        "ground answer-free evidence for the original entity and requested "
+        "relation in matching successful read Tool receipts"
+    ),
+    "reasoner": (
+        "bind grounded evidence to the original answer slot and requested "
+        "relation, then derive one semantic candidate"
+    ),
+    "verifier": (
+        "check entity identity, Tool provenance, semantic scope, relation "
+        "binding, and answer lineage without changing the candidate"
+    ),
+    "format": (
+        "copy the supported Verifier candidate without semantic reasoning"
+    ),
+}
+_QA_ROLE_EXCLUSIVE_BARE_CONTRACTS = {
+    "evidence_retriever": frozenset(
+        {
+            "format",
+            "formatter",
+            "formatting",
+            "reason",
+            "reasoner",
+            "reasoning",
+            "verification",
+            "verifier",
+            "verify",
+        }
+    ),
+    "reasoner": frozenset(
+        {
+            "format",
+            "formatter",
+            "formatting",
+            "read",
+            "reader",
+            "retrieval",
+            "retrieve",
+            "retriever",
+            "search",
+            "serialization",
+            "serialize",
+            "wrapper",
+        }
+    ),
+    "verifier": frozenset(
+        {
+            "answer",
+            "format",
+            "formatter",
+            "formatting",
+            "reason",
+            "reasoner",
+            "reasoning",
+            "retrieval",
+            "retrieve",
+            "retriever",
+            "serialization",
+            "serialize",
+            "wrapper",
+        }
+    ),
+}
 
 _REASONER_SEMANTIC_FIELDS = (
     "question_scope",
@@ -521,6 +586,33 @@ class AgentWorkflowEnv:
                 not self._uses_role_conditional_capabilities()
                 or self.require_format_agent
             )
+        )
+
+    @staticmethod
+    def _qa_role_contract_responsibility_issue(node: AgentNode) -> Optional[str]:
+        """Reject a bare contract that names a different QA responsibility.
+
+        FlowSteer keeps the Agent contract model-authored, while SkillFlow's
+        role-specific execution schema remains authoritative at Runtime.  This
+        admission check only closes a measured mismatch between those two
+        boundaries; it does not prescribe contract wording, Agent order, edges,
+        Agent count, or graph topology.
+        """
+
+        role = (node.role_family or "").casefold()
+        conflicting_labels = _QA_ROLE_EXCLUSIVE_BARE_CONTRACTS.get(role)
+        if not conflicting_labels:
+            return None
+        normalized = " ".join(node.contract.casefold().split()).strip(" .,:;")
+        normalized = re.sub(r"^(?:a|an|the)\s+", "", normalized)
+        normalized = re.sub(r"\s+(?:agent|role|task)$", "", normalized)
+        if normalized not in conflicting_labels:
+            return None
+        responsibility = _QA_ROLE_CONTRACT_RESPONSIBILITIES[role]
+        return (
+            f"{role.replace('_', ' ').title()} Agent {node.id!r} has a "
+            f"contract naming another role responsibility ({node.contract!r}); "
+            f"its contract must instead describe how it will {responsibility}"
         )
 
     def _role_conditional_registered_execution_profiles(
@@ -2709,28 +2801,38 @@ class AgentWorkflowEnv:
                             else {}
                         ),
                         "role_constraints": {
-                            "reasoner": (
-                                self._role_conditional_execution_constraint(
-                                    "reasoner"
-                                )
-                                if role_conditional_capabilities
-                                else {
-                                    "execution_modes": ["react"],
-                                    "allowed_tools": [
-                                        [self.required_evidence_tool_id]
-                                    ],
-                                }
-                            ),
-                            "verifier": (
-                                self._role_conditional_execution_constraint(
-                                    "verifier"
-                                )
-                                if role_conditional_capabilities
-                                else {
-                                    "execution_modes": ["reasoning"],
-                                    "allowed_tools": [[]],
-                                }
-                            ),
+                            "reasoner": {
+                                **(
+                                    self._role_conditional_execution_constraint(
+                                        "reasoner"
+                                    )
+                                    if role_conditional_capabilities
+                                    else {
+                                        "execution_modes": ["react"],
+                                        "allowed_tools": [
+                                            [self.required_evidence_tool_id]
+                                        ],
+                                    }
+                                ),
+                                "contract_responsibility": (
+                                    _QA_ROLE_CONTRACT_RESPONSIBILITIES["reasoner"]
+                                ),
+                            },
+                            "verifier": {
+                                **(
+                                    self._role_conditional_execution_constraint(
+                                        "verifier"
+                                    )
+                                    if role_conditional_capabilities
+                                    else {
+                                        "execution_modes": ["reasoning"],
+                                        "allowed_tools": [[]],
+                                    }
+                                ),
+                                "contract_responsibility": (
+                                    _QA_ROLE_CONTRACT_RESPONSIBILITIES["verifier"]
+                                ),
+                            },
                             "format": {
                                 **(
                                     self._role_conditional_execution_constraint(
@@ -2747,6 +2849,9 @@ class AgentWorkflowEnv:
                                     if role_conditional_capabilities
                                     else _HOTPOTQA_FORMAT_CONTRACT
                                 ],
+                                "contract_responsibility": (
+                                    _QA_ROLE_CONTRACT_RESPONSIBILITIES["format"]
+                                ),
                                 **(
                                     {"must_be_output_agent": True}
                                     if role_conditional_capabilities
@@ -2765,6 +2870,11 @@ class AgentWorkflowEnv:
                                             [self.required_evidence_tool_id]
                                         ],
                                     }
+                                ),
+                                "contract_responsibility": (
+                                    _QA_ROLE_CONTRACT_RESPONSIBILITIES[
+                                        "evidence_retriever"
+                                    ]
                                 ),
                                 **(
                                     {
@@ -2971,6 +3081,32 @@ class AgentWorkflowEnv:
                     {
                         "agent_id": agent_id,
                         "mutable_fields": per_agent_mutable_fields[agent_id],
+                        "role_family": (
+                            self._graph.get_node(agent_id).role_family or ""
+                        ),
+                        **(
+                            {
+                                "contract_responsibility": (
+                                    _QA_ROLE_CONTRACT_RESPONSIBILITIES[
+                                        (
+                                            self._graph.get_node(
+                                                agent_id
+                                            ).role_family
+                                            or ""
+                                        ).casefold()
+                                    ]
+                                )
+                            }
+                            if (
+                                "contract" in per_agent_mutable_fields[agent_id]
+                                and (
+                                    self._graph.get_node(agent_id).role_family
+                                    or ""
+                                ).casefold()
+                                in _QA_ROLE_CONTRACT_RESPONSIBILITIES
+                            )
+                            else {}
+                        ),
                         # Neutral current-state receipt for the hierarchical
                         # parameter phase.  The Env still authoritatively
                         # rejects no-op edits; this simply makes the measured
@@ -4828,6 +4964,9 @@ class AgentWorkflowEnv:
             normalized_contract = " ".join(
                 node.contract.casefold().split()
             ).rstrip(".")
+            role_contract_issue = self._qa_role_contract_responsibility_issue(node)
+            if role_contract_issue is not None:
+                return role_contract_issue
             if role in {"reasoner", "verifier"} and (
                 normalized_contract == formatting_contract
             ):
@@ -5044,6 +5183,9 @@ class AgentWorkflowEnv:
             normalized_contract = " ".join(node.contract.casefold().split()).rstrip(
                 "."
             )
+            role_contract_issue = self._qa_role_contract_responsibility_issue(node)
+            if role_contract_issue is not None:
+                return f"{protocol_label} {role_contract_issue}"
             formatting_only_contract = " ".join(
                 _HOTPOTQA_FORMAT_CONTRACT.casefold().split()
             ).rstrip(".")

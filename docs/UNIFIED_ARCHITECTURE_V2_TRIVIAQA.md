@@ -704,7 +704,7 @@ list the four responsibilities.  Their exact current legality appears only in
 the live `action_target_domains`; parallel Retrievers, evidence fan-in, repair
 branches, reciprocal non-Formatter communication and multi-Agent executable
 subgraphs remain in the search space.  The action-target-domain receipt is
-versioned as `agentgraph.live-action-target-domains.v8` so the strict and
+versioned as `agentgraph.live-action-target-domains.v9` so the strict and
 historical optional conditions cannot be mixed during replay.
 
 Progressive execution now defers a QA Reasoner that has no direct Evidence
@@ -739,8 +739,31 @@ arguments remain owned by the state-conditioned StructuredAction schema.
 The complete static suite passed `946` tests and `177` subtests.  Prepare-only
 selected the same 128 task IDs, questions and Ground Truth values in the same
 order (`triviaqa:tc_1` through `triviaqa:tc_223`) as the frozen comparison
-condition.  No v43 canary or fixed-128 score is inferred from these static
-checks.
+condition.  No fixed-128 score is inferred from these static checks.
+
+### v44 role-contract admission
+
+The v43 canary was retained as a two-trajectory diagnostic and stopped before
+the third task completed.  Both completed trajectories had valid Tool receipts,
+complete evidence lineage, explicit FINISH and no evaluator leakage:
+`triviaqa:tc_1` scored EM/F1 `1.0/1.0`; `triviaqa:tc_5` returned the
+semantically valid decade `1930s`, which the official accepted-answer aliases
+(`30s` variants) scored `0.0/0.0` and classified as
+`accepted_answer_canonicalization_mismatch`.  The diagnostic also exposed a
+Canvas/Runtime inconsistency in both trajectories: a Reasoner could retain its
+role-specific Runtime schema while accepting the bare contract of another
+responsibility (`format` or `retrieval`).  The resulting artifacts happened to
+be valid, but the condition was not admitted to the fixed-128 run.
+
+v44 adds only a role-contract admission guard and state-conditioned contract
+responsibility metadata.  A bare contract that names another QA responsibility
+is rejected transactionally, while the contract remains model-authored and
+question-specific.  The live domain describes each selected role's semantic
+responsibility; it does not provide a contract template or prescribe Agent
+count, order, edges, topology, communication pattern, or retrieval recipe.  The
+Director v6 system prompt is unchanged.  This live-domain shape change is why
+the action-target-domain receipt is now
+`agentgraph.live-action-target-domains.v9`.
 
 ### Stable Zero status
 

@@ -740,7 +740,7 @@ DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3 = (
     "agentgraph.model-admissible-action-mask.v3"
 )
 DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION = (
-    "agentgraph.live-action-target-domains.v8"
+    "agentgraph.live-action-target-domains.v9"
 )
 DIRECTOR_ACTION_JSON_SCHEMA_TEXT = json.dumps(
     DIRECTOR_ACTION_JSON_SCHEMA,

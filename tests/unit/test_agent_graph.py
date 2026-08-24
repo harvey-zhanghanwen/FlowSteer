@@ -4422,6 +4422,10 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             {
                 "execution_modes": ["react"],
                 "allowed_tools": [[QA_RETRIEVAL_TOOL_ID]],
+                "contract_responsibility": (
+                    "ground answer-free evidence for the original entity and "
+                    "requested relation in matching successful read Tool receipts"
+                ),
             },
             add_domain["role_constraints"]["evidence_retriever"],
         )
@@ -9349,6 +9353,111 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(rejected.accepted)
         self.assertIn("pre-execution obligations only", rejected.feedback)
         self.assertEqual((), env.graph.nodes)
+
+    async def test_triviaqa_reasoner_contract_rejects_bare_foreign_role_labels(
+        self,
+    ) -> None:
+        for conflicting_contract in ("format", "retrieval"):
+            registry = make_registry()
+            gateway = _ImmediateGateway()
+            env = AgentWorkflowEnv(
+                registry,
+                runtime=_trivia_semantic_runtime(registry, gateway),
+                problem="Which American author won the prize?",
+                execute_on_edit=False,
+                require_format_agent=True,
+                semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+                recovery_policy="preserve_diagnose_repair_augment",
+                required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+            )
+            revision = env.revision
+
+            rejected = await env.step(
+                json.dumps(
+                    {
+                        "action": "add_subgraph",
+                        "agents": [
+                            {
+                                "agent_id": "reasoner",
+                                "model_id": "balanced",
+                                "contract": conflicting_contract,
+                                "role_family": "reasoner",
+                                "allowed_tools": [QA_RETRIEVAL_TOOL_ID],
+                                "execution_mode": "react",
+                            }
+                        ],
+                        "relations": [],
+                    }
+                )
+            )
+
+            self.assertFalse(rejected.accepted)
+            self.assertIn("Reasoner Agent", rejected.feedback)
+            self.assertIn("another role responsibility", rejected.feedback)
+            self.assertEqual(revision, env.revision)
+            self.assertEqual((), env.graph.nodes)
+            self.assertEqual([], gateway.requests)
+
+    async def test_triviaqa_reasoner_contract_modify_preserves_role_boundary(
+        self,
+    ) -> None:
+        registry = make_registry()
+        gateway = _ImmediateGateway()
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_trivia_semantic_runtime(registry, gateway),
+            graph=_trivia_semantic_graph(),
+            problem="Which American author won the prize?",
+            execute_on_edit=False,
+            require_format_agent=True,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+        )
+        original = env.graph.get_node("reasoner")
+
+        for conflicting_contract in ("format", "retrieval"):
+            revision = env.revision
+            rejected = await env.step(
+                json.dumps(
+                    {
+                        "action": "modify_agent",
+                        "agent_id": "reasoner",
+                        "contract": conflicting_contract,
+                    }
+                )
+            )
+            self.assertFalse(rejected.accepted)
+            self.assertIn("another role responsibility", rejected.feedback)
+            self.assertEqual(revision, env.revision)
+            current = env.graph.get_node("reasoner")
+            self.assertEqual(original.contract, current.contract)
+            self.assertEqual(original.role_family, current.role_family)
+            self.assertEqual(original.execution_mode, current.execution_mode)
+            self.assertEqual(original.allowed_tools, current.allowed_tools)
+            self.assertEqual([], gateway.requests)
+
+        repaired_contract = (
+            "bind receipt-grounded evidence propositions to the original entity, "
+            "requested relation, qualifiers, and answer slot; derive one semantic "
+            "candidate without serializing the answer wrapper"
+        )
+        accepted = await env.step(
+            json.dumps(
+                {
+                    "action": "modify_agent",
+                    "agent_id": "reasoner",
+                    "contract": repaired_contract,
+                }
+            )
+        )
+        self.assertTrue(accepted.accepted, accepted.feedback)
+        current = env.graph.get_node("reasoner")
+        self.assertEqual(repaired_contract, current.contract)
+        self.assertEqual("reasoner", current.role_family)
+        self.assertEqual("react", current.execution_mode.value)
+        self.assertEqual((QA_RETRIEVAL_TOOL_ID,), current.allowed_tools)
+        self.assertEqual([], gateway.requests)
 
     async def test_hotpot_formatter_contract_cannot_be_mutated_to_an_answer(self) -> None:
         registry = make_registry()
