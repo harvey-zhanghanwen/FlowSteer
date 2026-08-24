@@ -88,6 +88,17 @@ _QA_EVIDENCE_RETRIEVER_RECOVERY_COMPLETION = (
     "complete only when entity identity and the requested relation are "
     "supported by a matching successful read Tool receipt"
 )
+_QA_LOCATION_REASONER_RECOVERY_CONTRACT = (
+    "preserve the receipt-grounded first-hop location proposition and the "
+    "public location-containment proposition, then bind answer_slot to the "
+    "containing city or town field supported by that same successful read "
+    "Tool receipt"
+)
+_QA_LOCATION_REASONER_RECOVERY_COMPLETION = (
+    "complete only when answer_slot selects the public containment "
+    "proposition's object_or_attribute_value and candidate_answer copies "
+    "that field exactly"
+)
 _QA_ROLE_CONTRACT_RESPONSIBILITIES = {
     "evidence_retriever": (
         "ground answer-free evidence for the original entity and requested "
@@ -1875,10 +1886,8 @@ class AgentWorkflowEnv:
                 return bool(self._provider_repair_model_ids(agent_id))
             if agent_id not in self._react_exhausted_agent_ids:
                 return True
-            recovery_values = (
-                self._triviaqa_evidence_retriever_recovery_field_values(
-                    agent_id
-                )
+            recovery_values = self._triviaqa_react_recovery_field_values(
+                agent_id
             )
             return recovery_values is None or bool(recovery_values)
 
@@ -1951,6 +1960,89 @@ class AgentWorkflowEnv:
             for field_name, value in candidates.items()
             if getattr(node, field_name) != value
         }
+
+    def _triviaqa_location_reasoner_recovery_field_values(
+        self,
+        agent_id: str,
+    ) -> Optional[dict[str, str]]:
+        """Return the bounded public-containment Reasoner repair values.
+
+        The QA adapter remains authoritative for the typed location-lineage
+        diagnosis.  This Canvas projection only closes the measured location
+        repair boundary after the responsible Reasoner has a successful public
+        read whose body explicitly states city/town containment.  It consumes
+        neither Ground Truth nor evaluator state and does not prescribe a
+        workflow topology.
+        """
+
+        if (
+            not isinstance(self.runtime.dataset_id, str)
+            or self.runtime.dataset_id.casefold() != "triviaqa"
+            or not self._graph.has_node(agent_id)
+        ):
+            return None
+        node = self._graph.get_node(agent_id)
+        if (node.role_family or "").casefold() != "reasoner":
+            return None
+        record = self._latest_failure_record_by_agent.get(agent_id)
+        if record is None:
+            return None
+        public_summary = self._react_public_error_summary(record)
+        raw_code_counts = public_summary.get("public_error_code_counts", {})
+        if not (
+            isinstance(raw_code_counts, Mapping)
+            and any(
+                isinstance(code, str)
+                and "qa_location_containment_lineage_missing" in code
+                for code in raw_code_counts
+            )
+        ):
+            return None
+        raw_receipts = record.metadata.get("tool_receipts", ())
+        receipts = (
+            tuple(item for item in raw_receipts if isinstance(item, Mapping))
+            if isinstance(raw_receipts, (list, tuple))
+            else ()
+        )
+        if self.required_evidence_tool_id is None:
+            return None
+        containment_read = any(
+            read_text is not None
+            and re.search(r"\b(?:part\s+of|belongs?\s+to)\b", read_text, re.I)
+            is not None
+            and re.search(r"\b(?:city|town)\b", read_text, re.I) is not None
+            for receipt in receipts
+            for read_text in (
+                self._successful_read_text(
+                    receipt,
+                    self.required_evidence_tool_id,
+                ),
+            )
+        )
+        if not containment_read:
+            return None
+        candidates = {
+            "contract": _QA_LOCATION_REASONER_RECOVERY_CONTRACT,
+            "completion_condition": _QA_LOCATION_REASONER_RECOVERY_COMPLETION,
+        }
+        return {
+            field_name: value
+            for field_name, value in candidates.items()
+            if getattr(node, field_name) != value
+        }
+
+    def _triviaqa_react_recovery_field_values(
+        self,
+        agent_id: str,
+    ) -> Optional[dict[str, str]]:
+        """Reuse the existing discrete ReAct repair domain by role/state."""
+
+        evidence_values = (
+            self._triviaqa_evidence_retriever_recovery_field_values(agent_id)
+        )
+        if evidence_values is not None:
+            return evidence_values
+        return self._triviaqa_location_reasoner_recovery_field_values(agent_id)
 
     def _provider_repair_admission_issue(
         self,
@@ -2039,19 +2131,23 @@ class AgentWorkflowEnv:
                 "role, tools, execution mode, artifact type, and relations"
             )
         node = self._graph.get_node(action.agent_id)
-        if (
-            isinstance(self.runtime.dataset_id, str)
-            and self.runtime.dataset_id.casefold() == "triviaqa"
-            and (node.role_family or "").casefold()
-            == "evidence_retriever"
-        ):
+        recovery_values = self._triviaqa_react_recovery_field_values(
+            action.agent_id
+        )
+        if recovery_values is not None:
             field_name = mutable_fields[0]
-            expected_value = (
-                _QA_EVIDENCE_RETRIEVER_RECOVERY_CONTRACT
-                if field_name == "contract"
-                else _QA_EVIDENCE_RETRIEVER_RECOVERY_COMPLETION
-            )
-            if getattr(action, field_name) != expected_value:
+            expected_value = recovery_values.get(field_name)
+            if (
+                expected_value is None
+                or getattr(action, field_name) != expected_value
+            ):
+                if (node.role_family or "").casefold() == "reasoner":
+                    return (
+                        "a measured location-containment Reasoner repair must "
+                        "use one live receipt-conditioned contract or "
+                        "completion_condition recovery value and preserve the "
+                        "public first-hop and containment propositions"
+                    )
                 return (
                     "a measured Evidence Retriever repair must preserve its "
                     "evidence-only responsibility and use the live "
@@ -3263,9 +3359,7 @@ class AgentWorkflowEnv:
             }
             per_agent_recovery_field_values = {
                 agent_id: (
-                    self._triviaqa_evidence_retriever_recovery_field_values(
-                        agent_id
-                    )
+                    self._triviaqa_react_recovery_field_values(agent_id)
                     if agent_id in self._react_exhausted_agent_ids
                     else None
                 )
@@ -4915,10 +5009,8 @@ class AgentWorkflowEnv:
                 if continuation is None
                 else self._failure_continuation_weight(continuation)[0]
             )
-            recovery_field_values = (
-                self._triviaqa_evidence_retriever_recovery_field_values(
-                    record.agent_id
-                )
+            recovery_field_values = self._triviaqa_react_recovery_field_values(
+                record.agent_id
             )
             if (
                 category in _BOUNDED_REACT_FAILURE_CATEGORIES
@@ -5773,6 +5865,7 @@ class AgentWorkflowEnv:
         if context.endswith(question) and context != question:
             context = context[: -len(question)]
         public_literals = self._public_semantic_contract_literals()
+        public_read_texts = self._public_successful_read_texts()
         named_phrases = self._context_named_phrases(context)
         context_tokens = self._lexical_tokens(context)
         question_tokens = self._lexical_tokens(question)
@@ -5840,7 +5933,7 @@ class AgentWorkflowEnv:
         )
         grounded_numeric_keys = {
             self._numeric_literal_key(literal)
-            for source in (question, *self._public_successful_read_texts())
+            for source in (question, *public_read_texts)
             for literal in self._numeric_literals(source)
         }
         candidate_language = re.compile(
@@ -5957,6 +6050,32 @@ class AgentWorkflowEnv:
             r"(?:\s+[A-Z][A-Za-z0-9'’.-]*){0,5}){0,3})"
             r"(?:\s*\))?\s+as\s+(?:the\s+)?answer\b",
         )
+        answer_assertion_clause = re.compile(
+            r"\b(?:answer|candidate)\b[^.!?\n]{0,192}",
+            flags=re.IGNORECASE,
+        )
+        assertion_bound_single_entity = re.compile(
+            r"\b(?:is|was|in|at)\s+"
+            r"(?:(?:an?|the)\s+)?([A-Z][A-Za-z0-9'’.-]*)\b"
+        )
+        operational_single_literals = {
+            "agent",
+            "agentgraph",
+            "canvas",
+            "director",
+            "evidence",
+            "formatter",
+            "json",
+            "markdown",
+            "reasoner",
+            "retriever",
+            "structuredaction",
+            "tool",
+            "verifier",
+            "workflow",
+            "xml",
+            "yaml",
+        }
 
         # PROJECT_NECESSARY_ADAPTATION: FlowSteer's Director authors semantic
         # Agent obligations, while SkillFlow's request-scoped action schema is
@@ -6002,6 +6121,35 @@ class AgentWorkflowEnv:
             )
 
         for obligation in obligations:
+            # Catch the measured one-token precommit form without treating
+            # every capitalized word as an entity.  The candidate must occur
+            # inside an explicit answer/candidate assertion and immediately
+            # after a binding preposition/copula.  Question terms and terms in
+            # successful public read receipts remain admissible; evaluator and
+            # accepted-answer fields are never consulted.
+            asserted_external_literals = tuple(
+                literal
+                for clause_match in answer_assertion_clause.finditer(obligation)
+                for literal in assertion_bound_single_entity.findall(
+                    clause_match.group(0)
+                )
+                if literal.casefold() not in operational_single_literals
+                and not question_contains(literal)
+                and not any(
+                    self._contains_lexical_span(read_text, literal)
+                    for read_text in public_read_texts
+                )
+            )
+            if asserted_external_literals:
+                return (
+                    f"{self._semantic_protocol_label()} Agent contract and "
+                    "completion_condition fields are pre-execution obligations "
+                    "only: an explicit answer/candidate assertion must not bind "
+                    "a question-external single-token entity without a matching "
+                    "successful public read Tool receipt; reject literals "
+                    f"{list(asserted_external_literals)!r}"
+                )
+
             # Exact public semantic values include one-word entities that a
             # proper-name phrase detector cannot safely infer from raw prose.
             if any(

@@ -1079,3 +1079,21 @@ cannot prove arbitrary predicate replacement. Evidence Retriever and Verifier
 therefore retain their stricter relation-binding boundary. No accepted answer,
 Ground Truth, evaluator result or preselected candidate enters transition
 classification. Director prompt v6 remains unchanged and topology-neutral.
+
+The v54 post-read repair continues to reuse FlowSteer's accepted Canvas edit
+-> execute -> feedback transaction and SkillFlow's bounded
+`StructuredAction -> ToolResult -> Observation` continuation. Project-specific
+`qa_location_containment_lineage_missing` attribution, the receipt-conditioned
+Reasoner declaration domain, and the corresponding answer-slot JSON Schema are
+`PROJECT_NECESSARY_ADAPTATION`: neither upstream contains TriviaQA location
+containment semantics. The constraint is activated only by successful public
+read text and never by Ground Truth, accepted answers or evaluator output.
+
+Title-conditioned pronoun binding and the bounded
+`introduced ... followed by ...` first-in-sequence validation are likewise
+`PROJECT_NECESSARY_ADAPTATION` over SkillFlow's unchanged public read receipt.
+They repair a measured TriviaQA title/body representation mismatch without
+turning `introduce` into a global publication synonym. The existing entity,
+relation, exact-span, Tool-receipt and Verifier boundaries remain authoritative.
+Director prompt v6, Agent roles, action vocabulary, model-visible topology
+search space, training state and Skill state are unchanged.

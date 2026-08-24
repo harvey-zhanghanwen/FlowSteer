@@ -1110,6 +1110,44 @@ records as v52. These are interface/regression results only: v53 must still pass
 frozen three-task Stable Zero gate before the ordered fixed-128 evaluation can
 run, and no v53 EM/F1 is inferred from static tests.
 
+The frozen v53 Stable Zero gate subsequently failed `1/3`, so it did not admit
+the fixed-128 evaluation. `triviaqa:tc_1` explicitly finished with `Harry
+Sinclair Lewis` at official EM/F1 `1.0/1.0`. `triviaqa:tc_3` and
+`triviaqa:tc_5` both ended at `canvas_action_domain_exhausted` with
+`final_answer=null` and EM/F1 `0.0/0.0`; collection failures were zero. Public
+Tool receipts show that neither failure was database coverage failure. For
+`tc_3`, the Evidence Retriever established Judi Dench -> Heworth and the
+Reasoner read that Heworth is part of York, but answer-slot binding remained on
+the first hop. For `tc_5`, a successful read established Billboard's
+`introduced ... followed by ...` chronology, but title/body pronoun
+coreference and ordinal relation validation prevented construction of a valid
+evidence artifact. These are failed-canary diagnostics, not a v2 accuracy
+estimate.
+
+### v54 receipt-conditioned post-read semantic repair
+
+v54 keeps Director prompt v6 byte-for-byte and changes neither the Canvas
+action vocabulary nor the topology search space. After a public
+`qa_location_containment_lineage_missing` failure and a successful read that
+explicitly states city/town containment, the existing bounded ReAct
+`modify_agent` domain exposes only the receipt-conditioned Reasoner contract
+or completion predicate. The completion schema preserves the first-hop
+proposition, places the containment proposition second, and binds answer-slot
+to that second proposition's publicly supported answer field. An explicit
+pre-execution answer assertion containing a question-external one-token entity
+is rejected unless a successful public read already contains it. None of these
+checks consumes Ground Truth, accepted answers or evaluator state.
+
+For evidence artifacts, v54 admits title-bound body-leading pronoun
+coreference and preserves the exact body surface rather than copying a passage
+title into an evidence span. It treats `introduced ... followed by ...` as a
+first-in-sequence publication onset only when the original question explicitly
+asks for the first event and both chronology signals occur within the same
+successful receipt span. `introduced` alone remains insufficient, so this is
+not a global `publish == introduce` synonym. The complete v54 static suite
+passes 990 tests and 182 subtests. This is an interface/regression result; the
+fresh v54 Stable Zero gate must pass before fixed-128 execution is admitted.
+
 ### Stable Zero status
 
 Static architecture, 946 unit tests, 177 subtests and the current frozen
@@ -1167,8 +1205,10 @@ run was stopped before a fourth trajectory was persisted for the v51
 requirements correction above. v51 static and live gates remain separate; no
 fixed-128 v2 score is inferred from unit tests, canaries or failed diagnostics.
 The later v51 three-task gate failed because `tc_3` exhausted the Canvas after
-the measured answer-slot/recovery defect above; v52 must pass a new three-task
-gate before any fixed-128 execution is admitted.
+the measured answer-slot/recovery defect above. v53 later failed its fresh
+three-task gate `1/3` for the measured answer-slot and evidence-artifact defects
+above; v54 must pass a new three-task gate before any fixed-128 execution is
+admitted.
 
 ## Historical comparison condition
 

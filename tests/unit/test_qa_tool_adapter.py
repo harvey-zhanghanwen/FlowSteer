@@ -212,6 +212,8 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("expand evidence_span only as needed", evidence_surface)
         self.assertIn("same read receipt", evidence_surface)
         self.assertIn("span contiguous", evidence_surface)
+        self.assertIn("coreferential pronoun", evidence_surface)
+        self.assertIn("do not copy the title into the body evidence", evidence_surface)
         self.assertIn("Repair only question_surface", question_surface)
         self.assertIn("unchanged original question", question_surface)
         self.assertIn(
@@ -2460,11 +2462,25 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             2,
+            completion_fields["evidence_propositions"]["maxItems"],
+        )
+        self.assertEqual(
+            2,
             completion_fields["multi_hop_chain"]["minItems"],
+        )
+        self.assertEqual(
+            2,
+            completion_fields["multi_hop_chain"]["maxItems"],
         )
         self.assertIn(
             "resolution proposition",
             completion_fields["answer_slot"]["description"],
+        )
+        self.assertEqual(
+            1,
+            completion_fields["answer_slot"]["properties"][
+                "proposition_index"
+            ]["const"],
         )
         self.assertEqual(
             "object_or_attribute_value",
@@ -7111,6 +7127,91 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         assert detail is not None
         self.assertIn("target_relation must preserve", detail)
 
+    def test_evidence_retriever_accepts_title_bound_pronoun_and_explicit_sequence_onset(
+        self,
+    ) -> None:
+        question = (
+            "In which decade did Billboard magazine first publish an American "
+            "hit chart?"
+        )
+        evidence = (
+            '1940, it introduced "Chart Line", which tracked the best-selling '
+            "records, and was followed by a chart for jukebox records in 1944 "
+            "called Music Box Machine charts."
+        )
+        artifact = {
+            "question_scope": question,
+            "entity_identity": {
+                "question_surface": "Billboard magazine",
+                "evidence_surface": "it",
+            },
+            "target_relation": "first publish an American hit chart",
+            "answer_type_constraint": "date",
+            "evidence_proposition": {
+                "subject": "it",
+                "predicate": 'introduced "Chart Line"',
+                "object_or_attribute_value": "1940",
+            },
+            "evidence_span": evidence,
+            "passage_id": "billboard-chart-line",
+        }
+
+        def receipt(text: str, *, title: str = "Billboard (magazine)") -> dict[str, object]:
+            return {
+                "tool_id": QA_RETRIEVAL_TOOL_ID,
+                "tool_version": "frozen-index-v1",
+                "request": {
+                    "action": "read",
+                    "arguments": {"passage_id": "billboard-chart-line"},
+                },
+                "result": {
+                    "value": {
+                        "operation": "read",
+                        "passage_id": "billboard-chart-line",
+                        "passage": {
+                            "passage_id": "billboard-chart-line",
+                            "title": title,
+                            "text": text,
+                        },
+                    },
+                    "completed": True,
+                },
+                "error_type": None,
+            }
+
+        issue = QARetrievalReactExecutionAdapter._evidence_retriever_completion_issue
+        self.assertIsNone(
+            issue(
+                original_question=question,
+                artifact=json.dumps(artifact),
+                tool_receipts=[receipt(evidence)],
+            )
+        )
+
+        no_sequence = (
+            '1940, it introduced "Chart Line", which tracked the best-selling '
+            "records."
+        )
+        no_sequence_artifact = json.loads(json.dumps(artifact))
+        no_sequence_artifact["evidence_span"] = no_sequence
+        detail = issue(
+            original_question=question,
+            artifact=json.dumps(no_sequence_artifact),
+            tool_receipts=[receipt(no_sequence)],
+        )
+        self.assertIsNotNone(detail)
+        assert detail is not None
+        self.assertIn("ordinal scope modifier", detail)
+
+        wrong_title = issue(
+            original_question=question,
+            artifact=json.dumps(artifact),
+            tool_receipts=[receipt(evidence, title="Unrelated magazine")],
+        )
+        self.assertIsNotNone(wrong_title)
+        assert wrong_title is not None
+        self.assertIn("alias identity lacks an explicit binding", wrong_title)
+
     def test_evidence_retriever_separates_question_relation_from_receipt_predicate(
         self,
     ) -> None:
@@ -8140,6 +8241,142 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             json.loads(response.text),
         )
         self.assertEqual(2, response.metadata["tool_calls"])
+
+    async def test_billboard_title_pronoun_repair_preserves_read_and_completes(
+        self,
+    ) -> None:
+        question = (
+            "In which decade did Billboard magazine first publish an American "
+            "hit chart?"
+        )
+        evidence = (
+            '1940, it introduced "Chart Line", which tracked the best-selling '
+            "records, and was followed by a chart for jukebox records in 1944 "
+            "called Music Box Machine charts."
+        )
+        valid_artifact = {
+            "question_scope": question,
+            "entity_identity": {
+                "question_surface": "Billboard magazine",
+                "evidence_surface": "it",
+            },
+            "target_relation": "first publish an American hit chart",
+            "answer_type_constraint": "date",
+            "evidence_proposition": {
+                "subject": "it",
+                "predicate": 'introduced "Chart Line"',
+                "object_or_attribute_value": "1940",
+            },
+            "evidence_span": evidence,
+            "passage_id": "billboard-chart-line",
+        }
+        invalid_artifact = json.loads(json.dumps(valid_artifact))
+        invalid_artifact["entity_identity"]["evidence_surface"] = "Billboard"
+
+        def action(name: str, arguments: object) -> str:
+            return json.dumps(
+                {
+                    "arguments": arguments,
+                    "kind": "complete" if name == "complete" else "tool",
+                    "name": name,
+                    "resource_id": (
+                        None if name == "complete" else QA_RETRIEVAL_TOOL_ID
+                    ),
+                    "skill_id": None,
+                }
+            )
+
+        class BillboardIndex(FakeIndex):
+            def search(self, query: str, *, limit: int) -> tuple[FakeHit, ...]:
+                self.search_calls.append((query, limit))
+                return (
+                    FakeHit(
+                        "billboard-chart-line",
+                        "billboard",
+                        "Billboard (magazine)",
+                        evidence,
+                        1,
+                    ),
+                )
+
+            def read(self, passage_id: str) -> FakePassage:
+                self.read_calls.append(passage_id)
+                return FakePassage(
+                    passage_id,
+                    "billboard",
+                    "Billboard (magazine)",
+                    evidence,
+                )
+
+        class SequenceGateway:
+            def __init__(self) -> None:
+                self.requests: list[AgentRequest] = []
+                self.outputs = [
+                    action(
+                        "search",
+                        {
+                            "query": (
+                                "Billboard magazine first publish American hit chart"
+                            ),
+                            "limit": 5,
+                        },
+                    ),
+                    action("read", {"passage_id": "billboard-chart-line"}),
+                    action("complete", {"value": invalid_artifact}),
+                    action("complete", {"value": valid_artifact}),
+                ]
+
+            async def generate(self, request: AgentRequest) -> AgentResponse:
+                self.requests.append(request)
+                return AgentResponse(self.outputs.pop(0))
+
+        index = BillboardIndex()
+        gateway = SequenceGateway()
+        response = await QARetrievalReactExecutionAdapter(
+            gateway=gateway,
+            tool_registry=build_qa_tool_registry(index),
+            max_turns=4,
+            max_tool_calls=16,
+            task_type="factual_qa",
+            completion_policy="required_evidence",
+        ).execute(
+            AgentRequest(
+                request_id="trivia:billboard-title-pronoun-repair",
+                run_id="trivia",
+                graph_revision=1,
+                problem=question,
+                agent=AgentNode(
+                    "evidence_retriever",
+                    "model",
+                    "retrieve receipt-grounded publication evidence",
+                    role_family="evidence_retriever",
+                    allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                    execution_mode="react",
+                ),
+                model=ModelSpec("model", "provider"),
+                provider=ProviderSpec("provider", kind="test"),
+                phase=ExecutionPhase.SINGLE,
+                semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            )
+        )
+
+        self.assertEqual(
+            [("Billboard magazine first publish American hit chart", 5)],
+            index.search_calls,
+        )
+        self.assertEqual(["billboard-chart-line"], index.read_calls)
+        self.assertEqual(2, response.metadata["tool_calls"])
+        feedback = response.metadata["react_trace"][2]["public_error_code"]
+        self.assertTrue(feedback.startswith("qa_semantic_artifact_invalid:"))
+        self.assertIn("evidence_surface does not occur", feedback)
+        repair_contract = gateway.requests[3].agent.contract
+        self.assertIn("coreferential pronoun", repair_contract)
+        self.assertIn("do not copy the title into the body evidence", repair_contract)
+        self.assertIn(
+            "- none\nCurrently admissible completion schema",
+            repair_contract,
+        )
+        self.assertEqual(valid_artifact, json.loads(response.text))
 
     def test_evidence_retriever_rejects_unprovenanced_or_answer_only_artifacts(
         self,

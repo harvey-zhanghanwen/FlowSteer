@@ -1319,6 +1319,26 @@ def _controlled_relation_paraphrase(
         if _surface_uses_relation_class(question_relation, relation_class)
         and _surface_uses_relation_class(evidence_predicate, relation_class)
     )
+    # A public history sentence can realize the first publication event as an
+    # introduction followed by later chart events.  Keep this narrower than a
+    # global ``publish == introduce`` synonym: the same receipt must contain
+    # the explicit in-sequence ``introduced ... followed by ...`` construction
+    # and the original question must request the first event.  Entity, object,
+    # answer type and exact-span checks remain authoritative below.
+    onset_publication_class = frozenset({"introduce", "publish"})
+    if (
+        "first" in _question_ordinal_classes(original_question)
+        and _receipt_first_in_sequence_onset(evidence_span)
+        and _surface_uses_relation_class(
+            question_relation,
+            onset_publication_class,
+        )
+        and _surface_uses_relation_class(
+            evidence_predicate,
+            onset_publication_class,
+        )
+    ):
+        matching_classes = (*matching_classes, onset_publication_class)
     if not matching_classes:
         return False
     excluded = set(_RELATION_CONTEXT_STOPWORDS)
@@ -1343,6 +1363,25 @@ def _controlled_relation_paraphrase(
         if token not in excluded and len(token) > 1
     }
     return bool(question_context & evidence_context)
+
+
+def _receipt_first_in_sequence_onset(surface: str) -> bool:
+    """Recognize one receipt-explicit introduction followed by a later event.
+
+    ``introduced`` alone does not prove a global ordinal.  The bounded
+    same-sentence ``followed by`` continuation is the public chronology signal
+    that makes the introduction an admissible realization of ``first``.
+    """
+
+    normalized = unicodedata.normalize("NFKC", surface)
+    return bool(
+        re.search(
+            r"\bintroduc(?:e|ed|es|ing)\b"
+            r"[^.!?]{0,240}\b(?:was\s+|were\s+)?followed\s+by\b",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+    )
 
 
 _QUESTION_SCOPE_ORDINAL_MODIFIERS = frozenset(
@@ -2991,6 +3030,16 @@ def _relation_aware_ordinal_scope_issue(
             for index, token in enumerate(clause_tokens)
             if _ordinal_surface_matches(token, ordinal_classes)
         )
+        if (
+            not ordinal_positions
+            and "first" in ordinal_classes
+            and _receipt_first_in_sequence_onset(evidence_span)
+        ):
+            ordinal_positions = tuple(
+                index
+                for index, token in enumerate(clause_tokens)
+                if "introduce" in _relation_token_variants(token)
+            )
         if not relation_positions or not ordinal_positions:
             continue
         subject_grounded = bool(subject_tokens) and " ".join(
@@ -3136,6 +3185,10 @@ def _question_scope_modifier_issue(
         if not any(
             _ordinal_surface_matches(token, (ordinal_class,))
             for token in evidence_tokens
+        )
+        and not (
+            ordinal_class == "first"
+            and _receipt_first_in_sequence_onset(evidence_span)
         )
     )
     if not missing:
@@ -3997,12 +4050,16 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             return (
                 "Preserve the same successful read receipt, passage_id, passage "
                 "title, question_surface, target_relation, and evidence "
-                "proposition. Do not search or read again. From that same read "
-                "receipt, expand evidence_span only as needed to include both "
-                "the exact entity mention and the sentence expressing the "
-                "requested relation, then copy that exact mention into "
-                "entity_identity.evidence_surface. Keep the span contiguous "
-                "and receipt-grounded, and emit a complete action."
+                "proposition. Do not search or read again. If that read body "
+                "begins with a coreferential pronoun whose public passage title "
+                "binds the original question entity, keep the exact body span, "
+                "copy that pronoun into entity_identity.evidence_surface and the "
+                "same proposition argument, and do not copy the title into the "
+                "body evidence. Otherwise, from that same read receipt, expand "
+                "evidence_span only as needed to include both the exact entity "
+                "mention and the sentence expressing the requested relation, "
+                "then copy that exact mention into evidence_surface. Keep the "
+                "span contiguous and receipt-grounded, and emit a complete action."
             )
         if isinstance(public_error_code, str) and (
             "Evidence Retriever answer-bearing entity surface is a strict "
@@ -5081,7 +5138,11 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                                                 "or short-name surface in the exact "
                                                 "evidence_span. The title supplies only "
                                                 "identity context and must never be used "
-                                                "as evidence_span. When that proposition "
+                                                "as evidence_span. When a read body chunk "
+                                                "starts with that pronoun, copy the pronoun "
+                                                "rather than the title as evidence_surface "
+                                                "and as the corresponding proposition "
+                                                "argument. When that proposition "
                                                 "field answers the original wh-dependency, "
                                                 "evidence_surface must preserve the complete "
                                                 "resolved title identity rather than an "
@@ -5645,20 +5706,23 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     )
                     if isinstance(propositions, dict):
                         propositions["minItems"] = 2
+                        propositions["maxItems"] = 2
                         propositions["description"] = (
                             "Encode the preserved first-hop location proposition "
                             "and the successful-read-backed geographic type or "
-                            "administrative-containment proposition as distinct "
-                            "items. Bind answer_slot to the item and field whose "
-                            "value equals candidate_answer."
+                            "administrative-containment proposition as exactly two "
+                            "distinct items in that order. Bind answer_slot to the "
+                            "second item and the field whose value equals "
+                            "candidate_answer."
                         )
                     chain = value_properties.get("multi_hop_chain")
                     if isinstance(chain, dict):
                         chain["minItems"] = 2
+                        chain["maxItems"] = 2
                         chain["description"] = (
-                            "Include distinct entries for the first-hop entity-to-"
-                            "locality relation and the receipt-backed locality "
-                            "type/containment resolution. The leading component "
+                            "Include exactly two distinct entries in order for the "
+                            "first-hop entity-to-locality relation and the receipt-"
+                            "backed locality type/containment resolution. The leading component "
                             "of a comma-qualified first-hop locality is an admitted "
                             "identity surface; an administrative suffix is not an "
                             "answer."
@@ -5692,6 +5756,16 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                                 )
                             )
                             if answer_field is not None:
+                                answer_slot_properties[
+                                    "proposition_index"
+                                ] = {
+                                    "const": 1,
+                                    "description": (
+                                        "The successful public location-"
+                                        "resolution read fixes the second "
+                                        "proposition as the answer-bearing hop."
+                                    ),
+                                }
                                 answer_slot_properties["answer_field"] = {
                                     "const": answer_field,
                                     "description": (
@@ -6973,6 +7047,14 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             for token in _scope_tokens(canonical_evidence_surface)
             if token not in _RELATION_CONTEXT_STOPWORDS and len(token) > 1
         )
+        read_tokens = _scope_tokens(canonical_read)
+        leading_receipt_coreference = bool(
+            canonical_evidence_surface in _ENTITY_COREFERENCE_PRONOUNS
+            and any(
+                token == canonical_evidence_surface and index <= 4
+                for index, token in enumerate(read_tokens)
+            )
+        )
         receipt_coreference_binding = bool(
             question_title_binding
             and (
@@ -6983,7 +7065,10 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 or (
                     canonical_evidence_surface
                     in _ENTITY_COREFERENCE_PRONOUNS
-                    and canonical_title in canonical_read
+                    and (
+                        canonical_title in canonical_read
+                        or leading_receipt_coreference
+                    )
                 )
             )
         )

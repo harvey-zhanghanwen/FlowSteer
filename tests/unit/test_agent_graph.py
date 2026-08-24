@@ -37,6 +37,8 @@ from src.interactive.agent_workflow_env import (
     _HOTPOTQA_FORMAT_CONTRACT,
     _QA_EVIDENCE_RETRIEVER_RECOVERY_COMPLETION,
     _QA_EVIDENCE_RETRIEVER_RECOVERY_CONTRACT,
+    _QA_LOCATION_REASONER_RECOVERY_COMPLETION,
+    _QA_LOCATION_REASONER_RECOVERY_CONTRACT,
     _evidence_span_matches_read,
 )
 from src.interactive.director import director_validate_live_action_target_domains
@@ -862,7 +864,18 @@ def _trivia_semantic_runtime(
     )
 
 
-def _test_read_receipt(passage_id: str) -> dict[str, object]:
+def _test_read_receipt(
+    passage_id: str,
+    *,
+    text: str = "Paris is the capital of France.",
+    title: str | None = None,
+) -> dict[str, object]:
+    passage: dict[str, object] = {
+        "passage_id": passage_id,
+        "text": text,
+    }
+    if title is not None:
+        passage["title"] = title
     return {
         "tool_id": QA_RETRIEVAL_TOOL_ID,
         "tool_version": "test-v1",
@@ -874,10 +887,7 @@ def _test_read_receipt(passage_id: str) -> dict[str, object]:
             "value": {
                 "operation": "read",
                 "passage_id": passage_id,
-                "passage": {
-                    "passage_id": passage_id,
-                    "text": "Paris is the capital of France.",
-                },
+                "passage": passage,
             },
             "completed": True,
         },
@@ -4348,6 +4358,161 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             env._reasoner_failure_requires_evidence_augmentation("reasoner")
         )
         self.assertEqual((), env.model_admissible_action_types())
+
+    async def test_triviaqa_location_reasoner_repair_is_receipt_conditioned_and_bounded(
+        self,
+    ) -> None:
+        question = "Where in England was Dame Judi Dench born?"
+        birth_span = (
+            "Dench was born in Heworth, North Riding of Yorkshire."
+        )
+        containment_span = (
+            "Heworth, York Heworth is part of the city of York in North "
+            "Yorkshire, England."
+        )
+
+        graph = _trivia_semantic_graph()
+        registry = make_registry()
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_trivia_semantic_runtime(registry, _ImmediateGateway()),
+            graph=graph,
+            problem=question,
+            execute_on_edit=False,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+            require_format_agent=True,
+        )
+        birth_receipt = _test_read_receipt(
+            "dench-birthplace",
+            title="Judi Dench",
+            text=birth_span,
+        )
+        env._progressive_outputs["reader"] = json.dumps(
+            {
+                "question_scope": question,
+                "entity_identity": {
+                    "question_surface": "Dame Judi Dench",
+                    "evidence_surface": "Dench",
+                },
+                "target_relation": "be born in",
+                "answer_type_constraint": "location",
+                "evidence_proposition": {
+                    "subject": "Dench",
+                    "predicate": "born in",
+                    "object_or_attribute_value": (
+                        "Heworth, North Riding of Yorkshire"
+                    ),
+                },
+                "evidence_span": birth_span,
+                "passage_id": "dench-birthplace",
+            }
+        )
+        env._progressive_output_metadata["reader"] = {
+            "artifact_version": "reader:v1",
+            "tool_receipts": [birth_receipt],
+        }
+        failure = AgentFailureRecord(
+            request_id="reasoner-location-containment-repair",
+            agent_id="reasoner",
+            phase=ExecutionPhase.SINGLE,
+            graph_revision=graph.revision,
+            error_type="ReactExecutionError",
+            message="react agent 'reasoner' exhausted 20 turns",
+            metadata={
+                "react_trace": [
+                    {
+                        "turn": 20,
+                        "observation_status": "schema_invalid",
+                        "public_error_code": (
+                            "qa_semantic_artifact_invalid: "
+                            "qa_location_containment_lineage_missing"
+                        ),
+                    }
+                ],
+                "tool_receipts": [
+                    _test_read_receipt(
+                        "heworth-york",
+                        title="Heworth, York",
+                        text=containment_span,
+                    )
+                ],
+                "input_artifact_versions": {"reader": "reader:v1"},
+                "tool_plan_exhausted": False,
+            },
+        )
+        env._record_failure_state(
+            (failure,),
+            current_agent_ids={node.id for node in graph.nodes},
+        )
+
+        actions = env.model_admissible_action_types()
+        targets = env.model_admissible_action_targets()
+        self.assertEqual(("modify_agent",), actions)
+        director_validate_live_action_target_domains(actions, targets)
+        candidate = targets["modify_agent"]["per_agent_candidates"][0]
+        self.assertEqual("reasoner", candidate["agent_id"])
+        self.assertEqual(
+            [_QA_LOCATION_REASONER_RECOVERY_CONTRACT],
+            candidate["discrete_value_domains"]["contract"],
+        )
+        self.assertEqual(
+            [_QA_LOCATION_REASONER_RECOVERY_COMPLETION],
+            candidate["discrete_value_domains"]["completion_condition"],
+        )
+
+        for field_name, conflicting_value in (
+            (
+                "contract",
+                "bind the first-hop location proposition's subject",
+            ),
+            (
+                "completion_condition",
+                "complete without further geographic confirmation",
+            ),
+        ):
+            revision = env.revision
+            rejected = await env.step(
+                json.dumps(
+                    {
+                        "action": "modify_agent",
+                        "agent_id": "reasoner",
+                        field_name: conflicting_value,
+                    }
+                )
+            )
+            self.assertFalse(rejected.accepted)
+            self.assertIn("receipt-conditioned", rejected.feedback)
+            self.assertEqual(revision, env.revision)
+
+        repaired = await env.step(
+            json.dumps(
+                {
+                    "action": "modify_agent",
+                    "agent_id": "reasoner",
+                    "contract": _QA_LOCATION_REASONER_RECOVERY_CONTRACT,
+                }
+            )
+        )
+        self.assertTrue(repaired.accepted, repaired.feedback)
+
+        repeated_failure = replace(
+            failure,
+            request_id="reasoner-location-containment-repair-repeated",
+            graph_revision=env.revision,
+        )
+        env._record_failure_state(
+            (repeated_failure,),
+            current_agent_ids={node.id for node in env.graph.nodes},
+        )
+
+        self.assertIn("reasoner", env._repair_exhausted_agent_ids)
+        self.assertFalse(
+            env._reasoner_failure_requires_evidence_augmentation("reasoner")
+        )
+        self.assertEqual((), env.model_admissible_action_types())
+        self.assertNotIn("add_subgraph", env.model_admissible_action_targets())
 
     async def test_exhausted_reasoner_adds_isolated_retriever_before_routing(
         self,
@@ -10000,6 +10165,74 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             unsupported_canonical_literal.feedback,
         )
         self.assertEqual(revision, env.revision)
+
+    async def test_triviaqa_contract_rejects_single_token_answer_assertion(
+        self,
+    ) -> None:
+        registry = make_registry()
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_trivia_semantic_runtime(
+                registry,
+                _ImmediateGateway(),
+            ),
+            problem="Where in England was Dame Judi Dench born?",
+            execute_on_edit=False,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+        )
+
+        rejected = await env.step(
+            json.dumps(
+                {
+                    "action": "add_subgraph",
+                    "agents": [
+                        {
+                            "agent_id": "reasoner",
+                            "model_id": "balanced",
+                            "contract": (
+                                "derive answer that Dame Judi Dench was born "
+                                "in London from retrieved evidence"
+                            ),
+                            "role_family": "reasoner",
+                            "allowed_tools": [QA_RETRIEVAL_TOOL_ID],
+                            "execution_mode": "react",
+                        }
+                    ],
+                    "relations": [],
+                }
+            )
+        )
+
+        self.assertFalse(rejected.accepted)
+        self.assertIn("question-external single-token entity", rejected.feedback)
+        self.assertIn("London", rejected.feedback)
+        self.assertEqual((), env.graph.nodes)
+
+        neutral = await env.step(
+            json.dumps(
+                {
+                    "action": "add_subgraph",
+                    "agents": [
+                        {
+                            "agent_id": "reasoner",
+                            "model_id": "balanced",
+                            "contract": (
+                                "derive the answer in JSON by binding Dame Judi "
+                                "Dench to receipt-grounded evidence"
+                            ),
+                            "role_family": "reasoner",
+                            "allowed_tools": [QA_RETRIEVAL_TOOL_ID],
+                            "execution_mode": "react",
+                        }
+                    ],
+                    "relations": [],
+                }
+            )
+        )
+
+        self.assertTrue(neutral.accepted, neutral.feedback)
 
     async def test_triviaqa_contract_rejects_question_external_candidate_before_answer_marker(
         self,
