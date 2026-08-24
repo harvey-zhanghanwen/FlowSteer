@@ -1305,10 +1305,54 @@ and lossless receipts plus FlowSteer's accepted Canvas edit -> execute ->
 feedback transaction. Search-result projection, TriviaQA Entity Linking and
 field-scoped constrained repair are `PROJECT_NECESSARY_ADAPTATION` for the
 32K Qwen3.5-9B context and factual-QA protocol. Ground Truth, accepted answers
-and evaluator output are absent from every inference constraint. The current
-static discovery passes 706 unit tests; prepare-only freezes the exact same
-ordered 128 records as v55 (`triviaqa:tc_1` through `triviaqa:tc_223`). A fresh
-three-task v56 Stable Zero gate remains mandatory before fixed-128 execution.
+and evaluator output are absent from every inference constraint. Prepare-only
+froze the exact same ordered 128 records as v55 (`triviaqa:tc_1` through
+`triviaqa:tc_223`).
+
+The fresh v56 live gate collected all three trajectories with zero collection
+failures but reached valid terminal lineage on only `1/3`, so the fixed-128
+evaluation was not started. `tc_5` explicitly FINISHed with `1930s`; the
+official evaluator assigned EM/F1 `0.0/0.0` because the accepted-answer set
+contains `30s` variants, which is an accepted-answer canonicalization mismatch
+rather than a terminal failure. `tc_1` and `tc_3` ended with null answers at
+`canvas_action_domain_exhausted`.
+
+### v57 shared relation realization and reciprocal receipt lineage
+
+The v56 `tc_1` trajectory proves that retrieval and entity linking succeeded:
+the Retriever read the Sinclair Lewis passage and the Reasoner generated the
+correct semantic candidate `Harry Sinclair Lewis`. The failure was a validator
+boundary mismatch: Retriever admitted the receipt-grounded compound relation
+`became` + `the first writer ... to receive the Nobel Prize`, while Reasoner
+tested only the predicate field. v57 extracts one shared compound relation-
+realization predicate. Both roles retain exact same-read field grounding;
+Reasoner keeps its relation-only lexical gate and applies exact/controlled
+paraphrase matching to the compound surface without using object-token overlap
+as a shortcut.
+
+The v56 `tc_3` trajectory likewise proves that the model produced the correct
+semantic candidate and Formatter output `York`. The reciprocal
+Reasoner--Verifier phase message carried only the Reasoner's new second-hop
+receipts and dropped the Retriever receipt inherited by that artifact. v57
+routes every phase-local artifact through the Runtime's existing
+`_response_output_metadata` provenance merge before constructing the next
+`CommunicationEnvelope`. The Verifier therefore receives the transitive,
+deduplicated Tool receipt lineage bound to the exact Reasoner artifact version;
+receipts absent from all ancestor artifacts remain inadmissible.
+
+For structured completion repair, v57 reuses SkillFlow's next-action JSON
+Schema boundary. Unimplicated Reasoner fields are fixed to the prior
+model-authored completion with `const`; an indexed proposition diagnosis uses
+Draft 2020-12 tuple validation (`prefixItems`, exact `minItems`/`maxItems`) so
+only the named field is mutable. Retriever identity repair also freezes an
+object field when the public prior proves that `predicate + object` is required
+to preserve the requested relation. These are non-destructive semantic repair
+constraints, not Director prompt templates. Director prompt v6 remains
+byte-for-byte topology-neutral; training and Skill retrieval remain disabled.
+
+The v57 static discovery passes 709 unit tests. A fresh three-task Stable Zero
+gate remains mandatory before fixed-128 execution; no v2 EM/F1 estimate is
+inferred from unit tests or the v56 diagnostic canary.
 
 ## Historical comparison condition
 

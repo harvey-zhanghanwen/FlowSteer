@@ -1142,6 +1142,115 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+    async def test_semantic_receipts_remain_transitive_inside_reciprocal_block(
+        self,
+    ) -> None:
+        catalog = registry()
+
+        class ReciprocalLineageGateway:
+            def __init__(self) -> None:
+                self.verifier_receipts: list[list[str]] = []
+
+            async def generate(self, request: AgentRequest) -> AgentResponse:
+                role = request.agent.role_family
+                if role == "evidence_retriever":
+                    return AgentResponse(
+                        "first-hop evidence",
+                        {"tool_receipts": [{"receipt": "first-hop-read"}]},
+                    )
+                if role == "reasoner" and request.phase is ExecutionPhase.DRAFT:
+                    return AgentResponse(
+                        "reasoner draft",
+                        {"tool_receipts": [{"receipt": "draft-second-hop-read"}]},
+                    )
+                if role == "verifier":
+                    reasoner_message = next(
+                        message
+                        for message in (
+                            *request.upstream,
+                            *((request.peer_draft,) if request.peer_draft else ()),
+                        )
+                        if message.source_agent_id == "reasoner"
+                    )
+                    self.verifier_receipts.append(
+                        [
+                            str(receipt["receipt"])
+                            for receipt in reasoner_message.tool_receipts
+                        ]
+                    )
+                    return AgentResponse(
+                        "supported"
+                        if request.phase is ExecutionPhase.SINGLE
+                        else "verified revision"
+                    )
+                if role == "reasoner" and request.phase is ExecutionPhase.REVISION:
+                    return AgentResponse(
+                        "reasoner revision",
+                        {"tool_receipts": [{"receipt": "revision-read"}]},
+                    )
+                raise AssertionError("unexpected reciprocal lineage request")
+
+        gateway = ReciprocalLineageGateway()
+        graph = AgentGraph(
+            [
+                AgentNode(
+                    "retriever",
+                    "m1",
+                    "retrieve evidence",
+                    role_family="evidence_retriever",
+                ),
+                AgentNode(
+                    "reasoner",
+                    "m1",
+                    "bind evidence to the answer slot",
+                    role_family="reasoner",
+                ),
+                AgentNode(
+                    "verifier",
+                    "m2",
+                    "verify the evidence lineage",
+                    role_family="verifier",
+                ),
+            ],
+            [
+                AgentRelation("retriever", "reasoner", True, False),
+                AgentRelation("reasoner", "verifier", True, True),
+            ],
+            output_agent_id="verifier",
+        )
+
+        result = await AgentRuntime(
+            catalog,
+            gateway,
+            semantic_protocol="qa_verified_answer_lineage_v2",
+        ).execute(graph, "question", run_id="semantic-reciprocal-lineage")
+
+        self.assertEqual(
+            [
+                ["first-hop-read", "draft-second-hop-read"],
+                [
+                    "first-hop-read",
+                    "draft-second-hop-read",
+                    "revision-read",
+                ],
+            ],
+            gateway.verifier_receipts,
+        )
+        final_provenance = result.output_metadata["verifier"][
+            "input_artifact_provenance"
+        ][0]
+        self.assertEqual(
+            [
+                "first-hop-read",
+                "draft-second-hop-read",
+                "revision-read",
+            ],
+            [
+                receipt["receipt"]
+                for receipt in final_provenance["tool_receipts"]
+            ],
+        )
+
     async def test_semantic_retriever_reasoner_reciprocal_block_is_causally_ordered(
         self,
     ) -> None:
@@ -1257,8 +1366,11 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
         ][0]
         self.assertEqual("retriever-revision", final_provenance["artifact"])
         self.assertEqual(
-            "revised-read",
-            final_provenance["tool_receipts"][0]["receipt"],
+            ["draft-read", "revised-read"],
+            [
+                receipt["receipt"]
+                for receipt in final_provenance["tool_receipts"]
+            ],
         )
 
     async def test_retriever_reasoner_reciprocal_failure_stops_before_reasoner(

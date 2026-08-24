@@ -1365,6 +1365,49 @@ def _controlled_relation_paraphrase(
     return bool(question_context & evidence_context)
 
 
+def _proposition_preserves_requested_relation(
+    *,
+    requested_relation: str,
+    predicate: str,
+    object_or_attribute_value: str,
+    original_question: str,
+    evidence_span: str,
+) -> bool:
+    """Check one receipt-grounded proposition's complete relation realization.
+
+    A structured proposition can split a verbal relation across ``predicate``
+    and ``object_or_attribute_value`` (for example, ``became`` + ``the first
+    writer ... to receive ...``).  Retriever and Reasoner call this same
+    predicate only after independently proving that the proposition fields and
+    evidence span come from one successful read receipt.  This keeps the
+    semantic boundary consistent without admitting a candidate answer,
+    workflow topology, or retrieval recipe into the Director prompt.
+    """
+
+    realizations = tuple(
+        dict.fromkeys(
+            (
+                predicate.strip(),
+                f"{predicate.strip()} {object_or_attribute_value.strip()}".strip(),
+            )
+        )
+    )
+    return any(
+        _relation_surface_matches_evidence(
+            requested_relation,
+            realization,
+        )
+        or _controlled_relation_paraphrase(
+            question_relation=requested_relation,
+            evidence_predicate=realization,
+            original_question=original_question,
+            evidence_span=evidence_span,
+        )
+        for realization in realizations
+        if realization
+    )
+
+
 def _receipt_first_in_sequence_onset(surface: str) -> bool:
     """Recognize one receipt-explicit introduction followed by a later event.
 
@@ -4592,6 +4635,74 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             return frozenset({("evidence_proposition",)})
         return frozenset()
 
+    @staticmethod
+    def _reasoner_repair_mutable_paths(
+        public_error_code: str,
+    ) -> frozenset[tuple[str, ...]]:
+        """Map a public Reasoner diagnosis to mutable top-level fields.
+
+        The current provider schema supports deterministic ``const`` freezing
+        for complete JSON values.  Keep every unimplicated top-level semantic
+        field fixed to the model-authored prior completion; the diagnosed
+        structured object/array remains the only mutable unit.  This is the
+        same SkillFlow StructuredAction continuation boundary already used for
+        Evidence Retriever repair and does not prescribe a workflow topology.
+        """
+
+        if _QA_LOCATION_CONTAINMENT_LINEAGE_MISSING in public_error_code:
+            return frozenset()
+        if "Reasoner field 'question_scope'" in public_error_code:
+            return frozenset({("question_scope",)})
+        proposition_field_match = re.search(
+            r"Reasoner evidence_propositions\[(\d+)\]\."
+            r"(subject|relation|object_or_attribute_value)",
+            public_error_code,
+        )
+        if proposition_field_match is not None:
+            proposition_index, field_name = proposition_field_match.groups()
+            return frozenset(
+                {
+                    (
+                        "evidence_propositions",
+                        proposition_index,
+                        field_name,
+                    )
+                }
+            )
+        if "answer_slot.proposition_index is outside" in public_error_code:
+            return frozenset({("answer_slot", "proposition_index")})
+        if "answer_slot.answer_field selects" in public_error_code:
+            return frozenset(
+                {
+                    ("answer_slot", "proposition_index"),
+                    ("answer_slot", "answer_field"),
+                }
+            )
+        if (
+            "Reasoner field 'answer_slot'" in public_error_code
+        ):
+            return frozenset({("answer_slot",)})
+        if "Reasoner candidate_answer" in public_error_code:
+            return frozenset(
+                {
+                    ("answer_slot",),
+                    ("candidate_answer",),
+                }
+            )
+        if (
+            "Reasoner evidence_propositions" in public_error_code
+            or "Reasoner evidence propositions" in public_error_code
+            or "Reasoner requested-relation proposition" in public_error_code
+            or "Reasoner answer-bearing proposition" in public_error_code
+        ):
+            mutable = {("evidence_propositions",)}
+            if "answer-bearing" in public_error_code:
+                mutable.add(("answer_slot",))
+            return frozenset(mutable)
+        if "Reasoner field 'multi_hop_chain'" in public_error_code:
+            return frozenset({("multi_hop_chain",)})
+        return frozenset()
+
     @classmethod
     def _constrain_repair_schema_to_prior_value(
         cls,
@@ -4624,6 +4735,35 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     prior_field_value,
                     frozenset(tails),
                 )
+                continue
+            if isinstance(prior_field_value, (list, tuple)):
+                item_schema = field_schema.get("items")
+                if not isinstance(item_schema, dict):
+                    continue
+                prefix_items: list[dict[str, object]] = []
+                for index, prior_item_value in enumerate(prior_field_value):
+                    constrained_item_schema = deepcopy(item_schema)
+                    item_tails = tuple(
+                        tail[1:]
+                        for tail in tails
+                        if tail and tail[0] == str(index)
+                    )
+                    if not item_tails:
+                        constrained_item_schema = {"const": prior_item_value}
+                    elif () not in item_tails:
+                        if isinstance(prior_item_value, Mapping):
+                            cls._constrain_repair_schema_to_prior_value(
+                                constrained_item_schema,
+                                prior_item_value,
+                                frozenset(item_tails),
+                            )
+                        else:
+                            constrained_item_schema = {"const": prior_item_value}
+                    prefix_items.append(constrained_item_schema)
+                field_schema["prefixItems"] = prefix_items
+                field_schema["minItems"] = len(prior_field_value)
+                field_schema["maxItems"] = len(prior_field_value)
+                field_schema["items"] = False
 
     def _required_evidence_state(
         self,
@@ -5952,9 +6092,9 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             return schema
         if action_name == "complete" and self._unified_factual_protocol(request):
             state = self._required_evidence_state(request, observations)
+            role_family = (request.agent.role_family or "").casefold()
             if (
-                (request.agent.role_family or "").casefold()
-                == "evidence_retriever"
+                role_family == "evidence_retriever"
                 and state.semantic_repair_kind == "structure"
                 and isinstance(state.semantic_repair_error_code, str)
             ):
@@ -5964,6 +6104,70 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 mutable_paths = self._evidence_retriever_repair_mutable_paths(
                     state.semantic_repair_error_code
                 )
+                proposition = (
+                    prior_value.get("evidence_proposition")
+                    if isinstance(prior_value, Mapping)
+                    else None
+                )
+                target_relation = (
+                    prior_value.get("target_relation")
+                    if isinstance(prior_value, Mapping)
+                    else None
+                )
+                predicate = (
+                    proposition.get("predicate")
+                    if isinstance(proposition, Mapping)
+                    else None
+                )
+                object_value = (
+                    proposition.get("object_or_attribute_value")
+                    if isinstance(proposition, Mapping)
+                    else None
+                )
+                evidence_span = (
+                    prior_value.get("evidence_span")
+                    if isinstance(prior_value, Mapping)
+                    else None
+                )
+                if (
+                    ("evidence_proposition", "object_or_attribute_value")
+                    in mutable_paths
+                    and all(
+                        isinstance(value, str) and bool(value.strip())
+                        for value in (
+                            target_relation,
+                            predicate,
+                            object_value,
+                            evidence_span,
+                        )
+                    )
+                    and _proposition_preserves_requested_relation(
+                        requested_relation=target_relation,
+                        predicate=predicate,
+                        object_or_attribute_value=object_value,
+                        original_question=qa_question_scope(request.problem),
+                        evidence_span=evidence_span,
+                    )
+                    and not _proposition_preserves_requested_relation(
+                        requested_relation=target_relation,
+                        predicate=predicate,
+                        object_or_attribute_value="",
+                        original_question=qa_question_scope(request.problem),
+                        evidence_span=evidence_span,
+                    )
+                ):
+                    # The public prior proves that the object field carries the
+                    # requested relation realization. An entity-binding repair
+                    # must not destroy that already-valid semantic content.
+                    mutable_paths = frozenset(
+                        path
+                        for path in mutable_paths
+                        if path
+                        != (
+                            "evidence_proposition",
+                            "object_or_attribute_value",
+                        )
+                    )
                 value_schema = argument_properties.get("value")
                 if (
                     prior_value is not None
@@ -5975,6 +6179,32 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     # StructuredAction. Preserve the same principle inside a
                     # rejected evidence artifact by fixing every unimplicated
                     # public field to the preceding model-authored value.
+                    self._constrain_repair_schema_to_prior_value(
+                        value_schema,
+                        prior_value,
+                        mutable_paths,
+                    )
+            if (
+                role_family == "reasoner"
+                and state.semantic_repair_kind == "structure"
+                and isinstance(state.semantic_repair_error_code, str)
+            ):
+                prior_value = self._latest_rejected_completion_value(
+                    observations
+                )
+                mutable_paths = self._reasoner_repair_mutable_paths(
+                    state.semantic_repair_error_code
+                )
+                value_schema = argument_properties.get("value")
+                if (
+                    prior_value is not None
+                    and mutable_paths
+                    and isinstance(value_schema, dict)
+                ):
+                    # Preserve all valid semantic fields while constraining the
+                    # next SkillFlow completion to the public diagnosis.  The
+                    # rejected draft remains model-authored and losslessly
+                    # recorded in the ReAct trajectory.
                     self._constrain_repair_schema_to_prior_value(
                         value_schema,
                         prior_value,
@@ -7685,36 +7915,15 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     f"{field_name} does not occur verbatim in evidence_span"
                 )
         # PROJECT_NECESSARY_ADAPTATION: SkillFlow's exact read receipt remains
-        # authoritative, but a proposition can realize its relation across the
-        # predicate and object fields (for example ``became`` + ``... to
-        # receive ...``).  Admit that complete, still-verbatim proposition
-        # realization through the same conservative lexical/paraphrase gates;
-        # all three proposition fields were independently checked against the
-        # same evidence_span above.
-        proposition_relation_realizations = tuple(
-            dict.fromkeys(
-                (
-                    canonical_predicate,
-                    f"{canonical_predicate} {canonical_object}".strip(),
-                )
-            )
-        )
-        if not any(
-            _relation_surface_matches_evidence(
-                canonical_relation,
-                relation_realization,
-            )
-            or _relation_surface_matches_evidence(
-                relation_realization,
-                canonical_relation,
-            )
-            or _controlled_relation_paraphrase(
-                question_relation=canonical_relation,
-                evidence_predicate=relation_realization,
-                original_question=original_question,
-                evidence_span=evidence_span,
-            )
-            for relation_realization in proposition_relation_realizations
+        # authoritative. Retriever and Reasoner use the same relation-
+        # realization predicate after every proposition field has been checked
+        # against this exact evidence_span.
+        if not _proposition_preserves_requested_relation(
+            requested_relation=canonical_relation,
+            predicate=canonical_predicate,
+            object_or_attribute_value=canonical_object,
+            original_question=original_question,
+            evidence_span=evidence_span,
         ):
             return (
                 "Evidence Retriever question target_relation and receipt-grounded "

@@ -6919,9 +6919,9 @@ class AgentWorkflowEnv:
             return "Reasoner field 'evidence_propositions' must be an array"
         from .qa_tool_adapter import (
             _ENTITY_COREFERENCE_PRONOUNS,
-            _controlled_relation_paraphrase,
             _explicit_named_geographic_scope,
             _location_surface_component_aliases,
+            _proposition_preserves_requested_relation,
             _question_scope_modifier_issue,
             _relation_surface_matches_evidence,
             _relation_surfaces_share_content,
@@ -7025,19 +7025,22 @@ class AgentWorkflowEnv:
             for proposition in propositions
             if isinstance(proposition, Mapping)
             and isinstance(proposition.get("relation"), str)
+            and isinstance(
+                proposition.get("object_or_attribute_value"),
+                str,
+            )
             and isinstance(proposition.get("evidence_span"), str)
             and (
-                _relation_surface_matches_evidence(
+                _relation_surfaces_share_content(
                     proposition["relation"],
                     original_question,
                 )
-                or _relation_surfaces_share_content(
-                    proposition["relation"],
-                    original_question,
-                )
-                or _controlled_relation_paraphrase(
-                    question_relation=original_question,
-                    evidence_predicate=proposition["relation"],
+                or _proposition_preserves_requested_relation(
+                    requested_relation=original_question,
+                    predicate=proposition["relation"],
+                    object_or_attribute_value=proposition[
+                        "object_or_attribute_value"
+                    ],
                     original_question=original_question,
                     evidence_span=proposition["evidence_span"],
                 )

@@ -1230,6 +1230,10 @@ class AgentRuntime:
                 calls,
                 cancelled_failure_records,
             )
+            retriever_draft_metadata = self._response_output_metadata(
+                retriever_draft_request,
+                retriever_draft,
+            )
             retriever_draft_message = UpstreamMessage(
                 retriever_id,
                 reasoner_id,
@@ -1241,10 +1245,10 @@ class AgentRuntime:
                     nodes[retriever_id], "artifact_type", "text"
                 ),
                 environment_revision=_environment_revision_from_metadata(
-                    retriever_draft.metadata
+                    retriever_draft_metadata
                 ),
                 tool_receipts=_tool_receipts_from_metadata(
-                    retriever_draft.metadata
+                    retriever_draft_metadata
                 ),
                 artifact_version=retriever_draft_request.request_id,
             )
@@ -1279,6 +1283,10 @@ class AgentRuntime:
                 calls,
                 cancelled_failure_records,
             )
+            reasoner_draft_metadata = self._response_output_metadata(
+                reasoner_draft_request,
+                reasoner_draft,
+            )
             retriever_revision_request = self._request(
                 agent=nodes[retriever_id],
                 phase=ExecutionPhase.REVISION,
@@ -1295,10 +1303,10 @@ class AgentRuntime:
                         nodes[reasoner_id], "artifact_type", "text"
                     ),
                     environment_revision=_environment_revision_from_metadata(
-                        reasoner_draft.metadata
+                        reasoner_draft_metadata
                     ),
                     tool_receipts=_tool_receipts_from_metadata(
-                        reasoner_draft.metadata
+                        reasoner_draft_metadata
                     ),
                     artifact_version=reasoner_draft_request.request_id,
                 ),
@@ -1318,6 +1326,10 @@ class AgentRuntime:
                 calls,
                 cancelled_failure_records,
             )
+            retriever_revision_metadata = self._response_output_metadata(
+                retriever_revision_request,
+                retriever_revision,
+            )
             reasoner_revision_request = self._request(
                 agent=nodes[reasoner_id],
                 phase=ExecutionPhase.REVISION,
@@ -1334,10 +1346,10 @@ class AgentRuntime:
                         nodes[retriever_id], "artifact_type", "text"
                     ),
                     environment_revision=_environment_revision_from_metadata(
-                        retriever_revision.metadata
+                        retriever_revision_metadata
                     ),
                     tool_receipts=_tool_receipts_from_metadata(
-                        retriever_revision.metadata
+                        retriever_revision_metadata
                     ),
                     artifact_version=retriever_revision_request.request_id,
                 ),
@@ -1357,14 +1369,12 @@ class AgentRuntime:
                 calls,
                 cancelled_failure_records,
             )
-            output_metadata[retriever_id] = self._response_output_metadata(
-                retriever_revision_request,
-                retriever_revision,
-            )
-            output_metadata[reasoner_id] = self._response_output_metadata(
+            reasoner_revision_metadata = self._response_output_metadata(
                 reasoner_revision_request,
                 reasoner_revision,
             )
+            output_metadata[retriever_id] = retriever_revision_metadata
+            output_metadata[reasoner_id] = reasoner_revision_metadata
             return {
                 retriever_id: retriever_revision.text,
                 reasoner_id: reasoner_revision.text,
@@ -1416,6 +1426,10 @@ class AgentRuntime:
                 calls,
                 cancelled_failure_records,
             )
+            reasoner_draft_metadata = self._response_output_metadata(
+                reasoner_draft_request,
+                reasoner_draft,
+            )
             reasoner_draft_message = UpstreamMessage(
                 reasoner_id,
                 verifier_id,
@@ -1427,10 +1441,10 @@ class AgentRuntime:
                     nodes[reasoner_id], "artifact_type", "text"
                 ),
                 environment_revision=_environment_revision_from_metadata(
-                    reasoner_draft.metadata
+                    reasoner_draft_metadata
                 ),
                 tool_receipts=_tool_receipts_from_metadata(
-                    reasoner_draft.metadata
+                    reasoner_draft_metadata
                 ),
                 artifact_version=reasoner_draft_request.request_id,
             )
@@ -1465,6 +1479,10 @@ class AgentRuntime:
                 calls,
                 cancelled_failure_records,
             )
+            verifier_initial_metadata = self._response_output_metadata(
+                verifier_initial_request,
+                verifier_initial,
+            )
             reasoner_revision_request = self._request(
                 agent=nodes[reasoner_id],
                 phase=ExecutionPhase.REVISION,
@@ -1481,10 +1499,10 @@ class AgentRuntime:
                         nodes[verifier_id], "artifact_type", "text"
                     ),
                     environment_revision=_environment_revision_from_metadata(
-                        verifier_initial.metadata
+                        verifier_initial_metadata
                     ),
                     tool_receipts=_tool_receipts_from_metadata(
-                        verifier_initial.metadata
+                        verifier_initial_metadata
                     ),
                     artifact_version=verifier_initial_request.request_id,
                 ),
@@ -1504,6 +1522,10 @@ class AgentRuntime:
                 calls,
                 cancelled_failure_records,
             )
+            reasoner_revision_metadata = self._response_output_metadata(
+                reasoner_revision_request,
+                reasoner_revision,
+            )
             verifier_revision_request = self._request(
                 agent=nodes[verifier_id],
                 phase=ExecutionPhase.REVISION,
@@ -1520,10 +1542,10 @@ class AgentRuntime:
                         nodes[reasoner_id], "artifact_type", "text"
                     ),
                     environment_revision=_environment_revision_from_metadata(
-                        reasoner_revision.metadata
+                        reasoner_revision_metadata
                     ),
                     tool_receipts=_tool_receipts_from_metadata(
-                        reasoner_revision.metadata
+                        reasoner_revision_metadata
                     ),
                     artifact_version=reasoner_revision_request.request_id,
                 ),
@@ -1543,14 +1565,12 @@ class AgentRuntime:
                 calls,
                 cancelled_failure_records,
             )
-            output_metadata[reasoner_id] = self._response_output_metadata(
-                reasoner_revision_request,
-                reasoner_revision,
-            )
-            output_metadata[verifier_id] = self._response_output_metadata(
+            verifier_revision_metadata = self._response_output_metadata(
                 verifier_revision_request,
                 verifier_revision,
             )
+            output_metadata[reasoner_id] = reasoner_revision_metadata
+            output_metadata[verifier_id] = verifier_revision_metadata
             return {
                 reasoner_id: reasoner_revision.text,
                 verifier_id: verifier_revision.text,

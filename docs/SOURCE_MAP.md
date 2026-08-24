@@ -1165,3 +1165,33 @@ invalid; the existing bounded recovery boundary is preserved. Startup 400 and
 401/403/404 provider failures retain their prior classification. FlowSteer's
 Canvas action vocabulary, Director prompt v6, topology search space, training
 state and Skill state are unchanged.
+
+The v57 relation-realization change reuses the exact read-receipt and
+StructuredAction boundaries already adapted from SkillFlow. A proposition's
+predicate and predicate-plus-object surfaces are now evaluated by one shared
+answer-free predicate in Retriever and Reasoner; every proposition field must
+still be grounded in the same successful read receipt. The shared compound
+gate uses exact/inflectional matching and the existing controlled paraphrase
+classes. It does not apply broad object-token overlap, inspect accepted answers
+or add retrieval guidance to the Director prompt. Unifying these two validators
+is `PROJECT_NECESSARY_ADAPTATION` because upstream FlowSteer has no typed
+factual-QA proposition schema.
+
+The v57 reciprocal provenance change keeps FlowSteer's Director-selected
+reciprocal execution order and SkillFlow's public Tool receipts. Each
+phase-local semantic artifact is passed through AgentRuntime's existing
+artifact-version/provenance metadata merge before the next
+`CommunicationEnvelope` is constructed. This makes one-way and reciprocal
+AgentGraph edges preserve the same transitive Tool receipt lineage while
+keeping all receipts bound to concrete ancestor artifact versions. The change
+is a minimal compatibility repair for the project's typed communication
+envelope; it does not relax Verifier or terminal admission.
+
+The v57 Reasoner repair schema directly reuses SkillFlow's constrained next
+StructuredAction generation and the project's existing Retriever field-freeze
+helper. JSON Schema 2020-12 tuple validation, already used by the Director's
+hierarchical action schemas, freezes unimplicated proposition items and fields
+to the latest model-authored rejected completion. The public error alone selects
+the mutable path. Ground Truth, accepted answers, evaluator output, topology,
+Agent inventory and role order are absent from this repair boundary. Director
+prompt v6, training state and Skill state remain unchanged.

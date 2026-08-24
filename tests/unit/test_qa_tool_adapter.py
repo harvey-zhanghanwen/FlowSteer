@@ -4226,22 +4226,30 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
     def test_evidence_retriever_field_repair_schema_freezes_unimplicated_fields(
         self,
     ) -> None:
-        question = "Which American-born Sinclair won the prize in 1930?"
+        question = (
+            "Which American-born Sinclair won the Nobel Prize for Literature "
+            "in 1930?"
+        )
         prior_value = {
             "question_scope": question,
             "entity_identity": {
                 "question_surface": "Sinclair",
                 "evidence_surface": "Sinclair Lewis",
             },
-            "target_relation": "won the prize in 1930",
+            "target_relation": "won the Nobel Prize for Literature in 1930",
             "answer_type_constraint": "entity",
             "evidence_proposition": {
                 "subject": "he",
                 "predicate": "became",
-                "object_or_attribute_value": "the first recipient of the prize",
+                "object_or_attribute_value": (
+                    "the first writer from the United States to receive the "
+                    "Nobel Prize in Literature"
+                ),
             },
             "evidence_span": (
-                "In 1930, he became the first recipient of the prize."
+                "Sinclair Lewis was an American novelist. In 1930, he became "
+                "the first writer from the United States to receive the Nobel "
+                "Prize in Literature."
             ),
             "passage_id": "sinclair-lewis",
         }
@@ -4282,8 +4290,8 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
                 "observation_status": "schema_invalid",
                 "public_error_code": (
                     "qa_semantic_artifact_invalid: Evidence Retriever "
-                    "entity_identity.evidence_surface does not occur in "
-                    "evidence_span"
+                    "entity_identity.evidence_surface must bind to exactly one "
+                    "evidence_proposition relation argument"
                 ),
                 "executed_action": {
                     "kind": "complete",
@@ -4351,9 +4359,170 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             proposition_properties["predicate"]["const"],
         )
         self.assertNotIn("const", proposition_properties["subject"])
-        self.assertNotIn(
-            "const",
-            proposition_properties["object_or_attribute_value"],
+        self.assertEqual(
+            prior_value["evidence_proposition"]["object_or_attribute_value"],
+            proposition_properties["object_or_attribute_value"]["const"],
+        )
+        serialized = json.dumps(response_schema).casefold()
+        for hidden_field in (
+            "accepted_answers",
+            "gold_answer",
+            "ground_truth",
+            "evaluator",
+        ):
+            self.assertNotIn(hidden_field, serialized)
+
+    def test_reasoner_field_repair_schema_freezes_unimplicated_proposition_fields(
+        self,
+    ) -> None:
+        question = (
+            "Which American-born Sinclair won the Nobel Prize for Literature "
+            "in 1930?"
+        )
+        evidence_span = (
+            "Harry Sinclair Lewis was an American novelist. In 1930, he became "
+            "the first writer from the United States to receive the Nobel Prize "
+            "in Literature."
+        )
+        prior_value = {
+            "question_scope": question,
+            "answer_slot": {
+                "answer_type": "entity",
+                "answer_cardinality": "single",
+                "qualifiers": [],
+                "proposition_index": 0,
+                "answer_field": "subject",
+            },
+            "evidence_propositions": [
+                {
+                    "subject": "Harry Sinclair Lewis",
+                    "relation": "became",
+                    "object_or_attribute_value": (
+                        "the first writer from the United States to receive the "
+                        "Nobel Prize in Literature"
+                    ),
+                    "qualifiers": ["in 1930"],
+                    "evidence_span": evidence_span,
+                }
+            ],
+            "multi_hop_chain": ["bind the receipt-grounded proposition"],
+            "candidate_answer": "Harry Sinclair Lewis",
+            "evidence": [evidence_span],
+        }
+        observations = [
+            {
+                "observation_status": "success",
+                "executed_action": {
+                    "kind": "tool",
+                    "name": "search",
+                    "resource_id": QA_RETRIEVAL_TOOL_ID,
+                    "arguments": {"query": "Sinclair Nobel 1930", "limit": 5},
+                },
+                "result": {
+                    "operation": "search",
+                    "query": "Sinclair Nobel 1930",
+                    "top_k": 5,
+                    "passage_ids": ["sinclair-lewis"],
+                },
+            },
+            {
+                "observation_status": "success",
+                "executed_action": {
+                    "kind": "tool",
+                    "name": "read",
+                    "resource_id": QA_RETRIEVAL_TOOL_ID,
+                    "arguments": {"passage_id": "sinclair-lewis"},
+                },
+                "result": {
+                    "operation": "read",
+                    "passage_id": "sinclair-lewis",
+                    "passage": {
+                        "title": "Sinclair Lewis",
+                        "text": evidence_span,
+                    },
+                },
+            },
+            {
+                "observation_status": "schema_invalid",
+                "public_error_code": (
+                    "qa_semantic_artifact_invalid: Reasoner "
+                    "evidence_propositions[0].relation is not grounded in its "
+                    "evidence_span from the same successful qa-retrieval read "
+                    "receipt"
+                ),
+                "executed_action": {
+                    "kind": "complete",
+                    "name": "complete",
+                    "resource_id": None,
+                    "skill_id": None,
+                    "arguments": {"value": prior_value},
+                },
+            },
+        ]
+        adapter = QARetrievalReactExecutionAdapter(
+            gateway=SimpleNamespace(generate=lambda request: None),
+            tool_registry=build_qa_tool_registry(FakeIndex()),
+            max_turns=8,
+            max_tool_calls=12,
+            task_type="factual_qa",
+            completion_policy="required_evidence",
+        )
+        request = AgentRequest(
+            request_id="trivia:reasoner-field-repair-schema",
+            run_id="trivia",
+            graph_revision=1,
+            problem=question,
+            agent=AgentNode(
+                "reasoner",
+                "model",
+                "bind public evidence to the answer slot",
+                role_family="reasoner",
+                allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                execution_mode="react",
+            ),
+            model=ModelSpec("model", "provider"),
+            provider=ProviderSpec("provider", kind="test"),
+            phase=ExecutionPhase.SINGLE,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+        )
+
+        response_schema = adapter._state_conditioned_response_schema(
+            request,
+            observations,
+        )
+        assert response_schema is not None
+        value_properties = response_schema["properties"]["arguments"][
+            "properties"
+        ]["value"]["properties"]
+        self.assertEqual(
+            prior_value["candidate_answer"],
+            value_properties["candidate_answer"]["const"],
+        )
+        self.assertEqual(
+            prior_value["answer_slot"],
+            value_properties["answer_slot"]["const"],
+        )
+        proposition_schema = value_properties["evidence_propositions"]
+        self.assertEqual(1, proposition_schema["minItems"])
+        self.assertEqual(1, proposition_schema["maxItems"])
+        self.assertFalse(proposition_schema["items"])
+        proposition_properties = proposition_schema["prefixItems"][0][
+            "properties"
+        ]
+        self.assertEqual(
+            "Harry Sinclair Lewis",
+            proposition_properties["subject"]["const"],
+        )
+        self.assertNotIn("const", proposition_properties["relation"])
+        self.assertEqual(
+            prior_value["evidence_propositions"][0][
+                "object_or_attribute_value"
+            ],
+            proposition_properties["object_or_attribute_value"]["const"],
+        )
+        self.assertEqual(
+            evidence_span,
+            proposition_properties["evidence_span"]["const"],
         )
         serialized = json.dumps(response_schema).casefold()
         for hidden_field in (

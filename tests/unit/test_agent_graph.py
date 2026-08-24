@@ -8453,6 +8453,70 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
+    def test_reasoner_accepts_receipt_grounded_compound_relation_realization(
+        self,
+    ) -> None:
+        question = (
+            "Which American-born Sinclair won the Nobel Prize for Literature "
+            "in 1930?"
+        )
+        evidence_span = (
+            "Harry Sinclair Lewis was an American novelist. In 1930, he became "
+            "the first writer from the United States to receive the Nobel Prize "
+            "in Literature."
+        )
+
+        def artifact(
+            relation: str,
+            object_or_attribute_value: str = (
+                "the first writer from the United States to receive the Nobel "
+                "Prize in Literature"
+            ),
+        ) -> str:
+            return json.dumps(
+                {
+                    "question_scope": question,
+                    "answer_slot": {
+                        "answer_type": "entity",
+                        "answer_cardinality": "single",
+                        "qualifiers": [],
+                        "proposition_index": 0,
+                        "answer_field": "subject",
+                    },
+                    "evidence_propositions": [
+                        {
+                            "subject": "Harry Sinclair Lewis",
+                            "relation": relation,
+                            "object_or_attribute_value": object_or_attribute_value,
+                            "qualifiers": ["in 1930"],
+                            "evidence_span": evidence_span,
+                        }
+                    ],
+                    "multi_hop_chain": [
+                        "bind Sinclair to Harry Sinclair Lewis",
+                        "bind the requested prize relation",
+                    ],
+                    "candidate_answer": "Harry Sinclair Lewis",
+                    "evidence": [evidence_span],
+                }
+            )
+
+        self.assertIsNone(
+            AgentWorkflowEnv._reasoner_evidence_provenance_issue(
+                artifact("became"),
+                [evidence_span],
+                require_answer_binding=True,
+                original_question=question,
+            )
+        )
+        unrelated = AgentWorkflowEnv._reasoner_evidence_provenance_issue(
+            artifact("was", "an American novelist"),
+            [evidence_span],
+            require_answer_binding=True,
+            original_question=question,
+        )
+        self.assertIn("do not preserve the requested relation", unrelated or "")
+
     def test_reasoner_entity_gate_accepts_only_receipt_title_bound_alias(
         self,
     ) -> None:
