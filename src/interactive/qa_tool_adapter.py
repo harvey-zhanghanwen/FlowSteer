@@ -5666,14 +5666,15 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     tool_actions = frozenset(
                         {(QA_RETRIEVAL_TOOL_ID, "read")}
                     )
-                elif _question_ordinal_classes(
-                    qa_question_scope(request.problem)
-                ):
-                    tool_actions = frozenset(
-                        action
-                        for action in tool_actions
-                        if action != (QA_RETRIEVAL_TOOL_ID, "read")
-                    )
+                # DIRECT_REUSE: SkillFlow's search Observation publishes
+                # opaque passage IDs that remain readable by the next bounded
+                # StructuredAction.  A bounded title/snippet preview may end
+                # before the answer-bearing ordinal proposition, so an empty
+                # compatibility ranking must not erase every returned read
+                # action.  In that case retain the ordinary read/search
+                # choice.  The complete read receipt still has to pass the
+                # unchanged entity, relation, scope, ordinal and provenance
+                # validators before completion is admitted.
             return admitted(tool_actions, completion)
 
         remaining_tool_calls = max(
@@ -7642,12 +7643,14 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     evidence_state.search_attempt_count
                 )
                 evidence_continuation += (
-                    "The latest public search candidates do not by themselves bind "
-                    "the unchanged question entity and requested relation. Preserve "
-                    "every receipt. Inspect the title/snippet candidates and either "
-                    "read one exact unread passage_id when its title and snippet "
-                    "jointly support entity identity, relation, and scope modifiers, "
-                    "or, when none does, issue a new qa-retrieval search with "
+                    "The latest bounded title/snippet previews do not by themselves "
+                    "prove the unchanged question entity and requested relation and "
+                    "may end before an answer-bearing proposition. Preserve every "
+                    "receipt. Inspect the complete latest search hit list and either "
+                    "read one exact unread passage_id whose public title or snippet "
+                    "is plausibly relevant to the entity/topic or requested relation "
+                    "so its full passage can be checked, or issue a new qa-retrieval "
+                    "search with "
                     f"limit exactly {expected_top_k}. For search, "
                     + transition_guidance
                     + " The query must either be a distinct, answer-free entity-and-"
@@ -7659,9 +7662,12 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     + json.dumps(searched_passage_ids, ensure_ascii=False)
                     + ". Public candidates from the latest successful search are: "
                     + public_search_candidates_text
-                    + ". Rank is retrieval order, not evidence or proof of entity/"
-                    "relation alignment. Do not complete until a read "
-                    "receipt binds entity identity and requested relation."
+                    + ". This compatibility list is a non-exhaustive ranking aid; "
+                    "every admitted read ID still comes from the latest successful "
+                    "search Observation. Rank and preview relevance are not evidence "
+                    "or proof of entity/relation alignment. Do not complete until "
+                    "the full read receipt binds entity identity, requested relation, "
+                    "scope modifiers and any ordinal constraint."
                 )
             elif searched_passage_ids and admitted_actions == frozenset(
                 {(QA_RETRIEVAL_TOOL_ID, "read")}

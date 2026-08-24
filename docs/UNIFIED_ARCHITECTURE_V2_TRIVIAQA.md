@@ -1508,8 +1508,45 @@ inventory, model catalog, evaluator, frozen tasks, scientific-sampling purpose,
 training state and Skill state are unchanged. The v60 static suite passes 1,008
 tests plus 197 subtests. Prepare-only reproduces the same ordered 128 task IDs,
 questions and ground-truth records as v59 under a new isolated condition/output
-path. Live v60 results must still pass the same three-task Stable Zero gate
-before the fixed-128 run is admitted.
+path. The isolated v60 Stable Zero gate subsequently collected all three frozen
+tasks with zero collection failures and passed `2/3` full chains. `tc_1`
+explicitly finished in seven Canvas turns with `Sinclair Lewis` and official
+EM/F1 `1/1`; `tc_3` explicitly finished in fifteen Canvas turns with `York`
+and official EM/F1 `1/1`. `tc_5` ended at
+`canvas_action_domain_exhausted`, with no final answer and no fallback. The
+fixed-128 run was therefore not admitted.
+
+### v61 SkillFlow search-to-read recovery
+
+The lossless v60 `tc_5` trajectory separates retrieval recall from the later
+failure. Its sixth successful search returned 25 opaque passage IDs; rank 7 was
+the public `Billboard charts` passage. The bounded snippet ended before the
+answer-bearing historical proposition, so the project's ordinal preview
+compatibility projection returned no preferred candidate. The runtime then
+removed `read` from the StructuredAction domain even though the successful
+SkillFlow search Observation had already published readable opaque passage
+IDs. The replacement Retriever could only continue searching and exhausted its
+turns after 32 rejected search actions. This is a read-candidate action-mask
+false negative, not a `knowledge_base_coverage_failure`.
+
+v61 removes only that project-added ordinal read pruning. A strong public
+title/snippet match still narrows the next action to `read` and to the filtered
+opaque IDs. When a bounded preview is inconclusive, the existing
+`{read, search}` domain remains available, and the read branch is constrained
+to IDs from the latest successful search receipt. Preview compatibility is a
+non-exhaustive ranking signal; only the complete read receipt can satisfy the
+unchanged entity identity, requested relation, named scope, ordinal,
+provenance, evidence-span and answer-slot validators. Completion admission is
+not relaxed.
+
+This restores SkillFlow's one `StructuredAction -> public Observation`
+search/read continuation inside FlowSteer's state-conditioned action mask and
+execute-on-edit feedback loop. Director prompt v6 remains byte-for-byte
+topology-neutral; no query, role order, workflow topology, task answer,
+accepted answer or evaluator output is embedded in it. Training, Skills,
+MACE and Bayesian updates remain disabled. The complete v61 static suite passes
+1,009 tests plus 197 subtests. Its isolated Stable Zero and fixed-128 results
+are reported only after execution under the versioned v61 condition.
 
 ## Historical comparison condition
 

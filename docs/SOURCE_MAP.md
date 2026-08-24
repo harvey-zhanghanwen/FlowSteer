@@ -1257,5 +1257,29 @@ finished with EM/F1 `1/1`; `tc_3` and `tc_5` ended at
 
 The v60 complete static suite passes 1,008 tests plus 197 subtests. Prepare-only
 reproduces the same ordered 128 task IDs, questions and ground-truth records as
-v59. No live score is claimed until the unchanged three-task Stable Zero gate
-executes.
+v59. The isolated gate then collected all three tasks with zero collection
+failures and passed `2/3`: `tc_1` and `tc_3` explicitly FINISHed with official
+EM/F1 `1/1`, while `tc_5` ended at `canvas_action_domain_exhausted`. The
+fixed-128 evaluation was not run.
+
+## TriviaQA unified architecture v61 search-to-read recovery
+
+The v60 `tc_5` Tool receipts show that retrieval recall recovered before the
+terminal failure: the sixth successful search returned 25 opaque IDs including
+the relevant public `Billboard charts` passage at rank 7. Its bounded snippet
+ended before the answer-bearing proposition, so the project preview
+compatibility projection was empty and the ordinal branch incorrectly removed
+`read`. The model was then restricted to search-only recovery and exhausted 32
+rejected searches without ever reading a passage. This is an action-domain
+false negative, not database coverage evidence.
+
+| Current module/boundary | Classification | Primary source retained | Minimal compatibility adaptation |
+| --- | --- | --- | --- |
+| `qa_tool_adapter.py::{_state_conditioned_action_domain,_contract}` | Necessary compatibility repair restoring direct SkillFlow Tool semantics | SkillFlow `runtime/bounded_agent.py::BoundedAgent.execute_turn`, `runtime/contracts.py::StructuredAction` and QA search/read public Observations; FlowSteer state-conditioned action mask and execute-on-edit feedback | Do not erase every returned `read` action merely because an ordinal question's bounded title/snippet preview has no strong compatibility match. Strong matches still narrow to read-only and the filtered IDs; otherwise retain the existing `{read, search}` domain. The read branch remains constrained to opaque IDs from the latest successful search, and only the full read receipt can satisfy unchanged entity/relation/named-scope/ordinal/provenance/evidence/answer-slot admission. Preview compatibility is exposed only as a non-exhaustive ranking aid. |
+| `evaluation_triviaqa_unified_architecture_v2_fixed128.yaml` v61 condition | Necessary isolated evaluation configuration | Same fixed ordered 128-task view, Director prompt v6, catalog v7, official evaluator and v57 scientific-sampling coordinates | Advance only the Tool contract identity and isolated output paths. Director topology/role search space, training, Skills, MACE and Bayesian state remain unchanged. |
+
+The v61 full static suite passes 1,009 tests plus 197 subtests. Director prompt
+v6 remains byte-for-byte topology-neutral and contains no fixed Agent count,
+role inventory/order, edge, topology, retrieval recipe, query or answer. The
+isolated Stable Zero and fixed-128 measurements are not claimed before their
+versioned executions complete.

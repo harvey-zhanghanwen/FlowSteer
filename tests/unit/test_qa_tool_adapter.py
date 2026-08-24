@@ -3279,8 +3279,12 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             },
         }
         read_contract = adapter._contract(request, [search_observation])
-        self.assertIn("title and snippet jointly", read_contract)
-        self.assertIn("Rank is retrieval order, not evidence or proof", read_contract)
+        self.assertIn("bounded title/snippet previews", read_contract)
+        self.assertIn("full read receipt binds entity identity", read_contract)
+        self.assertIn(
+            "Rank and preview relevance are not evidence or proof",
+            read_contract,
+        )
 
     def test_factual_strategy_requires_new_fts_terms_and_preserves_ordinal_scope(
         self,
@@ -4254,6 +4258,115 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             tuple(candidate["passage_id"] for candidate in candidates),
         )
 
+    def test_ordinal_preview_false_negative_does_not_erase_skillflow_read(
+        self,
+    ) -> None:
+        question = (
+            "In which decade did Chart Weekly magazine first publish an "
+            "American hit chart?"
+        )
+        query = "Chart Weekly magazine first publish American hit chart"
+        observations = [
+            {
+                "observation_status": "success",
+                "executed_action": {
+                    "kind": "tool",
+                    "name": "search",
+                    "resource_id": QA_RETRIEVAL_TOOL_ID,
+                    "skill_id": None,
+                    "arguments": {"query": query, "limit": 5},
+                },
+                "result": {
+                    "operation": "search",
+                    "query": query,
+                    "top_k": 5,
+                    "passage_ids": ["topic-title"],
+                    "hits": [
+                        {
+                            "passage_id": "topic-title",
+                            "document_id": "topic-document",
+                            "rank": 1,
+                            "title": "Chart Weekly charts",
+                            "snippet": (
+                                "The publication expanded into radio coverage "
+                                "during the interwar period…"
+                            ),
+                        }
+                    ],
+                },
+            }
+        ]
+        request = AgentRequest(
+            request_id="trivia:ordinal-preview-read-domain",
+            run_id="trivia",
+            graph_revision=1,
+            problem=question,
+            agent=AgentNode(
+                "retriever",
+                "model",
+                "retrieve question-grounded evidence",
+                role_family="evidence_retriever",
+                allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                execution_mode="react",
+            ),
+            model=ModelSpec("model", "provider"),
+            provider=ProviderSpec("provider", kind="test"),
+            phase=ExecutionPhase.SINGLE,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+        )
+        adapter = QARetrievalReactExecutionAdapter(
+            gateway=SimpleNamespace(generate=lambda request: None),
+            tool_registry=build_qa_tool_registry(FakeIndex()),
+            max_turns=16,
+            max_tool_calls=12,
+            task_type="factual_qa",
+            completion_policy="required_evidence",
+        )
+
+        self.assertEqual(
+            (),
+            adapter._latest_public_search_candidates(
+                observations,
+                unread_passage_ids=("topic-title",),
+                original_question=question,
+            ),
+        )
+        actions, completion = adapter._state_conditioned_action_domain(
+            request,
+            observations,
+        )
+        self.assertEqual(
+            frozenset(
+                {
+                    (QA_RETRIEVAL_TOOL_ID, "read"),
+                    (QA_RETRIEVAL_TOOL_ID, "search"),
+                }
+            ),
+            actions,
+        )
+        self.assertFalse(completion)
+
+        response_schema = adapter._state_conditioned_response_schema(
+            request,
+            observations,
+        )
+        assert response_schema is not None
+        read_branches = [
+            branch
+            for branch in response_schema["oneOf"]
+            if branch["properties"]["name"].get("const") == "read"
+        ]
+        self.assertEqual(1, len(read_branches))
+        self.assertEqual(
+            ["topic-title"],
+            read_branches[0]["properties"]["arguments"]["properties"]
+            ["passage_id"]["enum"],
+        )
+        self.assertIn(
+            "non-exhaustive ranking aid",
+            adapter._contract(request, observations),
+        )
+
     def test_v21_relation_strategy_replaces_instead_of_appending_alias(self) -> None:
         question = (
             "In which decade did Chart Weekly magazine first publish an "
@@ -4450,7 +4563,9 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
 
-    def test_v21_joint_schema_filters_local_first_hit_false_positives(self) -> None:
+    def test_v21_joint_schema_prioritizes_strong_hits_without_preview_hard_mask(
+        self,
+    ) -> None:
         question = (
             "In which decade did Chart Weekly magazine first publish an "
             "American hit chart?"
@@ -4583,7 +4698,12 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             adapter._state_conditioned_action_domain(request, false_only)
         )
         self.assertEqual(
-            frozenset({(QA_RETRIEVAL_TOOL_ID, "search")}),
+            frozenset(
+                {
+                    (QA_RETRIEVAL_TOOL_ID, "read"),
+                    (QA_RETRIEVAL_TOOL_ID, "search"),
+                }
+            ),
             false_only_actions,
         )
         self.assertFalse(false_only_completion)
@@ -4592,11 +4712,19 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             false_only,
         )
         assert false_only_schema is not None
+        false_only_read_branches = [
+            branch
+            for branch in false_only_schema["oneOf"]
+            if branch["properties"]["name"].get("const") == "read"
+        ]
+        self.assertEqual(1, len(false_only_read_branches))
         self.assertEqual(
-            "search",
-            false_only_schema["properties"]["name"]["const"],
+            {"p-sarah", "p-patti"},
+            set(
+                false_only_read_branches[0]["properties"]["arguments"]
+                ["properties"]["passage_id"]["enum"]
+            ),
         )
-
     def test_model_continuation_consumes_read_action_but_preserves_public_state(
         self,
     ) -> None:
