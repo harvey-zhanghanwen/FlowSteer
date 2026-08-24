@@ -1540,6 +1540,24 @@ def _surface_binds_entity_anchor(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _FactualRetrievalStrategyProof:
+    """Answer-free observability for one bounded retrieval attempt."""
+
+    strategy: str
+    verified: bool
+    proof_strength: str
+    source_passage_ids: tuple[str, ...] = ()
+
+    def to_value(self) -> dict[str, object]:
+        return {
+            "strategy": self.strategy,
+            "verified": self.verified,
+            "proof_strength": self.proof_strength,
+            "source_passage_ids": list(self.source_passage_ids),
+        }
+
+
 def _relation_surface_replacement_classes(
     *,
     original_question: str,
@@ -1657,6 +1675,55 @@ def _factual_strategy_semantics_verified(
                 entity_preserved and ordinal_preserved and relation_preserved
             )
     return tuple(verified)
+
+
+def _factual_strategy_proofs(
+    *,
+    original_question: str,
+    distinct_queries: Sequence[str],
+    search_observations: Sequence[Mapping[str, object]] = (),
+) -> tuple[_FactualRetrievalStrategyProof, ...]:
+    """Expose proof strength without narrowing the original action domain.
+
+    DIRECT_REUSE: SkillFlow supplies ordered public Tool receipts.  The project
+    adaptation only annotates the existing FlowSteer invariant check.
+    """
+
+    semantics = _factual_strategy_semantics_verified(
+        original_question=original_question,
+        distinct_queries=distinct_queries,
+    )
+    proofs: list[_FactualRetrievalStrategyProof] = []
+    for index, stage_verified in enumerate(semantics):
+        strategy = _FACTUAL_QA_RETRIEVAL_STRATEGIES[index]
+        source_ids: list[str] = []
+        for observation in search_observations[:index]:
+            result = observation.get("result")
+            raw_ids = result.get("passage_ids") if isinstance(result, Mapping) else None
+            if isinstance(raw_ids, list):
+                source_ids.extend(
+                    passage_id.strip()
+                    for passage_id in raw_ids
+                    if isinstance(passage_id, str) and passage_id.strip()
+                )
+        strength = (
+            "unverified_strategy_attempt"
+            if not stage_verified
+            else (
+                "tool_receipt_conditioned_strategy_attempt"
+                if index > 0 and search_observations[:index]
+                else "question_invariant_strategy_attempt"
+            )
+        )
+        proofs.append(
+            _FactualRetrievalStrategyProof(
+                strategy,
+                stage_verified,
+                strength,
+                tuple(dict.fromkeys(source_ids)),
+            )
+        )
+    return tuple(proofs)
 
 
 def _verified_transformed_relation_classes(
@@ -2125,6 +2192,7 @@ class _RequiredEvidenceState:
     search_attempt_count: int
     strategy_progress_count: int
     strategy_semantics: tuple[bool, ...]
+    strategy_proofs: tuple[_FactualRetrievalStrategyProof, ...]
     recall_expansion_count: int
     successful_search_hit_counts: tuple[int, ...]
     tool_error_count: int
@@ -3126,6 +3194,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             and QA_RETRIEVAL_TOOL_ID in request.agent.allowed_tools
         )
         search_queries: list[str] = []
+        successful_search_observations: list[Mapping[str, object]] = []
         normalized_search_queries: list[str] = []
         search_top_ks: list[int] = []
         successful_search_hit_counts: list[int] = []
@@ -3293,6 +3362,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 ):
                     query = query.strip()
                     search_queries.append(query)
+                    successful_search_observations.append(observation)
                     normalized_search_queries.append(
                         _normalized_retrieval_query(query)
                     )
@@ -3381,16 +3451,25 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     if passage_id not in read_passage_ids:
                         read_passage_ids.append(passage_id)
         distinct_queries: list[str] = []
+        distinct_search_observations: list[Mapping[str, object]] = []
         distinct_term_set_signatures: list[tuple[str, ...]] = []
-        for query in search_queries:
+        for query, search_observation in zip(
+            search_queries,
+            successful_search_observations,
+        ):
             signature = _retrieval_query_term_set_signature(query)
             if signature in distinct_term_set_signatures:
                 continue
             distinct_term_set_signatures.append(signature)
             distinct_queries.append(query)
-        strategy_semantics = _factual_strategy_semantics_verified(
+            distinct_search_observations.append(search_observation)
+        strategy_proofs = _factual_strategy_proofs(
             original_question=qa_question_scope(request.problem),
             distinct_queries=distinct_queries,
+            search_observations=distinct_search_observations,
+        )
+        strategy_semantics = tuple(
+            proof.verified for proof in strategy_proofs
         )
         completed_location_evidence_repair = bool(
             location_containment_repair_read_count > 0
@@ -3480,6 +3559,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             search_attempt_count=len(search_queries),
             strategy_progress_count=len(distinct_term_set_signatures),
             strategy_semantics=strategy_semantics,
+            strategy_proofs=strategy_proofs,
             recall_expansion_count=(
                 len(search_queries) - len(distinct_term_set_signatures)
             ),
@@ -4656,6 +4736,9 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 state.strategy_semantics_verified
             ),
             "strategy_semantics_prefix": list(state.strategy_semantics),
+            "strategy_proofs": [
+                proof.to_value() for proof in state.strategy_proofs
+            ],
             "strategy_schedule_length": len(
                 _FACTUAL_QA_RETRIEVAL_STRATEGIES
             ),

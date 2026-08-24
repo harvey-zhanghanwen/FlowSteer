@@ -921,11 +921,22 @@ the Tool adapter, not five Director roles and not an injected Skill.  The
 Director still chooses Agent declarations, models, relations, Output identity,
 repair actions and termination from the existing bounded search space.  The
 strategy labels form a model-visible schedule: the trace records the actual
-query, top-k and Tool receipt, while `strategy_semantics_verified=false`
-explicitly avoids claiming a deterministic semantic validation of spelling
-normalization, alias expansion, entity disambiguation or query rewriting.  The
-v2 evaluation configuration keeps Skills, MACE/Bayesian exploration, GRPO,
+query, top-k and Tool receipt.  The v46 adapter additionally publishes
+`strategy_proofs`, distinguishing question-invariant attempts from attempts
+conditioned on prior public Tool receipts and retaining the associated passage
+IDs.  This is PROJECT_NECESSARY_ADAPTATION observability over SkillFlow's
+unchanged StructuredAction/ToolResult contract; it is not an upstream Entity
+Linking implementation and does not call a search hit grounded evidence.  The
+existing successful-read entity/relation/evidence gate remains authoritative.
+The v2 evaluation configuration keeps Skills, MACE/Bayesian exploration, GRPO,
 backward, optimizer updates and adapter publication disabled.
+
+The v46 `add_subgraph` role-selection recovery reuses the project's existing
+state-conditioned JSON Schema, strict parser, hierarchical continuation and
+FlowSteer rejected-Canvas-turn boundary.  Exactly one same-schema/same-seed
+serialization retry is admitted; both exact receipts remain in the trajectory
+if it fails.  This is a minimal compatibility adaptation around SGLang output,
+not a new Director action, role, workflow template or topology constraint.
 
 Provider and bounded-ReAct failures stay typed.  A measured transient or
 permanent-configuration provider failure exposes only an exact `model_id`

@@ -8,10 +8,13 @@ path is:
 
 `Question -> Qwen3.5-9B Flow-Director -> progressive Canvas -> AgentGraph Runtime -> role-conditional Agent execution/communication -> selected Output Agent -> Evaluator -> Trajectory`.
 
-Reasoner, Verifier and Format are available semantic responsibilities, not a
-required Agent inventory or a prescribed serial workflow.  ReAct is selected
-per Agent as an execution mode; the live Canvas domain determines which Agents,
-relations and Output role are admissible for the current state.
+For the current fixed-128 condition, Evidence Retriever, Reasoner, Verifier and
+Formatter are required terminal responsibilities, not a prompt-fixed Agent
+inventory or prescribed serial workflow.  The Director may still construct
+parallel retrieval, fan-in, repair and reciprocal non-Formatter subgraphs.
+ReAct is selected per Agent as an execution mode; the live Canvas domain
+determines which Agents, relations and Output role are admissible for the
+current state.
 
 The pre-v2 source is recoverable from branch
 `backup/pre-unified-architecture-v2-triviaqa-20260822` at commit
@@ -32,10 +35,11 @@ with HTTP 403; no existing branch was overwritten.
   spelling normalization, alias expansion, entity disambiguation, query
   rewriting and increasing top-k recovery.
 - These five labels are a model-visible execution schedule.  The lossless
-  trace records the actual query, top-k and Tool receipt, but the Runtime does
-  not claim a deterministic semantic classifier for whether a generated query
-  itself performed the named transformation; receipts therefore retain
-  `strategy_semantics_verified=false`.
+  trace records the actual query, top-k and Tool receipt.  The public
+  continuation now records each stage's question-invariant validity and
+  whether the attempt was conditioned on prior Tool receipts, including the
+  associated public passage IDs.  This is observability rather than an oracle:
+  only the later entity/relation/evidence gate may call a read receipt grounded.
 - Entity/evidence provenance admission before reasoning, and explicit
   `knowledge_base_coverage_failure` only after bounded strategy exhaustion.
 - Successful public `read` Tool receipts follow the routed artifact lineage
@@ -47,9 +51,9 @@ with HTTP 403; no existing branch was overwritten.
   satisfy a location claim only when it occurs in the same evidence clause
   that binds the proposition subject, relation and object.  An unrelated
   clause in the same retrieved passage cannot close that semantic lineage.
-- Optional Reasoner, Verifier and Format responsibilities with no mandatory
-  serial chain.  ReAct is an execution mode selected per Agent, never an Agent
-  role.
+- Required Evidence Retriever, Reasoner, Verifier and Formatter terminal
+  responsibilities with no prompt-fixed serial chain.  ReAct is an execution
+  mode selected per Agent, never an Agent role.
 - `preserve -> diagnose -> repair/augment` recovery and an immutable last valid
   answer/Runtime/graph lineage for `max_rounds` fallback.
 - Exact trajectory fields for fallback use and report-only TriviaQA failure
@@ -59,7 +63,7 @@ with HTTP 403; no existing branch was overwritten.
 
 ### Verified without a live model
 
-- The current complete unit suite passes: 943 tests and 177 subtests across
+- The current complete unit suite passes: 955 tests and 177 subtests across
   AgentGraph, Runtime, Tool adapter, gateway prompts, Director action domains,
   configuration, records, collector, evaluator and reporting.  The only
   warning is the existing Pydantic class-config deprecation in
@@ -790,6 +794,38 @@ count, roles, edges and topology remain Director choices.  The target-domain
 receipt is `agentgraph.live-action-target-domains.v10`; Director prompt v6 is
 unchanged.
 
+### v46 receipt-preserving structured recovery and retrieval observability
+
+The v45 three-task canary was stopped after `triviaqa:tc_1` produced a real
+collection failure: the schema-bound `add_subgraph` role-selection phase
+returned non-JSON text.  That phase had not reused the one-shot bounded
+serialization recovery already present at the hierarchical parameter boundary,
+so the whole task terminated before a rejected Canvas turn could be recorded.
+No v45 benchmark score is reported.
+
+v46 keeps the exact sampled text, live JSON Schema, route and scientific seed,
+then permits exactly one schema-bound continuation request.  A valid repair
+continues the same `add_subgraph` transaction.  If the repair is still invalid,
+both exact phase receipts become a typed rejected Canvas turn at graph revision
+zero; no Agent is declared or executed and no third request is made.  Semantic
+violations such as trailing text or an out-of-domain role remain fail-closed and
+are not rewritten with regex or defaults.
+
+The Tool adapter also publishes `strategy_proofs` for the existing bounded
+retrieval schedule.  Each entry distinguishes a question-invariant strategy
+attempt from an attempt conditioned on prior public Tool receipts and records
+the associated passage IDs.  This metadata does not shrink the legal query
+action domain and does not call a search hit evidence-grounded.  The unchanged
+pre-Reasoner gate still requires exact entity identity, target relation,
+evidence span, passage ID and a matching successful read receipt.  Consequently
+spelling, alias, disambiguation and relation-rewrite recovery remain executable,
+while `knowledge_base_coverage_failure` remains unavailable unless the complete
+bounded semantic schedule is valid and no aligned evidence is obtained.
+
+The Director v6 prompt is unchanged and remains topology-neutral.  Static
+verification passes 955 tests and 177 subtests; the fixed 128 task selection is
+unchanged.  These checks are not a v46 accuracy result.
+
 ### Stable Zero status
 
 Static architecture, 946 unit tests, 177 subtests and the current frozen
@@ -829,9 +865,11 @@ was admitted.  No fixed-128 score is inferred from unit tests, four canary
 tasks, an incomplete run, or the previous architecture.  r56 subsequently
 introduced the role-conditional, topology-neutral inference boundaries above,
 but its `triviaqa:tc_3` live canary failed with the measured partial-Canvas
-recovery-domain defect documented above.  The post-r56 correction is
-statically verified; no v6 canary or fixed-128 v2 score is inferred from that
-static result.
+recovery-domain defect documented above.  v43 retained two valid diagnostic
+trajectories, v44 exposed an empty exact relation domain, and v45 exposed the
+unhandled role-selection serialization failure.  v46 is now statically
+verified; its Stable Zero canary and fixed-128 run remain pending, so no v2
+score is inferred from these static results or failed diagnostics.
 
 ## Historical comparison condition
 
