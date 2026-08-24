@@ -4558,7 +4558,9 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
                 {
                     "action": "modify_agent",
                     "agent_id": "reasoner",
-                    "contract": _QA_LOCATION_REASONER_RECOVERY_CONTRACT,
+                    "completion_condition": (
+                        _QA_LOCATION_REASONER_RECOVERY_COMPLETION
+                    ),
                 }
             )
         )
@@ -4571,6 +4573,38 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         )
         env._record_failure_state(
             (repeated_failure,),
+            current_agent_ids={node.id for node in env.graph.nodes},
+        )
+
+        self.assertNotIn("reasoner", env._repair_exhausted_agent_ids)
+        self.assertEqual(("modify_agent",), env.model_admissible_action_types())
+        remaining_targets = env.model_admissible_action_targets()
+        remaining_candidate = remaining_targets["modify_agent"][
+            "per_agent_candidates"
+        ][0]
+        self.assertEqual(["contract"], remaining_candidate["mutable_fields"])
+        self.assertEqual(
+            [_QA_LOCATION_REASONER_RECOVERY_CONTRACT],
+            remaining_candidate["discrete_value_domains"]["contract"],
+        )
+
+        second_repair = await env.step(
+            json.dumps(
+                {
+                    "action": "modify_agent",
+                    "agent_id": "reasoner",
+                    "contract": _QA_LOCATION_REASONER_RECOVERY_CONTRACT,
+                }
+            )
+        )
+        self.assertTrue(second_repair.accepted, second_repair.feedback)
+        exhausted_failure = replace(
+            failure,
+            request_id="reasoner-location-repair-after-both-fields",
+            graph_revision=env.revision,
+        )
+        env._record_failure_state(
+            (exhausted_failure,),
             current_agent_ids={node.id for node in env.graph.nodes},
         )
 
@@ -6051,11 +6085,14 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             env.graph.relation_bits("reader", "reasoner").source_to_target
         )
         self.assertIn("add_subgraph", env.model_admissible_action_types())
+        add_domain = env.model_admissible_action_targets()["add_subgraph"]
+        self.assertEqual(
+            ["reader"],
+            add_domain["preserved_input_agent_ids"],
+        )
         self.assertIn(
             "format",
-            env.model_admissible_action_targets()["add_subgraph"][
-                "admitted_new_role_families"
-            ],
+            add_domain["admitted_new_role_families"],
         )
 
     async def test_triviaqa_missing_retriever_add_domain_matches_canvas_admission(

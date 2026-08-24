@@ -8272,6 +8272,11 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         }
         invalid_artifact = json.loads(json.dumps(valid_artifact))
         invalid_artifact["entity_identity"]["evidence_surface"] = "Billboard"
+        ordinal_invalid_artifact = json.loads(json.dumps(valid_artifact))
+        ordinal_invalid_artifact["evidence_span"] = "1940, it introduced"
+        ordinal_invalid_artifact["evidence_proposition"]["predicate"] = (
+            "introduced"
+        )
 
         def action(name: str, arguments: object) -> str:
             return json.dumps(
@@ -8323,6 +8328,7 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
                     ),
                     action("read", {"passage_id": "billboard-chart-line"}),
                     action("complete", {"value": invalid_artifact}),
+                    action("complete", {"value": ordinal_invalid_artifact}),
                     action("complete", {"value": valid_artifact}),
                 ]
 
@@ -8335,7 +8341,7 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         response = await QARetrievalReactExecutionAdapter(
             gateway=gateway,
             tool_registry=build_qa_tool_registry(index),
-            max_turns=4,
+            max_turns=5,
             max_tool_calls=16,
             task_type="factual_qa",
             completion_policy="required_evidence",
@@ -8376,7 +8382,122 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             "- none\nCurrently admissible completion schema",
             repair_contract,
         )
+        ordinal_feedback = response.metadata["react_trace"][3][
+            "public_error_code"
+        ]
+        self.assertTrue(
+            ordinal_feedback.startswith("qa_semantic_artifact_invalid:")
+        )
+        self.assertIn("ordinal scope modifier", ordinal_feedback)
+        ordinal_repair_contract = gateway.requests[4].agent.contract
+        self.assertIn("Do not search or read again", ordinal_repair_contract)
+        self.assertIn(
+            "complete public introduction-followed-by sequence",
+            ordinal_repair_contract,
+        )
+        self.assertIn(
+            "- none\nCurrently admissible completion schema",
+            ordinal_repair_contract,
+        )
         self.assertEqual(valid_artifact, json.loads(response.text))
+
+        no_sequence_receipt = {
+            "tool_id": QA_RETRIEVAL_TOOL_ID,
+            "tool_version": "frozen-index-v1",
+            "request": {
+                "action": "read",
+                "arguments": {"passage_id": "billboard-chart-line"},
+            },
+            "result": {
+                "value": {
+                    "operation": "read",
+                    "passage_id": "billboard-chart-line",
+                    "passage": {
+                        "passage_id": "billboard-chart-line",
+                        "title": "Billboard (magazine)",
+                        "text": "1940, it introduced Chart Line.",
+                    },
+                },
+                "completed": True,
+            },
+            "error_type": None,
+        }
+        self.assertFalse(
+            QARetrievalReactExecutionAdapter
+            ._receipt_grounded_sequence_onset_repair_available(
+                original_question=question,
+                artifact=json.dumps(ordinal_invalid_artifact),
+                tool_receipts=[no_sequence_receipt],
+            )
+        )
+        wrong_title_receipt = json.loads(json.dumps(no_sequence_receipt))
+        wrong_title_receipt["result"]["value"]["passage"]["title"] = (
+            "Unrelated magazine"
+        )
+        wrong_title_receipt["result"]["value"]["passage"]["text"] = evidence
+        self.assertFalse(
+            QARetrievalReactExecutionAdapter
+            ._receipt_grounded_sequence_onset_repair_available(
+                original_question=question,
+                artifact=json.dumps(ordinal_invalid_artifact),
+                tool_receipts=[wrong_title_receipt],
+            )
+        )
+
+        classification_adapter = QARetrievalReactExecutionAdapter(
+            gateway=SimpleNamespace(generate=lambda request: None),
+            tool_registry=build_qa_tool_registry(FakeIndex()),
+            max_turns=4,
+            max_tool_calls=10,
+            task_type="factual_qa",
+            completion_policy="required_evidence",
+        )
+
+        def completion_error(receipt: dict[str, object]) -> str:
+            question_token = (
+                classification_adapter._semantic_evidence_retriever_question.set(
+                    question
+                )
+            )
+            protocol_token = (
+                classification_adapter._semantic_evidence_retriever_protocol.set(
+                    QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL
+                )
+            )
+            retrieval_token = (
+                classification_adapter._retrieval_completion_required.set(True)
+            )
+            try:
+                detail = classification_adapter._completion_error(
+                    action=StructuredAction(
+                        kind=ActionKind.COMPLETE,
+                        name="complete",
+                        arguments={"value": ordinal_invalid_artifact},
+                    ),
+                    artifact=json.dumps(ordinal_invalid_artifact),
+                    tool_receipts=[receipt],
+                )
+            finally:
+                classification_adapter._retrieval_completion_required.reset(
+                    retrieval_token
+                )
+                classification_adapter._semantic_evidence_retriever_protocol.reset(
+                    protocol_token
+                )
+                classification_adapter._semantic_evidence_retriever_question.reset(
+                    question_token
+                )
+            self.assertIsNotNone(detail)
+            assert detail is not None
+            return detail
+
+        for receipt in (no_sequence_receipt, wrong_title_receipt):
+            with self.subTest(receipt=receipt):
+                self.assertTrue(
+                    completion_error(receipt).startswith(
+                        "qa_semantic_evidence_provenance_invalid:"
+                    )
+                )
 
     def test_evidence_retriever_rejects_unprovenanced_or_answer_only_artifacts(
         self,

@@ -4062,6 +4062,24 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 "span contiguous and receipt-grounded, and emit a complete action."
             )
         if isinstance(public_error_code, str) and (
+            "Evidence Retriever evidence_span does not preserve the original "
+            "question's ordinal scope modifier"
+            in public_error_code
+            or _QA_ORDINAL_RELATION_SCOPE_MISMATCH in public_error_code
+        ):
+            return (
+                "Preserve the same successful read receipt, passage_id, passage "
+                "title, question_scope, target_relation, and every valid "
+                "structured field. Do not search or read again. Copy one "
+                "contiguous exact body span containing the complete public "
+                "introduction-followed-by sequence from that receipt. Use the "
+                "title-bound body pronoun as entity_identity.evidence_surface "
+                "and the corresponding evidence_proposition subject, then copy "
+                "the exact receipt predicate and its date or year answer-bearing "
+                "argument into the proposition. Repair only the implicated "
+                "fields and emit a complete action."
+            )
+        if isinstance(public_error_code, str) and (
             "Evidence Retriever answer-bearing entity surface is a strict "
             "subset of the resolved passage-title identity"
         ) in public_error_code:
@@ -6820,6 +6838,155 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         )
 
     @staticmethod
+    def _question_surface_binds_passage_title(
+        question_surface: str,
+        passage_title: str,
+    ) -> bool:
+        """Apply the Retriever's existing public title/entity-linking predicate."""
+
+        from .agent_workflow_env import (
+            _PERSON_TITLE_PATTERN,
+            _canonical_evidence_text,
+        )
+
+        canonical_question_surface = _canonical_evidence_text(question_surface)
+        canonical_title = _canonical_evidence_text(passage_title)
+        honorific_normalized_question = re.sub(
+            rf"^(?:{_PERSON_TITLE_PATTERN})\s+",
+            "",
+            canonical_question_surface,
+            count=1,
+            flags=re.IGNORECASE,
+        ).strip()
+        question_name_tokens = frozenset(
+            token
+            for token in _scope_tokens(honorific_normalized_question)
+            if token not in _RELATION_CONTEXT_STOPWORDS and len(token) > 1
+        )
+        title_name_tokens = frozenset(
+            token
+            for token in _scope_tokens(canonical_title)
+            if token not in _RELATION_CONTEXT_STOPWORDS and len(token) > 1
+        )
+        return bool(
+            canonical_title
+            and (
+                canonical_question_surface == canonical_title
+                or (
+                    honorific_normalized_question != canonical_question_surface
+                    and honorific_normalized_question == canonical_title
+                )
+                or (
+                    bool(question_name_tokens)
+                    and question_name_tokens <= title_name_tokens
+                )
+            )
+        )
+
+    @classmethod
+    def _receipt_grounded_sequence_onset_repair_available(
+        cls,
+        *,
+        original_question: str,
+        artifact: str,
+        tool_receipts: Sequence[Mapping[str, object]],
+    ) -> bool:
+        """Prove a completion-only ordinal repair from the cited public read."""
+
+        from .agent_workflow_env import AgentWorkflowEnv
+
+        fields, issue = AgentWorkflowEnv._structured_semantic_fields(
+            artifact,
+            (
+                "question_scope",
+                "entity_identity",
+                "target_relation",
+                "answer_type_constraint",
+                "evidence_proposition",
+                "evidence_span",
+                "passage_id",
+            ),
+        )
+        if issue is not None or fields is None:
+            return False
+        passage_id = fields.get("passage_id")
+        identity = fields.get("entity_identity")
+        target_relation = fields.get("target_relation")
+        if (
+            not isinstance(passage_id, str)
+            or not passage_id.strip()
+            or not isinstance(identity, Mapping)
+            or not isinstance(identity.get("question_surface"), str)
+            or not isinstance(target_relation, str)
+            or "first" not in _question_ordinal_classes(original_question)
+        ):
+            return False
+        publication_onset_class = frozenset({"introduce", "publish"})
+        if not (
+            _surface_uses_relation_class(
+                original_question,
+                publication_onset_class,
+            )
+            and _surface_uses_relation_class(
+                target_relation,
+                publication_onset_class,
+            )
+        ):
+            return False
+        question_surface = identity["question_surface"]
+        assert isinstance(question_surface, str)
+        for receipt in tool_receipts:
+            if not AgentWorkflowEnv._successful_read_receipt(
+                receipt,
+                QA_RETRIEVAL_TOOL_ID,
+            ):
+                continue
+            receipt_request = receipt.get("request")
+            receipt_result = receipt.get("result")
+            if not isinstance(receipt_request, Mapping) or not isinstance(
+                receipt_result,
+                Mapping,
+            ):
+                continue
+            receipt_arguments = receipt_request.get("arguments")
+            value = receipt_result.get("value", receipt_result)
+            if not isinstance(receipt_arguments, Mapping) or not isinstance(
+                value,
+                Mapping,
+            ):
+                continue
+            passage = value.get("passage")
+            if not isinstance(passage, Mapping):
+                continue
+            result_ids = (
+                receipt_arguments.get("passage_id"),
+                value.get("passage_id"),
+                passage.get("passage_id"),
+            )
+            if any(
+                result_id is not None and result_id != passage_id
+                for result_id in result_ids
+            ):
+                continue
+            passage_title = passage.get("title")
+            read_text = AgentWorkflowEnv._successful_read_text(
+                receipt,
+                QA_RETRIEVAL_TOOL_ID,
+            )
+            if (
+                isinstance(passage_title, str)
+                and passage_title.strip()
+                and read_text is not None
+                and cls._question_surface_binds_passage_title(
+                    question_surface,
+                    passage_title,
+                )
+                and _receipt_first_in_sequence_onset(read_text)
+            ):
+                return True
+        return False
+
+    @staticmethod
     def _evidence_retriever_completion_issue(
         *,
         original_question: str,
@@ -6834,7 +7001,6 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
 
         from .agent_workflow_env import (
             AgentWorkflowEnv,
-            _PERSON_TITLE_PATTERN,
             _canonical_evidence_text,
             _evidence_span_matches_read,
         )
@@ -6999,18 +7165,6 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         canonical_subject = _canonical_evidence_text(proposition_subject)
         canonical_predicate = _canonical_evidence_text(proposition_predicate)
         canonical_object = _canonical_evidence_text(proposition_object)
-        honorific_normalized_question = re.sub(
-            rf"^(?:{_PERSON_TITLE_PATTERN})\s+",
-            "",
-            canonical_question_surface,
-            count=1,
-            flags=re.IGNORECASE,
-        ).strip()
-        question_name_tokens = frozenset(
-            token
-            for token in _scope_tokens(honorific_normalized_question)
-            if token not in _RELATION_CONTEXT_STOPWORDS and len(token) > 1
-        )
         title_name_tokens = frozenset(
             token
             for token in _scope_tokens(canonical_title)
@@ -7028,18 +7182,10 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             for token in _scope_tokens(canonical_title_identity)
             if token not in _RELATION_CONTEXT_STOPWORDS and len(token) > 1
         )
-        question_title_binding = bool(
-            canonical_title
-            and (
-                canonical_question_surface == canonical_title
-                or (
-                    honorific_normalized_question != canonical_question_surface
-                    and honorific_normalized_question == canonical_title
-                )
-                or (
-                    bool(question_name_tokens)
-                    and question_name_tokens <= title_name_tokens
-                )
+        question_title_binding = (
+            QARetrievalReactExecutionAdapter._question_surface_binds_passage_title(
+                question_surface,
+                cited_read_title or "",
             )
         )
         evidence_name_tokens = frozenset(
@@ -7517,6 +7663,21 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     ),
                 )
             )
+            ordinal_structure_repair = bool(
+                (
+                    issue.startswith(
+                        "Evidence Retriever evidence_span does not preserve the "
+                        "original question's ordinal scope modifier"
+                    )
+                    or issue.startswith(_QA_ORDINAL_RELATION_SCOPE_MISMATCH)
+                )
+                and self._receipt_grounded_sequence_onset_repair_available(
+                    original_question=evidence_retriever_question,
+                    artifact=artifact,
+                    tool_receipts=tool_receipts,
+                )
+            )
+            structured_repair = structured_repair or ordinal_structure_repair
             if retriever_protocol == "hotpotqa_verified_answer_slot_v1":
                 prefix = (
                     _HOTPOTQA_SEMANTIC_STRUCTURE_ERROR_PREFIX

@@ -1914,6 +1914,18 @@ def director_live_add_subgraph_relation_candidates(
         return ()
     if _live_add_subgraph_isolated_boundary(domain):
         return ()
+    raw_preserved_input_ids = domain.get("preserved_input_agent_ids", ())
+    if (
+        not isinstance(raw_preserved_input_ids, (list, tuple))
+        or any(
+            not isinstance(agent_id, str) or not agent_id
+            for agent_id in raw_preserved_input_ids
+        )
+        or len(raw_preserved_input_ids) != len(set(raw_preserved_input_ids))
+        or not set(raw_preserved_input_ids) <= set(domain["existing_agent_ids"])
+    ):
+        raise ValueError("add_subgraph preserved input Agent IDs are invalid")
+    preserved_input_ids = set(raw_preserved_input_ids)
     role_constraints = domain["role_constraints"]
     roles = _live_existing_agent_roles(domain, role_constraints)
     for agent in normalized_agents:
@@ -2028,7 +2040,11 @@ def director_live_add_subgraph_relation_candidates(
                         "target_to_source": True,
                     }
                 )
-    return tuple(candidates)
+    return tuple(
+        candidate
+        for candidate in candidates
+        if candidate["target_id"] not in preserved_input_ids
+    )
 
 
 def director_live_add_subgraph_agent_declarations_from_text(

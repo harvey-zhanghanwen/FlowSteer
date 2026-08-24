@@ -2615,6 +2615,42 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
             "a reciprocal pair declared wholly inside one ADD remains sampled",
         )
 
+        preserved_domains = json.loads(json.dumps(domains))
+        preserved_domains["add_subgraph"]["preserved_input_agent_ids"] = [
+            "node_1"
+        ]
+        preserved_candidates = director_live_add_subgraph_relation_candidates(
+            preserved_domains,
+            agents,
+        )
+        self.assertFalse(
+            any(
+                candidate["target_id"] == "node_1"
+                for candidate in preserved_candidates
+            ),
+            "ADD must not advertise a new predecessor for a preserved Agent",
+        )
+        self.assertIn(
+            {
+                "source_id": "node_1",
+                "target_id": "node_4",
+                "source_to_target": True,
+                "target_to_source": False,
+            },
+            preserved_candidates,
+            "preserving inputs must not suppress a legal downstream edge",
+        )
+        self.assertIn(
+            {
+                "source_id": "node_3",
+                "target_id": "node_4",
+                "source_to_target": True,
+                "target_to_source": True,
+            },
+            preserved_candidates,
+            "state-conditioned preservation must not prescribe new-Agent topology",
+        )
+
         schema = json.loads(
             director_live_action_parameter_json_schema_text(
                 "add_subgraph",

@@ -89,15 +89,17 @@ _QA_EVIDENCE_RETRIEVER_RECOVERY_COMPLETION = (
     "supported by a matching successful read Tool receipt"
 )
 _QA_LOCATION_REASONER_RECOVERY_CONTRACT = (
-    "preserve the receipt-grounded first-hop location proposition and the "
-    "public location-containment proposition, then bind answer_slot to the "
-    "containing city or town field supported by that same successful read "
-    "Tool receipt"
+    "preserve the receipt-grounded first-hop location proposition as "
+    "evidence_propositions[0], encode the public location-containment "
+    "proposition as evidence_propositions[1], bind answer_slot to "
+    "proposition_index 1 and answer_field object_or_attribute_value, and copy "
+    "that field exactly into candidate_answer"
 )
 _QA_LOCATION_REASONER_RECOVERY_COMPLETION = (
-    "complete only when answer_slot selects the public containment "
-    "proposition's object_or_attribute_value and candidate_answer copies "
-    "that field exactly"
+    "complete only when evidence_propositions[0] is the preserved first hop, "
+    "evidence_propositions[1] is the public containment hop, answer_slot uses "
+    "proposition_index 1 and answer_field object_or_attribute_value, and "
+    "candidate_answer copies that field exactly"
 )
 _QA_ROLE_CONTRACT_RESPONSIBILITIES = {
     "evidence_retriever": (
@@ -3140,6 +3142,9 @@ class AgentWorkflowEnv:
                             }
                             for node in self._graph.nodes
                         ],
+                        "preserved_input_agent_ids": list(
+                            self._preserved_input_agent_ids()
+                        ),
                         "current_output_agent_id": self._graph.output_agent_id,
                         **(
                             {"output_role_families": ["format", "output"]}
@@ -5052,16 +5057,28 @@ class AgentWorkflowEnv:
             recovery_field_values = self._triviaqa_react_recovery_field_values(
                 record.agent_id
             )
+            location_reasoner_recovery_remaining = bool(
+                recovery_field_values
+                and self._graph.has_node(record.agent_id)
+                and (
+                    self._graph.get_node(record.agent_id).role_family or ""
+                ).casefold()
+                == "reasoner"
+                and isinstance(self.runtime.dataset_id, str)
+                and self.runtime.dataset_id.casefold() == "triviaqa"
+            )
             if (
                 category in _BOUNDED_REACT_FAILURE_CATEGORIES
                 and (
                     recovery_field_values == {}
                     or (
-                        baseline_receipt_count is not None
+                        not location_reasoner_recovery_remaining
+                        and baseline_receipt_count is not None
                         and new_receipt_count <= baseline_receipt_count
                     )
                     or (
-                        record.agent_id in self._repair_exhausted_agent_ids
+                        not location_reasoner_recovery_remaining
+                        and record.agent_id in self._repair_exhausted_agent_ids
                         and new_receipt_count <= current_receipt_count
                     )
                 )
@@ -8246,15 +8263,9 @@ class AgentWorkflowEnv:
     ) -> Optional[str]:
         """Protect the dependency identity of revision-live successful artifacts."""
 
-        if self.recovery_policy != _PRESERVE_REPAIR_RECOVERY_POLICY:
-            return None
-        repairable_ids = self._failed_agent_ids | self._unresolved_dirty_agents
+        preserved_input_ids = set(self._preserved_input_agent_ids())
         for node in self._graph.nodes:
-            if (
-                not self._has_successful_artifact(node.id)
-                or node.id in repairable_ids
-                or not candidate.has_node(node.id)
-            ):
+            if node.id not in preserved_input_ids or not candidate.has_node(node.id):
                 continue
             before = tuple(self._graph.directed_predecessors(node.id))
             after = tuple(candidate.directed_predecessors(node.id))
@@ -8274,6 +8285,19 @@ class AgentWorkflowEnv:
                     "Agent is the measured repair target"
                 )
         return None
+
+    def _preserved_input_agent_ids(self) -> Tuple[str, ...]:
+        """Return successful Agents whose current input identity is immutable."""
+
+        if self.recovery_policy != _PRESERVE_REPAIR_RECOVERY_POLICY:
+            return ()
+        repairable_ids = self._failed_agent_ids | self._unresolved_dirty_agents
+        return tuple(
+            node.id
+            for node in self._graph.nodes
+            if self._has_successful_artifact(node.id)
+            and node.id not in repairable_ids
+        )
 
     def _terminal_unreachable_agent_ids(self) -> Tuple[str, ...]:
         """Project the existing complete-graph reachability diagnosis.

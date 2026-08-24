@@ -1100,3 +1100,33 @@ turning `introduce` into a global publication synonym. The existing entity,
 relation, exact-span, Tool-receipt and Verifier boundaries remain authoritative.
 Director prompt v6, Agent roles, action vocabulary, model-visible topology
 search space, training state and Skill state are unchanged.
+
+The v54 live Stable Zero gate failed `1/3`; the ordered fixed-128 evaluation
+was therefore not run. The persisted trajectories show successful public reads
+for both failed tasks, followed respectively by a partially consumed Reasoner
+repair domain and an ordinal evidence-artifact error incorrectly routed back to
+retrieval. This is execution evidence for v55, not a v2 benchmark score.
+
+The v55 bounded post-read repair continues to reuse FlowSteer's accepted
+Canvas edit -> execute -> feedback transaction, exact live action-domain
+projection and Canvas admission, together with SkillFlow's bounded
+`StructuredAction -> ToolResult -> Observation` continuation and immutable
+public read receipt. Keeping a receipt-conditioned Reasoner's remaining
+atomic `modify_agent` field admissible, and excluding new predecessors of a
+successful preserved Agent from the projected ADD relation targets, are
+`PROJECT_NECESSARY_ADAPTATION` at the existing recovery/action-mask boundary.
+They do not prescribe a topology: legal outgoing edges from the preserved
+Agent, relations among new Agents, fan-in and reciprocal new-Agent relations
+remain in the search space.
+
+The v55 ordinal route reuses the same Evidence Retriever title/entity-linking
+predicate and `_receipt_first_in_sequence_onset` validator already used for
+completion admission. Only a matching successful read whose title binds the
+question entity and whose body contains the complete introduction/followed-by
+chronology can turn the measured ordinal error into completion-only structured
+repair. Missing chronology or title binding remains evidence recovery. This
+field-specific public Observation is a necessary TriviaQA adapter; it does not
+read Ground Truth, accepted answers or evaluator output and does not relax the
+official evaluator. Director prompt v6, action vocabulary, Agent role domain,
+model catalog, topology search space, training state and Skill state remain
+unchanged.

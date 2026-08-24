@@ -63,7 +63,7 @@ with HTTP 403; no existing branch was overwritten.
 
 ### Verified without a live model
 
-- The current complete unit suite passes: 958 tests and 177 subtests across
+- The current complete unit suite passes: 990 tests and 184 subtests across
   AgentGraph, Runtime, Tool adapter, gateway prompts, Director action domains,
   configuration, records, collector, evaluator and reporting.  The only
   warning is the existing Pydantic class-config deprecation in
@@ -1150,9 +1150,52 @@ not a global `publish == introduce` synonym. The complete v54 static suite
 passes 990 tests and 182 subtests. This is an interface/regression result; the
 fresh v54 Stable Zero gate must pass before fixed-128 execution is admitted.
 
+The fresh v54 Stable Zero gate subsequently failed `1/3`, so the ordered
+fixed-128 evaluation was not started. `triviaqa:tc_1` explicitly finished with
+`Sinclair Lewis` at official EM/F1 `1.0/1.0`. `triviaqa:tc_3` and
+`triviaqa:tc_5` both ended at `canvas_action_domain_exhausted` with
+`final_answer=null` and official EM/F1 `0.0/0.0`; collection failures were
+zero. `tc_3` had public reads for both Judi Dench -> Heworth and Heworth ->
+York, but the receipt-conditioned Reasoner repair exhausted after changing
+only one of its two structured fields. `tc_5` had the correct Billboard read,
+but its ordinal artifact error was routed back to retrieval after the public
+receipt already proved title binding and the `introduced ... followed by ...`
+sequence. These are failed-gate diagnostics, not a fixed-128 v2 score.
+
+### v55 bounded post-read repair
+
+v55 keeps Director prompt v6, Canvas actions and the model-visible topology
+search space unchanged. For the `tc_3` failure, each receipt-conditioned
+Reasoner contract/completion candidate now carries the complete public
+proposition-order and answer-slot binding obligation. Applying one discrete
+field leaves the other field in the same existing atomic `modify_agent`
+domain; the Agent is marked repair-exhausted only after both fields have been
+applied and the same typed failure recurs. A successful preserved Agent is
+also published in the live ADD domain as an immutable input target, so the
+Director cannot sample a new predecessor that Canvas admission must reject;
+legal downstream and new-Agent graph edges remain available.
+
+For the `tc_5` failure, the existing Evidence Retriever validator remains
+strict. Only when the cited successful read matches `passage_id`, the original
+question entity binds the public passage title, the requested first-publication
+relation remains aligned, and the full read body passes the existing
+`introduced ... followed by ...` onset predicate is an ordinal artifact error
+routed to structured completion repair. The public ReAct Observation asks the
+same Agent to preserve the read receipt and copy a contiguous chronology span,
+title-bound pronoun, exact predicate and date/year argument; search/read remain
+available when either the chronology signal or title binding is absent. This
+is receipt-conditioned `preserve -> diagnose -> repair`, not a Director prompt
+template or an evaluator relaxation.
+
+The complete v55 static suite passes 990 tests and 184 subtests, including
+negative cases for a read without `followed by` and for a non-binding passage
+title. Training, LoRA updates, MACE, Bayesian posterior updates and Skills
+remain disabled. A fresh three-task Stable Zero gate is required before the
+ordered fixed-128 evaluation can start.
+
 ### Stable Zero status
 
-Static architecture, 946 unit tests, 177 subtests and the current frozen
+Static architecture, 990 unit tests, 184 subtests and the current frozen
 data-selection preconditions are complete.  The initial, r2, r3 and r4 canaries failed for
 the documented causes; r5 **passed Stable Zero** but its incomplete fixed-128
 run was stopped after measured recovery defects appeared.  Recovery revision
@@ -1209,8 +1252,9 @@ fixed-128 v2 score is inferred from unit tests, canaries or failed diagnostics.
 The later v51 three-task gate failed because `tc_3` exhausted the Canvas after
 the measured answer-slot/recovery defect above. v53 later failed its fresh
 three-task gate `1/3` for the measured answer-slot and evidence-artifact defects
-above; v54 must pass a new three-task gate before any fixed-128 execution is
-admitted.
+above. v54 also failed its fresh three-task gate `1/3` for the bounded
+post-read repair defects documented above; v55 must pass a new three-task gate
+before any fixed-128 execution is admitted.
 
 ## Historical comparison condition
 
