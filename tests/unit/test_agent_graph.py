@@ -8877,6 +8877,14 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
                 "action": "modify_agent",
                 "agent_id": "reasoner",
                 "contract": (
+                    "Verify the candidate answer 'Meridian Archive' against "
+                    "the routed evidence"
+                ),
+            },
+            {
+                "action": "modify_agent",
+                "agent_id": "reasoner",
+                "contract": (
                     "Resolve entity 'Sinclair' to 'Joseph C. Lincoln' before "
                     "forming the evidence proposition"
                 ),
@@ -9105,6 +9113,73 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(revision, env.revision)
         self.assertEqual([], gateway.requests)
+
+    async def test_triviaqa_contract_rejects_external_entity_without_losing_qualifier(
+        self,
+    ) -> None:
+        registry = make_registry()
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_trivia_semantic_runtime(
+                registry,
+                _ImmediateGateway(),
+            ),
+            problem=(
+                "Which American-born Sinclair won the Nobel Prize for "
+                "Literature in 1930?"
+            ),
+            execute_on_edit=False,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+        )
+        external_entity = await env.step(
+            json.dumps(
+                {
+                    "action": "add_subgraph",
+                    "agents": [
+                        {
+                            "agent_id": "retriever",
+                            "model_id": "balanced",
+                            "contract": (
+                                "search for and read passages regarding "
+                                "Nicolas Sinclair Nobel Prize"
+                            ),
+                            "role_family": "evidence_retriever",
+                            "allowed_tools": [QA_RETRIEVAL_TOOL_ID],
+                            "execution_mode": "react",
+                        }
+                    ],
+                    "relations": [],
+                }
+            )
+        )
+        self.assertFalse(external_entity.accepted)
+        self.assertIn("pre-execution obligations only", external_entity.feedback)
+        self.assertFalse(env.graph.has_node("retriever"))
+
+        faithful_scope = await env.step(
+            json.dumps(
+                {
+                    "action": "add_subgraph",
+                    "agents": [
+                        {
+                            "agent_id": "retriever",
+                            "model_id": "balanced",
+                            "contract": (
+                                "find the American-born Nobel Prize winner in "
+                                "Literature for 1930"
+                            ),
+                            "role_family": "evidence_retriever",
+                            "allowed_tools": [QA_RETRIEVAL_TOOL_ID],
+                            "execution_mode": "react",
+                        }
+                    ],
+                    "relations": [],
+                }
+            )
+        )
+        self.assertTrue(faithful_scope.accepted, faithful_scope.feedback)
 
     async def test_triviaqa_contract_literals_ignore_short_evidence_fragments(
         self,

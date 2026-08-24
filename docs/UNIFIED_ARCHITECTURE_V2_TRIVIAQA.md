@@ -675,7 +675,7 @@ profiles remain available only when they are legal in the current
 Canvas observation no longer repeats `optional_role_capabilities`.
 
 The v5 prompt and its compact-history policy remain versioned and replayable.
-The fixed-128 condition is separately frozen to v6/Tool v42 under a new output
+The fixed-128 condition is separately frozen to v6/Tool v43 under a new output
 root, selects the same 128 development tasks in the same order, and keeps
 training, GRPO, Skills and policy synchronization disabled.  The earlier
 v6/Tool-v41 canary was stopped before any trajectory completed after the
@@ -684,10 +684,10 @@ not implement the requested complete semantic lineage.  Its interruption
 receipt remains isolated in the old artifact root and is not an evaluation
 result.
 
-### v42 required semantic lineage and evidence-before-reasoning gate
+### v43 required semantic lineage and evidence-before-reasoning gate
 
 The shared QA Runtime already contained the strict evidence-to-answer lineage
-used by the HotpotQA architecture.  Tool v42 reuses that implementation when
+used by the HotpotQA architecture.  Tool v43 reuses that implementation when
 the existing `require_format_agent` configuration is true; it does not add a
 separate TriviaQA workflow.  A terminal revision now requires an executed,
 artifact-version-consistent `Evidence Retriever -> Reasoner -> Verifier ->
@@ -718,15 +718,33 @@ measured concrete Tool-argument variants that escaped r56 (`limit of N` and an
 explicit query symbol/operator), while continuing to admit neutral query-
 rewriting and adaptive top-k responsibilities.
 
-The complete static suite passed `945` tests and `177` subtests.  Prepare-only
+The first v42 diagnostic trajectory completed `triviaqa:tc_1` with official
+EM/F1 `1.0/1.0` and an executed four-responsibility lineage.  It also exposed
+an inconsistent contract gate: two question-faithful `American-born`
+obligations were rejected after the qualifier moved beside a different head
+noun, while a question-external `Nicolas Sinclair` entity precommit was
+accepted.  The latter did not expose Ground Truth and the public Retriever
+eventually corrected it through real search/read receipts, but the v42
+condition was rejected and the remaining canary tasks were cancelled.
+
+v43 changes only that pre-execution admission boundary.  A hyphenated
+qualifier already present in the immutable question remains legal when a
+contract paraphrases the responsibility.  A multi-token proper-name phrase
+that introduces a token absent from the question is rejected as an entity
+precommit, and an explicit `candidate answer '...'` literal is rejected even
+when its text occurs in the question.  Neutral entity disambiguation, query
+rewriting and adaptive top-k responsibilities remain legal; exact Tool
+arguments remain owned by the state-conditioned StructuredAction schema.
+
+The complete static suite passed `946` tests and `177` subtests.  Prepare-only
 selected the same 128 task IDs, questions and Ground Truth values in the same
 order (`triviaqa:tc_1` through `triviaqa:tc_223`) as the frozen comparison
-condition.  No v42 canary or fixed-128 score is inferred from these static
+condition.  No v43 canary or fixed-128 score is inferred from these static
 checks.
 
 ### Stable Zero status
 
-Static architecture, 945 unit tests, 177 subtests and the current frozen
+Static architecture, 946 unit tests, 177 subtests and the current frozen
 data-selection preconditions are complete.  The initial, r2, r3 and r4 canaries failed for
 the documented causes; r5 **passed Stable Zero** but its incomplete fixed-128
 run was stopped after measured recovery defects appeared.  Recovery revision

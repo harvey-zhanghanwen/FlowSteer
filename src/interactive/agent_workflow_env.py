@@ -5491,7 +5491,7 @@ class AgentWorkflowEnv:
                         obligation,
                     )
                     if question_contains(head)
-                    and not question_contains(f"{phrase} {head}")
+                    and not question_contains(phrase)
                 )
             if question_external_numeric or question_external_modifiers:
                 return (
@@ -5618,9 +5618,37 @@ class AgentWorkflowEnv:
                 break
             if any(
                 literal.strip().casefold() not in allowed_protocol_literals
-                and not question_contains(literal)
                 for literal in directive_literals
             ):
+                break
+
+            # A multi-token proper-name phrase that introduces at least one
+            # token absent from the immutable question is a concrete entity
+            # precommit, even when the contract avoids explicit answer words.
+            # This closes the measured ``Nicolas Sinclair`` narrowing without
+            # rejecting a reordered responsibility description made entirely
+            # from question terms.  Tool/Agent protocol names remain ordinary
+            # execution vocabulary rather than task entities.
+            operational_named_phrases = {
+                "agent graph",
+                "evidence retriever",
+                "flow director",
+                "ground truth",
+                "structured action",
+                "tool receipt",
+            }
+            question_token_set = set(question_tokens)
+            external_named_phrases = tuple(
+                phrase
+                for phrase in self._context_named_phrases(obligation)
+                if phrase.casefold() not in operational_named_phrases
+                and not question_contains(phrase)
+                and any(
+                    token not in question_token_set
+                    for token in self._lexical_tokens(phrase)
+                )
+            )
+            if external_named_phrases:
                 break
 
             # A copied evidence sentence need not contain a named entity.  Six
