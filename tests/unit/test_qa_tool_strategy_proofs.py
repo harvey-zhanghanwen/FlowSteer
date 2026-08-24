@@ -32,8 +32,8 @@ QUERIES = (
     "Chart Weekly magazine first publish American hit chart decade",
     "Chart Weekly magazine first published American hit chart decade",
     "Chart Weekly magazine first publication American hit chart decade",
-    "Chart Weekly magazine first publication American hit chart history decade",
-    "Chart Weekly magazine first publication American hit parade history decade",
+    "Chart Weekly magazine first publication American hit chart decade publish",
+    "Chart Weekly magazine first publication American hit parade decade publish",
 )
 
 
@@ -96,7 +96,9 @@ OBSERVATIONS = (
         limit=15,
         passage_id="public-2",
         title="Chart Weekly",
-        snippet="Chart Weekly magazine first published an American hit chart.",
+        snippet=(
+            "Chart Weekly magazine first published an American hit chart."
+        ),
     ),
     search_observation(
         QUERIES[3],
@@ -247,7 +249,7 @@ class QAToolStrategyProofTests(unittest.TestCase):
                 self.assertFalse(record.tool_transition_verified)
                 self.assertFalse(record.verified)
 
-    def test_recall_expansion_inherits_unverified_query_proof_and_zero_is_false(
+    def test_recall_expansion_inherits_adjacent_transition_proof_and_zero_is_false(
         self,
     ) -> None:
         unsupported_initial = search_observation(
@@ -280,10 +282,10 @@ class QAToolStrategyProofTests(unittest.TestCase):
             ),
         )
 
-        self.assertFalse(records[1].query_variant_verified)
+        self.assertTrue(records[1].query_variant_verified)
         self.assertFalse(records[2].strategy_advanced)
-        self.assertFalse(records[2].query_variant_verified)
-        self.assertFalse(records[2].verified)
+        self.assertTrue(records[2].query_variant_verified)
+        self.assertTrue(records[2].verified)
 
         adapter = QARetrievalReactExecutionAdapter(
             gateway=SimpleNamespace(generate=lambda agent_request: None),
@@ -308,13 +310,25 @@ class QAToolStrategyProofTests(unittest.TestCase):
                 "Chart Weekly magazine first published an American hit chart."
             ),
         )
+        shifted = tuple(
+            search_observation(
+                query,
+                limit=limit,
+                passage_id=f"shifted-{index}",
+                title="Chart Weekly",
+                snippet=OBSERVATIONS[index]["result"]["hits"][0]["snippet"],
+            )
+            for index, (query, limit) in enumerate(
+                zip(QUERIES[1:], (15, 20, 25, 25)),
+                start=1,
+            )
+        )
         records = _factual_retrieval_attempt_records(
             original_question=QUESTION,
             search_observations=(
                 OBSERVATIONS[0],
                 recall_expansion,
-                OBSERVATIONS[1],
-                *OBSERVATIONS[2:],
+                *shifted,
             ),
         )
 
@@ -325,7 +339,7 @@ class QAToolStrategyProofTests(unittest.TestCase):
                 None,
                 "spelling_normalization",
                 "alias_expansion",
-                "entity_disambiguation",
+                "query_rewriting",
                 "alias_expansion",
             ),
             tuple(record.required_strategy for record in records),
@@ -339,11 +353,11 @@ class QAToolStrategyProofTests(unittest.TestCase):
             tuple(record.recall_expansion for record in records),
         )
         self.assertEqual(
-            (5, 10, 10, 15, 20, 25),
+            (5, 10, 15, 20, 25, 25),
             tuple(record.required_top_k for record in records),
         )
         self.assertEqual(
-            (5, 10, 10, 15, 20, 25),
+            (5, 10, 15, 20, 25, 25),
             tuple(record.observed_top_k for record in records),
         )
         self.assertTrue(all(record.verified for record in records))
@@ -493,6 +507,211 @@ class QAToolStrategyProofTests(unittest.TestCase):
         self.assertEqual("alias_expansion", records[1].required_strategy)
         self.assertNotEqual("spelling_normalization", proofs[1].strategy)
 
+    def test_tc5_snippet_grounded_relation_context_is_query_rewriting(
+        self,
+    ) -> None:
+        previous_query = (
+            "Chart Weekly magazine first publish American hit chart decade"
+        )
+        rewritten_query = previous_query + " publication"
+        prior = search_observation(
+            previous_query,
+            limit=5,
+            passage_id="tc5-prior",
+            title="Chart Weekly",
+            snippet=(
+                "Chart Weekly magazine made the first publication of an "
+                "American hit chart."
+            ),
+        )
+        current = search_observation(
+            rewritten_query,
+            limit=10,
+            passage_id="tc5-current",
+            title="Chart Weekly",
+            snippet=(
+                "Chart Weekly magazine first published an American hit chart."
+            ),
+        )
+
+        proofs = _factual_strategy_proofs(
+            original_question=QUESTION,
+            distinct_queries=(previous_query, rewritten_query),
+            search_observations=(prior, current),
+        )
+
+        self.assertEqual(2, len(proofs))
+        self.assertEqual("query_rewriting", proofs[1].strategy)
+        self.assertTrue(proofs[1].verified)
+        self.assertEqual(("tc5-prior",), proofs[1].source_passage_ids)
+
+    def test_query_rewriting_rejects_snippet_proper_name_as_relation_context(
+        self,
+    ) -> None:
+        previous_query = (
+            "Chart Weekly magazine first publish American hit chart decade"
+        )
+        rewritten_query = previous_query + " Lewis"
+        prior = search_observation(
+            previous_query,
+            limit=5,
+            passage_id="rewrite-prior",
+            title="Chart Weekly",
+            snippet=(
+                "Chart Weekly magazine first published an American hit chart; "
+                "Lewis discussed it."
+            ),
+        )
+        current = search_observation(
+            rewritten_query,
+            limit=10,
+            passage_id="rewrite-current",
+            title="Chart Weekly",
+            snippet=(
+                "Chart Weekly magazine first published an American hit chart."
+            ),
+        )
+
+        proofs = _factual_strategy_proofs(
+            original_question=QUESTION,
+            distinct_queries=(previous_query, rewritten_query),
+            search_observations=(prior, current),
+        )
+
+        self.assertFalse(proofs[1].verified)
+        self.assertEqual("unverified_strategy_attempt", proofs[1].proof_strength)
+
+    def test_query_rewriting_can_only_delete_question_syntax_noise(self) -> None:
+        noisy_query = (
+            "In which decade did Chart Weekly magazine first publish an "
+            "American hit chart"
+        )
+        concise_query = (
+            "decade Chart Weekly magazine first publish American hit chart"
+        )
+        prior = search_observation(
+            noisy_query,
+            limit=5,
+            passage_id="delete-prior",
+            title="Chart Weekly",
+            snippet=(
+                "Chart Weekly magazine first published an American hit chart."
+            ),
+        )
+        current = search_observation(
+            concise_query,
+            limit=10,
+            passage_id="delete-current",
+            title="Chart Weekly",
+            snippet=(
+                "Chart Weekly magazine first published an American hit chart."
+            ),
+        )
+
+        proofs = _factual_strategy_proofs(
+            original_question=QUESTION,
+            distinct_queries=(noisy_query, concise_query),
+            search_observations=(prior, current),
+        )
+
+        self.assertEqual("query_rewriting", proofs[1].strategy)
+        self.assertTrue(proofs[1].verified)
+
+    def test_generic_relation_rewrite_requires_local_public_snippet_context(
+        self,
+    ) -> None:
+        question = "When did Aurora premiere?"
+        previous_query = "Aurora premiere"
+        rewritten_query = "Aurora premiere debuted"
+        prior = search_observation(
+            previous_query,
+            limit=5,
+            passage_id="generic-rewrite-prior",
+            title="Aurora",
+            snippet="Aurora premiered and debuted at the festival.",
+        )
+        current = search_observation(
+            rewritten_query,
+            limit=10,
+            passage_id="generic-rewrite-current",
+            title="Aurora",
+            snippet="Aurora debuted at the festival.",
+        )
+
+        proofs = _factual_strategy_proofs(
+            original_question=question,
+            distinct_queries=(previous_query, rewritten_query),
+            search_observations=(prior, current),
+        )
+
+        self.assertEqual("query_rewriting", proofs[1].strategy)
+        self.assertTrue(proofs[1].verified)
+        self.assertEqual(
+            ("generic-rewrite-prior",),
+            proofs[1].source_passage_ids,
+        )
+
+    def test_local_snippet_proximity_cannot_replace_the_question_predicate(
+        self,
+    ) -> None:
+        question = "When did Aurora premiere?"
+        previous_query = "Aurora premiere"
+        drifted_query = "Aurora festival"
+        prior = search_observation(
+            previous_query,
+            limit=5,
+            passage_id="generic-drift-prior",
+            title="Aurora",
+            snippet="Aurora premiered at the festival.",
+        )
+        current = search_observation(
+            drifted_query,
+            limit=10,
+            passage_id="generic-drift-current",
+            title="Aurora",
+            snippet="Aurora appeared at the festival.",
+        )
+
+        proofs = _factual_strategy_proofs(
+            original_question=question,
+            distinct_queries=(previous_query, drifted_query),
+            search_observations=(prior, current),
+        )
+
+        self.assertEqual("query_rewriting", proofs[1].strategy)
+        self.assertFalse(proofs[1].verified)
+        self.assertEqual(
+            "unverified_strategy_attempt",
+            proofs[1].proof_strength,
+        )
+
+    def test_recall_expansion_has_attempt_record_but_no_strategy_proof(
+        self,
+    ) -> None:
+        expanded = search_observation(
+            QUERIES[0],
+            limit=10,
+            passage_id="expanded",
+            title="Chart Weekly",
+            snippet=(
+                "Chart Weekly magazine first published an American hit chart."
+            ),
+        )
+        proofs = _factual_strategy_proofs(
+            original_question=QUESTION,
+            distinct_queries=QUERIES[:2],
+            search_observations=(OBSERVATIONS[0], OBSERVATIONS[1]),
+        )
+        records = _factual_retrieval_attempt_records(
+            original_question=QUESTION,
+            search_observations=(OBSERVATIONS[0], expanded, OBSERVATIONS[1]),
+        )
+
+        self.assertEqual(2, len(proofs))
+        self.assertEqual(3, len(records))
+        self.assertIsNone(records[1].required_strategy)
+        self.assertTrue(records[1].recall_expansion)
+
     def test_knowledge_base_coverage_requires_complete_valid_schedule(self) -> None:
         diagnose = QARetrievalReactExecutionAdapter._factual_exhaustion_diagnosis
 
@@ -512,11 +731,100 @@ class QAToolStrategyProofTests(unittest.TestCase):
                 strategy_semantics_verified=True,
                 successful_search_hit_counts=(0, 0, 0, 0, 0),
                 tool_error_count=0,
+                verified_strategy_coverage=(
+                    "initial_retrieval",
+                    "spelling_normalization",
+                    "alias_expansion",
+                    "entity_disambiguation",
+                    "query_rewriting",
+                ),
+            ),
+        )
+        self.assertEqual(
+            "retrieval_strategy_failure",
+            diagnose(
+                strategy_progress_count=5,
+                strategy_semantics_verified=True,
+                successful_search_hit_counts=(0, 0, 0, 0, 0),
+                tool_error_count=0,
+                verified_strategy_coverage=(
+                    "initial_retrieval",
+                    "query_rewriting",
+                    "query_rewriting",
+                    "query_rewriting",
+                    "query_rewriting",
+                ),
             ),
         )
 
 
 class QAToolInvalidActionDispatchTests(unittest.IsolatedAsyncioTestCase):
+    async def test_live_recall_expansion_matches_replay_for_five_ten_fifteen(
+        self,
+    ) -> None:
+        query = QUERIES[0]
+
+        def action(limit: int) -> str:
+            return json.dumps(
+                {
+                    "kind": "tool",
+                    "name": "search",
+                    "resource_id": QA_RETRIEVAL_TOOL_ID,
+                    "skill_id": None,
+                    "arguments": {"query": query, "limit": limit},
+                }
+            )
+
+        class Gateway:
+            def __init__(self) -> None:
+                self.outputs = [action(5), action(10), action(15)]
+                self.schema_limits: list[int] = []
+                self.contracts: list[str] = []
+
+            async def generate(self, agent_request: AgentRequest) -> AgentResponse:
+                self.contracts.append(agent_request.agent.contract)
+                schema = json.loads(
+                    agent_request.model.metadata["response_json_schema"]
+                )
+                branches = schema.get("oneOf", [schema])
+                search_branch = next(
+                    branch
+                    for branch in branches
+                    if branch["properties"]["name"].get("const") == "search"
+                )
+                self.schema_limits.append(
+                    search_branch["properties"]["arguments"]["properties"]
+                    ["limit"]["const"]
+                )
+                return AgentResponse(self.outputs.pop(0))
+
+        index = CountingIndex()
+        gateway = Gateway()
+        adapter = QARetrievalReactExecutionAdapter(
+            gateway=gateway,
+            tool_registry=build_qa_tool_registry(index),
+            max_turns=3,
+            max_tool_calls=8,
+            task_type="factual_qa",
+            completion_policy="required_evidence",
+        )
+
+        with self.assertRaises(ReactExecutionError) as caught:
+            await adapter.execute(request())
+
+        self.assertEqual([(query, 5), (query, 10), (query, 15)], index.search_calls)
+        self.assertEqual([5, 10, 15], gateway.schema_limits)
+        self.assertIn(
+            "at each strictly larger required top_k",
+            gateway.contracts[1],
+        )
+        self.assertNotIn("may be repeated once", gateway.contracts[1])
+        records = caught.exception.react_trace[-1][
+            "terminal_failure_diagnosis"
+        ]["retrieval_attempts"]
+        self.assertEqual([5, 10, 15], [record["required_top_k"] for record in records])
+        self.assertEqual([False, True, True], [record["recall_expansion"] for record in records])
+
     async def test_invalid_spelling_action_does_not_dispatch_or_advance(self) -> None:
         def action(query: str, limit: int) -> str:
             return json.dumps(

@@ -1,8 +1,9 @@
 # Fixed 128-sample TriviaQA development evaluation for the topology-neutral
 # unified_architecture_v2 Director prompt v6, required semantic lineage, and
-# Tool/Canvas contract v52 with receipt-grounded transition-level retrieval
-# strategy observability, state-conditioned location answer-slot binding,
-# role-local Tool continuation, and typed Reasoner recovery attribution.
+# Tool/Canvas contract v53 with transition-evidence retrieval strategy
+# admission, live/replay-consistent recall expansion, state-conditioned
+# location answer-slot binding, role-local Tool continuation, and typed
+# Reasoner recovery attribution.
 # Director prompt v6 remains topology-neutral.
 # The sequential selection freezes the original aligned development order.  The
 # first three selected tasks form the Stable Zero canary when --canary-only is
@@ -14,15 +15,15 @@ experiment:
   name: "triviaqa_unified_architecture_v2_fixed128"
   phase: "triviaqa_evaluation"
   baseline_id: "triviaqa_unified_architecture_v2"
-  step_id: "fixed128_v6_v52_transition_grounded_recovery"
+  step_id: "fixed128_v6_v53_transition_evidence_policy"
   training_enabled: false
   seed: 20260817
-  condition_id: "triviaqa_unified_architecture_v2_fixed128_v6_v52_transition_grounded_recovery"
-  sampling_schedule_purpose: "triviaqa_fixed128_development_v6_v52_transition_grounded_recovery"
+  condition_id: "triviaqa_unified_architecture_v2_fixed128_v6_v53_transition_evidence_policy"
+  sampling_schedule_purpose: "triviaqa_fixed128_development_v6_v53_transition_evidence_policy"
   catalog_order_namespace: "unified_architecture_v2"
   prompt_version: "agentgraph.director.qa-semantic-recovery.v6"
-  tool_version: "skillflow.qa-retrieval.factual-semantic-retry.v52"
-  output_dir: "artifacts/unified_architecture_v2/triviaqa_fixed128_v6_v52_transition_grounded_recovery_20260824"
+  tool_version: "skillflow.qa-retrieval.factual-semantic-retry.v53"
+  output_dir: "artifacts/unified_architecture_v2/triviaqa_fixed128_v6_v53_transition_evidence_policy_20260824"
 
 data:
   catalog_path: "config/joint_qa_partitions_v2.yaml"
@@ -56,7 +57,7 @@ triviaqa_evaluation:
 
 qa_tool_runtime:
   enabled: true
-  condition_id: "triviaqa_unified_architecture_v2_fixed128_v6_v52_transition_grounded_recovery"
+  condition_id: "triviaqa_unified_architecture_v2_fixed128_v6_v53_transition_evidence_policy"
   mode: "model_driven_search_read"
   passage_source: "external_corpus"
   dataset_scope: ["triviaqa"]
@@ -69,17 +70,17 @@ qa_tool_runtime:
 
 storage:
   schema_version: "flowsteer.completion_benchmark.round.v1"
-  root: "artifacts/unified_architecture_v2/triviaqa_fixed128_v6_v52_transition_grounded_recovery_20260824/evidence"
-  selected_tasks_path: "artifacts/unified_architecture_v2/triviaqa_fixed128_v6_v52_transition_grounded_recovery_20260824/selected_tasks.jsonl"
-  direct_predictions_path: "artifacts/unified_architecture_v2/triviaqa_fixed128_v6_v52_transition_grounded_recovery_20260824/direct_question_only_predictions.jsonl"
-  trajectories_path: "artifacts/unified_architecture_v2/triviaqa_fixed128_v6_v52_transition_grounded_recovery_20260824/agentgraph_trajectories.jsonl"
-  failures_path: "artifacts/unified_architecture_v2/triviaqa_fixed128_v6_v52_transition_grounded_recovery_20260824/collection_failures.jsonl"
-  paired_results_path: "artifacts/unified_architecture_v2/triviaqa_fixed128_v6_v52_transition_grounded_recovery_20260824/paired_results.jsonl"
-  wrong_demos_path: "artifacts/unified_architecture_v2/triviaqa_fixed128_v6_v52_transition_grounded_recovery_20260824/wrong_demos.jsonl"
-  manifest_path: "artifacts/unified_architecture_v2/triviaqa_fixed128_v6_v52_transition_grounded_recovery_20260824/run_manifest.json"
-  preflight_receipt_path: "artifacts/unified_architecture_v2/triviaqa_fixed128_v6_v52_transition_grounded_recovery_20260824/preflight_receipt.json"
-  report_json_path: "reports/unified_architecture_v2/triviaqa_fixed128_v6_v52_transition_grounded_recovery_20260824_report.json"
-  report_markdown_path: "reports/unified_architecture_v2/triviaqa_fixed128_v6_v52_transition_grounded_recovery_20260824_report.md"
+  root: "artifacts/unified_architecture_v2/triviaqa_fixed128_v6_v53_transition_evidence_policy_20260824/evidence"
+  selected_tasks_path: "artifacts/unified_architecture_v2/triviaqa_fixed128_v6_v53_transition_evidence_policy_20260824/selected_tasks.jsonl"
+  direct_predictions_path: "artifacts/unified_architecture_v2/triviaqa_fixed128_v6_v53_transition_evidence_policy_20260824/direct_question_only_predictions.jsonl"
+  trajectories_path: "artifacts/unified_architecture_v2/triviaqa_fixed128_v6_v53_transition_evidence_policy_20260824/agentgraph_trajectories.jsonl"
+  failures_path: "artifacts/unified_architecture_v2/triviaqa_fixed128_v6_v53_transition_evidence_policy_20260824/collection_failures.jsonl"
+  paired_results_path: "artifacts/unified_architecture_v2/triviaqa_fixed128_v6_v53_transition_evidence_policy_20260824/paired_results.jsonl"
+  wrong_demos_path: "artifacts/unified_architecture_v2/triviaqa_fixed128_v6_v53_transition_evidence_policy_20260824/wrong_demos.jsonl"
+  manifest_path: "artifacts/unified_architecture_v2/triviaqa_fixed128_v6_v53_transition_evidence_policy_20260824/run_manifest.json"
+  preflight_receipt_path: "artifacts/unified_architecture_v2/triviaqa_fixed128_v6_v53_transition_evidence_policy_20260824/preflight_receipt.json"
+  report_json_path: "reports/unified_architecture_v2/triviaqa_fixed128_v6_v53_transition_evidence_policy_20260824_report.json"
+  report_markdown_path: "reports/unified_architecture_v2/triviaqa_fixed128_v6_v53_transition_evidence_policy_20260824_report.md"
 
 director:
   base_model: "${QWEN35_9B_MODEL_PATH:-/home/test/SKILLEV/skillev-new-b2-temp/model/Qwen3.5-9B-modelscope}"

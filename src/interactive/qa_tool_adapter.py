@@ -237,6 +237,22 @@ _FACTUAL_QA_RETRIEVAL_STRATEGY_GUIDANCE = {
 }
 _FACTUAL_QA_SEARCH_LIMITS = (5, 10, 15, 20, 25)
 
+
+def _factual_transition_frontier_guidance(strategy_progress_count: int) -> str:
+    """Describe legal retrieval transitions without an ordinal role template."""
+
+    if strategy_progress_count <= 0:
+        return _FACTUAL_QA_RETRIEVAL_STRATEGY_GUIDANCE["initial_retrieval"]
+    return (
+        "Choose one adjacent public-evidence-supported spelling normalization, "
+        "alias expansion, entity disambiguation, or query rewriting transition. "
+        "A query rewrite may remove only question syntax/noise while preserving "
+        "content-bearing tokens, or add relation context copied from a prior "
+        "mirror-valid snippet that binds entity, relation, and scope. The "
+        "transition label is derived after execution from adjacent public "
+        "Action--Observation receipts, never from attempt order."
+    )
+
 # PROJECT_NECESSARY_ADAPTATION: SkillFlow's lexical RetrievalIndex compiles
 # every query token into the FTS5/BM25 match expression.  A policy that copies
 # an action-mask label such as ``alias_expansion`` into ``query`` therefore
@@ -327,6 +343,26 @@ _CONTROLLED_RELATION_PARAPHRASE_CLASSES = (
     frozenset({"come", "from", "originate"}),
 )
 
+# Retrieval-query paraphrases are discovery actions, not evidence entailment.
+# Keep their lexical admission separate from the stricter proposition-level
+# relation classes above: ``birthplace`` can be useful for retrieving evidence
+# about where someone comes from, but does not by itself prove that the person
+# was born there.
+_RETRIEVAL_QUERY_RELATION_PARAPHRASE_CLASSES = (
+    *_CONTROLLED_RELATION_PARAPHRASE_CLASSES,
+    frozenset(
+        {
+            "birth",
+            "birthplace",
+            "born",
+            "come",
+            "from",
+            "originate",
+            "origin",
+        }
+    ),
+)
+
 # PROJECT_NECESSARY_ADAPTATION: SkillFlow intentionally leaves retrieval-query
 # lexical choice to the policy.  The bounded factual-QA schedule nevertheless
 # needs an answer-free way to verify that ``alias_expansion`` and
@@ -355,6 +391,9 @@ _RETRIEVAL_QUERY_RELATION_CLASS_LOSS = (
 )
 _RETRIEVAL_QUERY_ENTITY_ANCHOR_LOSS = (
     "qa_retrieval_query_entity_anchor_loss"
+)
+_RETRIEVAL_QUERY_NAMED_SCOPE_LOSS = (
+    "qa_retrieval_query_named_scope_loss"
 )
 
 _RELATION_CONTEXT_STOPWORDS = frozenset(
@@ -415,6 +454,22 @@ _QUESTION_ANCHOR_WH_WORDS = frozenset(
         "when",
         "why",
         "how",
+    }
+)
+
+# PROJECT_NECESSARY_ADAPTATION: a query-rewrite transition may remove only
+# question syntax that does not carry entity, relation, answer-slot scope, or
+# ordinal content.  This list is linguistic and benchmark-answer-free; public
+# search receipts remain the authority for any newly introduced context term.
+_QUERY_REWRITE_NOISE_TOKENS = frozenset(
+    {
+        *_RELATION_FUNCTION_WORDS,
+        *_QUESTION_ANCHOR_WH_WORDS,
+        "answer",
+        "give",
+        "please",
+        "question",
+        "tell",
     }
 )
 
@@ -1803,9 +1858,236 @@ def _query_transition_is_inflectional_normalization(
     return not unmatched
 
 
+def _query_transition_is_ordinal_surface_normalization(
+    previous_query: str,
+    query: str,
+) -> bool:
+    """Recognize an answer-free replacement within one ordinal class."""
+
+    previous_tokens = _scope_tokens(previous_query)
+    query_tokens = _scope_tokens(query)
+    if (
+        not previous_tokens
+        or _retrieval_query_term_set_signature(previous_query)
+        == _retrieval_query_term_set_signature(query)
+    ):
+        return False
+
+    def canonical_multiset(tokens: Sequence[str]) -> tuple[str, ...]:
+        return tuple(
+            sorted(_ORDINAL_SCOPE_CANONICAL.get(token, token) for token in tokens)
+        )
+
+    return canonical_multiset(previous_tokens) == canonical_multiset(query_tokens)
+
+
+def _query_transition_is_controlled_relation_paraphrase(
+    *,
+    original_question: str,
+    previous_query: str,
+    query: str,
+) -> bool:
+    """Verify a question-grounded relation paraphrase without answer injection.
+
+    Both adjacent queries and the original question must realize one controlled
+    linguistic relation class.  Outside that class, the transition may only
+    delete question syntax or restore tokens already published by the question.
+    """
+
+    question_tokens = _scope_tokens(original_question)
+
+    def token_is_question_backed(token: str) -> bool:
+        return any(
+            _relation_token_variants(token)
+            & _relation_token_variants(question_token)
+            for question_token in question_tokens
+        )
+
+    def residual_tokens(
+        surface: str,
+        relation_class: frozenset[str],
+    ) -> list[str]:
+        return [
+            token
+            for token in _scope_tokens(surface)
+            if not (_relation_token_variants(token) & relation_class)
+        ]
+
+    for relation_class in _RETRIEVAL_QUERY_RELATION_PARAPHRASE_CLASSES:
+        if not all(
+            _surface_uses_relation_class(surface, relation_class)
+            for surface in (original_question, previous_query, query)
+        ):
+            continue
+        previous_relation_tokens = {
+            token
+            for token in _scope_tokens(previous_query)
+            if _relation_token_variants(token) & relation_class
+        }
+        query_relation_tokens = {
+            token
+            for token in _scope_tokens(query)
+            if _relation_token_variants(token) & relation_class
+        }
+        if previous_relation_tokens == query_relation_tokens:
+            continue
+        previous_residual = residual_tokens(previous_query, relation_class)
+        remaining_query_residual = residual_tokens(query, relation_class)
+        removed_tokens: list[str] = []
+        for token in previous_residual:
+            try:
+                remaining_query_residual.remove(token)
+            except ValueError:
+                removed_tokens.append(token)
+        if any(
+            token not in _QUERY_REWRITE_NOISE_TOKENS
+            for token in removed_tokens
+        ):
+            continue
+        if all(
+            token_is_question_backed(token)
+            for token in remaining_query_residual
+        ):
+            return True
+    return False
+
+
+def _question_retrieval_relation_context_tokens(
+    original_question: str,
+) -> tuple[str, ...]:
+    """Project answer-free relation/scope content from the public question."""
+
+    question_tokens = _scope_tokens(original_question)
+    entity_anchor = _question_entity_anchor_tokens(original_question)
+    content = tuple(
+        token
+        for token in question_tokens
+        if token not in _RELATION_CONTEXT_STOPWORDS
+        and token not in _ORDINAL_SCOPE_CANONICAL
+        and not any(
+            _relation_token_variants(token)
+            & _relation_token_variants(anchor)
+            for anchor in entity_anchor
+        )
+    )
+    if content:
+        return content
+    return tuple(
+        token
+        for token in question_tokens
+        if token not in _RELATION_CONTEXT_STOPWORDS
+        and token not in _ORDINAL_SCOPE_CANONICAL
+    )
+
+
+def _question_named_constraint_tokens(
+    original_question: str,
+) -> frozenset[str]:
+    """Return explicit question-side named scope tokens outside the entity."""
+
+    entity_anchor = _question_entity_anchor_tokens(original_question)
+    named: set[str] = set()
+    for index, match in enumerate(
+        re.finditer(
+            r"[^\W\d_]+(?:[-'’][^\W\d_]+)*",
+            unicodedata.normalize("NFKC", original_question),
+            flags=re.UNICODE,
+        )
+    ):
+        surface = match.group(0)
+        token = surface.casefold()
+        if (
+            not surface[:1].isupper()
+            or (index == 0 and token in _QUESTION_ANCHOR_WH_WORDS)
+            or token in _RELATION_CONTEXT_STOPWORDS
+            or any(
+                _relation_token_variants(token)
+                & _relation_token_variants(anchor)
+                for anchor in entity_anchor
+            )
+        ):
+            continue
+        named.add(token)
+    return frozenset(named)
+
+
+def _missing_question_named_constraints(
+    original_question: str,
+    candidate_surface: str,
+) -> tuple[str, ...]:
+    candidate_tokens = _scope_tokens(candidate_surface)
+    return tuple(
+        constraint
+        for constraint in sorted(
+            _question_named_constraint_tokens(original_question)
+        )
+        if not any(
+            _relation_token_variants(constraint)
+            & _relation_token_variants(candidate)
+            for candidate in candidate_tokens
+        )
+    )
+
+
+def _snippet_relation_context_supports_tokens(
+    *,
+    snippet: str,
+    added_tokens: Sequence[str],
+    relation_context_tokens: Sequence[str],
+) -> bool:
+    """Verify lowercase relation context near a question relation anchor.
+
+    This is a conservative public-receipt lexical check, not semantic
+    entailment.  It rejects Title-Case entity/value import and requires every
+    newly introduced token to occur in the same clause and local window as a
+    question-derived relation/scope token.
+    """
+
+    if not added_tokens or not relation_context_tokens:
+        return False
+    for clause in re.split(r"[.!?;]+", unicodedata.normalize("NFKC", snippet)):
+        raw_tokens = re.findall(
+            r"[^\W\d_]+(?:[-'’][^\W\d_]+)*",
+            clause,
+            flags=re.UNICODE,
+        )
+        normalized_tokens = tuple(token.casefold() for token in raw_tokens)
+        anchor_positions = tuple(
+            index
+            for index, token in enumerate(normalized_tokens)
+            if any(
+                _relation_token_variants(token)
+                & _relation_token_variants(anchor)
+                for anchor in relation_context_tokens
+            )
+        )
+        if not anchor_positions:
+            continue
+        supported = True
+        for added in added_tokens:
+            added_positions = tuple(
+                index
+                for index, token in enumerate(normalized_tokens)
+                if _relation_token_variants(token)
+                & _relation_token_variants(added)
+                and raw_tokens[index][:1].islower()
+            )
+            if not added_positions or not any(
+                abs(added_index - anchor_index) <= 6
+                for added_index in added_positions
+                for anchor_index in anchor_positions
+            ):
+                supported = False
+                break
+        if supported:
+            return True
+    return False
+
+
 def _public_title_transition_support(
     *,
     original_question: str,
+    previous_query: str,
     query: str,
     prior_observation: Mapping[str, object] | None,
 ) -> tuple[bool, tuple[str, ...]]:
@@ -1821,7 +2103,11 @@ def _public_title_transition_support(
     if not transition_verified or not isinstance(raw_hits, list):
         return False, ()
     query_tokens = _scope_tokens(query)
+    previous_query_tokens = _scope_tokens(previous_query)
     entity_anchor = _question_entity_anchor_tokens(original_question)
+    relation_context_tokens = _question_retrieval_relation_context_tokens(
+        original_question
+    )
     source_ids: list[str] = []
     for hit in raw_hits:
         if not isinstance(hit, Mapping):
@@ -1841,6 +2127,20 @@ def _public_title_transition_support(
         public_surface = f"{title} {snippet}"
         if (
             title_tokens
+            and not any(
+                tuple(
+                    previous_query_tokens[
+                        offset : offset + len(title_tokens)
+                    ]
+                )
+                == title_tokens
+                for offset in range(
+                    max(
+                        0,
+                        len(previous_query_tokens) - len(title_tokens) + 1,
+                    )
+                )
+            )
             and any(
                 tuple(query_tokens[offset : offset + len(title_tokens)])
                 == title_tokens
@@ -1852,6 +2152,12 @@ def _public_title_transition_support(
                 not entity_anchor
                 or _surface_binds_entity_anchor(public_surface, entity_anchor)
             )
+            and any(
+                _relation_token_variants(public_token)
+                & _relation_token_variants(context_token)
+                for public_token in _scope_tokens(public_surface)
+                for context_token in relation_context_tokens
+            )
             and not _missing_required_relation_classes(
                 original_question,
                 public_surface,
@@ -1860,6 +2166,140 @@ def _public_title_transition_support(
                 original_question,
                 public_surface,
             )
+        ):
+            source_ids.append(passage_id.strip())
+    return bool(source_ids), tuple(dict.fromkeys(source_ids))
+
+
+def _query_rewriting_transition_support(
+    *,
+    original_question: str,
+    previous_query: str,
+    query: str,
+    prior_observation: Mapping[str, object] | None,
+) -> tuple[bool, tuple[str, ...]]:
+    """Verify one answer-free rewrite from adjacent public search state.
+
+    A rewrite either deletes only question syntax/noise while retaining every
+    content-bearing query token, or adds lexical context copied from a prior
+    mirror-valid snippet that itself binds the unchanged entity, relation and
+    scope.  Ground truth, accepted aliases and evaluator state are not inputs.
+    """
+
+    if not isinstance(prior_observation, Mapping):
+        return False, ()
+    prior_verified, verified_passage_ids = _public_search_transition_mirror(
+        prior_observation
+    )
+    if not prior_verified:
+        return False, ()
+    if (
+        not _surface_binds_entity_anchor(
+            query,
+            _question_entity_anchor_tokens(original_question),
+        )
+        or _missing_required_relation_classes(original_question, query)
+        or _missing_question_scope_modifiers(original_question, query)
+        or (
+            not _missing_question_named_constraints(
+                original_question,
+                previous_query,
+            )
+            and _missing_question_named_constraints(
+                original_question,
+                query,
+            )
+        )
+    ):
+        return False, ()
+
+    previous_tokens = list(_scope_tokens(previous_query))
+    query_tokens = list(_scope_tokens(query))
+    remaining_query_tokens = list(query_tokens)
+    removed_tokens: list[str] = []
+    for token in previous_tokens:
+        try:
+            remaining_query_tokens.remove(token)
+        except ValueError:
+            removed_tokens.append(token)
+    added_tokens = tuple(remaining_query_tokens)
+    if not removed_tokens and not added_tokens:
+        return False, ()
+    relation_context_tokens = _question_retrieval_relation_context_tokens(
+        original_question
+    )
+    named_constraint_tokens = _question_named_constraint_tokens(
+        original_question
+    )
+    content_removed_tokens = tuple(
+        token
+        for token in removed_tokens
+        if token not in _QUERY_REWRITE_NOISE_TOKENS
+    )
+    if any(
+        token in named_constraint_tokens
+        or not any(
+            _relation_token_variants(token)
+            & _relation_token_variants(context_token)
+            for context_token in relation_context_tokens
+        )
+        for token in content_removed_tokens
+    ):
+        return False, ()
+    if not added_tokens:
+        return (not content_removed_tokens), ()
+    if any(
+        token in _QUERY_REWRITE_NOISE_TOKENS
+        or token in _FACTUAL_QA_STRATEGY_METAWORDS
+        or not re.search(r"[^\W\d_]", token, flags=re.UNICODE)
+        for token in added_tokens
+    ):
+        return False, ()
+
+    question_tokens = _scope_tokens(original_question)
+    receipt_conditioned_added_tokens = tuple(
+        token
+        for token in added_tokens
+        if not any(
+            _relation_token_variants(token)
+            & _relation_token_variants(question_token)
+            for question_token in question_tokens
+        )
+    )
+    if not receipt_conditioned_added_tokens:
+        return (not content_removed_tokens), ()
+    # Local snippet co-occurrence can justify additive discovery context, but
+    # it cannot prove that an arbitrary new token is synonymous with a removed
+    # predicate. Predicate replacement remains limited to the inflectional,
+    # ordinal-equivalence and controlled same-predicate branches above.
+    if content_removed_tokens:
+        return False, ()
+
+    result = prior_observation.get("result")
+    raw_hits = result.get("hits") if isinstance(result, Mapping) else None
+    if not isinstance(raw_hits, list):
+        return False, ()
+    entity_anchor = _question_entity_anchor_tokens(original_question)
+    source_ids: list[str] = []
+    for hit in raw_hits:
+        if not isinstance(hit, Mapping):
+            continue
+        passage_id = hit.get("passage_id")
+        snippet = hit.get("snippet")
+        if (
+            not isinstance(passage_id, str)
+            or passage_id.strip() not in verified_passage_ids
+            or not isinstance(snippet, str)
+            or not snippet.strip()
+            or not _surface_binds_entity_anchor(snippet, entity_anchor)
+            or _missing_required_relation_classes(original_question, snippet)
+            or _missing_question_scope_modifiers(original_question, snippet)
+        ):
+            continue
+        if _snippet_relation_context_supports_tokens(
+            snippet=snippet,
+            added_tokens=receipt_conditioned_added_tokens,
+            relation_context_tokens=relation_context_tokens,
         ):
             source_ids.append(passage_id.strip())
     return bool(source_ids), tuple(dict.fromkeys(source_ids))
@@ -1887,12 +2327,25 @@ def _factual_transition_strategy_identification(
         original_question,
         query,
     )
+    named_scope_preserved = bool(
+        _missing_question_named_constraints(
+            original_question,
+            previous_query or "",
+        )
+        or not _missing_question_named_constraints(
+            original_question,
+            query,
+        )
+    )
     relation_preserved = not _missing_required_relation_classes(
         original_question,
         query,
     )
     invariants_verified = bool(
-        entity_preserved and scope_preserved and relation_preserved
+        entity_preserved
+        and scope_preserved
+        and named_scope_preserved
+        and relation_preserved
     )
     if previous_query is None:
         return "initial_retrieval", invariants_verified, ()
@@ -1909,27 +2362,53 @@ def _factual_transition_strategy_identification(
         # added; do not duplicate one transition into two proof records.
         return "alias_expansion", invariants_verified, ()
 
-    title_supported, source_ids = _public_title_transition_support(
-        original_question=original_question,
-        query=query,
-        prior_observation=prior_observation,
-    )
     if _query_transition_is_inflectional_normalization(
         previous_query,
         query,
     ):
-        return (
-            "spelling_normalization",
-            bool(invariants_verified and title_supported),
-            source_ids,
+        return "spelling_normalization", invariants_verified, ()
+
+    if _query_transition_is_ordinal_surface_normalization(
+        previous_query,
+        query,
+    ):
+        return "query_rewriting", invariants_verified, ()
+
+    if _query_transition_is_controlled_relation_paraphrase(
+        original_question=original_question,
+        previous_query=previous_query,
+        query=query,
+    ):
+        return "alias_expansion", invariants_verified, ()
+
+    rewrite_supported, rewrite_source_ids = (
+        _query_rewriting_transition_support(
+            original_question=original_question,
+            previous_query=previous_query,
+            query=query,
+            prior_observation=prior_observation,
         )
+    )
+    if rewrite_supported:
+        return (
+            "query_rewriting",
+            invariants_verified,
+            rewrite_source_ids,
+        )
+
+    title_supported, source_ids = _public_title_transition_support(
+        original_question=original_question,
+        previous_query=previous_query,
+        query=query,
+        prior_observation=prior_observation,
+    )
 
     previous_tokens = set(_scope_tokens(previous_query))
     query_tokens = set(_scope_tokens(query))
-    if query_tokens - previous_tokens:
+    if query_tokens - previous_tokens and title_supported:
         return (
             "entity_disambiguation",
-            bool(invariants_verified and title_supported),
+            invariants_verified,
             source_ids,
         )
 
@@ -2045,6 +2524,44 @@ def _public_search_transition_mirror(
     return verified, tuple(passage_ids) if verified else ()
 
 
+def _public_read_transition_mirror(
+    observation: Mapping[str, object],
+) -> tuple[bool, str | None]:
+    """Verify one public SkillFlow read Action--Observation mirror."""
+
+    executed_action = observation.get("executed_action")
+    result = observation.get("result")
+    if not isinstance(executed_action, Mapping) or not isinstance(result, Mapping):
+        return False, None
+    arguments = executed_action.get("arguments")
+    passage = result.get("passage")
+    if not isinstance(arguments, Mapping) or not isinstance(passage, Mapping):
+        return False, None
+    action_passage_id = arguments.get("passage_id")
+    result_passage_id = result.get("passage_id", passage.get("passage_id"))
+    passage_passage_id = passage.get("passage_id")
+    passage_text = passage.get("text")
+    verified = bool(
+        observation.get("observation_status") == "success"
+        and executed_action.get("kind") == "tool"
+        and executed_action.get("name") == "read"
+        and executed_action.get("resource_id") == QA_RETRIEVAL_TOOL_ID
+        and set(arguments) == {"passage_id"}
+        and isinstance(action_passage_id, str)
+        and bool(action_passage_id.strip())
+        and isinstance(result_passage_id, str)
+        and action_passage_id == result_passage_id
+        and (
+            passage_passage_id is None
+            or passage_passage_id == action_passage_id
+        )
+        and result.get("operation") == "read"
+        and isinstance(passage_text, str)
+        and bool(passage_text.strip())
+    )
+    return verified, passage_text.strip() if verified else None
+
+
 def _factual_strategy_proofs(
     *,
     original_question: str,
@@ -2107,6 +2624,7 @@ def _factual_strategy_proofs(
                 "tool_receipt_conditioned_strategy_attempt"
                 if strategy
                 in {"spelling_normalization", "entity_disambiguation"}
+                or (strategy == "query_rewriting" and bool(source_ids))
                 else "deterministic_relation_invariant_strategy_attempt"
                 if strategy in {"alias_expansion", "query_rewriting"}
                 else "question_invariant_strategy_attempt"
@@ -2183,11 +2701,12 @@ def _factual_retrieval_attempt_records(
             else None
         )
         signature = _retrieval_query_term_set_signature(query_variant)
-        strategy_index = min(
-            len(distinct_signatures),
-            len(_FACTUAL_QA_RETRIEVAL_STRATEGIES) - 1,
-        )
-        required_top_k = _FACTUAL_QA_SEARCH_LIMITS[strategy_index]
+        # Replay the same monotonic search-attempt schedule admitted live.  A
+        # same-query recall expansion consumes the next top-k (5 -> 10 -> 15)
+        # without consuming or fabricating a distinct strategy label.
+        required_top_k = _FACTUAL_QA_SEARCH_LIMITS[
+            min(attempt_index - 1, len(_FACTUAL_QA_SEARCH_LIMITS) - 1)
+        ]
         query_transition_advanced = bool(
             query_variant and signature not in distinct_signatures
         )
@@ -2216,15 +2735,6 @@ def _factual_retrieval_attempt_records(
             # recall but deliberately does not claim completion of the next
             # spelling/alias/disambiguation/rewrite strategy.
             prior_limits = prior_top_ks_by_signature.get(signature, [])
-            if prior_limits:
-                required_top_k = next(
-                    (
-                        limit
-                        for limit in _FACTUAL_QA_SEARCH_LIMITS
-                        if limit > max(prior_limits)
-                    ),
-                    _FACTUAL_QA_SEARCH_LIMITS[-1],
-                )
             query_variant_verified = bool(
                 distinct_signatures
                 and signature == distinct_signatures[-1]
@@ -2797,6 +3307,28 @@ class _RequiredEvidenceState:
         )
 
     @property
+    def verified_strategy_coverage(self) -> tuple[str, ...]:
+        """Return the unordered set of receipt-verified strategy labels."""
+
+        covered = {
+            proof.strategy for proof in self.strategy_proofs if proof.verified
+        }
+        return tuple(
+            strategy
+            for strategy in _FACTUAL_QA_RETRIEVAL_STRATEGIES
+            if strategy in covered
+        )
+
+    @property
+    def missing_strategy_coverage(self) -> tuple[str, ...]:
+        covered = frozenset(self.verified_strategy_coverage)
+        return tuple(
+            strategy
+            for strategy in _FACTUAL_QA_RETRIEVAL_STRATEGIES
+            if strategy not in covered
+        )
+
+    @property
     def retrieval_attempts_verified(self) -> bool:
         return (
             bool(self.retrieval_attempts)
@@ -3258,6 +3790,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         strategy_semantics_verified: bool,
         successful_search_hit_counts: Sequence[int],
         tool_error_count: int,
+        verified_strategy_coverage: Sequence[str] | None = None,
     ) -> str:
         """Classify the measured bounded retrieval schedule.
 
@@ -3268,11 +3801,24 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         relation-aligned successful read receipt.
         """
 
+        required_strategy_coverage = frozenset(
+            _FACTUAL_QA_RETRIEVAL_STRATEGIES
+        )
+        measured_strategy_coverage = (
+            frozenset(verified_strategy_coverage)
+            if verified_strategy_coverage is not None
+            else None
+        )
         if (
             strategy_progress_count
             < len(_FACTUAL_QA_RETRIEVAL_STRATEGIES)
             or tool_error_count > 0
             or not strategy_semantics_verified
+            or (
+                measured_strategy_coverage is not None
+                and not required_strategy_coverage
+                <= measured_strategy_coverage
+            )
         ):
             return _RETRIEVAL_STRATEGY_FAILURE
         if any(hit_count > 0 for hit_count in successful_search_hit_counts):
@@ -3610,9 +4156,9 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 "entity-and-relation query with a distinct FTS term set for the "
                 "current retrieval strategy; reordering the same terms is not a "
                 "new strategy. A "
-                "repeat of only the latest query is admitted once at the strictly "
-                "larger top_k required by the action schema as recall expansion, "
-                "but it does not advance retrieval-strategy progress. Do not "
+                "repeat of only the latest query is admitted at each strictly "
+                "larger top_k required by the bounded action schema as recall "
+                "expansion, but it does not advance retrieval-strategy progress. Do not "
                 "repeat a prior (query, top_k) pair or cycle to an older query."
             )
         if public_error_code == _RETRIEVAL_QUERY_CANDIDATE_INJECTION:
@@ -3641,6 +4187,16 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 "ordinal into an unscoped relation."
             )
         if isinstance(public_error_code, str) and public_error_code.startswith(
+            _RETRIEVAL_QUERY_NAMED_SCOPE_LOSS
+        ):
+            return (
+                "Preserve all successful Tool receipts, the original entity, and "
+                "the requested relation. Restore every explicit named scope "
+                "constraint copied from the question and listed by the public "
+                "error. Do not broaden a nationality, jurisdiction, language, or "
+                "other named restriction into an unscoped relation."
+            )
+        if isinstance(public_error_code, str) and public_error_code.startswith(
             _RETRIEVAL_QUERY_RELATION_CLASS_LOSS
         ):
             return (
@@ -3666,15 +4222,18 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             return (
                 "Preserve all successful Tool receipts, the public entity anchor, "
                 "every ordinal scope modifier, and every question-derived strong "
-                "relation class. Execute the required bounded strategy by replacing "
-                "one requested-relation surface with a same-predicate alternative "
-                "listed in required_relation_surface_alternatives while preserving "
-                "the other relation classes. If the public error names "
+                "relation class. Choose one still-uncovered strategy from "
+                "missing_strategy_coverage and express it through a distinct, "
+                "answer-free adjacent query transition supported by the public "
+                "question or the latest mirror-valid search receipt. Do not repeat a "
+                "covered strategy while another remains. If the public error names "
                 "remaining_relation_classes, replace at least one of those classes "
-                "and consult remaining_relation_transformation_classes in the "
-                "current public Tool continuation state. Do not merely append the "
-                "alternate surface, retain both surfaces, or reorder the existing "
-                "FTS terms."
+                "with a same-predicate alternative while preserving every other "
+                "relation and scope constraint; consult "
+                "remaining_relation_transformation_classes in the current public "
+                "continuation state. Do not merely append an alternate "
+                "surface, retain both surfaces, import a candidate answer, or reorder "
+                "the existing FTS terms."
             )
         repair_kind = cls._semantic_rejection_kind(public_error_code)
         if repair_kind is not None:
@@ -3967,8 +4526,12 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             ):
                 latest_successful_operation = "read"
                 latest_successful_read_index = observation_index
+                read_transition_verified, _ = _public_read_transition_mirror(
+                    observation
+                )
                 if (
                     location_relation_grounding_pending
+                    and read_transition_verified
                     and isinstance(
                         latest_location_containment_repair_anchor,
                         str,
@@ -5022,18 +5585,15 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             required_relation_alternatives = (
                 _question_relation_surface_alternatives(original_question)
             )
-            strategy = self._factual_retrieval_strategy(
-                state.strategy_progress_count
-            )
-            strategy_guidance = _FACTUAL_QA_RETRIEVAL_STRATEGY_GUIDANCE[
-                strategy
-            ]
             argument_properties["query"] = {
                 "type": "string",
                 "minLength": 1,
                 "description": (
-                    "A focused entity-and-relation query for retrieval strategy "
-                    f"{strategy}. {strategy_guidance} To advance this strategy, "
+                    "A focused entity-and-relation query. "
+                    + _factual_transition_frontier_guidance(
+                        state.strategy_progress_count
+                    )
+                    + " To advance retrieval, "
                     "change at least one normalized lexical item and keep both "
                     "the target entity and requested relation represented. Use "
                     "every explicit ordinal scope class from the original "
@@ -5053,17 +5613,17 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     "content-bearing entity/relation terms rather than generic "
                     "question syntax or auxiliary noise, and do not import an "
                     "unrelated topic from a returned hit. Its normalized FTS "
-                    "term set must differ from every prior strategy query; term "
+                    "term set must differ from every prior distinct query; term "
                     "reordering is not a strategy change. Repeating only the latest "
                     "normalized query at the required larger top_k is a recall "
                     "expansion and does not advance strategy progress. Express "
-                    "the strategy through a changed lexical entity/relation surface; "
+                    "a transition through a changed lexical entity/relation surface; "
                     "do not include an orchestration strategy name or metaword in query."
                 ),
             }
             argument_properties["limit"] = {
                 "const": self._factual_search_limit(
-                    state.strategy_progress_count
+                    state.search_attempt_count
                 )
             }
             return schema
@@ -5113,18 +5673,12 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                         answer_slot_properties = answer_slot.get("properties")
                         if isinstance(answer_slot_properties, dict):
                             read_evidence_texts = tuple(
-                                passage_text.strip()
+                                passage_text
                                 for observation in observations
-                                if observation.get("observation_status")
-                                == "success"
-                                for result in (observation.get("result"),)
-                                if isinstance(result, Mapping)
-                                and result.get("operation") == "read"
-                                for passage in (result.get("passage"),)
-                                if isinstance(passage, Mapping)
-                                for passage_text in (passage.get("text"),)
-                                if isinstance(passage_text, str)
-                                and passage_text.strip()
+                                for verified, passage_text in (
+                                    _public_read_transition_mirror(observation),
+                                )
+                                if verified and passage_text is not None
                             )
                             answer_field = (
                                 _location_resolution_answer_field_constraint(
@@ -5324,21 +5878,36 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             state.strategy_progress_count
             >= len(_FACTUAL_QA_RETRIEVAL_STRATEGIES)
         )
+        transition_admissible = bool(
+            not schedule_exhausted
+            and state.semantic_repair_kind != "structure"
+        )
         strategy = (
-            None
-            if schedule_exhausted or state.semantic_repair_kind == "structure"
-            else self._factual_retrieval_strategy(
-                state.strategy_progress_count
-            )
+            "initial_retrieval"
+            if transition_admissible and state.strategy_progress_count == 0
+            else None
+        )
+        remaining_transition_strategies = tuple(
+            candidate
+            for candidate in state.missing_strategy_coverage
+            if candidate != "initial_retrieval"
         )
         public_state = {
             "required_strategy": strategy,
             "required_top_k": (
                 None
-                if strategy is None
+                if not transition_admissible
                 else self._factual_search_limit(
-                    state.strategy_progress_count
+                    state.search_attempt_count
                 )
+            ),
+            "admissible_transition_strategies": (
+                list(remaining_transition_strategies)
+                + ["recall_expansion"]
+                if transition_admissible and state.strategy_progress_count > 0
+                else ["initial_retrieval"]
+                if transition_admissible
+                else []
             ),
             "prior_normalized_queries": list(
                 dict.fromkeys(state.normalized_search_queries)
@@ -5375,6 +5944,12 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             "strategy_semantics_verified": (
                 state.strategy_semantics_verified
             ),
+            "verified_strategy_coverage": list(
+                state.verified_strategy_coverage
+            ) if state.strategy_progress_count > 0 else [],
+            "missing_strategy_coverage": list(
+                state.missing_strategy_coverage
+            ) if state.strategy_progress_count > 0 else [],
             "strategy_semantics_prefix": list(state.strategy_semantics),
             "strategy_proofs": [
                 proof.to_value() for proof in state.strategy_proofs
@@ -5645,6 +6220,11 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     strategy_semantics_verified=diagnosis_semantics_verified,
                     successful_search_hit_counts=diagnosis_hit_counts,
                     tool_error_count=state.tool_error_count,
+                    verified_strategy_coverage=(
+                        None
+                        if location_containment_repair
+                        else state.verified_strategy_coverage
+                    ),
                 )
                 repair_kind = {
                     _KNOWLEDGE_BASE_COVERAGE_FAILURE: "coverage",
@@ -5662,9 +6242,13 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     ),
                     "recall_expansion_count": state.recall_expansion_count,
                     "retrieval_strategy_schedule_prefix": list(
-                        _FACTUAL_QA_RETRIEVAL_STRATEGIES[
-                            : state.strategy_progress_count
-                        ]
+                        proof.strategy for proof in state.strategy_proofs
+                    ),
+                    "verified_retrieval_strategy_coverage": list(
+                        state.verified_strategy_coverage
+                    ),
+                    "missing_retrieval_strategy_coverage": list(
+                        state.missing_strategy_coverage
                     ),
                     "normalized_query_novelty_verified": (
                         state.recall_expansion_count == 0
@@ -6002,14 +6586,11 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 and (QA_RETRIEVAL_TOOL_ID, "read") in admitted_actions
                 and (QA_RETRIEVAL_TOOL_ID, "search") in admitted_actions
             ):
-                strategy = self._factual_retrieval_strategy(
+                transition_guidance = _factual_transition_frontier_guidance(
                     evidence_state.strategy_progress_count
                 )
-                strategy_guidance = _FACTUAL_QA_RETRIEVAL_STRATEGY_GUIDANCE[
-                    strategy
-                ]
                 expected_top_k = self._factual_search_limit(
-                    evidence_state.strategy_progress_count
+                    evidence_state.search_attempt_count
                 )
                 evidence_continuation += (
                     "The latest public search candidates do not by themselves bind "
@@ -6017,12 +6598,14 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     "every receipt. Inspect the title/snippet candidates and either "
                     "read one exact unread passage_id when its title and snippet "
                     "jointly support entity identity, relation, and scope modifiers, "
-                    "or, when none does, issue a new qa-retrieval search for "
-                    f"strategy `{strategy}` with limit exactly {expected_top_k}. "
-                    "For search, "
-                    + strategy_guidance
-                    + " The query must be a distinct, answer-free entity-and-"
-                    "relation reformulation; do not copy a strategy label into it. "
+                    "or, when none does, issue a new qa-retrieval search with "
+                    f"limit exactly {expected_top_k}. For search, "
+                    + transition_guidance
+                    + " The query must either be a distinct, answer-free entity-and-"
+                    "relation reformulation, or repeat only the latest normalized "
+                    "query at each strictly larger required top_k in the bounded "
+                    "schedule as recall expansion. Recall expansion does not advance "
+                    "strategy coverage. Do not copy a strategy label into query. "
                     "For read, arguments contains only one passage_id from: "
                     + json.dumps(searched_passage_ids, ensure_ascii=False)
                     + ". Public candidates from the latest successful search are: "
@@ -6077,40 +6660,37 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 )
             else:
                 if self._unified_factual_protocol(request):
-                    strategy = self._factual_retrieval_strategy(
-                        evidence_state.strategy_progress_count
-                    )
-                    strategy_guidance = (
-                        _FACTUAL_QA_RETRIEVAL_STRATEGY_GUIDANCE[strategy]
+                    transition_guidance = (
+                        _factual_transition_frontier_guidance(
+                            evidence_state.strategy_progress_count
+                        )
                     )
                     expected_top_k = self._factual_search_limit(
-                        evidence_state.strategy_progress_count
+                        evidence_state.search_attempt_count
                     )
                     evidence_continuation += (
-                        "The next action must be qa-retrieval search using the "
-                        f"bounded retrieval strategy `{strategy}` at attempt "
-                        f"{evidence_state.strategy_progress_count + 1}, with limit "
+                        "The next action must be qa-retrieval search with limit "
                         f"exactly {expected_top_k}. Preserve the original semantic "
                         "scope and answer slot while reformulating only the "
-                        "entity/relation query according to this strategy. Current "
-                        "strategy semantics: "
-                        + strategy_guidance
+                        "entity/relation query. "
+                        + transition_guidance
                         + " A returned title may be reused as an exact entity anchor "
                         "only when that title and its snippet jointly identify the "
                         "target entity/topic; never import an anchor from an "
                         "irrelevant subtype or subtopic. If that supported title "
                         "anchor is retained but its passage misses the requested "
                         "relation, change only the relation surface. Express the "
-                        "strategy through the changed "
+                        "transition through the changed "
                         "lexical entity/relation surface; never copy a strategy label "
-                        "or metaword into query. To advance the current strategy, the "
+                        "or metaword into query. To advance retrieval, the "
                         "query FTS term set must differ from every prior strategy "
                         "term set; reordering terms is not a strategy change. Only "
-                        "the latest normalized query may be repeated once at this "
-                        "strictly larger required top_k as recall expansion; that "
-                        "expansion does not advance strategy progress, and the next "
-                        "search must use a distinct normalized FTS term set at the same "
-                        "top_k. Prior normalized queries are: "
+                        "the latest normalized query may be repeated at each "
+                        "strictly larger required top_k in the bounded schedule as "
+                        "recall expansion; that expansion does not advance strategy "
+                        "progress, and the next "
+                        "search must use the next schema-required top_k. Prior "
+                        "normalized queries are: "
                         + json.dumps(
                             list(evidence_state.normalized_search_queries),
                             ensure_ascii=False,
@@ -6761,6 +7341,9 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             strategy_semantics_verified=strategy_semantics_verified,
             successful_search_hit_counts=successful_search_hit_counts,
             tool_error_count=tool_error_count,
+            verified_strategy_coverage=tuple(
+                proof.strategy for proof in strategy_proofs if proof.verified
+            ),
         )
         upstream_tool_receipts = list(
             self._semantic_upstream_tool_receipts.get()
@@ -7147,6 +7730,11 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     strategy_semantics_verified=diagnosis_semantics_verified,
                     successful_search_hit_counts=diagnosis_hit_counts,
                     tool_error_count=state.tool_error_count,
+                    verified_strategy_coverage=(
+                        None
+                        if location_containment_repair
+                        else state.verified_strategy_coverage
+                    ),
                 )
             arguments = action.arguments
             if isinstance(arguments, dict):
@@ -7220,63 +7808,6 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                                     ensure_ascii=False,
                                 )
                             )
-                    required_strategy = self._factual_retrieval_strategy(
-                        state.strategy_progress_count
-                    )
-                    if not location_containment_repair and required_strategy in {
-                        "alias_expansion",
-                        "query_rewriting",
-                    } and _relation_alias_surfaces_in(original_question):
-                        distinct_prior_queries: list[str] = []
-                        prior_signatures: list[tuple[str, ...]] = []
-                        for prior_query in state.search_queries:
-                            prior_signature = (
-                                _retrieval_query_term_set_signature(prior_query)
-                            )
-                            if prior_signature in prior_signatures:
-                                continue
-                            prior_signatures.append(prior_signature)
-                            distinct_prior_queries.append(prior_query)
-                        transformed_relation_classes = (
-                            _verified_transformed_relation_classes(
-                                original_question=original_question,
-                                distinct_queries=distinct_prior_queries,
-                            )
-                        )
-                        remaining_relation_classes = frozenset(
-                            _relation_alias_surfaces_in(original_question)
-                        ) - transformed_relation_classes
-                        replacement_classes = (
-                            _relation_surface_replacement_classes(
-                                original_question=original_question,
-                                previous_query=distinct_prior_queries[-1],
-                                query=query,
-                            )
-                            if distinct_prior_queries
-                            else frozenset()
-                        )
-                        if (
-                            not distinct_prior_queries
-                            or not replacement_classes
-                            or (
-                                remaining_relation_classes
-                                and not (
-                                    replacement_classes
-                                    & remaining_relation_classes
-                                )
-                            )
-                        ):
-                            issue = (
-                                _RETRIEVAL_QUERY_STRATEGY_SEMANTICS_MISMATCH
-                            )
-                            if remaining_relation_classes:
-                                issue += ": remaining_relation_classes=" + (
-                                    json.dumps(
-                                        sorted(remaining_relation_classes),
-                                        ensure_ascii=False,
-                                    )
-                                )
-                            return issue
                     expected_answer_type = qa_answer_type_constraint(
                         original_question
                     )
@@ -7327,6 +7858,160 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                         if _retrieval_query_term_set_signature(prior_query)
                         == query_term_set_signature
                     )
+                    if (
+                        not location_containment_repair
+                        and prior_queries
+                        and not prior_limits
+                    ):
+                        previous_query = prior_queries[-1]
+                        lost_named_constraints = (
+                            _missing_question_named_constraints(
+                                original_question,
+                                query,
+                            )
+                            if not _missing_question_named_constraints(
+                                original_question,
+                                previous_query,
+                            )
+                            else ()
+                        )
+                        if lost_named_constraints:
+                            return (
+                                _RETRIEVAL_QUERY_NAMED_SCOPE_LOSS
+                                + ": missing_named_constraints="
+                                + json.dumps(
+                                    lost_named_constraints,
+                                    ensure_ascii=False,
+                                )
+                            )
+                        previous_signature = (
+                            _retrieval_query_term_set_signature(previous_query)
+                        )
+                        prior_observation = next(
+                            (
+                                observation
+                                for observation in reversed(observations)
+                                if isinstance(observation.get("result"), Mapping)
+                                and observation["result"].get("operation")
+                                == "search"
+                                and _retrieval_query_term_set_signature(
+                                    str(observation["result"].get("query", ""))
+                                )
+                                == previous_signature
+                            ),
+                            None,
+                        )
+                        transition_strategy, transition_verified, _ = (
+                            _factual_transition_strategy_identification(
+                                original_question=original_question,
+                                previous_query=previous_query,
+                                query=query,
+                                prior_observation=prior_observation,
+                            )
+                        )
+                        if not transition_verified:
+                            issue = _RETRIEVAL_QUERY_STRATEGY_SEMANTICS_MISMATCH
+                            required_relation_classes = frozenset(
+                                _relation_alias_surfaces_in(original_question)
+                            )
+                            if required_relation_classes:
+                                distinct_prior_queries: list[str] = []
+                                prior_signatures: set[tuple[str, ...]] = set()
+                                for prior_query in prior_queries:
+                                    signature = (
+                                        _retrieval_query_term_set_signature(
+                                            prior_query
+                                        )
+                                    )
+                                    if signature in prior_signatures:
+                                        continue
+                                    prior_signatures.add(signature)
+                                    distinct_prior_queries.append(prior_query)
+                                transformed_relation_classes = (
+                                    _verified_transformed_relation_classes(
+                                        original_question=original_question,
+                                        distinct_queries=distinct_prior_queries,
+                                    )
+                                )
+                                remaining_relation_classes = (
+                                    required_relation_classes
+                                    - transformed_relation_classes
+                                )
+                                if remaining_relation_classes:
+                                    issue += ": remaining_relation_classes=" + (
+                                        json.dumps(
+                                            sorted(remaining_relation_classes),
+                                            ensure_ascii=False,
+                                        )
+                                    )
+                            return issue
+                        covered_transition_strategies = frozenset(
+                            state.verified_strategy_coverage
+                        )
+                        remaining_transition_strategies = tuple(
+                            candidate
+                            for candidate in _FACTUAL_QA_RETRIEVAL_STRATEGIES[1:]
+                            if candidate
+                            not in covered_transition_strategies
+                        )
+                        if (
+                            transition_strategy
+                            in covered_transition_strategies
+                            and remaining_transition_strategies
+                        ):
+                            return (
+                                _RETRIEVAL_QUERY_STRATEGY_SEMANTICS_MISMATCH
+                                + ": remaining_transition_strategies="
+                                + json.dumps(
+                                    remaining_transition_strategies,
+                                    ensure_ascii=False,
+                                )
+                            )
+                        if transition_strategy == "alias_expansion":
+                            distinct_prior_queries: list[str] = []
+                            prior_signatures: set[tuple[str, ...]] = set()
+                            for prior_query in prior_queries:
+                                signature = (
+                                    _retrieval_query_term_set_signature(
+                                        prior_query
+                                    )
+                                )
+                                if signature in prior_signatures:
+                                    continue
+                                prior_signatures.add(signature)
+                                distinct_prior_queries.append(prior_query)
+                            transformed_relation_classes = (
+                                _verified_transformed_relation_classes(
+                                    original_question=original_question,
+                                    distinct_queries=distinct_prior_queries,
+                                )
+                            )
+                            remaining_relation_classes = frozenset(
+                                _relation_alias_surfaces_in(original_question)
+                            ) - transformed_relation_classes
+                            replacement_classes = (
+                                _relation_surface_replacement_classes(
+                                    original_question=original_question,
+                                    previous_query=previous_query,
+                                    query=query,
+                                )
+                            )
+                            if (
+                                remaining_relation_classes
+                                and replacement_classes
+                                and not (
+                                    replacement_classes
+                                    & remaining_relation_classes
+                                )
+                            ):
+                                return (
+                                    _RETRIEVAL_QUERY_STRATEGY_SEMANTICS_MISMATCH
+                                    + ": remaining_relation_classes="
+                                    + json.dumps(
+                                        sorted(remaining_relation_classes),
+                                        ensure_ascii=False,
+                                    )
+                                )
                     latest_normalized_query = (
                         _normalized_retrieval_query(prior_queries[-1])
                         if prior_queries
@@ -7349,13 +8034,15 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     )
                     if location_containment_repair
                     else self._factual_search_limit(
-                        state.strategy_progress_count
+                        state.search_attempt_count
                     )
                 )
                 attempt_number = (
                     state.strategy_progress_count
                     + state.location_containment_repair_search_count
                     + 1
+                    if location_containment_repair
+                    else state.search_attempt_count + 1
                 )
                 if type(limit) is int and limit != expected_limit:
                     return (
@@ -7408,6 +8095,11 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                             else state.successful_search_hit_counts
                         ),
                         tool_error_count=state.tool_error_count,
+                        verified_strategy_coverage=(
+                            None
+                            if location_containment_repair
+                            else state.verified_strategy_coverage
+                        ),
                     )
                 expected_action = (
                     next(iter(admitted_actions))[1] if admitted_actions else "complete"

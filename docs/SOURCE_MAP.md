@@ -1057,3 +1057,25 @@ The initial two-task live canary passed one complete lineage and failed one at
 Recovery r2 is a minimal repair of the existing SkillFlow continuation and
 FlowSteer recovery boundaries.  It does not activate Skill retrieval, MACE,
 Bayesian posterior updates, GRPO, backward, optimizer steps or LoRA updates.
+
+The v53 retrieval loop continues to directly reuse SkillFlow's public
+`StructuredAction -> ToolResult -> Observation` wire and bounded continuation;
+each executed search still produces exactly one public receipt. It also
+retains FlowSteer's accepted Canvas edit -> execute -> feedback transaction and
+does not change the Director action vocabulary or topology search space.
+Classifying an adjacent search transition from receipt evidence, requiring
+unordered receipt-verified strategy-set coverage, separating a same-query
+top-k recall expansion, enforcing the same live/replay top-k sequence, and
+validating read action/result agreement on passage ID and text are
+`PROJECT_NECESSARY_ADAPTATION`: neither upstream implements these TriviaQA
+retrieval-strategy proofs.
+
+The v53 query-transition admission is also
+`PROJECT_NECESSARY_ADAPTATION`. Question-grounded ordinal normalization,
+retrieval-only relation paraphrases, and lowercase local relation context from
+a mirror-valid public search snippet are discovery-query constraints, not
+evidence entailment. Generic snippet context may only add query terms; it
+cannot prove arbitrary predicate replacement. Evidence Retriever and Verifier
+therefore retain their stricter relation-binding boundary. No accepted answer,
+Ground Truth, evaluator result or preselected candidate enters transition
+classification. Director prompt v6 remains unchanged and topology-neutral.

@@ -1059,8 +1059,56 @@ Agent's latest public failure record, so a sibling cancellation or an earlier
 retrieval rejection cannot override a later Reasoner binding diagnosis. The
 complete v52 static suite passes 978 tests and 182 subtests. No model/API call,
 training, Skill activation, MACE/Bayesian update, backward pass, optimizer step
-or LoRA publication is represented by these static results. The v52 Stable
-Zero canary and fixed-128 scores remain separate live gates.
+or LoRA publication is represented by these static results.
+
+The frozen v52 Stable Zero run was stopped after two complete trajectories once
+failure was certain; it is a diagnostic run, not a three-task canary score.
+`tc_1` explicitly finished with `Sinclair Lewis` at official EM/F1 `1.0/1.0`
+through a four-Agent evidence lineage. `tc_5` regressed to
+`canvas_action_domain_exhausted`, `final_answer=null`, EM/F1 `0.0/0.0`: two
+Retriever instances produced five successful search receipts but no read, as
+the ordinal strategy instruction, transition-derived proof label and live
+top-k admission disagreed. `tc_3` was still running and was not persisted when
+the collector was stopped. There were zero collection failures. The GPU0
+Supervisor remained running; only this evaluation collector was stopped. The
+fixed-128 run was not admitted.
+
+### v53 evidence-conditioned retrieval transitions
+
+v53 removes the remaining ordinal retrieval recipe from the runtime boundary.
+After the initial query, the next admissible search is classified from the
+adjacent public `Action -> Observation` transition as spelling normalization,
+alias expansion, entity disambiguation or query rewriting. The classifier no
+longer assigns a strategy by attempt number. Repeating the same normalized
+query with a larger top-k is recorded only as recall expansion; live admission
+and receipt replay use the same `5 -> 10 -> 15 -> 20 -> 25` limits.
+Coverage diagnosis uses the unordered set of receipt-verified strategy labels,
+not the number or order of attempts. Repeating an already covered strategy
+while another strategy remains uncovered is rejected before Tool dispatch.
+
+Query rewriting is semantic-preserving and answer-free. It may remove only
+question syntax, restore terms already published by the question, replace an
+explicit ordinal with a member of the same linguistic equivalence class, or
+add lowercase discovery context found in a local question-relation window of
+a mirror-valid public search receipt. Receipt-local co-occurrence is additive
+only: it cannot justify replacing the question predicate with an arbitrary
+non-synonym. A small retrieval-only paraphrase class admits discovery queries such as
+`born -> birthplace`; it is deliberately isolated from Evidence Retriever and
+Verifier relation entailment, where `come from` and `was born in` remain
+distinct propositions. Question-external numeric/date candidates, arbitrary
+proper-name injection, entity loss, relation loss and unsupported lexical
+transitions fail before Tool dispatch. A location answer-field constraint may
+consume only a public read `Action -> Observation` mirror whose action and
+result agree on operation, resource, passage ID and non-empty passage text.
+
+Director prompt v6, Canvas actions, model-visible topology search space and
+semantic terminal lineage are unchanged. The prompt does not prescribe Agent
+count, role order, edges, communication pattern, topology, retrieval recipe or
+candidate answer. The complete v53 static suite passes 986 tests and 182
+subtests. Prepare-only selected the same ordered 128 task/question/Ground Truth
+records as v52. These are interface/regression results only: v53 must still pass the
+frozen three-task Stable Zero gate before the ordered fixed-128 evaluation can
+run, and no v53 EM/F1 is inferred from static tests.
 
 ### Stable Zero status
 

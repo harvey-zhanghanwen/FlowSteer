@@ -25,6 +25,7 @@ from src.interactive.qa_tool_adapter import (
     _factual_strategy_semantics_verified,
     _location_containment_lineage_issue,
     _location_resolution_answer_field_constraint,
+    _public_read_transition_mirror,
     _public_search_candidate_compatibility,
     _query_replaces_relation_surface,
     _question_entity_anchor_tokens,
@@ -458,14 +459,17 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(0, rejected_state.dispatched_tool_calls)
         self.assertEqual(0, rejected_state.strategy_progress_count)
         initial_contract = adapter._contract(request, [])
-        self.assertIn("Current strategy semantics", initial_contract)
+        self.assertIn(
+            '"required_strategy":"initial_retrieval"',
+            initial_contract,
+        )
         self.assertNotIn("alias_expansion", initial_contract)
         neutral = StructuredAction(
             ActionKind.TOOL,
             "search",
             {
                 "query": (
-                    "Billboard magazine first publish music hit parade"
+                    "Billboard magazine first publish American music hit parade"
                 ),
                 "limit": 5,
             },
@@ -1002,7 +1006,10 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             ["limit"]["const"],
         )
         initial_contract = adapter._contract(request, [])
-        self.assertIn("`initial_retrieval`", initial_contract)
+        self.assertIn(
+            '"required_strategy":"initial_retrieval"',
+            initial_contract,
+        )
         self.assertIn("entity identity and target relation", initial_contract)
 
     def test_unified_reasoner_answer_field_uses_question_only_constraint(self) -> None:
@@ -1095,6 +1102,30 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
                 ),
             )
         )
+
+    def test_location_answer_field_source_requires_read_action_observation_mirror(
+        self,
+    ) -> None:
+        text = "East Ward is part of the city of Riverton in Arcadia."
+        observation = {
+            "observation_status": "success",
+            "executed_action": {
+                "kind": "tool",
+                "name": "read",
+                "resource_id": QA_RETRIEVAL_TOOL_ID,
+                "arguments": {"passage_id": "east-ward"},
+            },
+            "result": {
+                "operation": "read",
+                "passage_id": "east-ward",
+                "passage": {"passage_id": "east-ward", "text": text},
+            },
+        }
+        mismatched = json.loads(json.dumps(observation))
+        mismatched["result"]["passage_id"] = "different-passage"
+
+        self.assertEqual((True, text), _public_read_transition_mirror(observation))
+        self.assertEqual((False, None), _public_read_transition_mirror(mismatched))
 
     def test_location_containment_lineage_is_state_conditioned(self) -> None:
         question = "Where in Arcadia was Professor Mira Hale born?"
@@ -2842,50 +2873,6 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             phase=ExecutionPhase.SINGLE,
             semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
         )
-        expected_guidance = (
-            (
-                "initial_retrieval",
-                (
-                    "target entity/topic anchor",
-                    "answer-slot wording",
-                    "auxiliary verbs",
-                ),
-            ),
-            (
-                "spelling_normalization",
-                (
-                    "Correct spelling, tokenization, and grammatical noise",
-                    "do not append a strategy label",
-                    "introduce a new topic",
-                ),
-            ),
-            (
-                "alias_expansion",
-                (
-                    "discovery query rather than evidence",
-                    "established domain expression",
-                    "returned title/snippet",
-                    "same entity/topic",
-                    "unrelated subtype",
-                ),
-            ),
-            (
-                "entity_disambiguation",
-                (
-                    "exact title anchor",
-                    "title and its snippet jointly identify",
-                    "irrelevant subtopic",
-                ),
-            ),
-            (
-                "query_rewriting",
-                (
-                    "exact chosen entity anchor",
-                    "verbal and nominal paraphrases",
-                    "same predicate meaning",
-                ),
-            ),
-        )
         queries = (
             "institution establish annual index",
             "institution established annual index",
@@ -2894,9 +2881,7 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         )
         observations: list[dict[str, object]] = []
         rendered_guidance: list[str] = []
-        for strategy_index, (strategy, fragments) in enumerate(
-            expected_guidance
-        ):
+        for strategy_index in range(5):
             schema = adapter._state_conditioned_response_schema(
                 request,
                 observations,
@@ -2908,13 +2893,29 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             )
             contract = adapter._contract(request, observations)
             rendered_guidance.extend((query_description, contract))
-            self.assertIn(strategy, query_description)
-            self.assertIn(f"`{strategy}`", contract)
             self.assertIn("content-bearing entity/relation terms", query_description)
             self.assertIn("unrelated topic", query_description)
-            for fragment in fragments:
-                self.assertIn(fragment, query_description)
-                self.assertIn(fragment, contract)
+            if strategy_index == 0:
+                self.assertIn("target entity/topic anchor", query_description)
+                self.assertIn("answer-slot wording", query_description)
+                self.assertIn("auxiliary verbs", query_description)
+                self.assertIn(
+                    '"required_strategy":"initial_retrieval"',
+                    contract,
+                )
+            else:
+                self.assertIn(
+                    "adjacent public-evidence-supported spelling normalization",
+                    query_description,
+                )
+                self.assertIn("alias expansion", query_description)
+                self.assertIn("entity disambiguation", query_description)
+                self.assertIn("query rewriting", query_description)
+                self.assertIn(
+                    "transition label is derived after execution",
+                    query_description,
+                )
+                self.assertIn('"required_strategy":null', contract)
 
             if strategy_index == len(queries):
                 continue
@@ -3113,12 +3114,36 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
                 observations=observations,
             )
         )
-        relation_alias = StructuredAction(
+        named_scope_dropped = StructuredAction(
             ActionKind.TOOL,
             "search",
             {
                 "query": (
                     "Billboard magazine first publish music hit parade"
+                ),
+                "limit": 10,
+            },
+            resource_id=QA_RETRIEVAL_TOOL_ID,
+        )
+        named_scope_issue = adapter._tool_action_error(
+            request=request,
+            action=named_scope_dropped,
+            observations=observations,
+        )
+        self.assertIsNotNone(named_scope_issue)
+        assert named_scope_issue is not None
+        self.assertTrue(
+            named_scope_issue.startswith(
+                "qa_retrieval_query_named_scope_loss"
+            )
+        )
+        self.assertIn("american", named_scope_issue)
+        relation_alias = StructuredAction(
+            ActionKind.TOOL,
+            "search",
+            {
+                "query": (
+                    "Billboard magazine first publish American music hit parade"
                 ),
                 "limit": 10,
             },
@@ -3347,7 +3372,7 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
         self.assertEqual(
-            (True, False, True, False, True),
+            (True, True, True, False, True),
             _factual_strategy_semantics_verified(
                 original_question=question,
                 distinct_queries=relation_coverage_trace,
@@ -3361,7 +3386,7 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
         self.assertEqual(
-            (True, False, True, False, True),
+            (True, True, True, False, True),
             _factual_strategy_semantics_verified(
                 original_question=question,
                 distinct_queries=repeated_class_trace,
@@ -3756,7 +3781,8 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             "search",
             {
                 "query": (
-                    "Chart Weekly magazine published first American hit parade history"
+                    "Chart Weekly magazine publication inaugural American "
+                    "hit parade history"
                 ),
                 "limit": 25,
             },
@@ -3787,7 +3813,7 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         # action attempts, but cannot be reported as verified merely because
         # their FTS term sets changed.
         self.assertEqual(
-            (True, False, True, False, True),
+            (True, True, True, False, True),
             state.strategy_semantics,
         )
         self.assertFalse(state.strategy_semantics_verified)
@@ -3798,6 +3824,13 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
                 strategy_semantics_verified=True,
                 successful_search_hit_counts=(0, 0, 0, 0, 0),
                 tool_error_count=0,
+                verified_strategy_coverage=(
+                    "initial_retrieval",
+                    "spelling_normalization",
+                    "alias_expansion",
+                    "entity_disambiguation",
+                    "query_rewriting",
+                ),
             ),
         )
         self.assertEqual(
@@ -3807,6 +3840,13 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
                 strategy_semantics_verified=True,
                 successful_search_hit_counts=(0, 0, 1, 0, 0),
                 tool_error_count=0,
+                verified_strategy_coverage=(
+                    "initial_retrieval",
+                    "spelling_normalization",
+                    "alias_expansion",
+                    "entity_disambiguation",
+                    "query_rewriting",
+                ),
             ),
         )
 
@@ -4229,7 +4269,8 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             ["limit"]["const"],
         )
         retry_contract = adapter._contract(request, observations)
-        self.assertIn("`spelling_normalization`", retry_contract)
+        self.assertIn('"required_strategy":null', retry_contract)
+        self.assertIn("admissible_transition_strategies", retry_contract)
         self.assertIn('"novel author"', retry_contract)
 
         expanded_same_query = StructuredAction(
@@ -4274,7 +4315,7 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         )
         assert expanded_schema is not None
         self.assertEqual(
-            10,
+            15,
             expanded_schema["properties"]["arguments"]["properties"]
             ["limit"]["const"],
         )
@@ -4385,13 +4426,17 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
                     "name": "search",
                     "resource_id": QA_RETRIEVAL_TOOL_ID,
                     "arguments": {
-                        "query": "Billboard first American hit chart",
+                        "query": (
+                            "Billboard magazine first publish American hit chart"
+                        ),
                         "limit": 5,
                     },
                 },
                 "result": {
                     "operation": "search",
-                    "query": "Billboard first American hit chart",
+                    "query": (
+                        "Billboard magazine first publish American hit chart"
+                    ),
                     "top_k": 5,
                     "passage_ids": ["p1"],
                 },
@@ -4422,7 +4467,7 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             "search",
             {
                 "query": (
-                    "Billboard magazine first publish hit chart 1930s"
+                    "Billboard magazine first publish American hit chart 1930s"
                 ),
                 "limit": 10,
             },
@@ -4441,7 +4486,7 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             "search",
             {
                 "query": (
-                    "Billboard magazine first publish music hit parade"
+                    "Billboard magazine first publish American music hit parade"
                 ),
                 "limit": 10,
             },
@@ -5082,7 +5127,11 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             ).execute(request)
 
         error = caught.exception
-        self.assertEqual(5, len(error.tool_receipts))
+        # The first unverified adjacent transition is rejected before Tool
+        # dispatch.  Only the initial public search receipt is retained; the
+        # terminal diagnosis remains a strategy failure, never a database
+        # coverage claim.
+        self.assertEqual(1, len(error.tool_receipts))
         self.assertIs(True, error.tool_plan_exhausted)
         self.assertEqual(
             "retrieval_strategy_failure",
@@ -5092,21 +5141,16 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             "terminal_failure_diagnosis"
         ]
         self.assertIs(True, terminal_diagnosis["tool_plan_exhausted"])
-        self.assertEqual(5, terminal_diagnosis["retrieval_attempt_count"])
+        self.assertEqual(1, terminal_diagnosis["retrieval_attempt_count"])
         self.assertEqual(
-            [5, 10, 15, 20, 25],
+            [5],
             terminal_diagnosis["search_top_ks"],
         )
         self.assertEqual(
-            [
-                "initial_retrieval",
-                "spelling_normalization",
-                "alias_expansion",
-                "entity_disambiguation",
-                "query_rewriting",
-            ],
+            ["initial_retrieval"],
             terminal_diagnosis["retrieval_strategy_schedule_prefix"],
         )
+        self.assertFalse(terminal_diagnosis["bounded_schedule_exhausted"])
         self.assertFalse(terminal_diagnosis["strategy_semantics_verified"])
         self.assertNotIn(
             "retrieval_strategies_attempted",
@@ -5219,7 +5263,11 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         )
         continuation_contract = gateway.requests[1].agent.contract
         self.assertIn(
-            '"required_strategy":"spelling_normalization"',
+            '"required_strategy":null',
+            continuation_contract,
+        )
+        self.assertIn(
+            '"admissible_transition_strategies"',
             continuation_contract,
         )
         self.assertIn('"required_top_k":10', continuation_contract)
@@ -5309,10 +5357,9 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
                     action("complete", {"value": artifact}),
                 ]
             )
-        # After the fifth provenance rejection the public action domain is
-        # empty. Five lexically distinct queries do not establish that the
-        # declared relation transformations actually ran, so this cannot be
-        # classified as frozen-knowledge-base coverage failure.
+        # A lexically different but unverified adjacent query is rejected
+        # before dispatch.  It cannot establish a strategy proof or be counted
+        # toward frozen-knowledge-base coverage exhaustion.
         outputs.append(action("complete", {"value": artifact}))
 
         class SequenceGateway:
@@ -5353,7 +5400,7 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             ).execute(request)
 
         error = caught.exception
-        self.assertEqual(10, len(error.tool_receipts))
+        self.assertEqual(2, len(error.tool_receipts))
         self.assertIs(True, error.tool_plan_exhausted)
         terminal_diagnosis = error.react_trace[-1][
             "terminal_failure_diagnosis"
@@ -5363,11 +5410,12 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             "retrieval_strategy_failure",
             terminal_diagnosis["public_error_code"],
         )
-        self.assertEqual(5, terminal_diagnosis["retrieval_attempt_count"])
+        self.assertEqual(1, terminal_diagnosis["retrieval_attempt_count"])
         self.assertEqual(
-            [5, 10, 15, 20, 25],
+            [5],
             terminal_diagnosis["search_top_ks"],
         )
+        self.assertFalse(terminal_diagnosis["bounded_schedule_exhausted"])
 
     async def test_react_read_requires_canonical_id_from_successful_search(self) -> None:
         index = FakeIndex()
@@ -8590,7 +8638,10 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             feedback.startswith("qa_semantic_evidence_provenance_invalid:")
         )
         self.assertIn("supplies a date relation argument", feedback)
-        self.assertIn("`spelling_normalization`", gateway.requests[3].agent.contract)
+        self.assertIn(
+            '"required_strategy":null',
+            gateway.requests[3].agent.contract,
+        )
 
     async def test_irrelevant_david_crockett_read_advances_david_soul_retrieval(
         self,
@@ -8716,7 +8767,10 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
                 "const"
             ],
         )
-        self.assertIn("`spelling_normalization`", gateway.requests[3].agent.contract)
+        self.assertIn(
+            '"required_strategy":null',
+            gateway.requests[3].agent.contract,
+        )
 
     async def test_react_direct_completion_remains_valid_when_dispatch_is_impossible(self) -> None:
         def complete(value: str) -> str:
