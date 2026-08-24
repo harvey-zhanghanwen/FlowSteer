@@ -6457,6 +6457,7 @@ class AgentWorkflowEnv:
         original_question: Optional[str] = None,
         minimum_evidence_propositions: int = 2,
         minimum_reasoning_steps: int = 2,
+        preserve_question_derived_answer_field: bool = False,
     ) -> tuple[Optional[str], Optional[str]]:
         if (
             isinstance(minimum_evidence_propositions, bool)
@@ -6680,8 +6681,36 @@ class AgentWorkflowEnv:
             _canonical_evidence_text(selected_subject)
             == _canonical_evidence_text(selected_object)
         ):
+            bound_answer_field = (
+                expected_answer_field
+                if expected_answer_field is not None
+                else answer_field
+            )
+            non_answer_field = (
+                "object_or_attribute_value"
+                if bound_answer_field == "subject"
+                else "subject"
+                if bound_answer_field == "object_or_attribute_value"
+                else None
+            )
+            if (
+                non_answer_field is not None
+                and selected.get(bound_answer_field) == candidate
+            ):
+                return None, (
+                    "Reasoner selected evidence proposition at "
+                    f"evidence_propositions[{proposition_index}] must bind "
+                    "distinct subject and object_or_attribute_value arguments; "
+                    f"candidate_answer already matches the fixed answer field "
+                    f"{bound_answer_field!r}, so repair only the non-answer "
+                    f"field {non_answer_field!r} from the same read receipt. "
+                    "The same entity or candidate cannot occupy both answer-slot "
+                    "fields; self-reported entity binding does not establish the "
+                    "other relation argument"
+                )
             return None, (
-                "Reasoner selected evidence proposition must bind distinct "
+                "Reasoner selected evidence proposition at "
+                f"evidence_propositions[{proposition_index}] must bind distinct "
                 "subject and object_or_attribute_value arguments. The same "
                 "entity or candidate cannot occupy both answer-slot fields; "
                 "self-reported entity binding does not establish which field "
@@ -6731,6 +6760,21 @@ class AgentWorkflowEnv:
             )
         )
         if not temporal_normalization and len(alternate_temporal_fields) == 1:
+            if (
+                preserve_question_derived_answer_field
+                and expected_answer_field is not None
+            ):
+                return None, (
+                    "Reasoner candidate_answer is bound to the alternate "
+                    "proposition argument "
+                    f"{alternate_temporal_fields[0]!r} at "
+                    f"evidence_propositions[{proposition_index}], but the original "
+                    "question's overt wh-dependency fixes answer_slot.answer_field "
+                    f"to {expected_answer_field!r}; preserve candidate_answer and "
+                    "answer_slot, and repair the selected proposition's subject "
+                    "and object_or_attribute_value as distinct receipt-grounded "
+                    "arguments"
+                )
             return None, (
                 "Reasoner answer_slot.answer_field selects "
                 f"{answer_field!r}, but candidate_answer is the verified "
@@ -6755,6 +6799,22 @@ class AgentWorkflowEnv:
                 if selected.get(field_name) == candidate
             )
             if len(matching_fields) == 1:
+                if (
+                    preserve_question_derived_answer_field
+                    and expected_answer_field is not None
+                ):
+                    return None, (
+                        "Reasoner candidate_answer is bound to the alternate "
+                        "proposition argument "
+                        f"{matching_fields[0]!r} at "
+                        f"evidence_propositions[{proposition_index}], but the "
+                        "original question's overt wh-dependency fixes "
+                        "answer_slot.answer_field to "
+                        f"{expected_answer_field!r}; preserve candidate_answer "
+                        "and answer_slot, and repair the selected proposition's "
+                        "subject and object_or_attribute_value as distinct "
+                        "receipt-grounded arguments"
+                    )
                 return None, (
                     "Reasoner answer_slot.answer_field selects "
                     f"{answer_field!r}, but candidate_answer exactly matches the "
@@ -6785,6 +6845,9 @@ class AgentWorkflowEnv:
             original_question=hotpotqa_question_scope(self._problem),
             minimum_evidence_propositions=minimum_evidence,
             minimum_reasoning_steps=minimum_steps,
+            preserve_question_derived_answer_field=(
+                self.semantic_protocol == _QA_SEMANTIC_PROTOCOL
+            ),
         )
 
     @classmethod
@@ -9510,8 +9573,11 @@ class AgentWorkflowEnv:
                 for field_name in (
                     "observation_status",
                     "public_error_code",
+                    "react_turn_exhausted",
                     "tool_plan_exhausted",
                     "bounded_schedule_exhausted",
+                    "continuation_admissible",
+                    "remaining_tool_calls",
                     "retrieval_attempt_count",
                     "retrieval_strategy_progress_count",
                     "recall_expansion_count",
@@ -9533,6 +9599,15 @@ class AgentWorkflowEnv:
                     projected["retrieval_strategy_schedule_prefix"] = list(
                         schedule[:8]
                     )
+                for coverage_field in (
+                    "verified_retrieval_strategy_coverage",
+                    "missing_retrieval_strategy_coverage",
+                ):
+                    coverage = terminal_diagnosis.get(coverage_field)
+                    if isinstance(coverage, list) and all(
+                        isinstance(value, str) for value in coverage
+                    ):
+                        projected[coverage_field] = list(coverage[:8])
                 terminal_code = projected.get("public_error_code")
                 if isinstance(terminal_code, str) and terminal_code:
                     code_counts[terminal_code] = (

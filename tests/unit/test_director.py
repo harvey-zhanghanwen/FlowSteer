@@ -4,8 +4,13 @@ import json
 import unittest
 
 from src.interactive.agent_graph import AgentGraph, AgentNode
-from src.interactive.agent_runtime import AgentResponse, AgentRuntime
+from src.interactive.agent_runtime import (
+    AgentResponse,
+    AgentRuntime,
+    AgentRuntimeResult,
+)
 from src.interactive.agent_workflow_env import (
+    AgentWorkflowEvidenceLineageSnapshot,
     AgentWorkflowEnv,
     _QA_EVIDENCE_RETRIEVER_RECOVERY_COMPLETION,
     _QA_EVIDENCE_RETRIEVER_RECOVERY_CONTRACT,
@@ -1433,6 +1438,75 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result.final_answer)
         self.assertFalse(result.explicit_finish)
         self.assertEqual("max_rounds", result.termination_reason)
+        self.assertFalse(result.valid_lineage_fallback_used)
+        self.assertEqual({}, result.valid_lineage_fallback_receipt)
+        self.assertEqual(1, len(result.turns))
+
+    async def test_round_limit_returns_last_valid_evidence_lineage_snapshot(
+        self,
+    ) -> None:
+        model_registry = registry()
+        client = ScriptedDirector(
+            [
+                '{"action":"add_agent","agent_id":"solver",'
+                '"model_id":"qwen","contract":"solve"}'
+            ]
+        )
+
+        class EnvWithHistoricalValidLineage(AgentWorkflowEnv):
+            async def step(self, raw_action):
+                historical_graph = self.graph.snapshot()
+                canvas = await super().step(raw_action)
+                runtime = AgentRuntimeResult(
+                    run_id="validated-lineage-run",
+                    graph_revision=historical_graph.revision,
+                    output_agent_id=historical_graph.output_agent_id,
+                    final_answer="<answer>Paris</answer>",
+                    outputs={},
+                    calls=(),
+                    block_completion_order=(),
+                )
+                self._last_valid_evidence_lineage = (
+                    AgentWorkflowEvidenceLineageSnapshot(
+                        answer="<answer>Paris</answer>",
+                        runtime=runtime,
+                        graph_revision=historical_graph.revision,
+                        graph_snapshot=historical_graph,
+                    )
+                )
+                return canvas
+
+        env = EnvWithHistoricalValidLineage(
+            model_registry,
+            gateway=FakeGateway(),
+        )
+        result = await AgentGraphOrchestrator(
+            model_registry,
+            client,
+            max_rounds=1,
+        ).run(env, "task")
+
+        lineage = env.last_valid_evidence_lineage
+        self.assertIsNotNone(lineage)
+        assert lineage is not None
+        self.assertEqual("<answer>Paris</answer>", result.final_answer)
+        self.assertEqual(lineage.graph_snapshot.to_dict(), result.final_graph)
+        self.assertNotEqual(env.graph.to_dict(), result.final_graph)
+        self.assertEqual("max_rounds", result.termination_reason)
+        self.assertFalse(result.explicit_finish)
+        self.assertTrue(result.valid_lineage_fallback_used)
+        self.assertEqual(
+            "complete_finish_gate",
+            result.valid_lineage_fallback_receipt["admission"],
+        )
+        self.assertEqual(
+            lineage.graph_revision,
+            result.valid_lineage_fallback_receipt["graph_revision"],
+        )
+        self.assertEqual(
+            lineage.graph_snapshot.snapshot_id,
+            result.valid_lineage_fallback_receipt["graph_snapshot_id"],
+        )
         self.assertEqual(1, len(result.turns))
 
     async def test_verified_qa_empty_canvas_domain_is_natural_terminal(self) -> None:

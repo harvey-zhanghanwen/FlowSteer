@@ -1819,10 +1819,11 @@ def _relation_surface_replacement_classes(
     original_question: str,
     previous_query: str,
     query: str,
+    entity_anchor_verified: bool = False,
 ) -> frozenset[str]:
     """Return question-derived relation classes replaced between two queries."""
 
-    if not _surface_binds_entity_anchor(
+    if not entity_anchor_verified and not _surface_binds_entity_anchor(
         query,
         _question_entity_anchor_tokens(original_question),
     ):
@@ -2248,8 +2249,102 @@ def _public_title_transition_support(
                 original_question,
                 public_surface,
             )
+            and not _missing_question_named_constraints(
+                original_question,
+                public_surface,
+            )
         ):
             source_ids.append(passage_id.strip())
+    return bool(source_ids), tuple(dict.fromkeys(source_ids))
+
+
+def _public_title_entity_anchor_support(
+    *,
+    original_question: str,
+    query: str,
+    prior_observation: (
+        Mapping[str, object]
+        | Sequence[Mapping[str, object]]
+        | None
+    ),
+) -> tuple[bool, tuple[str, ...]]:
+    """Verify an exact prior-hit title used as the current entity anchor.
+
+    SkillFlow's search Observation is the only alias authority here.  A title
+    is admitted only when the mirror-valid hit's title plus snippet also binds
+    the original entity, requested relation, ordinal scope, and named scope.
+    This permits a receipt-backed entity alias to persist across later query
+    transitions without admitting a guessed alias.
+    """
+
+    prior_observations = (
+        (prior_observation,)
+        if isinstance(prior_observation, Mapping)
+        else tuple(prior_observation)
+        if isinstance(prior_observation, Sequence)
+        else ()
+    )
+    query_tokens = _scope_tokens(query)
+    entity_anchor = _question_entity_anchor_tokens(original_question)
+    source_ids: list[str] = []
+    for observation in reversed(prior_observations):
+        prior_verified, verified_passage_ids = (
+            _public_search_transition_mirror(observation)
+        )
+        result = observation.get("result")
+        raw_hits = result.get("hits") if isinstance(result, Mapping) else None
+        if not prior_verified or not isinstance(raw_hits, list):
+            continue
+        for hit in raw_hits:
+            if not isinstance(hit, Mapping):
+                continue
+            title = hit.get("title")
+            snippet = hit.get("snippet")
+            passage_id = hit.get("passage_id")
+            if (
+                not isinstance(title, str)
+                or not title.strip()
+                or not isinstance(snippet, str)
+                or not snippet.strip()
+                or not isinstance(passage_id, str)
+                or passage_id.strip() not in verified_passage_ids
+            ):
+                continue
+            title_tokens = _scope_tokens(title)
+            public_surface = f"{title} {snippet}"
+            title_in_query = bool(
+                title_tokens
+                and any(
+                    tuple(query_tokens[offset : offset + len(title_tokens)])
+                    == title_tokens
+                    for offset in range(
+                        max(0, len(query_tokens) - len(title_tokens) + 1)
+                    )
+                )
+            )
+            if (
+                title_in_query
+                and (
+                    not entity_anchor
+                    or _surface_binds_entity_anchor(
+                        public_surface,
+                        entity_anchor,
+                    )
+                )
+                and not _missing_required_relation_classes(
+                    original_question,
+                    public_surface,
+                )
+                and not _missing_question_scope_modifiers(
+                    original_question,
+                    public_surface,
+                )
+                and not _missing_question_named_constraints(
+                    original_question,
+                    public_surface,
+                )
+            ):
+                source_ids.append(passage_id.strip())
     return bool(source_ids), tuple(dict.fromkeys(source_ids))
 
 
@@ -2259,6 +2354,7 @@ def _query_rewriting_transition_support(
     previous_query: str,
     query: str,
     prior_observation: Mapping[str, object] | None,
+    entity_anchor_verified: bool = False,
 ) -> tuple[bool, tuple[str, ...]]:
     """Verify one answer-free rewrite from adjacent public search state.
 
@@ -2276,7 +2372,8 @@ def _query_rewriting_transition_support(
     if not prior_verified:
         return False, ()
     if (
-        not _surface_binds_entity_anchor(
+        not entity_anchor_verified
+        and not _surface_binds_entity_anchor(
             query,
             _question_entity_anchor_tokens(original_question),
         )
@@ -2393,6 +2490,7 @@ def _factual_transition_strategy_identification(
     previous_query: str | None,
     query: str,
     prior_observation: Mapping[str, object] | None = None,
+    prior_observations: Sequence[Mapping[str, object]] = (),
 ) -> tuple[str, bool, tuple[str, ...]]:
     """Identify the strongest transition strategy from public invariants.
 
@@ -2401,23 +2499,37 @@ def _factual_transition_strategy_identification(
     ordinal position.
     """
 
-    entity_preserved = _surface_binds_entity_anchor(
+    direct_entity_preserved = _surface_binds_entity_anchor(
         query,
         _question_entity_anchor_tokens(original_question),
     )
+    if direct_entity_preserved:
+        title_entity_supported, title_entity_source_ids = False, ()
+    else:
+        title_entity_supported, title_entity_source_ids = (
+            _public_title_entity_anchor_support(
+                original_question=original_question,
+                query=query,
+                prior_observation=(
+                    prior_observations
+                    if prior_observations
+                    else prior_observation
+                ),
+            )
+        )
+    entity_preserved = direct_entity_preserved or title_entity_supported
     scope_preserved = not _missing_question_scope_modifiers(
         original_question,
         query,
     )
-    named_scope_preserved = bool(
-        _missing_question_named_constraints(
-            original_question,
-            previous_query or "",
-        )
-        or not _missing_question_named_constraints(
-            original_question,
-            query,
-        )
+    # Named restrictions belong to the original question invariant, not to a
+    # transition delta.  The previous implementation treated a missing named
+    # constraint in the first query as permission to keep omitting it, so an
+    # initial query could be marked verified after dropping nationality or
+    # another explicit scope restriction.
+    named_scope_preserved = not _missing_question_named_constraints(
+        original_question,
+        query,
     )
     relation_preserved = not _missing_required_relation_classes(
         original_question,
@@ -2436,32 +2548,49 @@ def _factual_transition_strategy_identification(
         original_question=original_question,
         previous_query=previous_query,
         query=query,
+        entity_anchor_verified=title_entity_supported,
     )
     if replacement_classes:
         # A deterministic same-class relation-surface replacement is the
         # strongest answer-free evidence available here.  More general query
         # rewriting remains unverified unless another controlled invariant is
         # added; do not duplicate one transition into two proof records.
-        return "alias_expansion", invariants_verified, ()
+        return (
+            "alias_expansion",
+            invariants_verified,
+            title_entity_source_ids,
+        )
 
     if _query_transition_is_inflectional_normalization(
         previous_query,
         query,
     ):
-        return "spelling_normalization", invariants_verified, ()
+        return (
+            "spelling_normalization",
+            invariants_verified,
+            title_entity_source_ids,
+        )
 
     if _query_transition_is_ordinal_surface_normalization(
         previous_query,
         query,
     ):
-        return "query_rewriting", invariants_verified, ()
+        return (
+            "query_rewriting",
+            invariants_verified,
+            title_entity_source_ids,
+        )
 
     if _query_transition_is_controlled_relation_paraphrase(
         original_question=original_question,
         previous_query=previous_query,
         query=query,
     ):
-        return "alias_expansion", invariants_verified, ()
+        return (
+            "alias_expansion",
+            invariants_verified,
+            title_entity_source_ids,
+        )
 
     rewrite_supported, rewrite_source_ids = (
         _query_rewriting_transition_support(
@@ -2469,13 +2598,18 @@ def _factual_transition_strategy_identification(
             previous_query=previous_query,
             query=query,
             prior_observation=prior_observation,
+            entity_anchor_verified=title_entity_supported,
         )
     )
     if rewrite_supported:
         return (
             "query_rewriting",
             invariants_verified,
-            rewrite_source_ids,
+            tuple(
+                dict.fromkeys(
+                    (*rewrite_source_ids, *title_entity_source_ids)
+                )
+            ),
         )
 
     title_supported, source_ids = _public_title_transition_support(
@@ -2491,7 +2625,7 @@ def _factual_transition_strategy_identification(
         return (
             "entity_disambiguation",
             invariants_verified,
-            source_ids,
+            tuple(dict.fromkeys((*source_ids, *title_entity_source_ids))),
         )
 
     # A distinct transition which merely removes or substitutes unsupported
@@ -2678,6 +2812,7 @@ def _factual_strategy_proofs(
                 previous_query=(distinct_queries[index - 1] if index else None),
                 query=query,
                 prior_observation=prior_observation,
+                prior_observations=tuple(search_observations[:index]),
             )
         )
         current_transition_verified, _ = (
@@ -4018,6 +4153,53 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 "fields, then emit a complete action."
             )
         if isinstance(public_error_code, str) and (
+            "candidate_answer is bound to the alternate proposition argument"
+            in public_error_code
+            and "overt wh-dependency fixes answer_slot.answer_field"
+            in public_error_code
+        ):
+            return (
+                "Preserve every successful qa-retrieval read receipt, "
+                "question_scope, candidate_answer, the complete answer_slot, "
+                "relation, qualifiers, evidence_span, multi_hop_chain, and every "
+                "unimplicated proposition. Do not search or read again and do "
+                "not change answer_slot.answer_field. Repair only the selected "
+                "evidence proposition's subject and "
+                "object_or_attribute_value by copying two distinct semantic "
+                "arguments from the same evidence_span: the fixed answer field "
+                "must equal candidate_answer and the other field must preserve "
+                "the receipt-grounded relation argument. Then emit a complete "
+                "action."
+            )
+        if isinstance(public_error_code, str) and (
+            "must bind distinct subject and object_or_attribute_value arguments"
+            in public_error_code
+            and "repair only the non-answer field" in public_error_code
+        ):
+            return (
+                "Preserve every successful qa-retrieval read receipt, "
+                "question_scope, candidate_answer, the complete answer_slot, "
+                "the selected proposition's answer field, relation, qualifiers, "
+                "evidence_span, multi_hop_chain, and every unimplicated "
+                "proposition. Do not search or read again. Repair only the named "
+                "non-answer proposition argument by copying the distinct "
+                "receipt-grounded argument from that same evidence_span, then "
+                "emit a complete action."
+            )
+        if isinstance(public_error_code, str) and (
+            "must bind distinct subject and object_or_attribute_value arguments"
+            in public_error_code
+        ):
+            return (
+                "Preserve every successful qa-retrieval read receipt, "
+                "question_scope, candidate_answer, the complete answer_slot, "
+                "relation, qualifiers, evidence_span, multi_hop_chain, and every "
+                "unimplicated proposition. Do not search or read again. Repair "
+                "only the selected evidence proposition's subject and "
+                "object_or_attribute_value as two distinct receipt-grounded "
+                "arguments, then emit a complete action."
+            )
+        if isinstance(public_error_code, str) and (
             "Reasoner answer_slot.answer_field selects" in public_error_code
         ):
             return (
@@ -4332,8 +4514,10 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             )
         if public_error_code == _RETRIEVAL_QUERY_SCOPE_MODIFIER_LOSS:
             return (
-                "Preserve all successful Tool receipts, the original entity, and "
-                "the requested relation. Restore every explicit ordinal scope "
+                "Preserve all successful Tool receipts, the complete ordered "
+                "question-derived entity anchor, every named scope constraint, "
+                "and every already-realized requested-relation class. Restore "
+                "every explicit ordinal scope "
                 "class from the original question using that surface or a "
                 "controlled equivalent in the retrieval query; do "
                 "not broaden `first`, `last`, `earliest`, or a corresponding "
@@ -4343,18 +4527,22 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             _RETRIEVAL_QUERY_NAMED_SCOPE_LOSS
         ):
             return (
-                "Preserve all successful Tool receipts, the original entity, and "
-                "the requested relation. Restore every explicit named scope "
-                "constraint copied from the question and listed by the public "
-                "error. Do not broaden a nationality, jurisdiction, language, or "
-                "other named restriction into an unscoped relation."
+                "Preserve all successful Tool receipts, the complete ordered "
+                "question-derived entity anchor, every ordinal scope modifier, "
+                "and every already-realized requested-relation class and surface. "
+                "Restore every explicit named scope constraint copied from the "
+                "question and listed by the public error. Do not broaden a "
+                "nationality, jurisdiction, language, or other named restriction "
+                "into an unscoped relation."
             )
         if isinstance(public_error_code, str) and public_error_code.startswith(
             _RETRIEVAL_QUERY_RELATION_CLASS_LOSS
         ):
             return (
                 "Preserve all successful Tool receipts, the ordered public entity "
-                "anchor, and every ordinal scope modifier. Restore every missing "
+                "anchor, every named scope constraint, every ordinal scope "
+                "modifier, and every relation class not named as missing by the "
+                "public error. Restore every missing "
                 "question-derived strong relation class using one of the answer-free "
                 "required_relation_surface_alternatives in the current public Tool "
                 "continuation state. A generic relation head alone cannot replace a "
@@ -4363,11 +4551,15 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             )
         if public_error_code == _RETRIEVAL_QUERY_ENTITY_ANCHOR_LOSS:
             return (
-                "Preserve all successful Tool receipts. Restore the complete "
+                "Preserve all successful Tool receipts, every named and ordinal "
+                "scope constraint, and every already-realized requested-relation "
+                "class and surface. Restore the complete "
                 "ordered question-derived entity anchor, including an adjacent "
-                "question-side type noun, before changing the relation surface. "
-                "Do not replace it with a returned subtype title or add an answer "
-                "candidate."
+                "question-side type noun, or use an exact prior-hit title only "
+                "when that mirror-valid search Observation's title and snippet "
+                "jointly bind the original entity, relation, and scope. Do not "
+                "use an unrelated returned subtype, guess an alias, or add an "
+                "answer candidate."
             )
         if isinstance(public_error_code, str) and public_error_code.startswith(
             _RETRIEVAL_QUERY_STRATEGY_SEMANTICS_MISMATCH
@@ -4653,6 +4845,67 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             return frozenset()
         if "Reasoner field 'question_scope'" in public_error_code:
             return frozenset({("question_scope",)})
+        fixed_dependency_match = re.search(
+            r"candidate_answer is bound to the alternate proposition argument "
+            r"(?:'subject'|'object_or_attribute_value') at "
+            r"evidence_propositions\[(\d+)\].*overt wh-dependency fixes "
+            r"answer_slot\.answer_field",
+            public_error_code,
+        )
+        if fixed_dependency_match is not None:
+            proposition_index = fixed_dependency_match.group(1)
+            return frozenset(
+                {
+                    (
+                        "evidence_propositions",
+                        proposition_index,
+                        "subject",
+                    ),
+                    (
+                        "evidence_propositions",
+                        proposition_index,
+                        "object_or_attribute_value",
+                    ),
+                }
+            )
+        duplicate_non_answer_match = re.search(
+            r"evidence_propositions\[(\d+)\] must bind distinct subject and "
+            r"object_or_attribute_value arguments;.*repair only the non-answer "
+            r"field '(subject|object_or_attribute_value)'",
+            public_error_code,
+        )
+        if duplicate_non_answer_match is not None:
+            proposition_index, field_name = duplicate_non_answer_match.groups()
+            return frozenset(
+                {
+                    (
+                        "evidence_propositions",
+                        proposition_index,
+                        field_name,
+                    )
+                }
+            )
+        duplicate_binding_match = re.search(
+            r"evidence_propositions\[(\d+)\] must bind distinct subject and "
+            r"object_or_attribute_value arguments",
+            public_error_code,
+        )
+        if duplicate_binding_match is not None:
+            proposition_index = duplicate_binding_match.group(1)
+            return frozenset(
+                {
+                    (
+                        "evidence_propositions",
+                        proposition_index,
+                        "subject",
+                    ),
+                    (
+                        "evidence_propositions",
+                        proposition_index,
+                        "object_or_attribute_value",
+                    ),
+                }
+            )
         proposition_field_match = re.search(
             r"Reasoner evidence_propositions\[(\d+)\]\."
             r"(subject|relation|object_or_attribute_value)",
@@ -6045,6 +6298,12 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 original_question,
                 "",
             )
+            required_entity_anchor_tokens = _question_entity_anchor_tokens(
+                original_question
+            )
+            required_named_constraints = tuple(
+                sorted(_question_named_constraint_tokens(original_question))
+            )
             required_relation_alternatives = (
                 _question_relation_surface_alternatives(original_question)
             )
@@ -6058,7 +6317,24 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     )
                     + " To advance retrieval, "
                     "change at least one normalized lexical item and keep both "
-                    "the target entity and requested relation represented. Use "
+                    "the target entity and requested relation represented. "
+                    "Represent the entity with the ordered question-derived "
+                    "anchor tokens: "
+                    + json.dumps(
+                        required_entity_anchor_tokens,
+                        ensure_ascii=False,
+                    )
+                    + ", or with an exact passage-title alias supported by a "
+                    "prior mirror-valid search Observation whose title and "
+                    "snippet bind that original entity, relation, and scope. "
+                    "Do not guess an alias. Preserve every question-derived "
+                    "named scope "
+                    "constraint: "
+                    + json.dumps(
+                        required_named_constraints,
+                        ensure_ascii=False,
+                    )
+                    + ". Use "
                     "every explicit ordinal scope class from the original "
                     "question, using its original surface or a controlled "
                     "equivalent: "
@@ -6519,6 +6795,12 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     "",
                 )
             ),
+            "question_entity_anchor_tokens": list(
+                _question_entity_anchor_tokens(original_question)
+            ),
+            "required_named_constraints": list(
+                sorted(_question_named_constraint_tokens(original_question))
+            ),
             "required_relation_classes": list(
                 required_relation_alternatives
             ),
@@ -6791,6 +7073,109 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                         tool_receipts=exc.tool_receipts,
                         model_calls=exc.model_calls,
                         tool_plan_exhausted=exc.tool_plan_exhausted,
+                    ) from exc
+                if not exhausted and not exc.tool_plan_exhausted:
+                    # The SkillFlow Agent exhausted its per-call ReAct turn
+                    # window while the bounded retrieval schedule and Tool
+                    # budget still admit continuation. Preserve the last typed
+                    # Observation and expose continuation state; do not relabel
+                    # this as Tool-plan/coverage exhaustion for FlowSteer's
+                    # non-destructive Canvas recovery.
+                    trace = [dict(item) for item in exc.react_trace]
+                    repair_instruction = (
+                        self._public_semantic_repair_instruction(
+                            state.semantic_repair_error_code
+                        )
+                        if isinstance(
+                            state.semantic_repair_error_code,
+                            str,
+                        )
+                        else None
+                    )
+                    if repair_instruction is None:
+                        repair_instruction = self._semantic_repair_instruction(
+                            state.semantic_repair_kind or "strategy"
+                        )
+                    terminal_diagnosis = {
+                        "react_turn_exhausted": True,
+                        "tool_plan_exhausted": False,
+                        "bounded_schedule_exhausted": False,
+                        "continuation_admissible": True,
+                        "remaining_tool_calls": max(
+                            0,
+                            self._max_tool_calls - state.dispatched_tool_calls,
+                        ),
+                        "retrieval_strategy_progress_count": (
+                            state.strategy_progress_count
+                        ),
+                        "missing_retrieval_strategy_coverage": list(
+                            state.missing_strategy_coverage
+                        ),
+                        "retrieval_attempt_count": state.search_attempt_count,
+                        "recall_expansion_count": state.recall_expansion_count,
+                        "retrieval_strategy_schedule_prefix": list(
+                            proof.strategy for proof in state.strategy_proofs
+                        ),
+                        "verified_retrieval_strategy_coverage": list(
+                            state.verified_strategy_coverage
+                        ),
+                        "normalized_query_novelty_verified": (
+                            state.recall_expansion_count == 0
+                        ),
+                        "strategy_semantics_verified": (
+                            state.strategy_semantics_verified
+                        ),
+                        "strategy_semantics_prefix": list(
+                            state.strategy_semantics
+                        ),
+                        "retrieval_attempts": [
+                            attempt.to_value()
+                            for attempt in state.retrieval_attempts
+                        ],
+                        "retrieval_attempts_verified": (
+                            state.retrieval_attempts_verified
+                        ),
+                        "successful_search_with_hits_count": sum(
+                            hit_count > 0
+                            for hit_count in state.successful_search_hit_counts
+                        ),
+                        "successful_empty_search_count": sum(
+                            hit_count == 0
+                            for hit_count in state.successful_search_hit_counts
+                        ),
+                        "tool_error_count": state.tool_error_count,
+                        "search_queries": list(state.search_queries),
+                        "search_top_ks": list(state.search_top_ks),
+                        "location_relation_grounding_search_count": (
+                            state.location_containment_repair_search_count
+                        ),
+                        "location_relation_grounding_queries": list(
+                            state.location_containment_repair_queries
+                        ),
+                        "location_relation_grounding_top_ks": list(
+                            state.location_containment_repair_top_ks
+                        ),
+                    }
+                    if trace:
+                        trace[-1]["repair_instruction"] = repair_instruction
+                        trace[-1]["terminal_failure_diagnosis"] = (
+                            terminal_diagnosis
+                        )
+                    else:  # pragma: no cover - a turn was necessarily sampled
+                        trace.append(
+                            {
+                                "repair_instruction": repair_instruction,
+                                "terminal_failure_diagnosis": (
+                                    terminal_diagnosis
+                                ),
+                            }
+                        )
+                    raise ReactExecutionError(
+                        str(exc),
+                        react_trace=tuple(trace),
+                        tool_receipts=exc.tool_receipts,
+                        model_calls=exc.model_calls,
+                        tool_plan_exhausted=False,
                     ) from exc
                 trace = [dict(item) for item in exc.react_trace]
                 if location_containment_repair:
@@ -7495,10 +7880,22 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         original_question: str,
         artifact: str,
         tool_receipts: Sequence[Mapping[str, object]],
+        require_answer_type_binding: bool = False,
     ) -> bool:
-        """Prove that entity-linking repair can stay on one public read."""
+        """Prove that entity/relation repair can stay on one public read.
 
-        from .agent_workflow_env import AgentWorkflowEnv
+        The default preserves the existing alias-repair admission boundary.
+        Relation-alignment failures use the stricter branch: the exact cited
+        span must already contain a proposition whose entity and open argument
+        satisfy the question-only answer type.  Otherwise the ordinary
+        SkillFlow Action--Observation loop must reopen search/read.
+        """
+
+        from .agent_workflow_env import (
+            AgentWorkflowEnv,
+            _canonical_evidence_text,
+            _evidence_span_matches_read,
+        )
 
         fields, issue = AgentWorkflowEnv._structured_semantic_fields(
             artifact,
@@ -7517,6 +7914,9 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         passage_id = fields.get("passage_id")
         identity = fields.get("entity_identity")
         target_relation = fields.get("target_relation")
+        answer_type_constraint = fields.get("answer_type_constraint")
+        evidence_proposition = fields.get("evidence_proposition")
+        evidence_span = fields.get("evidence_span")
         if (
             not isinstance(passage_id, str)
             or not passage_id.strip()
@@ -7528,6 +7928,18 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             return False
         question_surface = identity["question_surface"]
         assert isinstance(question_surface, str)
+        evidence_surface = identity.get("evidence_surface")
+        if require_answer_type_binding and (
+            not isinstance(evidence_surface, str)
+            or not evidence_surface.strip()
+            or not isinstance(evidence_span, str)
+            or not evidence_span.strip()
+            or not isinstance(evidence_proposition, Mapping)
+            or set(evidence_proposition)
+            != {"subject", "predicate", "object_or_attribute_value"}
+            or answer_type_constraint != qa_answer_type_constraint(original_question)
+        ):
+            return False
         for receipt in tool_receipts:
             if not AgentWorkflowEnv._successful_read_receipt(
                 receipt,
@@ -7553,6 +7965,14 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             passage = value.get("passage")
             if not isinstance(passage, Mapping):
                 continue
+            if require_answer_type_binding and any(
+                result_id is not None and result_id != passage_id
+                for result_id in (
+                    value.get("passage_id"),
+                    passage.get("passage_id"),
+                )
+            ):
+                continue
             title = passage.get("title")
             read_text = AgentWorkflowEnv._successful_read_text(
                 receipt,
@@ -7568,6 +7988,76 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 )
             ):
                 continue
+            if require_answer_type_binding:
+                assert isinstance(evidence_surface, str)
+                assert isinstance(evidence_span, str)
+                assert isinstance(evidence_proposition, Mapping)
+                if not _evidence_span_matches_read(evidence_span, read_text):
+                    continue
+                proposition_subject = evidence_proposition.get("subject")
+                proposition_predicate = evidence_proposition.get("predicate")
+                proposition_object = evidence_proposition.get(
+                    "object_or_attribute_value"
+                )
+                if any(
+                    not isinstance(value, str) or not value.strip()
+                    for value in (
+                        proposition_subject,
+                        proposition_predicate,
+                        proposition_object,
+                    )
+                ):
+                    continue
+                assert isinstance(proposition_subject, str)
+                assert isinstance(proposition_predicate, str)
+                assert isinstance(proposition_object, str)
+                canonical_span = _canonical_evidence_text(evidence_span)
+                canonical_entity = _canonical_evidence_text(evidence_surface)
+                canonical_subject = _canonical_evidence_text(proposition_subject)
+                canonical_predicate = _canonical_evidence_text(
+                    proposition_predicate
+                )
+                canonical_object = _canonical_evidence_text(proposition_object)
+                if any(
+                    surface not in canonical_span
+                    for surface in (
+                        canonical_subject,
+                        canonical_predicate,
+                        canonical_object,
+                    )
+                ):
+                    continue
+                entity_pattern = re.compile(
+                    rf"(?<!\w){re.escape(canonical_entity)}(?!\w)",
+                    flags=re.UNICODE,
+                )
+                entity_in_subject = (
+                    entity_pattern.search(canonical_subject) is not None
+                )
+                entity_in_object = (
+                    entity_pattern.search(canonical_object) is not None
+                )
+                if entity_in_subject == entity_in_object:
+                    continue
+                open_argument = (
+                    proposition_object
+                    if entity_in_subject
+                    else proposition_subject
+                )
+                if _answer_surface_type_issue(
+                    expected_type=qa_answer_type_constraint(original_question),
+                    surface=open_argument,
+                ) is not None:
+                    continue
+                if not _proposition_preserves_requested_relation(
+                    requested_relation=target_relation,
+                    predicate=proposition_predicate,
+                    object_or_attribute_value=proposition_object,
+                    original_question=original_question,
+                    evidence_span=evidence_span,
+                ):
+                    continue
+                return True
             if (
                 _relation_surface_matches_evidence(
                     target_relation,
@@ -7914,6 +8404,27 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     "Evidence Retriever evidence_proposition."
                     f"{field_name} does not occur verbatim in evidence_span"
                 )
+        # Bind the question-only answer type before relation-alignment repair.
+        # A read about the correct entity but the wrong relation argument (for
+        # example birth date for a birthplace question) cannot be repaired by
+        # rewriting structured fields on the same receipt; it must reopen the
+        # existing SkillFlow search/read Action--Observation domain.
+        entity_pattern = re.compile(
+            rf"(?<!\w){re.escape(canonical_evidence_surface)}(?!\w)",
+            flags=re.UNICODE,
+        )
+        entity_in_subject = entity_pattern.search(canonical_subject) is not None
+        entity_in_object = entity_pattern.search(canonical_object) is not None
+        if entity_in_subject != entity_in_object:
+            open_argument = (
+                proposition_object if entity_in_subject else proposition_subject
+            )
+            answer_type_issue = _answer_surface_type_issue(
+                expected_type=expected_answer_type,
+                surface=open_argument,
+            )
+            if answer_type_issue is not None:
+                return answer_type_issue
         # PROJECT_NECESSARY_ADAPTATION: SkillFlow's exact read receipt remains
         # authoritative. Retriever and Reasoner use the same relation-
         # realization predicate after every proposition field has been checked
@@ -7940,12 +8451,6 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         if ordinal_scope_issue is not None:
             return ordinal_scope_issue
 
-        entity_pattern = re.compile(
-            rf"(?<!\w){re.escape(canonical_evidence_surface)}(?!\w)",
-            flags=re.UNICODE,
-        )
-        entity_in_subject = entity_pattern.search(canonical_subject) is not None
-        entity_in_object = entity_pattern.search(canonical_object) is not None
         if entity_in_subject and entity_in_object:
             return (
                 "Evidence Retriever evidence proposition must not bind "
@@ -7985,15 +8490,6 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     "preserve the complete receipt-grounded entity mention "
                     "before Reasoner answer-slot binding"
                 )
-            open_argument = (
-                proposition_object if entity_in_subject else proposition_subject
-            )
-            answer_type_issue = _answer_surface_type_issue(
-                expected_type=expected_answer_type,
-                surface=open_argument,
-            )
-            if answer_type_issue is not None:
-                return answer_type_issue
 
         # A strong answer-slot mismatch cannot be repaired by rewriting only
         # identity fields. Diagnose it before the title-chain repair so the
@@ -8228,8 +8724,6 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     "Evidence Retriever evidence_span must be read-body evidence",
                     "Evidence Retriever entity_identity.question_surface",
                     "Evidence Retriever entity_identity.evidence_surface",
-                    "Evidence Retriever target_relation must preserve",
-                    "Evidence Retriever question target_relation",
                     "Evidence Retriever answer_type_constraint",
                     "Evidence Retriever evidence_proposition must contain",
                     "Evidence Retriever evidence proposition surfaces",
@@ -8272,10 +8766,25 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     tool_receipts=tool_receipts,
                 )
             )
+            relation_structure_repair = bool(
+                issue.startswith(
+                    (
+                        "Evidence Retriever target_relation must preserve",
+                        "Evidence Retriever question target_relation",
+                    )
+                )
+                and self._receipt_grounded_entity_relation_repair_available(
+                    original_question=evidence_retriever_question,
+                    artifact=artifact,
+                    tool_receipts=tool_receipts,
+                    require_answer_type_binding=True,
+                )
+            )
             structured_repair = (
                 structured_repair
                 or ordinal_structure_repair
                 or entity_relation_structure_repair
+                or relation_structure_repair
             )
             if retriever_protocol == "hotpotqa_verified_answer_slot_v1":
                 prefix = (
@@ -8308,6 +8817,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             reasoner_kwargs.update(
                 minimum_evidence_propositions=1,
                 minimum_reasoning_steps=1,
+                preserve_question_derived_answer_field=True,
             )
         candidate, issue = AgentWorkflowEnv._reasoner_candidate(
             artifact,
@@ -8620,6 +9130,20 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                         entity_anchor_tokens = _question_entity_anchor_tokens(
                             original_question
                         )
+                        prior_entity_observations = tuple(
+                            observation
+                            for observation in observations
+                            if isinstance(observation.get("result"), Mapping)
+                            and observation["result"].get("operation")
+                            == "search"
+                        )
+                        receipt_title_entity_supported, _ = (
+                            _public_title_entity_anchor_support(
+                                original_question=original_question,
+                                query=query,
+                                prior_observation=prior_entity_observations,
+                            )
+                        )
                         if (
                             entity_anchor_tokens
                             and (
@@ -8632,12 +9156,28 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                                     )
                                 )
                             )
+                            and not receipt_title_entity_supported
                             and not _surface_binds_entity_anchor(
                                 query,
                                 entity_anchor_tokens,
                             )
                         ):
                             return _RETRIEVAL_QUERY_ENTITY_ANCHOR_LOSS
+                        missing_named_constraints = (
+                            _missing_question_named_constraints(
+                                original_question,
+                                query,
+                            )
+                        )
+                        if missing_named_constraints:
+                            return (
+                                _RETRIEVAL_QUERY_NAMED_SCOPE_LOSS
+                                + ": missing_named_constraints="
+                                + json.dumps(
+                                    missing_named_constraints,
+                                    ensure_ascii=False,
+                                )
+                            )
                         missing_relation_classes = (
                             _missing_required_relation_classes(
                                 original_question,
@@ -8709,26 +9249,6 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                         and not prior_limits
                     ):
                         previous_query = prior_queries[-1]
-                        lost_named_constraints = (
-                            _missing_question_named_constraints(
-                                original_question,
-                                query,
-                            )
-                            if not _missing_question_named_constraints(
-                                original_question,
-                                previous_query,
-                            )
-                            else ()
-                        )
-                        if lost_named_constraints:
-                            return (
-                                _RETRIEVAL_QUERY_NAMED_SCOPE_LOSS
-                                + ": missing_named_constraints="
-                                + json.dumps(
-                                    lost_named_constraints,
-                                    ensure_ascii=False,
-                                )
-                            )
                         previous_signature = (
                             _retrieval_query_term_set_signature(previous_query)
                         )
@@ -8839,6 +9359,9 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                                     original_question=original_question,
                                     previous_query=previous_query,
                                     query=query,
+                                    entity_anchor_verified=(
+                                        receipt_title_entity_supported
+                                    ),
                                 )
                             )
                             if (

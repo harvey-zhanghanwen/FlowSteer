@@ -1350,9 +1350,77 @@ to preserve the requested relation. These are non-destructive semantic repair
 constraints, not Director prompt templates. Director prompt v6 remains
 byte-for-byte topology-neutral; training and Skill retrieval remain disabled.
 
-The v57 static discovery passes 709 unit tests. A fresh three-task Stable Zero
-gate remains mandatory before fixed-128 execution; no v2 EM/F1 estimate is
-inferred from unit tests or the v56 diagnostic canary.
+The v57 static discovery passed 709 unit tests. Its subsequent frozen
+three-task Stable Zero gate collected all three trajectories with zero
+collection failures but passed `0/3` legal terminal chains. All three tasks
+ended at `canvas_action_domain_exhausted`, with `final_answer=null`, no explicit
+FINISH and official EM/F1 `0.0/0.0`. `triviaqa:tc_1` had already produced the
+correct semantic candidate `Harry Sinclair Lewis`, but the structured repair
+incorrectly treated the question-derived answer field as mutable.
+`triviaqa:tc_3` read a birth-date receipt for a birthplace question and routed
+the resulting relation mismatch to completion-only repair instead of reopening
+evidence retrieval. `triviaqa:tc_5` did not enforce the question's named and
+relation constraints as query invariants: its initial queries omitted
+`American`, and later rewrites could lose other required scope. It then
+exhausted the per-call ReAct turn limit while Tool calls and retrieval
+strategies were still available.
+These are failed-gate diagnostics, not an accuracy estimate. The ordered
+fixed-128 evaluation was not run.
+
+### v58 evidence, answer-slot and query-constraint recovery
+
+v58 retains Director prompt v6 byte-for-byte. It does not prescribe an Agent
+inventory, role order, topology, edge pattern, retrieval recipe or candidate
+answer. The implementation priority remains SkillFlow's bounded
+`StructuredAction -> ToolResult -> Observation` execution and public receipts,
+then FlowSteer's accepted Canvas edit -> execute -> feedback transaction; the
+user design note supplies the project-specific semantic-preserving,
+non-destructive recovery requirement. The factual-QA semantics below are
+minimal project adaptations because neither upstream Runtime implements
+TriviaQA Entity Linking, answer-slot binding or relation-evidence admission.
+
+For retrieval, every initial and rewritten search query must retain the
+question-derived entity anchor, requested relation, ordinal modifiers and
+explicit named constraints. An exact prior search-result title may replace the
+surface entity anchor only when the mirror-valid public search receipt's title
+and snippet also bind the original entity, relation, ordinal scope and named
+scope. The corresponding passage IDs remain attached to the public transition
+record. This permits receipt-backed aliases without admitting guessed aliases
+or allowing a missing nationality, jurisdiction, language or other named
+restriction to disappear across turns.
+
+Evidence-to-completion routing now checks the question-derived answer type
+before relation-alignment repair. A relation mismatch stays on the same
+receipt only when the cited successful read proves the exact passage ID and
+contiguous evidence span, all proposition fields, the entity in exactly one
+relation argument, a type-compatible open argument and realization of the
+requested relation. If that strict same-receipt gate fails, the existing
+SkillFlow search/read action domain reopens; the Runtime does not rewrite a
+date receipt into a birthplace artifact or classify it as database coverage
+failure.
+
+Reasoner recovery preserves the model-authored candidate and the original
+question's overt wh-dependency. For a duplicate subject/object binding, only
+the non-answer proposition field is mutable; for an alternate-field mismatch,
+only the selected proposition's subject and object fields are reopened while
+the answer slot and all unrelated structured fields remain fixed by JSON
+Schema `const`. This implements `preserve -> diagnose -> repair/augment` on the
+existing Canvas rather than deleting a receipt-valid artifact or narrowing the
+question semantics.
+
+Finally, v58 separates per-call ReAct turn exhaustion from Tool-plan or bounded
+retrieval-schedule exhaustion. If the Agent reaches its turn limit while Tool
+calls and legal retrieval transitions remain, the last typed Observation and
+all receipts are preserved and the public diagnosis records
+`react_turn_exhausted=true`, `tool_plan_exhausted=false`,
+`bounded_schedule_exhausted=false` and `continuation_admissible=true`. It is
+not relabelled as `knowledge_base_coverage_failure`. The isolated v58 condition
+raises `max_turns_per_agent_call` from 20 to 32 but leaves
+`max_tool_calls_per_agent_call` fixed at 16; its v57 sampling-schedule purpose
+is retained so the scientific-sampling coordinates remain paired. The v58
+static suite passed 1,002 tests (plus 184 subtests), and prepare-only reproduced
+the exact same ordered 128 task records as v57. A fresh three-task Stable Zero
+gate and the ordered fixed-128 evaluation are not yet reported as completed.
 
 ## Historical comparison condition
 

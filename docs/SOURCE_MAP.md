@@ -1195,3 +1195,32 @@ to the latest model-authored rejected completion. The public error alone selects
 the mutable path. Ground Truth, accepted answers, evaluator output, topology,
 Agent inventory and role order are absent from this repair boundary. Director
 prompt v6, training state and Skill state remain unchanged.
+
+## TriviaQA unified architecture v58 evidence/slot/query recovery
+
+The source priority for v58 is explicit: SkillFlow supplies the bounded
+`StructuredAction -> ToolResult -> Observation` ReAct execution and immutable
+public Tool receipts; FlowSteer supplies the progressive Canvas transaction
+and state-conditioned action/admission boundary; the user design note requires
+semantic-preserving, non-destructive `preserve -> diagnose -> repair/augment`
+recovery. The user design note and papers are design inputs, not executable
+upstream code. TriviaQA-specific Entity Linking, relation/answer-slot checks
+and query invariants are therefore classified as necessary project
+adaptations, not attributed to either upstream implementation.
+
+| Current module/boundary | Classification | Primary source retained | Minimal compatibility adaptation |
+| --- | --- | --- | --- |
+| `qa_tool_adapter.py::{_public_title_entity_anchor_support,_factual_transition_strategy_identification}` and search Action admission | `PROJECT_NECESSARY_ADAPTATION` over SkillFlow receipts | SkillFlow's one public search Action, Observation and receipt per Tool call | Initial and subsequent queries retain the question-derived entity anchor, relation, ordinal modifiers and named constraints. An exact prior-hit title can serve as an alias only when a mirror-valid public receipt's title/snippet also binds those invariants; its passage IDs remain in the transition receipt. Guessed aliases remain inadmissible. |
+| `qa_tool_adapter.py::{_evidence_retriever_completion_issue,_receipt_grounded_entity_relation_repair_available,_completion_error}` | `PROJECT_NECESSARY_ADAPTATION` over the SkillFlow read receipt | Exact public read result, passage ID, text and Tool receipt remain the sole evidence authority | Answer-type binding is checked before relation-alignment repair. Completion-only repair requires one successful read to prove the cited passage/span, every proposition field, exactly one entity argument, a type-compatible open argument and the requested relation. Otherwise the existing search/read domain reopens. |
+| `agent_workflow_env.py::_reasoner_candidate`; `qa_tool_adapter.py::_reasoner_repair_mutable_paths` and constrained completion schema | Necessary adaptation following the user design note; FlowSteer Canvas and SkillFlow constrained generation retained | FlowSteer's accepted edit -> execute -> feedback transaction; SkillFlow's constrained next StructuredAction | The question-derived wh-dependency fixes the answer field. Duplicate subject/object binding opens only the non-answer field; alternate-field mismatch opens only the selected proposition's subject/object fields. Candidate, answer slot, unrelated propositions and receipts remain fixed/preserved instead of deleting the artifact. |
+| `qa_tool_adapter.py::QARetrievalReactExecutionAdapter.execute` turn-exhaustion boundary | Necessary Runtime compatibility adaptation | SkillFlow's bounded ReAct call, full public Action--Observation trace and Tool receipts | Reaching the model-turn cap with Tool calls or retrieval transitions remaining records `react_turn_exhausted=true`, `tool_plan_exhausted=false`, `bounded_schedule_exhausted=false` and `continuation_admissible=true`, preserving the last typed Observation rather than falsely declaring Tool-plan/coverage exhaustion. |
+| `evaluation_triviaqa_unified_architecture_v2_fixed128.yaml` v58 condition | Necessary isolated evaluation configuration | Existing fixed ordered 128-task view and SkillFlow-derived scientific-sampling coordinate | `max_turns_per_agent_call` is 32 while `max_tool_calls_per_agent_call` remains 16. Condition/output paths are isolated; the v57 sampling-schedule purpose is intentionally retained for paired generation coordinates. Director prompt v6 and the topology search space are unchanged. |
+
+The persisted v57 live gate is the evidence motivating these adaptations: it
+collected three trajectories with zero collection failures but passed Stable
+Zero `0/3`; every task ended at `canvas_action_domain_exhausted` without an
+explicit FINISH. The v57 fixed-128 evaluation was not run.
+
+After the source mapping above was written, the v58 static suite passed 1,002
+tests plus 184 subtests, and prepare-only reproduced the exact same ordered 128
+task records as v57. No live-canary or fixed-128 score is claimed here.

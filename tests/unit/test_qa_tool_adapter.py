@@ -16,12 +16,14 @@ from src.interactive.agent_runtime import (
     ExecutionPhase,
     UpstreamMessage,
 )
+from src.interactive.agent_workflow_env import AgentWorkflowEnv
 from src.interactive.model_registry import ModelSpec, ProviderSpec
 from src.interactive.react_execution import ReactExecutionError
 from src.interactive.qa_tool_adapter import (
     QARetrievalReactExecutionAdapter,
     QA_RETRIEVAL_TOOL_ID,
     QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+    _factual_transition_strategy_identification,
     _factual_strategy_semantics_verified,
     _location_containment_lineage_issue,
     _location_resolution_answer_field_constraint,
@@ -2180,17 +2182,21 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertIn("exhausted 5 turns", str(exhausted.exception))
+        self.assertIs(False, exhausted.exception.tool_plan_exhausted)
         self.assertEqual(5, len(gateway.requests))
         self.assertEqual(5, len(exhausted.exception.react_trace))
         self.assertEqual(3, len(exhausted.exception.tool_receipts))
         self.assertEqual(
-            "budget_exhausted",
+            "schema_invalid",
             exhausted.exception.react_trace[-1]["observation_status"],
         )
-        self.assertEqual(
-            "retrieval_strategy_failure",
-            exhausted.exception.react_trace[-1]["public_error_code"],
-        )
+        terminal_diagnosis = exhausted.exception.react_trace[-1][
+            "terminal_failure_diagnosis"
+        ]
+        self.assertIs(True, terminal_diagnosis["react_turn_exhausted"])
+        self.assertIs(False, terminal_diagnosis["tool_plan_exhausted"])
+        self.assertIs(True, terminal_diagnosis["continuation_admissible"])
+        self.assertIs(False, terminal_diagnosis["bounded_schedule_exhausted"])
         self.assertEqual(2, len(index.search_calls))
         self.assertEqual(
             ["first-hop"],
@@ -2779,7 +2785,10 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
                 self.outputs = [
                     action(
                         "search",
-                        {"query": "Professor Mira Hale birthplace", "limit": 5},
+                        {
+                            "query": "Professor Mira Hale birthplace Arcadia",
+                            "limit": 5,
+                        },
                     ),
                     action("read", {"passage_id": "first-hop"}),
                     action("complete", {"value": one_hop_artifact}),
@@ -2836,7 +2845,7 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             [
-                ("Professor Mira Hale birthplace", 5),
+                ("Professor Mira Hale birthplace Arcadia", 5),
                 ("East Ward city Arcadia", 10),
             ],
             index.search_calls,
@@ -2860,7 +2869,10 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
                 self.outputs = [
                     action(
                         "search",
-                        {"query": "Professor Mira Hale birthplace", "limit": 5},
+                        {
+                            "query": "Professor Mira Hale birthplace Arcadia",
+                            "limit": 5,
+                        },
                     ),
                     action("read", {"passage_id": "first-hop"}),
                     action("complete", {"value": one_hop_artifact}),
@@ -2966,7 +2978,10 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
                 self.outputs = [
                     action(
                         "search",
-                        {"query": "Professor Mira Hale birthplace", "limit": 5},
+                        {
+                            "query": "Professor Mira Hale birthplace Arcadia",
+                            "limit": 5,
+                        },
                     ),
                     action("read", {"passage_id": "first-hop"}),
                     action("complete", {"value": one_hop_artifact}),
@@ -3189,6 +3204,45 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             provider=ProviderSpec("provider", kind="test"),
             phase=ExecutionPhase.SINGLE,
             semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+        )
+        initial_named_scope_dropped = StructuredAction(
+            ActionKind.TOOL,
+            "search",
+            {
+                "query": "Billboard magazine first publish hit chart",
+                "limit": 5,
+            },
+            resource_id=QA_RETRIEVAL_TOOL_ID,
+        )
+        initial_named_scope_issue = adapter._tool_action_error(
+            request=request,
+            action=initial_named_scope_dropped,
+            observations=[],
+        )
+        self.assertIsNotNone(initial_named_scope_issue)
+        assert initial_named_scope_issue is not None
+        self.assertTrue(
+            initial_named_scope_issue.startswith(
+                "qa_retrieval_query_named_scope_loss"
+            )
+        )
+        self.assertIn("american", initial_named_scope_issue)
+        self.assertIsNone(
+            adapter._tool_action_error(
+                request=request,
+                action=StructuredAction(
+                    ActionKind.TOOL,
+                    "search",
+                    {
+                        "query": (
+                            "Billboard magazine first publish American hit chart"
+                        ),
+                        "limit": 5,
+                    },
+                    resource_id=QA_RETRIEVAL_TOOL_ID,
+                ),
+                observations=[],
+            )
         )
         observations = [
             {
@@ -3504,6 +3558,15 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
                 distinct_queries=measured_trace,
             ),
         )
+        self.assertEqual(
+            (False,),
+            _factual_strategy_semantics_verified(
+                original_question=question,
+                distinct_queries=(
+                    "Chart Weekly magazine first publish hit chart decade",
+                ),
+            ),
+        )
 
         relation_coverage_trace = (
             initial_query,
@@ -3545,6 +3608,109 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
                 distinct_queries=repeated_class_trace,
             ),
         )
+
+    def test_receipt_backed_title_alias_persists_across_relation_rewrite(
+        self,
+    ) -> None:
+        question = "Where in England was Dame Judi Dench born?"
+        previous_query = "Judi Dench birthplace England"
+        observation = {
+            "observation_status": "success",
+            "executed_action": {
+                "kind": "tool",
+                "name": "search",
+                "resource_id": QA_RETRIEVAL_TOOL_ID,
+                "arguments": {"query": previous_query, "limit": 5},
+            },
+            "result": {
+                "operation": "search",
+                "query": previous_query,
+                "top_k": 5,
+                "passage_ids": ["p1"],
+                "hits": [
+                    {
+                        "passage_id": "p1",
+                        "document_id": "d1",
+                        "title": "Judi Dench",
+                        "snippet": (
+                            "Dame Judi Dench was born in Heworth, England."
+                        ),
+                        "rank": 1,
+                    }
+                ],
+            },
+        }
+        strategy, verified, source_ids = (
+            _factual_transition_strategy_identification(
+                original_question=question,
+                previous_query=previous_query,
+                query="Judi Dench born England",
+                prior_observation=observation,
+            )
+        )
+        self.assertEqual("alias_expansion", strategy)
+        self.assertIs(True, verified)
+        self.assertEqual(("p1",), source_ids)
+
+        later_observation = {
+            "observation_status": "success",
+            "executed_action": {
+                "kind": "tool",
+                "name": "search",
+                "resource_id": QA_RETRIEVAL_TOOL_ID,
+                "arguments": {
+                    "query": "Judi Dench born England",
+                    "limit": 5,
+                },
+            },
+            "result": {
+                "operation": "search",
+                "query": "Judi Dench born England",
+                "top_k": 5,
+                "passage_ids": ["p2"],
+                "hits": [
+                    {
+                        "passage_id": "p2",
+                        "document_id": "d2",
+                        "title": "Heworth",
+                        "snippet": "Heworth is a place in England.",
+                        "rank": 1,
+                    }
+                ],
+            },
+        }
+        _, latest_only_verified, _ = (
+            _factual_transition_strategy_identification(
+                original_question=question,
+                previous_query="Judi Dench born England",
+                query="Judi Dench birthplace England",
+                prior_observation=later_observation,
+            )
+        )
+        self.assertIs(False, latest_only_verified)
+        persisted_strategy, persisted_verified, persisted_source_ids = (
+            _factual_transition_strategy_identification(
+                original_question=question,
+                previous_query="Judi Dench born England",
+                query="Judi Dench birthplace England",
+                prior_observation=later_observation,
+                prior_observations=(observation, later_observation),
+            )
+        )
+        self.assertEqual("alias_expansion", persisted_strategy)
+        self.assertIs(True, persisted_verified)
+        self.assertEqual(("p1",), persisted_source_ids)
+
+        _, guessed_verified, guessed_source_ids = (
+            _factual_transition_strategy_identification(
+                original_question=question,
+                previous_query=previous_query,
+                query="Judith Dench born England",
+                prior_observation=observation,
+            )
+        )
+        self.assertIs(False, guessed_verified)
+        self.assertEqual((), guessed_source_ids)
 
     def test_v23_public_action_domain_exposes_answer_free_relation_surfaces(
         self,
@@ -4532,6 +4698,308 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             "evaluator",
         ):
             self.assertNotIn(hidden_field, serialized)
+
+    def test_reasoner_fixed_wh_dependency_repair_schema_is_field_scoped(
+        self,
+    ) -> None:
+        question = (
+            "Which coastal-born novelist won the international fiction prize "
+            "in 1995?"
+        )
+        evidence_span = (
+            "Avery Morgan was a coastal-born novelist. In 1995, Avery Morgan "
+            "received the international fiction prize."
+        )
+        prior_value = {
+            "question_scope": question,
+            "answer_slot": {
+                "answer_type": "entity",
+                "answer_cardinality": "single",
+                "qualifiers": ["coastal-born", "1995"],
+                "proposition_index": 0,
+                "answer_field": "subject",
+            },
+            "evidence_propositions": [
+                {
+                    "subject": "the international fiction prize",
+                    "relation": "was received by",
+                    "object_or_attribute_value": "Avery Morgan",
+                    "qualifiers": ["in 1995"],
+                    "evidence_span": evidence_span,
+                },
+                {
+                    "subject": "Avery Morgan",
+                    "relation": "was",
+                    "object_or_attribute_value": "a coastal-born novelist",
+                    "qualifiers": [],
+                    "evidence_span": evidence_span,
+                },
+            ],
+            "multi_hop_chain": [
+                "bind the prize relation",
+                "bind the coastal-born qualifier",
+            ],
+            "candidate_answer": "Avery Morgan",
+            "evidence": [evidence_span],
+        }
+        candidate, issue = AgentWorkflowEnv._reasoner_candidate(
+            json.dumps(prior_value),
+            original_question=question,
+            minimum_evidence_propositions=1,
+            minimum_reasoning_steps=1,
+            preserve_question_derived_answer_field=True,
+        )
+        self.assertIsNone(candidate)
+        self.assertIsNotNone(issue)
+        assert issue is not None
+        self.assertIn("alternate proposition argument", issue)
+        self.assertIn("overt wh-dependency", issue)
+        self.assertNotIn("set answer_field", issue)
+
+        observations = [
+            {
+                "observation_status": "success",
+                "executed_action": {
+                    "kind": "tool",
+                    "name": "search",
+                    "resource_id": QA_RETRIEVAL_TOOL_ID,
+                    "arguments": {"query": "Avery Morgan prize 1995", "limit": 5},
+                },
+                "result": {
+                    "operation": "search",
+                    "query": "Avery Morgan prize 1995",
+                    "top_k": 5,
+                    "passage_ids": ["avery-morgan"],
+                },
+            },
+            {
+                "observation_status": "success",
+                "executed_action": {
+                    "kind": "tool",
+                    "name": "read",
+                    "resource_id": QA_RETRIEVAL_TOOL_ID,
+                    "arguments": {"passage_id": "avery-morgan"},
+                },
+                "result": {
+                    "operation": "read",
+                    "passage_id": "avery-morgan",
+                    "passage": {
+                        "title": "Avery Morgan",
+                        "text": evidence_span,
+                    },
+                },
+            },
+            {
+                "observation_status": "schema_invalid",
+                "public_error_code": f"qa_semantic_artifact_invalid: {issue}",
+                "executed_action": {
+                    "kind": "complete",
+                    "name": "complete",
+                    "resource_id": None,
+                    "skill_id": None,
+                    "arguments": {"value": prior_value},
+                },
+            },
+        ]
+        adapter = QARetrievalReactExecutionAdapter(
+            gateway=SimpleNamespace(generate=lambda request: None),
+            tool_registry=build_qa_tool_registry(FakeIndex()),
+            max_turns=8,
+            max_tool_calls=12,
+            task_type="factual_qa",
+            completion_policy="required_evidence",
+        )
+        request = AgentRequest(
+            request_id="trivia:fixed-wh-field-repair-schema",
+            run_id="trivia",
+            graph_revision=1,
+            problem=question,
+            agent=AgentNode(
+                "reasoner",
+                "model",
+                "bind public evidence to the answer slot",
+                role_family="reasoner",
+                allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                execution_mode="react",
+            ),
+            model=ModelSpec("model", "provider"),
+            provider=ProviderSpec("provider", kind="test"),
+            phase=ExecutionPhase.SINGLE,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+        )
+
+        response_schema = adapter._state_conditioned_response_schema(
+            request,
+            observations,
+        )
+        assert response_schema is not None
+        value_properties = response_schema["properties"]["arguments"][
+            "properties"
+        ]["value"]["properties"]
+        self.assertEqual(
+            prior_value["candidate_answer"],
+            value_properties["candidate_answer"]["const"],
+        )
+        self.assertEqual(
+            prior_value["answer_slot"],
+            value_properties["answer_slot"]["const"],
+        )
+        proposition_schema = value_properties["evidence_propositions"]
+        self.assertEqual(2, proposition_schema["minItems"])
+        self.assertEqual(2, proposition_schema["maxItems"])
+        self.assertFalse(proposition_schema["items"])
+        selected_properties = proposition_schema["prefixItems"][0]["properties"]
+        self.assertNotIn("const", selected_properties["subject"])
+        self.assertNotIn(
+            "const",
+            selected_properties["object_or_attribute_value"],
+        )
+        for field in ("relation", "qualifiers", "evidence_span"):
+            self.assertEqual(
+                prior_value["evidence_propositions"][0][field],
+                selected_properties[field]["const"],
+            )
+        self.assertEqual(
+            prior_value["evidence_propositions"][1],
+            proposition_schema["prefixItems"][1]["const"],
+        )
+        for field in (
+            "question_scope",
+            "multi_hop_chain",
+            "evidence",
+        ):
+            self.assertEqual(prior_value[field], value_properties[field]["const"])
+
+    def test_reasoner_duplicate_binding_repair_opens_only_non_answer_field(
+        self,
+    ) -> None:
+        question = "What is the capital of France?"
+        evidence_span = "Paris is the capital of France."
+        prior_value = {
+            "question_scope": question,
+            "answer_slot": {
+                "answer_type": "short_answer",
+                "answer_cardinality": "single",
+                "qualifiers": [],
+                "proposition_index": 0,
+                "answer_field": "object_or_attribute_value",
+            },
+            "evidence_propositions": [
+                {
+                    "subject": "Paris",
+                    "relation": "is the capital of",
+                    "object_or_attribute_value": "Paris",
+                    "qualifiers": [],
+                    "evidence_span": evidence_span,
+                },
+                {
+                    "subject": "France",
+                    "relation": "is a country in",
+                    "object_or_attribute_value": "Europe",
+                    "qualifiers": [],
+                    "evidence_span": "France is a country in Europe.",
+                },
+            ],
+            "multi_hop_chain": ["bind France", "select its capital"],
+            "candidate_answer": "Paris",
+            "evidence": [evidence_span, "France is a country in Europe."],
+        }
+        candidate, issue = AgentWorkflowEnv._reasoner_candidate(
+            json.dumps(prior_value),
+            original_question=question,
+        )
+        self.assertIsNone(candidate)
+        self.assertIsNotNone(issue)
+        assert issue is not None
+        self.assertIn("repair only the non-answer field 'subject'", issue)
+
+        observations = [
+            {
+                "observation_status": "success",
+                "executed_action": {
+                    "kind": "tool",
+                    "name": "read",
+                    "resource_id": QA_RETRIEVAL_TOOL_ID,
+                    "arguments": {"passage_id": "france"},
+                },
+                "result": {
+                    "operation": "read",
+                    "passage_id": "france",
+                    "passage": {"title": "France", "text": evidence_span},
+                },
+            },
+            {
+                "observation_status": "schema_invalid",
+                "public_error_code": f"qa_semantic_artifact_invalid: {issue}",
+                "executed_action": {
+                    "kind": "complete",
+                    "name": "complete",
+                    "resource_id": None,
+                    "skill_id": None,
+                    "arguments": {"value": prior_value},
+                },
+            },
+        ]
+        adapter = QARetrievalReactExecutionAdapter(
+            gateway=SimpleNamespace(generate=lambda request: None),
+            tool_registry=build_qa_tool_registry(FakeIndex()),
+            max_turns=8,
+            max_tool_calls=12,
+            task_type="factual_qa",
+            completion_policy="required_evidence",
+        )
+        request = AgentRequest(
+            request_id="trivia:duplicate-binding-field-repair-schema",
+            run_id="trivia",
+            graph_revision=1,
+            problem=question,
+            agent=AgentNode(
+                "reasoner",
+                "model",
+                "bind public evidence to the answer slot",
+                role_family="reasoner",
+                allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                execution_mode="react",
+            ),
+            model=ModelSpec("model", "provider"),
+            provider=ProviderSpec("provider", kind="test"),
+            phase=ExecutionPhase.SINGLE,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+        )
+
+        response_schema = adapter._state_conditioned_response_schema(
+            request,
+            observations,
+        )
+        assert response_schema is not None
+        value_properties = response_schema["properties"]["arguments"][
+            "properties"
+        ]["value"]["properties"]
+        proposition_schema = value_properties["evidence_propositions"]
+        selected_properties = proposition_schema["prefixItems"][0]["properties"]
+        self.assertNotIn("const", selected_properties["subject"])
+        for field in (
+            "relation",
+            "object_or_attribute_value",
+            "qualifiers",
+            "evidence_span",
+        ):
+            self.assertEqual(
+                prior_value["evidence_propositions"][0][field],
+                selected_properties[field]["const"],
+            )
+        self.assertEqual(
+            prior_value["evidence_propositions"][1],
+            proposition_schema["prefixItems"][1]["const"],
+        )
+        for field in (
+            "question_scope",
+            "answer_slot",
+            "multi_hop_chain",
+            "candidate_answer",
+            "evidence",
+        ):
+            self.assertEqual(prior_value[field], value_properties[field]["const"])
 
     async def test_unified_factual_completion_accepts_one_grounded_proposition(
         self,
@@ -5582,33 +6050,22 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         error = caught.exception
         # The first unverified adjacent transition is rejected before Tool
         # dispatch.  Only the initial public search receipt is retained; the
-        # terminal diagnosis remains a strategy failure, never a database
-        # coverage claim.
+        # max_turns ends this local call while the Tool plan remains
+        # continuable; it must not be relabelled as database coverage or
+        # retrieval-plan exhaustion.
         self.assertEqual(1, len(error.tool_receipts))
-        self.assertIs(True, error.tool_plan_exhausted)
-        self.assertEqual(
-            "retrieval_strategy_failure",
+        self.assertIs(False, error.tool_plan_exhausted)
+        self.assertNotEqual(
+            "knowledge_base_coverage_failure",
             error.react_trace[-1]["public_error_code"],
         )
         terminal_diagnosis = error.react_trace[-1][
             "terminal_failure_diagnosis"
         ]
-        self.assertIs(True, terminal_diagnosis["tool_plan_exhausted"])
-        self.assertEqual(1, terminal_diagnosis["retrieval_attempt_count"])
-        self.assertEqual(
-            [5],
-            terminal_diagnosis["search_top_ks"],
-        )
-        self.assertEqual(
-            ["initial_retrieval"],
-            terminal_diagnosis["retrieval_strategy_schedule_prefix"],
-        )
+        self.assertIs(True, terminal_diagnosis["react_turn_exhausted"])
+        self.assertIs(False, terminal_diagnosis["tool_plan_exhausted"])
+        self.assertIs(True, terminal_diagnosis["continuation_admissible"])
         self.assertFalse(terminal_diagnosis["bounded_schedule_exhausted"])
-        self.assertFalse(terminal_diagnosis["strategy_semantics_verified"])
-        self.assertNotIn(
-            "retrieval_strategies_attempted",
-            terminal_diagnosis,
-        )
 
     async def test_same_query_top_k_expansion_does_not_exhaust_strategies(
         self,
@@ -5634,16 +6091,16 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
                 self.requests: list[AgentRequest] = []
                 self.outputs = [
                     search_action(
-                        "Billboard magazine first publish hit chart decade", 5
+                        "Billboard magazine first publish American hit chart decade", 5
                     ),
                     search_action(
-                        "BILLBOARD MAGAZINE first publish hit chart decade", 10
+                        "BILLBOARD MAGAZINE first publish American hit chart decade", 10
                     ),
                     search_action(
-                        "Billboard magazine first publish hit chart decade", 10
+                        "Billboard magazine first publish American hit chart decade", 10
                     ),
                     search_action(
-                        "Billboard magazine first publish hit chart decade", 10
+                        "Billboard magazine first publish American hit chart decade", 10
                     ),
                 ]
 
@@ -5688,32 +6145,27 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         error = caught.exception
         self.assertEqual(
             [
-                ("Billboard magazine first publish hit chart decade", 5),
-                ("BILLBOARD MAGAZINE first publish hit chart decade", 10),
+                (
+                    "Billboard magazine first publish American hit chart decade",
+                    5,
+                ),
+                (
+                    "BILLBOARD MAGAZINE first publish American hit chart decade",
+                    10,
+                ),
             ],
             index.search_calls,
         )
         self.assertEqual(2, len(error.tool_receipts))
+        self.assertIs(False, error.tool_plan_exhausted)
         terminal_diagnosis = error.react_trace[-1][
             "terminal_failure_diagnosis"
         ]
-        self.assertEqual(
-            "retrieval_strategy_failure",
-            terminal_diagnosis["public_error_code"],
-        )
-        self.assertEqual(2, terminal_diagnosis["retrieval_attempt_count"])
-        self.assertEqual(
-            1,
-            terminal_diagnosis["retrieval_strategy_progress_count"],
-        )
-        self.assertEqual(1, terminal_diagnosis["recall_expansion_count"])
-        self.assertEqual(
-            ["initial_retrieval"],
-            terminal_diagnosis["retrieval_strategy_schedule_prefix"],
-        )
-        self.assertFalse(
-            terminal_diagnosis["normalized_query_novelty_verified"]
-        )
+        self.assertIs(True, terminal_diagnosis["react_turn_exhausted"])
+        self.assertIs(False, terminal_diagnosis["tool_plan_exhausted"])
+        self.assertIs(True, terminal_diagnosis["continuation_admissible"])
+        self.assertEqual(1, terminal_diagnosis["retrieval_strategy_progress_count"])
+        self.assertFalse(terminal_diagnosis["bounded_schedule_exhausted"])
         continuation_contract = gateway.requests[1].agent.contract
         self.assertIn(
             '"required_strategy":null',
@@ -5725,7 +6177,7 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn('"required_top_k":10', continuation_contract)
         self.assertIn(
-            '"prior_normalized_queries":["billboard magazine first publish hit chart decade"]',
+            '"prior_normalized_queries":["billboard magazine first publish american hit chart decade"]',
             continuation_contract,
         )
 
@@ -5854,20 +6306,13 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
 
         error = caught.exception
         self.assertEqual(2, len(error.tool_receipts))
-        self.assertIs(True, error.tool_plan_exhausted)
+        self.assertIs(False, error.tool_plan_exhausted)
         terminal_diagnosis = error.react_trace[-1][
             "terminal_failure_diagnosis"
         ]
-        self.assertIs(True, terminal_diagnosis["tool_plan_exhausted"])
-        self.assertEqual(
-            "retrieval_strategy_failure",
-            terminal_diagnosis["public_error_code"],
-        )
-        self.assertEqual(1, terminal_diagnosis["retrieval_attempt_count"])
-        self.assertEqual(
-            [5],
-            terminal_diagnosis["search_top_ks"],
-        )
+        self.assertIs(True, terminal_diagnosis["react_turn_exhausted"])
+        self.assertIs(False, terminal_diagnosis["tool_plan_exhausted"])
+        self.assertIs(True, terminal_diagnosis["continuation_admissible"])
         self.assertFalse(terminal_diagnosis["bounded_schedule_exhausted"])
 
     async def test_react_read_requires_canonical_id_from_successful_search(self) -> None:
@@ -6998,7 +7443,10 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
                 self.outputs = [
                     action(
                         "search",
-                        {"query": "Dame Judi Dench birthplace", "limit": 5},
+                        {
+                            "query": "Dame Judi Dench birthplace England",
+                            "limit": 5,
+                        },
                     ),
                     action("read", {"passage_id": "p1"}),
                     action("complete", {"value": ungrounded_entity_surface}),
@@ -7040,7 +7488,10 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             completion_policy="required_evidence",
         ).execute(request)
 
-        self.assertEqual([("Dame Judi Dench birthplace", 5)], index.search_calls)
+        self.assertEqual(
+            [("Dame Judi Dench birthplace England", 5)],
+            index.search_calls,
+        )
         self.assertEqual(["p1"], index.read_calls)
         public_error = response.metadata["react_trace"][2]["public_error_code"]
         self.assertTrue(public_error.startswith("qa_semantic_artifact_invalid:"))
@@ -8170,7 +8621,10 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
                 self.outputs = [
                     action(
                         "search",
-                        {"query": "Dame Judi Dench birthplace", "limit": 5},
+                        {
+                            "query": "Dame Judi Dench birthplace England",
+                            "limit": 5,
+                        },
                     ),
                     action("read", {"passage_id": "p1"}),
                     action("complete", {"value": invalid_artifact}),
@@ -8211,7 +8665,10 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        self.assertEqual([("Dame Judi Dench birthplace", 5)], index.search_calls)
+        self.assertEqual(
+            [("Dame Judi Dench birthplace England", 5)],
+            index.search_calls,
+        )
         self.assertEqual(["p1"], index.read_calls)
         self.assertEqual(2, response.metadata["tool_calls"])
         feedback = response.metadata["react_trace"][2]["public_error_code"]
@@ -8614,7 +9071,10 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
                 self.outputs = [
                     action(
                         "search",
-                        {"query": "Dame Judi Dench birthplace", "limit": 5},
+                        {
+                            "query": "Dame Judi Dench birthplace England",
+                            "limit": 5,
+                        },
                     ),
                     action("read", {"passage_id": "p1"}),
                     action(
@@ -8693,7 +9153,7 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(
-            [("Dame Judi Dench birthplace", 5)],
+            [("Dame Judi Dench birthplace England", 5)],
             index.search_calls,
         )
         self.assertEqual(["p1"], index.read_calls)
@@ -8702,10 +9162,7 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             for index in (2, 3, 4)
         ]
         self.assertTrue(
-            all(
-                error.startswith("qa_semantic_artifact_invalid:")
-                for error in public_errors
-            )
+            all(error.startswith("qa_semantic_") for error in public_errors)
         )
         self.assertIn("whole original question", public_errors[0])
         self.assertIn("whole evidence_span", public_errors[1])
@@ -9231,6 +9688,16 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         assert detail is not None
         self.assertIn("supplies a date relation argument", detail)
         self.assertIn("requested location relation argument", detail)
+        date_receipt = receipt("date", date_evidence)
+        self.assertFalse(
+            QARetrievalReactExecutionAdapter
+            ._receipt_grounded_entity_relation_repair_available(
+                original_question=question,
+                artifact=json.dumps(date_artifact),
+                tool_receipts=[date_receipt],
+                require_answer_type_binding=True,
+            )
+        )
 
         identity_and_type_mismatch = json.loads(json.dumps(date_artifact))
         identity_and_type_mismatch["entity_identity"] = {
@@ -9295,6 +9762,15 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
                 original_question=question,
                 artifact=json.dumps(place_artifact),
                 tool_receipts=[receipt("place", place_evidence)],
+            )
+        )
+        self.assertTrue(
+            QARetrievalReactExecutionAdapter
+            ._receipt_grounded_entity_relation_repair_available(
+                original_question=question,
+                artifact=json.dumps(place_artifact),
+                tool_receipts=[receipt("place", place_evidence)],
+                require_answer_type_binding=True,
             )
         )
 
@@ -9426,7 +9902,10 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
                 self.outputs = [
                     action(
                         "search",
-                        {"query": "Dame Judi Dench born", "limit": 5},
+                        {
+                            "query": "Dame Judi Dench born England",
+                            "limit": 5,
+                        },
                     ),
                     action("read", {"passage_id": "p1"}),
                     action("complete", {"value": invalid_artifact}),
@@ -9476,7 +9955,7 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             [
-                ("Dame Judi Dench born", 5),
+                ("Dame Judi Dench born England", 5),
                 ("Dame Judi Dench birthplace England", 10),
             ],
             index.search_calls,
@@ -9489,6 +9968,98 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(
             '"required_strategy":null',
             gateway.requests[3].agent.contract,
+        )
+
+        recovery_adapter = QARetrievalReactExecutionAdapter(
+            gateway=SimpleNamespace(generate=lambda request: None),
+            tool_registry=build_qa_tool_registry(FakeIndex()),
+            max_turns=8,
+            max_tool_calls=10,
+            task_type="factual_qa",
+            completion_policy="required_evidence",
+        )
+        recovery_request = AgentRequest(
+            request_id="trivia:dench-answer-type-domain",
+            run_id="trivia",
+            graph_revision=1,
+            problem=question,
+            agent=AgentNode(
+                "evidence_retriever",
+                "model",
+                "retrieve the requested relation argument",
+                role_family="evidence_retriever",
+                allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                execution_mode="react",
+            ),
+            model=ModelSpec("model", "provider"),
+            provider=ProviderSpec("provider", kind="test"),
+            phase=ExecutionPhase.SINGLE,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+        )
+        observations = [
+            {
+                "observation_status": "success",
+                "executed_action": {
+                    "kind": "tool",
+                    "name": "search",
+                    "resource_id": QA_RETRIEVAL_TOOL_ID,
+                    "arguments": {
+                        "query": "Dame Judi Dench born England",
+                        "limit": 5,
+                    },
+                },
+                "result": {
+                    "operation": "search",
+                    "query": "Dame Judi Dench born England",
+                    "top_k": 5,
+                    "passage_ids": ["p1", "p2"],
+                },
+            },
+            {
+                "observation_status": "success",
+                "executed_action": {
+                    "kind": "tool",
+                    "name": "read",
+                    "resource_id": QA_RETRIEVAL_TOOL_ID,
+                    "arguments": {"passage_id": "p1"},
+                },
+                "result": {
+                    "operation": "read",
+                    "passage_id": "p1",
+                    "passage": {"title": "Judi Dench", "text": evidence},
+                },
+            },
+            {
+                "observation_status": "schema_invalid",
+                "public_error_code": feedback,
+                "executed_action": {
+                    "kind": "complete",
+                    "name": "complete",
+                    "resource_id": None,
+                    "skill_id": None,
+                    "arguments": {"value": invalid_artifact},
+                },
+            },
+        ]
+        state = recovery_adapter._required_evidence_state(
+            recovery_request,
+            observations,
+        )
+        self.assertEqual("evidence", state.semantic_repair_kind)
+        self.assertEqual(
+            (
+                frozenset(
+                    {
+                        (QA_RETRIEVAL_TOOL_ID, "read"),
+                        (QA_RETRIEVAL_TOOL_ID, "search"),
+                    }
+                ),
+                False,
+            ),
+            recovery_adapter._state_conditioned_action_domain(
+                recovery_request,
+                observations,
+            ),
         )
 
     async def test_irrelevant_david_crockett_read_advances_david_soul_retrieval(

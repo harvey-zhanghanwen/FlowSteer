@@ -2647,6 +2647,55 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("search_queries", summary["terminal_failure_diagnosis"])
         self.assertNotIn(passage, feedback_text)
 
+    def test_react_summary_preserves_turn_exhaustion_continuation(self) -> None:
+        graph = _hotpot_semantic_graph()
+        registry = make_registry()
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_hotpot_semantic_runtime(registry, _ImmediateGateway()),
+            graph=graph,
+            problem="What is the capital of France?",
+            semantic_protocol="hotpotqa_verified_answer_slot_v1",
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id="qa-retrieval",
+        )
+        diagnosis = {
+            "react_turn_exhausted": True,
+            "tool_plan_exhausted": False,
+            "bounded_schedule_exhausted": False,
+            "continuation_admissible": True,
+            "remaining_tool_calls": 9,
+            "retrieval_strategy_progress_count": 2,
+            "verified_retrieval_strategy_coverage": [
+                "initial_retrieval",
+                "spelling_normalization",
+            ],
+            "missing_retrieval_strategy_coverage": [
+                "alias_expansion",
+                "entity_disambiguation",
+                "query_rewriting",
+            ],
+        }
+        record = AgentFailureRecord(
+            request_id="request-turn-exhaustion",
+            agent_id="retriever",
+            phase=ExecutionPhase.SINGLE,
+            graph_revision=graph.revision,
+            error_type="ReactExecutionError",
+            message="react agent exhausted its bounded turn window",
+            metadata={
+                "react_trace": [
+                    {"terminal_failure_diagnosis": diagnosis}
+                ]
+            },
+        )
+
+        summary = env._react_public_error_summary(record)
+        self.assertEqual(
+            diagnosis,
+            summary["terminal_failure_diagnosis"],
+        )
+
     def test_failure_diagnosis_promotes_only_typed_terminal_receipts(
         self,
     ) -> None:
@@ -9474,6 +9523,27 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(candidate)
         self.assertIn("overt wh-dependency", str(issue))
 
+        fixed_slot_alternate = json.loads(json.dumps(artifact))
+        fixed_slot_alternate["evidence_propositions"][0]["subject"] = (
+            "the international fiction prize"
+        )
+        fixed_slot_alternate["evidence_propositions"][0][
+            "object_or_attribute_value"
+        ] = "Avery Morgan"
+        candidate, issue = AgentWorkflowEnv._reasoner_candidate(
+            json.dumps(fixed_slot_alternate),
+            original_question=question,
+            minimum_evidence_propositions=1,
+            minimum_reasoning_steps=1,
+            preserve_question_derived_answer_field=True,
+        )
+        self.assertIsNone(candidate)
+        self.assertIn("alternate proposition argument", str(issue))
+        self.assertIn("overt wh-dependency", str(issue))
+        self.assertIn("preserve candidate_answer and answer_slot", str(issue))
+        self.assertNotIn("set answer_field", str(issue))
+        self.assertNotIn("set answer_slot.answer_field", str(issue))
+
         unrelated_relation = json.loads(json.dumps(artifact))
         unrelated_relation["evidence_propositions"][0]["relation"] = "was"
         provenance_issue = AgentWorkflowEnv._reasoner_evidence_provenance_issue(
@@ -9532,6 +9602,9 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(candidate)
         self.assertIn("distinct subject and object_or_attribute_value", issue or "")
         self.assertIn("self-reported entity binding", issue or "")
+        self.assertIn("evidence_propositions[0]", issue or "")
+        self.assertIn("fixed answer field 'object_or_attribute_value'", issue or "")
+        self.assertIn("repair only the non-answer field 'subject'", issue or "")
 
     async def test_hotpot_rejects_react_role_but_not_react_execution_semantics(self) -> None:
         registry = make_registry()
