@@ -322,17 +322,21 @@ class QAToolStrategyProofTests(unittest.TestCase):
         self.assertEqual(
             (
                 "initial_retrieval",
-                "spelling_normalization",
+                None,
                 "spelling_normalization",
                 "alias_expansion",
                 "entity_disambiguation",
-                "query_rewriting",
+                "alias_expansion",
             ),
             tuple(record.required_strategy for record in records),
         )
         self.assertEqual(
             (True, False, True, True, True, True),
             tuple(record.strategy_advanced for record in records),
+        )
+        self.assertEqual(
+            (False, True, False, False, False, False),
+            tuple(record.recall_expansion for record in records),
         )
         self.assertEqual(
             (5, 10, 10, 15, 20, 25),
@@ -347,6 +351,41 @@ class QAToolStrategyProofTests(unittest.TestCase):
             list(records[1].fts_term_set),
             records[1].to_value()["fts_term_set"],
         )
+
+    def test_repeated_top_k_expansion_does_not_create_strategy_labels(
+        self,
+    ) -> None:
+        observations = tuple(
+            search_observation(
+                QUERIES[0],
+                limit=limit,
+                passage_id=f"public-top-{limit}",
+                title="Chart Weekly",
+                snippet=(
+                    "Chart Weekly magazine first published an American hit "
+                    "chart."
+                ),
+            )
+            for limit in (5, 10, 15)
+        )
+        records = _factual_retrieval_attempt_records(
+            original_question=QUESTION,
+            search_observations=observations,
+        )
+
+        self.assertEqual(
+            ("initial_retrieval", None, None),
+            tuple(record.required_strategy for record in records),
+        )
+        self.assertEqual(
+            (False, True, True),
+            tuple(record.recall_expansion for record in records),
+        )
+        self.assertEqual(
+            (5, 10, 15),
+            tuple(record.required_top_k for record in records),
+        )
+        self.assertTrue(all(record.verified for record in records))
 
     def test_attempt_record_rejects_action_observation_receipt_mismatch(
         self,
@@ -382,13 +421,8 @@ class QAToolStrategyProofTests(unittest.TestCase):
             tuple(proof.proof_strength for proof in proofs),
         )
         self.assertEqual(("public-0",), proofs[1].source_passage_ids)
-        self.assertEqual(
-            ("public-0", "public-1"), proofs[2].source_passage_ids
-        )
-        self.assertEqual(
-            ("public-0", "public-1", "public-2"),
-            proofs[3].source_passage_ids,
-        )
+        self.assertEqual(("public-1",), proofs[2].source_passage_ids)
+        self.assertEqual(("public-2",), proofs[3].source_passage_ids)
 
         adapter = QARetrievalReactExecutionAdapter(
             gateway=SimpleNamespace(generate=lambda agent_request: None),
@@ -415,7 +449,7 @@ class QAToolStrategyProofTests(unittest.TestCase):
         receipt_conditioned = _factual_strategy_proofs(
             original_question=QUESTION,
             distinct_queries=QUERIES[:2],
-            search_observations=OBSERVATIONS[:1],
+            search_observations=OBSERVATIONS[:2],
         )
         invalid_alias_append = _factual_strategy_proofs(
             original_question=QUESTION,
@@ -439,6 +473,25 @@ class QAToolStrategyProofTests(unittest.TestCase):
             receipt_conditioned[-1].proof_strength,
         )
         self.assertFalse(invalid_alias_append[-1].verified)
+
+    def test_relation_alias_transition_is_not_ordinal_spelling_stage(
+        self,
+    ) -> None:
+        relation_alias_query = QUERIES[2]
+        proofs = _factual_strategy_proofs(
+            original_question=QUESTION,
+            distinct_queries=(QUERIES[1], relation_alias_query),
+            search_observations=(OBSERVATIONS[1], OBSERVATIONS[2]),
+        )
+        records = _factual_retrieval_attempt_records(
+            original_question=QUESTION,
+            search_observations=(OBSERVATIONS[1], OBSERVATIONS[2]),
+        )
+
+        self.assertEqual("alias_expansion", proofs[1].strategy)
+        self.assertTrue(proofs[1].verified)
+        self.assertEqual("alias_expansion", records[1].required_strategy)
+        self.assertNotEqual("spelling_normalization", proofs[1].strategy)
 
     def test_knowledge_base_coverage_requires_complete_valid_schedule(self) -> None:
         diagnose = QARetrievalReactExecutionAdapter._factual_exhaustion_diagnosis

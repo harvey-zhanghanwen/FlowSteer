@@ -589,6 +589,73 @@ def _location_surface_component_aliases(surface: str) -> frozenset[str]:
     return frozenset(aliases)
 
 
+def _location_resolution_answer_field_constraint(
+    *,
+    original_question: str,
+    entity_anchor: str,
+    read_evidence_texts: Sequence[str],
+) -> str | None:
+    """Derive branch-A/B answer binding only from public read bodies.
+
+    A finer locality explicitly contained by a city/town selects the
+    containment proposition's object.  A locality whose own body types it as
+    a city/town selects that proposition's subject.  Conflicting or incomplete
+    public bodies deliberately leave the schema unconstrained.
+    """
+
+    named_scope = _explicit_named_geographic_scope(original_question)
+    anchor_components = _comma_qualified_location_components(entity_anchor)
+    anchor = anchor_components[0] if anchor_components else entity_anchor
+    if (
+        not isinstance(named_scope, str)
+        or not named_scope.strip()
+        or not isinstance(anchor, str)
+        or not anchor.strip()
+    ):
+        return None
+    escaped_anchor = re.escape(anchor.strip())
+    branches: set[str] = set()
+    for read_text in read_evidence_texts:
+        if not isinstance(read_text, str):
+            continue
+        for clause in _evidence_proposition_clauses(read_text):
+            if (
+                not _contains_canonical_location_surface(clause, anchor)
+                or not _contains_canonical_location_surface(
+                    clause,
+                    named_scope,
+                )
+            ):
+                continue
+            explicit_containment = bool(
+                re.search(
+                    rf"(?<![\w]){escaped_anchor}(?![\w])\s+"
+                    r"(?:is|was)\s+[^.!?]{0,100}"
+                    r"(?:\bpart\s+of\b|\bbelongs?\s+to\b|"
+                    r"\b(?:district|suburb|sublocality)\b[^.!?]{0,40}\bof\b)"
+                    r"[^.!?]{0,100}\b(?:city|town)\b|"
+                    rf"(?<![\w]){escaped_anchor}(?![\w])\s+"
+                    r"(?:is|was)\s+(?:an?\s+|the\s+)?"
+                    r"(?:district|suburb|sublocality)\b[^.!?]{0,100}\bof\b",
+                    clause,
+                    flags=re.IGNORECASE,
+                )
+            )
+            typed_as_city_or_town = bool(
+                re.search(
+                    rf"(?<![\w]){escaped_anchor}(?![\w])\s+"
+                    r"(?:is|was)\s+(?:an?\s+|the\s+)?(?:city|town)\b",
+                    clause,
+                    flags=re.IGNORECASE,
+                )
+            )
+            if explicit_containment:
+                branches.add("object_or_attribute_value")
+            if typed_as_city_or_town:
+                branches.add("subject")
+    return next(iter(branches)) if len(branches) == 1 else None
+
+
 def _public_reads_matching_span(
     evidence_span: str,
     read_evidence_texts: Sequence[str],
@@ -1582,6 +1649,7 @@ class _FactualRetrievalAttemptRecord:
     query_variant_verified: bool
     tool_transition_verified: bool
     hit_count: int
+    recall_expansion: bool = False
 
     @property
     def verified(self) -> bool:
@@ -1601,6 +1669,7 @@ class _FactualRetrievalAttemptRecord:
             "required_top_k": self.required_top_k,
             "observed_top_k": self.observed_top_k,
             "strategy_advanced": self.strategy_advanced,
+            "recall_expansion": self.recall_expansion,
             "query_variant_verified": self.query_variant_verified,
             "tool_transition_verified": self.tool_transition_verified,
             "hit_count": self.hit_count,
@@ -1696,73 +1765,199 @@ def _query_replaces_relation_surface(
     )
 
 
+def _query_transition_is_inflectional_normalization(
+    previous_query: str,
+    query: str,
+) -> bool:
+    """Recognize a lexical normalization without assigning it by ordinal.
+
+    The two public search queries must differ as FTS term sets while retaining
+    a one-to-one conservative inflectional token alignment.  This intentionally
+    recognizes forms such as ``publish`` -> ``published`` but not a semantic
+    alias, added context term, or term-order-only recall retry.
+    """
+
+    previous_tokens = list(_scope_tokens(previous_query))
+    query_tokens = list(_scope_tokens(query))
+    if (
+        not previous_tokens
+        or len(previous_tokens) != len(query_tokens)
+        or _retrieval_query_term_set_signature(previous_query)
+        == _retrieval_query_term_set_signature(query)
+    ):
+        return False
+    unmatched = list(query_tokens)
+    for previous_token in previous_tokens:
+        match_index = next(
+            (
+                index
+                for index, query_token in enumerate(unmatched)
+                if _relation_token_variants(previous_token)
+                & _relation_token_variants(query_token)
+            ),
+            None,
+        )
+        if match_index is None:
+            return False
+        unmatched.pop(match_index)
+    return not unmatched
+
+
+def _public_title_transition_support(
+    *,
+    original_question: str,
+    query: str,
+    prior_observation: Mapping[str, object] | None,
+) -> tuple[bool, tuple[str, ...]]:
+    """Return exact prior-hit support for a title-conditioned transition."""
+
+    if not isinstance(prior_observation, Mapping):
+        return False, ()
+    transition_verified, verified_passage_ids = (
+        _public_search_transition_mirror(prior_observation)
+    )
+    result = prior_observation.get("result")
+    raw_hits = result.get("hits") if isinstance(result, Mapping) else None
+    if not transition_verified or not isinstance(raw_hits, list):
+        return False, ()
+    query_tokens = _scope_tokens(query)
+    entity_anchor = _question_entity_anchor_tokens(original_question)
+    source_ids: list[str] = []
+    for hit in raw_hits:
+        if not isinstance(hit, Mapping):
+            continue
+        title = hit.get("title")
+        snippet = hit.get("snippet")
+        passage_id = hit.get("passage_id")
+        if (
+            not isinstance(title, str)
+            or not title.strip()
+            or not isinstance(snippet, str)
+            or not isinstance(passage_id, str)
+            or passage_id.strip() not in verified_passage_ids
+        ):
+            continue
+        title_tokens = _scope_tokens(title)
+        public_surface = f"{title} {snippet}"
+        if (
+            title_tokens
+            and any(
+                tuple(query_tokens[offset : offset + len(title_tokens)])
+                == title_tokens
+                for offset in range(
+                    max(0, len(query_tokens) - len(title_tokens) + 1)
+                )
+            )
+            and (
+                not entity_anchor
+                or _surface_binds_entity_anchor(public_surface, entity_anchor)
+            )
+            and not _missing_required_relation_classes(
+                original_question,
+                public_surface,
+            )
+            and not _missing_question_scope_modifiers(
+                original_question,
+                public_surface,
+            )
+        ):
+            source_ids.append(passage_id.strip())
+    return bool(source_ids), tuple(dict.fromkeys(source_ids))
+
+
+def _factual_transition_strategy_identification(
+    *,
+    original_question: str,
+    previous_query: str | None,
+    query: str,
+    prior_observation: Mapping[str, object] | None = None,
+) -> tuple[str, bool, tuple[str, ...]]:
+    """Identify the strongest transition strategy from public invariants.
+
+    One distinct search transition yields one proof record and one strongest
+    public-invariant label.  No label is inferred from the transition's
+    ordinal position.
+    """
+
+    entity_preserved = _surface_binds_entity_anchor(
+        query,
+        _question_entity_anchor_tokens(original_question),
+    )
+    scope_preserved = not _missing_question_scope_modifiers(
+        original_question,
+        query,
+    )
+    relation_preserved = not _missing_required_relation_classes(
+        original_question,
+        query,
+    )
+    invariants_verified = bool(
+        entity_preserved and scope_preserved and relation_preserved
+    )
+    if previous_query is None:
+        return "initial_retrieval", invariants_verified, ()
+
+    replacement_classes = _relation_surface_replacement_classes(
+        original_question=original_question,
+        previous_query=previous_query,
+        query=query,
+    )
+    if replacement_classes:
+        # A deterministic same-class relation-surface replacement is the
+        # strongest answer-free evidence available here.  More general query
+        # rewriting remains unverified unless another controlled invariant is
+        # added; do not duplicate one transition into two proof records.
+        return "alias_expansion", invariants_verified, ()
+
+    title_supported, source_ids = _public_title_transition_support(
+        original_question=original_question,
+        query=query,
+        prior_observation=prior_observation,
+    )
+    if _query_transition_is_inflectional_normalization(
+        previous_query,
+        query,
+    ):
+        return (
+            "spelling_normalization",
+            bool(invariants_verified and title_supported),
+            source_ids,
+        )
+
+    previous_tokens = set(_scope_tokens(previous_query))
+    query_tokens = set(_scope_tokens(query))
+    if query_tokens - previous_tokens:
+        return (
+            "entity_disambiguation",
+            bool(invariants_verified and title_supported),
+            source_ids,
+        )
+
+    # A distinct transition which merely removes or substitutes unsupported
+    # lexical material remains observable, but public evidence has not
+    # identified a legal spelling, alias, disambiguation, or rewrite stage.
+    return "query_rewriting", False, ()
+
+
 def _factual_strategy_semantics_verified(
     *,
     original_question: str,
     distinct_queries: Sequence[str],
 ) -> tuple[bool, ...]:
-    """Measure semantics of the successful bounded strategy prefix."""
+    """Measure adjacent-query semantics without ordinal stage assignment."""
 
     verified: list[bool] = []
-    required_relation_classes = frozenset(
-        _relation_alias_surfaces_in(original_question)
-    )
-    transformed_relation_classes: set[str] = set()
     for index, query in enumerate(distinct_queries):
         if index >= len(_FACTUAL_QA_RETRIEVAL_STRATEGIES):
             break
-        strategy = _FACTUAL_QA_RETRIEVAL_STRATEGIES[index]
-        entity_preserved = _surface_binds_entity_anchor(
-            query,
-            _question_entity_anchor_tokens(original_question),
+        _, transition_verified, _ = (
+            _factual_transition_strategy_identification(
+                original_question=original_question,
+                previous_query=(distinct_queries[index - 1] if index else None),
+                query=query,
+            )
         )
-        ordinal_preserved = not _missing_question_scope_modifiers(
-            original_question,
-            query,
-        )
-        relation_preserved = not _missing_required_relation_classes(
-            original_question,
-            query,
-        )
-        if strategy in {"alias_expansion", "query_rewriting"}:
-            replacement_classes = (
-                _relation_surface_replacement_classes(
-                    original_question=original_question,
-                    previous_query=distinct_queries[index - 1],
-                    query=query,
-                )
-                if index > 0
-                else frozenset()
-            )
-            # While question-derived classes remain untransformed, each
-            # relation-rewrite stage must cover at least one new class.  Once
-            # every class has been covered, later stages may revisit a class.
-            # This prevents a composite relation from repeatedly rewriting
-            # only one surface while another strong relation is never tried.
-            uncovered_classes = (
-                required_relation_classes - transformed_relation_classes
-            )
-            replacement_progress = bool(replacement_classes) and (
-                not uncovered_classes
-                or bool(replacement_classes & uncovered_classes)
-            )
-            stage_verified = (
-                entity_preserved
-                and ordinal_preserved
-                and relation_preserved
-                and index > 0
-                and replacement_progress
-            )
-            verified.append(stage_verified)
-            if stage_verified:
-                transformed_relation_classes.update(replacement_classes)
-        else:
-            # Spelling normalization and entity disambiguation remain policy
-            # choices, but their observable invariants are still measurable:
-            # a distinct FTS term set with the public entity and ordinal intact.
-            verified.append(
-                entity_preserved and ordinal_preserved and relation_preserved
-            )
+        verified.append(transition_verified)
     return tuple(verified)
 
 
@@ -1856,88 +2051,54 @@ def _factual_strategy_proofs(
     distinct_queries: Sequence[str],
     search_observations: Sequence[Mapping[str, object]] = (),
 ) -> tuple[_FactualRetrievalStrategyProof, ...]:
-    """Expose proof strength without narrowing the original action domain.
+    """Expose one receipt-verifiable proof per distinct query transition.
 
-    DIRECT_REUSE: SkillFlow supplies ordered public Tool receipts.  The project
-    adaptation only annotates the existing FlowSteer invariant check.
+    DIRECT_REUSE: SkillFlow supplies the ordered search Action--Observation
+    receipts.  The project adaptation classifies each query against its
+    immediate predecessor and the adjacent public receipts; it never assigns a
+    stage from the query's ordinal position.
     """
 
-    semantics = _factual_strategy_semantics_verified(
-        original_question=original_question,
-        distinct_queries=distinct_queries,
-    )
     proofs: list[_FactualRetrievalStrategyProof] = []
-    for index, invariant_verified in enumerate(semantics):
-        strategy = _FACTUAL_QA_RETRIEVAL_STRATEGIES[index]
-        source_ids: list[str] = []
-        public_support = False
-        for observation in search_observations[:index]:
-            transition_verified, verified_passage_ids = (
-                _public_search_transition_mirror(observation)
+    for index, query in enumerate(distinct_queries):
+        if index >= len(_FACTUAL_QA_RETRIEVAL_STRATEGIES):
+            break
+        current_observation = (
+            search_observations[index]
+            if index < len(search_observations)
+            else None
+        )
+        prior_observation = (
+            search_observations[index - 1]
+            if index > 0 and index - 1 < len(search_observations)
+            else None
+        )
+        strategy, semantic_verified, source_ids = (
+            _factual_transition_strategy_identification(
+                original_question=original_question,
+                previous_query=(distinct_queries[index - 1] if index else None),
+                query=query,
+                prior_observation=prior_observation,
             )
-            if not transition_verified:
-                continue
-            result = observation.get("result")
-            raw_hits = result.get("hits") if isinstance(result, Mapping) else None
-            if not isinstance(raw_hits, list):
-                continue
-            query_tokens = _scope_tokens(distinct_queries[index])
-            entity_anchor = _question_entity_anchor_tokens(original_question)
-            for hit in raw_hits:
-                if not isinstance(hit, Mapping):
-                    continue
-                title = hit.get("title")
-                snippet = hit.get("snippet")
-                if not isinstance(title, str) or not isinstance(snippet, str):
-                    continue
-                title_tokens = _scope_tokens(title)
-                public_surface = f"{title} {snippet}"
-                if (
-                    title_tokens
-                    and any(
-                        tuple(
-                            query_tokens[offset : offset + len(title_tokens)]
-                        )
-                        == title_tokens
-                        for offset in range(
-                            len(query_tokens) - len(title_tokens) + 1
-                        )
-                    )
-                    and (
-                        not entity_anchor
-                        or _surface_binds_entity_anchor(
-                            public_surface,
-                            entity_anchor,
-                        )
-                    )
-                    and not _missing_required_relation_classes(
-                        original_question,
-                        public_surface,
-                    )
-                    and not _missing_question_scope_modifiers(
-                        original_question,
-                        public_surface,
-                    )
-                ):
-                    public_support = True
-                    passage_id = hit.get("passage_id")
-                    if (
-                        isinstance(passage_id, str)
-                        and passage_id.strip() in verified_passage_ids
-                    ):
-                        source_ids.append(passage_id.strip())
-
-        # SkillFlow intentionally exposes no entity-linking oracle.  Therefore
-        # spelling normalization and entity disambiguation are verified only
-        # when the query reuses an exact title from a prior public hit whose
-        # title+snippet preserve the question entity, relation, and scope.  A
-        # novel string alone remains an unverified policy attempt.  Alias
-        # expansion and query rewriting use the deterministic controlled
-        # relation-alternation invariant above and never consult answers.
-        stage_verified = invariant_verified and (
-            public_support
-            if strategy in {"spelling_normalization", "entity_disambiguation"}
-            else True
+        )
+        current_transition_verified, _ = (
+            _public_search_transition_mirror(current_observation)
+            if isinstance(current_observation, Mapping)
+            else (False, ())
+        )
+        prior_transition_verified = True
+        if index > 0:
+            prior_transition_verified, prior_passage_ids = (
+                _public_search_transition_mirror(prior_observation)
+                if isinstance(prior_observation, Mapping)
+                else (False, ())
+            )
+            if not source_ids and prior_transition_verified:
+                source_ids = prior_passage_ids
+        stage_verified = bool(
+            semantic_verified
+            and current_transition_verified
+            and prior_transition_verified
         )
         strength = (
             "unverified_strategy_attempt"
@@ -1946,7 +2107,6 @@ def _factual_strategy_proofs(
                 "tool_receipt_conditioned_strategy_attempt"
                 if strategy
                 in {"spelling_normalization", "entity_disambiguation"}
-                and public_support
                 else "deterministic_relation_invariant_strategy_attempt"
                 if strategy in {"alias_expansion", "query_rewriting"}
                 else "question_invariant_strategy_attempt"
@@ -1984,6 +2144,9 @@ def _factual_retrieval_attempt_records(
     distinct_signatures: list[tuple[str, ...]] = []
     prior_top_ks_by_signature: dict[tuple[str, ...], list[int]] = {}
     proof_verified_by_signature: dict[tuple[str, ...], bool] = {}
+    proof_by_signature: dict[
+        tuple[str, ...], _FactualRetrievalStrategyProof
+    ] = {}
 
     for attempt_index, observation in enumerate(search_observations, start=1):
         executed_action = observation.get("executed_action")
@@ -2024,26 +2187,28 @@ def _factual_retrieval_attempt_records(
             len(distinct_signatures),
             len(_FACTUAL_QA_RETRIEVAL_STRATEGIES) - 1,
         )
-        required_strategy = (
-            _FACTUAL_QA_RETRIEVAL_STRATEGIES[strategy_index]
-            if len(distinct_signatures) < len(_FACTUAL_QA_RETRIEVAL_STRATEGIES)
-            else None
-        )
         required_top_k = _FACTUAL_QA_SEARCH_LIMITS[strategy_index]
-        strategy_advanced = bool(
+        query_transition_advanced = bool(
             query_variant and signature not in distinct_signatures
         )
 
-        if strategy_advanced:
+        if query_transition_advanced:
             candidate_distinct_queries = (*distinct_queries, query_variant)
             proofs = _factual_strategy_proofs(
                 original_question=original_question,
                 distinct_queries=candidate_distinct_queries,
                 search_observations=(*distinct_observations, observation),
             )
+            current_proof = (
+                proofs[-1]
+                if len(proofs) == len(candidate_distinct_queries)
+                else None
+            )
             query_variant_verified = bool(
-                len(proofs) == len(candidate_distinct_queries)
-                and proofs[-1].verified
+                current_proof is not None and current_proof.verified
+            )
+            required_strategy = (
+                current_proof.strategy if current_proof is not None else None
             )
         else:
             # The existing action admission allows only the latest normalized
@@ -2051,6 +2216,15 @@ def _factual_retrieval_attempt_records(
             # recall but deliberately does not claim completion of the next
             # spelling/alias/disambiguation/rewrite strategy.
             prior_limits = prior_top_ks_by_signature.get(signature, [])
+            if prior_limits:
+                required_top_k = next(
+                    (
+                        limit
+                        for limit in _FACTUAL_QA_SEARCH_LIMITS
+                        if limit > max(prior_limits)
+                    ),
+                    _FACTUAL_QA_SEARCH_LIMITS[-1],
+                )
             query_variant_verified = bool(
                 distinct_signatures
                 and signature == distinct_signatures[-1]
@@ -2059,6 +2233,8 @@ def _factual_retrieval_attempt_records(
                 and observed_top_k > max(prior_limits)
                 and proof_verified_by_signature.get(signature, False)
             )
+            current_proof = proof_by_signature.get(signature)
+            required_strategy = None
 
         tool_transition_verified, passage_ids = (
             _public_search_transition_mirror(observation)
@@ -2072,21 +2248,24 @@ def _factual_retrieval_attempt_records(
                 fts_term_set=signature,
                 required_top_k=required_top_k,
                 observed_top_k=observed_top_k,
-                strategy_advanced=strategy_advanced,
+                strategy_advanced=query_transition_advanced,
                 query_variant_verified=query_variant_verified,
                 tool_transition_verified=tool_transition_verified,
                 hit_count=len(passage_ids),
+                recall_expansion=not query_transition_advanced,
             )
         )
         if observed_top_k is not None:
             prior_top_ks_by_signature.setdefault(signature, []).append(
                 observed_top_k
             )
-        if strategy_advanced:
+        if query_transition_advanced:
             distinct_signatures.append(signature)
             distinct_queries.append(query_variant)
             distinct_observations.append(observation)
             proof_verified_by_signature[signature] = query_variant_verified
+            if current_proof is not None:
+                proof_by_signature[signature] = current_proof
 
     return tuple(records)
 
@@ -2098,17 +2277,20 @@ def _verified_transformed_relation_classes(
 ) -> frozenset[str]:
     """Return relation classes covered by verified relation-rewrite stages."""
 
-    semantics = _factual_strategy_semantics_verified(
-        original_question=original_question,
-        distinct_queries=distinct_queries,
-    )
     transformed: set[str] = set()
-    for index, stage_verified in enumerate(semantics):
+    for index, query in enumerate(distinct_queries):
+        if index == 0:
+            continue
+        strategy, stage_verified, _ = (
+            _factual_transition_strategy_identification(
+                original_question=original_question,
+                previous_query=distinct_queries[index - 1],
+                query=query,
+            )
+        )
         if (
             not stage_verified
-            or index == 0
-            or _FACTUAL_QA_RETRIEVAL_STRATEGIES[index]
-            not in {"alias_expansion", "query_rewriting"}
+            or strategy not in {"alias_expansion", "query_rewriting"}
         ):
             continue
         transformed.update(
@@ -4463,6 +4645,35 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 "canonical-name choice must be supported by an explicit identity "
                 "binding in the evidence propositions."
             )
+        unified_answer_argument = (
+            qa_answer_argument_constraint(request.problem)
+            if semantic_protocol == QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL
+            else None
+        )
+        answer_field_constraint: dict[str, object] = (
+            {
+                "const": unified_answer_argument,
+                "description": (
+                    "The question-only wh-dependency fixes which proposition "
+                    "argument supplies candidate_answer."
+                ),
+            }
+            if unified_answer_argument
+            in {"subject", "object_or_attribute_value"}
+            else {
+                "type": "string",
+                "enum": ["subject", "object_or_attribute_value"],
+                "description": (
+                    "The selected proposition field copied as candidate_answer. "
+                    "For an entity comparison, select the winning entity from "
+                    "the subject field while its compared date, number, or "
+                    "attribute remains object_or_attribute_value. When the "
+                    "question explicitly asks for a decade, this field may "
+                    "instead select an evidence-grounded year that is "
+                    "deterministically normalized to the candidate decade."
+                ),
+            }
+        )
         answer_slot_schema = {
             "type": "object",
             "required": [
@@ -4503,19 +4714,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                         "field supplies candidate_answer."
                     ),
                 },
-                "answer_field": {
-                    "type": "string",
-                    "enum": ["subject", "object_or_attribute_value"],
-                    "description": (
-                        "The selected proposition field copied as candidate_answer. "
-                        "For an entity comparison, select the winning entity from "
-                        "the subject field while its compared date, number, or "
-                        "attribute remains object_or_attribute_value. When the "
-                        "question explicitly asks for a decade, this field may "
-                        "instead select an evidence-grounded year that is "
-                        "deterministically normalized to the candidate decade."
-                    ),
-                },
+                "answer_field": answer_field_constraint,
             },
             "additionalProperties": False,
         }
@@ -4911,6 +5110,42 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                             "proposition field that equals candidate_answer, not "
                             "the unresolved first-hop locality field."
                         )
+                        answer_slot_properties = answer_slot.get("properties")
+                        if isinstance(answer_slot_properties, dict):
+                            read_evidence_texts = tuple(
+                                passage_text.strip()
+                                for observation in observations
+                                if observation.get("observation_status")
+                                == "success"
+                                for result in (observation.get("result"),)
+                                if isinstance(result, Mapping)
+                                and result.get("operation") == "read"
+                                for passage in (result.get("passage"),)
+                                if isinstance(passage, Mapping)
+                                for passage_text in (passage.get("text"),)
+                                if isinstance(passage_text, str)
+                                and passage_text.strip()
+                            )
+                            answer_field = (
+                                _location_resolution_answer_field_constraint(
+                                    original_question=qa_question_scope(
+                                        request.problem
+                                    ),
+                                    entity_anchor=(
+                                        state.location_containment_repair_anchor
+                                    ),
+                                    read_evidence_texts=read_evidence_texts,
+                                )
+                            )
+                            if answer_field is not None:
+                                answer_slot_properties["answer_field"] = {
+                                    "const": answer_field,
+                                    "description": (
+                                        "The successful public location-"
+                                        "resolution read fixes the answer "
+                                        "argument for the admitted branch."
+                                    ),
+                                }
                 return schema
         if action_name != "read":
             return schema

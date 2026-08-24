@@ -2884,7 +2884,7 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(["reasoner"], recovery["mandatory_repair_agent_ids"])
         self.assertEqual(("modify_agent",), env.model_admissible_action_types())
 
-    async def test_hotpot_recovery_continuation_handoff_is_target_scoped_and_ephemeral(
+    def test_reasoner_continuation_is_not_handed_to_cross_role_retriever(
         self,
     ) -> None:
         graph = _hotpot_semantic_graph()
@@ -2970,67 +2970,20 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         )
         action = env.parser.parse(action_payload)
 
-        handoff = env._recovery_continuation_handoff(action)
-
-        self.assertEqual(["repair_reader"], list(handoff))
-        projected = handoff["repair_reader"]
-        self.assertEqual("single", projected["execution_phase"])
-        self.assertEqual(
-            "reasoner",
-            projected["continuation_source_agent_id"],
-        )
-        self.assertEqual([successful_tool_trace], projected["react_trace"])
-        self.assertEqual(receipts, projected["tool_receipts"])
+        self.assertEqual({}, env._recovery_continuation_handoff(action))
         self.assertNotIn("repair_reader", env._failure_continuations)
         self.assertNotIn(
             "continuation_source_agent_id",
             env._failure_continuations["reasoner"],
         )
-
-        observed_failure_metadata: dict[str, object] = {}
-
-        async def capture_overlay(
-            candidate_graph: AgentGraph,
-            *args: object,
-            **kwargs: object,
-        ) -> AgentRuntimeResult:
-            del args
-            observed_failure_metadata.update(
-                kwargs["prior_failure_metadata"]
-            )
-            return AgentRuntimeResult(
-                run_id="handoff-overlay",
-                graph_revision=candidate_graph.revision,
-                output_agent_id=candidate_graph.output_agent_id,
-                final_answer=None,
-                outputs={},
-                output_metadata={},
-                calls=(),
-                block_completion_order=(),
-                executed_agent_ids=(),
-                deferred_agent_ids=tuple(
-                    node.id for node in candidate_graph.nodes
-                ),
-            )
-
-        env.execute_on_edit = True
-        with patch.object(env.runtime, "execute", side_effect=capture_overlay):
-            result = await env.step(action_payload)
-
-        self.assertTrue(result.accepted)
-        self.assertEqual(projected, observed_failure_metadata["repair_reader"])
         self.assertEqual(
-            "single",
-            observed_failure_metadata["repair_reader"]["execution_phase"],
+            receipts,
+            env._failure_continuations["reasoner"]["tool_receipts"],
         )
         self.assertEqual(
-            "reasoner",
-            observed_failure_metadata["repair_reader"][
-                "continuation_source_agent_id"
-            ],
+            trace,
+            env._failure_continuations["reasoner"]["react_trace"],
         )
-        self.assertNotIn("repair_reader", env._failure_continuations)
-        self.assertIn("reasoner", env._failure_continuations)
 
     def test_hotpot_recovery_continuation_handoff_fails_closed(self) -> None:
         registry = make_registry()
@@ -4181,6 +4134,220 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("reasoner", recovery["repair_exhausted_agent_ids"])
         self.assertIn("reasoner", env._failure_continuations)
         self.assertIn("reasoner", env.unresolved_dirty_agent_ids)
+
+    def test_structured_reasoner_failure_with_valid_ingress_fails_closed(
+        self,
+    ) -> None:
+        complete = _trivia_semantic_graph()
+        graphs = (
+            AgentGraph(
+                [
+                    node
+                    for node in complete.nodes
+                    if node.id in {"reader", "reasoner"}
+                ],
+                [AgentRelation("reader", "reasoner", True, False)],
+            ),
+            complete,
+        )
+        for graph in graphs:
+            with self.subTest(complete_spine=graph.output_agent_id is not None):
+                registry = make_registry()
+                env = AgentWorkflowEnv(
+                    registry,
+                    runtime=_trivia_semantic_runtime(
+                        registry,
+                        _ImmediateGateway(),
+                    ),
+                    graph=graph,
+                    problem="What is the capital of France?",
+                    execute_on_edit=False,
+                    max_agents=8,
+                    semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+                    recovery_policy="preserve_diagnose_repair_augment",
+                    required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+                )
+                env._progressive_outputs["reader"] = (
+                    _test_evidence_retriever_artifact("reader-public")
+                )
+                env._progressive_output_metadata["reader"] = {
+                    "artifact_version": "reader:v1",
+                    "tool_receipts": [_test_read_receipt("reader-public")],
+                }
+                failure = AgentFailureRecord(
+                    request_id="reasoner-answer-slot-failure",
+                    agent_id="reasoner",
+                    phase=ExecutionPhase.SINGLE,
+                    graph_revision=graph.revision,
+                    error_type="ReactExecutionError",
+                    message="react agent 'reasoner' exhausted 20 turns",
+                    metadata={
+                        "react_trace": [
+                            {
+                                "turn": 10,
+                                "observation_status": "budget_exhausted",
+                                "terminal_failure_diagnosis": {
+                                    "public_error_code": (
+                                        "retrieval_recall_failure"
+                                    ),
+                                    "bounded_schedule_exhausted": True,
+                                },
+                            },
+                            {
+                                "turn": 20,
+                                "observation_status": "schema_invalid",
+                                "public_error_code": (
+                                    "qa_semantic_artifact_invalid: Reasoner "
+                                    "answer_slot.answer_field selects 'subject'"
+                                ),
+                            }
+                        ],
+                        "tool_receipts": [_test_read_receipt("reasoner-public")],
+                        "input_artifact_versions": {"reader": "reader:v1"},
+                    },
+                )
+                env._failed_agent_ids.add("reasoner")
+                env._react_exhausted_agent_ids.add("reasoner")
+                env._repair_exhausted_agent_ids.add("reasoner")
+                env._latest_failure_record_by_agent["reasoner"] = failure
+
+                self.assertEqual(
+                    ("reader",),
+                    env._receipt_valid_routed_evidence_retriever_ids("reasoner"),
+                )
+                self.assertFalse(
+                    env._reasoner_failure_requires_evidence_augmentation(
+                        "reasoner"
+                    )
+                )
+                self.assertEqual((), env.model_admissible_action_types())
+                self.assertEqual({}, env.model_admissible_action_targets())
+
+    def test_typed_reasoner_retrieval_deficit_admits_one_bounded_retriever(
+        self,
+    ) -> None:
+        graph = _trivia_semantic_graph()
+        registry = make_registry()
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_trivia_semantic_runtime(registry, _ImmediateGateway()),
+            graph=graph,
+            problem="What is the capital of France?",
+            execute_on_edit=False,
+            max_agents=8,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+        )
+        for agent_id in ("reader",):
+            env._progressive_outputs[agent_id] = (
+                _test_evidence_retriever_artifact(f"{agent_id}-public")
+            )
+            env._progressive_output_metadata[agent_id] = {
+                "tool_receipts": [_test_read_receipt(f"{agent_id}-public")]
+            }
+        failure = _test_retrieval_failure_record(
+            graph,
+            agent_id="reasoner",
+            public_error_code="retrieval_recall_failure",
+            bounded_schedule_exhausted=False,
+        )
+        env._failed_agent_ids.add("reasoner")
+        env._react_exhausted_agent_ids.add("reasoner")
+        env._repair_exhausted_agent_ids.add("reasoner")
+        env._latest_failure_record_by_agent["reasoner"] = failure
+
+        self.assertEqual(("add_subgraph",), env.model_admissible_action_types())
+        self.assertEqual(
+            ["evidence_retriever"],
+            env.model_admissible_action_targets()["add_subgraph"][
+                "admitted_new_role_families"
+            ],
+        )
+
+        env.graph.add_agent(
+            AgentNode(
+                "repair_reader",
+                "cheap",
+                "retrieve another receipt-grounded evidence proposition",
+                role_family="evidence_retriever",
+                allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                execution_mode="react",
+                artifact_type="retrieval_evidence",
+            )
+        )
+        env.graph.set_relation("repair_reader", "reasoner", True, False)
+        env._progressive_outputs["repair_reader"] = (
+            _test_evidence_retriever_artifact("repair-public")
+        )
+        env._progressive_output_metadata["repair_reader"] = {
+            "tool_receipts": [_test_read_receipt("repair-public")]
+        }
+
+        self.assertFalse(
+            env._reasoner_failure_requires_evidence_augmentation("reasoner")
+        )
+        self.assertEqual((), env.model_admissible_action_types())
+
+    def test_reciprocal_receipt_valid_ingress_closes_structured_recovery(
+        self,
+    ) -> None:
+        graph = _trivia_semantic_graph()
+        graph.set_relation("reader", "reasoner", True, True)
+        registry = make_registry()
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_trivia_semantic_runtime(registry, _ImmediateGateway()),
+            graph=graph,
+            problem="What is the capital of France?",
+            execute_on_edit=False,
+            max_agents=8,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+        )
+        env._progressive_outputs["reader"] = (
+            _test_evidence_retriever_artifact("reader-public")
+        )
+        env._progressive_output_metadata["reader"] = {
+            "artifact_version": "reader:v1",
+            "tool_receipts": [_test_read_receipt("reader-public")],
+        }
+        failure = AgentFailureRecord(
+            request_id="reasoner-reciprocal-answer-slot-failure",
+            agent_id="reasoner",
+            phase=ExecutionPhase.SINGLE,
+            graph_revision=graph.revision,
+            error_type="ReactExecutionError",
+            message="reasoner structured artifact rejected",
+            metadata={
+                "react_trace": [
+                    {
+                        "turn": 20,
+                        "observation_status": "schema_invalid",
+                        "public_error_code": (
+                            "qa_semantic_artifact_invalid: "
+                            "qa_location_containment_lineage_missing"
+                        ),
+                    }
+                ],
+                "tool_receipts": [_test_read_receipt("reasoner-public")],
+                "input_artifact_versions": {"reader": "reader:v1"},
+            },
+        )
+        env._failed_agent_ids.add("reasoner")
+        env._react_exhausted_agent_ids.add("reasoner")
+        env._repair_exhausted_agent_ids.add("reasoner")
+        env._latest_failure_record_by_agent["reasoner"] = failure
+
+        self.assertEqual(
+            ("reader",),
+            env._receipt_valid_routed_evidence_retriever_ids("reasoner"),
+        )
+        self.assertFalse(
+            env._reasoner_failure_requires_evidence_augmentation("reasoner")
+        )
+        self.assertEqual((), env.model_admissible_action_types())
 
     async def test_exhausted_reasoner_adds_isolated_retriever_before_routing(
         self,

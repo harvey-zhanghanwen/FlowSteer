@@ -1005,6 +1005,63 @@ official evaluator, Skill state and all training settings remain unchanged.
 The complete v51 static suite passes 969 tests and 180 subtests; this is an
 interface/regression result, not a TriviaQA accuracy claim.
 
+The subsequent frozen three-task v51 Stable Zero run did not pass and therefore
+did not admit the fixed-128 evaluation. `triviaqa:tc_1` explicitly finished
+with `Harry Sinclair Lewis` at official EM/F1 `1.0/1.0`.
+`triviaqa:tc_5` explicitly finished with the semantic decade `1930s`; the
+official accepted-answer set contains only `30s` variants, so EM/F1 remained
+`0.0/0.0` and the outcome is an
+`accepted_answer_canonicalization_mismatch`. `triviaqa:tc_3` retrieved and read
+the two necessary public propositions--Dame Judi Dench was born in Heworth,
+and Heworth is part of York--but the Reasoner selected the first proposition's
+`subject` instead of the containment proposition's
+`object_or_attribute_value`. Recovery then added unrelated Retriever fan-in
+until the Canvas action domain was exhausted, leaving `final_answer=null`.
+This is a measured relation/answer-slot binding and recovery-attribution
+failure, not evidence of database coverage failure. The v51 report's older
+aggregate taxonomy labelled it `retrieval_recall_failure`; v52 corrects that
+offline attribution without changing the preserved trajectory.
+
+### v52 transition-grounded retrieval and typed Reasoner recovery
+
+v52 retains Director prompt v6 byte-for-byte. The system instruction contains
+no fixed role inventory, Agent order, edge, topology, communication pattern,
+retrieval recipe or candidate answer. Retrieval recovery remains inside the
+Tool execution boundary: one actual `search(query, limit)` produces one public
+Action--Observation receipt and one attempt record. A distinct adjacent-query
+transition produces one strongest answer-free strategy proof; a same-query
+larger top-k is recorded separately as recall expansion and cannot advance the
+strategy frontier. This removes the ordinal misclassification in which a
+relation alias could be labelled spelling normalization.
+
+For a location-resolution repair, the Reasoner completion schema is narrowed
+only after public read evidence establishes the branch. A proposition stating
+that the anchor locality is contained by a city/town selects
+`object_or_attribute_value`; a proposition typing the anchor itself as the
+city/town selects `subject`; conflicting or incomplete receipts leave both
+fields legal. Ground Truth, accepted answers and evaluator state are not
+available to this constraint.
+
+Canvas recovery now distinguishes evidence deficit from structured semantic
+failure. With no receipt-valid Retriever ingress, or with one ingress followed
+by an explicit typed retrieval deficit, one bounded Retriever augmentation is
+admissible. With receipt-valid evidence followed by relation/answer-slot
+binding failure, the action domain fails closed instead of adding more
+Retrievers. Both one-way `Retriever -> Reasoner` and reciprocal
+`Retriever <-> Reasoner` ingress are recognized; multiple exhausted Reasoners
+cannot bypass this gate. Public Tool continuation is role-local: a failed
+Retriever may pass its public Action--Observation state to a same-role
+replacement, while a failed Reasoner's continuation is never projected into a
+new Retriever.
+
+The reporting taxonomy first selects the terminally attributed responsible
+Agent's latest public failure record, so a sibling cancellation or an earlier
+retrieval rejection cannot override a later Reasoner binding diagnosis. The
+complete v52 static suite passes 978 tests and 182 subtests. No model/API call,
+training, Skill activation, MACE/Bayesian update, backward pass, optimizer step
+or LoRA publication is represented by these static results. The v52 Stable
+Zero canary and fixed-128 scores remain separate live gates.
+
 ### Stable Zero status
 
 Static architecture, 946 unit tests, 177 subtests and the current frozen
@@ -1061,6 +1118,9 @@ exact matches and one accepted-answer canonicalization mismatch; its fixed-128
 run was stopped before a fourth trajectory was persisted for the v51
 requirements correction above. v51 static and live gates remain separate; no
 fixed-128 v2 score is inferred from unit tests, canaries or failed diagnostics.
+The later v51 three-task gate failed because `tc_3` exhausted the Canvas after
+the measured answer-slot/recovery defect above; v52 must pass a new three-task
+gate before any fixed-128 execution is admitted.
 
 ## Historical comparison condition
 

@@ -778,6 +778,15 @@ class AgentWorkflowEnv:
         node_ids = tuple(node.id for node in self._graph.nodes)
         can_add = self.max_agents is None or node_count < self.max_agents
         exhausted_reasoner_ids = self._repair_exhausted_reasoner_ids()
+        evidence_recovery_reasoner_ids = tuple(
+            agent_id
+            for agent_id in exhausted_reasoner_ids
+            if self._reasoner_failure_requires_evidence_augmentation(agent_id)
+        )
+        has_single_evidence_recovery_target = bool(
+            len(exhausted_reasoner_ids) == 1
+            and evidence_recovery_reasoner_ids == exhausted_reasoner_ids
+        )
         exhausted_auxiliary_ids = tuple(
             agent_id
             for agent_id in self._recovery_auxiliary_agent_ids()
@@ -809,6 +818,18 @@ class AgentWorkflowEnv:
             and AgentActionType.ADD_SUBGRAPH.value
             in self._allowed_action_type_set
         ):
+            if (
+                exhausted_reasoner_ids
+                and not has_single_evidence_recovery_target
+            ):
+                # A receipt-grounded Retriever is already routed into the
+                # measured Reasoner and its latest public failure belongs to
+                # structured semantic binding rather than retrieval.  Adding
+                # Verifier/Formatter responsibilities cannot materialize the
+                # missing Reasoner artifact, so fail closed at this exact
+                # FlowSteer edit boundary instead of constructing a downstream
+                # spine that AgentRuntime can only defer.
+                return ()
             if (
                 isinstance(self.runtime.dataset_id, str)
                 and self.runtime.dataset_id.casefold() == "triviaqa"
@@ -965,6 +986,11 @@ class AgentWorkflowEnv:
                 in self._allowed_action_type_set
             ):
                 return (AgentActionType.ADD_SUBGRAPH.value,)
+            # Every evidence/routing/repair boundary above is closed.  Do not
+            # fall through to unrelated relation rewrites for a measured
+            # structured Reasoner failure; persist the typed empty Canvas
+            # domain until a supported same-responsibility repair exists.
+            return ()
 
         if exhausted_auxiliary_ids:
             if (
@@ -1359,6 +1385,78 @@ class AgentWorkflowEnv:
             for auxiliary_id in self._recovery_auxiliary_agent_ids()
             for reasoner_id in exhausted_reasoner_ids
         )
+
+    def _receipt_valid_routed_evidence_retriever_ids(
+        self,
+        reasoner_id: str,
+    ) -> Tuple[str, ...]:
+        """Return current receipt-grounded Retriever inputs to one Reasoner."""
+
+        if (
+            not self._graph.has_node(reasoner_id)
+            or not self._has_valid_evidence_retriever_artifact()
+        ):
+            return ()
+        return tuple(
+            predecessor_id
+            for predecessor_id in self._graph.directed_predecessors(reasoner_id)
+            if (
+                self._graph.get_node(predecessor_id).role_family or ""
+            ).casefold()
+            == "evidence_retriever"
+            and predecessor_id not in self._failed_agent_ids
+            and predecessor_id not in self._repair_exhausted_agent_ids
+            and predecessor_id not in self._unresolved_dirty_agents
+            and self._has_successful_artifact(predecessor_id)
+            and self._semantic_replacement_has_valid_artifact(
+                predecessor_id,
+                "evidence_retriever",
+            )
+        )
+
+    def _reasoner_failure_requires_evidence_augmentation(
+        self,
+        reasoner_id: str,
+    ) -> bool:
+        """Gate one bounded Retriever augmentation on public failure evidence.
+
+        Missing receipt-valid ingress is an evidence deficit.  With an
+        existing ingress, only an explicit latest retrieval diagnosis or
+        missing-read contract may justify one additional Retriever.  A second
+        valid routed Retriever closes that bounded recovery frontier; repeated
+        fan-in cannot repair answer-slot, relation, or structured-artifact
+        failures.
+        """
+
+        valid_ingress_ids = self._receipt_valid_routed_evidence_retriever_ids(
+            reasoner_id
+        )
+        if not valid_ingress_ids:
+            return True
+        record = self._latest_failure_record_by_agent.get(reasoner_id)
+        if record is None:
+            return False
+        public_summary = self._react_public_error_summary(record)
+        last_public_error = public_summary.get("last_public_error", {})
+        public_error_code = (
+            last_public_error.get("public_error_code")
+            if isinstance(last_public_error, Mapping)
+            else None
+        )
+        if isinstance(public_error_code, str):
+            if public_error_code not in {
+                "qa_completion_requires_successful_read_evidence",
+                "qa_read_requires_successful_search",
+                "retrieval_recall_failure",
+                "retrieval_strategy_failure",
+            }:
+                return False
+        elif self._typed_retrieval_failure_category(record) not in {
+            "retrieval_recall_failure",
+            "retrieval_strategy_failure",
+        }:
+            return False
+        return len(valid_ingress_ids) == 1
 
     def _repair_exhausted_relation_candidates(
         self,
@@ -2453,7 +2551,11 @@ class AgentWorkflowEnv:
             # into the exhausted Reasoner. A reasoning-only Repair Agent has
             # no admissible input while isolated, so it is not an executable
             # first augmentation unit.
-            return tuple(role for role in admitted if role == "evidence_retriever")
+            if self._requires_isolated_reasoner_augmentation():
+                return tuple(
+                    role for role in admitted if role == "evidence_retriever"
+                )
+            return ()
         return admitted
 
     def _repair_exhausted_auxiliary_replacement_domains(
@@ -2517,7 +2619,10 @@ class AgentWorkflowEnv:
         return bool(
             self._uses_semantic_lineage_protocol()
             and self.recovery_policy == _PRESERVE_REPAIR_RECOVERY_POLICY
-            and self._repair_exhausted_reasoner_ids()
+            and len(self._repair_exhausted_reasoner_ids()) == 1
+            and self._reasoner_failure_requires_evidence_augmentation(
+                self._repair_exhausted_reasoner_ids()[0]
+            )
             and not self._missing_semantic_role_families()
             and not any(
                 auxiliary_id in self._failed_agent_ids
@@ -4549,14 +4654,12 @@ class AgentWorkflowEnv:
         self,
         action: AgentAction,
     ) -> dict[str, dict[str, object]]:
-        """Project one failed Agent's public Tool state to a new Retriever.
+        """Project failed Retriever Tool state to a same-role replacement.
 
-        The source is either a same-role/same-artifact Retriever replacement or
-        the existing bounded Reasoner-to-Retriever recovery handoff.  Normal
-        repair remains same-Agent and phase-scoped.  This narrowly admitted
-        augmentation is public recovery state at FlowSteer's edit--execute
-        boundary; it does not create an AgentGraph message edge or transfer a
-        semantic artifact, model transcript, Ground Truth, or evaluator state.
+        SkillFlow public Action--Observation continuation remains scoped to the
+        same Agent responsibility.  A Reasoner's rejected semantic completion
+        and Tool frontier stay in its lossless failure trajectory; neither is
+        projected into a new Retriever with a different role contract.
         """
 
         if (
@@ -4586,32 +4689,22 @@ class AgentWorkflowEnv:
             == "evidence_retriever"
             and node.artifact_type.casefold() == target_artifact_type
         )
-        if replacement_source_ids:
-            # A failed replacement can itself be replaced.  Reuse the most
-            # advanced public SkillFlow Action--Observation continuation; for
-            # equal receipt/trace progress, graph declaration order makes the
-            # newest replacement the deterministic source.  This selects no
-            # private reasoning, semantic answer, label, or evaluator state.
-            source_id = max(
-                enumerate(replacement_source_ids),
-                key=lambda item: (
-                    self._failure_continuation_weight(
-                        self._failure_continuations[item[1]]
-                    ),
-                    item[0],
+        if not replacement_source_ids:
+            return {}
+        # A failed Retriever replacement can itself be replaced.  Reuse the
+        # most advanced public SkillFlow Action--Observation continuation; for
+        # equal receipt/trace progress, graph declaration order makes the
+        # newest same-role replacement the deterministic source.  This selects
+        # no private reasoning, semantic answer, label, or evaluator state.
+        source_id = max(
+            enumerate(replacement_source_ids),
+            key=lambda item: (
+                self._failure_continuation_weight(
+                    self._failure_continuations[item[1]]
                 ),
-            )[1]
-        else:
-            source_ids = tuple(
-                source_id
-                for source_id in self._repair_exhausted_reasoner_ids()
-                if source_id in self._failure_continuations
-            )
-            # Preserve the existing fail-closed Reasoner handoff: multiple
-            # competing semantic owners are not resolved by this adapter.
-            if len(source_ids) != 1:
-                return {}
-            source_id = source_ids[0]
+                item[0],
+            ),
+        )[1]
         result = self._tool_continuation_projection(
             self._failure_continuations[source_id],
             execution_phase="single",

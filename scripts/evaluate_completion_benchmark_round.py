@@ -1507,6 +1507,106 @@ def _direct_telemetry(value: Optional[Mapping[str, Any]]) -> Mapping[str, Any]:
     }
 
 
+def _latest_failure_diagnostic_text(
+    graph_value: Mapping[str, Any],
+) -> str:
+    """Return only the terminal/latest public Canvas failure receipt."""
+
+    turns = graph_value.get("turns", ())
+    if not isinstance(turns, Sequence) or isinstance(turns, (str, bytes)):
+        return ""
+    for turn in reversed(turns):
+        if not isinstance(turn, Mapping):
+            continue
+        runtime_summary = turn.get("runtime_summary")
+        summary = runtime_summary if isinstance(runtime_summary, Mapping) else {}
+        terminal_diagnosis = summary.get("terminal_canvas_diagnosis")
+        failure_records = summary.get("failure_records")
+        has_failure_records = bool(
+            isinstance(failure_records, Sequence)
+            and not isinstance(failure_records, (str, bytes))
+            and any(isinstance(item, Mapping) for item in failure_records)
+        )
+        if not (
+            isinstance(terminal_diagnosis, Mapping)
+            or has_failure_records
+            or summary.get("execution_status") == "failed"
+        ):
+            continue
+        responsible_agent_ids: set[str] = set()
+        if isinstance(terminal_diagnosis, Mapping):
+            finish_admissibility = terminal_diagnosis.get("finish_admissibility")
+            attribution = (
+                finish_admissibility.get("failure_attribution")
+                if isinstance(finish_admissibility, Mapping)
+                else None
+            )
+            if isinstance(attribution, Mapping):
+                responsible_agent_id = attribution.get("responsible_agent_id")
+                if isinstance(responsible_agent_id, str):
+                    responsible_agent_ids.add(responsible_agent_id)
+                attributed_ids = attribution.get("responsible_agent_ids")
+                if isinstance(attributed_ids, Sequence) and not isinstance(
+                    attributed_ids, (str, bytes)
+                ):
+                    responsible_agent_ids.update(
+                        item for item in attributed_ids if isinstance(item, str)
+                    )
+        mapped_failure_records = (
+            tuple(item for item in failure_records if isinstance(item, Mapping))
+            if has_failure_records
+            else ()
+        )
+        latest_failure_record = next(
+            (
+                item
+                for item in reversed(mapped_failure_records)
+                if item.get("agent_id") in responsible_agent_ids
+            ),
+            None,
+        )
+        if latest_failure_record is None and mapped_failure_records:
+            latest_failure_record = mapped_failure_records[-1]
+        latest_public_observation = None
+        if isinstance(latest_failure_record, Mapping):
+            metadata = latest_failure_record.get("metadata")
+            trace = metadata.get("react_trace") if isinstance(metadata, Mapping) else None
+            if isinstance(trace, Sequence) and not isinstance(trace, (str, bytes)):
+                latest_public_observation = next(
+                    (
+                        item
+                        for item in reversed(trace)
+                        if isinstance(item, Mapping)
+                    ),
+                    None,
+                )
+        payload = {
+            "canvas_feedback": turn.get("canvas_feedback"),
+            "terminal_canvas_diagnosis": terminal_diagnosis,
+            "latest_failure_record": (
+                {
+                    field_name: latest_failure_record.get(field_name)
+                    for field_name in (
+                        "agent_id",
+                        "error_type",
+                        "message",
+                        "phase",
+                    )
+                }
+                if isinstance(latest_failure_record, Mapping)
+                else None
+            ),
+            "latest_public_observation": latest_public_observation,
+        }
+        return json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        ).casefold()
+    return ""
+
+
 def _failure_type(
     direct_value: Optional[Mapping[str, Any]],
     graph_value: Optional[Mapping[str, Any]],
@@ -1555,6 +1655,37 @@ def _failure_type(
             # trajectory for diagnosis, but cannot relabel this final
             # evaluator mismatch as a retrieval failure.
             return "reasoning_failure"
+        latest_diagnostic_text = _latest_failure_diagnostic_text(graph_value)
+        if "knowledge_base_coverage_failure" in latest_diagnostic_text:
+            return "knowledge_base_coverage_failure"
+        if "retrieval_strategy_failure" in latest_diagnostic_text:
+            return "retrieval_strategy_failure"
+        if "retrieval_recall_failure" in latest_diagnostic_text:
+            return "retrieval_recall_failure"
+        if any(
+            marker in latest_diagnostic_text
+            for marker in (
+                "answer_slot",
+                "entity_attribute_binding",
+                "alias_binding",
+                "scope_preserved",
+                "target_relation",
+                "qa_location_containment_lineage_missing",
+                "reasoner_semantic_artifact",
+            )
+        ):
+            return "relation_or_answer_slot_binding_failure"
+        if any(
+            marker in latest_diagnostic_text
+            for marker in (
+                "parse_error",
+                "completion_schema",
+                "structured_action",
+                "terminal_protocol",
+            )
+        ):
+            return "structured_output_or_format_failure"
+
         diagnostic_payload = {
             "turns": [
                 {
@@ -1572,10 +1703,22 @@ def _failure_type(
             sort_keys=True,
             default=str,
         ).casefold()
-        if "retrieval_strategy_failure" in diagnostic_text:
-            return "retrieval_strategy_failure"
         if "knowledge_base_coverage_failure" in diagnostic_text:
             return "knowledge_base_coverage_failure"
+        if "retrieval_strategy_failure" in diagnostic_text:
+            return "retrieval_strategy_failure"
+        if any(
+            marker in diagnostic_text
+            for marker in (
+                "answer_slot",
+                "entity_attribute_binding",
+                "alias_binding",
+                "scope_preserved",
+                "target_relation",
+                "qa_location_containment_lineage_missing",
+            )
+        ):
+            return "relation_or_answer_slot_binding_failure"
         if any(
             marker in diagnostic_text
             for marker in (
@@ -1587,17 +1730,6 @@ def _failure_type(
             )
         ):
             return "retrieval_recall_failure"
-        if any(
-            marker in diagnostic_text
-            for marker in (
-                "answer_slot",
-                "entity_attribute_binding",
-                "alias_binding",
-                "scope_preserved",
-                "target_relation",
-            )
-        ):
-            return "relation_or_answer_slot_binding_failure"
         if any(
             marker in diagnostic_text
             for marker in (

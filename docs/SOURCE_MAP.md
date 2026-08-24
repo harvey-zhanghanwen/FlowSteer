@@ -1016,6 +1016,34 @@ read receipt before reuse; only invalid cache members are marked dirty. This
 prevents stale evidence from bypassing the existing completion boundary while
 preserving FlowSteer's accepted edit -> execute -> feedback transaction.
 
+The v52 retrieval transition record directly reuses SkillFlow's public
+`StructuredAction -> Observation` search/read wire. Classifying an adjacent
+query transition as spelling normalization, alias expansion, entity
+disambiguation or query rewriting, and recording same-query top-k growth as
+recall expansion, are `PROJECT_NECESSARY_ADAPTATION` because neither upstream
+implements TriviaQA Entity Linking or retrieval-strategy proof semantics. Each
+actual search remains exactly one Tool action, one observation, one receipt and
+one attempt; no accepted answer, Ground Truth or evaluator result enters the
+classification.
+
+The v52 Reasoner answer-field constraint is also
+`PROJECT_NECESSARY_ADAPTATION`. It is derived from the original question plus
+successful public read bodies only, and is applied after a measured
+location-containment repair. It does not alter SkillFlow's Tool interface or
+FlowSteer's Canvas action vocabulary, and it deliberately remains
+unconstrained when the public propositions are incomplete or conflicting.
+
+The v52 recovery boundary directly retains FlowSteer's accepted edit ->
+execute -> feedback transaction and SkillFlow's bounded, role-local public
+Action--Observation continuation. The distinction between a typed evidence
+deficit and a structured Reasoner binding failure, one bounded Retriever
+augmentation, reciprocal-ingress recognition, multiple-Reasoner fail-closed
+admission and responsible-Agent report attribution are
+`PROJECT_NECESSARY_ADAPTATION`. SkillFlow does not provide cross-role
+continuation, so the earlier Reasoner-to-Retriever projection was removed
+rather than described as upstream reuse. Director prompt v6 and the
+Director-selected topology search space are unchanged.
+
 Provider and bounded-ReAct failures stay typed.  A measured transient or
 permanent-configuration provider failure exposes only an exact `model_id`
 repair, preferring a different provider when the frozen catalog contains one

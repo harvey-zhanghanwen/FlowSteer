@@ -24,6 +24,7 @@ from src.interactive.qa_tool_adapter import (
     QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
     _factual_strategy_semantics_verified,
     _location_containment_lineage_issue,
+    _location_resolution_answer_field_constraint,
     _public_search_candidate_compatibility,
     _query_replaces_relation_surface,
     _question_entity_anchor_tokens,
@@ -1003,6 +1004,97 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         initial_contract = adapter._contract(request, [])
         self.assertIn("`initial_retrieval`", initial_contract)
         self.assertIn("entity identity and target relation", initial_contract)
+
+    def test_unified_reasoner_answer_field_uses_question_only_constraint(self) -> None:
+        adapter = QARetrievalReactExecutionAdapter(
+            gateway=SimpleNamespace(generate=lambda request: None),
+            tool_registry=build_qa_tool_registry(FakeIndex()),
+            max_turns=6,
+            max_tool_calls=10,
+            task_type="factual_qa",
+            completion_policy="required_evidence",
+        )
+
+        def reasoner_request(protocol: str) -> AgentRequest:
+            return AgentRequest(
+                request_id=f"answer-field:{protocol}",
+                run_id="answer-field",
+                graph_revision=1,
+                problem=(
+                    "Which American-born Sinclair won the Nobel Prize for "
+                    "Literature in 1930?"
+                ),
+                agent=AgentNode(
+                    "reasoner",
+                    "model",
+                    "bind grounded evidence to the requested answer slot",
+                    role_family="reasoner",
+                    allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                    execution_mode="react",
+                ),
+                model=ModelSpec("model", "provider"),
+                provider=ProviderSpec("provider", kind="test"),
+                phase=ExecutionPhase.SINGLE,
+                semantic_protocol=protocol,
+            )
+
+        unified = adapter._completion_arguments_schema(
+            reasoner_request(QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL)
+        )
+        unified_answer_field = unified["properties"]["value"]["properties"][
+            "answer_slot"
+        ]["properties"]["answer_field"]
+        self.assertEqual("subject", unified_answer_field["const"])
+        self.assertNotIn("enum", unified_answer_field)
+
+        hotpot = adapter._completion_arguments_schema(
+            reasoner_request("hotpotqa_verified_answer_slot_v1")
+        )
+        hotpot_answer_field = hotpot["properties"]["value"]["properties"][
+            "answer_slot"
+        ]["properties"]["answer_field"]
+        self.assertEqual(
+            ["subject", "object_or_attribute_value"],
+            hotpot_answer_field["enum"],
+        )
+        self.assertNotIn("const", hotpot_answer_field)
+
+    def test_location_answer_field_constraint_is_public_read_conditioned(
+        self,
+    ) -> None:
+        question = "Where in Arcadia was Professor Mira Hale born?"
+        containment = (
+            "East Ward is a district and part of the city of Riverton in "
+            "Arcadia."
+        )
+        settlement = "Riverton is a city in Arcadia."
+
+        self.assertEqual(
+            "object_or_attribute_value",
+            _location_resolution_answer_field_constraint(
+                original_question=question,
+                entity_anchor="East Ward, North Province",
+                read_evidence_texts=(containment,),
+            ),
+        )
+        self.assertEqual(
+            "subject",
+            _location_resolution_answer_field_constraint(
+                original_question=question,
+                entity_anchor="Riverton, North Province",
+                read_evidence_texts=(settlement,),
+            ),
+        )
+        self.assertIsNone(
+            _location_resolution_answer_field_constraint(
+                original_question=question,
+                entity_anchor="East Ward",
+                read_evidence_texts=(
+                    containment,
+                    "East Ward is a town in Arcadia.",
+                ),
+            )
+        )
 
     def test_location_containment_lineage_is_state_conditioned(self) -> None:
         question = "Where in Arcadia was Professor Mira Hale born?"
@@ -2343,6 +2435,12 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             "resolution proposition",
             completion_fields["answer_slot"]["description"],
         )
+        self.assertEqual(
+            "object_or_attribute_value",
+            completion_fields["answer_slot"]["properties"]["answer_field"][
+                "const"
+            ],
+        )
 
         observations.append(
             {
@@ -3249,7 +3347,7 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
         self.assertEqual(
-            (True, True, True, True, True),
+            (True, False, True, False, True),
             _factual_strategy_semantics_verified(
                 original_question=question,
                 distinct_queries=relation_coverage_trace,
@@ -3263,7 +3361,7 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
         self.assertEqual(
-            (True, True, True, True, False),
+            (True, False, True, False, True),
             _factual_strategy_semantics_verified(
                 original_question=question,
                 distinct_queries=repeated_class_trace,

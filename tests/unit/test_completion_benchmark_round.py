@@ -901,6 +901,149 @@ def test_trivia_failure_taxonomy_prioritizes_final_legal_lineage():
     ) == "reasoning_failure"
 
 
+def test_trivia_failure_taxonomy_prefers_latest_reasoner_binding_failure():
+    direct = {"evaluation": {"valid": True}}
+    graph = {
+        "explicit_finish": False,
+        "termination_reason": "canvas_action_domain_exhausted",
+        "evaluation": {
+            "valid": True,
+            "metrics": {"exact_match": 0.0, "token_f1": 0.0},
+            "details": {"answer_mismatch_type": "no_accepted_answer_overlap"},
+        },
+        "turns": [
+            {
+                "canvas_feedback": (
+                    "qa_semantic_evidence_provenance_invalid: early rejected "
+                    "completion"
+                ),
+                "runtime_summary": {"execution_status": "failed"},
+            },
+            {
+                "canvas_feedback": "accepted set_relation at revision 19",
+                "runtime_summary": {
+                    "execution_status": "failed",
+                    "failure_records": [
+                        {
+                            "agent_id": "reasoner",
+                            "error_type": "ReactExecutionError",
+                            "metadata": {
+                                "react_trace": [
+                                    {
+                                        "turn": 10,
+                                        "observation_status": "schema_invalid",
+                                        "public_error_code": (
+                                            "qa_semantic_artifact_invalid: "
+                                            "Reasoner answer_slot.answer_field "
+                                            "selects 'subject'"
+                                        ),
+                                    },
+                                    {
+                                        "turn": 20,
+                                        "observation_status": "schema_invalid",
+                                        "public_error_code": (
+                                            "qa_semantic_artifact_invalid: "
+                                            "qa_location_containment_lineage_missing"
+                                        ),
+                                    },
+                                ]
+                            },
+                        }
+                    ],
+                    "terminal_canvas_diagnosis": {
+                        "public_error_code": "canvas_action_domain_exhausted",
+                        "finish_admissibility": {
+                            "failure_attribution": {
+                                "responsible_agent_id": "reasoner",
+                                "responsible_role_family": "reasoner",
+                                "responsible_constraint": (
+                                    "execution_contract_or_runtime_failure"
+                                ),
+                            }
+                        },
+                    },
+                },
+            },
+        ],
+    }
+
+    assert _MODULE._failure_type(
+        direct,
+        graph,
+        direct_valid=True,
+        graph_valid=True,
+        direct_score=1.0,
+        graph_score=0.0,
+        dataset_key="triviaqa",
+    ) == "relation_or_answer_slot_binding_failure"
+
+
+def test_trivia_failure_taxonomy_uses_terminal_responsible_agent_record():
+    direct = {"evaluation": {"valid": True}}
+    graph = {
+        "explicit_finish": False,
+        "termination_reason": "canvas_action_domain_exhausted",
+        "evaluation": {
+            "valid": True,
+            "metrics": {"exact_match": 0.0, "token_f1": 0.0},
+            "details": {"answer_mismatch_type": "no_accepted_answer_overlap"},
+        },
+        "turns": [
+            {
+                "runtime_summary": {
+                    "execution_status": "failed",
+                    "failure_records": [
+                        {
+                            "agent_id": "reasoner",
+                            "error_type": "ReactExecutionError",
+                            "metadata": {
+                                "react_trace": [
+                                    {
+                                        "public_error_code": (
+                                            "qa_semantic_artifact_invalid: "
+                                            "answer_slot relation binding failed"
+                                        )
+                                    }
+                                ]
+                            },
+                        },
+                        {
+                            "agent_id": "sibling",
+                            "error_type": "CancelledError",
+                            "metadata": {
+                                "react_trace": [
+                                    {
+                                        "public_error_code": (
+                                            "retrieval_recall_failure"
+                                        )
+                                    }
+                                ]
+                            },
+                        },
+                    ],
+                    "terminal_canvas_diagnosis": {
+                        "finish_admissibility": {
+                            "failure_attribution": {
+                                "responsible_agent_id": "reasoner"
+                            }
+                        }
+                    },
+                }
+            }
+        ],
+    }
+
+    assert _MODULE._failure_type(
+        direct,
+        graph,
+        direct_valid=True,
+        graph_valid=True,
+        direct_score=1.0,
+        graph_score=0.0,
+        dataset_key="triviaqa",
+    ) == "relation_or_answer_slot_binding_failure"
+
+
 def test_paired_row_uses_the_evaluated_lineage_graph_for_fallback():
     task = _MODULE.TaskRecord(
         task_id="triviaqa:fallback",
