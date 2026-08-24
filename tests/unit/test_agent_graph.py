@@ -962,6 +962,62 @@ def _test_retrieval_failure_record(
     )
 
 
+def _test_retrieval_turn_exhaustion_record(
+    graph: AgentGraph,
+    *,
+    agent_id: str,
+    strategies: tuple[str, ...] = (
+        "initial_retrieval",
+        "alias_expansion",
+        "query_rewriting",
+    ),
+    passage_ids: tuple[str, ...] = ("public-read",),
+    continuation_admissible: bool = True,
+    tool_plan_exhausted: bool = False,
+    bounded_schedule_exhausted: bool = False,
+    remaining_tool_calls: int = 11,
+) -> AgentFailureRecord:
+    diagnosis = {
+        "react_turn_exhausted": True,
+        "continuation_admissible": continuation_admissible,
+        "tool_plan_exhausted": tool_plan_exhausted,
+        "bounded_schedule_exhausted": bounded_schedule_exhausted,
+        "remaining_tool_calls": remaining_tool_calls,
+        "retrieval_strategy_progress_count": len(strategies),
+        "retrieval_strategy_schedule_prefix": list(strategies),
+    }
+    return AgentFailureRecord(
+        request_id=f"{agent_id}-react-turn-exhaustion",
+        agent_id=agent_id,
+        phase=ExecutionPhase.SINGLE,
+        graph_revision=graph.revision,
+        error_type="ReactExecutionError",
+        message=f"react agent {agent_id!r} exhausted 32 turns",
+        metadata={
+            "react_trace": [
+                {
+                    "turn": 32,
+                    "observation_status": "schema_invalid",
+                    "public_error_code": (
+                        "qa_retrieval_query_named_scope_loss: "
+                        'missing_named_constraints=["american"]'
+                    ),
+                    "repair_instruction": (
+                        "Preserve public Tool receipts and continue the "
+                        "admitted retrieval schedule."
+                    ),
+                    "terminal_failure_diagnosis": diagnosis,
+                }
+            ],
+            "tool_receipts": [
+                _test_read_receipt(passage_id)
+                for passage_id in passage_ids
+            ],
+            "tool_plan_exhausted": tool_plan_exhausted,
+        },
+    )
+
+
 def _react_exhaustion_record(
     graph: AgentGraph,
     *,
@@ -5947,6 +6003,212 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         self.assertTrue(replacement.accepted, replacement.feedback)
+
+    def test_react_turn_exhausted_retriever_continuation_exposes_replacement(
+        self,
+    ) -> None:
+        complete = _trivia_semantic_graph()
+        graph = AgentGraph(
+            [complete.get_node("reasoner"), complete.get_node("reader")],
+            [AgentRelation("reader", "reasoner", True, False)],
+        )
+        registry = make_registry()
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_trivia_semantic_runtime(registry, _ImmediateGateway()),
+            graph=graph,
+            problem=(
+                "In which decade did Billboard magazine first publish an "
+                "American hit chart?"
+            ),
+            execute_on_edit=False,
+            max_agents=8,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+        )
+        record = _test_retrieval_turn_exhaustion_record(
+            graph,
+            agent_id="reader",
+        )
+        env._failed_agent_ids.add("reader")
+        env._repair_exhausted_agent_ids.add("reader")
+        env._latest_failure_record_by_agent["reader"] = record
+
+        self.assertEqual(
+            "react_turn_exhaustion",
+            env._execution_failure_diagnosis(record)[0],
+        )
+        self.assertEqual(
+            {"evidence_retriever": ("retrieval_evidence",)},
+            env._repair_exhausted_auxiliary_replacement_domains(),
+        )
+        self.assertEqual(("add_subgraph",), env.model_admissible_action_types())
+        add_domain = env.model_admissible_action_targets()["add_subgraph"]
+        self.assertEqual(1, add_domain["min_new_agents"])
+        self.assertEqual(1, add_domain["max_new_agents"])
+        self.assertEqual(
+            ["evidence_retriever"],
+            add_domain["admitted_new_role_families"],
+        )
+        self.assertEqual([], add_domain["relations"])
+        self.assertIsNone(add_domain["output_agent_id"])
+        self.assertEqual(
+            ["retrieval_evidence"],
+            add_domain["role_constraints"]["evidence_retriever"][
+                "artifact_types"
+            ],
+        )
+        recovery = env.recovery_state()
+        self.assertEqual("augment", recovery["phase"])
+        self.assertEqual(["add_subgraph"], recovery["preferred_actions"])
+
+    def test_react_turn_exhausted_retriever_terminal_receipts_close_replacement(
+        self,
+    ) -> None:
+        cases = (
+            {"continuation_admissible": False},
+            {"tool_plan_exhausted": True},
+            {"bounded_schedule_exhausted": True},
+            {"remaining_tool_calls": 0},
+            {"strategies": (), "passage_ids": ()},
+        )
+        for overrides in cases:
+            with self.subTest(overrides=overrides):
+                complete = _trivia_semantic_graph()
+                graph = AgentGraph(
+                    [
+                        complete.get_node("reasoner"),
+                        complete.get_node("reader"),
+                    ],
+                    [AgentRelation("reader", "reasoner", True, False)],
+                )
+                registry = make_registry()
+                env = AgentWorkflowEnv(
+                    registry,
+                    runtime=_trivia_semantic_runtime(
+                        registry,
+                        _ImmediateGateway(),
+                    ),
+                    graph=graph,
+                    problem="Who is the requested entity?",
+                    execute_on_edit=False,
+                    max_agents=8,
+                    semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+                    recovery_policy="preserve_diagnose_repair_augment",
+                    required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+                )
+                record = _test_retrieval_turn_exhaustion_record(
+                    graph,
+                    agent_id="reader",
+                    **overrides,
+                )
+                env._failed_agent_ids.add("reader")
+                env._repair_exhausted_agent_ids.add("reader")
+                env._latest_failure_record_by_agent["reader"] = record
+
+                self.assertEqual(
+                    {},
+                    env._repair_exhausted_auxiliary_replacement_domains(),
+                )
+                self.assertEqual((), env.model_admissible_action_types())
+                self.assertEqual({}, env.model_admissible_action_targets())
+                self.assertEqual([], env.recovery_state()["preferred_actions"])
+
+    def test_react_turn_exhausted_replacement_requires_new_public_progress(
+        self,
+    ) -> None:
+        for replacement_strategies, expected in (
+            (("initial_retrieval",), {}),
+            (
+                ("initial_retrieval", "alias_expansion"),
+                {"evidence_retriever": ("retrieval_evidence",)},
+            ),
+        ):
+            with self.subTest(
+                replacement_strategies=replacement_strategies
+            ):
+                complete = _trivia_semantic_graph()
+                graph = AgentGraph(
+                    [
+                        complete.get_node("reasoner"),
+                        complete.get_node("reader"),
+                        AgentNode(
+                            "replacement_reader",
+                            "cheap",
+                            _QA_EVIDENCE_RETRIEVER_RECOVERY_CONTRACT,
+                            role_family="evidence_retriever",
+                            allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                            execution_mode="react",
+                            artifact_type="retrieval_evidence",
+                            completion_condition=(
+                                _QA_EVIDENCE_RETRIEVER_RECOVERY_COMPLETION
+                            ),
+                        ),
+                    ],
+                    [
+                        AgentRelation("reader", "reasoner", True, False),
+                        AgentRelation(
+                            "replacement_reader",
+                            "reasoner",
+                            True,
+                            False,
+                        ),
+                    ],
+                )
+                registry = make_registry()
+                env = AgentWorkflowEnv(
+                    registry,
+                    runtime=_trivia_semantic_runtime(
+                        registry,
+                        _ImmediateGateway(),
+                    ),
+                    graph=graph,
+                    problem="Who is the requested entity?",
+                    execute_on_edit=False,
+                    max_agents=8,
+                    semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+                    recovery_policy="preserve_diagnose_repair_augment",
+                    required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+                )
+                env._failed_agent_ids.update(
+                    {"reader", "replacement_reader"}
+                )
+                env._repair_exhausted_agent_ids.update(
+                    {"reader", "replacement_reader"}
+                )
+                env._latest_failure_record_by_agent.update(
+                    {
+                        "reader": _test_retrieval_turn_exhaustion_record(
+                            graph,
+                            agent_id="reader",
+                            strategies=("initial_retrieval",),
+                            passage_ids=("shared-public-read",),
+                        ),
+                        "replacement_reader": (
+                            _test_retrieval_turn_exhaustion_record(
+                                graph,
+                                agent_id="replacement_reader",
+                                strategies=replacement_strategies,
+                                passage_ids=("shared-public-read",),
+                            )
+                        ),
+                    }
+                )
+
+                self.assertEqual(
+                    expected,
+                    env._repair_exhausted_auxiliary_replacement_domains(),
+                )
+                expected_actions = ("add_subgraph",) if expected else ()
+                self.assertEqual(
+                    expected_actions,
+                    env.model_admissible_action_types(),
+                )
+                self.assertEqual(
+                    ["add_subgraph"] if expected else [],
+                    env.recovery_state()["preferred_actions"],
+                )
 
     async def test_triviaqa_valid_retriever_artifact_admits_any_direct_reasoner_ingress(
         self,

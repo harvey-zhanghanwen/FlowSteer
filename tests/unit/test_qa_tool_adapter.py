@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass, replace
 import json
 from pathlib import Path
@@ -27,10 +28,13 @@ from src.interactive.qa_tool_adapter import (
     _factual_strategy_semantics_verified,
     _location_containment_lineage_issue,
     _location_resolution_answer_field_constraint,
+    _missing_question_named_constraints,
     _public_read_transition_mirror,
     _public_search_candidate_compatibility,
     _query_replaces_relation_surface,
     _question_entity_anchor_tokens,
+    _question_named_constraint_tokens,
+    _scope_tokens,
     build_qa_tool_registry,
     open_qa_tool_registry,
     open_provided_context_qa_tool_registry,
@@ -3711,6 +3715,103 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIs(False, guessed_verified)
         self.assertEqual((), guessed_source_ids)
+
+    def test_compound_named_constraints_share_fts_tokenization(self) -> None:
+        question = (
+            "Which American-born Sinclair won the Nobel Prize for Literature "
+            "in 1930?"
+        )
+        self.assertIn(
+            "american-born",
+            _question_named_constraint_tokens(question),
+        )
+        self.assertEqual(("american", "born"), _scope_tokens("American-born"))
+        self.assertEqual(("american", "born"), _scope_tokens("American born"))
+        for preserved_surface in (
+            "American-born Sinclair Nobel Prize Literature 1930",
+            "American born Sinclair Nobel Prize Literature 1930",
+        ):
+            with self.subTest(preserved_surface=preserved_surface):
+                self.assertEqual(
+                    (),
+                    _missing_question_named_constraints(
+                        question,
+                        preserved_surface,
+                    ),
+                )
+        for missing_surface in (
+            "American Sinclair Nobel Prize Literature 1930",
+            "born Sinclair Nobel Prize Literature 1930",
+        ):
+            with self.subTest(missing_surface=missing_surface):
+                self.assertEqual(
+                    ("american-born",),
+                    _missing_question_named_constraints(
+                        question,
+                        missing_surface,
+                    ),
+                )
+
+        three_component_question = (
+            "Which award did New-Zealand-born author Smith win?"
+        )
+        self.assertEqual(
+            (),
+            _missing_question_named_constraints(
+                three_component_question,
+                "Smith New Zealand born author award win",
+            ),
+        )
+        self.assertEqual(
+            ("new-zealand-born",),
+            _missing_question_named_constraints(
+                three_component_question,
+                "Smith New Zealand author award win",
+            ),
+        )
+
+        adapter = QARetrievalReactExecutionAdapter(
+            gateway=SimpleNamespace(generate=lambda request: None),
+            tool_registry=build_qa_tool_registry(FakeIndex()),
+            max_turns=16,
+            max_tool_calls=12,
+            task_type="factual_qa",
+            completion_policy="required_evidence",
+        )
+        request = AgentRequest(
+            request_id="trivia:compound-named-constraint",
+            run_id="trivia",
+            graph_revision=1,
+            problem=question,
+            agent=AgentNode(
+                "retriever",
+                "model",
+                "retrieve question-grounded evidence",
+                role_family="evidence_retriever",
+                allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                execution_mode="react",
+            ),
+            model=ModelSpec("model", "provider"),
+            provider=ProviderSpec("provider", kind="test"),
+            phase=ExecutionPhase.SINGLE,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+        )
+        for query in (
+            "American-born Sinclair won Nobel Prize Literature 1930",
+            "American born Sinclair won Nobel Prize Literature 1930",
+        ):
+            with self.subTest(query=query):
+                error = adapter._tool_action_error(
+                    request=request,
+                    action=StructuredAction(
+                        ActionKind.TOOL,
+                        "search",
+                        {"query": query, "limit": 5},
+                        resource_id=QA_RETRIEVAL_TOOL_ID,
+                    ),
+                    observations=[],
+                )
+                self.assertIsNone(error)
 
     def test_v23_public_action_domain_exposes_answer_free_relation_surfaces(
         self,
@@ -7813,6 +7914,137 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(detail)
         assert detail is not None
         self.assertIn("not a wh-word or wh-phrase", detail)
+
+    def test_evidence_retriever_preserves_location_first_hop_for_resolution(
+        self,
+    ) -> None:
+        question = "Where in England was Dame Judi Dench born?"
+        evidence = "Dench was born in Heworth, North Riding of Yorkshire."
+        artifact = {
+            "question_scope": question,
+            "entity_identity": {
+                "question_surface": "Dame Judi Dench",
+                "evidence_surface": "Dench",
+            },
+            "target_relation": "born in England",
+            "answer_type_constraint": "location",
+            "evidence_proposition": {
+                "subject": "Dench",
+                "predicate": "born in",
+                "object_or_attribute_value": (
+                    "Heworth, North Riding of Yorkshire"
+                ),
+            },
+            "evidence_span": evidence,
+            "passage_id": "judi-dench-birthplace",
+        }
+        receipt = {
+            "tool_id": QA_RETRIEVAL_TOOL_ID,
+            "tool_version": "frozen-index-v1",
+            "request": {
+                "action": "read",
+                "arguments": {"passage_id": "judi-dench-birthplace"},
+            },
+            "result": {
+                "value": {
+                    "operation": "read",
+                    "passage_id": "judi-dench-birthplace",
+                    "passage": {
+                        "passage_id": "judi-dench-birthplace",
+                        "title": "Judi Dench",
+                        "text": evidence,
+                    },
+                },
+                "completed": True,
+            },
+            "error_type": None,
+        }
+
+        self.assertIsNone(
+            QARetrievalReactExecutionAdapter._evidence_retriever_completion_issue(
+                original_question=question,
+                artifact=json.dumps(artifact),
+                tool_receipts=[receipt],
+            )
+        )
+        wrong_predicate = dict(artifact)
+        wrong_predicate["target_relation"] = "educated in England"
+        self.assertIn(
+            "target_relation must preserve",
+            QARetrievalReactExecutionAdapter._evidence_retriever_completion_issue(
+                original_question=question,
+                artifact=json.dumps(wrong_predicate),
+                tool_receipts=[receipt],
+            )
+            or "",
+        )
+
+        drifted_evidence = (
+            "Dench died in Heworth, North Riding of Yorkshire."
+        )
+        drifted_artifact = dict(artifact)
+        drifted_artifact["target_relation"] = "died in England"
+        drifted_artifact["evidence_span"] = drifted_evidence
+        drifted_artifact["evidence_proposition"] = {
+            "subject": "Dench",
+            "predicate": "died in",
+            "object_or_attribute_value": (
+                "Heworth, North Riding of Yorkshire"
+            ),
+        }
+        drifted_receipt = deepcopy(receipt)
+        drifted_receipt["result"]["value"]["passage"]["text"] = (
+            drifted_evidence
+        )
+        self.assertIn(
+            "target_relation must preserve",
+            QARetrievalReactExecutionAdapter._evidence_retriever_completion_issue(
+                original_question=question,
+                artifact=json.dumps(drifted_artifact),
+                tool_receipts=[drifted_receipt],
+            )
+            or "",
+        )
+
+        hyphen_question = "Where in New-Zealand was Jane Doe born?"
+        hyphen_evidence = "Doe was born in Auckland, North Island."
+        hyphen_artifact = {
+            "question_scope": hyphen_question,
+            "entity_identity": {
+                "question_surface": "Jane Doe",
+                "evidence_surface": "Doe",
+            },
+            "target_relation": "born in New-Zealand",
+            "answer_type_constraint": "location",
+            "evidence_proposition": {
+                "subject": "Doe",
+                "predicate": "born in",
+                "object_or_attribute_value": "Auckland, North Island",
+            },
+            "evidence_span": hyphen_evidence,
+            "passage_id": "jane-doe-birthplace",
+        }
+        hyphen_receipt = deepcopy(receipt)
+        hyphen_receipt["request"]["arguments"]["passage_id"] = (
+            "jane-doe-birthplace"
+        )
+        hyphen_receipt["result"]["value"]["passage_id"] = (
+            "jane-doe-birthplace"
+        )
+        hyphen_receipt["result"]["value"]["passage"]["passage_id"] = (
+            "jane-doe-birthplace"
+        )
+        hyphen_receipt["result"]["value"]["passage"]["title"] = "Jane Doe"
+        hyphen_receipt["result"]["value"]["passage"]["text"] = (
+            hyphen_evidence
+        )
+        self.assertIsNone(
+            QARetrievalReactExecutionAdapter._evidence_retriever_completion_issue(
+                original_question=hyphen_question,
+                artifact=json.dumps(hyphen_artifact),
+                tool_receipts=[hyphen_receipt],
+            )
+        )
 
     def test_evidence_retriever_preserves_complete_answer_bearing_title_identity(
         self,

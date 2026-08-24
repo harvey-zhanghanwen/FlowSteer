@@ -1419,8 +1419,50 @@ raises `max_turns_per_agent_call` from 20 to 32 but leaves
 `max_tool_calls_per_agent_call` fixed at 16; its v57 sampling-schedule purpose
 is retained so the scientific-sampling coordinates remain paired. The v58
 static suite passed 1,002 tests (plus 184 subtests), and prepare-only reproduced
-the exact same ordered 128 task records as v57. A fresh three-task Stable Zero
-gate and the ordered fixed-128 evaluation are not yet reported as completed.
+the exact same ordered 128 task records as v57. Its fresh three-task Stable Zero
+gate collected all three trajectories without collection failure but passed
+`0/3` legal terminal chains. All three ended with
+`canvas_action_domain_exhausted`, `final_answer=null`, no explicit FINISH and no
+valid-lineage fallback. Therefore no v58 benchmark EM/F1 and no ordered
+fixed-128 result are claimed.
+
+### v59 compound constraint, location first-hop and ReAct continuation repair
+
+The persisted v58 trajectories isolate three implementation defects. On
+`triviaqa:tc_1`, the question-side diagnostic retained `American-born` as one
+compound while the SkillFlow FTS boundary tokenized its query into `american`
+and `born`, so every otherwise valid search was rejected before Tool dispatch.
+v59 compares every compound component using the existing FTS-compatible token
+boundary while retaining the original compound in public diagnostics.
+
+On `triviaqa:tc_3`, a successful public read stated that Dench was born in
+`Heworth, North Riding of Yorkshire`. The Retriever's structured proposition
+was rejected because its `target_relation` also carried the question-side
+geographic qualifier `England`. v59 treats the named geographic scope as an
+answer constraint rather than a receipt-side predicate component: it removes
+the same exact token-bounded scope from the question and target surfaces before
+checking their requested relation, then removes it from the target only for
+first-hop proposition alignment when the receipt exposes a finer locality. A
+separate read-backed location-containment lineage is still mandatory before a
+Reasoner answer can be verified. This also rejects a joint `born -> died`
+target/receipt drift and supports hyphenated place names without a gazetteer.
+
+On `triviaqa:tc_5`, terminal diagnosis reported
+`continuation_admissible=true`, positive remaining Tool calls and an
+unexhausted retrieval schedule, but the Canvas exposed no legal continuation.
+v59 admits one same-role replacement only when those typed terminal fields are
+jointly true and the failed generation has public retrieval progress. A later
+replacement must add a new strategy or read-receipt token; unchanged progress,
+Tool-plan exhaustion, bounded-schedule exhaustion and zero remaining Tool calls
+all fail closed. `recovery_state.preferred_actions` now projects that same live
+action domain.
+
+Director prompt v6, Agent role search space, topology search space, model
+catalog, evaluator, training state and Skill state are unchanged. The complete
+static suite passes 1,007 tests plus 197 subtests. Prepare-only freezes the same
+128 ordered task records (`tc_1`, `tc_3`, `tc_5`, ..., `tc_223`) and retains the
+v57 sampling-schedule purpose. The isolated v59 live gate and fixed-128 result
+are reported only after execution.
 
 ## Historical comparison condition
 

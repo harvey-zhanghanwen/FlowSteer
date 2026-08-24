@@ -1507,6 +1507,33 @@ def _scope_tokens(surface: str) -> tuple[str, ...]:
     )
 
 
+def _remove_named_geographic_scope(
+    surface: str,
+    named_scope: str,
+) -> str:
+    """Remove one exact lexical place-name span from a relation surface.
+
+    Geographic scope is an answer constraint, not a relation predicate.  The
+    token-boundary form treats hyphenated and spaced place names identically
+    without introducing aliases or a gazetteer.
+    """
+
+    scope_tokens = _scope_tokens(named_scope)
+    if not scope_tokens:
+        return " ".join(surface.split())
+    scope_pattern = r"(?<!\w)" + r"[\W_]+".join(
+        re.escape(token) for token in scope_tokens
+    ) + r"(?!\w)"
+    return " ".join(
+        re.sub(
+            scope_pattern,
+            " ",
+            surface,
+            flags=re.IGNORECASE,
+        ).split()
+    )
+
+
 def _tokens_contain_alias_surface(
     tokens: Sequence[str],
     alias_surface: Sequence[str],
@@ -2099,16 +2126,29 @@ def _missing_question_named_constraints(
     candidate_surface: str,
 ) -> tuple[str, ...]:
     candidate_tokens = _scope_tokens(candidate_surface)
+
+    def constraint_preserved(constraint: str) -> bool:
+        # The question-side extractor intentionally retains a compound proper
+        # modifier such as ``American-born`` for public diagnostics, while the
+        # SkillFlow FTS/search boundary tokenizes both hyphenated and spaced
+        # forms into the same lexical components.  Compare those components
+        # without changing the shared query tokenizer or the public label.
+        components = _scope_tokens(constraint)
+        return bool(components) and all(
+            any(
+                _relation_token_variants(component)
+                & _relation_token_variants(candidate)
+                for candidate in candidate_tokens
+            )
+            for component in components
+        )
+
     return tuple(
         constraint
         for constraint in sorted(
             _question_named_constraint_tokens(original_question)
         )
-        if not any(
-            _relation_token_variants(constraint)
-            & _relation_token_variants(candidate)
-            for candidate in candidate_tokens
-        )
+        if not constraint_preserved(constraint)
     )
 
 
@@ -8367,18 +8407,39 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         )
         if scope_modifier_issue is not None:
             return scope_modifier_issue
+        named_geographic_scope = _explicit_named_geographic_scope(
+            original_question
+        )
+        relation_question_surface = canonical_question
+        relation_target_surface = canonical_relation
+        if (
+            expected_answer_type == "location"
+            and isinstance(named_geographic_scope, str)
+        ):
+            # Compare the requested predicate independently from its explicit
+            # geographic answer constraint. Otherwise an unrelated predicate
+            # can appear aligned merely because both surfaces contain the same
+            # place name.
+            relation_question_surface = _remove_named_geographic_scope(
+                relation_question_surface,
+                named_geographic_scope,
+            )
+            relation_target_surface = _remove_named_geographic_scope(
+                relation_target_surface,
+                named_geographic_scope,
+            )
         if not (
             _relation_surface_matches_evidence(
-                canonical_relation,
-                canonical_question,
+                relation_target_surface,
+                relation_question_surface,
             )
             or _relation_surfaces_share_content(
-                canonical_relation,
-                canonical_question,
+                relation_target_surface,
+                relation_question_surface,
             )
             or _controlled_relation_paraphrase(
-                question_relation=canonical_question,
-                evidence_predicate=canonical_relation,
+                question_relation=relation_question_surface,
+                evidence_predicate=relation_target_surface,
                 original_question=original_question,
                 evidence_span=evidence_span,
             )
@@ -8429,12 +8490,42 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         # authoritative. Retriever and Reasoner use the same relation-
         # realization predicate after every proposition field has been checked
         # against this exact evidence_span.
-        if not _proposition_preserves_requested_relation(
-            requested_relation=canonical_relation,
-            predicate=canonical_predicate,
-            object_or_attribute_value=canonical_object,
-            original_question=original_question,
-            evidence_span=evidence_span,
+        proposition_requested_relation = canonical_relation
+        if (
+            expected_answer_type == "location"
+            and isinstance(named_geographic_scope, str)
+            and _contains_canonical_location_surface(
+                canonical_relation,
+                named_geographic_scope,
+            )
+            and not _contains_canonical_location_surface(
+                evidence_span,
+                named_geographic_scope,
+            )
+            and _finer_locality_surface_in_span(
+                proposition_object,
+                evidence_span,
+            )
+        ):
+            # A named geographic scope is an answer constraint, not part of
+            # the receipt-side first-hop predicate. Preserve it in
+            # ``target_relation`` above, but compare the first-hop proposition
+            # against the remaining relation surface. The existing
+            # location-containment lineage gate then requires a separate
+            # read-backed locality -> named-scope resolution before an answer
+            # can be accepted.
+            proposition_requested_relation = _remove_named_geographic_scope(
+                proposition_requested_relation,
+                named_geographic_scope,
+            )
+        if not proposition_requested_relation or not (
+            _proposition_preserves_requested_relation(
+                requested_relation=proposition_requested_relation,
+                predicate=canonical_predicate,
+                object_or_attribute_value=canonical_object,
+                original_question=original_question,
+                evidence_span=evidence_span,
+            )
         ):
             return (
                 "Evidence Retriever question target_relation and receipt-grounded "

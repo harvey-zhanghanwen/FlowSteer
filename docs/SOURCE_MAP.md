@@ -1223,4 +1223,19 @@ explicit FINISH. The v57 fixed-128 evaluation was not run.
 
 After the source mapping above was written, the v58 static suite passed 1,002
 tests plus 184 subtests, and prepare-only reproduced the exact same ordered 128
-task records as v57. No live-canary or fixed-128 score is claimed here.
+task records as v57. The isolated live gate subsequently collected all three
+tasks without collection failure but passed `0/3` legal terminal chains; all
+ended at `canvas_action_domain_exhausted`. The fixed-128 evaluation was not run.
+
+## TriviaQA unified architecture v59 measured recovery repair
+
+| Current module/boundary | Classification | Primary source retained | Minimal compatibility adaptation |
+| --- | --- | --- | --- |
+| `qa_tool_adapter.py::_missing_question_named_constraints` | Necessary Tool-boundary compatibility adaptation | SkillFlow FTS tokenization and unchanged public search Action/receipt | Compare every component of a question-side compound constraint against the query token sequence, so hyphenated and spaced forms are equivalent while missing any component still fails closed. |
+| `qa_tool_adapter.py::{_remove_named_geographic_scope,_evidence_retriever_completion_issue}` | `PROJECT_NECESSARY_ADAPTATION` over exact SkillFlow read receipts | Existing entity, answer-type, exact-span, proposition and Tool-receipt gates | Separate a token-bounded named geographic qualifier from requested-relation alignment for a receipt-grounded finer-locality first hop. The same qualifier is removed from question and target before relation comparison, preventing an unrelated predicate from matching only on the place name. Final location containment still requires a separate public read lineage. |
+| `agent_workflow_env.py::{_auxiliary_replacement_has_strict_progress_opportunity,recovery_state}` | Necessary compatibility repair at the FlowSteer Canvas action-domain boundary | FlowSteer's progressive ADD/execute/feedback transaction and SkillFlow's typed ReAct continuation receipt | Admit a replacement only for `react_turn_exhausted` with continuation admissible, positive remaining Tool calls, unexhausted Tool plan/schedule and public retrieval progress. Later generations require a new strategy/read token. Preferred actions reuse the same replacement-domain projection. |
+| `evaluation_triviaqa_unified_architecture_v2_fixed128.yaml` v59 condition | Necessary isolated evaluation configuration | Same fixed ordered 128-task view, prompt v6 and v57 sampling coordinates | Only the Tool/Canvas contract and isolated output paths advance to v59; topology, Agent inventory, model catalog, evaluator, training and Skills remain unchanged. |
+
+The v59 complete static suite passes 1,007 tests plus 197 subtests, and
+prepare-only reproduces the exact v58 task records in the same order. No live
+v59 score is claimed before the Stable Zero gate executes.

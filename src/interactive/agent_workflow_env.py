@@ -2430,6 +2430,38 @@ class AgentWorkflowEnv:
         if record is None:
             return False
         category, _, _ = self._execution_failure_diagnosis(record)
+        if category == "react_turn_exhaustion":
+            diagnosis = self._terminal_retrieval_failure_diagnosis(record)
+            remaining_tool_calls = (
+                diagnosis.get("remaining_tool_calls")
+                if diagnosis is not None
+                else None
+            )
+            if (
+                diagnosis is not None
+                and diagnosis.get("react_turn_exhausted") is True
+                and diagnosis.get("continuation_admissible") is True
+                and diagnosis.get("tool_plan_exhausted") is False
+                and diagnosis.get("bounded_schedule_exhausted") is False
+                and isinstance(remaining_tool_calls, int)
+                and not isinstance(remaining_tool_calls, bool)
+                and remaining_tool_calls > 0
+                and not self._tool_continuation_exhausted(record.metadata)
+            ):
+                current_progress = self._auxiliary_retrieval_progress_tokens(
+                    source_id
+                )
+                if not current_progress:
+                    return False
+                previous_progress = frozenset().union(
+                    *(
+                        self._auxiliary_retrieval_progress_tokens(agent_id)
+                        for agent_id in previous_source_ids
+                    )
+                )
+                return not previous_source_ids or bool(
+                    current_progress - previous_progress
+                )
         if (
             isinstance(self.runtime.dataset_id, str)
             and self.runtime.dataset_id.casefold() == "triviaqa"
@@ -8413,6 +8445,22 @@ class AgentWorkflowEnv:
         active_auxiliary_replacements = (
             self._dirty_auxiliary_replacement_agent_ids()
         )
+        auxiliary_replacement_domains = (
+            self._repair_exhausted_auxiliary_replacement_domains()
+        )
+        triviaqa_failed_auxiliary_blocks_missing_roles = bool(
+            isinstance(self.runtime.dataset_id, str)
+            and self.runtime.dataset_id.casefold() == "triviaqa"
+            and any(
+                node.id in self._failed_agent_ids
+                and node.id in self._repair_exhausted_agent_ids
+                and (node.role_family or "").casefold()
+                in {"evidence_retriever", "repair"}
+                for node in self._graph.nodes
+            )
+            and not auxiliary_replacement_domains
+            and not self._has_valid_evidence_retriever_artifact()
+        )
         diagnosed_unusable = tuple(
             sorted(self._diagnosed_unusable_agent_ids & current_ids)
         )
@@ -8519,6 +8567,7 @@ class AgentWorkflowEnv:
                 if (
                     self._graph.nodes
                     and self._missing_semantic_role_families()
+                    and not triviaqa_failed_auxiliary_blocks_missing_roles
                     and (
                         self.max_agents is None
                         or len(self._graph.nodes) < self.max_agents
