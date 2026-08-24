@@ -32,8 +32,8 @@ QUERIES = (
     "Chart Weekly magazine first publish American hit chart decade",
     "Chart Weekly magazine first published American hit chart decade",
     "Chart Weekly magazine first publication American hit chart decade",
-    "Chart Weekly magazine first publication American hit chart decade publish",
-    "Chart Weekly magazine first publication American hit parade decade publish",
+    "Chart Weekly magazine first publication American hit chart decade ranking",
+    "Chart Weekly magazine first publication American hit parade decade ranking",
 )
 
 
@@ -97,7 +97,8 @@ OBSERVATIONS = (
         passage_id="public-2",
         title="Chart Weekly",
         snippet=(
-            "Chart Weekly magazine first published an American hit chart."
+            "Chart Weekly magazine first published an American hit chart "
+            "ranking."
         ),
     ),
     search_observation(

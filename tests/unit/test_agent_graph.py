@@ -976,6 +976,7 @@ def _test_retrieval_turn_exhaustion_record(
     tool_plan_exhausted: bool = False,
     bounded_schedule_exhausted: bool = False,
     remaining_tool_calls: int = 11,
+    retrieval_attempts: tuple[dict[str, object], ...] = (),
 ) -> AgentFailureRecord:
     diagnosis = {
         "react_turn_exhausted": True,
@@ -985,6 +986,7 @@ def _test_retrieval_turn_exhaustion_record(
         "remaining_tool_calls": remaining_tool_calls,
         "retrieval_strategy_progress_count": len(strategies),
         "retrieval_strategy_schedule_prefix": list(strategies),
+        "retrieval_attempts": list(retrieval_attempts),
     }
     return AgentFailureRecord(
         request_id=f"{agent_id}-react-turn-exhaustion",
@@ -6209,6 +6211,96 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
                     ["add_subgraph"] if expected else [],
                     env.recovery_state()["preferred_actions"],
                 )
+
+    def test_react_turn_exhausted_replacement_counts_verified_recall_expansion(
+        self,
+    ) -> None:
+        complete = _trivia_semantic_graph()
+        graph = AgentGraph(
+            [
+                complete.get_node("reasoner"),
+                complete.get_node("reader"),
+                AgentNode(
+                    "replacement_reader",
+                    "cheap",
+                    _QA_EVIDENCE_RETRIEVER_RECOVERY_CONTRACT,
+                    role_family="evidence_retriever",
+                    allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                    execution_mode="react",
+                    artifact_type="retrieval_evidence",
+                    completion_condition=(
+                        _QA_EVIDENCE_RETRIEVER_RECOVERY_COMPLETION
+                    ),
+                ),
+            ],
+            [
+                AgentRelation("reader", "reasoner", True, False),
+                AgentRelation(
+                    "replacement_reader",
+                    "reasoner",
+                    True,
+                    False,
+                ),
+            ],
+        )
+        registry = make_registry()
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_trivia_semantic_runtime(registry, _ImmediateGateway()),
+            graph=graph,
+            problem="Who is the requested entity?",
+            execute_on_edit=False,
+            max_agents=8,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+        )
+        verified_recall = {
+            "verified": True,
+            "recall_expansion": True,
+            "fts_term_set": ["billboard", "chart", "publish"],
+            "observed_top_k": 20,
+        }
+        env._failed_agent_ids.update({"reader", "replacement_reader"})
+        env._repair_exhausted_agent_ids.update(
+            {"reader", "replacement_reader"}
+        )
+        env._latest_failure_record_by_agent.update(
+            {
+                "reader": _test_retrieval_turn_exhaustion_record(
+                    graph,
+                    agent_id="reader",
+                    strategies=("initial_retrieval", "alias_expansion"),
+                    passage_ids=(),
+                ),
+                "replacement_reader": _test_retrieval_turn_exhaustion_record(
+                    graph,
+                    agent_id="replacement_reader",
+                    strategies=("initial_retrieval", "alias_expansion"),
+                    passage_ids=(),
+                    retrieval_attempts=(verified_recall,),
+                ),
+            }
+        )
+
+        self.assertEqual(
+            {"evidence_retriever": ("retrieval_evidence",)},
+            env._repair_exhausted_auxiliary_replacement_domains(),
+        )
+
+        env._latest_failure_record_by_agent["reader"] = (
+            _test_retrieval_turn_exhaustion_record(
+                graph,
+                agent_id="reader",
+                strategies=("initial_retrieval", "alias_expansion"),
+                passage_ids=(),
+                retrieval_attempts=(verified_recall,),
+            )
+        )
+        self.assertEqual(
+            {},
+            env._repair_exhausted_auxiliary_replacement_domains(),
+        )
 
     async def test_triviaqa_valid_retriever_artifact_admits_any_direct_reasoner_ingress(
         self,

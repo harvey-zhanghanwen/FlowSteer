@@ -2378,6 +2378,47 @@ class AgentWorkflowEnv:
                     for value in schedule
                     if isinstance(value, str) and value
                 )
+            retrieval_attempts = diagnosis.get("retrieval_attempts", ())
+            if isinstance(retrieval_attempts, (list, tuple)):
+                for attempt in retrieval_attempts:
+                    if (
+                        not isinstance(attempt, Mapping)
+                        or attempt.get("verified") is not True
+                        or attempt.get("recall_expansion") is not True
+                    ):
+                        continue
+                    term_set = attempt.get("fts_term_set")
+                    observed_top_k = attempt.get("observed_top_k")
+                    if (
+                        not isinstance(term_set, (list, tuple))
+                        or not term_set
+                        or not all(
+                            isinstance(token, str) and bool(token)
+                            for token in term_set
+                        )
+                        or type(observed_top_k) is not int
+                        or observed_top_k < 1
+                    ):
+                        continue
+                    # FlowSteer's next Canvas edit is admitted only after a
+                    # new public execution result. A verified SkillFlow
+                    # same-FTS-term-set search at a strictly larger top-k is
+                    # such a result even though, correctly, it does not claim
+                    # completion of another retrieval strategy.
+                    result.add(
+                        (
+                            "recall_expansion",
+                            json.dumps(
+                                {
+                                    "fts_term_set": list(term_set),
+                                    "observed_top_k": observed_top_k,
+                                },
+                                ensure_ascii=False,
+                                sort_keys=True,
+                                separators=(",", ":"),
+                            ),
+                        )
+                    )
 
         if self.required_evidence_tool_id is None:
             return frozenset(result)

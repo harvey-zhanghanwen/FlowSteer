@@ -1239,3 +1239,23 @@ ended at `canvas_action_domain_exhausted`. The fixed-128 evaluation was not run.
 The v59 complete static suite passes 1,007 tests plus 197 subtests, and
 prepare-only reproduces the exact v58 task records in the same order. No live
 v59 score is claimed before the Stable Zero gate executes.
+
+## TriviaQA unified architecture v60 FTS-recall and slot repair
+
+The persisted v59 gate collected all three frozen tasks without collection
+failure but passed only `1/3` legal terminal lineages. `tc_1` explicitly
+finished with EM/F1 `1/1`; `tc_3` and `tc_5` ended at
+`canvas_action_domain_exhausted`. The fixed-128 evaluation was not run.
+
+| Current module/boundary | Classification | Primary source retained | Minimal compatibility adaptation |
+| --- | --- | --- | --- |
+| `qa_tool_adapter.py::_condition_qa_action_response_schema` Reasoner repair branch | `PROJECT_NECESSARY_ADAPTATION` over SkillFlow constrained StructuredAction generation | Exact successful public read receipts, the rejected model-authored artifact and field-scoped JSON Schema repair | When a successful location-containment read fixes the answer-bearing proposition field and the public error reports the exact candidate/selected-field mismatch, reopen only `candidate_answer`. Preserve propositions, chain, evidence, reads and the receipt-grounded answer slot. |
+| `qa_tool_adapter.py::_tool_action_error` recall-expansion branch | Necessary compatibility repair at the SkillFlow FTS Tool boundary | SkillFlow's deduplicated OR-connected FTS compiler, the project's existing term-set-equivalence mirror, public query/top-k receipts and the bounded top-k schedule | Compare the attempted term-set signature with the latest successful term-set signature and require a strictly larger top-k. Keep entity, named-scope, ordinal, relation-class and candidate-injection gates unchanged and earlier in admission. |
+| `qa_tool_adapter.py::_query_rewriting_transition_support` | `PROJECT_NECESSARY_ADAPTATION` over adjacent public search state | Original question invariants and the mirror-valid SkillFlow search Action--Observation receipt | Do not count accumulation of an original-question relation token as `query_rewriting`. A verified rewrite either deletes only question syntax/noise or adds context supported by the adjacent receipt; otherwise the action remains an unverified strategy transition. |
+| `agent_workflow_env.py::_auxiliary_retrieval_progress_tokens` | Necessary compatibility repair at the FlowSteer progressive Canvas boundary | FlowSteer's accepted edit -> execute -> feedback transaction and SkillFlow's public Action--Observation/Tool receipts projected into the existing typed terminal retrieval diagnosis | Count only a `verified=true`, `recall_expansion=true` public attempt identified by `(fts_term_set, observed_top_k)` as strict execution progress. It may justify one later non-destructive replacement but does not fabricate strategy coverage or admit unchanged retries. |
+| `evaluation_triviaqa_unified_architecture_v2_fixed128.yaml` v60 condition | Necessary isolated evaluation configuration | Same fixed ordered 128-task view, Director prompt v6, model catalog v7, evaluator and v57 sampling coordinates | Advance only Tool/Canvas contract and isolated output paths to v60. Training, Skills, topology constraints and model selection remain unchanged. |
+
+The v60 complete static suite passes 1,008 tests plus 197 subtests. Prepare-only
+reproduces the same ordered 128 task IDs, questions and ground-truth records as
+v59. No live score is claimed until the unchanged three-task Stable Zero gate
+executes.

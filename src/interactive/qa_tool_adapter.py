@@ -2486,7 +2486,11 @@ def _query_rewriting_transition_support(
         )
     )
     if not receipt_conditioned_added_tokens:
-        return (not content_removed_tokens), ()
+        # Restoring or accumulating a token already present in the question
+        # does not constitute a new query-rewriting transition and cannot
+        # claim another strategy proof. Pure deletion of question syntax/noise
+        # was handled above.
+        return False, ()
     # Local snippet co-occurrence can justify additive discovery context, but
     # it cannot prove that an arbitrary new token is synonymous with a removed
     # predicate. Predicate replacement remains limited to the inflectional,
@@ -2987,8 +2991,9 @@ def _factual_retrieval_attempt_records(
                 current_proof.strategy if current_proof is not None else None
             )
         else:
-            # The existing action admission allows only the latest normalized
-            # FTS term set at a strictly larger top-k.  Such an attempt expands
+            # The existing action admission allows only the latest
+            # FTS-equivalent term set at a strictly larger top-k. Such an
+            # attempt expands
             # recall but deliberately does not claim completion of the next
             # spelling/alias/disambiguation/rewrite strategy.
             prior_limits = prior_top_ks_by_signature.get(signature, [])
@@ -4531,7 +4536,8 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 "entity-and-relation query with a distinct FTS term set for the "
                 "current retrieval strategy; reordering the same terms is not a "
                 "new strategy. A "
-                "repeat of only the latest query is admitted at each strictly "
+                "repeat of only the latest FTS-equivalent query is admitted at "
+                "each strictly "
                 "larger top_k required by the bounded action schema as recall "
                 "expansion, but it does not advance retrieval-strategy progress. Do not "
                 "repeat a prior (query, top_k) pair or cycle to an older query."
@@ -6394,7 +6400,8 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     "unrelated topic from a returned hit. Its normalized FTS "
                     "term set must differ from every prior distinct query; term "
                     "reordering is not a strategy change. Repeating only the latest "
-                    "normalized query at the required larger top_k is a recall "
+                    "FTS-equivalent term set at the required larger top_k is "
+                    "a recall "
                     "expansion and does not advance strategy progress. Express "
                     "a transition through a changed lexical entity/relation surface; "
                     "do not include an orchestration strategy name or metaword in query."
@@ -6511,6 +6518,29 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 mutable_paths = self._reasoner_repair_mutable_paths(
                     state.semantic_repair_error_code
                 )
+                if (
+                    state.location_containment_repair_read_count > 0
+                    and "answer_slot.answer_field selects"
+                    in state.semantic_repair_error_code
+                    and "candidate_answer exactly matches"
+                    in state.semantic_repair_error_code
+                ):
+                    # A successful public location-resolution read fixes which
+                    # argument of the second proposition is answer-bearing.
+                    # If the rejected draft still copies the unresolved
+                    # first-hop locality, freezing candidate_answer while the
+                    # answer_slot is fixed to the resolved field creates an
+                    # unsatisfiable StructuredAction schema. Preserve the
+                    # propositions, reads and chain; reopen only the slot and
+                    # candidate so the model can copy the receipt-grounded
+                    # resolved field. The ordinary candidate/provenance gates
+                    # remain authoritative.
+                    mutable_paths = frozenset(
+                        {
+                            *mutable_paths,
+                            ("candidate_answer",),
+                        }
+                    )
                 value_schema = argument_properties.get("value")
                 if (
                     prior_value is not None
@@ -7621,7 +7651,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     f"limit exactly {expected_top_k}. For search, "
                     + transition_guidance
                     + " The query must either be a distinct, answer-free entity-and-"
-                    "relation reformulation, or repeat only the latest normalized "
+                    "relation reformulation, or repeat only the latest FTS-equivalent "
                     "query at each strictly larger required top_k in the bounded "
                     "schedule as recall expansion. Recall expansion does not advance "
                     "strategy coverage. Do not copy a strategy label into query. "
@@ -7704,7 +7734,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                         "or metaword into query. To advance retrieval, the "
                         "query FTS term set must differ from every prior strategy "
                         "term set; reordering terms is not a strategy change. Only "
-                        "the latest normalized query may be repeated at each "
+                        "the latest FTS-equivalent query may be repeated at each "
                         "strictly larger required top_k in the bounded schedule as "
                         "recall expansion; that expansion does not advance strategy "
                         "progress, and the next "
@@ -9471,16 +9501,16 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                                         ensure_ascii=False,
                                     )
                                 )
-                    latest_normalized_query = (
-                        _normalized_retrieval_query(prior_queries[-1])
+                    latest_query_term_set_signature = (
+                        _retrieval_query_term_set_signature(prior_queries[-1])
                         if prior_queries
                         else None
                     )
                     if (
                         prior_limits
                         and not (
-                            normalized_query
-                            == latest_normalized_query
+                            query_term_set_signature
+                            == latest_query_term_set_signature
                             and type(limit) is int
                             and limit > max(prior_limits)
                         )

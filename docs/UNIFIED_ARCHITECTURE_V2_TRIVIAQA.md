@@ -1464,6 +1464,53 @@ static suite passes 1,007 tests plus 197 subtests. Prepare-only freezes the same
 v57 sampling-schedule purpose. The isolated v59 live gate and fixed-128 result
 are reported only after execution.
 
+### v59 live evidence and v60 FTS-recall repair
+
+The isolated v59 Stable Zero run collected all three frozen tasks with zero
+collection failures, but only `triviaqa:tc_1` formed a legal terminal lineage.
+It explicitly finished after nine Canvas turns with `Sinclair Lewis` and
+official EM/F1 `1/1`. `triviaqa:tc_3` and `triviaqa:tc_5` ended at
+`canvas_action_domain_exhausted`, so v59 passed only `1/3`; the fixed-128 run
+was not started and no 128-sample accuracy is claimed.
+
+The lossless `tc_3` trajectory exposed an unsatisfiable state-conditioned
+completion schema after a successful public location-containment read. The
+preserved draft fixed `candidate_answer` to the unresolved first-hop locality,
+while the same read receipt correctly fixed `answer_slot` to the containing
+proposition's object. v60 reopens only `candidate_answer` for that exact public
+field-mismatch diagnosis. Evidence propositions, multi-hop chain, Tool reads
+and the receipt-grounded answer-slot field remain fixed, and the ordinary
+candidate/provenance validators remain authoritative.
+
+The `tc_5` trajectory exposed a separate live/replay inconsistency. SkillFlow's
+FTS compiler reduces a query to deduplicated OR-connected terms, while the
+existing project admission mirrors that backend equivalence with an order-
+insensitive FTS term-set signature. Live recall expansion additionally required
+the normalized query string to retain identical token order. A search
+containing the same latest term set at the required larger `top_k` was therefore
+rejected after harmless term reordering. v60 uses the same latest FTS term-set
+signature on both sides of this admission boundary while preserving the
+preceding entity, named-scope, ordinal, relation-class and candidate-injection
+checks. A verified recall-expansion receipt is also counted as strict public
+execution progress for a later non-destructive Canvas replacement; it does not
+advance retrieval-strategy coverage.
+
+The same public trace showed that merely adding the question token `publish`
+beside an already-present `publication` surface was incorrectly recorded as
+`query_rewriting`. v60 no longer treats accumulation of question-derived
+relation tokens as a strategy proof. A verified rewrite must either delete only
+question syntax/noise or add lexical context supported by the adjacent mirror-
+valid public search receipt. Otherwise the action remains an unverified
+strategy transition and cannot fabricate retrieval-strategy coverage.
+
+Director prompt v6, the model-selected AgentGraph search space, Agent role
+inventory, model catalog, evaluator, frozen tasks, scientific-sampling purpose,
+training state and Skill state are unchanged. The v60 static suite passes 1,008
+tests plus 197 subtests. Prepare-only reproduces the same ordered 128 task IDs,
+questions and ground-truth records as v59 under a new isolated condition/output
+path. Live v60 results must still pass the same three-task Stable Zero gate
+before the fixed-128 run is admitted.
+
 ## Historical comparison condition
 
 The frozen v6.2 TriviaQA development run on the same ordered 128 tasks reported

@@ -2640,6 +2640,111 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+        stale_candidate = json.loads(json.dumps(first_hop_artifact))
+        stale_candidate["evidence_propositions"].append(
+            {
+                "subject": "Heworth",
+                "relation": "is part of the city of",
+                "object_or_attribute_value": "York",
+                "qualifiers": ["in England"],
+                "evidence_span": containment_span,
+            }
+        )
+        stale_candidate["multi_hop_chain"].append(
+            "Heworth --part of the city of--> York"
+        )
+        stale_candidate["answer_slot"]["proposition_index"] = 1
+        stale_candidate["candidate_answer"] = "Heworth"
+        stale_candidate["evidence"].append(containment_span)
+        observations.append(
+            {
+                "observation_status": "schema_invalid",
+                "public_error_code": (
+                    "qa_semantic_artifact_invalid: Reasoner "
+                    "answer_slot.answer_field selects "
+                    "'object_or_attribute_value', but candidate_answer "
+                    "exactly matches the selected proposition field "
+                    "'subject'; set answer_field to the proposition field "
+                    "containing candidate_answer"
+                ),
+                "executed_action": {
+                    "kind": "complete",
+                    "name": "complete",
+                    "resource_id": None,
+                    "skill_id": None,
+                    "arguments": {"value": stale_candidate},
+                },
+            }
+        )
+        mismatch_state = adapter._required_evidence_state(
+            request,
+            observations,
+        )
+        self.assertEqual("structure", mismatch_state.semantic_repair_kind)
+        self.assertEqual(
+            1,
+            mismatch_state.location_containment_repair_read_count,
+        )
+        mismatch_schema = adapter._state_conditioned_response_schema(
+            request,
+            observations,
+        )
+        assert mismatch_schema is not None
+        mismatch_fields = mismatch_schema["properties"]["arguments"][
+            "properties"
+        ]["value"]["properties"]
+        self.assertNotIn("const", mismatch_fields["candidate_answer"])
+        self.assertEqual(
+            stale_candidate["evidence_propositions"],
+            mismatch_fields["evidence_propositions"]["const"],
+        )
+        self.assertEqual(
+            stale_candidate["multi_hop_chain"],
+            mismatch_fields["multi_hop_chain"]["const"],
+        )
+        self.assertEqual(
+            1,
+            mismatch_fields["answer_slot"]["properties"][
+                "proposition_index"
+            ]["const"],
+        )
+        self.assertEqual(
+            "object_or_attribute_value",
+            mismatch_fields["answer_slot"]["properties"]["answer_field"][
+                "const"
+            ],
+        )
+
+        unrelated_structure_observations = [
+            *observations[:-1],
+            {
+                "observation_status": "schema_invalid",
+                "public_error_code": (
+                    "qa_semantic_artifact_invalid: Reasoner field "
+                    "'multi_hop_chain' must contain one step per proposition"
+                ),
+                "executed_action": {
+                    "kind": "complete",
+                    "name": "complete",
+                    "resource_id": None,
+                    "skill_id": None,
+                    "arguments": {"value": stale_candidate},
+                },
+            },
+        ]
+        unrelated_schema = adapter._state_conditioned_response_schema(
+            request,
+            unrelated_structure_observations,
+        )
+        assert unrelated_schema is not None
+        unrelated_fields = unrelated_schema["properties"]["arguments"][
+            "properties"
+        ]["value"]["properties"]
+        self.assertEqual(
+            "Heworth",
+            unrelated_fields["candidate_answer"]["const"],
+        )
+
         observations.append(
             {
                 "observation_status": "schema_invalid",
@@ -3284,11 +3389,29 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             },
             resource_id=QA_RETRIEVAL_TOOL_ID,
         )
+        self.assertIsNone(
+            adapter._tool_action_error(
+                request=request,
+                action=reordered,
+                observations=observations,
+            ),
+        )
+        reordered_without_expansion = StructuredAction(
+            ActionKind.TOOL,
+            "search",
+            {
+                "query": (
+                    "Billboard magazine American hit chart first publish"
+                ),
+                "limit": 5,
+            },
+            resource_id=QA_RETRIEVAL_TOOL_ID,
+        )
         self.assertEqual(
             "qa_retrieval_duplicate_normalized_query",
             adapter._tool_action_error(
                 request=request,
-                action=reordered,
+                action=reordered_without_expansion,
                 observations=observations,
             ),
         )
@@ -3369,6 +3492,63 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
                 request=request,
                 action=relation_alias,
                 observations=observations,
+            )
+        )
+        publication_query = (
+            "American hit chart Billboard magazine first publication decade"
+        )
+        publication_observation = {
+            "observation_status": "success",
+            "executed_action": {
+                "kind": "tool",
+                "name": "search",
+                "resource_id": QA_RETRIEVAL_TOOL_ID,
+                "arguments": {
+                    "query": publication_query,
+                    "limit": 10,
+                },
+            },
+            "result": {
+                "operation": "search",
+                "query": publication_query,
+                "top_k": 10,
+                "passage_ids": [],
+                "hits": [],
+            },
+        }
+        accumulated_question_relation = (
+            "Billboard magazine American hit chart first publish "
+            "publication decade"
+        )
+        strategy, verified, source_ids = (
+            _factual_transition_strategy_identification(
+                original_question=request.problem,
+                previous_query=publication_query,
+                query=accumulated_question_relation,
+                prior_observation=publication_observation,
+            )
+        )
+        self.assertEqual("query_rewriting", strategy)
+        self.assertIs(False, verified)
+        self.assertEqual((), source_ids)
+        accumulation_issue = adapter._tool_action_error(
+            request=request,
+            action=StructuredAction(
+                ActionKind.TOOL,
+                "search",
+                {
+                    "query": accumulated_question_relation,
+                    "limit": 15,
+                },
+                resource_id=QA_RETRIEVAL_TOOL_ID,
+            ),
+            observations=[*observations, publication_observation],
+        )
+        self.assertIsNotNone(accumulation_issue)
+        assert accumulation_issue is not None
+        self.assertTrue(
+            accumulation_issue.startswith(
+                "qa_retrieval_query_strategy_semantics_mismatch"
             )
         )
         self.assertIn(
