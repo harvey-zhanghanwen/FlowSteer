@@ -1545,8 +1545,55 @@ execute-on-edit feedback loop. Director prompt v6 remains byte-for-byte
 topology-neutral; no query, role order, workflow topology, task answer,
 accepted answer or evaluator output is embedded in it. Training, Skills,
 MACE and Bayesian updates remain disabled. The complete v61 static suite passes
-1,009 tests plus 197 subtests. Its isolated Stable Zero and fixed-128 results
-are reported only after execution under the versioned v61 condition.
+1,009 tests plus 197 subtests.
+
+The isolated v61 canary subsequently collected all three trajectories with no
+collection failure and passed Stable Zero `2/3`. `tc_1` and `tc_3` explicitly
+FINISHed with official EM/F1 `1/1`; `tc_5` ended at
+`canvas_action_domain_exhausted`, with no answer and no valid-lineage fallback.
+Its five FTS-equivalent top-k searches and eleven reads consumed all sixteen
+Tool calls while only `initial_retrieval` was complete. The fixed-128 run was
+therefore not admitted.
+
+### v62 entity/topic candidate selection and bounded query recovery
+
+The v61 lossless trajectory shows that restoring every syntactically legal
+SkillFlow read over-corrected the v60 false negative. The first five searches
+did not contain the target document title. With no compatible candidate, the
+model read eleven unrelated hits and exhausted the Tool budget before the
+distinct query rewrite that had recovered the target passage in v60. This is a
+candidate-selection and action-domain defect, not evidence of database
+coverage failure and not a reason to increase the budget.
+
+v62 keeps SkillFlow's public `SearchHit` and `RetrievalIndex.search/read`
+contracts unchanged. For unified factual ordinal questions only, public-title
+Entity Linking may omit exactly one question-published lower-case entity type
+noun while requiring the complete proper-name core and a question-derived
+relation/topic head outside that entity span. This admits a bounded title such
+as a proper entity name followed by its requested topic even when its snippet
+ends before the answer-bearing proposition. It does not treat the title or
+snippet as evidence, drop a component of a multi-token proper name, use an
+accepted answer or inspect evaluator state.
+
+The state-conditioned action domain now exposes only the next bounded `search`
+when the latest public result has no compatible candidate. When at least one
+candidate exists, it exposes `read` with exactly the highest-ranked unread
+opaque `passage_id`; a rejected read preserves every Action--Observation
+receipt and advances to the next candidate or search state. The same selection
+is used by the response schema, Tool contract and Tool action validator. This
+scope is limited to `factual_qa + qa_verified_answer_lineage_v2 + ordinal` and
+does not alter non-ordinal TriviaQA, location-containment recovery or HotpotQA
+multi-hop reads.
+
+The full read receipt remains authoritative for entity identity, target
+relation, named scope, ordinal, provenance, exact evidence span and answer-slot
+binding; downstream Reasoner, Verifier, Formatter and FINISH admission are
+unchanged. ReAct remains the per-Agent `Thought -> Action -> Observation ->
+Thought` execution schedule, not an Agent role. Director prompt v6, AgentGraph
+topology search space, model catalog, training state, Skills, MACE and Bayesian
+state are unchanged. The v62 complete static suite passes 1,011 tests plus 197
+subtests; prepare-only and live measurements are not claimed before execution
+under the isolated v62 condition.
 
 ## Historical comparison condition
 

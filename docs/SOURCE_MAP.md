@@ -1281,5 +1281,32 @@ false negative, not database coverage evidence.
 The v61 full static suite passes 1,009 tests plus 197 subtests. Director prompt
 v6 remains byte-for-byte topology-neutral and contains no fixed Agent count,
 role inventory/order, edge, topology, retrieval recipe, query or answer. The
-isolated Stable Zero and fixed-128 measurements are not claimed before their
-versioned executions complete.
+isolated canary collected three trajectories with zero collection failures and
+passed Stable Zero `2/3`: `tc_1` and `tc_3` explicitly FINISHed with official
+EM/F1 `1/1`; `tc_5` ended at `canvas_action_domain_exhausted` with no answer or
+fallback. Its five FTS-equivalent searches and eleven arbitrary reads consumed
+all sixteen Tool calls before a distinct query rewrite, so the fixed-128 run
+was not admitted.
+
+## TriviaQA unified architecture v62 entity/topic candidate selection
+
+SkillFlow `SearchHit` publishes only `passage_id`, `document_id`, `title`,
+`snippet`, and `rank`; `RetrievalIndex.search/read` retains its upstream
+FTS5/BM25 and opaque-ID read behavior. SkillFlow's bounded Agent executes one
+`StructuredAction` and returns one public Observation per turn. FlowSteer keeps
+the progressive Canvas `edit -> execute -> feedback` boundary. Neither
+upstream supplies TriviaQA Entity Linking, relation-aware passage selection or
+a dynamic opaque passage-ID action domain, so the v62 policy below is a
+necessary compatibility adaptation rather than an upstream algorithm.
+
+| Current module/boundary | Classification | Primary source retained | Minimal compatibility adaptation |
+| --- | --- | --- | --- |
+| `qa_tool_adapter.py::{_question_proper_name_title_anchor_tokens,_public_title_entity_topic_compatibility,_latest_public_search_candidates}` | `PROJECT_NECESSARY_ADAPTATION` over public SkillFlow SearchHit receipts | SkillFlow `benchmarks/retrieval.py::{SearchHit,RetrievalIndex.search,RetrievalIndex.read}` and its bounded public title/snippet | For unified factual ordinal questions only, a title may omit exactly one question-published lower-case entity type noun when it preserves the complete proper-name core and contains a question-derived relation/topic head outside that entity span. This ranks a candidate for a full read; it is not evidence. Multi-token proper-name component loss and relationless titles remain inadmissible. |
+| `qa_tool_adapter.py::{_state_conditioned_action_domain,_condition_qa_action_response_schema,_contract,_tool_action_error}` | Necessary state-conditioned Tool admission adaptation | SkillFlow one-Action/one-Observation continuation plus FlowSteer progressive Canvas feedback | With no compatible public candidate, retain the search receipt and expose only the next bounded search transition. With candidates, expose only `read` and the highest-ranked unread opaque ID; a rejected read preserves all receipts and advances to the next candidate/search state. The scope is `factual_qa + qa_verified_answer_lineage_v2 + ordinal` and explicitly excludes location-containment repair, non-ordinal TriviaQA and HotpotQA multi-hop. |
+| Existing read/evidence/terminal validators | Unchanged | Exact SkillFlow read receipt and FlowSteer terminal admission | Entity identity, target relation, named scope, ordinal, provenance, exact evidence span, answer-slot, Verifier, Formatter and FINISH gates are unchanged. Ground Truth, accepted answers and evaluator state are absent from candidate selection and action admission. |
+| `evaluation_triviaqa_unified_architecture_v2_fixed128.yaml` v62 condition | Necessary isolated evaluation configuration | Same fixed ordered 128 tasks, Director prompt v6, catalog v7, official evaluator and v57 sampling coordinates | Advance only the Tool contract identity and isolated output paths. Training, Skills, MACE, Bayesian state, Agent role inventory and AgentGraph topology search space remain unchanged. |
+
+The v62 complete static suite passes 1,011 tests plus 197 subtests, including
+the shared HotpotQA two-hop read and TriviaQA location-containment continuation
+paths. The prepare-only selection check, Stable Zero and fixed-128 scores are
+reported only after their versioned executions complete.

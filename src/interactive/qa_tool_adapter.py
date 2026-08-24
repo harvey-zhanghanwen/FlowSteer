@@ -1751,6 +1751,42 @@ def _question_has_proper_entity_anchor(original_question: str) -> bool:
     )
 
 
+def _question_proper_name_title_anchor_tokens(
+    original_question: str,
+) -> tuple[str, ...]:
+    """Return the complete proper-name core before one lower-case type noun.
+
+    ``_question_entity_anchor_tokens`` deliberately retains an adjacent type
+    noun such as ``magazine`` for query/evidence admission.  Public document
+    titles commonly omit that type while preserving the proper-name entity.
+    Candidate selection may bridge exactly that one question-published suffix,
+    but it must not drop any component of a multi-token proper name.
+    """
+
+    entity_anchor = _question_entity_anchor_tokens(original_question)
+    if len(entity_anchor) < 2:
+        return ()
+    raw_tokens = tuple(
+        re.findall(
+            r"[^\W\d_]+(?:[-'’][^\W\d_]+)*",
+            unicodedata.normalize("NFKC", original_question),
+            flags=re.UNICODE,
+        )
+    )
+    normalized = tuple(token.casefold() for token in raw_tokens)
+    width = len(entity_anchor)
+    for offset in range(len(normalized) - width + 1):
+        if normalized[offset : offset + width] != entity_anchor:
+            continue
+        anchor_surfaces = raw_tokens[offset : offset + width]
+        if (
+            anchor_surfaces[-1][:1].islower()
+            and all(surface[:1].isupper() for surface in anchor_surfaces[:-1])
+        ):
+            return entity_anchor[:-1]
+    return ()
+
+
 def _surface_binds_entity_anchor(
     surface: str,
     entity_anchor_tokens: Sequence[str],
@@ -1770,6 +1806,59 @@ def _surface_binds_entity_anchor(
         )
         for offset in range(max(0, len(surface_tokens) - width + 1))
     )
+
+
+def _public_title_entity_topic_compatibility(
+    *,
+    original_question: str,
+    title: str,
+) -> bool:
+    """Prioritize an ordinal search hit by proper entity and relation topic.
+
+    This is Entity Linking candidate selection over the public SearchHit title,
+    not evidence entailment.  It only bridges a lower-case entity type suffix
+    omitted by the title, requires the full proper-name core, and requires a
+    question-derived relation head outside that entity span.  The subsequent
+    read receipt and unchanged semantic validators remain authoritative.
+    """
+
+    if not _question_ordinal_classes(original_question):
+        return False
+    entity_core = _question_proper_name_title_anchor_tokens(original_question)
+    if not entity_core:
+        return False
+    relation_heads = {
+        alias_surface[-1]
+        for aliases in _relation_alias_surfaces_in(original_question).values()
+        for alias_surface in aliases
+        if alias_surface
+    }
+    if not relation_heads:
+        return False
+    title_tokens = _scope_tokens(title)
+    width = len(entity_core)
+    for offset in range(len(title_tokens) - width + 1):
+        if not all(
+            _relation_token_variants(anchor)
+            & _relation_token_variants(title_token)
+            for anchor, title_token in zip(
+                entity_core,
+                title_tokens[offset : offset + width],
+            )
+        ):
+            continue
+        topic_tokens = (
+            *title_tokens[:offset],
+            *title_tokens[offset + width :],
+        )
+        if any(
+            _relation_token_variants(topic_token)
+            & _relation_token_variants(relation_head)
+            for topic_token in topic_tokens
+            for relation_head in relation_heads
+        ):
+            return True
+    return False
 
 
 @dataclass(frozen=True, slots=True)
@@ -5646,8 +5735,16 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
 
         if self._unified_factual_protocol(request):
             tool_actions, completion = self._unified_factual_action_domain(state)
+            location_containment_repair = (
+                state.semantic_repair_kind == "evidence"
+                and isinstance(state.semantic_repair_error_code, str)
+                and _QA_LOCATION_CONTAINMENT_LINEAGE_MISSING
+                in state.semantic_repair_error_code
+                and isinstance(state.location_containment_repair_anchor, str)
+            )
             if (
                 (QA_RETRIEVAL_TOOL_ID, "read") in tool_actions
+                and not location_containment_repair
                 and self._latest_search_has_public_candidate_metadata(
                     observations
                 )
@@ -5656,6 +5753,14 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     observations,
                     unread_passage_ids=state.latest_unread_passage_ids,
                     original_question=qa_question_scope(request.problem),
+                    enable_title_entity_topic_priority=True,
+                    candidate_limit=(
+                        1
+                        if _question_ordinal_classes(
+                            qa_question_scope(request.problem)
+                        )
+                        else None
+                    ),
                 )
                 if public_candidates:
                     # SkillFlow executes one StructuredAction per Observation.
@@ -5666,15 +5771,18 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     tool_actions = frozenset(
                         {(QA_RETRIEVAL_TOOL_ID, "read")}
                     )
-                # DIRECT_REUSE: SkillFlow's search Observation publishes
-                # opaque passage IDs that remain readable by the next bounded
-                # StructuredAction.  A bounded title/snippet preview may end
-                # before the answer-bearing ordinal proposition, so an empty
-                # compatibility ranking must not erase every returned read
-                # action.  In that case retain the ordinary read/search
-                # choice.  The complete read receipt still has to pass the
-                # unchanged entity, relation, scope, ordinal and provenance
-                # validators before completion is admitted.
+                else:
+                    # The public search receipt has no question-compatible
+                    # candidate.  Preserve its Observation, but do not spend
+                    # the bounded Tool budget reading an arbitrary hit: advance
+                    # the existing spelling/alias/disambiguation/rewrite search
+                    # frontier when it is live.  With no remaining search/read
+                    # pair, the domain correctly exhausts instead of guessing.
+                    tool_actions = frozenset(
+                        action
+                        for action in tool_actions
+                        if action == (QA_RETRIEVAL_TOOL_ID, "search")
+                    )
             return admitted(tool_actions, completion)
 
         remaining_tool_calls = max(
@@ -6156,6 +6264,8 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         *,
         unread_passage_ids: Sequence[str],
         original_question: str | None = None,
+        enable_title_entity_topic_priority: bool = False,
+        candidate_limit: int | None = None,
     ) -> tuple[dict[str, object], ...]:
         """Return public title/snippet metadata for the latest search only.
 
@@ -6178,7 +6288,13 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             if not isinstance(raw_hits, list):
                 return ()
             ranked_candidates: list[
-                tuple[tuple[bool, int, int, int], int, dict[str, object]]
+                tuple[
+                    tuple[bool, int, int, int],
+                    bool,
+                    bool,
+                    int,
+                    dict[str, object],
+                ]
             ] = []
             for hit_index, raw_hit in enumerate(raw_hits):
                 if not isinstance(raw_hit, Mapping):
@@ -6208,21 +6324,48 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     and original_question.strip()
                     else (False, 0, 0, 0)
                 )
+                complete_title_anchor = bool(
+                    isinstance(original_question, str)
+                    and original_question.strip()
+                    and _surface_binds_entity_anchor(
+                        title,
+                        _question_entity_anchor_tokens(original_question),
+                    )
+                )
+                title_entity_topic_compatible = bool(
+                    enable_title_entity_topic_priority
+                    and isinstance(original_question, str)
+                    and original_question.strip()
+                    and _public_title_entity_topic_compatibility(
+                        original_question=original_question,
+                        title=title,
+                    )
+                )
                 encounter_rank = (
                     rank
                     if type(rank) is int and rank > 0
                     else hit_index + 1
                 )
                 ranked_candidates.append(
-                    (compatibility, encounter_rank, candidate)
+                    (
+                        compatibility,
+                        complete_title_anchor,
+                        title_entity_topic_compatible,
+                        encounter_rank,
+                        candidate,
+                    )
                 )
             ranked_candidates.sort(
                 key=lambda item: (
                     -int(item[0][0]),
+                    -int(
+                        item[1] and enable_title_entity_topic_priority
+                    ),
+                    -int(item[2]),
                     -item[0][1],
                     -item[0][2],
                     -item[0][3],
-                    item[1],
+                    item[3],
                 )
             )
             if (
@@ -6230,25 +6373,20 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 and _question_ordinal_classes(original_question)
             ):
                 # Search snippets are bounded public previews and may end
-                # before the answer-bearing proposition.  Keep strongly
-                # compatible previews first, but do not make snippet
-                # entailment an exhaustive read gate when the public passage
-                # title itself binds the complete question entity anchor.
-                # The successful read receipt and semantic evidence gate
-                # remain authoritative after the passage is opened.
-                entity_anchor_tokens = _question_entity_anchor_tokens(
-                    original_question
-                )
+                # before the answer-bearing proposition.  A read candidate may
+                # therefore be selected by either full clause compatibility, a
+                # complete question entity in the title, or a title that keeps
+                # the full proper-name core and a question-derived relation
+                # topic.  This ranking is not evidence: the successful read
+                # receipt and semantic evidence gate remain authoritative.
                 ranked_candidates = [
                     item
                     for item in ranked_candidates
-                    if item[0][0]
-                    or _surface_binds_entity_anchor(
-                        str(item[2]["title"]),
-                        entity_anchor_tokens,
-                    )
+                    if item[0][0] or item[1] or item[2]
                 ]
-            return tuple(item[2] for item in ranked_candidates)
+            if candidate_limit is not None:
+                ranked_candidates = ranked_candidates[:candidate_limit]
+            return tuple(item[4] for item in ranked_candidates)
         return ()
 
     @staticmethod
@@ -6670,6 +6808,17 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             observations,
             unread_passage_ids=state.latest_unread_passage_ids,
             original_question=candidate_selection_scope,
+            enable_title_entity_topic_priority=(
+                self._unified_factual_protocol(request)
+                and not location_containment_repair
+            ),
+            candidate_limit=(
+                1
+                if self._unified_factual_protocol(request)
+                and not location_containment_repair
+                and _question_ordinal_classes(original_question)
+                else None
+            ),
         )
         admitted_passage_ids = (
             state.location_containment_repair_candidate_ids
@@ -7408,6 +7557,17 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             observations,
             unread_passage_ids=searched_passage_ids,
             original_question=candidate_selection_scope,
+            enable_title_entity_topic_priority=(
+                self._unified_factual_protocol(request)
+                and not location_containment_repair
+            ),
+            candidate_limit=(
+                1
+                if self._unified_factual_protocol(request)
+                and not location_containment_repair
+                and _question_ordinal_classes(original_question)
+                else None
+            ),
         )
         if public_search_candidates and not location_containment_repair:
             searched_passage_ids = tuple(
@@ -9629,6 +9789,17 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 observations,
                 unread_passage_ids=state.latest_unread_passage_ids,
                 original_question=qa_question_scope(request.problem),
+                enable_title_entity_topic_priority=(
+                    self._unified_factual_protocol(request)
+                ),
+                candidate_limit=(
+                    1
+                    if self._unified_factual_protocol(request)
+                    and _question_ordinal_classes(
+                        qa_question_scope(request.problem)
+                    )
+                    else None
+                ),
             )
             admitted_passage_ids = {
                 candidate["passage_id"]
