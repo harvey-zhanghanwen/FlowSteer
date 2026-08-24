@@ -675,16 +675,58 @@ profiles remain available only when they are legal in the current
 Canvas observation no longer repeats `optional_role_capabilities`.
 
 The v5 prompt and its compact-history policy remain versioned and replayable.
-The fixed-128 condition is separately frozen to v6/Tool v41 under a new output
+The fixed-128 condition is separately frozen to v6/Tool v42 under a new output
 root, selects the same 128 development tasks in the same order, and keeps
-training, GRPO, Skills and policy synchronization disabled.  At this document
-update v6 and the post-r56 recovery correction passed the complete static suite
-and prepare-only freeze but had not yet produced a live canary or fixed-128
-score.
+training, GRPO, Skills and policy synchronization disabled.  The earlier
+v6/Tool-v41 canary was stopped before any trajectory completed after the
+terminal-admission audit below found that its optional-capability condition did
+not implement the requested complete semantic lineage.  Its interruption
+receipt remains isolated in the old artifact root and is not an evaluation
+result.
+
+### v42 required semantic lineage and evidence-before-reasoning gate
+
+The shared QA Runtime already contained the strict evidence-to-answer lineage
+used by the HotpotQA architecture.  Tool v42 reuses that implementation when
+the existing `require_format_agent` configuration is true; it does not add a
+separate TriviaQA workflow.  A terminal revision now requires an executed,
+artifact-version-consistent `Evidence Retriever -> Reasoner -> Verifier ->
+Formatter` responsibility lineage.  The Retriever completion must match the
+original entity, requested relation, evidence span and passage ID to a
+successful public read receipt.  The Reasoner owns the answer slot and semantic
+candidate, the Verifier preserves that candidate while checking evidence and
+scope, and the Formatter is a reasoning-free, Tool-free, copy-only Output sink.
+A generic Output with only a successful read receipt can no longer FINISH.
+
+This is a semantic data-dependency constraint, not a Director prompt template.
+The v6 system instruction remains byte-for-byte topology-neutral and does not
+list the four responsibilities.  Their exact current legality appears only in
+the live `action_target_domains`; parallel Retrievers, evidence fan-in, repair
+branches, reciprocal non-Formatter communication and multi-Agent executable
+subgraphs remain in the search space.  The action-target-domain receipt is
+versioned as `agentgraph.live-action-target-domains.v8` so the strict and
+historical optional conditions cannot be mixed during replay.
+
+Progressive execution now defers a QA Reasoner that has no direct Evidence
+Retriever dependency.  Once such an edge exists, ordinary AgentGraph scheduling
+runs the Retriever first, and the existing SkillFlow-derived completion gate
+prevents the Reasoner from receiving an entity/relation artifact without its
+matching read receipt.  Evidence Retriever execution is correspondingly limited
+to bounded ReAct with `qa-retrieval`; reasoning-only, receipt-free Retriever
+artifacts are not admitted.  The Canvas contract gate also rejects the two
+measured concrete Tool-argument variants that escaped r56 (`limit of N` and an
+explicit query symbol/operator), while continuing to admit neutral query-
+rewriting and adaptive top-k responsibilities.
+
+The complete static suite passed `945` tests and `177` subtests.  Prepare-only
+selected the same 128 task IDs, questions and Ground Truth values in the same
+order (`triviaqa:tc_1` through `triviaqa:tc_223`) as the frozen comparison
+condition.  No v42 canary or fixed-128 score is inferred from these static
+checks.
 
 ### Stable Zero status
 
-Static architecture, 944 unit tests, 177 subtests and the current frozen
+Static architecture, 945 unit tests, 177 subtests and the current frozen
 data-selection preconditions are complete.  The initial, r2, r3 and r4 canaries failed for
 the documented causes; r5 **passed Stable Zero** but its incomplete fixed-128
 run was stopped after measured recovery defects appeared.  Recovery revision

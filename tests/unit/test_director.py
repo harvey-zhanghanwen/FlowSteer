@@ -453,6 +453,30 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
             {item["provider_id"] for item in state["model_catalog"]},
         )
 
+        strict_env = AgentWorkflowEnv(
+            model_registry,
+            runtime=runtime,
+            problem="Who wrote Lord of the Flies?",
+            require_format_agent=True,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            recovery_policy=PRESERVE_DIAGNOSE_REPAIR_AUGMENT_POLICY,
+            required_evidence_tool_id="qa-retrieval",
+        )
+        strict_messages = transcript_messages(
+            orchestrator.build_prompt(strict_env, 0, ())
+        )
+        strict_state = observation_payload(strict_messages[-1])
+        self.assertEqual(QA_DIRECTOR_SYSTEM_PROMPT_V6, strict_messages[0]["content"])
+        self.assertNotIn("semantic_lineage_constraints", strict_state)
+        strict_domain = strict_state["action_target_domains"]["add_subgraph"]
+        self.assertTrue(strict_domain["require_format_agent"])
+        self.assertEqual("format", strict_domain["output_role_family"])
+        self.assertNotIn("output_role_families", strict_domain)
+        self.assertNotIn("output", strict_domain["role_constraints"])
+        director_live_add_subgraph_agent_declarations_json_schema_text(
+            {"add_subgraph": strict_domain}
+        )
+
         default = AgentGraphOrchestrator(
             model_registry,
             ScriptedDirector([]),
@@ -1988,7 +2012,7 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
             request["action_target_domain_version"],
         )
         self.assertEqual(
-            "agentgraph.live-action-target-domains.v7",
+            "agentgraph.live-action-target-domains.v8",
             DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION,
         )
         initial_retriever_domain = env.model_admissible_action_targets()[

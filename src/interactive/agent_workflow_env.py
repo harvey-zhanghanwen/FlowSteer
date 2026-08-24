@@ -503,6 +503,26 @@ class AgentWorkflowEnv:
 
         return self.semantic_protocol == _QA_SEMANTIC_PROTOCOL
 
+    def _requires_complete_semantic_lineage(self) -> bool:
+        """Return whether FINISH requires the full QA responsibility lineage.
+
+        The shared QA protocol can expose optional capabilities for historical
+        conditions.  ``require_format_agent`` is the existing configuration
+        boundary that selects the already implemented evidence--reasoning--
+        verification--formatting lineage.  Keeping this decision in Canvas
+        admission, rather than the Director system prompt, preserves a neutral
+        topology search space while making the requested semantic
+        responsibilities non-optional.
+        """
+
+        return bool(
+            self._uses_semantic_lineage_protocol()
+            and (
+                not self._uses_role_conditional_capabilities()
+                or self.require_format_agent
+            )
+        )
+
     def _role_conditional_registered_execution_profiles(
         self,
     ) -> Tuple[Tuple[str, Tuple[str, ...]], ...]:
@@ -538,9 +558,21 @@ class AgentWorkflowEnv:
             return tuple(
                 profile
                 for profile in registered
-                if profile == ("reasoning", ())
-                or profile
+                if profile
                 == ("react", (self.required_evidence_tool_id,))
+            )
+        if role == "reasoner" and self.require_format_agent:
+            return tuple(
+                profile
+                for profile in registered
+                if profile
+                == ("react", (self.required_evidence_tool_id,))
+            )
+        if role == "verifier" and self.require_format_agent:
+            return tuple(
+                profile
+                for profile in registered
+                if profile == ("reasoning", ())
             )
         return registered
 
@@ -1063,7 +1095,7 @@ class AgentWorkflowEnv:
 
         if not self._uses_semantic_lineage_protocol():
             return ()
-        if self._uses_role_conditional_capabilities():
+        if not self._requires_complete_semantic_lineage():
             # Role labels are capabilities selected inside the FlowSteer
             # search space.  Terminal artifact/receipt validation, rather
             # than a fixed role adjacency, determines whether a routed graph
@@ -1582,9 +1614,9 @@ class AgentWorkflowEnv:
             if self._uses_semantic_lineage_protocol():
                 role_family = (node.role_family or "").casefold()
                 admitted_output_roles = (
-                    {"format", "output"}
-                    if self._uses_role_conditional_capabilities()
-                    else {"format"}
+                    {"format"}
+                    if self._requires_complete_semantic_lineage()
+                    else {"format", "output"}
                 )
                 if role_family not in admitted_output_roles:
                     continue
@@ -2106,7 +2138,10 @@ class AgentWorkflowEnv:
         )
         if not self._uses_semantic_lineage_protocol():
             return role_families
-        if self._uses_role_conditional_capabilities():
+        if (
+            self._uses_role_conditional_capabilities()
+            and not self._requires_complete_semantic_lineage()
+        ):
             return tuple(
                 role_family
                 for role_family in (*role_families, "output")
@@ -2138,7 +2173,7 @@ class AgentWorkflowEnv:
 
         if not self._uses_semantic_lineage_protocol():
             return ()
-        if self._uses_role_conditional_capabilities():
+        if not self._requires_complete_semantic_lineage():
             return ()
         required_role_families = (
             (
@@ -2584,6 +2619,10 @@ class AgentWorkflowEnv:
 
         admitted = set(self.model_admissible_action_types())
         node_ids = [node.id for node in self._graph.nodes]
+        role_conditional_capabilities = bool(
+            self._uses_role_conditional_capabilities()
+            and not self._requires_complete_semantic_lineage()
+        )
         replacement_domains = (
             self._repair_exhausted_auxiliary_replacement_domains()
         )
@@ -2626,6 +2665,7 @@ class AgentWorkflowEnv:
                 **(
                     {
                         "semantic_protocol": self.semantic_protocol,
+                        "require_format_agent": self.require_format_agent,
                         "existing_agents": [
                             {
                                 "agent_id": node.id,
@@ -2636,7 +2676,7 @@ class AgentWorkflowEnv:
                         "current_output_agent_id": self._graph.output_agent_id,
                         **(
                             {"output_role_families": ["format", "output"]}
-                            if self._uses_role_conditional_capabilities()
+                            if role_conditional_capabilities
                             else {"output_role_family": "format"}
                         ),
                         "required_agent_fields": [
@@ -2665,7 +2705,7 @@ class AgentWorkflowEnv:
                                     )
                                 ]
                             }
-                            if self._uses_role_conditional_capabilities()
+                            if role_conditional_capabilities
                             else {}
                         ),
                         "role_constraints": {
@@ -2673,7 +2713,7 @@ class AgentWorkflowEnv:
                                 self._role_conditional_execution_constraint(
                                     "reasoner"
                                 )
-                                if self._uses_role_conditional_capabilities()
+                                if role_conditional_capabilities
                                 else {
                                     "execution_modes": ["react"],
                                     "allowed_tools": [
@@ -2685,7 +2725,7 @@ class AgentWorkflowEnv:
                                 self._role_conditional_execution_constraint(
                                     "verifier"
                                 )
-                                if self._uses_role_conditional_capabilities()
+                                if role_conditional_capabilities
                                 else {
                                     "execution_modes": ["reasoning"],
                                     "allowed_tools": [[]],
@@ -2696,7 +2736,7 @@ class AgentWorkflowEnv:
                                     self._role_conditional_execution_constraint(
                                         "format"
                                     )
-                                    if self._uses_role_conditional_capabilities()
+                                    if role_conditional_capabilities
                                     else {
                                         "execution_modes": ["reasoning"],
                                         "allowed_tools": [[]],
@@ -2704,12 +2744,12 @@ class AgentWorkflowEnv:
                                 ),
                                 "contracts": [
                                     _QA_ROLE_CONDITIONAL_FORMAT_CONTRACT
-                                    if self._uses_role_conditional_capabilities()
+                                    if role_conditional_capabilities
                                     else _HOTPOTQA_FORMAT_CONTRACT
                                 ],
                                 **(
                                     {"must_be_output_agent": True}
-                                    if self._uses_role_conditional_capabilities()
+                                    if role_conditional_capabilities
                                     else {}
                                 ),
                             },
@@ -2718,7 +2758,7 @@ class AgentWorkflowEnv:
                                     self._role_conditional_execution_constraint(
                                         "evidence_retriever"
                                     )
-                                    if self._uses_role_conditional_capabilities()
+                                    if role_conditional_capabilities
                                     else {
                                         "execution_modes": ["react"],
                                         "allowed_tools": [
@@ -2756,7 +2796,7 @@ class AgentWorkflowEnv:
                                     self._role_conditional_execution_constraint(
                                         "repair"
                                     )
-                                    if self._uses_role_conditional_capabilities()
+                                    if role_conditional_capabilities
                                     else {
                                         "execution_modes": ["reasoning"],
                                         "allowed_tools": [[]],
@@ -2780,7 +2820,7 @@ class AgentWorkflowEnv:
                                         )
                                     )
                                 }
-                                if self._uses_role_conditional_capabilities()
+                                if role_conditional_capabilities
                                 else {}
                             ),
                         },
@@ -4661,8 +4701,7 @@ class AgentWorkflowEnv:
                 "to the Format Agent before FINISH"
             )
         if (
-            self._uses_semantic_lineage_protocol()
-            and not self._uses_role_conditional_capabilities()
+            self._requires_complete_semantic_lineage()
         ):
             protocol_label = self._semantic_protocol_label()
             verifier_id = predecessors[0]
@@ -4939,7 +4978,7 @@ class AgentWorkflowEnv:
 
         if not self._uses_semantic_lineage_protocol():
             return None
-        if self._uses_role_conditional_capabilities():
+        if not self._requires_complete_semantic_lineage():
             return self._role_conditional_semantic_edit_issue_for(graph)
         protocol_label = self._semantic_protocol_label()
         missing_role_ids = tuple(
@@ -5355,7 +5394,17 @@ class AgentWorkflowEnv:
                 flags=re.IGNORECASE,
             ),
             re.compile(
-                r"[\"']?(?:limit|top[_ -]?k)[\"']?\s*(?:=|:)\s*\d+",
+                r"[\"']?(?:limit|top[_ -]?k)[\"']?\s*"
+                r"(?:(?:=|:)\s*|(?:of|to)\s+)\d+",
+                flags=re.IGNORECASE,
+            ),
+            re.compile(
+                r"\b(?:symbol|operator|syntax)\b[^.!?\n]{0,80}"
+                r"\b(?:in|for)\s+(?:the\s+)?(?:search\s+)?query\b",
+                flags=re.IGNORECASE,
+            ),
+            re.compile(
+                r"(?<![A-Za-z0-9_]):[A-Za-z][A-Za-z0-9_-]*\b",
                 flags=re.IGNORECASE,
             ),
             re.compile(
@@ -7001,7 +7050,7 @@ class AgentWorkflowEnv:
 
         if not self._uses_semantic_lineage_protocol():
             return None
-        if self._uses_role_conditional_capabilities():
+        if not self._requires_complete_semantic_lineage():
             return self._role_conditional_semantic_issue(execution)
         protocol_label = self._semantic_protocol_label()
         structure_issue = self._format_agent_issue_for(self._graph)
@@ -7694,7 +7743,7 @@ class AgentWorkflowEnv:
 
         if not self._uses_semantic_lineage_protocol():
             return ()
-        if self._uses_role_conditional_capabilities():
+        if not self._requires_complete_semantic_lineage():
             execution = self._cached_progressive_execution()
             output_id = self._graph.output_agent_id
             if (
@@ -7761,7 +7810,7 @@ class AgentWorkflowEnv:
         artifact = self._progressive_outputs.get(agent_id)
         if not isinstance(artifact, str) or not artifact.strip():
             return False
-        if self._uses_role_conditional_capabilities():
+        if not self._requires_complete_semantic_lineage():
             if role_family == "reasoner":
                 candidate, issue = self._reasoner_candidate_for_current_dataset(
                     artifact

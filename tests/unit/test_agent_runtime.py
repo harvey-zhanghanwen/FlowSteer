@@ -364,7 +364,7 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
             [item.source_agent_id for item in formatter_request.upstream],
         )
 
-    async def test_unified_qa_does_not_infer_required_retriever_reasoner_edge(
+    async def test_unified_qa_defers_reasoner_without_retriever_ingress(
         self,
     ) -> None:
         catalog = registry()
@@ -392,10 +392,10 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
             semantic_protocol="qa_verified_answer_lineage_v2",
         ).execute(graph, "question", require_complete=False)
 
-        self.assertEqual(("reasoner", "retriever"), result.executed_agent_ids)
-        self.assertEqual((), result.deferred_agent_ids)
+        self.assertEqual(("retriever",), result.executed_agent_ids)
+        self.assertEqual(("reasoner",), result.deferred_agent_ids)
         self.assertEqual(
-            {"reasoner", "retriever"},
+            {"retriever"},
             {request.agent.id for request in gateway.requests},
         )
 

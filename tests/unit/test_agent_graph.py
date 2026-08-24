@@ -4389,6 +4389,85 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+    def test_triviaqa_required_lineage_excludes_generic_output_bypass(
+        self,
+    ) -> None:
+        registry = make_registry()
+        runtime = _trivia_semantic_runtime(
+            registry,
+            _ImmediateGateway(),
+        )
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=runtime,
+            problem="What is the capital of France?",
+            execute_on_edit=False,
+            require_format_agent=True,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+        )
+
+        self.assertTrue(env._requires_complete_semantic_lineage())
+        self.assertEqual(
+            ("evidence_retriever", "reasoner", "verifier", "format"),
+            env._missing_semantic_role_families(),
+        )
+        add_domain = env.model_admissible_action_targets()["add_subgraph"]
+        self.assertTrue(add_domain["require_format_agent"])
+        self.assertEqual("format", add_domain["output_role_family"])
+        self.assertNotIn("output_role_families", add_domain)
+        self.assertNotIn("output", add_domain["role_constraints"])
+        self.assertEqual(
+            {
+                "execution_modes": ["react"],
+                "allowed_tools": [[QA_RETRIEVAL_TOOL_ID]],
+            },
+            add_domain["role_constraints"]["evidence_retriever"],
+        )
+
+        generic_output = AgentGraph(
+            [
+                AgentNode(
+                    "output",
+                    "cheap",
+                    "retrieve and answer",
+                    role_family="output",
+                    allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                    execution_mode="react",
+                )
+            ],
+            output_agent_id="output",
+        )
+        bypass_env = AgentWorkflowEnv(
+            registry,
+            runtime=runtime,
+            graph=generic_output,
+            problem="What is the capital of France?",
+            execute_on_edit=False,
+            require_format_agent=True,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+        )
+        bypass_execution = AgentRuntimeResult(
+            run_id="generic-output-bypass",
+            graph_revision=generic_output.revision,
+            output_agent_id="output",
+            final_answer="<answer>Paris</answer>",
+            outputs={"output": "<answer>Paris</answer>"},
+            output_metadata={
+                "output": {
+                    "tool_receipts": [_test_read_receipt("output-public")]
+                }
+            },
+            calls=(),
+            block_completion_order=(("output",),),
+            executed_agent_ids=("output",),
+        )
+        issue = bypass_env._semantic_protocol_issue(bypass_execution)
+        self.assertIn("Format Agent", issue or "")
+
     async def test_pending_isolated_retriever_repairs_before_another_add(
         self,
     ) -> None:
@@ -8734,6 +8813,8 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             "Perform a focused search for 'Dame Judi Dench birthplace'.",
             'Use {"query": "David Soul birthplace"} for retrieval.',
             "Expand retrieval with top-k=25.",
+            "Search for the birthplace with a limit of 3 results.",
+            "Use an explicit locus symbol (e.g., :loc) in the search query.",
             'Read the Tool receipt with "passage_id": "atlas:123".',
         ):
             revision = env.revision

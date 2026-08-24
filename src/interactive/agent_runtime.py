@@ -901,10 +901,25 @@ class AgentRuntime:
             output_agent_id = graph.output_agent_id
             for agent_id, node in nodes.items():
                 role = (node.role_family or "").casefold()
-                has_routed_upstream = bool(
-                    graph.directed_predecessors(agent_id)
-                )
-                if role == "verifier" and not has_routed_upstream:
+                predecessors = graph.directed_predecessors(agent_id)
+                has_routed_upstream = bool(predecessors)
+                if role == "reasoner" and not any(
+                    (
+                        nodes[predecessor_id].role_family or ""
+                    ).casefold()
+                    == "evidence_retriever"
+                    for predecessor_id in predecessors
+                ):
+                    # The unified factual-QA Reasoner is a semantic consumer,
+                    # not the initial retrieval root.  A declared Retriever
+                    # dependency lets the ordinary execution plan run the
+                    # Retriever first; its SkillFlow completion validator then
+                    # admits only entity/relation-aligned evidence with a
+                    # successful read receipt.  Until that dependency exists,
+                    # preserve the partial Canvas and defer the Reasoner rather
+                    # than executing it on an ungrounded question-only input.
+                    seeds.add(plan.component_for[agent_id])
+                elif role == "verifier" and not has_routed_upstream:
                     seeds.add(plan.component_for[agent_id])
                 elif role == "format" and (
                     not format_output_agent

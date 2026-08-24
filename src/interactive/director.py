@@ -459,8 +459,21 @@ def verified_qa_semantic_protocol(value: object) -> bool:
 
 
 def role_conditional_qa_protocol(value: object) -> bool:
-    """Return whether QA role labels are optional Canvas capabilities."""
+    """Return whether QA role labels are optional Canvas capabilities.
 
+    Historical observations pass only the protocol identifier and retain the
+    optional-capability schema.  Current live domains also carry the existing
+    ``require_format_agent`` receipt; when it is true, the Director schema
+    reuses the required semantic-lineage branch without changing the neutral
+    system prompt.
+    """
+
+    if isinstance(value, Mapping):
+        return bool(
+            value.get("semantic_protocol")
+            == QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL
+            and value.get("require_format_agent") is not True
+        )
     return value == QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL
 
 
@@ -727,7 +740,7 @@ DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3 = (
     "agentgraph.model-admissible-action-mask.v3"
 )
 DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION = (
-    "agentgraph.live-action-target-domains.v7"
+    "agentgraph.live-action-target-domains.v8"
 )
 DIRECTOR_ACTION_JSON_SCHEMA_TEXT = json.dumps(
     DIRECTOR_ACTION_JSON_SCHEMA,
@@ -1128,14 +1141,14 @@ def _live_role_agent_schema(
 
 def _live_role_agent_schema_branches(
     required_fields: Sequence[str],
-    semantic_protocol: object,
+    semantic_domain: object,
     role_family: str,
     constraint: Mapping[str, Any],
     model_ids: Sequence[str],
     *,
     agent_id: str,
 ) -> tuple[Mapping[str, Any], ...]:
-    if not role_conditional_qa_protocol(semantic_protocol):
+    if not role_conditional_qa_protocol(semantic_domain):
         return (
             _live_role_agent_schema(
                 required_fields,
@@ -1294,7 +1307,7 @@ def _live_hotpotqa_output_domain(
 ) -> Optional[str]:
     """Validate the revision-local HotpotQA Output ownership receipt."""
 
-    if role_conditional_qa_protocol(domain.get("semantic_protocol")):
+    if role_conditional_qa_protocol(domain):
         allowed_output_roles = _live_string_domain(
             domain.get("output_role_families"),
             label="add_subgraph.output_role_families",
@@ -1322,7 +1335,7 @@ def _live_hotpotqa_output_domain(
 def _live_output_role_families(
     domain: Mapping[str, Any],
 ) -> tuple[str, ...]:
-    if role_conditional_qa_protocol(domain.get("semantic_protocol")):
+    if role_conditional_qa_protocol(domain):
         return _live_string_domain(
             domain.get("output_role_families"),
             label="add_subgraph.output_role_families",
@@ -1444,7 +1457,7 @@ def director_live_add_subgraph_agent_declarations_json_schema_text(
     role_constraints = domain.get("role_constraints")
     if not isinstance(role_constraints, Mapping) or not role_constraints:
         raise ValueError("add_subgraph role constraints are missing")
-    if role_conditional_qa_protocol(domain.get("semantic_protocol")):
+    if role_conditional_qa_protocol(domain):
         registered_profiles = set(
             _live_execution_profiles(
                 domain.get("registered_execution_profiles"),
@@ -1524,7 +1537,7 @@ def director_live_add_subgraph_agent_declarations_json_schema_text(
             and isinstance(constraint, Mapping)
             for branch in _live_role_agent_schema_branches(
                 required_fields,
-                domain.get("semantic_protocol"),
+                domain,
                 role_family,
                 constraint,
                 model_ids,
@@ -1829,7 +1842,7 @@ def _live_add_subgraph_agents(
             raise ValueError("add_subgraph Agent Tool set violates its role")
         if any(tool_id != tool_id.strip() for tool_id in allowed_tools):
             raise ValueError("add_subgraph Agent Tool IDs must be canonical")
-        if role_conditional_qa_protocol(domain.get("semantic_protocol")):
+        if role_conditional_qa_protocol(domain):
             execution_profiles = _live_execution_profiles(
                 constraint.get("execution_profiles"),
                 label=f"{role_family}.execution_profiles",
@@ -1911,9 +1924,7 @@ def director_live_add_subgraph_relation_candidates(
     endpoint_ids = [*domain["existing_agent_ids"]]
     endpoint_ids.extend(agent["agent_id"] for agent in normalized_agents)
     candidates: list[dict[str, Any]] = []
-    role_conditional = role_conditional_qa_protocol(
-        domain.get("semantic_protocol")
-    )
+    role_conditional = role_conditional_qa_protocol(domain)
     semantic_dataflow_pairs = (
         set()
         if role_conditional
@@ -2297,9 +2308,7 @@ def director_live_action_parameter_json_schema_text(
                 if isolated_boundary or current_output_agent_id is not None
                 else {"const": selected_format_ids[0]}
                 if (
-                    role_conditional_qa_protocol(
-                        domain.get("semantic_protocol")
-                    )
+                    role_conditional_qa_protocol(domain)
                     and len(selected_format_ids) == 1
                 )
                 else
@@ -3226,11 +3235,15 @@ class AgentGraphOrchestrator:
             )
         if self.semantic_protocol != "none":
             payload["semantic_protocol"] = self.semantic_protocol
-            if role_conditional_qa_protocol(self.semantic_protocol):
+            if (
+                self.semantic_protocol == QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL
+                and self.prompt_version == QA_DIRECTOR_PROMPT_VERSION
+            ):
                 # The exact currently legal role families, execution profiles
                 # and their constraints already live in action_target_domains.
                 # Do not duplicate a canonical role inventory or workflow hint
-                # in the general observation payload.
+                # in the general observation payload, including when the live
+                # Env requires every semantic responsibility before FINISH.
                 pass
             else:
                 payload["semantic_lineage_constraints"] = {
