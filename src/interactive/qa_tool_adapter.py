@@ -4051,15 +4051,17 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 "Preserve the same successful read receipt, passage_id, passage "
                 "title, question_surface, target_relation, and evidence "
                 "proposition. Do not search or read again. If that read body "
-                "begins with a coreferential pronoun whose public passage title "
-                "binds the original question entity, keep the exact body span, "
-                "copy that pronoun into entity_identity.evidence_surface and the "
-                "same proposition argument, and do not copy the title into the "
-                "body evidence. Otherwise, from that same read receipt, expand "
-                "evidence_span only as needed to include both the exact entity "
-                "mention and the sentence expressing the requested relation, "
-                "then copy that exact mention into evidence_surface. Keep the "
-                "span contiguous and receipt-grounded, and emit a complete action."
+                "contains a requested-relation clause using a coreferential "
+                "pronoun whose public passage title binds the original question "
+                "entity, keep one exact contiguous span containing that clause, "
+                "copy that pronoun into entity_identity.evidence_surface and "
+                "exactly one matching proposition argument, and do not copy the "
+                "title into the body evidence. Otherwise, from that same read "
+                "receipt, expand evidence_span only as needed to include both "
+                "the exact entity mention and the clause expressing the requested "
+                "relation, then copy that exact mention into evidence_surface and "
+                "the matching proposition argument. Keep the span contiguous and "
+                "receipt-grounded, and emit a complete action."
             )
         if isinstance(public_error_code, str) and (
             "Evidence Retriever evidence_span does not preserve the original "
@@ -4141,13 +4143,46 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         ) in public_error_code:
             return (
                 "Preserve the same successful read receipt, passage_id, passage "
+                "title, question_surface, target_relation, and evidence_span. Do "
+                "not search or read again. In the requested-relation clause, copy "
+                "one exact entity surface into entity_identity.evidence_surface "
+                "and exactly one of evidence_proposition.subject or "
+                "evidence_proposition.object_or_attribute_value. A coreferential "
+                "pronoun is admissible only when the same receipt's passage title "
+                "binds it to the original question entity. Keep the other argument "
+                "distinct and receipt-grounded; repair only evidence_surface and "
+                "the implicated proposition argument, then emit a complete action."
+            )
+        proposition_verbatim_match = (
+            re.search(
+                r"Evidence Retriever evidence_proposition\."
+                r"(subject|predicate|object_or_attribute_value) does not occur "
+                r"verbatim in evidence_span",
+                public_error_code,
+            )
+            if isinstance(public_error_code, str)
+            else None
+        )
+        if proposition_verbatim_match is not None:
+            field_name = proposition_verbatim_match.group(1)
+            identity_repair = (
+                " If this is the proposition argument that denotes the "
+                "question entity, copy the same exact surface into "
+                "entity_identity.evidence_surface; a title-bound coreferential "
+                "pronoun is admissible only inside that relation clause."
+                if field_name in {"subject", "object_or_attribute_value"}
+                else ""
+            )
+            return (
+                "Preserve the same successful read receipt, passage_id, passage "
                 "title, question_surface, target_relation, evidence_span, and "
-                "evidence_surface. Do not search or read again. Copy that exact "
-                "evidence_surface into exactly one of evidence_proposition.subject "
-                "or evidence_proposition.object_or_attribute_value according to "
-                "the relation expressed by the same evidence_span; keep the "
-                "other argument distinct and receipt-grounded. Repair only the "
-                "implicated proposition argument, then emit a complete action."
+                "every unimplicated structured field. Do not search or read again. "
+                "Repair only evidence_proposition."
+                + field_name
+                + " by copying its exact surface from the requested-relation "
+                "clause in that same evidence_span and read receipt."
+                + identity_repair
+                + " Then emit a complete action."
             )
         if isinstance(public_error_code, str) and (
             "Reasoner requested-relation proposition has no deterministic "
@@ -4340,13 +4375,79 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 observation["repair_instruction"] = repair_instruction
 
         # SkillFlow persists every sampled Action--Observation turn in the
-        # trajectory, but the next model input need not replay an unbounded run
-        # of identical invalid-action observations. Preserve every Tool result
-        # and every change of diagnosis while collapsing only consecutive
-        # duplicate public errors.
+        # trajectory.  The model-facing continuation is a bounded projection:
+        # keep every successful read verbatim and the latest successful search
+        # with its complete candidate list, while reducing older search results
+        # to stable public query/count metadata.  This is the target Tool's
+        # context-window adaptation; observations, trajectory, and Tool receipts
+        # remain lossless and authoritative outside this returned projection.
+        successful_search_indexes = tuple(
+            index
+            for index, observation in enumerate(visible)
+            if observation.get("observation_status") == "success"
+            and isinstance(observation.get("result"), Mapping)
+            and observation["result"].get("operation") == "search"
+        )
+        latest_successful_search_index = (
+            successful_search_indexes[-1]
+            if successful_search_indexes
+            else None
+        )
+        latest_successful_observation_index = next(
+            (
+                index
+                for index in range(len(visible) - 1, -1, -1)
+                if visible[index].get("observation_status") == "success"
+            ),
+            -1,
+        )
+        projected: list[dict[str, object]] = []
+        for index, observation in enumerate(visible):
+            status = observation.get("observation_status")
+            if (
+                status in {"parse_error", "schema_invalid"}
+                and index < latest_successful_observation_index
+            ):
+                # A later accepted Tool transition supersedes earlier malformed
+                # attempts for the next action, while the lossless trace retains
+                # them for attribution and training data.
+                continue
+            result = observation.get("result")
+            if (
+                index != latest_successful_search_index
+                and status == "success"
+                and isinstance(result, Mapping)
+                and result.get("operation") == "search"
+            ):
+                raw_hits = result.get("hits")
+                passage_ids = result.get("passage_ids")
+                hit_count = (
+                    len(raw_hits)
+                    if isinstance(raw_hits, list)
+                    else len(passage_ids)
+                    if isinstance(passage_ids, list)
+                    else 0
+                )
+                compact_result = {
+                    key: result[key]
+                    for key in ("operation", "query", "top_k")
+                    if key in result
+                }
+                compact_result["hit_count"] = hit_count
+                projected.append(
+                    {
+                        "observation_status": "success",
+                        "result": compact_result,
+                    }
+                )
+                continue
+            projected.append(observation)
+
+        # Preserve every Tool result and every current change of diagnosis
+        # while collapsing consecutive duplicate public errors.
         compacted: list[dict[str, object]] = []
         last_invalid_key: tuple[str, str] | None = None
-        for observation in visible:
+        for observation in projected:
             status = observation.get("observation_status")
             public_error_code = observation.get("public_error_code")
             if (
@@ -4368,6 +4469,26 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             else:
                 last_invalid_key = None
             compacted.append(observation)
+
+        # Keep only the current bounded diagnosis frontier in the model input.
+        # Every omitted invalid Action--Observation remains in the lossless
+        # trajectory; four distinct current diagnostics are sufficient to
+        # expose coupled field failures without turning failed drafts into an
+        # ever-growing imitation context.
+        invalid_indexes = tuple(
+            index
+            for index, observation in enumerate(compacted)
+            if observation.get("observation_status")
+            in {"parse_error", "schema_invalid"}
+        )
+        if len(invalid_indexes) > 4:
+            retained_invalid_indexes = frozenset(invalid_indexes[-4:])
+            compacted = [
+                observation
+                for index, observation in enumerate(compacted)
+                if index not in invalid_indexes
+                or index in retained_invalid_indexes
+            ]
 
         # A successful read action has already been consumed by SkillFlow's
         # bounded Action--Observation loop.  Preserve its public result in the
@@ -4391,6 +4512,118 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             ):
                 observation.pop("executed_action", None)
         return compacted
+
+    @staticmethod
+    def _latest_rejected_completion_value(
+        observations: Sequence[Mapping[str, object]],
+    ) -> Mapping[str, object] | None:
+        """Return the latest public model-authored completion draft, if any."""
+
+        for observation in reversed(observations):
+            if observation.get("observation_status") != "schema_invalid":
+                continue
+            action = observation.get("executed_action")
+            if not isinstance(action, Mapping):
+                continue
+            if action.get("kind") != "complete" or action.get("name") != "complete":
+                continue
+            arguments = action.get("arguments")
+            value = (
+                arguments.get("value")
+                if isinstance(arguments, Mapping)
+                else None
+            )
+            if isinstance(value, Mapping):
+                return value
+        return None
+
+    @staticmethod
+    def _evidence_retriever_repair_mutable_paths(
+        public_error_code: str,
+    ) -> frozenset[tuple[str, ...]]:
+        """Map one field-scoped public diagnosis to mutable artifact paths."""
+
+        if "entity_identity.question_surface" in public_error_code:
+            return frozenset({("entity_identity", "question_surface")})
+        if (
+            "entity_identity.evidence_surface does not occur" in public_error_code
+            or "answer-bearing entity surface is a strict subset" in public_error_code
+            or "evidence_surface is not supported by the cited passage title" in public_error_code
+        ):
+            return frozenset(
+                {
+                    ("entity_identity", "evidence_surface"),
+                    ("evidence_proposition", "subject"),
+                    ("evidence_proposition", "object_or_attribute_value"),
+                    ("evidence_span",),
+                }
+            )
+        if "evidence_surface must bind to exactly one" in public_error_code:
+            return frozenset(
+                {
+                    ("entity_identity", "evidence_surface"),
+                    ("evidence_proposition", "subject"),
+                    ("evidence_proposition", "object_or_attribute_value"),
+                }
+            )
+        if "target_relation must preserve" in public_error_code:
+            return frozenset({("target_relation",)})
+        proposition_match = re.search(
+            r"Evidence Retriever evidence_proposition\."
+            r"(subject|predicate|object_or_attribute_value) does not occur "
+            r"verbatim in evidence_span",
+            public_error_code,
+        )
+        if proposition_match is not None:
+            field_name = proposition_match.group(1)
+            paths = {("evidence_proposition", field_name)}
+            if field_name in {"subject", "object_or_attribute_value"}:
+                paths.add(("entity_identity", "evidence_surface"))
+            return frozenset(paths)
+        if "evidence_span has no typography-canonical lexical match" in public_error_code:
+            return frozenset(
+                {
+                    ("entity_identity", "evidence_surface"),
+                    ("evidence_proposition",),
+                    ("evidence_span",),
+                }
+            )
+        if "question target_relation and receipt-grounded" in public_error_code:
+            return frozenset({("evidence_proposition",)})
+        return frozenset()
+
+    @classmethod
+    def _constrain_repair_schema_to_prior_value(
+        cls,
+        schema: dict[str, object],
+        prior_value: Mapping[str, object],
+        mutable_paths: frozenset[tuple[str, ...]],
+    ) -> None:
+        """Freeze unimplicated model-authored fields during one repair turn."""
+
+        properties = schema.get("properties")
+        if not isinstance(properties, dict):
+            return
+        for field_name, prior_field_value in prior_value.items():
+            field_schema = properties.get(field_name)
+            if not isinstance(field_schema, dict):
+                continue
+            tails = tuple(
+                path[1:]
+                for path in mutable_paths
+                if path and path[0] == field_name
+            )
+            if not tails:
+                properties[field_name] = {"const": prior_field_value}
+                continue
+            if () in tails:
+                continue
+            if isinstance(prior_field_value, Mapping):
+                cls._constrain_repair_schema_to_prior_value(
+                    field_schema,
+                    prior_field_value,
+                    frozenset(tails),
+                )
 
     def _required_evidence_state(
         self,
@@ -4976,21 +5209,32 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             tool_actions, completion = self._unified_factual_action_domain(state)
             if (
                 (QA_RETRIEVAL_TOOL_ID, "read") in tool_actions
-                and _question_ordinal_classes(qa_question_scope(request.problem))
                 and self._latest_search_has_public_candidate_metadata(
                     observations
                 )
-                and not self._latest_public_search_candidates(
+            ):
+                public_candidates = self._latest_public_search_candidates(
                     observations,
                     unread_passage_ids=state.latest_unread_passage_ids,
                     original_question=qa_question_scope(request.problem),
                 )
-            ):
-                tool_actions = frozenset(
-                    action
-                    for action in tool_actions
-                    if action != (QA_RETRIEVAL_TOOL_ID, "read")
-                )
+                if public_candidates:
+                    # SkillFlow executes one StructuredAction per Observation.
+                    # Once the current public search exposes a candidate that
+                    # passes the request-local entity/relation/scope gate, read
+                    # it before another search. A rejected read re-opens the
+                    # bounded retrieval strategy through semantic feedback.
+                    tool_actions = frozenset(
+                        {(QA_RETRIEVAL_TOOL_ID, "read")}
+                    )
+                elif _question_ordinal_classes(
+                    qa_question_scope(request.problem)
+                ):
+                    tool_actions = frozenset(
+                        action
+                        for action in tool_actions
+                        if action != (QA_RETRIEVAL_TOOL_ID, "read")
+                    )
             return admitted(tool_actions, completion)
 
         remaining_tool_calls = max(
@@ -5708,6 +5952,34 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             return schema
         if action_name == "complete" and self._unified_factual_protocol(request):
             state = self._required_evidence_state(request, observations)
+            if (
+                (request.agent.role_family or "").casefold()
+                == "evidence_retriever"
+                and state.semantic_repair_kind == "structure"
+                and isinstance(state.semantic_repair_error_code, str)
+            ):
+                prior_value = self._latest_rejected_completion_value(
+                    observations
+                )
+                mutable_paths = self._evidence_retriever_repair_mutable_paths(
+                    state.semantic_repair_error_code
+                )
+                value_schema = argument_properties.get("value")
+                if (
+                    prior_value is not None
+                    and mutable_paths
+                    and isinstance(value_schema, dict)
+                ):
+                    # PROJECT_NECESSARY_ADAPTATION: FlowSteer preserves the
+                    # accepted Canvas state and SkillFlow constrains each next
+                    # StructuredAction. Preserve the same principle inside a
+                    # rejected evidence artifact by fixing every unimplicated
+                    # public field to the preceding model-authored value.
+                    self._constrain_repair_schema_to_prior_value(
+                        value_schema,
+                        prior_value,
+                        mutable_paths,
+                    )
             if (
                 state.location_containment_repair_read_count > 0
                 and isinstance(state.location_containment_repair_anchor, str)
@@ -6986,6 +7258,105 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 return True
         return False
 
+    @classmethod
+    def _receipt_grounded_entity_relation_repair_available(
+        cls,
+        *,
+        original_question: str,
+        artifact: str,
+        tool_receipts: Sequence[Mapping[str, object]],
+    ) -> bool:
+        """Prove that entity-linking repair can stay on one public read."""
+
+        from .agent_workflow_env import AgentWorkflowEnv
+
+        fields, issue = AgentWorkflowEnv._structured_semantic_fields(
+            artifact,
+            (
+                "question_scope",
+                "entity_identity",
+                "target_relation",
+                "answer_type_constraint",
+                "evidence_proposition",
+                "evidence_span",
+                "passage_id",
+            ),
+        )
+        if issue is not None or fields is None:
+            return False
+        passage_id = fields.get("passage_id")
+        identity = fields.get("entity_identity")
+        target_relation = fields.get("target_relation")
+        if (
+            not isinstance(passage_id, str)
+            or not passage_id.strip()
+            or not isinstance(identity, Mapping)
+            or not isinstance(identity.get("question_surface"), str)
+            or not isinstance(target_relation, str)
+            or not target_relation.strip()
+        ):
+            return False
+        question_surface = identity["question_surface"]
+        assert isinstance(question_surface, str)
+        for receipt in tool_receipts:
+            if not AgentWorkflowEnv._successful_read_receipt(
+                receipt,
+                QA_RETRIEVAL_TOOL_ID,
+            ):
+                continue
+            receipt_request = receipt.get("request")
+            receipt_result = receipt.get("result")
+            if not isinstance(receipt_request, Mapping) or not isinstance(
+                receipt_result,
+                Mapping,
+            ):
+                continue
+            receipt_arguments = receipt_request.get("arguments")
+            value = receipt_result.get("value", receipt_result)
+            if not isinstance(receipt_arguments, Mapping) or not isinstance(
+                value,
+                Mapping,
+            ):
+                continue
+            if receipt_arguments.get("passage_id") != passage_id:
+                continue
+            passage = value.get("passage")
+            if not isinstance(passage, Mapping):
+                continue
+            title = passage.get("title")
+            read_text = AgentWorkflowEnv._successful_read_text(
+                receipt,
+                QA_RETRIEVAL_TOOL_ID,
+            )
+            if (
+                not isinstance(title, str)
+                or not title.strip()
+                or read_text is None
+                or not cls._question_surface_binds_passage_title(
+                    question_surface,
+                    title,
+                )
+            ):
+                continue
+            if (
+                _relation_surface_matches_evidence(
+                    target_relation,
+                    read_text,
+                )
+                or _relation_surfaces_share_content(
+                    target_relation,
+                    read_text,
+                )
+                or _controlled_relation_paraphrase(
+                    question_relation=target_relation,
+                    evidence_predicate=read_text,
+                    original_question=original_question,
+                    evidence_span=read_text,
+                )
+            ):
+                return True
+        return False
+
     @staticmethod
     def _evidence_retriever_completion_issue(
         *,
@@ -7677,7 +8048,26 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     tool_receipts=tool_receipts,
                 )
             )
-            structured_repair = structured_repair or ordinal_structure_repair
+            entity_relation_structure_repair = bool(
+                issue.startswith(
+                    (
+                        "Evidence Retriever answer-bearing entity surface is a "
+                        "strict subset of the resolved passage-title identity",
+                        "Evidence Retriever alias identity lacks an explicit "
+                        "binding between question_surface and evidence_surface",
+                    )
+                )
+                and self._receipt_grounded_entity_relation_repair_available(
+                    original_question=evidence_retriever_question,
+                    artifact=artifact,
+                    tool_receipts=tool_receipts,
+                )
+            )
+            structured_repair = (
+                structured_repair
+                or ordinal_structure_repair
+                or entity_relation_structure_repair
+            )
             if retriever_protocol == "hotpotqa_verified_answer_slot_v1":
                 prefix = (
                     _HOTPOTQA_SEMANTIC_STRUCTURE_ERROR_PREFIX

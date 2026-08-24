@@ -1130,3 +1130,38 @@ read Ground Truth, accepted answers or evaluator output and does not relax the
 official evaluator. Director prompt v6, action vocabulary, Agent role domain,
 model catalog, topology search space, training state and Skill state remain
 unchanged.
+
+The v56 model-visible continuation projection directly preserves SkillFlow's
+lossless `StructuredAction -> ToolResult -> Observation` trajectory and Tool
+receipts. Only the next Qwen3.5-9B input is bounded: the latest successful
+search remains complete, older successful searches retain public
+query/top-k/hit-count metadata, every successful read remains complete, and
+the latest structured-error frontier remains visible. SkillFlow upstream does
+not implement target-Tool result compaction against a 32K context window, so
+this projection is `PROJECT_NECESSARY_ADAPTATION`; it does not alter replay,
+evaluator input or training records.
+
+The v56 candidate-to-read transition reuses SkillFlow's one-action/one-
+observation execution boundary and the existing answer-free public
+entity/relation/scope compatibility predicate. A matching unread candidate
+temporarily narrows the live Tool action mask to `read`; a receipt-grounded
+semantic rejection reopens bounded search recovery. This is state-conditioned
+Tool admission, not a Director prompt recipe or AgentGraph topology template.
+
+The v56 field-scoped evidence repair retains FlowSteer's non-destructive Canvas
+principle and SkillFlow's constrained StructuredAction generation. The latest
+model-authored rejected evidence artifact supplies only public prior field
+values; all fields not named by the public error are fixed with JSON-Schema
+`const`, while the implicated Entity Linking, evidence-span or proposition
+fields remain mutable. Passage title, exact read body and target relation must
+still prove repair availability. This TriviaQA semantic layer is
+`PROJECT_NECESSARY_ADAPTATION`; it has no Ground Truth, accepted-answer or
+evaluator access.
+
+The v56 late-HTTP-400 attribution is also a necessary Runtime compatibility
+adaptation. An HTTP 400 after a non-empty public ReAct trace and multiple model
+calls is not treated as evidence that the frozen catalog model is permanently
+invalid; the existing bounded recovery boundary is preserved. Startup 400 and
+401/403/404 provider failures retain their prior classification. FlowSteer's
+Canvas action vocabulary, Director prompt v6, topology search space, training
+state and Skill state are unchanged.

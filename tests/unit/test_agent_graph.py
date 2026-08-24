@@ -2321,6 +2321,115 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             env.model_availability_receipt()["unavailable_model_ids"],
         )
 
+    def test_late_react_http_400_preserves_continuation_repair_boundary(
+        self,
+    ) -> None:
+        registry = make_registry()
+        graph = AgentGraph(
+            [
+                AgentNode(
+                    "retriever",
+                    "balanced",
+                    "retrieve public evidence",
+                    role_family="evidence_retriever",
+                    allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                    execution_mode="react",
+                    artifact_type="retrieval_evidence",
+                )
+            ]
+        )
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_trivia_semantic_runtime(registry, _ImmediateGateway()),
+            graph=graph,
+            problem="Who wrote the novel?",
+            execute_on_edit=False,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+        )
+        record = AgentFailureRecord(
+            request_id="request-late-400",
+            agent_id="retriever",
+            phase=ExecutionPhase.SINGLE,
+            graph_revision=graph.revision,
+            error_type="ReactGenerationError",
+            message=(
+                "OpenAICompatibleGatewayError: provider request failed "
+                "with HTTP status 400"
+            ),
+            metadata={
+                "http_status": 400,
+                "react_trace": [
+                    {
+                        "turn": 1,
+                        "observation": {
+                            "observation_status": "success",
+                            "result": {
+                                "operation": "search",
+                                "query": "novel author",
+                                "top_k": 5,
+                                "passage_ids": ["p1"],
+                            },
+                        },
+                    }
+                ],
+                "tool_receipts": [
+                    {
+                        "tool_id": QA_RETRIEVAL_TOOL_ID,
+                        "request": {
+                            "action": "search",
+                            "arguments": {"query": "novel author", "limit": 5},
+                        },
+                        "result": {"completed": True, "value": {}},
+                        "error_type": None,
+                    }
+                ],
+                "model_calls": [
+                    {"request_status": "completed"},
+                    {
+                        "request_status": "failed",
+                        "error_type": "OpenAICompatibleGatewayError",
+                    },
+                ],
+            },
+        )
+
+        self.assertEqual(
+            (
+                "react_continuation_request_failure",
+                "preserve_public_continuation",
+                400,
+            ),
+            env._execution_failure_diagnosis(record),
+        )
+        env._record_failure_state(
+            (record,),
+            current_agent_ids={"retriever"},
+        )
+        self.assertFalse(env._provider_repair_required("retriever"))
+        feedback = json.loads(
+            env._execution_error_feedback(
+                AgentRuntimeError(
+                    "late bounded ReAct request failed",
+                    failure_records=(record,),
+                )
+            ).split("=", 1)[1]
+        )
+        attributed = feedback["failed_agents"][0]
+        self.assertEqual(
+            "react_continuation_request_failure",
+            attributed["failure_category"],
+        )
+        self.assertEqual(
+            "contract",
+            attributed["preferred_repair"]["field"],
+        )
+        self.assertNotEqual(
+            "model_id",
+            attributed["preferred_repair"]["field"],
+        )
+
     async def test_provider_repair_precedes_incomplete_semantic_spine(self) -> None:
         registry = make_multi_provider_registry()
         graph = AgentGraph(

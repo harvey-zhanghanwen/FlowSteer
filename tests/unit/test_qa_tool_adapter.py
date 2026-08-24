@@ -94,7 +94,7 @@ class FakeIndex:
 
 
 class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
-    async def test_model_visible_continuation_collapses_only_duplicate_errors(
+    async def test_model_visible_continuation_drops_stale_and_collapses_duplicate_errors(
         self,
     ) -> None:
         error = {
@@ -112,12 +112,123 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             [error, dict(error), success, error, dict(error)]
         )
 
-        self.assertEqual(3, len(visible))
-        self.assertEqual("success", visible[1]["observation_status"])
-        self.assertIn("repair_instruction", visible[0])
-        self.assertIn("repair_instruction", visible[2])
-        self.assertEqual(2, visible[0]["repeat_count"])
-        self.assertEqual(2, visible[2]["repeat_count"])
+        self.assertEqual(2, len(visible))
+        self.assertEqual("success", visible[0]["observation_status"])
+        self.assertIn("repair_instruction", visible[1])
+        self.assertEqual(2, visible[1]["repeat_count"])
+
+    def test_model_visible_search_history_is_bounded_and_lossless_source_remains(
+        self,
+    ) -> None:
+        def search(
+            query: str,
+            top_k: int,
+            passage_id: str,
+            snippet: str,
+        ) -> dict[str, object]:
+            return {
+                "observation_status": "success",
+                "executed_action": {
+                    "kind": "tool",
+                    "name": "search",
+                    "resource_id": QA_RETRIEVAL_TOOL_ID,
+                    "arguments": {"query": query, "limit": top_k},
+                },
+                "result": {
+                    "operation": "search",
+                    "query": query,
+                    "top_k": top_k,
+                    "passage_ids": [passage_id],
+                    "hits": [
+                        {
+                            "passage_id": passage_id,
+                            "title": f"Title {passage_id}",
+                            "snippet": snippet,
+                            "rank": 1,
+                        }
+                    ],
+                },
+            }
+
+        observations = [
+            search("entity relation", 5, "old", "OLD SEARCH SNIPPET"),
+            {
+                "observation_status": "schema_invalid",
+                "public_error_code": "qa_retrieval_duplicate_normalized_query",
+            },
+            search(
+                "entity requested relation",
+                10,
+                "latest",
+                "LATEST SEARCH SNIPPET",
+            ),
+            {
+                "observation_status": "success",
+                "executed_action": {
+                    "kind": "tool",
+                    "name": "read",
+                    "resource_id": QA_RETRIEVAL_TOOL_ID,
+                    "arguments": {"passage_id": "latest"},
+                },
+                "result": {
+                    "operation": "read",
+                    "passage_id": "latest",
+                    "passage": {
+                        "title": "Title latest",
+                        "text": "FULL PUBLIC READ BODY",
+                    },
+                },
+            },
+            {
+                "observation_status": "schema_invalid",
+                "public_error_code": (
+                    "qa_semantic_artifact_invalid: repair one structured field"
+                ),
+            },
+        ]
+        source_snapshot = json.loads(json.dumps(observations))
+
+        visible = QARetrievalReactExecutionAdapter._model_visible_observations(
+            observations
+        )
+        rendered = json.dumps(visible, ensure_ascii=False)
+
+        self.assertEqual(source_snapshot, observations)
+        self.assertNotIn("OLD SEARCH SNIPPET", rendered)
+        self.assertIn("LATEST SEARCH SNIPPET", rendered)
+        self.assertIn("FULL PUBLIC READ BODY", rendered)
+        self.assertIn('"hit_count": 1', rendered)
+        self.assertNotIn("qa_retrieval_duplicate_normalized_query", rendered)
+        self.assertIn("repair one structured field", rendered)
+        self.assertIn("repair_instruction", visible[-1])
+
+    def test_model_visible_diagnosis_frontier_keeps_latest_four_distinct_errors(
+        self,
+    ) -> None:
+        observations = [
+            {
+                "observation_status": "schema_invalid",
+                "public_error_code": (
+                    "qa_semantic_artifact_invalid: field " + str(index)
+                ),
+            }
+            for index in range(7)
+        ]
+
+        visible = QARetrievalReactExecutionAdapter._model_visible_observations(
+            observations
+        )
+
+        self.assertEqual(4, len(visible))
+        self.assertEqual(
+            [
+                "qa_semantic_artifact_invalid: field 3",
+                "qa_semantic_artifact_invalid: field 4",
+                "qa_semantic_artifact_invalid: field 5",
+                "qa_semantic_artifact_invalid: field 6",
+            ],
+            [item["public_error_code"] for item in visible],
+        )
 
     def test_answer_slot_binding_feedback_is_field_specific_and_completion_only(
         self,
@@ -198,21 +309,36 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             "qa_semantic_artifact_invalid: Reasoner requested-relation "
             "proposition has no deterministic entity binding"
         )
+        retriever_binding = adapter._public_semantic_repair_instruction(
+            "qa_semantic_artifact_invalid: Evidence Retriever "
+            "entity_identity.evidence_surface must bind to exactly one "
+            "evidence_proposition relation argument"
+        )
+        retriever_predicate = adapter._public_semantic_repair_instruction(
+            "qa_semantic_artifact_invalid: Evidence Retriever "
+            "evidence_proposition.predicate does not occur verbatim in "
+            "evidence_span"
+        )
 
         self.assertIsNotNone(evidence_surface)
         self.assertIsNotNone(question_surface)
         self.assertIsNotNone(short_answer_surface)
         self.assertIsNotNone(expanded_identity)
         self.assertIsNotNone(proposition_binding)
+        self.assertIsNotNone(retriever_binding)
+        self.assertIsNotNone(retriever_predicate)
         assert evidence_surface is not None
         assert question_surface is not None
         assert short_answer_surface is not None
         assert expanded_identity is not None
         assert proposition_binding is not None
+        assert retriever_binding is not None
+        assert retriever_predicate is not None
         self.assertIn("expand evidence_span only as needed", evidence_surface)
         self.assertIn("same read receipt", evidence_surface)
         self.assertIn("span contiguous", evidence_surface)
         self.assertIn("coreferential pronoun", evidence_surface)
+        self.assertIn("requested-relation clause", evidence_surface)
         self.assertIn("do not copy the title into the body evidence", evidence_surface)
         self.assertIn("Repair only question_surface", question_surface)
         self.assertIn("unchanged original question", question_surface)
@@ -242,12 +368,27 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             proposition_binding,
         )
         self.assertIn("do not add a search or read", proposition_binding)
+        self.assertIn("requested-relation clause", retriever_binding)
+        self.assertIn("entity_identity.evidence_surface", retriever_binding)
+        self.assertIn("exactly one", retriever_binding)
+        self.assertIn("coreferential pronoun", retriever_binding)
+        self.assertNotIn(
+            "and evidence_surface. Do not search or read again. Copy that exact",
+            retriever_binding,
+        )
+        self.assertIn("evidence_proposition.predicate", retriever_predicate)
+        self.assertIn("requested-relation clause", retriever_predicate)
+        self.assertIn("same evidence_span and read receipt", retriever_predicate)
+        self.assertIn("every unimplicated structured field", retriever_predicate)
+        self.assertIn("Do not search or read again", retriever_predicate)
         for repair in (
             evidence_surface,
             question_surface,
             short_answer_surface,
             expanded_identity,
             proposition_binding,
+            retriever_binding,
+            retriever_predicate,
         ):
             self.assertNotIn("Sinclair Lewis", repair)
             self.assertNotIn("Judi Dench", repair)
@@ -3179,7 +3320,7 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
 
-    def test_public_hit_metadata_conditions_read_or_search_without_changing_wire(
+    def test_relation_compatible_public_hit_is_read_only_without_changing_wire(
         self,
     ) -> None:
         request = AgentRequest(
@@ -3249,12 +3390,7 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             observations,
         )
         self.assertEqual(
-            frozenset(
-                {
-                    (QA_RETRIEVAL_TOOL_ID, "read"),
-                    (QA_RETRIEVAL_TOOL_ID, "search"),
-                }
-            ),
+            frozenset({(QA_RETRIEVAL_TOOL_ID, "read")}),
             actions,
         )
         self.assertFalse(completion)
@@ -3265,10 +3401,11 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Unrelated annual report", contract)
         self.assertIn("Target institution", contract)
         self.assertIn(
-            'For read, arguments contains only one passage_id from: ["p2"]',
+            "The next action must be qa-retrieval read",
             contract,
         )
-        self.assertIn("when none does, issue a new qa-retrieval search", contract)
+        self.assertIn('["p2"]', contract)
+        self.assertNotIn("when none does, issue a new qa-retrieval search", contract)
 
         bounded_adapter = QARetrievalReactExecutionAdapter(
             gateway=SimpleNamespace(generate=lambda request: None),
@@ -3960,22 +4097,12 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         )
         schema = adapter._state_conditioned_response_schema(request, observations)
         assert schema is not None
-        self.assertIn("oneOf", schema)
-        branches = {
-            branch["properties"]["name"]["const"]: branch
-            for branch in schema["oneOf"]
-        }
-        self.assertEqual({"read", "search"}, set(branches))
-        read_ids = branches["read"]["properties"]["arguments"]["properties"][
+        self.assertNotIn("oneOf", schema)
+        self.assertEqual("read", schema["properties"]["name"]["const"])
+        read_ids = schema["properties"]["arguments"]["properties"][
             "passage_id"
         ]["enum"]
         self.assertEqual({"p-hit", "p-weekly"}, set(read_ids))
-        self.assertEqual(
-            10,
-            branches["search"]["properties"]["arguments"]["properties"][
-                "limit"
-            ]["const"],
-        )
         false_positive = StructuredAction(
             ActionKind.TOOL,
             "read",
@@ -4095,6 +4222,147 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         state = adapter._required_evidence_state(request, observations)
         self.assertEqual(("p1",), state.read_passage_ids)
         self.assertEqual(("p2",), state.latest_unread_passage_ids)
+
+    def test_evidence_retriever_field_repair_schema_freezes_unimplicated_fields(
+        self,
+    ) -> None:
+        question = "Which American-born Sinclair won the prize in 1930?"
+        prior_value = {
+            "question_scope": question,
+            "entity_identity": {
+                "question_surface": "Sinclair",
+                "evidence_surface": "Sinclair Lewis",
+            },
+            "target_relation": "won the prize in 1930",
+            "answer_type_constraint": "entity",
+            "evidence_proposition": {
+                "subject": "he",
+                "predicate": "became",
+                "object_or_attribute_value": "the first recipient of the prize",
+            },
+            "evidence_span": (
+                "In 1930, he became the first recipient of the prize."
+            ),
+            "passage_id": "sinclair-lewis",
+        }
+        observations = [
+            {
+                "observation_status": "success",
+                "executed_action": {
+                    "kind": "tool",
+                    "name": "search",
+                    "resource_id": QA_RETRIEVAL_TOOL_ID,
+                    "arguments": {"query": "Sinclair prize 1930", "limit": 5},
+                },
+                "result": {
+                    "operation": "search",
+                    "query": "Sinclair prize 1930",
+                    "top_k": 5,
+                    "passage_ids": ["sinclair-lewis"],
+                },
+            },
+            {
+                "observation_status": "success",
+                "executed_action": {
+                    "kind": "tool",
+                    "name": "read",
+                    "resource_id": QA_RETRIEVAL_TOOL_ID,
+                    "arguments": {"passage_id": "sinclair-lewis"},
+                },
+                "result": {
+                    "operation": "read",
+                    "passage_id": "sinclair-lewis",
+                    "passage": {
+                        "title": "Sinclair Lewis",
+                        "text": prior_value["evidence_span"],
+                    },
+                },
+            },
+            {
+                "observation_status": "schema_invalid",
+                "public_error_code": (
+                    "qa_semantic_artifact_invalid: Evidence Retriever "
+                    "entity_identity.evidence_surface does not occur in "
+                    "evidence_span"
+                ),
+                "executed_action": {
+                    "kind": "complete",
+                    "name": "complete",
+                    "resource_id": None,
+                    "skill_id": None,
+                    "arguments": {"value": prior_value},
+                },
+            },
+        ]
+        adapter = QARetrievalReactExecutionAdapter(
+            gateway=SimpleNamespace(generate=lambda request: None),
+            tool_registry=build_qa_tool_registry(FakeIndex()),
+            max_turns=8,
+            max_tool_calls=12,
+            task_type="factual_qa",
+            completion_policy="required_evidence",
+        )
+        request = AgentRequest(
+            request_id="trivia:field-repair-schema",
+            run_id="trivia",
+            graph_revision=1,
+            problem=question,
+            agent=AgentNode(
+                "retriever",
+                "model",
+                "retrieve public evidence",
+                role_family="evidence_retriever",
+                allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                execution_mode="react",
+            ),
+            model=ModelSpec("model", "provider"),
+            provider=ProviderSpec("provider", kind="test"),
+            phase=ExecutionPhase.SINGLE,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+        )
+
+        response_schema = adapter._state_conditioned_response_schema(
+            request,
+            observations,
+        )
+        assert response_schema is not None
+        value_properties = response_schema["properties"]["arguments"][
+            "properties"
+        ]["value"]["properties"]
+        self.assertEqual(
+            prior_value["target_relation"],
+            value_properties["target_relation"]["const"],
+        )
+        self.assertEqual(
+            prior_value["passage_id"],
+            value_properties["passage_id"]["const"],
+        )
+        identity_properties = value_properties["entity_identity"]["properties"]
+        self.assertEqual(
+            "Sinclair",
+            identity_properties["question_surface"]["const"],
+        )
+        self.assertNotIn("const", identity_properties["evidence_surface"])
+        proposition_properties = value_properties["evidence_proposition"][
+            "properties"
+        ]
+        self.assertEqual(
+            "became",
+            proposition_properties["predicate"]["const"],
+        )
+        self.assertNotIn("const", proposition_properties["subject"])
+        self.assertNotIn(
+            "const",
+            proposition_properties["object_or_attribute_value"],
+        )
+        serialized = json.dumps(response_schema).casefold()
+        for hidden_field in (
+            "accepted_answers",
+            "gold_answer",
+            "ground_truth",
+            "evaluator",
+        ):
+            self.assertNotIn(hidden_field, serialized)
 
     async def test_unified_factual_completion_accepts_one_grounded_proposition(
         self,
@@ -7285,6 +7553,59 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(detail)
         assert detail is not None
         self.assertIn("exactly one evidence_proposition relation argument", detail)
+        self.assertTrue(
+            QARetrievalReactExecutionAdapter
+            ._receipt_grounded_entity_relation_repair_available(
+                original_question=question,
+                artifact=json.dumps(unbound_identity),
+                tool_receipts=[receipt],
+            )
+        )
+
+        classification_adapter = QARetrievalReactExecutionAdapter(
+            gateway=SimpleNamespace(generate=lambda request: None),
+            tool_registry=build_qa_tool_registry(FakeIndex()),
+            max_turns=4,
+            max_tool_calls=10,
+            task_type="factual_qa",
+            completion_policy="required_evidence",
+        )
+        question_token = (
+            classification_adapter._semantic_evidence_retriever_question.set(
+                question
+            )
+        )
+        protocol_token = (
+            classification_adapter._semantic_evidence_retriever_protocol.set(
+                QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL
+            )
+        )
+        retrieval_token = (
+            classification_adapter._retrieval_completion_required.set(True)
+        )
+        try:
+            classified = classification_adapter._completion_error(
+                action=StructuredAction(
+                    kind=ActionKind.COMPLETE,
+                    name="complete",
+                    arguments={"value": unbound_identity},
+                ),
+                artifact=json.dumps(unbound_identity),
+                tool_receipts=[receipt],
+            )
+        finally:
+            classification_adapter._retrieval_completion_required.reset(
+                retrieval_token
+            )
+            classification_adapter._semantic_evidence_retriever_protocol.reset(
+                protocol_token
+            )
+            classification_adapter._semantic_evidence_retriever_question.reset(
+                question_token
+            )
+        self.assertIsNotNone(classified)
+        assert classified is not None
+        self.assertTrue(classified.startswith("qa_semantic_artifact_invalid:"))
 
         unrelated_relation = json.loads(json.dumps(artifact))
         unrelated_relation["evidence_proposition"]["predicate"] = "was"

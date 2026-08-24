@@ -68,6 +68,7 @@ _TYPED_RETRIEVAL_FAILURE_RETRYABILITY = {
 }
 _BOUNDED_REACT_FAILURE_CATEGORIES = frozenset(
     {
+        "react_continuation_request_failure",
         "react_turn_exhaustion",
         *_TYPED_RETRIEVAL_FAILURE_RETRYABILITY,
     }
@@ -9399,6 +9400,26 @@ class AgentWorkflowEnv:
                 _TYPED_RETRIEVAL_FAILURE_RETRYABILITY[
                     typed_retrieval_failure
                 ],
+                status_code,
+            )
+        raw_react_trace = record.metadata.get("react_trace", ())
+        raw_model_calls = record.metadata.get("model_calls", ())
+        late_react_bad_request = bool(
+            status_code == 400
+            and isinstance(raw_react_trace, (list, tuple))
+            and len(raw_react_trace) > 0
+            and isinstance(raw_model_calls, (list, tuple))
+            and len(raw_model_calls) > 1
+        )
+        if late_react_bad_request:
+            # A provider 400 after an already-materialized public ReAct prefix
+            # is not evidence that the catalog model is permanently invalid.
+            # Preserve the Action--Observation continuation and expose the
+            # ordinary bounded repair boundary. Startup/configuration 400s and
+            # 401/403/404 keep their existing provider diagnosis below.
+            return (
+                "react_continuation_request_failure",
+                "preserve_public_continuation",
                 status_code,
             )
         if (

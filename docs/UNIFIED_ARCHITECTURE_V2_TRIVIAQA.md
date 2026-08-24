@@ -1256,6 +1256,60 @@ above. v54 also failed its fresh three-task gate `1/3` for the bounded
 post-read repair defects documented above; v55 must pass a new three-task gate
 before any fixed-128 execution is admitted.
 
+### v55 live diagnosis and v56 bounded ReAct field repair
+
+The fresh v55 three-task gate collected all three trajectories with zero
+collection failures but failed Stable Zero at `1/3`, so no v55 fixed-128 run
+was started. `triviaqa:tc_3` explicitly FINISHed with `York` at official
+EM/F1 `1.0/1.0`, confirming that the receipt-conditioned location answer-slot
+repair closed its complete lineage. `triviaqa:tc_1` and `triviaqa:tc_5`
+ended at `canvas_action_domain_exhausted` with null final answers and official
+EM/F1 `0.0/0.0`; this is diagnostic evidence, not a v2 accuracy estimate.
+
+The two failures had different measured causes. `tc_1` obtained the relevant
+Sinclair Lewis read receipt on its first retrieval and accumulated additional
+successful reads, but the Evidence Retriever oscillated among title/body
+coreference, exact proposition predicate and entity-argument binding fields.
+No evidence artifact passed admission, so downstream Reasoner communication
+never began. `tc_5` performed seven successful searches and no read. Its latest
+public candidate already contained the relevant Billboard/Hit parade relation,
+but both search and read remained legal; the model-visible prompt grew to
+26,273 tokens before another 25-hit observation, after which the 32,768-context
+local service returned HTTP 400. The Runtime then incorrectly treated that
+late continuation failure as permanent provider configuration failure, which
+made the one-model repair domain empty.
+
+v56 keeps Director prompt v6 byte-for-byte and does not prescribe an Agent
+inventory, role order, graph depth, edge pattern, retrieval recipe or candidate
+answer. It retains every sampled Action, Observation and Tool receipt in the
+lossless trajectory, while projecting older successful search results to
+query/top-k/hit-count metadata for the next bounded model turn. The latest
+search candidate list and every successful read body remain model-visible;
+stale invalid drafts before a later accepted Tool action are omitted, and the
+current diagnosis frontier is bounded to the latest four distinct errors.
+
+When the latest public search metadata exposes a request-compatible unread
+candidate, the state-conditioned SkillFlow action domain admits `read` before
+another `search`. A rejected read reopens the next answer-free retrieval
+strategy through the existing semantic feedback. For a receipt-grounded
+Entity Linking or proposition-field error, the next completion JSON Schema
+keeps unimplicated model-authored fields as `const` and admits changes only to
+the diagnosed field set. Passage-title-supported pronoun binding is evaluated
+inside the requested-relation clause rather than only at the beginning of a
+read body. A provider HTTP 400 after a materialized ReAct prefix is classified
+as a continuation request failure and preserves the bounded repair boundary;
+startup/configuration failures retain their existing provider path.
+
+These changes reuse SkillFlow's one-StructuredAction/one-Observation execution
+and lossless receipts plus FlowSteer's accepted Canvas edit -> execute ->
+feedback transaction. Search-result projection, TriviaQA Entity Linking and
+field-scoped constrained repair are `PROJECT_NECESSARY_ADAPTATION` for the
+32K Qwen3.5-9B context and factual-QA protocol. Ground Truth, accepted answers
+and evaluator output are absent from every inference constraint. The current
+static discovery passes 706 unit tests; prepare-only freezes the exact same
+ordered 128 records as v55 (`triviaqa:tc_1` through `triviaqa:tc_223`). A fresh
+three-task v56 Stable Zero gate remains mandatory before fixed-128 execution.
+
 ## Historical comparison condition
 
 The frozen v6.2 TriviaQA development run on the same ordered 128 tasks reported

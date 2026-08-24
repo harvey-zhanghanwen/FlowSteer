@@ -798,7 +798,15 @@ class QAToolInvalidActionDispatchTests(unittest.IsolatedAsyncioTestCase):
                 )
                 return AgentResponse(self.outputs.pop(0))
 
-        index = CountingIndex()
+        class EmptyCountingIndex(CountingIndex):
+            def search(self, query: str, *, limit: int) -> tuple[Hit, ...]:
+                self.search_calls.append((query, limit))
+                return ()
+
+        # Recall expansion is admissible only while the public search has no
+        # relation-compatible unread candidate. Candidate -> read transition
+        # is covered separately by the QA adapter action-domain tests.
+        index = EmptyCountingIndex()
         gateway = Gateway()
         adapter = QARetrievalReactExecutionAdapter(
             gateway=gateway,
