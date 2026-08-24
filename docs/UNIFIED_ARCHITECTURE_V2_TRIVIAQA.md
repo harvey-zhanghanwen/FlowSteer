@@ -704,7 +704,7 @@ list the four responsibilities.  Their exact current legality appears only in
 the live `action_target_domains`; parallel Retrievers, evidence fan-in, repair
 branches, reciprocal non-Formatter communication and multi-Agent executable
 subgraphs remain in the search space.  The action-target-domain receipt is
-versioned as `agentgraph.live-action-target-domains.v9` so the strict and
+versioned as `agentgraph.live-action-target-domains.v10` so the strict and
 historical optional conditions cannot be mixed during replay.
 
 Progressive execution now defers a QA Reasoner that has no direct Evidence
@@ -764,6 +764,31 @@ count, order, edges, topology, communication pattern, or retrieval recipe.  The
 Director v6 system prompt is unchanged.  This live-domain shape change is why
 the action-target-domain receipt is now
 `agentgraph.live-action-target-domains.v9`.
+
+### v45 exact relation-domain consistency
+
+The v44 canary was retained as an operational diagnostic and stopped after
+`triviaqa:tc_3` failed collection with
+`set_relation exact live candidates are missing`; no v44 benchmark score is
+reported.  The failure occurred when the strict semantic lineage still lacked
+the Formatter: the action-type projection correctly prioritized the executed
+Retriever-to-Reasoner evidence ingress, but the relation-target projection
+returned an empty list merely because another semantic responsibility was
+still missing.  The v3 two-phase StructuredAction boundary therefore exposed
+`set_relation` and then had no exact candidate to serialize.
+
+v45 makes both projections reuse the same receipt-grounded evidence-ingress
+candidates.  The invariant is now `set_relation in admissible actions` implies
+at least one exact live relation candidate, and the existing Director validator
+continues to fail closed before generation if that invariant is violated.  The
+regression uses a strict TriviaQA partial Canvas with a valid Retriever read
+receipt, an unconnected Reasoner, and a still-missing Formatter; it validates
+the action mask, exact target domain and v3 schema boundary from one snapshot.
+This does not add an edge template: any valid Retriever may provide ingress,
+reciprocal non-Formatter communication remains legal, and the remaining Agent
+count, roles, edges and topology remain Director choices.  The target-domain
+receipt is `agentgraph.live-action-target-domains.v10`; Director prompt v6 is
+unchanged.
 
 ### Stable Zero status
 

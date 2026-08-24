@@ -1093,6 +1093,23 @@ class AgentWorkflowEnv:
             and self._graph.nodes
             and self._missing_semantic_role_families()
         ):
+            # A successful TriviaQA Retriever may need to hand its receipt-
+            # grounded artifact to an already declared Reasoner before the
+            # Director adds the remaining semantic responsibilities.  The
+            # action-type projection already prioritizes this exact ingress;
+            # expose the identical parameter domain here so FlowSteer's v3
+            # two-phase StructuredAction schema cannot advertise SET_RELATION
+            # and then fail with an empty selector.  This orders one live
+            # data-dependency edit only; it does not prescribe the remaining
+            # Agent count, edges, order, or topology.
+            all_candidates = self._all_model_admissible_relation_candidates()
+            evidence_ingress_candidates = (
+                self._required_evidence_ingress_relation_candidates(
+                    all_candidates
+                )
+            )
+            if evidence_ingress_candidates:
+                return evidence_ingress_candidates
             # A peer edge cannot materialize a missing semantic
             # responsibility. With capacity, ADD owns the next Canvas edit;
             # at full capacity, only the strict artifact-free auxiliary DELETE

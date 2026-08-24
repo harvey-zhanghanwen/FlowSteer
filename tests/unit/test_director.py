@@ -2012,7 +2012,7 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
             request["action_target_domain_version"],
         )
         self.assertEqual(
-            "agentgraph.live-action-target-domains.v9",
+            "agentgraph.live-action-target-domains.v10",
             DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION,
         )
         initial_retriever_domain = env.model_admissible_action_targets()[

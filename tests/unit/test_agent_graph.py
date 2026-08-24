@@ -39,6 +39,7 @@ from src.interactive.agent_workflow_env import (
     _QA_EVIDENCE_RETRIEVER_RECOVERY_CONTRACT,
     _evidence_span_matches_read,
 )
+from src.interactive.director import director_validate_live_action_target_domains
 from src.interactive.model_registry import (
     ModelRegistry,
     ModelRegistryError,
@@ -5378,6 +5379,7 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             graph=graph,
             problem="What is the capital of France?",
             execute_on_edit=False,
+            require_format_agent=True,
             semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
             recovery_policy="preserve_diagnose_repair_augment",
             required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
@@ -5390,7 +5392,10 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             "artifact_version": "fixture:reader:current",
         }
 
-        self.assertEqual(("set_relation",), env.model_admissible_action_types())
+        self.assertEqual(("format",), env._missing_semantic_role_families())
+        actions = env.model_admissible_action_types()
+        targets = env.model_admissible_action_targets()
+        self.assertEqual(("set_relation",), actions)
         self.assertEqual(
             [
                 {
@@ -5400,8 +5405,9 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
                     "target_to_source": False,
                 }
             ],
-            env.model_admissible_action_targets()["set_relation"]["candidates"],
+            targets["set_relation"]["candidates"],
         )
+        director_validate_live_action_target_domains(actions, targets)
 
         rejected = await env.step(
             json.dumps(
