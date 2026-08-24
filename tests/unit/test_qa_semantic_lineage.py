@@ -41,6 +41,8 @@ def _semantic_graph() -> AgentGraph:
                 "reader-model",
                 "retrieve public evidence",
                 role_family="evidence_retriever",
+                allowed_tools=("qa-retrieval",),
+                execution_mode="react",
                 artifact_type="retrieval_evidence",
             ),
             AgentNode(
@@ -110,7 +112,24 @@ class _TriviaSemanticGateway:
     async def generate(self, request: AgentRequest):  # type: ignore[no-untyped-def]
         if request.agent.id == "reader":
             return AgentResponse(
-                "retrieved passage p1",
+                json.dumps(
+                    {
+                        "question_scope": request.problem,
+                        "entity_identity": {
+                            "question_surface": "France",
+                            "evidence_surface": "France",
+                        },
+                        "target_relation": "capital",
+                        "answer_type_constraint": "short_answer",
+                        "evidence_proposition": {
+                            "subject": "France",
+                            "predicate": "capital",
+                            "object_or_attribute_value": "Paris",
+                        },
+                        "evidence_span": "Paris is the capital of France.",
+                        "passage_id": "p1",
+                    }
+                ),
                 {
                     "tool_receipts": [
                         {
@@ -123,8 +142,9 @@ class _TriviaSemanticGateway:
                             "result": {
                                 "value": {
                                     "operation": "read",
+                                    "passage_id": "p1",
                                     "passage": {
-                                        "id": "p1",
+                                        "passage_id": "p1",
                                         "text": "Paris is the capital of France.",
                                     },
                                 },
@@ -185,6 +205,36 @@ class _TriviaSemanticGateway:
             )
         if request.agent.id == "formatter":
             return "<answer>Paris</answer>"
+        if request.agent.id == "output":
+            return AgentResponse(
+                "<answer>Paris</answer>",
+                {
+                    "tool_receipts": [
+                        {
+                            "tool_id": "qa-retrieval",
+                            "tool_version": "test-v1",
+                            "request": {
+                                "action": "read",
+                                "arguments": {"passage_id": "p1"},
+                            },
+                            "result": {
+                                "value": {
+                                    "operation": "read",
+                                    "passage_id": "p1",
+                                    "passage": {
+                                        "passage_id": "p1",
+                                        "text": (
+                                            "Paris is the capital of France."
+                                        ),
+                                    },
+                                },
+                                "completed": True,
+                            },
+                            "error_type": None,
+                        }
+                    ]
+                },
+            )
         raise AssertionError(f"unexpected Agent {request.agent.id!r}")
 
 
@@ -230,6 +280,51 @@ def _env(
 
 
 class SharedQASemanticLineageTests(unittest.IsolatedAsyncioTestCase):
+    async def test_role_conditional_generic_output_finishes_without_named_spine(
+        self,
+    ) -> None:
+        registry = _registry()
+        gateway = _TriviaSemanticGateway()
+        graph = AgentGraph(
+            [
+                AgentNode(
+                    "output",
+                    "reader-model",
+                    "answer from successful public retrieval evidence",
+                    role_family="output",
+                    allowed_tools=("qa-retrieval",),
+                    execution_mode="react",
+                    artifact_type="answer_wrapper",
+                )
+            ],
+            output_agent_id="output",
+        )
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_runtime(registry, gateway, dataset_id="triviaqa"),
+            graph=graph,
+            problem="What is the capital of France?",
+            execute_on_edit=True,
+            require_exact_answer_tag=True,
+            require_format_agent=False,
+            semantic_protocol="qa_verified_answer_lineage_v2",
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id="qa-retrieval",
+        )
+
+        executed = await env.step(
+            '{"action":"modify_agent","agent_id":"output",'
+            '"contract":"return the short answer grounded in a successful read"}'
+        )
+
+        self.assertTrue(executed.accepted)
+        self.assertEqual((), env._missing_semantic_role_families())
+        self.assertEqual((), env._required_semantic_edges())
+        self.assertTrue(env.finish_admissibility()["admissible"])
+        finished = await env.step('{"action":"finish"}')
+        self.assertTrue(finished.done)
+        self.assertEqual("<answer>Paris</answer>", finished.final_answer)
+
     async def test_trivia_accepts_one_proposition_and_captures_atomic_lineage(
         self,
     ) -> None:
@@ -307,8 +402,8 @@ class SharedQASemanticLineageTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(executed.accepted)
         admission = env.finish_admissibility()
         self.assertFalse(admission["admissible"])
-        self.assertIn("no deterministic entity binding", admission["reason"])
-        self.assertIn("'subject'", admission["reason"])
+        self.assertIn("subject is not grounded", admission["reason"])
+        self.assertIn("evidence_propositions[0].subject", admission["reason"])
         self.assertIsNone(env.last_valid_evidence_lineage)
 
     def test_v2_requires_an_explicit_supported_dataset_id(self) -> None:

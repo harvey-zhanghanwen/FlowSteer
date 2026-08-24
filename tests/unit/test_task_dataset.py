@@ -8,6 +8,8 @@ from src.interactive.task_dataset import (
     hotpotqa_answer_type_constraint,
     hotpotqa_question_scope,
     iter_task_records,
+    qa_answer_argument_constraint,
+    qa_answer_type_constraint,
     task_record_from_mapping,
 )
 
@@ -86,6 +88,38 @@ def test_hotpot_answer_type_constraint_uses_question_surface_only(
     answer_type: str,
 ) -> None:
     assert hotpotqa_answer_type_constraint(question) == answer_type
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "In which decade did Billboard magazine first publish a hit chart?",
+        "In which decade of the 20th century was Billy Crystal born?",
+        "Which year did the first edition appear?",
+        "Which century saw the event?",
+    ],
+)
+def test_shared_qa_answer_type_recognizes_which_date_slots(
+    question: str,
+) -> None:
+    assert qa_answer_type_constraint(question) == "date"
+
+
+@pytest.mark.parametrize(
+    ("question", "answer_field"),
+    [
+        ("Which Canadian-born novelist won the international award?", "subject"),
+        ("Who wrote the first published algorithm?", "subject"),
+        ("Which book did the mathematician write?", None),
+        ("In which decade did the magazine publish its first chart?", None),
+        ("Where was the actor born?", None),
+    ],
+)
+def test_shared_qa_answer_argument_constraint_is_question_only_and_conservative(
+    question: str,
+    answer_field: str | None,
+) -> None:
+    assert qa_answer_argument_constraint(question) == answer_field
 
 
 @pytest.mark.parametrize(

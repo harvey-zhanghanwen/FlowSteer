@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import re
+import unicodedata
 from typing import Any, Dict, Iterator, List, Mapping, Optional
 
 from .records import TaskRecord, VALID_SPLITS
@@ -60,6 +61,77 @@ def hotpotqa_question_scope(rendered_question: str) -> str:
     return qa_question_scope(rendered_question)
 
 
+def verified_year_to_decade_normalization(
+    *,
+    original_question: Optional[str],
+    source_value: object,
+    candidate_answer: object,
+) -> bool:
+    """Verify a deterministic year-to-decade answer normalization.
+
+    The source year remains an exact proposition argument grounded by the
+    evidence-provenance gate. No accepted answer or evaluator state enters the
+    runtime use of this check; it applies only when the question explicitly
+    requests a decade. The evaluator may reuse the same deterministic rule for
+    diagnosis without changing official EM/F1.
+    """
+
+    if (
+        not isinstance(original_question, str)
+        or not isinstance(source_value, str)
+        or not isinstance(candidate_answer, str)
+    ):
+        return False
+    question = " ".join(qa_question_scope(original_question).casefold().split())
+    if not re.search(r"\b(?:what|which) decade\b", question):
+        return False
+    years = tuple(
+        dict.fromkeys(
+            int(value)
+            for value in re.findall(
+                r"(?<!\d)(?:1\d{3}|20\d{2})(?!\d)",
+                source_value,
+            )
+        )
+    )
+    if len(years) != 1:
+        return False
+    decade_start = years[0] // 10 * 10
+    short_start = decade_start % 100
+    normalized = unicodedata.normalize("NFKC", candidate_answer).casefold()
+    normalized = " ".join(normalized.split()).strip(" .,:;[]")
+    normalized = re.sub(r"\s*\(decade\)\s*$", "", normalized).strip()
+    normalized = re.sub(r"\s+(?:ad|ce)$", "", normalized).strip()
+    normalized = re.sub(r"^the\s+", "", normalized).strip()
+    numeric_forms = {
+        f"{decade_start}s",
+        f"{decade_start}'s",
+        f"{decade_start}’s",
+        f"{decade_start}-{decade_start + 9}",
+        f"{decade_start}–{decade_start + 9}",
+        f"{short_start:02d}s",
+        f"{short_start:02d}'s",
+        f"{short_start:02d}’s",
+        f"'{short_start:02d}s",
+        f"’{short_start:02d}s",
+        f"{short_start:02d}-{(short_start + 9) % 100:02d}",
+        f"{short_start:02d}–{(short_start + 9) % 100:02d}",
+    }
+    decade_words = {
+        20: "twenties",
+        30: "thirties",
+        40: "forties",
+        50: "fifties",
+        60: "sixties",
+        70: "seventies",
+        80: "eighties",
+        90: "nineties",
+    }
+    return normalized in numeric_forms or normalized == decade_words.get(
+        short_start
+    )
+
+
 def qa_answer_type_constraint(rendered_question: str) -> str:
     """Return the question's surface-syntax answer-type constraint.
 
@@ -74,7 +146,7 @@ def qa_answer_type_constraint(rendered_question: str) -> str:
     if re.search(r"\bhow (?:many|much)\b", normalized):
         return "number"
     if normalized.startswith("when ") or re.search(
-        r"\bwhat (?:year|date)\b", normalized
+        r"\b(?:what|which) (?:year|date|decade|century)\b", normalized
     ):
         return "date"
     if normalized.startswith("where ") or re.search(
@@ -126,6 +198,43 @@ def hotpotqa_answer_type_constraint(rendered_question: str) -> str:
     """Backward-compatible HotpotQA wrapper for the shared QA classifier."""
 
     return qa_answer_type_constraint(rendered_question)
+
+
+def qa_answer_argument_constraint(rendered_question: str) -> Optional[str]:
+    """Return a conservative question-only answer argument constraint.
+
+    The constraint is derived only from an overt wh-dependency.  It deliberately
+    returns ``None`` for syntactically ambiguous questions rather than guessing a
+    semantic role.  In the high-confidence active-subject construction
+    ``Which/Who ... <finite lexical predicate>``, the wh constituent fills the
+    proposition subject.  Auxiliary-inverted object questions are left
+    unconstrained so retrieved evidence, rather than a surface heuristic, owns
+    the remaining binding decision.
+    """
+
+    question = qa_question_scope(rendered_question)
+    if qa_answer_type_constraint(question) != "entity":
+        return None
+    normalized = " ".join(question.casefold().split())
+    if not re.match(r"^(?:who|which|what)\b", normalized):
+        return None
+    # Do-support and modal inversion introduce an overt post-auxiliary subject,
+    # so the leading wh constituent is not safely classifiable as the subject.
+    if re.match(
+        r"^(?:who|which|what)\b.*?\b"
+        r"(?:am|are|is|was|were|has|have|had|do|does|did|can|could|"
+        r"will|would|shall|should|may|might|must)\b",
+        normalized,
+    ):
+        return None
+    finite_lexical_predicate = re.compile(
+        r"\b(?:became|began|came|held|made|went|won|wrote|"
+        r"[a-z]+(?:ed|s))\b"
+    )
+    prefix = re.sub(r"^(?:who|which|what)\s+", "", normalized, count=1)
+    if finite_lexical_predicate.search(prefix) is None:
+        return None
+    return "subject"
 
 
 def qa_answer_cardinality_constraint(rendered_question: str) -> str:
@@ -273,4 +382,5 @@ __all__ = [
     "qa_answer_type_constraint",
     "qa_question_scope",
     "task_record_from_mapping",
+    "verified_year_to_decade_normalization",
 ]

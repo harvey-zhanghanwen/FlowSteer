@@ -23,7 +23,12 @@ from .agent_runtime import (
 
 
 class OpenAICompatibleGatewayError(RuntimeError):
-    pass
+    """Provider failure with public routing metadata for typed recovery."""
+
+    provider_id: str | None = None
+    model_id: str | None = None
+    http_status: int | None = None
+    request_status: str | None = None
 
 
 MASKED_UPSTREAM_CONTENT = "[UPSTREAM CONTENT MASKED FOR COMMUNICATION DIAGNOSTIC]"
@@ -52,6 +57,69 @@ def _integer(metadata: Mapping[str, str], key: str, default: int) -> int:
     return parsed
 
 
+def _non_negative_integer(
+    metadata: Mapping[str, str],
+    key: str,
+    default: Optional[int],
+) -> Optional[int]:
+    value = metadata.get(key)
+    if value is None:
+        return default
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise OpenAICompatibleGatewayError(
+            f"model metadata {key} must be an integer"
+        ) from exc
+    if not 0 <= parsed < 2**64:
+        raise OpenAICompatibleGatewayError(
+            f"model metadata {key} must be an unsigned 64-bit integer"
+        )
+    return parsed
+
+
+def supports_local_sglang_top_k(request: AgentRequest) -> bool:
+    """Return whether this exact model arm declares local SGLang ``top_k``.
+
+    ``top_k`` is not part of the portable OpenAI Chat Completions contract.
+    SkillFlow sends ``top_k=-1`` to its native SGLang rollout endpoint, so the
+    compatible field is forwarded only when the frozen provider/model metadata
+    explicitly declares the same local backend and capability.  An endpoint or
+    provider name alone is not treated as a capability receipt.
+    """
+
+    provider_metadata = request.provider.metadata
+    model_metadata = request.model.metadata
+
+    def declared_value(key: str) -> str:
+        value = model_metadata.get(key, provider_metadata.get(key, ""))
+        return value.strip().casefold() if isinstance(value, str) else ""
+
+    return bool(
+        declared_value("sampling_backend") == "sglang"
+        and declared_value("deployment_locality") == "local"
+        and declared_value("supports_top_k") == "true"
+    )
+
+
+def _requested_sampling(payload: Mapping[str, Any]) -> Dict[str, Any]:
+    """Project only the decoding fields placed on the provider request."""
+
+    return {
+        "temperature": payload.get("temperature"),
+        "top_p": payload.get("top_p"),
+        "top_k": payload.get("top_k"),
+        "max_tokens": payload.get("max_tokens"),
+        "seed": payload.get("seed"),
+    }
+
+
+def _sglang_backend_sampling_seed(seed: int) -> int:
+    """Project a scientific uint64 seed into SGLang's signed int64 domain."""
+
+    return seed & ((1 << 63) - 1)
+
+
 def _visible_message_content(
     content: str,
     condition: CommunicationCondition,
@@ -61,11 +129,108 @@ def _visible_message_content(
     return content
 
 
+def _artifact_receipt_references(
+    artifact: str,
+) -> tuple[frozenset[str], tuple[str, ...]]:
+    """Return public passage IDs and evidence spans cited by one artifact."""
+
+    try:
+        value = json.loads(artifact)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return frozenset(), ()
+    passage_ids: set[str] = set()
+    evidence_spans: list[str] = []
+
+    def visit(item: object, *, field_name: str | None = None) -> None:
+        if isinstance(item, Mapping):
+            for key, child in item.items():
+                visit(child, field_name=str(key))
+            return
+        if isinstance(item, (list, tuple)):
+            for child in item:
+                visit(child, field_name=field_name)
+            return
+        if not isinstance(item, str) or not item.strip():
+            return
+        if field_name == "passage_id":
+            passage_ids.add(item.strip())
+        elif field_name in {"evidence", "evidence_span"}:
+            evidence_spans.append(item.strip())
+
+    visit(value)
+    return frozenset(passage_ids), tuple(dict.fromkeys(evidence_spans))
+
+
+def _successful_read_receipt_projection(
+    receipts: Sequence[Mapping[str, object]],
+    *,
+    artifact: str,
+) -> tuple[dict[str, object], ...]:
+    """Project only artifact-referenced successful read receipts for a model.
+
+    The immutable UpstreamMessage and trajectory keep every Tool receipt.  This
+    projection changes only the model-visible communication envelope so a
+    semantic-lineage fan-in does not replay unrelated search results or read
+    bodies.  Backend provenance validation continues to consume the complete
+    receipt tuple from AgentRequest.
+    """
+
+    referenced_ids, evidence_spans = _artifact_receipt_references(artifact)
+    successful_reads: list[tuple[dict[str, object], str | None, str | None]] = []
+    for receipt in receipts:
+        if receipt.get("error_type") is not None:
+            continue
+        request = receipt.get("request")
+        result = receipt.get("result")
+        if not isinstance(request, Mapping) or request.get("action") != "read":
+            continue
+        if not isinstance(result, Mapping):
+            continue
+        value = result.get("value", result)
+        if not isinstance(value, Mapping) or value.get("operation") != "read":
+            continue
+        passage = value.get("passage")
+        if not isinstance(passage, Mapping):
+            continue
+        passage_id = value.get("passage_id", passage.get("passage_id"))
+        if not isinstance(passage_id, str):
+            arguments = request.get("arguments")
+            if isinstance(arguments, Mapping):
+                passage_id = arguments.get("passage_id")
+        passage_text = passage.get("text")
+        successful_reads.append(
+            (
+                dict(receipt),
+                passage_id if isinstance(passage_id, str) else None,
+                passage_text if isinstance(passage_text, str) else None,
+            )
+        )
+    selected = [
+        receipt
+        for receipt, passage_id, passage_text in successful_reads
+        if (
+            passage_id is not None
+            and passage_id in referenced_ids
+        )
+        or (
+            passage_text is not None
+            and any(span in passage_text for span in evidence_spans)
+        )
+    ]
+    # A malformed/non-JSON intermediate artifact still needs evidence for a
+    # downstream repair diagnosis.  Fall back to successful reads only; never
+    # replay search receipts in the semantic-lineage model envelope.
+    if not selected and not referenced_ids and not evidence_spans:
+        selected = [receipt for receipt, _, _ in successful_reads]
+    return tuple(selected)
+
+
 def _format_upstream(
     messages: Sequence[UpstreamMessage],
     condition: CommunicationCondition,
     *,
     include_dependency: bool = True,
+    project_artifact_read_receipts: bool = False,
 ) -> str:
     if not messages:
         return "(none)"
@@ -86,11 +251,23 @@ def _format_upstream(
             envelope.append(
                 f"request_or_dependency: {item.request_or_dependency}"
             )
-        if item.tool_receipts:
+        visible_tool_receipts = (
+            _successful_read_receipt_projection(
+                item.tool_receipts,
+                artifact=item.artifact,
+            )
+            if project_artifact_read_receipts
+            else tuple(dict(receipt) for receipt in item.tool_receipts)
+        )
+        if project_artifact_read_receipts and item.tool_receipts:
+            envelope.append(
+                "tool_receipt_projection: artifact-referenced-successful-reads"
+            )
+        if visible_tool_receipts:
             envelope.append(
                 "tool_receipts: "
                 + json.dumps(
-                    [dict(receipt) for receipt in item.tool_receipts],
+                    list(visible_tool_receipts),
                     ensure_ascii=False,
                     sort_keys=True,
                     separators=(",", ":"),
@@ -150,7 +327,9 @@ _HOTPOTQA_REASONER_PROTOCOL = (
     "question. answer_slot contains exactly answer_type, answer_cardinality, qualifiers, "
     "proposition_index, and answer_field. proposition_index selects one item in "
     "evidence_propositions and answer_field selects either its subject or its "
-    "object_or_attribute_value; candidate_answer must equal that selected value. "
+    "object_or_attribute_value; candidate_answer must equal that selected value, "
+    "except for a deterministic year-to-decade normalization when the original "
+    "question explicitly requests a decade. "
     + _HOTPOTQA_COMPLETE_ENTITY_SURFACE_RULE
     + "If a comparison produces unexpectedly "
     "equal values, recheck the "
@@ -221,7 +400,9 @@ _QA_REASONER_PROTOCOL = (
     "contains exactly answer_type, answer_cardinality, qualifiers, "
     "proposition_index, and answer_field. proposition_index selects one evidence "
     "proposition and answer_field selects its subject or "
-    "object_or_attribute_value; candidate_answer must equal that selected value. "
+    "object_or_attribute_value; candidate_answer must equal that selected value, "
+    "except for a deterministic year-to-decade normalization when the original "
+    "question explicitly requests a decade. "
     + _QA_COMPLETE_ENTITY_SURFACE_RULE
     + "If the retrieved evidence does not bind both entity identity and target "
     "relation, do not guess or fabricate a candidate; continue the admitted "
@@ -334,8 +515,14 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
     elif request.is_format_agent and semantic_lineage:
         protocol = (
             "You are the terminal FlowSteer Format Operator. The solution has already "
-            "been computed and passed by a Verifier in exactly one routed upstream "
-            "artifact. You will not receive the original question. Follow the copying "
+            + (
+                "been computed and passed by a Verifier in exactly one routed "
+                "upstream artifact. "
+                if hotpot_semantic
+                else "been computed as one explicit candidate in a routed upstream "
+                "artifact. "
+            )
+            + "You will not receive the original question. Follow the copying "
             "instructions in the user message; do not solve, verify, or extend the "
             "answer; do not canonicalize or reselect it."
         )
@@ -364,6 +551,17 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
             "evidence. Return exactly two fields: one `Candidate answer: ...` line containing "
             "only the answer value, followed by one `Evidence: ...` field. Do not use "
             "<answer> tags."
+        )
+    elif unified_qa_semantic and request.is_output_agent:
+        protocol = (
+            "You are the unique Output Agent. Use only routed upstream artifacts "
+            "and successful qa-retrieval read receipts. If an explicit semantic "
+            "candidate is routed to you, preserve it character-for-character; if "
+            "multiple candidates are present, they must agree. Otherwise derive the "
+            "short answer directly from the routed receipt-grounded evidence. Return "
+            "exactly one <answer>...</answer> wrapper with no explanation. Do not "
+            "invent evidence or assume a fixed Retriever, Reasoner, Verifier, or "
+            "Formatter sequence."
         )
     elif request.is_output_agent:
         protocol = (
@@ -416,6 +614,10 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
         request.upstream,
         request.communication_condition,
         include_dependency=not request.is_format_agent,
+        project_artifact_read_receipts=(
+            semantic_lineage
+            and semantic_role in {"reasoner", "verifier"}
+        ),
     )
     if request.is_format_agent:
         # Directly reuse FlowSteer's Format Operator prompt and its clean
@@ -434,20 +636,42 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
         if semantic_lineage:
             common = FORMAT_PROMPT.format(
                 problem_description=(
-                    "the formatting-only transfer of one verified Candidate answer"
+                    "the formatting-only transfer of one explicit Candidate answer"
                 ),
                 solution=solution,
             ) + (
-                "\nFor this AgentGraph terminal protocol, the rules below take precedence "
-                "over every normalization or transformation example above. The solution "
-                "must be a Verifier artifact whose `Verification status:` is exactly "
-                "`supported`. Copy character-for-character only the value following its "
-                "single `Candidate answer:` label; never select another name or value, "
-                "and never change an alias, abbreviation, "
-                "unit, date, spelling, or symbolic form. Enclose that exact copied value "
-                "in exactly one <answer>...</answer> wrapper, with no explanation. If the "
-                "supported status or exactly one Candidate answer is absent, return "
-                "exactly <answer></answer>."
+                (
+                    "\nFor this AgentGraph terminal protocol, the rules below take "
+                    "precedence over every normalization or transformation example "
+                    "above. The solution must be a Verifier artifact whose "
+                    "`Verification status:` is exactly `supported`. "
+                )
+                if hotpot_semantic
+                else (
+                    "\nFor this role-conditional QA terminal protocol, the rules "
+                    "below take precedence over every normalization or "
+                    "transformation example above. The solution must contain one "
+                    "explicit routed semantic candidate. "
+                )
+            ) + (
+                (
+                    "Copy character-for-character only the value following its "
+                    "single `Candidate answer:` label; never select another name "
+                    "or value, and never change an alias, abbreviation, unit, "
+                    "date, spelling, or symbolic form. Enclose that exact copied "
+                    "value in exactly one <answer>...</answer> wrapper, with no "
+                    "explanation. If the supported status or exactly one Candidate "
+                    "answer is absent, return exactly <answer></answer>."
+                )
+                if hotpot_semantic
+                else (
+                    "Copy character-for-character only its candidate value; never "
+                    "select another name or value, and never change an alias, "
+                    "abbreviation, unit, date, spelling, or symbolic form. Enclose "
+                    "that exact copied value in exactly one <answer>...</answer> "
+                    "wrapper, with no explanation. If one explicit candidate is "
+                    "absent, return exactly <answer></answer>."
+                )
             )
         else:
             common = FORMAT_PROMPT.format(
@@ -550,9 +774,11 @@ class OpenAICompatibleGateway:
         if self.default_seed is not None and (
             isinstance(self.default_seed, bool)
             or not isinstance(self.default_seed, int)
-            or self.default_seed < 0
+            or not 0 <= self.default_seed < 2**64
         ):
-            raise ValueError("default_seed must be a non-negative integer or None")
+            raise ValueError(
+                "default_seed must be an unsigned 64-bit integer or None"
+            )
 
     def request_payload(self, request: AgentRequest) -> Dict[str, Any]:
         metadata = request.model.metadata
@@ -569,10 +795,34 @@ class OpenAICompatibleGateway:
             "top_p": top_p,
             "max_tokens": _integer(metadata, "max_tokens", self.default_max_tokens),
         }
-        if self.default_seed is not None:
-            # SkillFlow's OpenAI-compatible provider sends the configured seed
-            # to the serving boundary.  Keep the same fixed-run contract here.
-            payload["seed"] = self.default_seed
+        generation_seed = _non_negative_integer(
+            metadata,
+            "generation_seed",
+            self.default_seed,
+        )
+        if generation_seed is not None:
+            # DIRECT_REUSE: SkillFlow derives one scientific seed for each
+            # bounded rollout step. A request-level seed therefore takes
+            # precedence over the gateway's legacy fixed-run default.
+            payload["seed"] = (
+                _sglang_backend_sampling_seed(generation_seed)
+                if supports_local_sglang_top_k(request)
+                else generation_seed
+            )
+        if supports_local_sglang_top_k(request):
+            raw_top_k = metadata.get("top_k")
+            if raw_top_k is not None:
+                try:
+                    top_k = int(raw_top_k)
+                except (TypeError, ValueError) as exc:
+                    raise OpenAICompatibleGatewayError(
+                        "model metadata top_k must be an integer"
+                    ) from exc
+                if top_k != -1 and top_k <= 0:
+                    raise OpenAICompatibleGatewayError(
+                        "model metadata top_k must be -1 or a positive integer"
+                    )
+                payload["top_k"] = top_k
         thinking = metadata.get("chat_template_enable_thinking")
         if thinking is not None:
             normalized = thinking.strip().lower()
@@ -631,6 +881,18 @@ class OpenAICompatibleGateway:
                     f"{request.provider.api_key_env}"
                 )
         payload = self.request_payload(request)
+        scientific_generation_seed = _non_negative_integer(
+            request.model.metadata,
+            "generation_seed",
+            self.default_seed,
+        )
+        requested_sampling = _requested_sampling(payload)
+        if (
+            scientific_generation_seed is not None
+            and payload.get("seed") != scientific_generation_seed
+        ):
+            requested_sampling["seed"] = scientific_generation_seed
+            requested_sampling["backend_seed"] = payload.get("seed")
         url = endpoint.rstrip("/") + "/chat/completions"
 
         last_error: BaseException | None = None
@@ -647,7 +909,10 @@ class OpenAICompatibleGateway:
                             0.0,
                         ),
                         "attempt_count": attempt + 1,
-                        "generation_seed": payload.get("seed"),
+                        "generation_seed": scientific_generation_seed,
+                        "backend_sampling_seed": payload.get("seed"),
+                        "requested_sampling": requested_sampling,
+                        "request_status": "completed",
                     }
                 )
                 return AgentResponse(parsed.text, metadata)
@@ -667,9 +932,20 @@ class OpenAICompatibleGateway:
             detail = f"HTTP {last_error.code}"
         else:
             detail = type(last_error).__name__ if last_error is not None else "unknown error"
-        raise OpenAICompatibleGatewayError(
+        error = OpenAICompatibleGatewayError(
             f"provider request failed for {request.provider.provider_id}: {detail}"
-        ) from last_error
+        )
+        # This is the exact decoding projection from the already-materialized
+        # provider payload.  It states what was requested, not what a failed
+        # server necessarily applied.
+        error.requested_sampling = requested_sampling
+        error.request_status = "failed"
+        error.provider_id = request.provider.provider_id
+        error.model_id = request.model.model_id
+        error.http_status = (
+            last_error.code if isinstance(last_error, HTTPError) else None
+        )
+        raise error from last_error
 
     def _post_json(self, url: str, api_key: str, payload: Mapping[str, Any]) -> Mapping[str, Any]:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")

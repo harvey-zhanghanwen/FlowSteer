@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 import os
 import unittest
@@ -93,6 +94,90 @@ def request(
 
 
 class MessageTests(unittest.TestCase):
+    def test_semantic_lineage_projects_only_artifact_referenced_read_receipts(
+        self,
+    ) -> None:
+        artifact = json.dumps(
+            {
+                "question_scope": "Where was the person born?",
+                "entity_identity": {
+                    "question_surface": "the person",
+                    "evidence_surface": "The person",
+                },
+                "target_relation": "was born",
+                "answer_type_constraint": "location",
+                "evidence_proposition": {
+                    "subject": "The person",
+                    "predicate": "was born in",
+                    "object_or_attribute_value": "East Ward",
+                },
+                "evidence_span": "The person was born in East Ward.",
+                "passage_id": "p2",
+            }
+        )
+        search_receipt = {
+            "tool_id": "qa-retrieval",
+            "error_type": None,
+            "request": {
+                "action": "search",
+                "arguments": {"query": "unrelated search", "limit": 5},
+            },
+            "result": {"value": {"operation": "search", "passage_ids": ["p1"]}},
+        }
+
+        def read_receipt(passage_id: str, text: str) -> dict[str, object]:
+            return {
+                "tool_id": "qa-retrieval",
+                "error_type": None,
+                "request": {
+                    "action": "read",
+                    "arguments": {"passage_id": passage_id},
+                },
+                "result": {
+                    "value": {
+                        "operation": "read",
+                        "passage_id": passage_id,
+                        "passage": {
+                            "passage_id": passage_id,
+                            "title": passage_id,
+                            "text": text,
+                        },
+                    }
+                },
+            }
+
+        upstream = UpstreamMessage(
+            "retriever",
+            "agent",
+            artifact,
+            artifact_type="evidence",
+            tool_receipts=(
+                search_receipt,
+                read_receipt("p1", "Unrelated public passage."),
+                read_receipt("p2", "The person was born in East Ward."),
+            ),
+        )
+        agent_request = replace(
+            request(
+                is_output_agent=False,
+                role_family="reasoner",
+                semantic_protocol="qa_verified_answer_lineage_v2",
+            ),
+            upstream=(upstream,),
+        )
+
+        messages = build_agent_messages(agent_request)
+        visible = messages[1]["content"]
+
+        self.assertIn(
+            "tool_receipt_projection: artifact-referenced-successful-reads",
+            visible,
+        )
+        self.assertIn('"passage_id":"p2"', visible)
+        self.assertNotIn('"passage_id":"p1"', visible)
+        self.assertNotIn("unrelated search", visible)
+        self.assertEqual(3, len(agent_request.upstream[0].tool_receipts))
+
     def test_revision_prompt_uses_immutable_own_and_peer_drafts(self) -> None:
         messages = build_agent_messages(request(ExecutionPhase.REVISION))
         text = messages[1]["content"]
@@ -433,6 +518,123 @@ class MessageTests(unittest.TestCase):
 
 
 class GatewayTests(unittest.IsolatedAsyncioTestCase):
+    def test_request_generation_seed_overrides_gateway_default(self) -> None:
+        item = request()
+        item = replace(
+            item,
+            model=replace(
+                item.model,
+                metadata={
+                    **dict(item.model.metadata),
+                    "generation_seed": "18446744073709551615",
+                    "temperature": "1.0",
+                    "top_p": "1.0",
+                },
+            ),
+        )
+        payload = OpenAICompatibleGateway(default_seed=17).request_payload(item)
+        self.assertEqual(18446744073709551615, payload["seed"])
+        self.assertEqual(1.0, payload["temperature"])
+        self.assertEqual(1.0, payload["top_p"])
+
+    def test_generation_seed_rejects_values_outside_uint64(self) -> None:
+        item = request()
+        item = replace(
+            item,
+            model=replace(
+                item.model,
+                metadata={
+                    **dict(item.model.metadata),
+                    "generation_seed": str(2**64),
+                },
+            ),
+        )
+        with self.assertRaisesRegex(
+            OpenAICompatibleGatewayError,
+            "unsigned 64-bit",
+        ):
+            OpenAICompatibleGateway().request_payload(item)
+        with self.assertRaisesRegex(ValueError, "unsigned 64-bit"):
+            OpenAICompatibleGateway(default_seed=2**64)
+
+    async def test_local_sglang_signed_seed_preserves_scientific_receipt(
+        self,
+    ) -> None:
+        scientific_seed = (1 << 63) + 29
+        item = request()
+        item = replace(
+            item,
+            provider=replace(
+                item.provider,
+                metadata={
+                    "sampling_backend": "sglang",
+                    "deployment_locality": "local",
+                },
+            ),
+            model=replace(
+                item.model,
+                metadata={
+                    **dict(item.model.metadata),
+                    "generation_seed": str(scientific_seed),
+                    "supports_top_k": "true",
+                },
+            ),
+        )
+        gateway = OpenAICompatibleGateway(max_retries=0)
+        captured = {}
+
+        def fake_post(url, api_key, payload):
+            captured["payload"] = payload
+            return {
+                "id": "req-local",
+                "model": "supervisor_theta",
+                "choices": [
+                    {"message": {"content": "answer"}, "finish_reason": "stop"}
+                ],
+                "usage": {},
+            }
+
+        gateway._post_json = fake_post  # type: ignore[method-assign]
+        response = await gateway.generate(item)
+
+        self.assertEqual(29, captured["payload"]["seed"])
+        self.assertEqual(scientific_seed, response.metadata["generation_seed"])
+        self.assertEqual(29, response.metadata["backend_sampling_seed"])
+        self.assertEqual(
+            {"seed": scientific_seed, "backend_seed": 29},
+            {
+                key: response.metadata["requested_sampling"][key]
+                for key in ("seed", "backend_seed")
+            },
+        )
+
+    def test_top_k_is_forwarded_only_for_declared_local_sglang(self) -> None:
+        item = request()
+        declared_provider = replace(
+            item.provider,
+            metadata={
+                "sampling_backend": "sglang",
+                "deployment_locality": "local",
+            },
+        )
+        declared_model = replace(
+            item.model,
+            metadata={
+                **dict(item.model.metadata),
+                "supports_top_k": "true",
+                "top_k": "-1",
+            },
+        )
+        local_payload = OpenAICompatibleGateway().request_payload(
+            replace(item, provider=declared_provider, model=declared_model)
+        )
+        self.assertEqual(-1, local_payload["top_k"])
+
+        remote_payload = OpenAICompatibleGateway().request_payload(
+            replace(item, model=declared_model)
+        )
+        self.assertNotIn("top_k", remote_payload)
+
     async def test_request_and_response_mapping(self) -> None:
         gateway = OpenAICompatibleGateway(max_retries=0, default_seed=17)
         captured = {}
@@ -458,6 +660,17 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(response.metadata["latency_ms"], 0.0)
         self.assertEqual(response.metadata["attempt_count"], 1)
         self.assertEqual(response.metadata["generation_seed"], 17)
+        self.assertEqual(response.metadata["request_status"], "completed")
+        self.assertEqual(
+            response.metadata["requested_sampling"],
+            {
+                "temperature": 0.2,
+                "top_p": 1.0,
+                "top_k": None,
+                "max_tokens": 512,
+                "seed": 17,
+            },
+        )
 
     async def test_missing_credential_names_variable_without_printing_key(self) -> None:
         with patch.dict(os.environ, {}, clear=True):

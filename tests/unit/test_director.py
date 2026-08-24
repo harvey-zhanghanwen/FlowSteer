@@ -5,7 +5,11 @@ import unittest
 
 from src.interactive.agent_graph import AgentGraph, AgentNode
 from src.interactive.agent_runtime import AgentResponse, AgentRuntime
-from src.interactive.agent_workflow_env import AgentWorkflowEnv
+from src.interactive.agent_workflow_env import (
+    AgentWorkflowEnv,
+    _QA_EVIDENCE_RETRIEVER_RECOVERY_COMPLETION,
+    _QA_EVIDENCE_RETRIEVER_RECOVERY_CONTRACT,
+)
 from src.interactive.director import (
     AgentGraphOrchestrator,
     DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION,
@@ -32,7 +36,16 @@ from src.interactive.director import (
     HOTPOTQA_SEMANTIC_PROTOCOL,
     QA_DIRECTOR_PROMPT_VERSION,
     QA_DIRECTOR_SYSTEM_PROMPT_V1,
+    QA_DIRECTOR_SYSTEM_PROMPT_V2,
+    QA_DIRECTOR_SYSTEM_PROMPT_V3,
+    QA_DIRECTOR_SYSTEM_PROMPT_V4,
+    QA_DIRECTOR_SYSTEM_PROMPT_V5,
+    QA_DIRECTOR_SYSTEM_PROMPT_V6,
     QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+    LEGACY_QA_DIRECTOR_PROMPT_VERSION_V4,
+    LEGACY_QA_DIRECTOR_PROMPT_VERSION_V5,
+    LEGACY_QA_DIRECTOR_PROMPT_VERSION_V2,
+    LEGACY_QA_DIRECTOR_PROMPT_VERSION_V3,
     LEGACY_DIRECTOR_SYSTEM_PROMPT_V8,
     LEGACY_DIRECTOR_SYSTEM_PROMPT_V9,
     PRESERVE_DIAGNOSE_REPAIR_AUGMENT_POLICY,
@@ -143,7 +156,10 @@ def observation_payload(message: dict[str, str]) -> dict[str, object]:
     if message["role"] != "user":
         raise AssertionError("Canvas observation must be a user message")
     heading, separator, raw_payload = message["content"].partition("\n\n")
-    if not separator or not heading.startswith("Canvas observation."):
+    if not separator or not (
+        heading.startswith("Canvas observation.")
+        or heading.startswith("Historical Canvas public feedback.")
+    ):
         raise AssertionError("Canvas observation message has no JSON payload")
     payload = json.loads(raw_payload)
     if not isinstance(payload, dict):
@@ -199,8 +215,38 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
             director_system_prompt_for_version(HOTPOTQA_DIRECTOR_PROMPT_VERSION),
         )
         self.assertIs(
-            QA_DIRECTOR_SYSTEM_PROMPT_V1,
+            QA_DIRECTOR_SYSTEM_PROMPT_V6,
             director_system_prompt_for_version(QA_DIRECTOR_PROMPT_VERSION),
+        )
+        self.assertIs(
+            QA_DIRECTOR_SYSTEM_PROMPT_V5,
+            director_system_prompt_for_version(
+                LEGACY_QA_DIRECTOR_PROMPT_VERSION_V5
+            ),
+        )
+        self.assertIs(
+            QA_DIRECTOR_SYSTEM_PROMPT_V4,
+            director_system_prompt_for_version(
+                LEGACY_QA_DIRECTOR_PROMPT_VERSION_V4
+            ),
+        )
+        self.assertIs(
+            QA_DIRECTOR_SYSTEM_PROMPT_V3,
+            director_system_prompt_for_version(
+                LEGACY_QA_DIRECTOR_PROMPT_VERSION_V3
+            ),
+        )
+        self.assertIs(
+            QA_DIRECTOR_SYSTEM_PROMPT_V2,
+            director_system_prompt_for_version(
+                LEGACY_QA_DIRECTOR_PROMPT_VERSION_V2
+            ),
+        )
+        self.assertIs(
+            QA_DIRECTOR_SYSTEM_PROMPT_V1,
+            director_system_prompt_for_version(
+                "agentgraph.director.qa-semantic-recovery.v1"
+            ),
         )
         self.assertIs(
             HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V21,
@@ -304,8 +350,14 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
             "qa-retrieval",
             state["terminal_constraints"]["required_evidence_tool_id"],
         )
+        self.assertEqual(
+            "reasoner_or_direct_reasoner_predecessor",
+            state["semantic_lineage_constraints"][
+                "required_evidence_tool_owner"
+            ],
+        )
 
-    async def test_shared_qa_prompt_uses_same_canvas_policy_without_hotpot_name(self) -> None:
+    async def test_shared_qa_prompt_uses_neutral_live_canvas_policy(self) -> None:
         model_registry = registry()
         runtime = AgentRuntime(
             model_registry,
@@ -331,7 +383,7 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
 
         messages = transcript_messages(orchestrator.build_prompt(env, 0, ()))
         state = observation_payload(messages[-1])
-        self.assertEqual(QA_DIRECTOR_SYSTEM_PROMPT_V1, messages[0]["content"])
+        self.assertEqual(QA_DIRECTOR_SYSTEM_PROMPT_V6, messages[0]["content"])
         self.assertNotIn("For HotpotQA,", messages[0]["content"])
         self.assertEqual(
             QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
@@ -341,64 +393,50 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
             "qa-retrieval",
             state["terminal_constraints"]["required_evidence_tool_id"],
         )
-        self.assertEqual(
-            {
-                "semantic_answer_owner_role_family": "reasoner",
-                "required_evidence_tool_id": "qa-retrieval",
-                "required_evidence_tool_owner": (
-                    "reasoner_or_direct_reasoner_predecessor"
-                ),
-                "required_evidence_execution_mode": "react",
-                "verifier_execution_mode": "reasoning",
-                "formatter_execution_mode": "reasoning",
-                "required_direct_role_edges": [
-                    ["reasoner", "verifier"],
-                    ["verifier", "format"],
-                ],
-                "output_role_family": "format",
-                "formatter_original_question_visible": False,
-                "formatter_answer_reselection_allowed": False,
-                "semantic_answer_owner_count": 1,
-                "max_agents_per_add_subgraph": 3,
-                "output_agent_id_optional_until_lineage_complete": True,
-            },
-            state["semantic_lineage_constraints"],
-        )
-        self.assertIn("aligns the requested answer slot", messages[0]["content"])
-        self.assertIn("Exactly one Reasoner owns", messages[0]["content"])
-        self.assertIn("never selects or invents", messages[0]["content"])
-        self.assertIn("copies that candidate", messages[0]["content"])
-        self.assertIn("unexpectedly equal", messages[0]["content"])
-        self.assertIn("preserve -> diagnose -> repair -> augment", messages[0]["content"])
-        self.assertIn("action_target_domains", messages[0]["content"])
-        self.assertIn("resolves aliases and coreference", messages[0]["content"])
-        self.assertIn("failure_attribution", messages[0]["content"])
-        self.assertIn("Which-comparison returns", messages[0]["content"])
-        self.assertIn("who-question returns", messages[0]["content"])
-        self.assertIn(
-            "different provider",
-            messages[0]["content"],
-        )
-        self.assertIn("never reference a future Agent", messages[0]["content"])
-        self.assertIn(
-            "Every Agent declaration includes role_family, execution_mode, and allowed_tools",
-            messages[0]["content"],
-        )
-        self.assertIn(
-            "It uses execution_mode react and declares qa-retrieval",
-            messages[0]["content"],
-        )
-        self.assertIn(
-            "finish_admissibility.admissible is true, submit finish",
-            messages[0]["content"],
-        )
+        self.assertNotIn("semantic_lineage_constraints", state)
+        self.assertNotIn("optional_role_capabilities", state)
+        prompt = messages[0]["content"]
+        self.assertIn("admissible_action_types", prompt)
+        self.assertIn("action_target_domains", prompt)
+        self.assertIn("model_catalog", prompt)
+        self.assertIn("tool_catalog", prompt)
+        self.assertIn("ReAct is a bounded Tool-execution mode", prompt)
+        self.assertIn("requested relation", prompt)
+        self.assertIn("never invent either", prompt)
+        self.assertIn("Preserve valid evidence", prompt)
+        self.assertIn("typed failure attribution", prompt)
+        self.assertIn("finish_admissibility is present and admissible", prompt)
+        self.assertIn("Do not assume a fixed Agent count", prompt)
+        self.assertIn("retrieval recipe", prompt)
+        for fixed_recipe in (
+            "Exactly one Reasoner",
+            "The Verifier consumes only",
+            "The terminal Formatter consumes only",
+            "Reasoner--Verifier",
+            "An evidence_retriever produces",
+            "A reasoner binds",
+            "A verifier checks",
+            "A format Agent only copies",
+            "optional_role_capabilities",
+            "Which-comparison returns",
+            "who-question returns",
+            "spelling normalization",
+            "alias expansion",
+            "entity disambiguation",
+            "query rewriting",
+            "expand top-k",
+        ):
+            self.assertNotIn(fixed_recipe.casefold(), prompt.casefold())
         add_domain = state["action_target_domains"]["add_subgraph"]
         self.assertEqual(1, add_domain["min_new_agents"])
         self.assertEqual(3, add_domain["max_new_agents"])
         self.assertEqual([], add_domain["existing_agent_ids"])
         self.assertEqual([], add_domain["existing_agents"])
         self.assertIsNone(add_domain["current_output_agent_id"])
-        self.assertEqual("format", add_domain["output_role_family"])
+        self.assertEqual(
+            {"format", "output"},
+            set(add_domain["output_role_families"]),
+        )
         self.assertEqual(
             [
                 "agent_id",
@@ -425,6 +463,145 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("semantic_protocol", default_state)
         self.assertNotIn("semantic_lineage_constraints", default_state)
         self.assertNotIn("recovery_policy", default_state)
+
+    def test_shared_qa_system_prompt_is_workflow_neutral(self) -> None:
+        prompt = QA_DIRECTOR_SYSTEM_PROMPT_V4.casefold()
+        legacy_sentence = (
+            "These artifact contracts do not require a separate Retriever, a "
+            "fixed Agent count, a role order, or any particular edge or "
+            "topology; follow only the responsibilities and relations admitted "
+            "by the current state."
+        )
+        current_sentence = (
+            "Whether a semantic responsibility is currently required is "
+            "determined only by action_target_domains; do not infer a fixed "
+            "Agent count, role order, edge, topology, or retrieval recipe."
+        )
+
+        self.assertIn(legacy_sentence, QA_DIRECTOR_SYSTEM_PROMPT_V3)
+        self.assertNotIn(legacy_sentence, QA_DIRECTOR_SYSTEM_PROMPT_V4)
+        self.assertEqual(
+            QA_DIRECTOR_SYSTEM_PROMPT_V3.replace(
+                legacy_sentence,
+                current_sentence,
+            ),
+            QA_DIRECTOR_SYSTEM_PROMPT_V4,
+        )
+
+        self.assertIn("do not assume a fixed number or sequence", prompt)
+        self.assertIn("fixed graph topology", prompt)
+        self.assertIn("retrieval-strategy recipe", prompt)
+        self.assertIn(
+            "semantic responsibility is currently required is determined only "
+            "by action_target_domains",
+            prompt,
+        )
+        self.assertIn(
+            "do not infer a fixed agent count, role order, edge, topology, or "
+            "retrieval recipe",
+            prompt,
+        )
+        self.assertIn("non-destructive recovery", prompt)
+        self.assertIn("matching successful read tool receipt", prompt)
+        self.assertIn("a format agent only copies", prompt)
+        for prohibited in (
+            "exactly one reasoner",
+            "reasoner -> verifier",
+            "verifier -> format",
+            "evidence_retriever -> reasoner",
+            "do not require a separate retriever",
+            "linear workflow",
+            "chain workflow",
+            "required_direct_role_edges",
+            "semantic_answer_owner_count",
+            "preferred_actions",
+            "preferred_action_order",
+            "spelling normalization",
+            "alias expansion",
+            "entity disambiguation",
+            "query rewriting",
+            "expand top-k",
+            "lord of the flies",
+            "william golding",
+        ):
+            self.assertNotIn(prohibited, prompt)
+
+    async def test_shared_qa_complete_transcript_is_workflow_neutral(self) -> None:
+        model_registry = registry()
+        runtime = AgentRuntime(
+            model_registry,
+            FakeGateway(),
+            dataset_id="triviaqa",
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+        )
+        env = AgentWorkflowEnv(
+            model_registry,
+            runtime=runtime,
+            problem="Who wrote Lord of the Flies?",
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            recovery_policy=PRESERVE_DIAGNOSE_REPAIR_AUGMENT_POLICY,
+            required_evidence_tool_id="qa-retrieval",
+        )
+        orchestrator = AgentGraphOrchestrator(
+            model_registry,
+            ScriptedDirector([]),
+            prompt_version=QA_DIRECTOR_PROMPT_VERSION,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            recovery_policy=PRESERVE_DIAGNOSE_REPAIR_AUGMENT_POLICY,
+        )
+
+        complete_prompt = orchestrator.build_prompt(env, 0, ())
+        state = observation_payload(transcript_messages(complete_prompt)[-1])
+
+        self.assertIn("admissible_action_types", state)
+        self.assertIn("action_target_domains", state)
+        self.assertIn("finish_admissibility", state)
+        self.assertIn(
+            "responsible_constraint",
+            state["finish_admissibility"]["failure_attribution"],
+        )
+        self.assertNotIn("semantic_lineage_constraints", state)
+        self.assertNotIn("optional_role_capabilities", state)
+        self.assertEqual(
+            {"format", "output"},
+            set(
+                state["action_target_domains"]["add_subgraph"][
+                    "output_role_families"
+                ]
+            ),
+        )
+        for prohibited in (
+            "required_direct_role_edges",
+            "semantic_answer_owner_count",
+            "preferred_actions",
+            "preferred_action_order",
+            "preferred_repair",
+            "action_order",
+        ):
+            self.assertNotIn(prohibited, complete_prompt)
+
+        rejected = await env.step('{"action":"finish"}')
+        self.assertFalse(rejected.accepted)
+        continued_prompt = orchestrator.continue_prompt(
+            complete_prompt,
+            '{"action":"finish"}',
+            env,
+            (),
+        )
+        continued_state = observation_payload(
+            transcript_messages(continued_prompt)[-1]
+        )
+        self.assertIn("canvas_feedback", continued_state)
+        self.assertIn("recent_rejected_actions", continued_state)
+        for prohibited in (
+            "required_direct_role_edges",
+            "semantic_answer_owner_count",
+            "preferred_actions",
+            "preferred_action_order",
+            "preferred_repair",
+            "action_order",
+        ):
+            self.assertNotIn(prohibited, continued_prompt)
 
     async def test_rejected_qa_answer_precommit_is_not_replayed_to_director(self) -> None:
         model_registry = registry()
@@ -459,8 +636,8 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
                         "model_id": "qwen",
                         "contract": "Output ONLY the word 'Shirley'.",
                         "role_family": "reasoner",
-                        "allowed_tools": ["qa-retrieval"],
-                        "execution_mode": "react",
+                        "allowed_tools": [],
+                        "execution_mode": "reasoning",
                     }
                 ],
                 "relations": [],
@@ -867,7 +1044,9 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         ):
             self.assertNotIn(prohibited.casefold(), DIRECTOR_SYSTEM_PROMPT.casefold())
 
-    async def test_history_window_keeps_real_recent_message_pairs(self) -> None:
+    async def test_history_window_keeps_actions_and_full_prior_observations_for_neutral_v10(
+        self,
+    ) -> None:
         model_registry = registry()
         actions = [
             '{"action":"add_agent","agent_id":"source","model_id":"qwen","contract":"produce evidence"}',
@@ -878,7 +1057,7 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         client = ScriptedDirector(actions)
         env = AgentWorkflowEnv(model_registry, gateway=FakeGateway())
 
-        await AgentGraphOrchestrator(
+        result = await AgentGraphOrchestrator(
             model_registry,
             client,
             max_rounds=4,
@@ -894,6 +1073,220 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(actions[2], messages[4]["content"])
         self.assertNotIn(actions[0], [item["content"] for item in messages[2:]])
         self.assertNotIn("recent_canvas_history", client.prompts[3])
+        historical_state = observation_payload(messages[3])
+        current_state = observation_payload(messages[5])
+        self.assertIn("current_graph", historical_state)
+        self.assertIn("admissible_action_types", historical_state)
+        self.assertEqual(
+            result.turns[2].canvas_result.snapshot.graph.to_dict(),
+            current_state["current_graph"],
+        )
+        self.assertEqual(
+            list(env.allowed_action_types),
+            current_state["admissible_action_types"],
+        )
+
+    async def test_compact_history_preserves_failure_and_tool_receipts_exactly(
+        self,
+    ) -> None:
+        model_registry = registry()
+        runtime = AgentRuntime(
+            model_registry,
+            FakeGateway(),
+            dataset_id="triviaqa",
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+        )
+        env = AgentWorkflowEnv(
+            model_registry,
+            runtime=runtime,
+            problem="Who wrote Lord of the Flies?",
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            recovery_policy=PRESERVE_DIAGNOSE_REPAIR_AUGMENT_POLICY,
+            required_evidence_tool_id="qa-retrieval",
+        )
+        orchestrator = AgentGraphOrchestrator(
+            model_registry,
+            ScriptedDirector([]),
+            history_window=2,
+            prompt_version=QA_DIRECTOR_PROMPT_VERSION,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            recovery_policy=PRESERVE_DIAGNOSE_REPAIR_AUGMENT_POLICY,
+        )
+        initial_prompt = orchestrator.build_prompt(env, 0, ())
+        initial_messages = transcript_messages(initial_prompt)
+        canvas_feedback = (
+            'accepted modify_agent at revision 3; execution_error={'
+            '"failure_category":"tool_execution","retryability":"retryable",'
+            '"react_public_error_summary":{"successful_tool_receipt_count":2,'
+            '"successful_evidence_read_count":1,"last_public_error":"timeout"}}'
+        )
+        failure_attribution = {
+            "responsible_agent_id": "reasoner",
+            "responsible_constraint": "evidence_receipt_lineage",
+            "retryability": "retryable",
+        }
+        tool_receipts = [
+            {
+                "tool_id": "qa-retrieval",
+                "request_id": "receipt-1",
+                "result": {"passage": "public evidence"},
+            }
+        ]
+        historical_payload = {
+            "current_graph": {"large_stale_graph": "x" * 4000},
+            "topology_statistics": {"node_count": 8},
+            "admissible_action_types": ["modify_agent"],
+            "action_target_domains": {"modify_agent": "y" * 4000},
+            "terminal_constraints": {"explicit_finish_required": True},
+            "semantic_lineage_constraints": {"output_role_family": "format"},
+            "canvas_feedback": canvas_feedback,
+            "recent_rejected_actions": [
+                {
+                    "revision": 2,
+                    "action": "finish",
+                    "reason": "missing receipt",
+                }
+            ],
+            "finish_admissibility": {
+                "admissible": False,
+                "stage": "semantic_protocol",
+                "reason": "missing receipt-backed evidence lineage",
+                "issues": [{"code": "missing_receipt"}],
+                "failure_attribution": failure_attribution,
+                "recovery_state": {"large_duplicate_state": "z" * 4000},
+            },
+            "tool_receipts": tool_receipts,
+            "execution_receipt": {"executed_agent_ids": ["reasoner"]},
+        }
+        previous_prompt = encode_director_transcript(
+            (
+                initial_messages[0],
+                initial_messages[1],
+                {"role": "assistant", "content": '{"action":"modify_agent"}'},
+                {
+                    "role": "user",
+                    "content": orchestrator._observation_message(
+                        historical_payload
+                    ),
+                },
+            )
+        )
+        expected_current = orchestrator._canvas_observation(
+            env,
+            include_task_context=False,
+            skills=(),
+        )
+
+        continued = orchestrator.continue_prompt(
+            previous_prompt,
+            '{"action":"set_output","agent_id":"reasoner"}',
+            env,
+            (),
+        )
+
+        messages = transcript_messages(continued)
+        compact_history = observation_payload(messages[3])
+        current_state = observation_payload(messages[-1])
+        self.assertEqual(canvas_feedback, compact_history["canvas_feedback"])
+        self.assertEqual(tool_receipts, compact_history["tool_receipts"])
+        self.assertEqual(
+            {"executed_agent_ids": ["reasoner"]},
+            compact_history["execution_receipt"],
+        )
+        self.assertEqual(
+            failure_attribution,
+            compact_history["finish_admissibility"]["failure_attribution"],
+        )
+        self.assertEqual(
+            historical_payload["recent_rejected_actions"],
+            compact_history["recent_rejected_actions"],
+        )
+        self.assertNotIn("recovery_state", compact_history["finish_admissibility"])
+        for stale_key in (
+            "current_graph",
+            "topology_statistics",
+            "admissible_action_types",
+            "action_target_domains",
+            "terminal_constraints",
+            "semantic_lineage_constraints",
+        ):
+            self.assertNotIn(stale_key, compact_history)
+        self.assertEqual(expected_current, current_state)
+        self.assertEqual(
+            env.model_admissible_action_targets(),
+            current_state["action_target_domains"],
+        )
+
+    async def test_legacy_qa_v4_keeps_full_historical_observation(self) -> None:
+        model_registry = registry()
+        orchestrator = AgentGraphOrchestrator(
+            model_registry,
+            ScriptedDirector([]),
+            prompt_version=LEGACY_QA_DIRECTOR_PROMPT_VERSION_V4,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            recovery_policy=PRESERVE_DIAGNOSE_REPAIR_AUGMENT_POLICY,
+        )
+        messages = [
+            {"role": "system", "content": QA_DIRECTOR_SYSTEM_PROMPT_V4},
+            {"role": "user", "content": "task"},
+            {"role": "assistant", "content": '{"action":"finish"}'},
+            {
+                "role": "user",
+                "content": orchestrator._observation_message(
+                    {"current_graph": {"revision": 1}}
+                ),
+            },
+            {"role": "assistant", "content": '{"action":"finish"}'},
+            {
+                "role": "user",
+                "content": orchestrator._observation_message(
+                    {"current_graph": {"revision": 2}}
+                ),
+            },
+        ]
+
+        replay = orchestrator._compact_historical_messages(messages)
+
+        self.assertEqual(messages, replay)
+
+    async def test_legacy_qa_v5_keeps_compact_historical_observation(self) -> None:
+        model_registry = registry()
+        orchestrator = AgentGraphOrchestrator(
+            model_registry,
+            ScriptedDirector([]),
+            prompt_version=LEGACY_QA_DIRECTOR_PROMPT_VERSION_V5,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            recovery_policy=PRESERVE_DIAGNOSE_REPAIR_AUGMENT_POLICY,
+        )
+        messages = [
+            {"role": "system", "content": QA_DIRECTOR_SYSTEM_PROMPT_V5},
+            {"role": "user", "content": "task"},
+            {"role": "assistant", "content": '{"action":"finish"}'},
+            {
+                "role": "user",
+                "content": orchestrator._observation_message(
+                    {
+                        "current_graph": {"revision": 1},
+                        "canvas_feedback": "typed failure",
+                    }
+                ),
+            },
+            {"role": "assistant", "content": '{"action":"finish"}'},
+            {
+                "role": "user",
+                "content": orchestrator._observation_message(
+                    {"current_graph": {"revision": 2}}
+                ),
+            },
+        ]
+
+        replay = orchestrator._compact_historical_messages(messages)
+
+        historical = observation_payload(replay[3])
+        current = observation_payload(replay[-1])
+        self.assertEqual("typed failure", historical["canvas_feedback"])
+        self.assertNotIn("current_graph", historical)
+        self.assertEqual({"revision": 2}, current["current_graph"])
 
     async def test_catalog_order_is_decoupled_from_rollout_sampling_seed(self) -> None:
         model_registry = registry()
@@ -1017,6 +1410,58 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result.explicit_finish)
         self.assertEqual("max_rounds", result.termination_reason)
         self.assertEqual(1, len(result.turns))
+
+    async def test_verified_qa_empty_canvas_domain_is_natural_terminal(self) -> None:
+        model_registry = registry()
+        client = ScriptedDirector(
+            [
+                (
+                    '{"action":"add_subgraph","agents":['
+                    '{"agent_id":"solver","model_id":"qwen",'
+                    '"contract":"solve"}],"relations":[],'
+                    '"output_agent_id":"solver"}'
+                )
+            ]
+        )
+
+        class DeadEndAfterOneTurnEnv(AgentWorkflowEnv):
+            def model_admissible_action_types(self):
+                if self.history:
+                    return ()
+                return super().model_admissible_action_types()
+
+        env = DeadEndAfterOneTurnEnv(model_registry, gateway=FakeGateway())
+        result = await AgentGraphOrchestrator(
+            model_registry,
+            client,
+            max_rounds=3,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            sampling_action_profile=(
+                DIRECTOR_MODEL_ADMISSIBLE_ACTION_MASK_PROFILE
+            ),
+            sampling_action_schema_version=(
+                DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION
+            ),
+        ).run(env, "task")
+
+        self.assertEqual(1, len(client.prompts))
+        self.assertEqual(1, len(result.turns))
+        self.assertEqual("max_rounds", result.termination_reason)
+        self.assertFalse(result.explicit_finish)
+        self.assertIsNone(result.final_answer)
+        self.assertEqual(
+            "canvas_action_domain_exhausted",
+            result.terminal_canvas_diagnosis["public_error_code"],
+        )
+        self.assertEqual(
+            result.final_graph["revision"],
+            result.terminal_canvas_diagnosis["graph_revision"],
+        )
+        self.assertIn(
+            "finish_admissibility",
+            result.terminal_canvas_diagnosis,
+        )
+        self.assertIn("recovery_state", result.terminal_canvas_diagnosis)
 
     async def test_progressive_action_mask_switches_only_after_finish_admission(
         self,
@@ -1326,6 +1771,7 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
             {"enum": [["qa-retrieval"]]},
             reasoner_branch["properties"]["allowed_tools"],
         )
+
         self.assertEqual(
             {"enum": ["qwen", "other"]},
             reasoner_branch["properties"]["model_id"],
@@ -1542,6 +1988,18 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
             request["action_target_domain_version"],
         )
         self.assertEqual(
+            "agentgraph.live-action-target-domains.v7",
+            DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION,
+        )
+        initial_retriever_domain = env.model_admissible_action_targets()[
+            "add_subgraph"
+        ]["role_constraints"]["evidence_retriever"]
+        self.assertNotIn("contracts", initial_retriever_domain)
+        self.assertNotIn(
+            "completion_conditions",
+            initial_retriever_domain,
+        )
+        self.assertEqual(
             env.model_admissible_action_targets(),
             json.loads(request["action_target_domains_json"]),
         )
@@ -1549,6 +2007,95 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
             "admissible-v3:add_subgraph",
             request["action_schema_branch"],
         )
+
+    def test_role_conditional_qa_schema_preserves_execution_profile_pairs(
+        self,
+    ) -> None:
+        profiles = [
+            {"execution_mode": "reasoning", "allowed_tools": []},
+            {
+                "execution_mode": "react",
+                "allowed_tools": ["qa-retrieval"],
+            },
+        ]
+        domains = {
+            "add_subgraph": {
+                "min_new_agents": 1,
+                "max_new_agents": 1,
+                "existing_agent_ids": [],
+                "existing_agents": [],
+                "current_output_agent_id": None,
+                "output_role_families": ["format", "output"],
+                "semantic_protocol": QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+                "required_agent_fields": [
+                    "agent_id",
+                    "model_id",
+                    "contract",
+                    "role_family",
+                    "allowed_tools",
+                    "execution_mode",
+                ],
+                "model_ids": ["qwen"],
+                "registered_execution_profiles": profiles,
+                "role_constraints": {
+                    "output": {
+                        "execution_modes": ["reasoning", "react"],
+                        "allowed_tools": [[], ["qa-retrieval"]],
+                        "execution_profiles": profiles,
+                    }
+                },
+                "admitted_new_role_families": ["output"],
+                "endpoint_scope": {
+                    "relation_endpoint_sources": [
+                        "existing_agent_ids",
+                        "same_action_agent_ids",
+                    ],
+                    "output_agent_id_sources": [
+                        "existing_agent_ids",
+                        "same_action_agent_ids",
+                    ],
+                },
+            }
+        }
+
+        schema = json.loads(
+            director_live_add_subgraph_agent_declarations_json_schema_text(
+                domains
+            )
+        )
+        branches = schema["properties"]["agents"]["oneOf"][0][
+            "prefixItems"
+        ][0]["anyOf"]
+        sampled_profiles = {
+            (
+                branch["properties"]["execution_mode"]["const"],
+                tuple(branch["properties"]["allowed_tools"]["const"]),
+            )
+            for branch in branches
+        }
+        self.assertEqual(
+            {("reasoning", ()), ("react", ("qa-retrieval",))},
+            sampled_profiles,
+        )
+        with self.assertRaisesRegex(ValueError, "registered profile"):
+            director_live_add_subgraph_agent_declarations_from_text(
+                json.dumps(
+                    {
+                        "action": "add_subgraph",
+                        "agents": [
+                            {
+                                "agent_id": "node_1",
+                                "model_id": "qwen",
+                                "contract": "answer from public evidence",
+                                "role_family": "output",
+                                "allowed_tools": ["qa-retrieval"],
+                                "execution_mode": "reasoning",
+                            }
+                        ],
+                    }
+                ),
+                domains,
+            )
 
     def test_hotpotqa_v3_binds_semantic_relation_directions_and_format_output(
         self,
@@ -1787,6 +2334,12 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
                         "execution_modes": ["react"],
                         "allowed_tools": [["qa-retrieval"]],
                         "artifact_types": ["retrieval_evidence"],
+                        "contracts": [
+                            _QA_EVIDENCE_RETRIEVER_RECOVERY_CONTRACT
+                        ],
+                        "completion_conditions": [
+                            _QA_EVIDENCE_RETRIEVER_RECOVERY_COMPLETION
+                        ],
                     },
                     "reasoner": {
                         "execution_modes": ["react"],
@@ -1828,11 +2381,23 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
             {"enum": ["retrieval_evidence"]},
             agent_schema["properties"]["artifact_type"],
         )
+        self.assertEqual(
+            {"enum": [_QA_EVIDENCE_RETRIEVER_RECOVERY_CONTRACT]},
+            agent_schema["properties"]["contract"],
+        )
+        self.assertEqual(
+            {"enum": [_QA_EVIDENCE_RETRIEVER_RECOVERY_COMPLETION]},
+            agent_schema["properties"]["completion_condition"],
+        )
+        self.assertIn("completion_condition", agent_schema["required"])
 
         agent = {
             "agent_id": "node_1",
             "model_id": "qwen",
-            "contract": "continue evidence retrieval",
+            "contract": _QA_EVIDENCE_RETRIEVER_RECOVERY_CONTRACT,
+            "completion_condition": (
+                _QA_EVIDENCE_RETRIEVER_RECOVERY_COMPLETION
+            ),
             "role_family": "evidence_retriever",
             "allowed_tools": ["qa-retrieval"],
             "execution_mode": "react",
@@ -1856,6 +2421,40 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
                 domains,
             ),
         )
+        wrong_contract = {**agent, "contract": "continue evidence retrieval"}
+        with self.assertRaisesRegex(ValueError, "contract violates its role"):
+            director_live_add_subgraph_agent_declarations_from_text(
+                json.dumps(
+                    {"action": "add_subgraph", "agents": [wrong_contract]}
+                ),
+                domains,
+            )
+        wrong_completion = {
+            **agent,
+            "completion_condition": "return the best available answer",
+        }
+        with self.assertRaisesRegex(
+            ValueError,
+            "completion_condition violates its role",
+        ):
+            director_live_add_subgraph_agent_declarations_from_text(
+                json.dumps(
+                    {"action": "add_subgraph", "agents": [wrong_completion]}
+                ),
+                domains,
+            )
+        missing_completion = dict(agent)
+        missing_completion.pop("completion_condition")
+        with self.assertRaisesRegex(
+            ValueError,
+            "completion_condition violates its role",
+        ):
+            director_live_add_subgraph_agent_declarations_from_text(
+                json.dumps(
+                    {"action": "add_subgraph", "agents": [missing_completion]}
+                ),
+                domains,
+            )
         self.assertEqual(
             (),
             director_live_add_subgraph_relation_candidates(domains, [agent]),
@@ -1875,6 +2474,145 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
             {"type": "null"},
             final_schema["properties"]["output_agent_id"],
         )
+
+    def test_add_relation_candidates_are_prospectively_canvas_valid(
+        self,
+    ) -> None:
+        domains = {
+            "add_subgraph": {
+                "min_new_agents": 1,
+                "max_new_agents": 2,
+                "existing_agent_ids": ["node_1", "node_2"],
+                "existing_agents": [
+                    {"agent_id": "node_1", "role_family": "reasoner"},
+                    {"agent_id": "node_2", "role_family": "verifier"},
+                ],
+                "current_output_agent_id": None,
+                "output_role_family": "format",
+                "semantic_protocol": HOTPOTQA_SEMANTIC_PROTOCOL,
+                "required_agent_fields": [
+                    "agent_id",
+                    "model_id",
+                    "contract",
+                    "role_family",
+                    "allowed_tools",
+                    "execution_mode",
+                ],
+                "model_ids": ["qwen"],
+                "role_constraints": {
+                    "evidence_retriever": {
+                        "execution_modes": ["react"],
+                        "allowed_tools": [["qa-retrieval"]],
+                    },
+                    "reasoner": {
+                        "execution_modes": ["react"],
+                        "allowed_tools": [["qa-retrieval"]],
+                    },
+                    "verifier": {
+                        "execution_modes": ["reasoning"],
+                        "allowed_tools": [[]],
+                    },
+                },
+                "admitted_new_role_families": [
+                    "evidence_retriever",
+                    "reasoner",
+                ],
+                "endpoint_scope": {
+                    "relation_endpoint_sources": [
+                        "existing_agent_ids",
+                        "same_action_agent_ids",
+                    ],
+                    "output_agent_id_sources": [
+                        "existing_agent_ids",
+                        "same_action_agent_ids",
+                    ],
+                },
+            }
+        }
+        agents = [
+            {
+                "agent_id": "node_3",
+                "model_id": "qwen",
+                "contract": "retrieve evidence for the requested relation",
+                "role_family": "evidence_retriever",
+                "allowed_tools": ["qa-retrieval"],
+                "execution_mode": "react",
+            },
+            {
+                "agent_id": "node_4",
+                "model_id": "qwen",
+                "contract": "bind grounded evidence to the answer slot",
+                "role_family": "reasoner",
+                "allowed_tools": ["qa-retrieval"],
+                "execution_mode": "react",
+            },
+        ]
+
+        candidates = director_live_add_subgraph_relation_candidates(
+            domains,
+            agents,
+        )
+
+        self.assertFalse(
+            any(
+                {candidate["source_id"], candidate["target_id"]}
+                == {"node_1", "node_2"}
+                for candidate in candidates
+            ),
+            "ADD must not rewrite a relation between two existing Agents",
+        )
+        self.assertIn(
+            {
+                "source_id": "node_3",
+                "target_id": "node_1",
+                "source_to_target": True,
+                "target_to_source": False,
+            },
+            candidates,
+        )
+        self.assertNotIn(
+            {
+                "source_id": "node_1",
+                "target_id": "node_3",
+                "source_to_target": True,
+                "target_to_source": True,
+            },
+            candidates,
+            "ADD cannot prove a reciprocal new/existing edge executable",
+        )
+        self.assertIn(
+            {
+                "source_id": "node_3",
+                "target_id": "node_4",
+                "source_to_target": True,
+                "target_to_source": True,
+            },
+            candidates,
+            "a reciprocal pair declared wholly inside one ADD remains sampled",
+        )
+
+        schema = json.loads(
+            director_live_action_parameter_json_schema_text(
+                "add_subgraph",
+                domains,
+                add_agents=agents,
+            )
+        )
+        sampled_candidates = tuple(
+            {
+                key: branch["properties"][key]["const"]
+                for key in (
+                    "source_id",
+                    "target_id",
+                    "source_to_target",
+                    "target_to_source",
+                )
+            }
+            for branch in schema["properties"]["relations"]["items"][
+                "anyOf"
+            ]
+        )
+        self.assertEqual(candidates, sampled_candidates)
 
     async def test_model_admissible_v1_receipts_remain_replayable(self) -> None:
         model_registry = registry()

@@ -37,6 +37,7 @@ from .aime2026_adapter import (
     score_aime2026_integer,
 )
 from .records import TaskRecord
+from .task_dataset import verified_year_to_decade_normalization
 
 
 DEFAULT_RAGEN_ADAPTER_PATH = Path(
@@ -514,10 +515,26 @@ def _evaluate_static(
         accepted_token_sets = tuple(
             set(answer.split()) for answer in normalized_answers if answer
         )
-        if normalized_prediction and any(
+        question = _record_field(record, "question")
+        decade_alias_mismatch = any(
+            verified_year_to_decade_normalization(
+                original_question=question,
+                source_value=scored_prediction,
+                candidate_answer=answer,
+            )
+            or verified_year_to_decade_normalization(
+                original_question=question,
+                source_value=answer,
+                candidate_answer=scored_prediction,
+            )
+            for answer in answers
+        )
+        if decade_alias_mismatch or (
+            normalized_prediction and any(
             prediction_tokens < accepted_tokens
             or accepted_tokens < prediction_tokens
             for accepted_tokens in accepted_token_sets
+            )
         ):
             # Evaluation-only diagnosis: accepted answers never enter the
             # Director, Agent, retrieval query, or Tool observation.  Official

@@ -1545,6 +1545,16 @@ def _failure_type(
             # the official evaluator's final-answer diagnosis is partial
             # accepted-answer overlap.
             return "partial_answer_overlap"
+        if (
+            mismatch_type == "no_accepted_answer_overlap"
+            and graph_value.get("explicit_finish") is True
+        ):
+            # An accepted explicit FINISH is the final-state receipt that the
+            # evidence/semantic/Verifier/Formatter lineage passed admission.
+            # Earlier rejected retrieval attempts remain in the lossless
+            # trajectory for diagnosis, but cannot relabel this final
+            # evaluator mismatch as a retrieval failure.
+            return "reasoning_failure"
         diagnostic_payload = {
             "turns": [
                 {
@@ -1562,6 +1572,8 @@ def _failure_type(
             sort_keys=True,
             default=str,
         ).casefold()
+        if "retrieval_strategy_failure" in diagnostic_text:
+            return "retrieval_strategy_failure"
         if "knowledge_base_coverage_failure" in diagnostic_text:
             return "knowledge_base_coverage_failure"
         if any(
@@ -2264,6 +2276,9 @@ async def run_completion_benchmark_round(
             ),
             adapter_name=str(director["behavior_adapter_name"]),
         )
+        sglang_server_runtime = await asyncio.to_thread(
+            backend.publisher.server_runtime_receipt
+        )
         evaluator_preflight = await _run_evaluator_preflight(
             backend,
             config,
@@ -2272,6 +2287,7 @@ async def run_completion_benchmark_round(
         )
         preflight = {
             **dict(adapter_preflight),
+            "sglang_server_runtime": sglang_server_runtime,
             "evaluator_preflight": evaluator_preflight,
             "healthbench_judge_model": (
                 backend.judge_model
@@ -2281,6 +2297,10 @@ async def run_completion_benchmark_round(
             "healthbench_judge_receipt": judge_receipt,
             "swebench_harness_receipt": swebench_harness_receipt,
         }
+        manifest["runtime_resource"]["sglang_server_runtime"] = (
+            sglang_server_runtime
+        )
+        _write_json(paths["manifest"], manifest)
         _write_json(paths["preflight"], preflight)
     except Exception as exc:
         manifest.update(

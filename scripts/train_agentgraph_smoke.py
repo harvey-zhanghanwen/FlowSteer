@@ -44,6 +44,11 @@ from src.interactive.director import (
     DIRECTOR_SGLANG_SAMPLING_SCHEMA_VERSION,
     DIRECTOR_STATE_CONDITIONED_ACTION_SCHEMA_VERSION,
     HOTPOTQA_DIRECTOR_PROMPT_VERSION,
+    LEGACY_QA_DIRECTOR_PROMPT_VERSION_V1,
+    LEGACY_QA_DIRECTOR_PROMPT_VERSION_V2,
+    LEGACY_QA_DIRECTOR_PROMPT_VERSION_V3,
+    LEGACY_QA_DIRECTOR_PROMPT_VERSION_V4,
+    LEGACY_QA_DIRECTOR_PROMPT_VERSION_V5,
     QA_DIRECTOR_PROMPT_VERSION,
     decode_director_transcript,
     director_system_prompt_for_version,
@@ -394,6 +399,28 @@ def _dataset_key(task: TaskRecord) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"task {task.task_id!r} has no metadata.dataset_key")
     return value.strip()
+
+
+def _requires_format_agent(
+    graph_config: Mapping[str, Any],
+    *,
+    terminal_protocol: str,
+) -> bool:
+    """Resolve graph topology independently from terminal answer syntax.
+
+    Historical configurations coupled ``exact_single_answer_tag`` to a
+    dedicated Format Agent. New configurations may explicitly disable that
+    topology requirement while retaining the same terminal syntax.
+    """
+
+    configured = graph_config.get("require_format_agent")
+    if configured is None:
+        return terminal_protocol == "exact_single_answer_tag"
+    if type(configured) is not bool:
+        raise ConfigurationError(
+            "agent_graph.require_format_agent must be boolean when configured"
+        )
+    return configured
 
 
 def _workflow_problem(
@@ -1938,6 +1965,8 @@ class LiveSmokeBackend:
         *,
         condition_id: Optional[str] = None,
         semantic_protocol: str = "none",
+        sampling_base_seed: int | None = None,
+        sampling_coordinate: ScientificSamplingCoordinate | None = None,
     ) -> tuple[AgentRuntime, Any, Callable[[], None]]:
         """Build the task-scoped runtime selected by the frozen condition.
 
@@ -1952,6 +1981,40 @@ class LiveSmokeBackend:
         enabled branch gives the Director and AgentRuntime the exact same
         ToolRegistry instance.
         """
+
+        if (sampling_base_seed is None) != (sampling_coordinate is None):
+            raise ConfigurationError(
+                "sampling_base_seed and sampling_coordinate must be supplied together"
+            )
+        if sampling_base_seed is not None and (
+            type(sampling_base_seed) is not int
+            or not 0 <= sampling_base_seed < 2**64
+        ):
+            raise ConfigurationError(
+                "sampling_base_seed must be an unsigned 64-bit integer"
+            )
+        if sampling_coordinate is not None:
+            if not isinstance(
+                sampling_coordinate,
+                ScientificSamplingCoordinate,
+            ):
+                raise ConfigurationError(
+                    "sampling_coordinate must be a ScientificSamplingCoordinate"
+                )
+            if sampling_coordinate.task_id != task.task_id:
+                raise ConfigurationError(
+                    "sampling_coordinate task_id does not match the runtime task"
+                )
+            assert sampling_base_seed is not None
+            if (
+                sampling_coordinate.sampling_schedule_hash
+                != scientific_sampling_schedule_hash(
+                    base_seed=sampling_base_seed
+                )
+            ):
+                raise ConfigurationError(
+                    "sampling_coordinate schedule hash does not match sampling_base_seed"
+                )
 
         runtime_section_names = (
             "qa_tool_runtime",
@@ -2069,6 +2132,7 @@ class LiveSmokeBackend:
                 runtime = AgentRuntime(
                     self.registry,
                     self.runtime.gateway,
+                    timeout_seconds=self.runtime.timeout_seconds,
                     execution_adapters={"coding": adapter},
                     tool_registry=tool_registry,
                     dataset_id=source_key,
@@ -2099,6 +2163,7 @@ class LiveSmokeBackend:
             runtime = AgentRuntime(
                 self.registry,
                 self.runtime.gateway,
+                timeout_seconds=self.runtime.timeout_seconds,
                 execution_adapters={"react": adapter},
                 tool_registry=tool_registry,
                 dataset_id=source_key,
@@ -2133,6 +2198,7 @@ class LiveSmokeBackend:
                 runtime = AgentRuntime(
                     self.registry,
                     self.runtime.gateway,
+                    timeout_seconds=self.runtime.timeout_seconds,
                     execution_adapters={"react": adapter},
                     tool_registry=opened.registry,
                     dataset_id=source_key,
@@ -2173,6 +2239,7 @@ class LiveSmokeBackend:
             runtime = AgentRuntime(
                 self.registry,
                 self.runtime.gateway,
+                timeout_seconds=self.runtime.timeout_seconds,
                 execution_adapters={"react": resources.execution_adapter},
                 tool_registry=resources.tool_registry,
                 dataset_id=source_key,
@@ -2246,10 +2313,13 @@ class LiveSmokeBackend:
                 max_action_tokens=tool_action_tokens,
                 task_type=str(task_type),
                 completion_policy=str(qa_settings["completion_policy"]),
+                sampling_base_seed=sampling_base_seed,
+                sampling_coordinate=sampling_coordinate,
             )
             runtime = AgentRuntime(
                 self.registry,
                 self.runtime.gateway,
+                timeout_seconds=self.runtime.timeout_seconds,
                 execution_adapters={"react": adapter},
                 tool_registry=opened.registry,
                 dataset_id=source_key,
@@ -2278,6 +2348,16 @@ class LiveSmokeBackend:
         sync = _mapping(config["policy_sync"], "policy_sync")
         evaluation = _mapping(config["evaluation"], "evaluation")
         skills_config = _mapping(config["skills"], "skills")
+        execution_timeout = config.get("execution_timeout")
+        if (
+            isinstance(execution_timeout, bool)
+            or not isinstance(execution_timeout, (int, float))
+            or not 0.0 < float(execution_timeout) < float("inf")
+        ):
+            raise ConfigurationError(
+                "execution_timeout must be an explicit positive finite number"
+            )
+        execution_timeout_seconds = float(execution_timeout)
 
         catalog_path = _resolve(root, str(graph_config["model_catalog_path"]))
         if not catalog_path.is_file():
@@ -2428,8 +2508,15 @@ class LiveSmokeBackend:
             ),
         )
 
-        gateway = OpenAICompatibleGateway(default_seed=int(experiment["seed"]))
-        runtime = AgentRuntime(registry, gateway)
+        gateway = OpenAICompatibleGateway(
+            timeout_seconds=execution_timeout_seconds,
+            default_seed=int(experiment["seed"]),
+        )
+        runtime = AgentRuntime(
+            registry,
+            gateway,
+            timeout_seconds=execution_timeout_seconds,
+        )
         evidence_store = EvidenceStore(_resolve(root, str(storage["root"])))
         skill_pipeline: Optional[SkillEvidencePipeline] = None
         skill_epoch = int(skills_config.get("current_epoch", 0))
@@ -3088,11 +3175,19 @@ class LiveSmokeBackend:
             )
         if (
             semantic_protocol == "qa_verified_answer_lineage_v2"
-            and prompt_version != QA_DIRECTOR_PROMPT_VERSION
+            and prompt_version
+            not in {
+                LEGACY_QA_DIRECTOR_PROMPT_VERSION_V1,
+                LEGACY_QA_DIRECTOR_PROMPT_VERSION_V2,
+                LEGACY_QA_DIRECTOR_PROMPT_VERSION_V3,
+                LEGACY_QA_DIRECTOR_PROMPT_VERSION_V4,
+                LEGACY_QA_DIRECTOR_PROMPT_VERSION_V5,
+                QA_DIRECTOR_PROMPT_VERSION,
+            }
         ):
             raise ConfigurationError(
-                "qa_verified_answer_lineage_v2 requires the exact "
-                f"Director prompt {QA_DIRECTOR_PROMPT_VERSION}"
+                "qa_verified_answer_lineage_v2 requires a versioned shared QA "
+                "Director prompt"
             )
         try:
             director_system_prompt = director_system_prompt_for_version(
@@ -3138,6 +3233,8 @@ class LiveSmokeBackend:
             task,
             condition_id=resolved_condition_id,
             semantic_protocol=semantic_protocol,
+            sampling_base_seed=base_seed,
+            sampling_coordinate=sampling_coordinate,
         )
         try:
             environment_runtime_settings = _environment_runtime_settings(
@@ -3183,8 +3280,9 @@ class LiveSmokeBackend:
                 require_exact_answer_tag=(
                     terminal_protocol == "exact_single_answer_tag"
                 ),
-                require_format_agent=(
-                    terminal_protocol == "exact_single_answer_tag"
+                require_format_agent=_requires_format_agent(
+                    graph_config,
+                    terminal_protocol=terminal_protocol,
                 ),
                 required_tool_id=(
                     f"{_dataset_key(task)}.environment"

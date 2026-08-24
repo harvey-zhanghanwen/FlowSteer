@@ -1,0 +1,35 @@
+# Successor Executor catalog for unified_architecture_v2 r44+. Earlier
+# catalogs remain immutable because trajectory receipts are bound to them.
+# The exact previously probed MiniMax-M2.5 model ID returned an HTTP 403
+# permanent-configuration receipt in r43, so the frozen r44 catalog retains
+# only the available local Qwen3.5-9B Executor. No guessed provider alias or
+# unprobed replacement model is introduced.
+providers:
+  - provider_id: "local-director"
+    kind: "openai-compatible"
+    endpoint: "http://127.0.0.1:8015/v1"
+    max_concurrency: 32
+
+models:
+  - model_id: "qwen3.5-9b-local"
+    provider_id: "local-director"
+    model_name: "supervisor_theta"
+    selection_weight: 1.0
+    cheap_weight: 1.0
+    fast_weight: 1.0
+    context_window: 32768
+    metadata:
+      family: "qwen"
+      profile: "provider=local-director;locality=local;instruction=chat;context=32768;capabilities=text,structured-action,coding-format"
+      capability_canary: "passed_2026-08-20"
+      canary_source: "artifacts/model_capability_canary/local_qwen35_9b_nonthinking_20260820.json"
+      text_capable: "true"
+      tool_capable: "true"
+      tool_capability_scope: "flowsteer-structured-action"
+      coding_capable: "true"
+      coding_capability_scope: "structured-action-and-unified-diff-format"
+      chat_template_enable_thinking: "false"
+      sampling_backend: "sglang"
+      deployment_locality: "local"
+      supports_top_k: "true"
+      max_tokens: "4096"

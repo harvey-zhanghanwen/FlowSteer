@@ -60,7 +60,22 @@ LEGACY_DIRECTOR_PROMPT_VERSION_V8 = "agentgraph.director.minimal-neutral.v8"
 HOTPOTQA_DIRECTOR_PROMPT_VERSION = (
     "agentgraph.director.hotpotqa-semantic-recovery.v22"
 )
-QA_DIRECTOR_PROMPT_VERSION = "agentgraph.director.qa-semantic-recovery.v1"
+QA_DIRECTOR_PROMPT_VERSION = "agentgraph.director.qa-semantic-recovery.v6"
+LEGACY_QA_DIRECTOR_PROMPT_VERSION_V5 = (
+    "agentgraph.director.qa-semantic-recovery.v5"
+)
+LEGACY_QA_DIRECTOR_PROMPT_VERSION_V4 = (
+    "agentgraph.director.qa-semantic-recovery.v4"
+)
+LEGACY_QA_DIRECTOR_PROMPT_VERSION_V3 = (
+    "agentgraph.director.qa-semantic-recovery.v3"
+)
+LEGACY_QA_DIRECTOR_PROMPT_VERSION_V2 = (
+    "agentgraph.director.qa-semantic-recovery.v2"
+)
+LEGACY_QA_DIRECTOR_PROMPT_VERSION_V1 = (
+    "agentgraph.director.qa-semantic-recovery.v1"
+)
 LEGACY_HOTPOTQA_DIRECTOR_PROMPT_VERSION_V21 = (
     "agentgraph.director.hotpotqa-semantic-recovery.v21"
 )
@@ -102,6 +117,71 @@ _VERIFIED_QA_SEMANTIC_PROTOCOLS = frozenset(
 PRESERVE_DIAGNOSE_REPAIR_AUGMENT_POLICY = (
     "preserve_diagnose_repair_augment"
 )
+
+# The Env remains authoritative for terminal validation and the exact live
+# action mask.  These fields are useful internally and in the lossless
+# trajectory, but exposing them to the Director would turn measured state into
+# a fixed topology or action-order hint.  The Director instead receives the
+# responsible failure diagnosis plus ``admissible_action_types`` and
+# ``action_target_domains`` for the current revision.
+_DIRECTOR_OBSERVATION_PATTERN_KEYS = frozenset(
+    {
+        "required_direct_role_edges",
+        "semantic_answer_owner_count",
+        "preferred_actions",
+        "preferred_action_order",
+        "preferred_repair",
+        "action_order",
+    }
+)
+_DIRECTOR_FEEDBACK_JSON_MARKERS = (
+    "recovery_state=",
+    "execution_result=",
+    "execution_error=",
+)
+
+
+def _director_neutral_state_projection(value: Any) -> Any:
+    """Remove static workflow/action recipes from one model-visible value.
+
+    This projection changes neither Env state nor trajectory receipts.  It
+    retains measured failures, responsible Agents, preservation state and live
+    legal action domains, while withholding redundant prescriptive fields that
+    can bias the policy toward one terminal spine or repair sequence.
+    """
+
+    if isinstance(value, Mapping):
+        return {
+            key: _director_neutral_state_projection(item)
+            for key, item in value.items()
+            if key not in _DIRECTOR_OBSERVATION_PATTERN_KEYS
+        }
+    if isinstance(value, (list, tuple)):
+        return [_director_neutral_state_projection(item) for item in value]
+    return value
+
+
+def _director_neutral_feedback_projection(feedback: str) -> str:
+    """Project structured Env feedback without changing its public diagnosis."""
+
+    for marker in _DIRECTOR_FEEDBACK_JSON_MARKERS:
+        marker_index = feedback.find(marker)
+        if marker_index < 0:
+            continue
+        payload_index = marker_index + len(marker)
+        try:
+            structured = json.loads(feedback[payload_index:])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            # Unstructured typed feedback is already an observation rather than
+            # a workflow recipe, so preserve it verbatim.
+            return feedback
+        projected = _director_neutral_state_projection(structured)
+        return feedback[:payload_index] + json.dumps(
+            projected,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+    return feedback
 
 # This is an explicitly selected HotpotQA policy.  The neutral v10 prompt above
 # remains the default for every other dataset and for existing callers.
@@ -311,10 +391,77 @@ QA_DIRECTOR_SYSTEM_PROMPT_V1 = (
 )
 
 
+# NECESSARY_ADAPTATION: the shared QA policy is a thin specialization of
+# FlowSteer's progressive Canvas boundary and SkillFlow's compact Supervisor
+# instruction.  Task recipes (role counts/order, topology, and retrieval retry
+# strategies) are deliberately absent: the live Canvas action mask, Executor
+# Tool contract, and terminal semantic-lineage validator remain authoritative.
+QA_DIRECTOR_SYSTEM_PROMPT_V2 = """You are the Flow-Director. Incrementally edit the executable AgentGraph from the latest Canvas observation. Return exactly one valid JSON action each turn and no other text.
+
+Use only action types in the current admissible_action_types, targets and parameters in action_target_domains, model_id values in model_catalog, and exact tool_id values in tool_catalog. Follow the current constrained action schema. Each accepted Canvas edit is executed once, and its execution feedback appears in the next observation; inspect that live state before choosing the next action. role_family describes a semantic responsibility. execution_mode is reasoning, react, or coding. ReAct is not an Agent role; when a Tool is needed, it is the bounded Thought -> Action(tool) -> Observation -> Thought execution schedule.
+
+Keep every proposed contract faithful to the original question scope, entity identity, requested relation, qualifiers, answer slot, and answer cardinality. Before execution, do not predict, embed, or privilege a concrete candidate answer, alias, value, or evidence span, and do not narrow the question. Use only evidence and Tool receipts present in the Canvas observation or produced by execution; never invent either. Treat semantic_protocol, semantic_lineage_constraints, terminal_constraints, execution feedback, and finish_admissibility as authoritative live state.
+
+Recover in this order: preserve -> diagnose -> repair -> augment. Preserve valid evidence, semantic answers, verified artifacts, working relations, and Output identity. Diagnose the reported failure attribution and typed feedback. When admitted by the current action mask, repair the responsible execution mode, Tool contract, entity/relation binding, Agent contract, or communication edge before augmentation; augment only through an admitted action and role family. Delete only an Agent explicitly exposed as deletable after replacement takeover. Submit finish as soon as finish_admissibility is present and admissible.
+
+Do not assume a fixed number or sequence of semantic roles, a fixed graph topology, a fixed communication pattern, a benchmark-specific workflow template, a retrieval-strategy recipe, or an unlisted Skill. Never hard-code a sample, candidate answer, evidence span, Ground Truth, or evaluator result."""
+
+
+# v3 preserves v2 byte-for-byte for historical receipts and adds only
+# state-conditioned artifact responsibilities.  These are validity contracts
+# for a role *when the live Canvas admits or already contains that role*, not a
+# required node inventory, edge order, topology, or retrieval recipe.
+QA_DIRECTOR_SYSTEM_PROMPT_V3 = """You are the Flow-Director. Incrementally edit the executable AgentGraph from the latest Canvas observation. Return exactly one valid JSON action each turn and no other text.
+
+Use only action types in the current admissible_action_types, targets and parameters in action_target_domains, model_id values in model_catalog, and exact tool_id values in tool_catalog. Follow the current constrained action schema. Each accepted Canvas edit is executed once, and its execution feedback appears in the next observation; inspect that live state before choosing the next action. role_family describes a semantic responsibility. execution_mode is reasoning, react, or coding. ReAct is not an Agent role; when a Tool is needed, it is the bounded Thought -> Action(tool) -> Observation -> Thought -> Final execution schedule.
+
+Keep every proposed contract faithful to the original question scope, entity identity, requested relation, qualifiers, answer slot, and answer cardinality. Before execution, do not predict, embed, or privilege a concrete candidate answer, alias, value, or evidence span, and do not narrow the question. Use only evidence and Tool receipts present in the Canvas observation or produced by execution; never invent either. Treat semantic_protocol, semantic_lineage_constraints, terminal_constraints, execution feedback, and finish_admissibility as authoritative live state.
+
+Apply a semantic responsibility only when that role_family is already present or currently admitted by action_target_domains. An evidence_retriever produces answer-free evidence propositions grounded in a matching successful read Tool receipt; it does not choose an answer. A reasoner binds entity identity, the requested relation and answer slot to receipt-grounded evidence and produces the semantic candidate. A verifier checks entity consistency, evidence grounding, semantic scope and valid evidence lineage, preserves the identical candidate, and does not select a replacement. A format Agent only copies the verified candidate into the required output format; it does not retrieve, reason, verify, canonicalize, or reselect. These artifact contracts do not require a separate Retriever, a fixed Agent count, a role order, or any particular edge or topology; follow only the responsibilities and relations admitted by the current state.
+
+Use non-destructive recovery in this order: preserve -> diagnose -> repair -> augment. Preserve valid evidence, semantic answers, verified artifacts, working relations, and Output identity. Diagnose the reported failure attribution and typed feedback. When admitted by the current action mask, repair the responsible execution mode, Tool contract, entity/relation binding, Agent contract, or communication edge before augmentation; augment only through an admitted action and role family. Delete only an Agent explicitly exposed as deletable after replacement takeover. Submit finish as soon as finish_admissibility is present and admissible.
+
+Do not assume a fixed number or sequence of semantic roles, a fixed graph topology, a fixed communication pattern, a benchmark-specific workflow template, a retrieval-strategy recipe, or an unlisted Skill. Never hard-code a sample, candidate answer, evidence span, Ground Truth, or evaluator result."""
+
+
+# v4 preserves the v3 artifact contracts while removing the only sentence that
+# could be read as a static admission decision.  FlowSteer's live Canvas domain
+# remains the sole authority for whether a responsibility is currently needed.
+QA_DIRECTOR_SYSTEM_PROMPT_V4 = QA_DIRECTOR_SYSTEM_PROMPT_V3.replace(
+    "These artifact contracts do not require a separate Retriever, a fixed Agent count, a role order, or any particular edge or topology; follow only the responsibilities and relations admitted by the current state.",
+    "Whether a semantic responsibility is currently required is determined only by action_target_domains; do not infer a fixed Agent count, role order, edge, topology, or retrieval recipe.",
+)
+
+# v5 keeps the concise, topology-neutral v4 policy byte-for-byte.  The new
+# receipt version identifies the compact historical-observation transcript
+# policy; v4 remains available for exact replay of earlier experiments.
+QA_DIRECTOR_SYSTEM_PROMPT_V5 = QA_DIRECTOR_SYSTEM_PROMPT_V4
+
+
+# NECESSARY_ADAPTATION: SkillFlow's action guidance is deliberately compact,
+# while FlowSteer places the exact legal edit and execution-feedback boundary in
+# the current Canvas observation.  Keep semantic role contracts exclusively in
+# ``action_target_domains`` so the system instruction does not introduce a
+# canonical workflow prior.  v5 remains immutable for exact replay.
+QA_DIRECTOR_SYSTEM_PROMPT_V6 = """You are the Flow-Director. Incrementally edit the executable AgentGraph from the latest Canvas observation. Return exactly one valid JSON action each turn and no other text.
+
+Use only action types, targets and parameters in the current admissible_action_types and action_target_domains, model_id values in model_catalog, and exact tool_id values in tool_catalog. Follow the constrained action schema. Each accepted Canvas edit is executed once; inspect its public execution feedback before choosing the next action. ReAct is a bounded Tool-execution mode, not an Agent role.
+
+Keep contracts faithful to the original question scope, entity identity, requested relation, qualifiers, answer slot and cardinality. Before execution, do not embed or privilege a candidate answer, alias, value, evidence span or concrete Tool argument. Use only public evidence and Tool receipts produced by execution; never invent either.
+
+Preserve valid evidence, semantic artifacts, working relations and Output identity. Follow typed failure attribution and the current action domain when repairing or augmenting; delete only an Agent exposed as deletable after replacement takeover. Use finish only when finish_admissibility is present and admissible. Do not assume a fixed Agent count, role inventory or order, edge, topology, communication pattern, benchmark workflow, retrieval recipe or unlisted Skill."""
+
+
 def verified_qa_semantic_protocol(value: object) -> bool:
     """Return whether the shared evidence-lineage Canvas policy is active."""
 
     return value in _VERIFIED_QA_SEMANTIC_PROTOCOLS
+
+
+def role_conditional_qa_protocol(value: object) -> bool:
+    """Return whether QA role labels are optional Canvas capabilities."""
+
+    return value == QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL
 
 
 def director_system_prompt_for_version(prompt_version: str) -> str:
@@ -337,7 +484,12 @@ def director_system_prompt_for_version(prompt_version: str) -> str:
             LEGACY_DIRECTOR_SYSTEM_PROMPT_V8
         ),
         HOTPOTQA_DIRECTOR_PROMPT_VERSION: HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V22,
-        QA_DIRECTOR_PROMPT_VERSION: QA_DIRECTOR_SYSTEM_PROMPT_V1,
+        QA_DIRECTOR_PROMPT_VERSION: QA_DIRECTOR_SYSTEM_PROMPT_V6,
+        LEGACY_QA_DIRECTOR_PROMPT_VERSION_V5: QA_DIRECTOR_SYSTEM_PROMPT_V5,
+        LEGACY_QA_DIRECTOR_PROMPT_VERSION_V4: QA_DIRECTOR_SYSTEM_PROMPT_V4,
+        LEGACY_QA_DIRECTOR_PROMPT_VERSION_V3: QA_DIRECTOR_SYSTEM_PROMPT_V3,
+        LEGACY_QA_DIRECTOR_PROMPT_VERSION_V2: QA_DIRECTOR_SYSTEM_PROMPT_V2,
+        LEGACY_QA_DIRECTOR_PROMPT_VERSION_V1: QA_DIRECTOR_SYSTEM_PROMPT_V1,
         LEGACY_HOTPOTQA_DIRECTOR_PROMPT_VERSION_V21: (
             HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V21
         ),
@@ -395,6 +547,11 @@ _SUPPORTED_DIRECTOR_SYSTEM_PROMPTS = frozenset(
         HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V21,
         HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V22,
         QA_DIRECTOR_SYSTEM_PROMPT_V1,
+        QA_DIRECTOR_SYSTEM_PROMPT_V2,
+        QA_DIRECTOR_SYSTEM_PROMPT_V3,
+        QA_DIRECTOR_SYSTEM_PROMPT_V4,
+        QA_DIRECTOR_SYSTEM_PROMPT_V5,
+        QA_DIRECTOR_SYSTEM_PROMPT_V6,
         LEGACY_DIRECTOR_SYSTEM_PROMPT_V9,
         LEGACY_DIRECTOR_SYSTEM_PROMPT_V8,
     }
@@ -570,7 +727,7 @@ DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3 = (
     "agentgraph.model-admissible-action-mask.v3"
 )
 DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION = (
-    "agentgraph.live-action-target-domains.v6"
+    "agentgraph.live-action-target-domains.v7"
 )
 DIRECTOR_ACTION_JSON_SCHEMA_TEXT = json.dumps(
     DIRECTOR_ACTION_JSON_SCHEMA,
@@ -846,6 +1003,39 @@ def _live_string_domain(value: Any, *, label: str) -> tuple[str, ...]:
     return result
 
 
+def _live_execution_profiles(
+    value: Any,
+    *,
+    label: str,
+) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    if not isinstance(value, (list, tuple)) or not value:
+        raise ValueError(f"{label} must be a non-empty profile domain")
+    profiles: list[tuple[str, tuple[str, ...]]] = []
+    for raw_profile in value:
+        if not isinstance(raw_profile, Mapping) or set(raw_profile) != {
+            "execution_mode",
+            "allowed_tools",
+        }:
+            raise ValueError(f"{label} contains a malformed profile")
+        execution_mode = raw_profile.get("execution_mode")
+        allowed_tools = raw_profile.get("allowed_tools")
+        if (
+            execution_mode not in {"reasoning", "react", "coding"}
+            or not isinstance(allowed_tools, (list, tuple))
+            or any(
+                not isinstance(tool_id, str) or not tool_id
+                for tool_id in allowed_tools
+            )
+            or len(allowed_tools) != len(set(allowed_tools))
+        ):
+            raise ValueError(f"{label} contains an invalid profile")
+        profile = (execution_mode, tuple(allowed_tools))
+        if profile in profiles:
+            raise ValueError(f"{label} contains duplicate profiles")
+        profiles.append(profile)
+    return tuple(profiles)
+
+
 def _live_role_agent_schema(
     required_fields: Sequence[str],
     role_family: str,
@@ -853,6 +1043,8 @@ def _live_role_agent_schema(
     model_ids: Sequence[str],
     *,
     agent_id: Optional[str] = None,
+    execution_mode: Optional[str] = None,
+    allowed_tools: Optional[Sequence[str]] = None,
 ) -> Mapping[str, Any]:
     execution_modes = _live_string_domain(
         constraint.get("execution_modes"),
@@ -860,18 +1052,18 @@ def _live_role_agent_schema(
     )
     if any(mode not in {"reasoning", "react", "coding"} for mode in execution_modes):
         raise ValueError("live role constraint contains an unknown execution mode")
-    allowed_tools = constraint.get("allowed_tools")
+    raw_allowed_tools = constraint.get("allowed_tools")
     if (
-        not isinstance(allowed_tools, (list, tuple))
-        or not allowed_tools
+        not isinstance(raw_allowed_tools, (list, tuple))
+        or not raw_allowed_tools
         or any(
             not isinstance(tool_set, (list, tuple))
             or any(not isinstance(tool_id, str) or not tool_id for tool_id in tool_set)
-            for tool_set in allowed_tools
+            for tool_set in raw_allowed_tools
         )
     ):
         raise ValueError(f"{role_family}.allowed_tools must contain Tool-ID lists")
-    normalized_tool_sets = [list(tool_set) for tool_set in allowed_tools]
+    normalized_tool_sets = [list(tool_set) for tool_set in raw_allowed_tools]
     if len({json.dumps(item, separators=(",", ":")) for item in normalized_tool_sets}) != len(
         normalized_tool_sets
     ):
@@ -883,8 +1075,17 @@ def _live_role_agent_schema(
         properties["agent_id"] = {"const": agent_id}
     properties["model_id"] = {"enum": list(model_ids)}
     properties["role_family"] = {"const": role_family}
-    properties["execution_mode"] = {"enum": list(execution_modes)}
-    properties["allowed_tools"] = {"enum": normalized_tool_sets}
+    properties["execution_mode"] = (
+        {"const": execution_mode}
+        if execution_mode is not None
+        else {"enum": list(execution_modes)}
+    )
+    properties["allowed_tools"] = (
+        {"const": list(allowed_tools)}
+        if allowed_tools is not None
+        else {"enum": normalized_tool_sets}
+    )
+    role_required_fields = list(required_fields)
     raw_contracts = constraint.get("contracts")
     if raw_contracts is not None:
         properties["contract"] = {
@@ -895,6 +1096,18 @@ def _live_role_agent_schema(
                 )
             )
         }
+    raw_completion_conditions = constraint.get("completion_conditions")
+    if raw_completion_conditions is not None:
+        properties["completion_condition"] = {
+            "enum": list(
+                _live_string_domain(
+                    raw_completion_conditions,
+                    label=f"{role_family}.completion_conditions",
+                )
+            )
+        }
+        if "completion_condition" not in role_required_fields:
+            role_required_fields.append("completion_condition")
     raw_artifact_types = constraint.get("artifact_types")
     if raw_artifact_types is not None:
         properties["artifact_type"] = {
@@ -908,9 +1121,61 @@ def _live_role_agent_schema(
     return {
         "type": "object",
         "additionalProperties": False,
-        "required": list(required_fields),
+        "required": role_required_fields,
         "properties": properties,
     }
+
+
+def _live_role_agent_schema_branches(
+    required_fields: Sequence[str],
+    semantic_protocol: object,
+    role_family: str,
+    constraint: Mapping[str, Any],
+    model_ids: Sequence[str],
+    *,
+    agent_id: str,
+) -> tuple[Mapping[str, Any], ...]:
+    if not role_conditional_qa_protocol(semantic_protocol):
+        return (
+            _live_role_agent_schema(
+                required_fields,
+                role_family,
+                constraint,
+                model_ids,
+                agent_id=agent_id,
+            ),
+        )
+    profiles = _live_execution_profiles(
+        constraint.get("execution_profiles"),
+        label=f"{role_family}.execution_profiles",
+    )
+    execution_modes = _live_string_domain(
+        constraint.get("execution_modes"),
+        label=f"{role_family}.execution_modes",
+    )
+    raw_tool_sets = constraint.get("allowed_tools")
+    if not isinstance(raw_tool_sets, (list, tuple)) or not raw_tool_sets:
+        raise ValueError(f"{role_family}.allowed_tools is missing")
+    tool_sets = tuple(tuple(tool_ids) for tool_ids in raw_tool_sets)
+    if (
+        set(execution_modes) != {mode for mode, _ in profiles}
+        or set(tool_sets) != {tool_ids for _, tool_ids in profiles}
+    ):
+        raise ValueError(
+            f"{role_family} execution profile marginals are inconsistent"
+        )
+    return tuple(
+        _live_role_agent_schema(
+            required_fields,
+            role_family,
+            constraint,
+            model_ids,
+            agent_id=agent_id,
+            execution_mode=mode,
+            allowed_tools=tool_ids,
+        )
+        for mode, tool_ids in profiles
+    )
 
 
 def _live_new_agent_ids(
@@ -1029,8 +1294,17 @@ def _live_hotpotqa_output_domain(
 ) -> Optional[str]:
     """Validate the revision-local HotpotQA Output ownership receipt."""
 
-    if domain.get("output_role_family") != "format":
-        raise ValueError("add_subgraph HotpotQA Output role domain is invalid")
+    if role_conditional_qa_protocol(domain.get("semantic_protocol")):
+        allowed_output_roles = _live_string_domain(
+            domain.get("output_role_families"),
+            label="add_subgraph.output_role_families",
+        )
+        if set(allowed_output_roles) != {"format", "output"}:
+            raise ValueError("add_subgraph QA Output role domain is invalid")
+    else:
+        if domain.get("output_role_family") != "format":
+            raise ValueError("add_subgraph HotpotQA Output role domain is invalid")
+        allowed_output_roles = ("format",)
     if "current_output_agent_id" not in domain:
         raise ValueError("add_subgraph HotpotQA current Output receipt is missing")
     current_output = domain.get("current_output_agent_id")
@@ -1039,24 +1313,45 @@ def _live_hotpotqa_output_domain(
     if (
         not isinstance(current_output, str)
         or current_output not in roles
-        or roles[current_output] != "format"
+        or roles[current_output] not in allowed_output_roles
     ):
         raise ValueError("add_subgraph HotpotQA current Output receipt is invalid")
     return current_output
 
 
+def _live_output_role_families(
+    domain: Mapping[str, Any],
+) -> tuple[str, ...]:
+    if role_conditional_qa_protocol(domain.get("semantic_protocol")):
+        return _live_string_domain(
+            domain.get("output_role_families"),
+            label="add_subgraph.output_role_families",
+        )
+    return ("format",)
+
+
 def _hotpotqa_directed_role_relation_allowed(
     source_role: str,
     target_role: str,
+    *,
+    role_conditional: bool = False,
 ) -> bool:
     """Mirror the incremental HotpotQA semantic-edge validator."""
 
-    if source_role == "format":
+    if source_role in ({"format", "output"} if role_conditional else {"format"}):
         return False
     if target_role == "verifier":
-        return source_role == "reasoner"
+        return (
+            source_role not in {"evidence_retriever", "format", "output"}
+            if role_conditional
+            else source_role == "reasoner"
+        )
     if target_role == "format":
-        return source_role == "verifier"
+        return (
+            source_role not in {"evidence_retriever", "format", "output"}
+            if role_conditional
+            else source_role == "verifier"
+        )
     return True
 
 
@@ -1149,6 +1444,29 @@ def director_live_add_subgraph_agent_declarations_json_schema_text(
     role_constraints = domain.get("role_constraints")
     if not isinstance(role_constraints, Mapping) or not role_constraints:
         raise ValueError("add_subgraph role constraints are missing")
+    if role_conditional_qa_protocol(domain.get("semantic_protocol")):
+        registered_profiles = set(
+            _live_execution_profiles(
+                domain.get("registered_execution_profiles"),
+                label="add_subgraph.registered_execution_profiles",
+            )
+        )
+        for role_family, constraint in role_constraints.items():
+            if not isinstance(role_family, str) or not isinstance(
+                constraint,
+                Mapping,
+            ):
+                raise ValueError("add_subgraph role constraints are malformed")
+            role_profiles = set(
+                _live_execution_profiles(
+                    constraint.get("execution_profiles"),
+                    label=f"{role_family}.execution_profiles",
+                )
+            )
+            if not role_profiles <= registered_profiles:
+                raise ValueError(
+                    f"{role_family} exposes an unregistered execution profile"
+                )
     admitted_new_roles = _live_admitted_new_role_families(
         domain,
         role_constraints,
@@ -1199,19 +1517,21 @@ def director_live_add_subgraph_agent_declarations_json_schema_text(
             )
         )
         role_branches = [
-            _live_role_agent_schema(
+            branch
+            for role_family, constraint in admitted_roles
+            if isinstance(role_family, str)
+            and role_family
+            and isinstance(constraint, Mapping)
+            for branch in _live_role_agent_schema_branches(
                 required_fields,
+                domain.get("semantic_protocol"),
                 role_family,
                 constraint,
                 model_ids,
                 agent_id=agent_id,
             )
-            for role_family, constraint in admitted_roles
-            if isinstance(role_family, str)
-            and role_family
-            and isinstance(constraint, Mapping)
         ]
-        if len(role_branches) != len(admitted_roles):
+        if not role_branches:
             raise ValueError("add_subgraph role constraints are malformed")
         positional_agent_schemas.append({"anyOf": role_branches})
     admitted_counts = (
@@ -1475,6 +1795,18 @@ def _live_add_subgraph_agents(
             label=f"{role_family}.contracts",
         ):
             raise ValueError("add_subgraph Agent contract violates its role")
+        completion_condition_domain = constraint.get("completion_conditions")
+        if (
+            completion_condition_domain is not None
+            and agent.get("completion_condition")
+            not in _live_string_domain(
+                completion_condition_domain,
+                label=f"{role_family}.completion_conditions",
+            )
+        ):
+            raise ValueError(
+                "add_subgraph Agent completion_condition violates its role"
+            )
         artifact_type_domain = constraint.get("artifact_types")
         if (
             artifact_type_domain is not None
@@ -1497,6 +1829,16 @@ def _live_add_subgraph_agents(
             raise ValueError("add_subgraph Agent Tool set violates its role")
         if any(tool_id != tool_id.strip() for tool_id in allowed_tools):
             raise ValueError("add_subgraph Agent Tool IDs must be canonical")
+        if role_conditional_qa_protocol(domain.get("semantic_protocol")):
+            execution_profiles = _live_execution_profiles(
+                constraint.get("execution_profiles"),
+                label=f"{role_family}.execution_profiles",
+            )
+            if (execution_mode, tuple(allowed_tools)) not in execution_profiles:
+                raise ValueError(
+                    "add_subgraph Agent execution mode and Tool set do not "
+                    "form one registered profile"
+                )
         for optional_text in ("artifact_type", "completion_condition"):
             value = agent.get(optional_text)
             if value is not None and (
@@ -1529,16 +1871,25 @@ def director_live_add_subgraph_relation_candidates(
     action_target_domains: Mapping[str, Any],
     agents: Sequence[Mapping[str, Any]],
 ) -> tuple[dict[str, Any], ...]:
-    """Project exact role-valid relation encodings for one sampled subgraph.
+    """Project exact role- and Canvas-valid relations for one sampled subgraph.
 
     The HotpotQA Canvas remains authoritative.  This projection applies its
     incremental role-edge validator and the user-required semantic dataflow
-    order (Retriever/Repair -> Reasoner -> Verifier -> Formatter).  A reverse
-    feedback edge remains available through a reciprocal relation when both
-    directed edges are legal.  A one-way relation is always encoded as its
-    actual sender ``source_id`` to receiver ``target_id`` with ``(true,false)``
-    instead of the directionally equivalent but ambiguous ``(false,true)``.
-    No relation is required, so the Director still selects the graph topology.
+    order (Retriever/Repair -> Reasoner -> Verifier -> Formatter).  ADD may
+    only describe a relation incident to an Agent declared by that same
+    transaction; edits between two existing Canvas Agents belong to the live
+    ``set_relation`` domain.  Because the final ADD schema admits at most one
+    relation, a one-way edge incident to a new Agent cannot introduce a cycle.
+    A reciprocal edge is exposed here only between two Agents from this same
+    transaction: making a new Agent reciprocal with an existing Agent could
+    enlarge an already reciprocal Canvas block beyond its executable two-Agent
+    bound, which cannot be decided from role metadata alone.  The subsequent
+    Canvas-validated ``set_relation`` domain may still make that edge
+    reciprocal after execution feedback.  A one-way relation is always encoded
+    as its actual sender ``source_id`` to receiver ``target_id`` with
+    ``(true,false)`` instead of the directionally equivalent but ambiguous
+    ``(false,true)``.  No relation is required, so the Director still selects
+    the graph topology.
     """
 
     normalized_agents = _live_add_subgraph_agents(
@@ -1554,32 +1905,56 @@ def director_live_add_subgraph_relation_candidates(
     roles = _live_existing_agent_roles(domain, role_constraints)
     for agent in normalized_agents:
         roles[agent["agent_id"]] = agent["role_family"]
+    same_action_agent_ids = {
+        agent["agent_id"] for agent in normalized_agents
+    }
     endpoint_ids = [*domain["existing_agent_ids"]]
     endpoint_ids.extend(agent["agent_id"] for agent in normalized_agents)
     candidates: list[dict[str, Any]] = []
-    semantic_dataflow_pairs = {
-        ("evidence_retriever", "reasoner"),
-        ("repair", "reasoner"),
-        ("reasoner", "verifier"),
-        ("verifier", "format"),
-    }
+    role_conditional = role_conditional_qa_protocol(
+        domain.get("semantic_protocol")
+    )
+    semantic_dataflow_pairs = (
+        set()
+        if role_conditional
+        else {
+            ("evidence_retriever", "reasoner"),
+            ("repair", "reasoner"),
+            ("reasoner", "verifier"),
+            ("verifier", "format"),
+        }
+    )
     for source_index, source_id in enumerate(endpoint_ids):
         for target_id in endpoint_ids[source_index + 1 :]:
+            if (
+                source_id not in same_action_agent_ids
+                and target_id not in same_action_agent_ids
+            ):
+                # ADD creates one functional subgraph.  Rewriting a relation
+                # solely between existing Agents is a SET_RELATION operation
+                # and may otherwise expose a no-op or a Canvas-illegal edit.
+                continue
             source_role = roles[source_id]
             target_role = roles[target_id]
             source_to_target = _hotpotqa_directed_role_relation_allowed(
                 source_role,
                 target_role,
+                role_conditional=role_conditional,
             )
             target_to_source = _hotpotqa_directed_role_relation_allowed(
                 target_role,
                 source_role,
+                role_conditional=role_conditional,
             )
             forward_is_source_to_target = (source_role, target_role) in (
                 semantic_dataflow_pairs
             )
             forward_is_target_to_source = (target_role, source_role) in (
                 semantic_dataflow_pairs
+            )
+            reciprocal_is_prospectively_safe = (
+                source_id in same_action_agent_ids
+                and target_id in same_action_agent_ids
             )
             if forward_is_source_to_target or forward_is_target_to_source:
                 if forward_is_source_to_target and source_to_target:
@@ -1597,7 +1972,11 @@ def director_live_add_subgraph_relation_candidates(
                             "target_to_source": False,
                         }
                     )
-                if source_to_target and target_to_source:
+                if (
+                    reciprocal_is_prospectively_safe
+                    and source_to_target
+                    and target_to_source
+                ):
                     candidates.append(
                         {
                             "source_id": source_id,
@@ -1625,7 +2004,11 @@ def director_live_add_subgraph_relation_candidates(
                         "target_to_source": False,
                     }
                 )
-            if source_to_target and target_to_source:
+            if (
+                reciprocal_is_prospectively_safe
+                and source_to_target
+                and target_to_source
+            ):
                 candidates.append(
                     {
                         "source_id": source_id,
@@ -1898,22 +2281,35 @@ def director_live_action_parameter_json_schema_text(
                     for agent in normalized_agents
                 }
             )
-            format_ids = [
+            output_role_families = set(_live_output_role_families(domain))
+            output_ids = [
                 agent_id
                 for agent_id in endpoint_ids
-                if roles[agent_id] == "format"
+                if roles[agent_id] in output_role_families
+            ]
+            selected_format_ids = [
+                agent["agent_id"]
+                for agent in normalized_agents
+                if agent["role_family"] == "format"
             ]
             schema["properties"]["output_agent_id"] = (
                 {"type": "null"}
                 if isolated_boundary or current_output_agent_id is not None
+                else {"const": selected_format_ids[0]}
+                if (
+                    role_conditional_qa_protocol(
+                        domain.get("semantic_protocol")
+                    )
+                    and len(selected_format_ids) == 1
+                )
                 else
                 {
                     "anyOf": [
-                        {"enum": format_ids},
+                        {"enum": output_ids},
                         {"type": "null"},
                     ]
                 }
-                if format_ids
+                if output_ids
                 else {"type": "null"}
             )
         else:
@@ -2170,6 +2566,33 @@ def director_actions_from_admissible_schema_branch(
 
 DIRECTOR_TRANSCRIPT_SCHEMA = "flowsteer.director.transcript.v1"
 DIRECTOR_TRANSCRIPT_HEADER = "Flow-Director chat transcript"
+_HISTORICAL_CANVAS_OBSERVATION_HEADING = (
+    "Historical Canvas public feedback. The final user message contains the "
+    "current live state and legal action domain."
+)
+_HISTORICAL_PUBLIC_FEEDBACK_KEYS = (
+    "canvas_feedback",
+    "recent_rejected_actions",
+    "structural_issues",
+    "terminal_format_issue",
+)
+_HISTORICAL_FINISH_DIAGNOSTIC_KEYS = (
+    "admissible",
+    "stage",
+    "reason",
+    "issues",
+    "failure_attribution",
+    "semantic_lineage_diagnostic",
+    "graph_revision",
+    "submission_semantics",
+)
+_HISTORICAL_RECEIPT_DIAGNOSTIC_MARKERS = (
+    "receipt",
+    "feedback",
+    "failure",
+    "error",
+    "issue",
+)
 
 
 def encode_director_transcript(
@@ -2438,6 +2861,7 @@ class OrchestrationResult:
     valid_lineage_fallback_receipt: Mapping[str, Any] = field(
         default_factory=dict
     )
+    terminal_canvas_diagnosis: Mapping[str, Any] = field(default_factory=dict)
 
 
 class AgentGraphOrchestrator:
@@ -2612,6 +3036,34 @@ class AgentGraphOrchestrator:
             "action_schema_branch": action_branch,
         }
 
+    def terminal_canvas_diagnosis(
+        self,
+        env: AgentWorkflowEnv,
+    ) -> Optional[Mapping[str, Any]]:
+        """Return the typed natural terminal for an exhausted verified-QA Canvas.
+
+        FlowSteer's bounded Canvas stops when no legal edit remains; it does not
+        ask the policy to sample outside the live action domain.  Preserve that
+        boundary for verified QA without synthesizing a FINISH action or a
+        policy turn.  The projection contains only public environment state and
+        is computed before evaluation.
+        """
+
+        if not verified_qa_semantic_protocol(self.semantic_protocol):
+            return None
+        if env.model_admissible_action_types():
+            return None
+        return {
+            "public_error_code": "canvas_action_domain_exhausted",
+            "graph_revision": env.graph.revision,
+            "finish_admissibility": _director_neutral_state_projection(
+                env.finish_admissibility()
+            ),
+            "recovery_state": _director_neutral_state_projection(
+                env.recovery_state()
+            ),
+        }
+
     def generation_seed(self, round_index: int) -> int:
         """Return the exact Director action seed for one zero-based Canvas round."""
 
@@ -2711,7 +3163,9 @@ class AgentGraphOrchestrator:
         payload: dict[str, Any] = {
             "current_graph": env.graph.to_dict(),
             "topology_statistics": env.graph.topology_statistics(),
-            "canvas_feedback": snapshot.last_feedback,
+            "canvas_feedback": _director_neutral_feedback_projection(
+                snapshot.last_feedback
+            ),
             "admissible_action_types": list(
                 env.model_admissible_action_types()
                 if verified_qa_semantic_protocol(self.semantic_protocol)
@@ -2744,7 +3198,9 @@ class AgentGraphOrchestrator:
                         "source_id": action_value.get("source_id"),
                         "target_id": action_value.get("target_id"),
                     }
-                reason = " ".join(entry.feedback.split())
+                reason = " ".join(
+                    _director_neutral_feedback_projection(entry.feedback).split()
+                )
                 recent_rejections.append(
                     {
                         "revision": entry.revision,
@@ -2770,26 +3226,30 @@ class AgentGraphOrchestrator:
             )
         if self.semantic_protocol != "none":
             payload["semantic_protocol"] = self.semantic_protocol
-            payload["semantic_lineage_constraints"] = {
-                "semantic_answer_owner_role_family": "reasoner",
-                "required_evidence_tool_id": env.required_evidence_tool_id,
-                "required_evidence_tool_owner": (
-                    "reasoner_or_direct_reasoner_predecessor"
-                ),
-                "required_evidence_execution_mode": "react",
-                "verifier_execution_mode": "reasoning",
-                "formatter_execution_mode": "reasoning",
-                "required_direct_role_edges": [
-                    ["reasoner", "verifier"],
-                    ["verifier", "format"],
-                ],
-                "output_role_family": "format",
-                "formatter_original_question_visible": False,
-                "formatter_answer_reselection_allowed": False,
-                "semantic_answer_owner_count": 1,
-                "max_agents_per_add_subgraph": env.max_agents_per_subgraph,
-                "output_agent_id_optional_until_lineage_complete": True,
-            }
+            if role_conditional_qa_protocol(self.semantic_protocol):
+                # The exact currently legal role families, execution profiles
+                # and their constraints already live in action_target_domains.
+                # Do not duplicate a canonical role inventory or workflow hint
+                # in the general observation payload.
+                pass
+            else:
+                payload["semantic_lineage_constraints"] = {
+                    "semantic_answer_owner_role_family": "reasoner",
+                    "required_evidence_tool_id": env.required_evidence_tool_id,
+                    "required_evidence_tool_owner": (
+                        "direct_evidence_retriever_predecessor"
+                        if env.runtime.dataset_id == "triviaqa"
+                        else "reasoner_or_direct_reasoner_predecessor"
+                    ),
+                    "required_evidence_execution_mode": "react",
+                    "verifier_execution_mode": "reasoning",
+                    "formatter_execution_mode": "reasoning",
+                    "output_role_family": "format",
+                    "formatter_original_question_visible": False,
+                    "formatter_answer_reselection_allowed": False,
+                    "max_agents_per_add_subgraph": env.max_agents_per_subgraph,
+                    "output_agent_id_optional_until_lineage_complete": True,
+                }
         if self.recovery_policy != "default":
             payload["recovery_policy"] = self.recovery_policy
         if directed_edges:
@@ -2815,7 +3275,9 @@ class AgentGraphOrchestrator:
         # Director repairs the responsible semantic node instead of probing
         # FINISH or repeatedly modifying the Formatter.
         if verified_qa_semantic_protocol(self.semantic_protocol):
-            payload["finish_admissibility"] = env.finish_admissibility()
+            payload["finish_admissibility"] = _director_neutral_state_projection(
+                env.finish_admissibility()
+            )
         else:
             finish_admissibility = env.finish_admissibility()
             if finish_admissibility.get("admissible") is True:
@@ -2863,6 +3325,95 @@ class AgentGraphOrchestrator:
                 separators=(",", ":"),
             )
         )
+
+    @staticmethod
+    def _historical_canvas_observation(
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Keep one prior Action's public feedback without stale live state.
+
+        The final user message remains the sole source of the current graph and
+        exact legal action domain.  Historical messages retain failure and Tool
+        receipts verbatim so the sampled assistant Action is still paired with
+        its real public Observation, as in SkillFlow's Action--Observation
+        history boundary.
+        """
+
+        historical = {
+            key: payload[key]
+            for key in _HISTORICAL_PUBLIC_FEEDBACK_KEYS
+            if key in payload
+        }
+        finish_admissibility = payload.get("finish_admissibility")
+        if isinstance(finish_admissibility, Mapping):
+            historical["finish_admissibility"] = {
+                key: finish_admissibility[key]
+                for key in _HISTORICAL_FINISH_DIAGNOSTIC_KEYS
+                if key in finish_admissibility
+            }
+        for key, value in payload.items():
+            normalized_key = key.casefold()
+            if any(
+                marker in normalized_key
+                for marker in _HISTORICAL_RECEIPT_DIAGNOSTIC_MARKERS
+            ):
+                historical.setdefault(key, value)
+        return historical
+
+    @classmethod
+    def _historical_observation_message(cls, content: str) -> str:
+        """Project one canonical Canvas message to compact public feedback."""
+
+        heading, separator, raw_payload = content.partition("\n\n")
+        if not separator or not (
+            heading.startswith("Canvas observation.")
+            or heading == _HISTORICAL_CANVAS_OBSERVATION_HEADING
+        ):
+            return content
+        try:
+            payload = json.loads(raw_payload)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return content
+        if not isinstance(payload, Mapping):
+            return content
+        return _HISTORICAL_CANVAS_OBSERVATION_HEADING + "\n\n" + json.dumps(
+            cls._historical_canvas_observation(payload),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    def _compact_historical_messages(
+        self,
+        messages: Sequence[Mapping[str, str]],
+    ) -> list[dict[str, str]]:
+        """Apply the versioned compact-history policy to prior observations."""
+
+        copied = [dict(message) for message in messages]
+        if self.prompt_version not in {
+            LEGACY_QA_DIRECTOR_PROMPT_VERSION_V5,
+            QA_DIRECTOR_PROMPT_VERSION,
+        }:
+            return copied
+        return self._compact_qa_historical_messages(copied)
+
+    @classmethod
+    def _compact_qa_historical_messages(
+        cls,
+        messages: Sequence[Mapping[str, str]],
+    ) -> list[dict[str, str]]:
+        """Compact prior QA observations while leaving the latest one exact."""
+
+        compacted = [dict(message) for message in messages]
+        # Index one is immutable task/catalog context (P0).  The final message
+        # is the exact current Canvas observation and must never be projected.
+        for index in range(2, len(compacted) - 1):
+            message = compacted[index]
+            if message["role"] == "user":
+                message["content"] = cls._historical_observation_message(
+                    message["content"]
+                )
+        return compacted
 
     def build_prompt(
         self,
@@ -2920,7 +3471,9 @@ class AgentGraphOrchestrator:
                 "role": "user",
                 "content": self._observation_message(observation),
             }
-            return encode_director_transcript(tuple(redacted))
+            return encode_director_transcript(
+                tuple(self._compact_historical_messages(redacted))
+            )
         continuation = list(messages[2:])
         continuation.extend(
             (
@@ -2931,13 +3484,14 @@ class AgentGraphOrchestrator:
                 },
             )
         )
-        # Keep the immutable task/catalog context and a bounded real message
-        # continuation.  Unlike the former reconstructed history JSON, these
-        # are the exact assistant actions and Canvas observations seen by Qwen.
+        # Keep the immutable task/catalog context, exact sampled assistant
+        # actions, compact public feedback for prior observations, and the full
+        # current Canvas state with its revision-local legal action domain.
         continuation = continuation[-2 * self.history_window :]
-        return encode_director_transcript(
+        messages_to_encode = self._compact_historical_messages(
             (messages[0], messages[1], *continuation)
         )
+        return encode_director_transcript(tuple(messages_to_encode))
 
     @staticmethod
     def consumed_assistant_content(
@@ -2959,7 +3513,12 @@ class AgentGraphOrchestrator:
         env.reset(problem)
         turns: list[DirectorTurn] = []
         prompt = self.build_prompt(env, 0, skills)
+        terminal_canvas_diagnosis: Mapping[str, Any] = {}
         for index in range(self.max_rounds):
+            diagnosis = self.terminal_canvas_diagnosis(env)
+            if diagnosis is not None:
+                terminal_canvas_diagnosis = diagnosis
+                break
             schema_request = self.action_schema_request(env)
             response = await self.client.propose(
                 prompt,
@@ -2976,6 +3535,10 @@ class AgentGraphOrchestrator:
                     termination_reason="finish",
                     explicit_finish=True,
                 )
+            diagnosis = self.terminal_canvas_diagnosis(env)
+            if diagnosis is not None:
+                terminal_canvas_diagnosis = diagnosis
+                break
             prompt = self.continue_prompt(
                 prompt,
                 self.consumed_assistant_content(response, canvas),
@@ -3002,6 +3565,7 @@ class AgentGraphOrchestrator:
                     "graph_snapshot_id": lineage.graph_snapshot.snapshot_id,
                     "admission": "complete_finish_gate",
                 },
+                terminal_canvas_diagnosis=terminal_canvas_diagnosis,
             )
         return OrchestrationResult(
             final_answer=None,
@@ -3009,6 +3573,7 @@ class AgentGraphOrchestrator:
             final_graph=env.graph.to_dict(),
             termination_reason="max_rounds",
             explicit_finish=False,
+            terminal_canvas_diagnosis=terminal_canvas_diagnosis,
         )
 
 
@@ -3042,9 +3607,19 @@ __all__ = [
     "HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V13",
     "HOTPOTQA_SEMANTIC_PROTOCOL",
     "QA_DIRECTOR_PROMPT_VERSION",
+    "QA_DIRECTOR_SYSTEM_PROMPT_V6",
     "QA_DIRECTOR_SYSTEM_PROMPT_V1",
+    "QA_DIRECTOR_SYSTEM_PROMPT_V2",
+    "QA_DIRECTOR_SYSTEM_PROMPT_V3",
+    "QA_DIRECTOR_SYSTEM_PROMPT_V4",
+    "QA_DIRECTOR_SYSTEM_PROMPT_V5",
     "QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL",
     "PRESERVE_DIAGNOSE_REPAIR_AUGMENT_POLICY",
+    "LEGACY_QA_DIRECTOR_PROMPT_VERSION_V1",
+    "LEGACY_QA_DIRECTOR_PROMPT_VERSION_V2",
+    "LEGACY_QA_DIRECTOR_PROMPT_VERSION_V3",
+    "LEGACY_QA_DIRECTOR_PROMPT_VERSION_V4",
+    "LEGACY_QA_DIRECTOR_PROMPT_VERSION_V5",
     "LEGACY_DIRECTOR_SYSTEM_PROMPT_V8",
     "LEGACY_DIRECTOR_SYSTEM_PROMPT_V9",
     "LEGACY_DIRECTOR_PROMPT_VERSION_V8",

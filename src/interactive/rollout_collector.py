@@ -20,6 +20,7 @@ for those downstream boundaries.
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 import inspect
 import json
 import math
@@ -30,7 +31,11 @@ from typing import Any, Awaitable, Callable, Iterable, Mapping, Optional, Sequen
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from .agent_action_parser import AgentAction, AgentActionParseError
+from .agent_action_parser import (
+    AgentAction,
+    AgentActionParseError,
+    AgentActionParser,
+)
 from .agent_runtime import AgentCallRecord, AgentRuntimeResult
 from .agent_workflow_env import AgentWorkflowEnv
 from .director import (
@@ -94,6 +99,11 @@ ROLE_FIRST_ADD_DECODING_STRATEGY = (
     "hierarchical_json_schema_role_first_add_v1"
 )
 _ADD_DECLARATION_PARSE_FAILURE_PHASE = "add_agent_declarations"
+_PARAMETER_SERIALIZATION_FAILURE_PHASE = "parameter_serialization_failure"
+_RELATION_CANDIDATE_SERIALIZATION_FAILURE_PHASE = (
+    "relation_candidate_serialization_failure"
+)
+_SGLANG_DETERMINISTIC_SEED_MASK = (1 << 63) - 1
 
 _ADD_DECLARATION_CONTINUATION = (
     "Complete the Agent declarations for the selected positions and "
@@ -105,6 +115,24 @@ _ADD_ACTION_CONTINUATION = (
     "agents unchanged. Select only relations and output_agent_id allowed by "
     "the current schema. Return only the JSON object."
 )
+_PARAMETER_REGENERATION_CONTINUATION = (
+    "Return one complete JSON object that conforms to the current schema."
+)
+
+
+def _sglang_backend_sampling_seed(seed: int) -> int:
+    """Project one scientific uint64 seed into SGLang's signed int64 domain.
+
+    The scientific coordinate keeps its original uint64 value in the
+    trajectory receipt.  SGLang deterministic inference materializes request
+    seeds as ``torch.int64``; masking only the sign bit is therefore the
+    minimal transport adaptation and is persisted separately as the backend
+    sampling seed.
+    """
+
+    if isinstance(seed, bool) or not isinstance(seed, int) or not 0 <= seed < 2**64:
+        raise ValueError("Director seed must be a uint64 integer")
+    return seed & _SGLANG_DETERMINISTIC_SEED_MASK
 
 
 def _hierarchical_continuation_prompt(
@@ -147,6 +175,55 @@ def _hierarchical_continuation_prompt(
         )
     )
     return encode_director_transcript(messages)
+
+
+def _action_parameter_serialization_failed(text: str) -> bool:
+    """Return whether the first action object is syntactically incomplete.
+
+    A complete JSON object that violates the action contract remains a Canvas
+    rejection; regeneration is only for serialization failures such as an EOS-
+    truncated object.  The strict ``AgentActionParser`` remains authoritative
+    and is not repaired or bypassed here.
+    """
+
+    try:
+        AgentActionParser().parse(text)
+    except AgentActionParseError:
+        if not isinstance(text, str):
+            return True
+        stripped_start = len(text) - len(text.lstrip())
+        object_start = text.find("{", stripped_start)
+        array_start = text.find("[", stripped_start)
+        candidates = [
+            position
+            for position in (object_start, array_start)
+            if position >= 0
+        ]
+        if not candidates:
+            return True
+        try:
+            json.JSONDecoder().raw_decode(text[min(candidates) :])
+        except (TypeError, ValueError):
+            return True
+    return False
+
+
+def _hierarchical_selector_serialization_failed(text: str) -> bool:
+    """Return whether one schema-bound selector is not a JSON value.
+
+    This only classifies serialization.  Selector fields and admitted values
+    remain authoritative in ``_hierarchical_choice`` and
+    ``_hierarchical_index_choice``; callers must not infer either from the
+    malformed text.
+    """
+
+    if not isinstance(text, str):
+        return True
+    try:
+        json.JSONDecoder().raw_decode(text.lstrip())
+    except (TypeError, ValueError):
+        return True
+    return False
 
 
 class ReceiptValidationError(DirectorError):
@@ -505,10 +582,8 @@ class SGLangReceiptDirectorClient:
         action_target_domains_json: Optional[str] = None,
         action_target_domain_version: Optional[str] = None,
     ) -> Mapping[str, Any]:
-        if seed is not None and (
-            isinstance(seed, bool) or not isinstance(seed, int) or seed < 0
-        ):
-            raise ValueError("Director seed must be a non-negative integer or None")
+        if seed is not None:
+            _sglang_backend_sampling_seed(seed)
         prompt_ids = self.prompt_token_ids(prompt)
         payload: dict[str, Any] = {
             "input_ids": list(prompt_ids),
@@ -530,8 +605,11 @@ class SGLangReceiptDirectorClient:
         if seed is not None:
             # SkillFlow's OpenAI boundary calls this field ``seed``.  The
             # deployed SGLang 0.5.15 native /generate SamplingParams exposes
-            # the equivalent field as ``sampling_seed``.
-            payload["sampling_params"]["sampling_seed"] = seed
+            # the equivalent field as ``sampling_seed`` and deterministic
+            # inference materializes it as a signed torch.int64.
+            payload["sampling_params"]["sampling_seed"] = (
+                _sglang_backend_sampling_seed(seed)
+            )
         (
             resolved_action_schema,
             _,
@@ -822,6 +900,7 @@ class SGLangReceiptDirectorClient:
                 action_target_domain_version=resolved_target_domain_version,
                 latency_ms=latency_ms,
                 attempt_count=attempt_count,
+                generation_seed=seed,
             )
         finally:
             self.rollout_gate.release()
@@ -942,6 +1021,7 @@ class SGLangReceiptDirectorClient:
             "latency_ms": metadata.get("latency_ms"),
             "attempt_count": metadata.get("attempt_count"),
             "generation_seed": metadata.get("generation_seed"),
+            "backend_sampling_seed": metadata.get("backend_sampling_seed"),
             "server_weight_version": metadata.get("server_weight_version"),
             "receipt_verified": metadata.get("receipt_verified"),
         }
@@ -981,6 +1061,8 @@ class SGLangReceiptDirectorClient:
         total_latency_ms = 0.0
         total_attempt_count = 0
         phase_receipts: dict[str, Mapping[str, Any]] = {}
+        relation_candidate_regeneration_attempted = False
+        relation_candidate_regeneration_succeeded = False
 
         if len(actions) == 1:
             selected_action = actions[0]
@@ -1003,6 +1085,7 @@ class SGLangReceiptDirectorClient:
                 action_target_domain_version=action_target_domain_version,
                 latency_ms=latency_ms,
                 attempt_count=attempt_count,
+                generation_seed=seed,
             )
             selected_action = self._hierarchical_choice(
                 selector_response.text,
@@ -1051,6 +1134,7 @@ class SGLangReceiptDirectorClient:
                 action_target_domain_version=action_target_domain_version,
                 latency_ms=latency_ms,
                 attempt_count=attempt_count,
+                generation_seed=seed,
             )
             try:
                 selected_add_agent_roles = (
@@ -1111,6 +1195,7 @@ class SGLangReceiptDirectorClient:
                 action_target_domain_version=action_target_domain_version,
                 latency_ms=latency_ms,
                 attempt_count=attempt_count,
+                generation_seed=seed,
             )
             phase_receipts["add_agent_declarations"] = (
                 self._hierarchical_phase_receipt(declaration_response)
@@ -1227,6 +1312,7 @@ class SGLangReceiptDirectorClient:
                 action_target_domain_version=action_target_domain_version,
                 latency_ms=latency_ms,
                 attempt_count=attempt_count,
+                generation_seed=seed,
             )
             field_selector = json.loads(field_schema)
             admitted_fields = field_selector["properties"]["field"]["enum"]
@@ -1282,6 +1368,7 @@ class SGLangReceiptDirectorClient:
                         action_target_domain_version=action_target_domain_version,
                         latency_ms=latency_ms,
                         attempt_count=attempt_count,
+                        generation_seed=seed,
                     )
                     selected_modify_agent_id = self._hierarchical_choice(
                         agent_response.text,
@@ -1326,16 +1413,77 @@ class SGLangReceiptDirectorClient:
                 action_target_domain_version=action_target_domain_version,
                 latency_ms=latency_ms,
                 attempt_count=attempt_count,
+                generation_seed=seed,
             )
             candidate_selector = json.loads(candidate_schema)
             admitted_indices = candidate_selector["properties"]["candidate_index"][
                 "enum"
             ]
-            selected_relation_candidate = self._hierarchical_index_choice(
-                candidate_response.text,
-                admitted=admitted_indices,
-                required_action="set_relation",
-            )
+            try:
+                selected_relation_candidate = self._hierarchical_index_choice(
+                    candidate_response.text,
+                    admitted=admitted_indices,
+                    required_action="set_relation",
+                )
+            except ReceiptValidationError:
+                if not _hierarchical_selector_serialization_failed(
+                    candidate_response.text
+                ):
+                    raise
+                # Match the existing bounded parameter regeneration boundary:
+                # retain the exact invalid selector receipt, then make one
+                # schema-bound continuation request with the same route and
+                # scientific seed.  No candidate is inferred from malformed
+                # text and there is no default index.
+                relation_candidate_regeneration_attempted = True
+                phase_receipts[
+                    _RELATION_CANDIDATE_SERIALIZATION_FAILURE_PHASE
+                ] = self._hierarchical_phase_receipt(candidate_response)
+                regeneration_prompt = _hierarchical_continuation_prompt(
+                    prompt,
+                    committed_json=candidate_response.text,
+                    instruction=_PARAMETER_REGENERATION_CONTINUATION,
+                )
+                regeneration_payload = dict(
+                    self._request_payload(
+                        regeneration_prompt,
+                        adapter_name,
+                        seed,
+                    )
+                )
+                regeneration_sampling = dict(
+                    regeneration_payload["sampling_params"]
+                )
+                regeneration_sampling["json_schema"] = candidate_schema
+                regeneration_payload["sampling_params"] = regeneration_sampling
+                value, latency_ms, attempt_count = await self._post_with_retries(
+                    regeneration_payload
+                )
+                total_latency_ms += latency_ms
+                total_attempt_count += attempt_count
+                candidate_response = self._parse_response(
+                    regeneration_prompt,
+                    regeneration_payload,
+                    value,
+                    policy_version=policy_version,
+                    adapter_name=adapter_name,
+                    expected_server_weight_version=(
+                        expected_server_weight_version
+                    ),
+                    action_json_schema_version=action_schema_version,
+                    action_schema_branch=action_schema_branch,
+                    action_target_domains_json=action_target_domains_json,
+                    action_target_domain_version=action_target_domain_version,
+                    latency_ms=latency_ms,
+                    attempt_count=attempt_count,
+                    generation_seed=seed,
+                )
+                selected_relation_candidate = self._hierarchical_index_choice(
+                    candidate_response.text,
+                    admitted=admitted_indices,
+                    required_action="set_relation",
+                )
+                relation_candidate_regeneration_succeeded = True
             phase_receipts["relation_candidate_selection"] = (
                 self._hierarchical_phase_receipt(candidate_response)
             )
@@ -1378,7 +1526,61 @@ class SGLangReceiptDirectorClient:
             action_target_domain_version=action_target_domain_version,
             latency_ms=latency_ms,
             attempt_count=attempt_count,
+            generation_seed=seed,
         )
+        parameter_regeneration_attempted = False
+        parameter_regeneration_succeeded = False
+        if _action_parameter_serialization_failed(response.text):
+            # SGLang may emit EOS before a schema-bound JSON object closes.
+            # Preserve that exact failed sample as a phase receipt and make
+            # one further request with the same schema, route, and seed.  The
+            # continuation does not infer missing fields or alter the already
+            # selected action/field/Agent semantics.
+            parameter_regeneration_attempted = True
+            phase_receipts[_PARAMETER_SERIALIZATION_FAILURE_PHASE] = (
+                self._hierarchical_phase_receipt(response)
+            )
+            regeneration_prompt = _hierarchical_continuation_prompt(
+                parameter_prompt,
+                committed_json=response.text,
+                instruction=_PARAMETER_REGENERATION_CONTINUATION,
+            )
+            regeneration_payload = dict(
+                self._request_payload(regeneration_prompt, adapter_name, seed)
+            )
+            regeneration_sampling = dict(
+                regeneration_payload["sampling_params"]
+            )
+            regeneration_sampling["json_schema"] = parameter_schema
+            regeneration_payload["sampling_params"] = regeneration_sampling
+            value, latency_ms, attempt_count = await self._post_with_retries(
+                regeneration_payload
+            )
+            total_latency_ms += latency_ms
+            total_attempt_count += attempt_count
+            response = self._parse_response(
+                regeneration_prompt,
+                regeneration_payload,
+                value,
+                policy_version=policy_version,
+                adapter_name=adapter_name,
+                expected_server_weight_version=(
+                    expected_server_weight_version
+                ),
+                action_json_schema_version=action_schema_version,
+                action_schema_branch=action_schema_branch,
+                action_target_domains_json=action_target_domains_json,
+                action_target_domain_version=action_target_domain_version,
+                latency_ms=latency_ms,
+                attempt_count=attempt_count,
+                generation_seed=seed,
+            )
+            try:
+                AgentActionParser().parse(response.text)
+            except AgentActionParseError:
+                pass
+            else:
+                parameter_regeneration_succeeded = True
         metadata = dict(response.metadata)
         metadata.update(
             {
@@ -1406,6 +1608,16 @@ class SGLangReceiptDirectorClient:
                 "attempt_count": total_attempt_count,
             }
         )
+        if parameter_regeneration_attempted:
+            metadata["parameter_regeneration_attempted"] = True
+            metadata["parameter_regeneration_succeeded"] = (
+                parameter_regeneration_succeeded
+            )
+        if relation_candidate_regeneration_attempted:
+            metadata["relation_candidate_regeneration_attempted"] = True
+            metadata["relation_candidate_regeneration_succeeded"] = (
+                relation_candidate_regeneration_succeeded
+            )
         if action_target_domains is not None:
             metadata["selected_add_agent_ids"] = (
                 None
@@ -1470,6 +1682,7 @@ class SGLangReceiptDirectorClient:
         action_target_domain_version: Optional[str],
         latency_ms: float,
         attempt_count: int,
+        generation_seed: Optional[int] = None,
     ) -> DirectorResponse:
         text = value.get("text")
         meta_info = value.get("meta_info")
@@ -1533,9 +1746,14 @@ class SGLangReceiptDirectorClient:
                 "completion_tokens": len(output_ids),
                 "latency_ms": latency_ms,
                 "attempt_count": attempt_count,
-                "generation_seed": payload.get("sampling_params", {}).get(
-                    "sampling_seed"
+                "generation_seed": (
+                    generation_seed
+                    if generation_seed is not None
+                    else payload.get("sampling_params", {}).get("sampling_seed")
                 ),
+                "backend_sampling_seed": payload.get(
+                    "sampling_params", {}
+                ).get("sampling_seed"),
                 "action_json_schema_version": action_json_schema_version,
                 "action_schema_branch": action_schema_branch,
                 "receipt_verified": True,
@@ -1602,6 +1820,41 @@ def _validate_v3_hierarchical_action_receipt(
     selected_action = metadata.get("selected_action")
     decoding_strategy = metadata.get("action_decoding_strategy")
     parse_failure_phase = metadata.get("parse_failure_phase")
+    phase_receipts = metadata.get("hierarchical_phase_receipts")
+    parameter_regeneration_attempted = metadata.get(
+        "parameter_regeneration_attempted"
+    )
+    if (
+        parameter_regeneration_attempted is not None
+        and parameter_regeneration_attempted is not True
+    ):
+        raise ReceiptValidationError(
+            "v3 parameter-regeneration attempt flag is invalid"
+        )
+    parameter_failure_receipt = (
+        phase_receipts.get(_PARAMETER_SERIALIZATION_FAILURE_PHASE)
+        if isinstance(phase_receipts, Mapping)
+        else None
+    )
+    relation_candidate_regeneration_attempted = metadata.get(
+        "relation_candidate_regeneration_attempted"
+    )
+    if (
+        relation_candidate_regeneration_attempted is not None
+        and relation_candidate_regeneration_attempted is not True
+    ):
+        raise ReceiptValidationError(
+            "v3 relation-candidate regeneration attempt flag is invalid"
+        )
+    relation_candidate_failure_receipt = (
+        phase_receipts.get(_RELATION_CANDIDATE_SERIALIZATION_FAILURE_PHASE)
+        if isinstance(phase_receipts, Mapping)
+        else None
+    )
+    if parse_failure_phase is not None and parameter_regeneration_attempted:
+        raise ReceiptValidationError(
+            "v3 declaration parse failure cannot carry parameter regeneration"
+        )
     action_value = None if action is None else action.to_dict()
     if selected_action not in actions or (
         action_value is not None
@@ -1639,6 +1892,14 @@ def _validate_v3_hierarchical_action_receipt(
     if len(actions) > 1:
         expected_phases.add("action_selection")
     expected_parameter_branch = selected_action
+    if selected_action != "set_relation" and (
+        relation_candidate_regeneration_attempted is not None
+        or metadata.get("relation_candidate_regeneration_succeeded") is not None
+        or relation_candidate_failure_receipt is not None
+    ):
+        raise ReceiptValidationError(
+            "v3 non-relation action carries relation-candidate regeneration"
+        )
 
     if selected_action == "add_subgraph":
         role_first_add = decoding_strategy == ROLE_FIRST_ADD_DECODING_STRATEGY
@@ -1660,7 +1921,6 @@ def _validate_v3_hierarchical_action_receipt(
             raise ReceiptValidationError(
                 "v3 add_subgraph receipt has an unsupported decoding strategy"
             )
-        phase_receipts = metadata.get("hierarchical_phase_receipts")
         role_phase = (
             phase_receipts.get("add_agent_role_selection")
             if isinstance(phase_receipts, Mapping)
@@ -1823,7 +2083,13 @@ def _validate_v3_hierarchical_action_receipt(
                 committed_json=selected_declarations_json,
                 instruction=_ADD_ACTION_CONTINUATION,
             )
-            if metadata.get("prompt_text") != expected_parameter_prompt:
+            observed_parameter_prompt = (
+                parameter_failure_receipt.get("prompt_text")
+                if parameter_regeneration_attempted
+                and isinstance(parameter_failure_receipt, Mapping)
+                else metadata.get("prompt_text")
+            )
+            if observed_parameter_prompt != expected_parameter_prompt:
                 raise ReceiptValidationError(
                     "v3 role-first ADD parameter prompt is not conditioned on "
                     "its Agent declarations"
@@ -2011,6 +2277,76 @@ def _validate_v3_hierarchical_action_receipt(
             raise ReceiptValidationError(
                 "v3 relation candidate receipt is outside the live domain"
             )
+        relation_candidate_receipt = (
+            phase_receipts.get("relation_candidate_selection")
+            if isinstance(phase_receipts, Mapping)
+            else None
+        )
+        if not isinstance(relation_candidate_receipt, Mapping) or not isinstance(
+            relation_candidate_receipt.get("text"), str
+        ):
+            raise ReceiptValidationError(
+                "v3 relation candidate selection has no exact phase receipt"
+            )
+        sampled_index = SGLangReceiptDirectorClient._hierarchical_index_choice(
+            relation_candidate_receipt["text"],
+            admitted=tuple(range(len(candidates))),
+            required_action="set_relation",
+        )
+        if sampled_index != selected_index:
+            raise ReceiptValidationError(
+                "v3 relation candidate selection differs from its phase receipt"
+            )
+        if relation_candidate_regeneration_attempted:
+            if metadata.get("relation_candidate_regeneration_succeeded") is not True:
+                raise ReceiptValidationError(
+                    "v3 relation-candidate regeneration did not succeed"
+                )
+            if not isinstance(relation_candidate_failure_receipt, Mapping):
+                raise ReceiptValidationError(
+                    "v3 relation-candidate regeneration has no initial failure receipt"
+                )
+            failed_text = relation_candidate_failure_receipt.get("text")
+            failed_prompt = relation_candidate_failure_receipt.get("prompt_text")
+            if (
+                not isinstance(failed_text, str)
+                or not failed_text
+                or not isinstance(failed_prompt, str)
+                or not failed_prompt
+                or not _hierarchical_selector_serialization_failed(failed_text)
+            ):
+                raise ReceiptValidationError(
+                    "v3 relation-candidate regeneration initial receipt is not "
+                    "a serialization failure"
+                )
+            expected_regeneration_prompt = _hierarchical_continuation_prompt(
+                failed_prompt,
+                committed_json=failed_text,
+                instruction=_PARAMETER_REGENERATION_CONTINUATION,
+            )
+            if relation_candidate_receipt.get("prompt_text") != (
+                expected_regeneration_prompt
+            ):
+                raise ReceiptValidationError(
+                    "v3 relation-candidate regeneration is not bound to its "
+                    "failed sample"
+                )
+            if relation_candidate_failure_receipt.get(
+                "generation_seed"
+            ) != relation_candidate_receipt.get("generation_seed"):
+                raise ReceiptValidationError(
+                    "v3 relation-candidate regeneration changed its generation seed"
+                )
+            expected_phases.add(
+                _RELATION_CANDIDATE_SERIALIZATION_FAILURE_PHASE
+            )
+        elif (
+            metadata.get("relation_candidate_regeneration_succeeded") is not None
+            or relation_candidate_failure_receipt is not None
+        ):
+            raise ReceiptValidationError(
+                "v3 relation-candidate regeneration receipt has no attempt flag"
+            )
         expected_action = {"action": "set_relation", **candidates[selected_index]}
         if action_value is not None and action_value != expected_action:
             raise ReceiptValidationError(
@@ -2040,6 +2376,58 @@ def _validate_v3_hierarchical_action_receipt(
     if metadata.get("parameter_schema_branch") != expected_parameter_branch:
         raise ReceiptValidationError(
             "v3 parameter-schema branch differs from the sampled action"
+        )
+    if parameter_regeneration_attempted:
+        parameter_regeneration_succeeded = metadata.get(
+            "parameter_regeneration_succeeded"
+        )
+        if type(parameter_regeneration_succeeded) is not bool:
+            raise ReceiptValidationError(
+                "v3 parameter-regeneration result flag is invalid"
+            )
+        if not isinstance(parameter_failure_receipt, Mapping):
+            raise ReceiptValidationError(
+                "v3 parameter regeneration has no initial failure receipt"
+            )
+        failed_text = parameter_failure_receipt.get("text")
+        failed_prompt = parameter_failure_receipt.get("prompt_text")
+        if (
+            not isinstance(failed_text, str)
+            or not failed_text
+            or not isinstance(failed_prompt, str)
+            or not failed_prompt
+            or not _action_parameter_serialization_failed(failed_text)
+        ):
+            raise ReceiptValidationError(
+                "v3 parameter-regeneration initial receipt is not a "
+                "serialization failure"
+            )
+        if parameter_regeneration_succeeded != (action is not None):
+            raise ReceiptValidationError(
+                "v3 parameter-regeneration result differs from the parsed action"
+            )
+        expected_regeneration_prompt = _hierarchical_continuation_prompt(
+            failed_prompt,
+            committed_json=failed_text,
+            instruction=_PARAMETER_REGENERATION_CONTINUATION,
+        )
+        if metadata.get("prompt_text") != expected_regeneration_prompt:
+            raise ReceiptValidationError(
+                "v3 parameter regeneration is not bound to its failed sample"
+            )
+        if parameter_failure_receipt.get("generation_seed") != metadata.get(
+            "generation_seed"
+        ):
+            raise ReceiptValidationError(
+                "v3 parameter regeneration changed its generation seed"
+            )
+        expected_phases.add(_PARAMETER_SERIALIZATION_FAILURE_PHASE)
+    elif (
+        metadata.get("parameter_regeneration_succeeded") is not None
+        or parameter_failure_receipt is not None
+    ):
+        raise ReceiptValidationError(
+            "v3 parameter regeneration receipt has no attempt flag"
         )
     if metadata.get("request_count") != len(expected_phases) + 1:
         raise ReceiptValidationError(
@@ -2232,6 +2620,9 @@ _PROVIDER_RESPONSE_METADATA_FIELDS: Tuple[str, ...] = (
 )
 
 _UNIFIED_EXECUTION_METADATA_FIELDS: Tuple[str, ...] = (
+    "artifact_version",
+    "input_artifact_versions",
+    "input_artifact_provenance",
     "execution_mode",
     "react_turns_used",
     "new_react_turns_used",
@@ -2739,6 +3130,7 @@ class AgentGraphRolloutCollector:
         valid_lineage_fallback_used = False
         valid_lineage_fallback_receipt: Mapping[str, Any] = {}
         explicit_finish = False
+        natural_terminal_reason: Optional[str] = None
 
         group_id = f"{task.task_id}:{self.condition_id}:{self.versions.policy}"
         rollout_id = f"{group_id}:rollout:{rollout_index:04d}"
@@ -2783,6 +3175,24 @@ class AgentGraphRolloutCollector:
             )
         prompt = self.orchestrator.build_prompt(env, 0, current_skills)
         for round_index in range(self.orchestrator.max_rounds):
+            terminal_diagnosis = self.orchestrator.terminal_canvas_diagnosis(env)
+            if terminal_diagnosis is not None:
+                natural_terminal_reason = str(
+                    terminal_diagnosis.get(
+                        "public_error_code",
+                        "canvas_action_domain_exhausted",
+                    )
+                )
+                if turns:
+                    runtime_summary = dict(turns[-1].runtime_summary)
+                    runtime_summary["terminal_canvas_diagnosis"] = dict(
+                        terminal_diagnosis
+                    )
+                    turns[-1] = replace(
+                        turns[-1],
+                        runtime_summary=runtime_summary,
+                    )
+                break
             generation_seed = self.orchestrator.generation_seed(round_index)
             schema_request = self.orchestrator.action_schema_request(env)
             response = await self.orchestrator.client.propose(
@@ -2863,6 +3273,20 @@ class AgentGraphRolloutCollector:
                     raise ReceiptValidationError(
                         "role-first ADD receipt is not rooted in the Canvas prompt"
                     )
+            elif metadata.get("parameter_regeneration_attempted") is True:
+                raw_phases = metadata.get("hierarchical_phase_receipts")
+                failed_parameter_phase = (
+                    raw_phases.get(_PARAMETER_SERIALIZATION_FAILURE_PHASE)
+                    if isinstance(raw_phases, Mapping)
+                    else None
+                )
+                if (
+                    not isinstance(failed_parameter_phase, Mapping)
+                    or failed_parameter_phase.get("prompt_text") != prompt
+                ):
+                    raise ReceiptValidationError(
+                        "parameter regeneration is not rooted in the Canvas prompt"
+                    )
             elif metadata.get("prompt_text") != prompt:
                 raise ReceiptValidationError(
                     "Director final receipt is bound to a different prompt"
@@ -2870,6 +3294,13 @@ class AgentGraphRolloutCollector:
             if _optional_int(metadata.get("generation_seed")) != generation_seed:
                 raise ReceiptValidationError(
                     "Director receipt generation seed differs from the request"
+                )
+            if _optional_int(metadata.get("backend_sampling_seed")) != (
+                _sglang_backend_sampling_seed(generation_seed)
+            ):
+                raise ReceiptValidationError(
+                    "Director receipt backend sampling seed differs from the "
+                    "signed-int64 SGLang request"
                 )
             prompt_ids = _token_ids(metadata.get("prompt_token_ids"), "prompt_token_ids")
             output_ids = _token_ids(metadata.get("output_token_ids"), "output_token_ids")
@@ -2969,6 +3400,15 @@ class AgentGraphRolloutCollector:
                         raise ReceiptValidationError(
                             "hierarchical Director phase lacks an exact receipt"
                         )
+                    if _optional_int(
+                        phase_receipt.get("generation_seed")
+                    ) != generation_seed or _optional_int(
+                        phase_receipt.get("backend_sampling_seed")
+                    ) != _sglang_backend_sampling_seed(generation_seed):
+                        raise ReceiptValidationError(
+                            "hierarchical Director phase seed receipt differs "
+                            "from the scientific/backend request pair"
+                        )
                     if live_v3_receipt:
                         if phase_receipt.get(
                             "action_json_schema_version"
@@ -3023,6 +3463,15 @@ class AgentGraphRolloutCollector:
                 else ()
             )
             runtime_summary = dict(_runtime_summary(receipt_execution))
+            runtime_summary["director_backend_sampling_seed"] = (
+                metadata.get("backend_sampling_seed")
+            )
+            availability_receipt = env.model_availability_receipt()
+            if availability_receipt["failure_receipts"]:
+                runtime_summary["model_availability"] = {
+                    "model_catalog_version": self.versions.model_catalog,
+                    **availability_receipt,
+                }
             if (
                 canvas.partial_execution is not None
                 or canvas.execution_failure_records
@@ -3100,6 +3549,13 @@ class AgentGraphRolloutCollector:
                     action_decoding["parse_failure_phase"] = metadata.get(
                         "parse_failure_phase"
                     )
+                if metadata.get("parameter_regeneration_attempted") is not None:
+                    action_decoding["parameter_regeneration_attempted"] = (
+                        metadata.get("parameter_regeneration_attempted")
+                    )
+                    action_decoding["parameter_regeneration_succeeded"] = (
+                        metadata.get("parameter_regeneration_succeeded")
+                    )
                 runtime_summary["director_action_decoding"] = action_decoding
             turn = TurnRecord(
                 turn_id=stable_id(
@@ -3150,6 +3606,23 @@ class AgentGraphRolloutCollector:
                 final_runtime = canvas.execution
                 final_graph = env.graph.to_dict()
                 break
+            terminal_diagnosis = self.orchestrator.terminal_canvas_diagnosis(env)
+            if terminal_diagnosis is not None:
+                natural_terminal_reason = str(
+                    terminal_diagnosis.get(
+                        "public_error_code",
+                        "canvas_action_domain_exhausted",
+                    )
+                )
+                runtime_summary = dict(turns[-1].runtime_summary)
+                runtime_summary["terminal_canvas_diagnosis"] = dict(
+                    terminal_diagnosis
+                )
+                turns[-1] = replace(
+                    turns[-1],
+                    runtime_summary=runtime_summary,
+                )
+                break
             current_skills = visible_skills()
             current_retrieved_skill_ids = _retrieved_skill_ids(current_skills)
             if current_retrieved_skill_ids and self.active_skill_provider is None:
@@ -3167,8 +3640,12 @@ class AgentGraphRolloutCollector:
                 current_skills,
             )
 
-        termination_reason = "finish" if explicit_finish else "max_rounds"
-        if termination_reason == "max_rounds":
+        termination_reason = (
+            "finish"
+            if explicit_finish
+            else natural_terminal_reason or "max_rounds"
+        )
+        if termination_reason != "finish":
             # Progressive execution remains Canvas feedback, never an implicit
             # FINISH.  The Env is the sole semantic-lineage admission authority;
             # reuse only its last complete, revision-consistent receipt.

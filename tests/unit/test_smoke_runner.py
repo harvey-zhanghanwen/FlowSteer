@@ -98,6 +98,7 @@ swe_coding_runtime_settings = _MODULE._swe_coding_runtime_settings
 environment_replay_trace_from_runtime = (
     _MODULE._environment_replay_trace_from_runtime
 )
+requires_format_agent = _MODULE._requires_format_agent
 
 
 SOURCE_NAMES = {
@@ -140,6 +141,7 @@ def test_live_backend_rejects_invalid_model_admissible_sampling_contract():
             encoding="utf-8"
         )
     )
+    source["execution_timeout"] = 37.0
     fake_transformers = SimpleNamespace(
         AutoTokenizer=SimpleNamespace(
             from_pretrained=lambda *args, **kwargs: object()
@@ -182,6 +184,52 @@ def test_live_backend_rejects_invalid_model_admissible_sampling_contract():
                     root,
                     evaluation_only=True,
                 )
+
+
+def test_live_backend_requires_and_wires_explicit_execution_timeout():
+    root = Path(__file__).resolve().parents[2]
+    source = yaml.safe_load(
+        (root / "config/evaluation_hotpotqa_unified_architecture_v1.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    for invalid_value in (None, 0, -1.0, True, "37", float("inf"), float("nan")):
+        config = copy.deepcopy(source)
+        config["execution_timeout"] = invalid_value
+        with unittest.TestCase().assertRaisesRegex(
+            ConfigurationError,
+            "execution_timeout must be an explicit positive finite number",
+        ):
+            _MODULE.LiveSmokeBackend.from_config(
+                config,
+                root,
+                evaluation_only=True,
+            )
+
+    config = copy.deepcopy(source)
+    config["execution_timeout"] = 37.0
+    fake_transformers = SimpleNamespace(
+        AutoTokenizer=SimpleNamespace(
+            from_pretrained=lambda *args, **kwargs: object()
+        )
+    )
+    with patch.dict(
+        os.environ,
+        {"VECTOR_ENGINE_API_KEY": "unit-test-placeholder"},
+        clear=False,
+    ), patch.dict(sys.modules, {"transformers": fake_transformers}), patch.object(
+        _MODULE,
+        "SGLangReceiptDirectorClient",
+        return_value=object(),
+    ):
+        backend = _MODULE.LiveSmokeBackend.from_config(
+            config,
+            root,
+            evaluation_only=True,
+        )
+
+    assert backend.runtime.timeout_seconds == 37.0
+    assert backend.runtime.gateway.timeout_seconds == 37.0
 
 
 def test_interactive_workflow_problem_exposes_only_the_execution_contract():
@@ -406,6 +454,31 @@ class QAToolRuntimeWiringTests(unittest.TestCase):
         def close(self):
             return None
 
+    def test_exact_answer_syntax_does_not_require_a_format_agent(self) -> None:
+        self.assertFalse(
+            requires_format_agent(
+                {"require_format_agent": False},
+                terminal_protocol="exact_single_answer_tag",
+            )
+        )
+        self.assertTrue(
+            requires_format_agent(
+                {},
+                terminal_protocol="exact_single_answer_tag",
+            )
+        )
+        self.assertTrue(
+            requires_format_agent(
+                {"require_format_agent": True},
+                terminal_protocol="none",
+            )
+        )
+        with self.assertRaises(ConfigurationError):
+            requires_format_agent(
+                {"require_format_agent": "false"},
+                terminal_protocol="exact_single_answer_tag",
+            )
+
     @staticmethod
     def _config(
         *,
@@ -459,6 +532,52 @@ class QAToolRuntimeWiringTests(unittest.TestCase):
                 semantic_protocol="hotpotqa_verified_answer_slot_v1",
             )
 
+    def test_sampling_coordinate_is_bound_to_runtime_task_and_seed(self) -> None:
+        task = make_task("hotpotqa", 0)
+        registry = load_model_registry(
+            Path(__file__).resolve().parents[2]
+            / "config/model_catalog_triviaqa_v1.yaml"
+        )
+        backend = object.__new__(_MODULE.LiveSmokeBackend)
+        backend.config = self._config()
+        backend.registry = registry
+        backend.runtime = AgentRuntime(registry, self._Gateway())
+        backend.project_root = Path(self._temp_dir.name)
+
+        wrong_task = ScientificSamplingCoordinate(
+            sampling_schedule_hash=scientific_sampling_schedule_hash(base_seed=17),
+            schedule_purpose="test",
+            ordered_sequence_hash=stable_hash([task.task_id]),
+            sequence_position=0,
+            task_id="hotpotqa:different-task",
+            optimizer_step_or_anchor_ordinal=0,
+        )
+        wrong_schedule = ScientificSamplingCoordinate(
+            sampling_schedule_hash=scientific_sampling_schedule_hash(base_seed=18),
+            schedule_purpose="test",
+            ordered_sequence_hash=stable_hash([task.task_id]),
+            sequence_position=0,
+            task_id=task.task_id,
+            optimizer_step_or_anchor_ordinal=0,
+        )
+        with patch.object(
+            _MODULE,
+            "open_qa_tool_registry",
+            side_effect=AssertionError("invalid sampling must fail before Tool setup"),
+        ):
+            with self.assertRaisesRegex(ConfigurationError, "task_id"):
+                backend._runtime_for_task(
+                    task,
+                    sampling_base_seed=17,
+                    sampling_coordinate=wrong_task,
+                )
+            with self.assertRaisesRegex(ConfigurationError, "schedule hash"):
+                backend._runtime_for_task(
+                    task,
+                    sampling_base_seed=17,
+                    sampling_coordinate=wrong_schedule,
+                )
+
     def test_tool_condition_shares_registry_and_exposes_only_capabilities(self) -> None:
         root = Path(self._temp_dir.name)
         task = TaskRecord(
@@ -486,6 +605,7 @@ class QAToolRuntimeWiringTests(unittest.TestCase):
         backend.config = self._config()
         backend.registry = registry
         backend.runtime = AgentRuntime(registry, self._Gateway())
+        backend.runtime.timeout_seconds = 37.0
         backend.project_root = root
 
         with patch.object(
@@ -507,6 +627,7 @@ class QAToolRuntimeWiringTests(unittest.TestCase):
             "hotpotqa_verified_answer_slot_v1",
             runtime.semantic_protocol,
         )
+        self.assertEqual(37.0, runtime.timeout_seconds)
         opened.assert_called_once_with(
             index_path=root / "data/public-retrieval.sqlite3",
             skillflow_source=root / "vendor/SkillFlow/src",
@@ -765,6 +886,7 @@ class AIMEComputationRuntimeWiringTests(unittest.IsolatedAsyncioTestCase):
     def test_tool_condition_shares_exact_registry_and_public_catalog(self) -> None:
         task = self._task()
         backend = self._backend(self._config())
+        backend.runtime.timeout_seconds = 37.0
         with patch.object(
             _MODULE,
             "create_aime_computation_registry",
@@ -785,6 +907,7 @@ class AIMEComputationRuntimeWiringTests(unittest.IsolatedAsyncioTestCase):
             runtime.execution_adapters["react"]._tool_registry,
         )
         self.assertEqual("aime_2026", runtime.dataset_id)
+        self.assertEqual(37.0, runtime.timeout_seconds)
 
         orchestrator = AgentGraphOrchestrator(
             backend.registry,
@@ -1078,6 +1201,7 @@ class HealthBenchMedRAGRuntimeWiringTests(unittest.IsolatedAsyncioTestCase):
     def test_enabled_condition_shares_registry_and_public_catalog(self) -> None:
         task = self._task()
         backend = self._backend(self._config())
+        backend.runtime.timeout_seconds = 37.0
         owner = self._registry_owner()
         root = backend.project_root
 
@@ -1104,6 +1228,7 @@ class HealthBenchMedRAGRuntimeWiringTests(unittest.IsolatedAsyncioTestCase):
             runtime.execution_adapters["react"]._tool_registry,
         )
         self.assertEqual("healthbench_professional", runtime.dataset_id)
+        self.assertEqual(37.0, runtime.timeout_seconds)
 
         orchestrator = AgentGraphOrchestrator(
             backend.registry,
@@ -1413,6 +1538,7 @@ class EnvironmentRuntimeWiringTests(unittest.TestCase):
     def test_live_condition_shares_registry_and_binds_the_exact_record(self) -> None:
         task = self._task()
         backend = self._backend(self._config())
+        backend.runtime.timeout_seconds = 37.0
         root = backend.project_root
 
         # The concrete builder only stores this callable until execution; no
@@ -1458,6 +1584,7 @@ class EnvironmentRuntimeWiringTests(unittest.TestCase):
             shared_registry,
             runtime.execution_adapters["react"]._tool_registry,
         )
+        self.assertEqual(37.0, runtime.timeout_seconds)
         self.assertEqual("webshop", runtime.dataset_id)
 
         orchestrator = AgentGraphOrchestrator(
@@ -1819,6 +1946,7 @@ class SWEbenchCodingRuntimeWiringTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         gateway = self._CodingGateway()
         backend = self._backend(self._config(), gateway=gateway)
+        backend.runtime.timeout_seconds = 37.0
         task = self._task()
 
         runtime, shared_registry, close = backend._runtime_for_task(
@@ -1832,6 +1960,7 @@ class SWEbenchCodingRuntimeWiringTests(unittest.IsolatedAsyncioTestCase):
             runtime.execution_adapters["coding"]._tool_registry,
         )
         self.assertEqual("swe_bench", runtime.dataset_id)
+        self.assertEqual(37.0, runtime.timeout_seconds)
         self.assertEqual(
             (SWEBENCH_REPOSITORY_TOOL_ID,),
             shared_registry.resource_ids,

@@ -498,14 +498,15 @@ class TrajectoryRecord:
         if self.valid_lineage_fallback_used:
             if (
                 self.explicit_finish
-                or self.termination_reason != "max_rounds"
+                or self.termination_reason
+                not in {"max_rounds", "canvas_action_domain_exhausted"}
                 or not isinstance(self.final_answer, str)
                 or not self.final_answer.strip()
                 or not fallback_receipt
             ):
                 raise ValueError(
-                    "valid lineage fallback requires a non-empty max_rounds "
-                    "answer without explicit finish and a fallback receipt"
+                    "valid lineage fallback requires a non-empty natural "
+                    "terminal answer without explicit finish and a fallback receipt"
                 )
         elif fallback_receipt:
             raise ValueError(
@@ -590,7 +591,8 @@ class TrajectoryRecord:
 
         return bool(
             not self.explicit_finish
-            and self.termination_reason == "max_rounds"
+            and self.termination_reason
+            in {"max_rounds", "canvas_action_domain_exhausted"}
             and (
                 self.final_answer in (None, "")
                 or self.valid_lineage_fallback_used

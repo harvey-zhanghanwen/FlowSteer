@@ -6,7 +6,12 @@ This version extends the existing shared HotpotQA AgentGraph architecture to
 TriviaQA.  It does not create a second dataset-specific Runtime.  The executed
 path is:
 
-`Question -> Qwen3.5-9B Flow-Director -> progressive Canvas -> AgentGraph Runtime -> search/read Tool receipts -> Reasoner -> Verifier -> Formatter -> Evaluator -> Trajectory`.
+`Question -> Qwen3.5-9B Flow-Director -> progressive Canvas -> AgentGraph Runtime -> role-conditional Agent execution/communication -> selected Output Agent -> Evaluator -> Trajectory`.
+
+Reasoner, Verifier and Format are available semantic responsibilities, not a
+required Agent inventory or a prescribed serial workflow.  ReAct is selected
+per Agent as an execution mode; the live Canvas domain determines which Agents,
+relations and Output role are admissible for the current state.
 
 The pre-v2 source is recoverable from branch
 `backup/pre-unified-architecture-v2-triviaqa-20260822` at commit
@@ -26,10 +31,25 @@ with HTTP 403; no existing branch was overwritten.
 - SkillFlow-compatible bounded `search/read` Action–Observation execution with
   spelling normalization, alias expansion, entity disambiguation, query
   rewriting and increasing top-k recovery.
+- These five labels are a model-visible execution schedule.  The lossless
+  trace records the actual query, top-k and Tool receipt, but the Runtime does
+  not claim a deterministic semantic classifier for whether a generated query
+  itself performed the named transformation; receipts therefore retain
+  `strategy_semantics_verified=false`.
 - Entity/evidence provenance admission before reasoning, and explicit
   `knowledge_base_coverage_failure` only after bounded strategy exhaustion.
-- Separate Reasoner, Verifier and Formatter responsibilities.  ReAct is an
-  execution strategy, never an Agent role.
+- Successful public `read` Tool receipts follow the routed artifact lineage
+  from Retriever to Reasoner and onward to Verifier/Output.  The Runtime keeps
+  upstream and current receipts in artifact metadata with structural
+  de-duplication, so a downstream semantic check does not lose the evidence
+  provenance used by its predecessor.
+- Geographic-scope grounding is proposition-clause scoped: a named scope may
+  satisfy a location claim only when it occurs in the same evidence clause
+  that binds the proposition subject, relation and object.  An unrelated
+  clause in the same retrieved passage cannot close that semantic lineage.
+- Optional Reasoner, Verifier and Format responsibilities with no mandatory
+  serial chain.  ReAct is an execution mode selected per Agent, never an Agent
+  role.
 - `preserve -> diagnose -> repair/augment` recovery and an immutable last valid
   answer/Runtime/graph lineage for `max_rounds` fallback.
 - Exact trajectory fields for fallback use and report-only TriviaQA failure
@@ -39,10 +59,11 @@ with HTTP 403; no existing branch was overwritten.
 
 ### Verified without a live model
 
-- The complete unit suite passes: 780 tests and 142 subtests passed across AgentGraph, Runtime,
-  Tool adapter, gateway prompts, Director action domains, configuration,
-  records, collector, evaluator and reporting.  The only warning is the
-  existing Pydantic class-config deprecation in `scripts/formatter.py`.
+- The current complete unit suite passes: 943 tests and 177 subtests across
+  AgentGraph, Runtime, Tool adapter, gateway prompts, Director action domains,
+  configuration, records, collector, evaluator and reporting.  The only
+  warning is the existing Pydantic class-config deprecation in
+  `scripts/formatter.py`.
 - `git diff --check` passed.
 - Prepare-only selected exactly 128 TriviaQA tasks, from `triviaqa:tc_1` through
   `triviaqa:tc_223`, in the same order as the previous condition.
@@ -503,10 +524,148 @@ exactly `triviaqa:tc_9` then `triviaqa:tc_10`.  Both retain the frozen 128-row
 question-only Direct source.  Training, optimizer updates, Skills and policy
 synchronization remain disabled.  r15 has not yet produced a live score.
 
+Recovery revision r16 keeps the shared Runtime and introduces Tool v8.  It
+allows the same normalized retrieval query only at a strictly larger top-k,
+rejects an exact repeated `(query, top_k)` pair, and reuses one public repair
+instruction in both the next model input and the exhausted trace.  Answer-type
+mismatch is evaluated before an identity-only repair.  On the Canvas side, a
+same-role auxiliary replacement is first executed as an isolated functional
+unit; a successful Evidence Retriever replacement must carry a successful
+public `read` receipt before it may be routed into a Reasoner.  The failed
+Agent, its typed diagnosis, its relations and all previously successful
+artifacts remain preserved while this replacement is tested.
+
+Static r16 integration passed the complete unit suite (`808 passed`, `144
+subtests passed`) and both prepare-only freezes.  Its main live canary failed
+the `2/2` Stable Zero gate.  `triviaqa:tc_3` explicitly finished with
+`Heworth, North Riding of Yorkshire` and official EM/F1 `0.0/0.5`.
+`triviaqa:tc_1` had already produced the correct
+`<answer>Harry Sinclair Lewis</answer>` semantic chain, but a successful,
+receipt-grounded Evidence Retriever remained terminal-unreachable.  The
+preserved-input gate incorrectly removed the exact one-way
+`Evidence Retriever -> Reasoner` relation from the live domain, so complete
+graph reachability prevented `FINISH` and the task reached `max_rounds`.
+Because the main gate failed, r16 did not run the isolated regression or
+fixed-128 evaluation.
+
+Recovery revision r17 changes only that measured relation-admission boundary.
+It permits exactly one successful, terminal-unreachable Evidence Retriever
+with a valid `qa-retrieval` read receipt to add one one-way predecessor edge to
+the active Reasoner.  Reciprocal ingress, a non-Retriever source, a non-Reasoner
+target and arbitrary successful-predecessor mutation remain rejected.  The
+accepted relation uses the existing FlowSteer execute-on-edit transaction to
+recompute Reasoner, Verifier and Formatter, while their old revision artifacts
+are retained in the previous-revision preservation store.
+
+Static r17 integration passed the complete unit suite (`809 passed`, `144
+subtests passed`) and both prepare-only freezes.  The main live gate passed
+`2/2`: `tc_1` explicitly finished at official EM/F1 `1.0/1.0`, and `tc_3`
+explicitly finished at `0.0/0.5`.  The independent `tc_9`/`tc_10` gate also
+passed `2/2`, both at official EM/F1 `1.0/1.0`.  All four checks retained full
+turn, Output-inbox, terminal-artifact, environment-terminal and official
+evaluator receipts, with zero collection failures.  Direct predictions were
+reused from the frozen question-only source and no new Direct inference was
+collected.  The r17 fixed-128 evaluation was admitted only after both gates and
+is recorded under the same r17 condition; its final result must be read from
+the completed manifest/report rather than inferred from these four gate tasks.
+
+### r56 role-conditional inference architecture update
+
+r56 changes only the shared HotpotQA/TriviaQA inference architecture and its
+versioned TriviaQA configuration; it is not a training, RL or Skill result.
+The shared QA Canvas no longer requires a named
+`Reasoner -> Verifier -> Formatter` spine.  Those role families are optional
+semantic capabilities, a generic `output` role is terminal-compatible, and
+the Canvas validates the correlated `(execution_mode, allowed_tools)` profile
+selected for each Agent.  All ordinary selected Agents must reach the unique
+Output.  If a Verifier is selected, it must consume and preserve a routed
+semantic candidate; if a Format Agent is selected, it is a copy-only terminal
+sink.  Without those named roles, a generic Output must still preserve a
+single consistent semantic candidate and have a successful `read` receipt in
+its routed ancestry.
+
+Evidence lineage is transitive across routed Agent messages.  A Reasoner
+artifact may cite successful public `read` receipts produced by an upstream
+Retriever as well as receipts from its own bounded ReAct execution, and those
+receipts remain attached when the artifact is delivered to a Verifier or
+Output.  TriviaQA location containment also requires the named geographic
+scope in the same proposition-supporting clause that grounds subject,
+relation and object; an unrelated clause in the same passage does not satisfy
+the scope gate.
+
+The live legal action domain and authoritative Canvas admission use the same
+state projection.  When exactly one current Reasoner has no evidence ingress
+and one or more executed Evidence Retrievers have a valid receipt-grounded
+artifact, the next admissible action is `set_relation` over the exact
+Canvas-validated Retriever-to-Reasoner candidates before an unrelated
+semantic ADD.  This is a state-conditioned data dependency: it neither
+chooses a fixed Retriever nor inserts a fixed role order, edge set, chain or
+other topology template.  Reciprocal communication and multiple evidence
+branches remain representable when legal in the current Canvas.
+
+Recovery remains semantic-preserving and non-destructive:
+`preserve -> diagnose -> repair/augment`.  Successful evidence, Tool receipts,
+semantic artifacts, working relations and Output identity remain
+revision-bound while the measured responsible Agent, execution profile, Tool
+contract, entity/relation binding or relation is repaired.  Augmentation is
+opened only by the typed live recovery state.  The otherwise strict
+all-Agents-reach-Output rule has one narrow execute-on-edit exception: the
+exact newly admitted, isolated Evidence Retriever or Repair unit may execute
+before its validated artifact is routed in a later Canvas edit.  This does not
+relax FINISH admission, authorize arbitrary disconnected Agents, or delete the
+failed responsibility.  A last-valid evidence-lineage fallback, when one
+exists at `max_rounds`, remains explicitly non-FINISH and GRPO-ineligible.
+
+Director prompt receipt v5 keeps the concise, topology-neutral v4 system
+instruction byte-for-byte and changes only the versioned historical-
+observation policy.  It compacts stale historical Canvas observations while
+retaining the initial task/catalog context, exact sampled actions, public
+failure and Tool receipts, and the exact current Canvas/action domain.  The
+prompt contains no fixed Agent count, role order, communication topology,
+workflow template, retrieval-strategy recipe, candidate answer or unlisted
+Skill.
+
+The r56 configuration uses the local Qwen3.5-9B Supervisor on GPU 0 at port
+8015, explicitly sets `require_format_agent: false`, and keeps training, GRPO,
+backward, optimizer updates, LoRA publication/policy synchronization, Skills,
+MACE/Bayesian exploration and gradient-replica use disabled.  Prepare-only
+selected the frozen `triviaqa:tc_3` canary.  At this documentation update the
+live r56 manifest was still in `agentgraph` status with zero completed
+AgentGraph records; therefore this report does not claim an r56 canary score
+or a fixed-128 v2 score.  Either result is authoritative only after its own
+manifest/report completes.
+
+### v6 topology-neutral Director instruction
+
+A model-visible prompt inspection showed that v5 did not prescribe a fixed
+edge set or topology, but its system instruction still described the
+`evidence_retriever`, `reasoner`, `verifier` and `format` responsibilities one
+by one, while the Canvas observation repeated the same optional role inventory.
+Those duplicate descriptions formed a canonical-role prior even though each
+role was technically optional.
+
+Prompt v6 removes that duplicate prior.  Following SkillFlow's compact action
+guidance and FlowSteer's live Canvas boundary, the system instruction now states
+only the legal action/target domains, model and Tool selection boundaries,
+public execute-and-feedback cycle, question-scope preservation, non-destructive
+recovery and terminal admission.  It is 1,387 characters rather than v5's
+3,246 characters and contains no static per-role workflow instruction or
+retrieval-strategy recipe.  Exact role families and correlated execution
+profiles remain available only when they are legal in the current
+`action_target_domains`; the search space itself is not reduced.  The general
+Canvas observation no longer repeats `optional_role_capabilities`.
+
+The v5 prompt and its compact-history policy remain versioned and replayable.
+The fixed-128 condition is separately frozen to v6/Tool v41 under a new output
+root, selects the same 128 development tasks in the same order, and keeps
+training, GRPO, Skills and policy synchronization disabled.  At this document
+update v6 had passed the complete static suite and prepare-only freeze but had
+not yet produced a live canary or fixed-128 score.
+
 ### Stable Zero status
 
-Static architecture, 808 unit tests, 144 subtests and both frozen data-selection
-preconditions are complete.  The initial, r2, r3 and r4 canaries failed for
+Static architecture, 943 unit tests, 177 subtests and the current frozen
+data-selection preconditions are complete.  The initial, r2, r3 and r4 canaries failed for
 the documented causes; r5 **passed Stable Zero** but its incomplete fixed-128
 run was stopped after measured recovery defects appeared.  Recovery revision
 r6 failed Stable Zero for the documented retrieval-recovery defect.  Recovery
@@ -533,10 +692,17 @@ explicitly finishing at EM/F1 `1.0/1.0` and `tc_9` recorded as
 was not started.  Recovery revision r14 failed its live main canary `1/2`:
 `tc_1` explicitly finished at EM/F1 `1.0/1.0`, while `tc_3` ended at
 `max_rounds` with a null answer despite a correct public read receipt.  Its
-isolated and fixed-128 runs were not started.  Recovery revision r15 has passed
-static and prepare-only gates; its live gates and formal fixed-128 v2 EM/F1
-remain pending.  No score is inferred from
-unit tests, a two-task canary, an incomplete run, or the previous architecture.
+isolated and fixed-128 runs were not started.  Recovery revision r15 passed
+only its static and prepare-only gates.  Recovery revision r16 then failed its
+main canary `1/2` because the exact grounded Retriever-to-Reasoner ingress was
+missing from the live relation domain.  Recovery revision r17 passed both the
+main `2/2` and isolated `tc_9`/`tc_10` `2/2` live gates, so its fixed-128 run
+was admitted.  No fixed-128 score is inferred from unit tests, four canary
+tasks, an incomplete run, or the previous architecture.  r56 subsequently
+introduced the role-conditional, topology-neutral inference boundaries above;
+its `triviaqa:tc_3` live canary had started but had not produced a completed
+trajectory at this documentation update, so no r56 or fixed-128 v2 score is
+reported here.
 
 ## Historical comparison condition
 

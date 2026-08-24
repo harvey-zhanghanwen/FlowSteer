@@ -716,6 +716,22 @@ def test_trivia_failure_taxonomy_uses_evaluator_and_public_runtime_receipts():
             }
         ],
     }
+    strategy_failure = {
+        **common,
+        "explicit_finish": False,
+        "turns": [
+            {
+                "canvas_feedback": "bounded ReAct execution failed",
+                "runtime_summary": {
+                    "react_public_error_summary": {
+                        "terminal_failure_diagnosis": {
+                            "public_error_code": "retrieval_strategy_failure"
+                        }
+                    }
+                },
+            }
+        ],
+    }
 
     assert _MODULE._failure_type(
         {"evaluation": {"valid": True}},
@@ -728,6 +744,15 @@ def test_trivia_failure_taxonomy_uses_evaluator_and_public_runtime_receipts():
     ) == "accepted_answer_canonicalization_mismatch"
     assert _MODULE._failure_type(
         {"evaluation": {"valid": True}},
+        canonicalization,
+        direct_valid=True,
+        graph_valid=True,
+        direct_score=0.0,
+        graph_score=0.0,
+        dataset_key="triviaqa",
+    ) == "accepted_answer_canonicalization_mismatch"
+    assert _MODULE._failure_type(
+        {"evaluation": {"valid": True}},
         coverage,
         direct_valid=True,
         graph_valid=True,
@@ -735,6 +760,15 @@ def test_trivia_failure_taxonomy_uses_evaluator_and_public_runtime_receipts():
         graph_score=0.6,
         dataset_key="triviaqa",
     ) == "knowledge_base_coverage_failure"
+    assert _MODULE._failure_type(
+        {"evaluation": {"valid": True}},
+        strategy_failure,
+        direct_valid=True,
+        graph_valid=True,
+        direct_score=0.0,
+        graph_score=0.0,
+        dataset_key="triviaqa",
+    ) == "retrieval_strategy_failure"
 
     partial_overlap_after_recovery = {
         **common,
@@ -773,6 +807,98 @@ def test_trivia_failure_taxonomy_uses_evaluator_and_public_runtime_receipts():
         graph_score=0.0,
         dataset_key="triviaqa",
     ) == "knowledge_base_coverage_failure"
+
+
+def test_trivia_failure_taxonomy_prioritizes_final_legal_lineage():
+    direct = {"evaluation": {"valid": True}}
+    no_overlap_evaluation = {
+        "valid": True,
+        "metrics": {"exact_match": 0.0, "token_f1": 0.0},
+        "details": {"answer_mismatch_type": "no_accepted_answer_overlap"},
+    }
+    recall_failure_turn = {
+        "canvas_feedback": (
+            "accepted modify_agent at revision 4; "
+            "execution_error=bounded ReAct execution failed"
+        ),
+        "runtime_summary": {
+            "execution_status": "failed",
+            "failure_records": [
+                {
+                    "request_id": "trivia:recall:reader:single",
+                    "agent_id": "reader",
+                    "phase": "single",
+                    "graph_revision": 4,
+                    "error_type": "ReactExecutionError",
+                    "message": "bounded ReAct execution failed",
+                    "metadata": {
+                        "react_trace": [
+                            {
+                                "turn": 10,
+                                "terminal_failure_diagnosis": {
+                                    "observation_status": "budget_exhausted",
+                                    "public_error_code": (
+                                        "retrieval_recall_failure"
+                                    ),
+                                    "tool_plan_exhausted": True,
+                                    "bounded_schedule_exhausted": True,
+                                },
+                            }
+                        ],
+                        "tool_plan_exhausted": True,
+                    },
+                }
+            ],
+        },
+    }
+
+    unresolved_recall = {
+        "explicit_finish": False,
+        "termination_reason": "max_rounds",
+        "evaluation": no_overlap_evaluation,
+        "turns": [recall_failure_turn],
+    }
+    assert _MODULE._failure_type(
+        direct,
+        unresolved_recall,
+        direct_valid=True,
+        graph_valid=True,
+        direct_score=0.0,
+        graph_score=0.0,
+        dataset_key="triviaqa",
+    ) == "retrieval_recall_failure"
+
+    final_reasoning_failure = {
+        "explicit_finish": True,
+        "termination_reason": "finish",
+        "evaluation": no_overlap_evaluation,
+        "turns": [],
+    }
+    assert _MODULE._failure_type(
+        direct,
+        final_reasoning_failure,
+        direct_valid=True,
+        graph_valid=True,
+        direct_score=0.0,
+        graph_score=0.0,
+        dataset_key="triviaqa",
+    ) == "reasoning_failure"
+
+    recovered_then_reasoning_failure = {
+        **final_reasoning_failure,
+        # The exact failed Runtime receipt remains losslessly available after
+        # a later Canvas revision repairs retrieval and explicitly finishes.
+        "turns": [recall_failure_turn],
+    }
+    assert _MODULE._failure_type(
+        direct,
+        recovered_then_reasoning_failure,
+        direct_valid=True,
+        graph_valid=True,
+        direct_score=0.0,
+        graph_score=0.0,
+        dataset_key="triviaqa",
+    ) == "reasoning_failure"
 
 
 def test_paired_row_uses_the_evaluated_lineage_graph_for_fallback():

@@ -9,6 +9,7 @@ does not persist or request hidden chain-of-thought.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 import json
 from types import MappingProxyType
@@ -19,6 +20,14 @@ from .agent_runtime import (
     AgentRequest,
     AgentResponse,
     GatewayResponse,
+)
+from .openai_gateway import supports_local_sglang_top_k
+from .scientific_sampling import (
+    GenerationPhase,
+    SCIENTIFIC_SAMPLING_ALGORITHM,
+    ScientificSamplingCoordinate,
+    derive_generation_seed,
+    scientific_sampling_schedule_hash,
 )
 from .tool_runtime import (
     ActionKind,
@@ -51,6 +60,51 @@ class ReactExecutionError(RuntimeError):
         self.tool_receipts = tuple(dict(item) for item in tool_receipts)
         self.model_calls = tuple(dict(item) for item in model_calls)
         self.tool_plan_exhausted = tool_plan_exhausted
+
+
+class ReactGenerationError(RuntimeError):
+    """One ReAct policy-generation request failed before producing an Action."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        cause_error_type: str,
+        react_trace: tuple[Mapping[str, object], ...] = (),
+        tool_receipts: tuple[Mapping[str, object], ...] = (),
+        model_calls: tuple[Mapping[str, object], ...] = (),
+    ) -> None:
+        super().__init__(message)
+        if not isinstance(cause_error_type, str) or not cause_error_type.strip():
+            raise ValueError("cause_error_type must be non-empty text")
+        self.cause_error_type = cause_error_type.strip()
+        self.react_trace = tuple(dict(item) for item in react_trace)
+        self.tool_receipts = tuple(dict(item) for item in tool_receipts)
+        self.model_calls = tuple(dict(item) for item in model_calls)
+
+
+def _continuation_step_offset(
+    action_history: tuple[Mapping[str, object], ...],
+) -> int:
+    """Return the last persisted Action turn after strict monotonic validation.
+
+    A cross-Agent continuation may retain only Tool-bearing turns, so gaps are
+    valid.  List length is not a valid generation coordinate in that case.
+    """
+
+    last_turn = 0
+    for item in action_history:
+        turn = item.get("turn")
+        if type(turn) is not int or turn < 1:
+            raise ValueError(
+                "continued ReAct action_history turns must be positive integers"
+            )
+        if turn <= last_turn:
+            raise ValueError(
+                "continued ReAct action_history turns must be strictly increasing"
+            )
+        last_turn = turn
+    return last_turn
 
 
 def _parse_structured_action(text: str) -> StructuredAction:
@@ -87,6 +141,8 @@ class ToolReactExecutionAdapter:
         max_tool_calls: int,
         max_action_tokens: int = 512,
         execution_mode: str = "react",
+        sampling_base_seed: int | None = None,
+        sampling_coordinate: ScientificSamplingCoordinate | None = None,
     ) -> None:
         if not hasattr(gateway, "generate"):
             raise TypeError("gateway must implement generate")
@@ -100,6 +156,31 @@ class ToolReactExecutionAdapter:
             raise ValueError("max_action_tokens must be a positive integer")
         if execution_mode not in {"react", "coding"}:
             raise ValueError("execution_mode must be react or coding")
+        if (sampling_base_seed is None) != (sampling_coordinate is None):
+            raise ValueError(
+                "sampling_base_seed and sampling_coordinate must be supplied together"
+            )
+        if sampling_base_seed is not None and (
+            type(sampling_base_seed) is not int
+            or not 0 <= sampling_base_seed < 2**64
+        ):
+            raise ValueError("sampling_base_seed must be an unsigned 64-bit integer")
+        if sampling_coordinate is not None and not isinstance(
+            sampling_coordinate,
+            ScientificSamplingCoordinate,
+        ):
+            raise TypeError(
+                "sampling_coordinate must be a ScientificSamplingCoordinate"
+            )
+        if (
+            sampling_base_seed is not None
+            and sampling_coordinate is not None
+            and sampling_coordinate.sampling_schedule_hash
+            != scientific_sampling_schedule_hash(base_seed=sampling_base_seed)
+        ):
+            raise ValueError(
+                "sampling_coordinate schedule hash does not match sampling_base_seed"
+            )
         self._gateway = gateway
         self._tool_registry = tool_registry
         self._max_turns = max_turns
@@ -110,6 +191,20 @@ class ToolReactExecutionAdapter:
         # 4096-token completion allowance can exceed an 8K context window.
         self._max_action_tokens = max_action_tokens
         self._execution_mode = execution_mode
+        self._sampling_base_seed = sampling_base_seed
+        self._sampling_coordinate = sampling_coordinate
+        # AgentRuntime's timeout boundary normalizes CancelledError.  Preserve
+        # the already-materialized public request receipt by request ID, using
+        # the same handoff contract as EnvironmentExecutionAdapter.
+        self._cancelled_prefixes: dict[str, Mapping[str, object]] = {}
+
+    def take_cancelled_failure_metadata(
+        self,
+        request_id: str,
+    ) -> Mapping[str, object]:
+        """Consume one cancelled Action-generation receipt."""
+
+        return self._cancelled_prefixes.pop(request_id, MappingProxyType({}))
 
     def _state_conditioned_action_domain(
         self,
@@ -443,6 +538,16 @@ class ToolReactExecutionAdapter:
         model_calls: list[dict[str, object]] = []
         tool_calls = len(tool_receipts)
         continuation_turn_count = len(trace)
+        try:
+            continuation_step_offset = _continuation_step_offset(
+                request.action_history
+            )
+        except ValueError as exc:
+            raise ReactExecutionError(
+                str(exc),
+                react_trace=tuple(trace),
+                tool_receipts=tuple(tool_receipts),
+            ) from exc
         last_dispatched_tool_action_key: Optional[str] = None
         for observation in reversed(observations):
             executed_action = observation.get("executed_action")
@@ -459,6 +564,27 @@ class ToolReactExecutionAdapter:
                 break
 
         for turn in range(1, self._max_turns + 1):
+            admitted_tool_actions, completion_admitted = (
+                self._state_conditioned_action_domain(request, observations)
+            )
+            if (
+                admitted_tool_actions is not None
+                and not admitted_tool_actions
+                and not completion_admitted
+            ):
+                # NECESSARY_ADAPTATION: SkillFlow bounds one Agent rollout but
+                # does not publish this project's explicit empty action mask.
+                # Stop at that measured no-transition state instead of spending
+                # later turns on actions the current Tool contract must reject;
+                # dataset adapters attach the typed terminal diagnosis while
+                # preserving the exact public prefix.
+                raise ReactExecutionError(
+                    "bounded ReAct action domain is exhausted",
+                    react_trace=tuple(trace),
+                    tool_receipts=tuple(tool_receipts),
+                    model_calls=tuple(model_calls),
+                    tool_plan_exhausted=True,
+                )
             response_schema = self._state_conditioned_response_schema(
                 request,
                 observations,
@@ -467,6 +593,53 @@ class ToolReactExecutionAdapter:
                 **dict(request.model.metadata),
                 "max_tokens": str(self._max_action_tokens),
             }
+            absolute_step_index = continuation_step_offset + turn
+            scientific_sampling_receipt: dict[str, object] | None = None
+            requested_sampling: dict[str, object] = {
+                "temperature": None,
+                "top_p": None,
+                "top_k": None,
+                "max_tokens": self._max_action_tokens,
+                "seed": None,
+            }
+            if (
+                self._sampling_base_seed is not None
+                and self._sampling_coordinate is not None
+            ):
+                generation_seed = derive_generation_seed(
+                    base_seed=self._sampling_base_seed,
+                    coordinate=self._sampling_coordinate,
+                    step_index=absolute_step_index,
+                    phase=GenerationPhase.ACTION,
+                )
+                # DIRECT_REUSE: SkillFlow fixes temperature=1, top_p=1 and one
+                # step-specific scientific seed.  Its SGLang-native top_k=-1
+                # is forwarded only through an explicitly declared compatible
+                # local provider; portable remote OpenAI providers remain
+                # untouched and the receipt records top_k=None.
+                model_metadata["temperature"] = "1.0"
+                model_metadata["top_p"] = "1.0"
+                model_metadata["generation_seed"] = str(generation_seed)
+                top_k = None
+                if supports_local_sglang_top_k(request):
+                    top_k = -1
+                    model_metadata["top_k"] = "-1"
+                requested_sampling = {
+                    "temperature": 1.0,
+                    "top_p": 1.0,
+                    "top_k": top_k,
+                    "max_tokens": self._max_action_tokens,
+                    "seed": generation_seed,
+                }
+                scientific_sampling_receipt = {
+                    "algorithm": SCIENTIFIC_SAMPLING_ALGORITHM,
+                    "base_seed": self._sampling_base_seed,
+                    "coordinate": self._sampling_coordinate.to_value(),
+                    "phase": GenerationPhase.ACTION.value,
+                    "step_index": absolute_step_index,
+                    "generation_seed": generation_seed,
+                    "requested_sampling": dict(requested_sampling),
+                }
             if response_schema is not None:
                 model_metadata["response_json_schema"] = json.dumps(
                     response_schema,
@@ -487,19 +660,84 @@ class ToolReactExecutionAdapter:
                     metadata=model_metadata,
                 ),
             )
-            generated = await self._gateway.generate(turn_request)
-            response = (
-                generated if isinstance(generated, AgentResponse) else AgentResponse(generated)
-            )
-            model_calls.append(
-                {
-                    "turn": turn,
-                    "request_id": turn_request.request_id,
-                    "metadata": dict(response.metadata),
-                }
-            )
+            model_call: dict[str, object] = {
+                "turn": absolute_step_index,
+                "request_id": turn_request.request_id,
+                "requested_sampling": dict(requested_sampling),
+                "request_status": "requested",
+                **(
+                    {
+                        "algorithm": SCIENTIFIC_SAMPLING_ALGORITHM,
+                        "scientific_sampling": scientific_sampling_receipt,
+                    }
+                    if scientific_sampling_receipt is not None
+                    else {}
+                ),
+            }
+            try:
+                generated = await self._gateway.generate(turn_request)
+                response = (
+                    generated
+                    if isinstance(generated, AgentResponse)
+                    else AgentResponse(generated)
+                )
+            except asyncio.CancelledError as exc:
+                model_call["request_status"] = "cancelled"
+                model_call["error_type"] = type(exc).__name__
+                model_calls.append(model_call)
+                cancellation_metadata = MappingProxyType(
+                    {
+                        "react_trace": tuple(dict(item) for item in trace),
+                        "tool_receipts": tuple(
+                            dict(item) for item in tool_receipts
+                        ),
+                        "model_calls": tuple(
+                            dict(item) for item in model_calls
+                        ),
+                        "cause_error_type": type(exc).__name__,
+                    }
+                )
+                exc.react_trace = cancellation_metadata["react_trace"]
+                exc.tool_receipts = cancellation_metadata["tool_receipts"]
+                exc.model_calls = cancellation_metadata["model_calls"]
+                exc.cause_error_type = type(exc).__name__
+                self._cancelled_prefixes[request.request_id] = (
+                    cancellation_metadata
+                )
+                raise
+            except Exception as exc:
+                failure_sampling = getattr(exc, "requested_sampling", None)
+                if isinstance(failure_sampling, Mapping):
+                    model_call["requested_sampling"] = dict(failure_sampling)
+                model_call["request_status"] = "failed"
+                model_call["error_type"] = type(exc).__name__
+                model_calls.append(model_call)
+                error = ReactGenerationError(
+                    f"{type(exc).__name__}: "
+                    + (" ".join(str(exc).split()) or "generation failed"),
+                    cause_error_type=type(exc).__name__,
+                    react_trace=tuple(trace),
+                    tool_receipts=tuple(tool_receipts),
+                    model_calls=tuple(model_calls),
+                )
+                for field_name in (
+                    "provider_id",
+                    "model_id",
+                    "http_status",
+                    "request_status",
+                ):
+                    value = getattr(exc, field_name, None)
+                    if value is not None:
+                        setattr(error, field_name, value)
+                raise error from exc
+            response_sampling = response.metadata.get("requested_sampling")
+            if isinstance(response_sampling, Mapping):
+                model_call["requested_sampling"] = dict(response_sampling)
+            model_call["request_status"] = "completed"
+            model_call["metadata"] = dict(response.metadata)
+            model_calls.append(model_call)
             entry: dict[str, object] = {
-                "turn": continuation_turn_count + turn,
+                "turn": absolute_step_index,
                 "action_text": response.text,
             }
             try:
@@ -604,7 +842,7 @@ class ToolReactExecutionAdapter:
                     artifact,
                     {
                         "execution_mode": self._execution_mode,
-                        "react_turns_used": continuation_turn_count + turn,
+                        "react_turns_used": absolute_step_index,
                         "new_react_turns_used": turn,
                         "continued_action_history_count": continuation_turn_count,
                         "continued_tool_receipt_count": len(

@@ -99,6 +99,40 @@ class StaticEvaluatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1.0, alias.metrics["exact_match"])
         self.assertEqual(1.0, alias.metrics["token_f1"])
 
+    async def test_trivia_decade_alias_is_diagnostic_only(self) -> None:
+        record = task(
+            "TriviaQA",
+            question="In which decade did Billboard publish its first chart?",
+            ground_truth="30s | 30-39",
+            payload={"accepted_answers": ["30s", "30-39"]},
+        )
+        canonicalization = await evaluate_task(record, "<answer>1930s</answer>")
+        wrong_decade = await evaluate_task(record, "<answer>1950s</answer>")
+        wrong_scope = await evaluate_task(
+            task(
+                "TriviaQA",
+                question="When did Billboard publish its first chart?",
+                ground_truth="30s",
+                payload={"accepted_answers": ["30s"]},
+            ),
+            "<answer>1930s</answer>",
+        )
+
+        self.assertEqual(0.0, canonicalization.metrics["exact_match"])
+        self.assertEqual(0.0, canonicalization.metrics["token_f1"])
+        self.assertEqual(
+            "accepted_answer_canonicalization_mismatch",
+            canonicalization.details["answer_mismatch_type"],
+        )
+        self.assertEqual(
+            "no_accepted_answer_overlap",
+            wrong_decade.details["answer_mismatch_type"],
+        )
+        self.assertEqual(
+            "no_accepted_answer_overlap",
+            wrong_scope.details["answer_mismatch_type"],
+        )
+
     async def test_hotpot_yes_no_and_hyphen_rules_match_official_scorer(self) -> None:
         yes_with_explanation = await evaluate_task(
             task("HotpotQA", ground_truth="yes"),

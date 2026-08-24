@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+from dataclasses import replace
 import json
 import unittest
 
@@ -8,7 +10,15 @@ from src.interactive.agent_runtime import AgentRequest, AgentResponse, Execution
 from src.interactive.model_registry import ModelSpec, ProviderSpec
 from src.interactive.react_execution import (
     ReactExecutionError,
+    ReactGenerationError,
     ToolReactExecutionAdapter,
+)
+from src.interactive.scientific_sampling import (
+    GenerationPhase,
+    ScientificSamplingCoordinate,
+    derive_generation_seed,
+    scientific_sampling_schedule_hash,
+    stable_hash,
 )
 from src.interactive.tool_runtime import (
     FakeTool,
@@ -102,6 +112,268 @@ class SequenceGateway:
 
 
 class ToolReactExecutionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_empty_action_domain_fails_before_any_model_call(self) -> None:
+        class ExhaustedAdapter(ToolReactExecutionAdapter):
+            def _state_conditioned_action_domain(
+                self,
+                request: AgentRequest,
+                observations: list[dict[str, object]],
+            ) -> tuple[frozenset[tuple[str, str]], bool]:
+                del request, observations
+                return frozenset(), False
+
+        gateway = SequenceGateway([])
+        with self.assertRaises(ReactExecutionError) as caught:
+            await ExhaustedAdapter(
+                gateway=gateway,
+                tool_registry=registry(),
+                max_turns=4,
+                max_tool_calls=2,
+            ).execute(request())
+
+        self.assertIs(True, caught.exception.tool_plan_exhausted)
+        self.assertEqual((), caught.exception.react_trace)
+        self.assertEqual((), caught.exception.tool_receipts)
+        self.assertEqual((), caught.exception.model_calls)
+        self.assertEqual([], gateway.requests)
+
+    async def test_scientific_sampling_uses_absolute_action_turn(self) -> None:
+        coordinate = ScientificSamplingCoordinate(
+            sampling_schedule_hash=scientific_sampling_schedule_hash(
+                base_seed=17
+            ),
+            schedule_purpose="triviaqa-fixed-schedule",
+            ordered_sequence_hash=stable_hash(["triviaqa:tc_5"]),
+            sequence_position=0,
+            task_id="triviaqa:tc_5",
+            optimizer_step_or_anchor_ordinal=0,
+        )
+        completed = action(
+            "complete",
+            name="complete",
+            arguments={"value": "answer"},
+            resource_id=None,
+        )
+        gateway = SequenceGateway([completed])
+        continued = request()
+        continued = AgentRequest(
+            request_id=continued.request_id,
+            run_id=continued.run_id,
+            graph_revision=2,
+            problem=continued.problem,
+            agent=continued.agent,
+            model=continued.model,
+            provider=continued.provider,
+            phase=continued.phase,
+            action_history=(
+                {"turn": 1, "observation_status": "schema_invalid"},
+                # Cross-Agent public-state projection may retain only the
+                # Tool-bearing turns; the next seed follows the last explicit
+                # turn, not the projected list length.
+                {"turn": 4, "observation_status": "schema_invalid"},
+            ),
+            continuation_source_agent_id="reasoner",
+        )
+        response = await ToolReactExecutionAdapter(
+            gateway=gateway,
+            tool_registry=registry(),
+            max_turns=1,
+            max_tool_calls=2,
+            sampling_base_seed=17,
+            sampling_coordinate=coordinate,
+        ).execute(continued)
+
+        expected_seed = derive_generation_seed(
+            base_seed=17,
+            coordinate=coordinate,
+            step_index=5,
+            phase=GenerationPhase.ACTION,
+        )
+        metadata = gateway.requests[0].model.metadata
+        self.assertEqual("1.0", metadata["temperature"])
+        self.assertEqual("1.0", metadata["top_p"])
+        self.assertEqual(str(expected_seed), metadata["generation_seed"])
+        receipt = response.metadata["model_calls"][0]["scientific_sampling"]
+        self.assertEqual(5, receipt["step_index"])
+        self.assertEqual("action", receipt["phase"])
+        self.assertEqual(expected_seed, receipt["generation_seed"])
+        self.assertEqual(coordinate.to_value(), receipt["coordinate"])
+        self.assertEqual(
+            "skillev-scientific-sampling@1",
+            response.metadata["model_calls"][0]["algorithm"],
+        )
+        self.assertEqual("completed", response.metadata["model_calls"][0]["request_status"])
+        self.assertEqual(
+            {
+                "temperature": 1.0,
+                "top_p": 1.0,
+                "top_k": None,
+                "max_tokens": 512,
+                "seed": expected_seed,
+            },
+            response.metadata["model_calls"][0]["requested_sampling"],
+        )
+
+    async def test_scientific_sampling_rejects_invalid_continuation_turns(self) -> None:
+        coordinate = ScientificSamplingCoordinate(
+            sampling_schedule_hash=scientific_sampling_schedule_hash(base_seed=17),
+            schedule_purpose="triviaqa-fixed-schedule",
+            ordered_sequence_hash=stable_hash(["triviaqa:tc_5"]),
+            sequence_position=0,
+            task_id="triviaqa:tc_5",
+            optimizer_step_or_anchor_ordinal=0,
+        )
+        histories = (
+            ({"turn": 1}, {"turn": 1}),
+            ({"turn": 2}, {"turn": 1}),
+            ({"turn": 0},),
+            ({"turn": True},),
+            ({"observation_status": "schema_invalid"},),
+        )
+        for history in histories:
+            with self.subTest(history=history):
+                with self.assertRaises(ReactExecutionError):
+                    await ToolReactExecutionAdapter(
+                        gateway=SequenceGateway([]),
+                        tool_registry=registry(),
+                        max_turns=1,
+                        max_tool_calls=1,
+                        sampling_base_seed=17,
+                        sampling_coordinate=coordinate,
+                    ).execute(
+                        replace(
+                            request(),
+                            action_history=history,
+                            continuation_source_agent_id="retriever",
+                        )
+                    )
+
+    async def test_declared_local_sglang_requests_unrestricted_top_k(self) -> None:
+        coordinate = ScientificSamplingCoordinate(
+            sampling_schedule_hash=scientific_sampling_schedule_hash(base_seed=17),
+            schedule_purpose="triviaqa-fixed-schedule",
+            ordered_sequence_hash=stable_hash(["triviaqa:tc_5"]),
+            sequence_position=0,
+            task_id="triviaqa:tc_5",
+            optimizer_step_or_anchor_ordinal=0,
+        )
+        gateway = SequenceGateway(
+            [
+                action(
+                    "complete",
+                    name="complete",
+                    arguments={"value": "answer"},
+                    resource_id=None,
+                )
+            ]
+        )
+        base_request = request()
+        local_request = replace(
+            base_request,
+            provider=replace(
+                base_request.provider,
+                metadata={
+                    "sampling_backend": "sglang",
+                    "deployment_locality": "local",
+                },
+            ),
+            model=replace(
+                base_request.model,
+                metadata={"supports_top_k": "true"},
+            ),
+        )
+        response = await ToolReactExecutionAdapter(
+            gateway=gateway,
+            tool_registry=registry(),
+            max_turns=1,
+            max_tool_calls=1,
+            sampling_base_seed=17,
+            sampling_coordinate=coordinate,
+        ).execute(local_request)
+
+        self.assertEqual("-1", gateway.requests[0].model.metadata["top_k"])
+        self.assertEqual(
+            -1,
+            response.metadata["model_calls"][0]["requested_sampling"]["top_k"],
+        )
+
+    async def test_failed_generation_preserves_scientific_sampling_receipt(self) -> None:
+        coordinate = ScientificSamplingCoordinate(
+            sampling_schedule_hash=scientific_sampling_schedule_hash(base_seed=17),
+            schedule_purpose="triviaqa-fixed-schedule",
+            ordered_sequence_hash=stable_hash(["triviaqa:tc_5"]),
+            sequence_position=0,
+            task_id="triviaqa:tc_5",
+            optimizer_step_or_anchor_ordinal=0,
+        )
+
+        class FailingGateway:
+            async def generate(self, request):
+                del request
+                raise RuntimeError("provider unavailable")
+
+        with self.assertRaises(ReactGenerationError) as raised:
+            await ToolReactExecutionAdapter(
+                gateway=FailingGateway(),
+                tool_registry=registry(),
+                max_turns=1,
+                max_tool_calls=1,
+                sampling_base_seed=17,
+                sampling_coordinate=coordinate,
+            ).execute(request())
+
+        self.assertEqual("RuntimeError", raised.exception.cause_error_type)
+        self.assertEqual(1, len(raised.exception.model_calls))
+        failed_call = raised.exception.model_calls[0]
+        self.assertEqual("failed", failed_call["request_status"])
+        self.assertEqual(
+            "skillev-scientific-sampling@1",
+            failed_call["algorithm"],
+        )
+        self.assertEqual(
+            failed_call["scientific_sampling"]["generation_seed"],
+            failed_call["requested_sampling"]["seed"],
+        )
+
+    async def test_cancelled_generation_preserves_request_scoped_receipt(self) -> None:
+        coordinate = ScientificSamplingCoordinate(
+            sampling_schedule_hash=scientific_sampling_schedule_hash(base_seed=17),
+            schedule_purpose="triviaqa-fixed-schedule",
+            ordered_sequence_hash=stable_hash(["triviaqa:tc_5"]),
+            sequence_position=0,
+            task_id="triviaqa:tc_5",
+            optimizer_step_or_anchor_ordinal=0,
+        )
+
+        class CancelledGateway:
+            async def generate(self, request):
+                del request
+                raise asyncio.CancelledError
+
+        adapter = ToolReactExecutionAdapter(
+            gateway=CancelledGateway(),
+            tool_registry=registry(),
+            max_turns=1,
+            max_tool_calls=1,
+            sampling_base_seed=17,
+            sampling_coordinate=coordinate,
+        )
+        item = request()
+        with self.assertRaises(asyncio.CancelledError):
+            await adapter.execute(item)
+
+        metadata = adapter.take_cancelled_failure_metadata(item.request_id)
+        self.assertEqual(1, len(metadata["model_calls"]))
+        self.assertEqual(
+            "cancelled",
+            metadata["model_calls"][0]["request_status"],
+        )
+        self.assertEqual(
+            "skillev-scientific-sampling@1",
+            metadata["model_calls"][0]["algorithm"],
+        )
+        self.assertEqual({}, dict(adapter.take_cancelled_failure_metadata(item.request_id)))
+
     async def test_public_action_history_continues_after_canvas_repair(self) -> None:
         completed = action(
             "complete",

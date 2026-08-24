@@ -190,6 +190,94 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((), adapter.requests[1].prior_tool_receipts)
         self.assertIsNone(adapter.requests[1].continuation_source_agent_id)
 
+    async def test_new_input_artifact_version_supersedes_active_continuation_state(
+        self,
+    ) -> None:
+        catalog = registry()
+
+        class ContinuationAdapter:
+            def __init__(self) -> None:
+                self.requests: list[AgentRequest] = []
+
+            async def execute(self, request: AgentRequest) -> AgentResponse:
+                self.requests.append(request)
+                return AgentResponse("repaired")
+
+        adapter = ContinuationAdapter()
+        runtime = AgentRuntime(
+            catalog,
+            RecordingGateway(),
+            execution_adapters={"react": adapter},
+        )
+        graph = AgentGraph(
+            [
+                AgentNode("retriever", "m1", "retrieve evidence"),
+                AgentNode(
+                    "reasoner",
+                    "m2",
+                    "repair the semantic artifact",
+                    execution_mode="react",
+                ),
+            ],
+            [AgentRelation("retriever", "reasoner", True, False)],
+            output_agent_id="reasoner",
+        )
+
+        await runtime.execute(
+            graph,
+            "question",
+            prior_outputs={"retriever": "new evidence"},
+            prior_output_metadata={
+                "retriever": {
+                    "artifact_version": "retriever:new",
+                    "tool_receipts": [
+                        {
+                            "tool_id": "qa-retrieval",
+                            "request": {"action": "read"},
+                            "result": {"value": {"operation": "read"}},
+                        }
+                    ],
+                }
+            },
+            prior_failure_metadata={
+                "reasoner": {
+                    "execution_phase": "single",
+                    "react_trace": [
+                        {
+                            "turn": 1,
+                            "observation_status": "schema_invalid",
+                            "public_error_code": "old input binding mismatch",
+                        }
+                    ],
+                    "tool_receipts": [
+                        {
+                            "tool_id": "qa-retrieval",
+                            "success": True,
+                        }
+                    ],
+                    "input_artifact_versions": {
+                        "retriever": "retriever:old"
+                    },
+                    "continuation_source_agent_id": "failed_reasoner",
+                }
+            },
+            dirty_agents={"reasoner"},
+        )
+
+        self.assertEqual(1, len(adapter.requests))
+        repaired_request = adapter.requests[0]
+        self.assertEqual((), repaired_request.action_history)
+        self.assertEqual((), repaired_request.prior_tool_receipts)
+        self.assertEqual(
+            "retriever:new",
+            repaired_request.upstream[0].artifact_version,
+        )
+        self.assertEqual(
+            "qa-retrieval",
+            repaired_request.upstream[0].tool_receipts[0]["tool_id"],
+        )
+        self.assertIsNone(repaired_request.continuation_source_agent_id)
+
     async def test_semantic_protocol_is_propagated_to_every_agent_request(self) -> None:
         catalog = registry()
         gateway = RecordingGateway()
@@ -275,6 +363,189 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
             ["verifier"],
             [item.source_agent_id for item in formatter_request.upstream],
         )
+
+    async def test_unified_qa_does_not_infer_required_retriever_reasoner_edge(
+        self,
+    ) -> None:
+        catalog = registry()
+        gateway = RecordingGateway()
+        graph = AgentGraph(
+            [
+                AgentNode(
+                    "retriever",
+                    "m1",
+                    "retrieve evidence",
+                    role_family="evidence_retriever",
+                ),
+                AgentNode(
+                    "reasoner",
+                    "m2",
+                    "bind the answer",
+                    role_family="reasoner",
+                ),
+            ]
+        )
+
+        result = await AgentRuntime(
+            catalog,
+            gateway,
+            semantic_protocol="qa_verified_answer_lineage_v2",
+        ).execute(graph, "question", require_complete=False)
+
+        self.assertEqual(("reasoner", "retriever"), result.executed_agent_ids)
+        self.assertEqual((), result.deferred_agent_ids)
+        self.assertEqual(
+            {"reasoner", "retriever"},
+            {request.agent.id for request in gateway.requests},
+        )
+
+    async def test_unified_qa_single_directional_retriever_ingress_schedules_reasoner(
+        self,
+    ) -> None:
+        catalog = registry()
+
+        class EvidenceGateway:
+            def __init__(self) -> None:
+                self.requests: list[AgentRequest] = []
+
+            async def generate(self, request: AgentRequest) -> AgentResponse:
+                self.requests.append(request)
+                if request.agent.role_family == "evidence_retriever":
+                    return AgentResponse(
+                        "receipt-grounded evidence",
+                        {"tool_receipts": [{"tool_id": "qa-retrieval"}]},
+                    )
+                self.assert_reasoner_input(request)
+                return AgentResponse("grounded answer")
+
+            @staticmethod
+            def assert_reasoner_input(request: AgentRequest) -> None:
+                if len(request.upstream) != 1:
+                    raise AssertionError("Reasoner did not receive one Retriever input")
+                evidence = request.upstream[0]
+                if evidence.source_agent_id != "retriever":
+                    raise AssertionError("Reasoner input source is not the Retriever")
+                if evidence.artifact_version is None:
+                    raise AssertionError("Retriever artifact version was not routed")
+                if not evidence.tool_receipts:
+                    raise AssertionError("Retriever Tool receipt was not routed")
+
+        gateway = EvidenceGateway()
+        graph = AgentGraph(
+            [
+                AgentNode(
+                    "retriever",
+                    "m1",
+                    "retrieve evidence",
+                    role_family="evidence_retriever",
+                ),
+                AgentNode(
+                    "reasoner",
+                    "m2",
+                    "bind the answer",
+                    role_family="reasoner",
+                ),
+            ],
+            [AgentRelation("retriever", "reasoner", True, False)],
+            output_agent_id="reasoner",
+        )
+
+        result = await AgentRuntime(
+            catalog,
+            gateway,
+            semantic_protocol="qa_verified_answer_lineage_v2",
+        ).execute(graph, "question", run_id="retriever-ingress")
+
+        self.assertEqual(
+            ["retriever", "reasoner"],
+            [request.agent.id for request in gateway.requests],
+        )
+        self.assertEqual((), result.deferred_agent_ids)
+        self.assertEqual(
+            result.output_metadata["retriever"]["artifact_version"],
+            result.output_metadata["reasoner"]["input_artifact_versions"][
+                "retriever"
+            ],
+        )
+
+    async def test_unified_qa_preserves_multiple_retriever_fanin(self) -> None:
+        catalog = registry()
+        gateway = RecordingGateway()
+        graph = AgentGraph(
+            [
+                AgentNode(
+                    "retriever_a",
+                    "m1",
+                    "retrieve one evidence branch",
+                    role_family="evidence_retriever",
+                ),
+                AgentNode(
+                    "retriever_b",
+                    "m2",
+                    "retrieve another evidence branch",
+                    role_family="evidence_retriever",
+                ),
+                AgentNode(
+                    "reasoner",
+                    "m1",
+                    "bind the answer",
+                    role_family="reasoner",
+                ),
+            ],
+            [
+                AgentRelation("retriever_a", "reasoner", True, False),
+                AgentRelation("retriever_b", "reasoner", True, False),
+            ],
+            output_agent_id="reasoner",
+        )
+
+        result = await AgentRuntime(
+            catalog,
+            gateway,
+            semantic_protocol="qa_verified_answer_lineage_v2",
+        ).execute(graph, "question", run_id="retriever-fanin")
+
+        reasoner_request = next(
+            request
+            for request in gateway.requests
+            if request.agent.id == "reasoner"
+        )
+        self.assertEqual(
+            ["retriever_a", "retriever_b"],
+            [message.source_agent_id for message in reasoner_request.upstream],
+        )
+        self.assertEqual(
+            ("reasoner", "retriever_a", "retriever_b"),
+            result.executed_agent_ids,
+        )
+        self.assertEqual((), result.deferred_agent_ids)
+
+    async def test_hotpot_reasoner_without_retriever_ingress_remains_schedulable(
+        self,
+    ) -> None:
+        catalog = registry()
+        gateway = RecordingGateway()
+        graph = AgentGraph(
+            [
+                AgentNode(
+                    "reasoner",
+                    "m1",
+                    "answer from supplied context",
+                    role_family="reasoner",
+                )
+            ],
+            output_agent_id="reasoner",
+        )
+
+        result = await AgentRuntime(
+            catalog,
+            gateway,
+            semantic_protocol="hotpotqa_verified_answer_slot_v1",
+        ).execute(graph, "question")
+
+        self.assertEqual(("reasoner",), result.executed_agent_ids)
+        self.assertEqual((), result.deferred_agent_ids)
+        self.assertEqual(["reasoner"], [item.agent.id for item in gateway.requests])
 
     async def test_masked_condition_keeps_canonical_upstream_and_marks_requests(self) -> None:
         catalog = registry()
@@ -670,6 +941,371 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(2, phases.count(ExecutionPhase.DRAFT))
         self.assertEqual(2, phases.count(ExecutionPhase.REVISION))
 
+    async def test_semantic_reasoner_verifier_reciprocal_block_is_causally_ordered(
+        self,
+    ) -> None:
+        catalog = registry()
+
+        class SemanticGateway:
+            def __init__(self) -> None:
+                self.requests: list[AgentRequest] = []
+
+            async def generate(self, request: AgentRequest) -> str:
+                self.requests.append(request)
+                role = request.agent.role_family
+                if role == "evidence_retriever":
+                    return "evidence"
+                if role == "reasoner" and request.phase is ExecutionPhase.DRAFT:
+                    self.assert_no_peer(request)
+                    if [item.content for item in request.upstream] != ["evidence"]:
+                        raise AssertionError(
+                            "Reasoner DRAFT did not consume Retriever evidence"
+                        )
+                    return "reasoner-draft"
+                if role == "verifier" and request.phase is ExecutionPhase.SINGLE:
+                    if [item.content for item in request.upstream] != [
+                        "reasoner-draft"
+                    ]:
+                        raise AssertionError(
+                            "Verifier first pass did not consume Reasoner DRAFT"
+                        )
+                    return "verifier-first-pass"
+                if role == "reasoner" and request.phase is ExecutionPhase.REVISION:
+                    if (
+                        request.peer_draft is None
+                        or request.peer_draft.content != "verifier-first-pass"
+                    ):
+                        raise AssertionError(
+                            "Reasoner REVISION did not consume Verifier first pass"
+                        )
+                    return "reasoner-revision"
+                if role == "verifier" and request.phase is ExecutionPhase.REVISION:
+                    if (
+                        request.peer_draft is None
+                        or request.peer_draft.content != "reasoner-revision"
+                    ):
+                        raise AssertionError(
+                            "Verifier REVISION did not consume current Reasoner"
+                        )
+                    return "verifier-revision"
+                raise AssertionError("unexpected semantic reciprocal request")
+
+            @staticmethod
+            def assert_no_peer(request: AgentRequest) -> None:
+                if request.peer_draft is not None:
+                    raise AssertionError("Reasoner DRAFT unexpectedly has a peer")
+
+        gateway = SemanticGateway()
+        graph = AgentGraph(
+            [
+                AgentNode(
+                    "retriever",
+                    "m1",
+                    "retrieve grounded evidence",
+                    role_family="evidence_retriever",
+                ),
+                AgentNode(
+                    "reasoner",
+                    "m1",
+                    "produce a grounded candidate",
+                    role_family="reasoner",
+                ),
+                AgentNode(
+                    "verifier",
+                    "m2",
+                    "verify the routed candidate",
+                    role_family="verifier",
+                ),
+            ],
+            [
+                AgentRelation("retriever", "reasoner", True, False),
+                AgentRelation("reasoner", "verifier", True, True),
+            ],
+            output_agent_id="verifier",
+        )
+        result = await AgentRuntime(
+            catalog,
+            gateway,
+            semantic_protocol="qa_verified_answer_lineage_v2",
+        ).execute(graph, "question", run_id="semantic-pair")
+
+        self.assertEqual(
+            [
+                ("retriever", ExecutionPhase.SINGLE),
+                ("reasoner", ExecutionPhase.DRAFT),
+                ("verifier", ExecutionPhase.SINGLE),
+                ("reasoner", ExecutionPhase.REVISION),
+                ("verifier", ExecutionPhase.REVISION),
+            ],
+            [(item.agent.id, item.phase) for item in gateway.requests],
+        )
+        self.assertEqual("reasoner-revision", result.outputs["reasoner"])
+        self.assertEqual("verifier-revision", result.outputs["verifier"])
+        self.assertEqual(
+            result.output_metadata["reasoner"]["artifact_version"],
+            result.output_metadata["verifier"]["input_artifact_versions"][
+                "reasoner"
+            ],
+        )
+        self.assertEqual(
+            "reasoner-revision",
+            result.output_metadata["verifier"]["input_artifact_provenance"][
+                0
+            ]["artifact"],
+        )
+
+    async def test_semantic_receipts_follow_reasoner_artifact_to_verifier(
+        self,
+    ) -> None:
+        catalog = registry()
+
+        class LineageGateway:
+            def __init__(self) -> None:
+                self.verifier_request: AgentRequest | None = None
+
+            async def generate(self, request: AgentRequest) -> AgentResponse:
+                role = request.agent.role_family
+                if role == "evidence_retriever":
+                    return AgentResponse(
+                        "retrieved first-hop evidence",
+                        {"tool_receipts": [{"receipt": "first-hop-read"}]},
+                    )
+                if role == "reasoner":
+                    self.assert_first_hop_received(request)
+                    return AgentResponse(
+                        "reasoned two-hop artifact",
+                        {"tool_receipts": [{"receipt": "second-hop-read"}]},
+                    )
+                if role == "verifier":
+                    self.verifier_request = request
+                    return AgentResponse("supported")
+                raise AssertionError("unexpected semantic role")
+
+            @staticmethod
+            def assert_first_hop_received(request: AgentRequest) -> None:
+                if request.upstream[0].tool_receipts[0]["receipt"] != (
+                    "first-hop-read"
+                ):
+                    raise AssertionError("Reasoner lost Retriever provenance")
+
+        gateway = LineageGateway()
+        graph = AgentGraph(
+            [
+                AgentNode(
+                    "retriever",
+                    "m1",
+                    "retrieve evidence",
+                    role_family="evidence_retriever",
+                ),
+                AgentNode(
+                    "reasoner",
+                    "m1",
+                    "bind evidence to the answer slot",
+                    role_family="reasoner",
+                ),
+                AgentNode(
+                    "verifier",
+                    "m2",
+                    "verify the evidence lineage",
+                    role_family="verifier",
+                ),
+            ],
+            [
+                AgentRelation("retriever", "reasoner", True, False),
+                AgentRelation("reasoner", "verifier", True, False),
+            ],
+            output_agent_id="verifier",
+        )
+
+        result = await AgentRuntime(
+            catalog,
+            gateway,
+            semantic_protocol="qa_verified_answer_lineage_v2",
+        ).execute(graph, "question", run_id="semantic-receipt-lineage")
+
+        self.assertIsNotNone(gateway.verifier_request)
+        assert gateway.verifier_request is not None
+        self.assertEqual(
+            ["first-hop-read", "second-hop-read"],
+            [
+                receipt["receipt"]
+                for receipt in gateway.verifier_request.upstream[0].tool_receipts
+            ],
+        )
+        self.assertEqual(
+            ["first-hop-read", "second-hop-read"],
+            [
+                receipt["receipt"]
+                for receipt in result.output_metadata["reasoner"][
+                    "tool_receipts"
+                ]
+            ],
+        )
+
+    async def test_semantic_retriever_reasoner_reciprocal_block_is_causally_ordered(
+        self,
+    ) -> None:
+        catalog = registry()
+
+        class ReciprocalEvidenceGateway:
+            def __init__(self) -> None:
+                self.requests: list[AgentRequest] = []
+
+            async def generate(self, request: AgentRequest) -> AgentResponse:
+                self.requests.append(request)
+                role = request.agent.role_family
+                if (
+                    role == "evidence_retriever"
+                    and request.phase is ExecutionPhase.DRAFT
+                ):
+                    if request.peer_draft is not None:
+                        raise AssertionError("Retriever DRAFT unexpectedly has a peer")
+                    return AgentResponse(
+                        "retriever-draft",
+                        {"tool_receipts": [{"receipt": "draft-read"}]},
+                    )
+                if role == "reasoner" and request.phase is ExecutionPhase.DRAFT:
+                    if [item.content for item in request.upstream] != [
+                        "retriever-draft"
+                    ]:
+                        raise AssertionError(
+                            "Reasoner DRAFT did not consume Retriever DRAFT"
+                        )
+                    routed = request.upstream[0]
+                    if routed.artifact_version is None or not routed.tool_receipts:
+                        raise AssertionError(
+                            "Retriever DRAFT provenance was not routed"
+                        )
+                    return AgentResponse("reasoner-draft")
+                if (
+                    role == "evidence_retriever"
+                    and request.phase is ExecutionPhase.REVISION
+                ):
+                    if request.own_draft != "retriever-draft":
+                        raise AssertionError("Retriever REVISION lost its own draft")
+                    if (
+                        request.peer_draft is None
+                        or request.peer_draft.content != "reasoner-draft"
+                        or request.peer_draft.artifact_version is None
+                    ):
+                        raise AssertionError(
+                            "Retriever REVISION did not consume Reasoner DRAFT"
+                        )
+                    return AgentResponse(
+                        "retriever-revision",
+                        {"tool_receipts": [{"receipt": "revised-read"}]},
+                    )
+                if role == "reasoner" and request.phase is ExecutionPhase.REVISION:
+                    if request.own_draft != "reasoner-draft":
+                        raise AssertionError("Reasoner REVISION lost its own draft")
+                    if (
+                        request.peer_draft is None
+                        or request.peer_draft.content != "retriever-revision"
+                        or request.peer_draft.artifact_version is None
+                        or not request.peer_draft.tool_receipts
+                    ):
+                        raise AssertionError(
+                            "Reasoner REVISION did not consume Retriever REVISION"
+                        )
+                    return AgentResponse("reasoner-revision")
+                raise AssertionError("unexpected reciprocal evidence request")
+
+        gateway = ReciprocalEvidenceGateway()
+        graph = AgentGraph(
+            [
+                AgentNode(
+                    "retriever",
+                    "m1",
+                    "retrieve evidence",
+                    role_family="evidence_retriever",
+                ),
+                AgentNode(
+                    "reasoner",
+                    "m2",
+                    "bind the answer",
+                    role_family="reasoner",
+                ),
+            ],
+            [AgentRelation("retriever", "reasoner", True, True)],
+            output_agent_id="reasoner",
+        )
+        result = await AgentRuntime(
+            catalog,
+            gateway,
+            semantic_protocol="qa_verified_answer_lineage_v2",
+        ).execute(graph, "question", run_id="semantic-evidence-pair")
+
+        self.assertEqual(
+            [
+                ("retriever", ExecutionPhase.DRAFT),
+                ("reasoner", ExecutionPhase.DRAFT),
+                ("retriever", ExecutionPhase.REVISION),
+                ("reasoner", ExecutionPhase.REVISION),
+            ],
+            [(item.agent.id, item.phase) for item in gateway.requests],
+        )
+        self.assertEqual("retriever-revision", result.outputs["retriever"])
+        self.assertEqual("reasoner-revision", result.outputs["reasoner"])
+        self.assertEqual(
+            result.output_metadata["retriever"]["artifact_version"],
+            result.output_metadata["reasoner"]["input_artifact_versions"][
+                "retriever"
+            ],
+        )
+        final_provenance = result.output_metadata["reasoner"][
+            "input_artifact_provenance"
+        ][0]
+        self.assertEqual("retriever-revision", final_provenance["artifact"])
+        self.assertEqual(
+            "revised-read",
+            final_provenance["tool_receipts"][0]["receipt"],
+        )
+
+    async def test_retriever_reasoner_reciprocal_failure_stops_before_reasoner(
+        self,
+    ) -> None:
+        catalog = registry()
+
+        class FailingRetrieverGateway:
+            def __init__(self) -> None:
+                self.requests: list[AgentRequest] = []
+
+            async def generate(self, request: AgentRequest) -> str:
+                self.requests.append(request)
+                raise RuntimeError("retrieval failed")
+
+        gateway = FailingRetrieverGateway()
+        graph = AgentGraph(
+            [
+                AgentNode(
+                    "retriever",
+                    "m1",
+                    "retrieve evidence",
+                    role_family="evidence_retriever",
+                ),
+                AgentNode(
+                    "reasoner",
+                    "m2",
+                    "bind the answer",
+                    role_family="reasoner",
+                ),
+            ],
+            [AgentRelation("retriever", "reasoner", True, True)],
+            output_agent_id="reasoner",
+        )
+
+        with self.assertRaises(AgentRuntimeError):
+            await AgentRuntime(
+                catalog,
+                gateway,
+                semantic_protocol="qa_verified_answer_lineage_v2",
+            ).execute(graph, "question", run_id="retriever-draft-failure")
+
+        self.assertEqual(
+            [("retriever", ExecutionPhase.DRAFT)],
+            [(item.agent.id, item.phase) for item in gateway.requests],
+        )
+
     async def test_bidirectional_members_receive_only_their_external_inputs(self) -> None:
         catalog = registry()
         gateway = RecordingGateway()
@@ -862,6 +1498,34 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
         )
         await AgentRuntime(catalog, gateway, max_concurrency=1).execute(graph, "q")
         self.assertEqual(1, gateway.maximum)
+
+    async def test_unavailable_model_defers_component_and_downstream_without_call(
+        self,
+    ) -> None:
+        catalog = registry()
+        gateway = RecordingGateway()
+        graph = AgentGraph(
+            [
+                AgentNode("unavailable", "m1", "retrieve"),
+                AgentNode("independent", "m2", "analyze"),
+                AgentNode("dependent", "m2", "verify"),
+            ],
+            [AgentRelation("unavailable", "dependent", True, False)],
+        )
+
+        result = await AgentRuntime(catalog, gateway).execute(
+            graph,
+            "question",
+            require_complete=False,
+            unavailable_model_ids={"m1"},
+        )
+
+        self.assertEqual(["independent"], [item.agent.id for item in gateway.requests])
+        self.assertEqual({"independent"}, set(result.outputs))
+        self.assertEqual(
+            ("dependent", "unavailable"),
+            result.deferred_agent_ids,
+        )
 
 
 if __name__ == "__main__":

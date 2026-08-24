@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 import json
 import os
 import random
@@ -34,6 +35,8 @@ from src.interactive.agent_workflow_env import (
     AgentWorkflowEnv,
     AgentWorkflowStateError,
     _HOTPOTQA_FORMAT_CONTRACT,
+    _QA_EVIDENCE_RETRIEVER_RECOVERY_COMPLETION,
+    _QA_EVIDENCE_RETRIEVER_RECOVERY_CONTRACT,
     _evidence_span_matches_read,
 )
 from src.interactive.model_registry import (
@@ -44,6 +47,7 @@ from src.interactive.model_registry import (
 )
 from src.interactive.qa_tool_adapter import (
     QA_RETRIEVAL_TOOL_ID,
+    QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
     build_qa_tool_registry,
 )
 
@@ -90,13 +94,45 @@ def test_evidence_provenance_accepts_typography_but_not_paraphrase() -> None:
         "She married Ewan MacColl."
     )
     assert _evidence_span_matches_read(
-        "Margaret 'Peggy' Seeger is an American folksinger. She married Ewan MacColl.",
+        "MARGARET 'Peggy' Seeger is an American folksinger. She married Ewan MacColl.",
         passage,
     )
     assert not _evidence_span_matches_read(
         "Peggy Seeger had American nationality and was Ewan MacColl's spouse.",
         passage,
     )
+
+
+def test_artifact_version_binding_rejects_stale_semantic_input() -> None:
+    current = {
+        "reasoner": {"artifact_version": "reasoner:revision"},
+        "verifier": {
+            "artifact_version": "verifier:revision",
+            "input_artifact_versions": {"reasoner": "reasoner:revision"},
+        },
+    }
+    assert AgentWorkflowEnv._artifact_version_binding_issue(
+        current,
+        producer_id="reasoner",
+        consumer_id="verifier",
+        consumer_role="Verifier",
+    ) is None
+
+    stale = {
+        **current,
+        "verifier": {
+            **current["verifier"],
+            "input_artifact_versions": {"reasoner": "reasoner:draft"},
+        },
+    }
+    issue = AgentWorkflowEnv._artifact_version_binding_issue(
+        stale,
+        producer_id="reasoner",
+        consumer_id="verifier",
+        consumer_role="Verifier",
+    )
+    assert issue is not None
+    assert "not bound to the current artifact version" in issue
 
 
 class AgentGraphTests(unittest.TestCase):
@@ -720,6 +756,58 @@ def _hotpot_semantic_graph(*, format_predecessor: str = "verifier") -> AgentGrap
     )
 
 
+def _trivia_semantic_graph(*, reader_to_reasoner: bool = True) -> AgentGraph:
+    """Return the shared QA lineage with a Tool-executed Retriever ingress."""
+
+    relations = [
+        AgentRelation("reasoner", "verifier", True, False),
+        AgentRelation("verifier", "formatter", True, False),
+    ]
+    if reader_to_reasoner:
+        relations.insert(
+            0,
+            AgentRelation("reader", "reasoner", True, False),
+        )
+    return AgentGraph(
+        [
+            AgentNode(
+                "reader",
+                "cheap",
+                "retrieve answer-free evidence for the question entity and relation",
+                role_family="evidence_retriever",
+                allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                execution_mode="react",
+                artifact_type="retrieval_evidence",
+            ),
+            AgentNode(
+                "reasoner",
+                "balanced",
+                "bind grounded propositions to the requested answer slot",
+                role_family="reasoner",
+                allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                execution_mode="react",
+                artifact_type="semantic_candidate",
+            ),
+            AgentNode(
+                "verifier",
+                "balanced",
+                "verify evidence, entity, relation, scope, and answer lineage",
+                role_family="verifier",
+                artifact_type="verified_semantic_answer",
+            ),
+            AgentNode(
+                "formatter",
+                "fast",
+                _HOTPOTQA_FORMAT_CONTRACT,
+                role_family="format",
+                artifact_type="answer_wrapper",
+            ),
+        ],
+        relations,
+        output_agent_id="formatter",
+    )
+
+
 class _HotpotNoopRetrievalIndex:
     manifest = type(
         "Manifest",
@@ -757,6 +845,22 @@ def _hotpot_semantic_runtime(
     )
 
 
+def _trivia_semantic_runtime(
+    registry: ModelRegistry,
+    gateway: _ImmediateGateway,
+) -> AgentRuntime:
+    """Shared semantic-lineage fixture under the TriviaQA dataset binding."""
+
+    return AgentRuntime(
+        registry,
+        gateway,
+        execution_adapters={"react": ReasoningExecutionAdapter(gateway)},
+        tool_registry=build_qa_tool_registry(_HotpotNoopRetrievalIndex()),
+        dataset_id="triviaqa",
+        semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+    )
+
+
 def _test_read_receipt(passage_id: str) -> dict[str, object]:
     return {
         "tool_id": QA_RETRIEVAL_TOOL_ID,
@@ -768,8 +872,9 @@ def _test_read_receipt(passage_id: str) -> dict[str, object]:
         "result": {
             "value": {
                 "operation": "read",
+                "passage_id": passage_id,
                 "passage": {
-                    "id": passage_id,
+                    "passage_id": passage_id,
                     "text": "Paris is the capital of France.",
                 },
             },
@@ -777,6 +882,73 @@ def _test_read_receipt(passage_id: str) -> dict[str, object]:
         },
         "error_type": None,
     }
+
+
+def _test_evidence_retriever_artifact(passage_id: str) -> str:
+    """Return a complete answer-free Retriever artifact for the shared fixture."""
+
+    return json.dumps(
+        {
+            "question_scope": "What is the capital of France?",
+            "entity_identity": {
+                "question_surface": "France",
+                "evidence_surface": "France",
+            },
+            "target_relation": "capital of",
+            "answer_type_constraint": "short_answer",
+            "evidence_proposition": {
+                "subject": "Paris",
+                "predicate": "is the capital of",
+                "object_or_attribute_value": "France",
+            },
+            "evidence_span": "Paris is the capital of France.",
+            "passage_id": passage_id,
+        }
+    )
+
+
+def _test_retrieval_failure_record(
+    graph: AgentGraph,
+    *,
+    agent_id: str,
+    public_error_code: str = "retrieval_strategy_failure",
+    strategies: tuple[str, ...] = (
+        "initial_retrieval",
+        "spelling_normalization",
+    ),
+    passage_ids: tuple[str, ...] = (),
+    bounded_schedule_exhausted: bool = False,
+) -> AgentFailureRecord:
+    diagnosis = {
+        "observation_status": "budget_exhausted",
+        "public_error_code": public_error_code,
+        "tool_plan_exhausted": True,
+        "bounded_schedule_exhausted": bounded_schedule_exhausted,
+        "retrieval_strategy_progress_count": len(strategies),
+        "retrieval_strategy_schedule_prefix": list(strategies),
+    }
+    return AgentFailureRecord(
+        request_id=f"{agent_id}-{public_error_code}",
+        agent_id=agent_id,
+        phase=ExecutionPhase.SINGLE,
+        graph_revision=graph.revision,
+        error_type="ReactExecutionError",
+        message=f"react agent {agent_id!r} exhausted its bounded execution",
+        metadata={
+            "react_trace": [
+                {
+                    "turn": 1,
+                    "observation_status": "budget_exhausted",
+                    "terminal_failure_diagnosis": diagnosis,
+                }
+            ],
+            "tool_receipts": [
+                _test_read_receipt(passage_id)
+                for passage_id in passage_ids
+            ],
+            "tool_plan_exhausted": True,
+        },
+    )
 
 
 def _react_exhaustion_record(
@@ -843,8 +1015,9 @@ class _HotpotSemanticGateway(_ImmediateGateway):
                             "result": {
                                 "value": {
                                     "operation": "read",
+                                    "passage_id": "p1",
                                     "passage": {
-                                        "id": "p1",
+                                        "passage_id": "p1",
                                         "text": (
                                             "Paris is the capital of France. "
                                             "France is a country in Europe."
@@ -879,7 +1052,7 @@ class _HotpotSemanticGateway(_ImmediateGateway):
                         },
                         {
                             "subject": "France",
-                            "relation": "located in",
+                            "relation": "is a country in",
                             "object_or_attribute_value": "Europe",
                             "qualifiers": [],
                             "evidence_span": "France is a country in Europe.",
@@ -2014,6 +2187,15 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             current_agent_ids={node.id for node in graph.nodes},
         )
 
+        availability = env.model_availability_receipt()
+        self.assertFalse(availability["catalog_mutated"])
+        self.assertEqual(["balanced"], availability["unavailable_model_ids"])
+        self.assertNotIn("balanced", availability["available_model_ids"])
+        self.assertEqual(
+            ("reasoner", "verifier"),
+            env._mandatory_repair_agent_ids(),
+        )
+
         failure = AgentRuntimeError(
             "gateway failed",
             failure_records=(record,),
@@ -2090,6 +2272,43 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(repaired.accepted)
         self.assertEqual("fast", env.graph.get_node("reasoner").model_id)
+        self.assertEqual(
+            ["balanced"],
+            env.model_availability_receipt()["unavailable_model_ids"],
+        )
+        self.assertEqual(("verifier",), env._mandatory_repair_agent_ids())
+
+    def test_http_400_does_not_quarantine_catalog_model(self) -> None:
+        registry = make_multi_provider_registry()
+        graph = _hotpot_semantic_graph()
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_hotpot_semantic_runtime(registry, _ImmediateGateway()),
+            graph=graph,
+            problem="What is the capital of France?",
+            execute_on_edit=False,
+            semantic_protocol="hotpotqa_verified_answer_slot_v1",
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+        )
+        env._record_failure_state(
+            (
+                AgentFailureRecord(
+                    request_id="request-400",
+                    agent_id="reasoner",
+                    phase=ExecutionPhase.SINGLE,
+                    graph_revision=graph.revision,
+                    error_type="OpenAICompatibleGatewayError",
+                    message="provider request failed with HTTP status 400",
+                ),
+            ),
+            current_agent_ids={node.id for node in graph.nodes},
+        )
+
+        self.assertEqual(
+            [],
+            env.model_availability_receipt()["unavailable_model_ids"],
+        )
 
     async def test_provider_repair_precedes_incomplete_semantic_spine(self) -> None:
         registry = make_multi_provider_registry()
@@ -2177,7 +2396,8 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             "result": {
                 "value": {
                     "operation": "read",
-                    "passage": {"id": "p1", "text": passage},
+                    "passage_id": "p1",
+                    "passage": {"passage_id": "p1", "text": passage},
                 },
                 "completed": True,
             },
@@ -2217,6 +2437,24 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
                             "Remove action_envelope and place arguments, kind, name, "
                             "resource_id, and skill_id at the top level."
                         ),
+                        "terminal_failure_diagnosis": {
+                            "observation_status": "budget_exhausted",
+                            "public_error_code": "retrieval_strategy_failure",
+                            "tool_plan_exhausted": True,
+                            "bounded_schedule_exhausted": False,
+                            "retrieval_attempt_count": 2,
+                            "retrieval_strategy_progress_count": 1,
+                            "recall_expansion_count": 1,
+                            "retrieval_strategy_schedule_prefix": [
+                                "initial_retrieval"
+                            ],
+                            "normalized_query_novelty_verified": True,
+                            "strategy_semantics_verified": False,
+                            "successful_search_with_hits_count": 2,
+                            "successful_empty_search_count": 0,
+                            "tool_error_count": 0,
+                            "search_queries": ["private from compact summary"],
+                        },
                     },
                 ],
                 "tool_receipts": [read_receipt],
@@ -2231,7 +2469,10 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         feedback = json.loads(feedback_text.split("=", 1)[1])
 
         attributed = feedback["failed_agents"][0]
-        self.assertEqual("react_turn_exhaustion", attributed["failure_category"])
+        self.assertEqual(
+            "retrieval_strategy_failure",
+            attributed["failure_category"],
+        )
         self.assertEqual("contract", attributed["preferred_repair"]["field"])
         self.assertEqual(
             "completion_condition",
@@ -2249,6 +2490,10 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             summary["public_error_code_counts"]["completion_schema_invalid"],
         )
         self.assertEqual(
+            1,
+            summary["public_error_code_counts"]["retrieval_strategy_failure"],
+        )
+        self.assertEqual(
             {
                 "observation_status": "schema_invalid",
                 "public_error_code": "completion_artifact_empty",
@@ -2261,7 +2506,83 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(1, summary["successful_tool_receipt_count"])
         self.assertEqual(1, summary["successful_evidence_read_count"])
+        self.assertEqual(
+            {
+                "observation_status": "budget_exhausted",
+                "public_error_code": "retrieval_strategy_failure",
+                "tool_plan_exhausted": True,
+                "bounded_schedule_exhausted": False,
+                "retrieval_attempt_count": 2,
+                "retrieval_strategy_progress_count": 1,
+                "recall_expansion_count": 1,
+                "normalized_query_novelty_verified": True,
+                "strategy_semantics_verified": False,
+                "successful_search_with_hits_count": 2,
+                "successful_empty_search_count": 0,
+                "tool_error_count": 0,
+                "retrieval_strategy_schedule_prefix": ["initial_retrieval"],
+            },
+            summary["terminal_failure_diagnosis"],
+        )
+        self.assertNotIn("search_queries", summary["terminal_failure_diagnosis"])
         self.assertNotIn(passage, feedback_text)
+
+    def test_failure_diagnosis_promotes_only_typed_terminal_receipts(
+        self,
+    ) -> None:
+        expected = {
+            "knowledge_base_coverage_failure": (
+                "repair_retrieval_or_database_coverage"
+            ),
+            "retrieval_recall_failure": (
+                "repair_retrieval_or_database_coverage"
+            ),
+            "retrieval_strategy_failure": (
+                "repair_execution_contract_or_tool_plan"
+            ),
+        }
+        for index, (category, retryability) in enumerate(expected.items()):
+            diagnosis = {
+                "observation_status": "budget_exhausted",
+                "public_error_code": category,
+            }
+            trace_entry = (
+                {"terminal_failure_diagnosis": diagnosis}
+                if index != 1
+                else {
+                    "observation": {
+                        "terminal_failure_diagnosis": diagnosis,
+                    }
+                }
+            )
+            record = AgentFailureRecord(
+                request_id=f"typed-retrieval-{index}",
+                agent_id="reader",
+                phase=ExecutionPhase.SINGLE,
+                graph_revision=0,
+                error_type="ReactExecutionError",
+                message="bounded ReAct execution failed",
+                metadata={"react_trace": [trace_entry]},
+            )
+
+            with self.subTest(category=category):
+                self.assertEqual(
+                    (category, retryability, None),
+                    AgentWorkflowEnv._execution_failure_diagnosis(record),
+                )
+
+        untyped = AgentFailureRecord(
+            request_id="untyped-retrieval-text",
+            agent_id="reader",
+            phase=ExecutionPhase.SINGLE,
+            graph_revision=0,
+            error_type="RuntimeError",
+            message="knowledge_base_coverage_failure",
+        )
+        self.assertEqual(
+            "execution_contract_or_runtime_failure",
+            AgentWorkflowEnv._execution_failure_diagnosis(untyped)[0],
+        )
 
     async def test_hotpot_recovery_requires_modify_before_augment(
         self,
@@ -2478,14 +2799,9 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, add_domain["min_new_agents"])
         self.assertEqual(1, add_domain["max_new_agents"])
         self.assertEqual(
-            ["evidence_retriever", "repair"],
+            ["evidence_retriever"],
             add_domain["admitted_new_role_families"],
         )
-        self.assertIn(
-            "evidence_retriever",
-            add_domain["admitted_new_role_families"],
-        )
-        self.assertIn("repair", add_domain["admitted_new_role_families"])
 
         deletion = await env.step(
             '{"action":"delete_agent","agent_id":"reasoner"}'
@@ -3339,8 +3655,8 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             recovery_policy="preserve_diagnose_repair_augment",
             required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
         )
-        env._repair_exhausted_agent_ids.add("reasoner")
-
+        all_relation_candidates = env._all_model_admissible_relation_candidates()
+        self.assertGreater(len(all_relation_candidates), 1)
         self.assertEqual(("set_relation",), env.model_admissible_action_types())
         relation_candidates = env.model_admissible_action_targets()[
             "set_relation"
@@ -3410,8 +3726,15 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             recovery_policy="preserve_diagnose_repair_augment",
             required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
         )
-        env._repair_exhausted_agent_ids.add("reasoner")
+        # This is a recovery boundary, but the Reasoner itself is not
+        # repair-exhausted. The missing responsibility must therefore be
+        # selected by the general semantic Canvas mask, not by the old
+        # exhausted-Reasoner-only branch.
+        env._failed_agent_ids.add("reader")
+        env._repair_exhausted_agent_ids.add("reader")
 
+        self.assertEqual((), env._repair_exhausted_reasoner_ids())
+        self.assertTrue(env._all_model_admissible_relation_candidates())
         self.assertEqual(("add_subgraph",), env.model_admissible_action_types())
         add_domain = env.model_admissible_action_targets()["add_subgraph"]
         self.assertEqual(1, add_domain["min_new_agents"])
@@ -3460,6 +3783,315 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(formatter.accepted)
         self.assertEqual(("set_relation",), env.model_admissible_action_types())
 
+    def test_trivia_failure_feedback_does_not_advertise_roles_outside_live_add_domain(
+        self,
+    ) -> None:
+        complete = _trivia_semantic_graph()
+        graph = AgentGraph(
+            [node for node in complete.nodes if node.id != "formatter"],
+            [
+                relation
+                for relation in complete.relations
+                if "formatter" not in {relation.source_id, relation.target_id}
+            ],
+        )
+        registry = make_registry()
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_trivia_semantic_runtime(registry, _ImmediateGateway()),
+            graph=graph,
+            problem="Who wrote the novel?",
+            execute_on_edit=False,
+            max_agents=8,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+        )
+        record = _test_retrieval_failure_record(
+            graph,
+            agent_id="reader",
+            passage_ids=("preserved-read",),
+        )
+        env._failed_agent_ids.add("reader")
+        env._repair_exhausted_agent_ids.add("reader")
+        env._latest_failure_record_by_agent["reader"] = record
+
+        self.assertEqual(("add_subgraph",), env.model_admissible_action_types())
+        self.assertEqual(
+            ["evidence_retriever"],
+            env.model_admissible_action_targets()["add_subgraph"][
+                "admitted_new_role_families"
+            ],
+        )
+        feedback = json.loads(
+            env._execution_error_feedback(
+                AgentRuntimeError(
+                    "bounded Retriever failed",
+                    failure_records=(record,),
+                )
+            ).split("=", 1)[1]
+        )
+        self.assertEqual(
+            ["add_subgraph"],
+            feedback["failed_agents"][0]["preferred_repair"][
+                "action_order"
+            ],
+        )
+        self.assertEqual(
+            ["evidence_retriever"],
+            feedback["failed_agents"][0]["preferred_repair"][
+                "admitted_role_families"
+            ],
+        )
+        self.assertEqual(
+            ["add_subgraph"],
+            feedback["recovery_state"]["preferred_actions"],
+        )
+
+    async def test_full_capacity_dead_auxiliary_delete_admits_reasoner_recovery_unit(
+        self,
+    ) -> None:
+        complete = _trivia_semantic_graph()
+        graph = AgentGraph(
+            [node for node in complete.nodes if node.id != "formatter"],
+            [
+                relation
+                for relation in complete.relations
+                if "formatter" not in {relation.source_id, relation.target_id}
+            ],
+        )
+        for agent_id in (
+            "dead_reader",
+            "auxiliary_1",
+            "auxiliary_2",
+            "auxiliary_3",
+            "auxiliary_4",
+        ):
+            graph.add_agent(
+                AgentNode(
+                    agent_id,
+                    "cheap",
+                    "retrieve bounded supplementary evidence",
+                    role_family="evidence_retriever",
+                    allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                    execution_mode="react",
+                    artifact_type="retrieval_evidence",
+                )
+            )
+        registry = make_registry()
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_trivia_semantic_runtime(registry, _ImmediateGateway()),
+            graph=graph,
+            problem="Who wrote the novel?",
+            execute_on_edit=False,
+            max_agents=8,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+        )
+        env._failed_agent_ids.update({"dead_reader", "reasoner"})
+        env._repair_exhausted_agent_ids.update(
+            {"dead_reader", "reasoner"}
+        )
+        env._latest_failure_record_by_agent["dead_reader"] = AgentFailureRecord(
+            request_id="dead-reader-bounded-exhaustion",
+            agent_id="dead_reader",
+            phase=ExecutionPhase.SINGLE,
+            graph_revision=graph.revision,
+            error_type="ReactExecutionError",
+            message="react agent 'dead_reader' exhausted 8 turns",
+        )
+
+        self.assertEqual(8, len(env.graph.nodes))
+        self.assertEqual(("delete_agent",), env.model_admissible_action_types())
+        self.assertEqual(
+            ["dead_reader"],
+            env.model_admissible_action_targets()["delete_agent"]["agent_ids"],
+        )
+
+        deleted = await env.step(
+            '{"action":"delete_agent","agent_id":"dead_reader"}'
+        )
+
+        self.assertTrue(deleted.accepted, deleted.feedback)
+        self.assertEqual(7, len(env.graph.nodes))
+        self.assertEqual(1, len(env.history))
+        self.assertEqual("delete_agent", env.history[0].action.action_type.value)
+        self.assertEqual(("add_subgraph",), env.model_admissible_action_types())
+        add_domain = env.model_admissible_action_targets()["add_subgraph"]
+        self.assertEqual(
+            ["evidence_retriever"],
+            add_domain["admitted_new_role_families"],
+        )
+
+        added = await env.step(
+            json.dumps(
+                {
+                    "action": "add_subgraph",
+                    "agents": [
+                        {
+                            "agent_id": "replacement_reader",
+                            "model_id": "cheap",
+                            "contract": (
+                                _QA_EVIDENCE_RETRIEVER_RECOVERY_CONTRACT
+                            ),
+                            "completion_condition": (
+                                _QA_EVIDENCE_RETRIEVER_RECOVERY_COMPLETION
+                            ),
+                            "role_family": "evidence_retriever",
+                            "allowed_tools": [QA_RETRIEVAL_TOOL_ID],
+                            "execution_mode": "react",
+                            "artifact_type": "retrieval_evidence",
+                        }
+                    ],
+                    "relations": [],
+                    "output_agent_id": None,
+                }
+            )
+        )
+
+        self.assertTrue(added.accepted, added.feedback)
+        self.assertEqual(8, len(env.graph.nodes))
+        self.assertEqual(2, len(env.history))
+        self.assertEqual("delete_agent", env.history[0].action.action_type.value)
+        self.assertEqual("add_subgraph", env.history[1].action.action_type.value)
+        self.assertEqual(("modify_agent",), env.model_admissible_action_types())
+
+    def test_capacity_delete_preservation_predicate_counterexamples(self) -> None:
+        def make_env() -> AgentWorkflowEnv:
+            complete = _trivia_semantic_graph()
+            graph = AgentGraph(
+                [node for node in complete.nodes if node.id != "formatter"],
+                [
+                    relation
+                    for relation in complete.relations
+                    if "formatter"
+                    not in {relation.source_id, relation.target_id}
+                ],
+            )
+            for agent_id in (
+                "dead_reader",
+                "auxiliary_1",
+                "auxiliary_2",
+                "auxiliary_3",
+                "auxiliary_4",
+            ):
+                graph.add_agent(
+                    AgentNode(
+                        agent_id,
+                        "cheap",
+                        "retrieve bounded supplementary evidence",
+                        role_family="evidence_retriever",
+                        allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                        execution_mode="react",
+                        artifact_type="retrieval_evidence",
+                    )
+                )
+            registry = make_registry()
+            env = AgentWorkflowEnv(
+                registry,
+                runtime=_trivia_semantic_runtime(
+                    registry,
+                    _ImmediateGateway(),
+                ),
+                graph=graph,
+                problem="Who wrote the novel?",
+                execute_on_edit=False,
+                max_agents=8,
+                semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+                recovery_policy="preserve_diagnose_repair_augment",
+                required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+            )
+            env._failed_agent_ids.update({"dead_reader", "reasoner"})
+            env._repair_exhausted_agent_ids.update(
+                {"dead_reader", "reasoner"}
+            )
+            env._latest_failure_record_by_agent[
+                "dead_reader"
+            ] = AgentFailureRecord(
+                request_id="dead-reader-bounded-exhaustion",
+                agent_id="dead_reader",
+                phase=ExecutionPhase.SINGLE,
+                graph_revision=graph.revision,
+                error_type="ReactExecutionError",
+                message="react agent 'dead_reader' exhausted 8 turns",
+            )
+            return env
+
+        baseline = make_env()
+        self.assertEqual(
+            ("dead_reader",),
+            baseline._capacity_blocking_failed_auxiliary_delete_ids(),
+        )
+
+        current_artifact = make_env()
+        current_artifact._progressive_outputs["dead_reader"] = "retained artifact"
+        self.assertEqual(
+            (), current_artifact._capacity_blocking_failed_auxiliary_delete_ids()
+        )
+
+        previous_artifact = make_env()
+        previous_artifact._previous_revision_outputs[
+            "dead_reader"
+        ] = "retained prior artifact"
+        self.assertEqual(
+            (), previous_artifact._capacity_blocking_failed_auxiliary_delete_ids()
+        )
+
+        retained_read = make_env()
+        retained_read._failure_continuations["dead_reader"] = {
+            "tool_receipts": [_test_read_receipt("retained-public-read")]
+        }
+        self.assertEqual(
+            (), retained_read._capacity_blocking_failed_auxiliary_delete_ids()
+        )
+        self.assertEqual([], retained_read._model_admissible_relation_candidates())
+        self.assertEqual((), retained_read.model_admissible_action_types())
+
+        incoming_edge = make_env()
+        incoming_edge.graph.set_relation(
+            "auxiliary_1", "dead_reader", True, False
+        )
+        self.assertEqual(
+            (), incoming_edge._capacity_blocking_failed_auxiliary_delete_ids()
+        )
+
+        outgoing_edge = make_env()
+        outgoing_edge.graph.set_relation(
+            "dead_reader", "auxiliary_1", True, False
+        )
+        self.assertEqual(
+            (), outgoing_edge._capacity_blocking_failed_auxiliary_delete_ids()
+        )
+
+        repair_not_exhausted = make_env()
+        repair_not_exhausted._repair_exhausted_agent_ids.clear()
+        self.assertEqual(
+            (), repair_not_exhausted._capacity_blocking_failed_auxiliary_delete_ids()
+        )
+
+        unbounded_failure = make_env()
+        unbounded_failure._latest_failure_record_by_agent[
+            "dead_reader"
+        ] = AgentFailureRecord(
+            request_id="provider-failure",
+            agent_id="dead_reader",
+            phase=ExecutionPhase.SINGLE,
+            graph_revision=unbounded_failure.graph.revision,
+            error_type="RuntimeError",
+            message="provider request failed",
+        )
+        self.assertEqual(
+            (), unbounded_failure._capacity_blocking_failed_auxiliary_delete_ids()
+        )
+
+        spare_capacity = make_env()
+        spare_capacity.max_agents = 9
+        self.assertEqual(
+            (), spare_capacity._capacity_blocking_failed_auxiliary_delete_ids()
+        )
+
     async def test_hotpot_partial_auxiliary_success_preserves_reasoner_recovery(
         self,
     ) -> None:
@@ -3502,7 +4134,9 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             "execution_phase": "single",
             "tool_receipts": [_test_read_receipt("p1")],
         }
-        env._progressive_outputs["repair_evidence"] = "retrieved evidence"
+        env._progressive_outputs["repair_evidence"] = (
+            _test_evidence_retriever_artifact("p1")
+        )
         env._progressive_output_metadata["repair_evidence"] = {
             "tool_receipts": [_test_read_receipt("p1")]
         }
@@ -3527,7 +4161,9 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
                 graph_revision=candidate_graph.revision,
                 output_agent_id=candidate_graph.output_agent_id,
                 final_answer=None,
-                outputs={"repair_evidence": "retrieved evidence"},
+                outputs={
+                    "repair_evidence": _test_evidence_retriever_artifact("p1")
+                },
                 output_metadata={"repair_evidence": {}},
                 calls=(),
                 block_completion_order=(("repair_evidence",),),
@@ -3544,6 +4180,249 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("reasoner", recovery["repair_exhausted_agent_ids"])
         self.assertIn("reasoner", env._failure_continuations)
         self.assertIn("reasoner", env.unresolved_dirty_agent_ids)
+
+    async def test_exhausted_reasoner_adds_isolated_retriever_before_routing(
+        self,
+    ) -> None:
+        complete = _hotpot_semantic_graph()
+        graph = AgentGraph(
+            [node for node in complete.nodes if node.id != "reader"],
+            [
+                relation
+                for relation in complete.relations
+                if "reader" not in {relation.source_id, relation.target_id}
+            ],
+            output_agent_id="formatter",
+        )
+        registry = make_registry()
+        runtime = _hotpot_semantic_runtime(registry, _ImmediateGateway())
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=runtime,
+            graph=graph,
+            problem="What is the capital of France?",
+            execute_on_edit=True,
+            semantic_protocol="hotpotqa_verified_answer_slot_v1",
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+        )
+        env._failed_agent_ids.add("reasoner")
+        env._react_exhausted_agent_ids.add("reasoner")
+        env._repair_exhausted_agent_ids.add("reasoner")
+        env._latest_failure_record_by_agent["reasoner"] = (
+            _react_exhaustion_record(
+                graph,
+                request_id="reasoner-first-retriever-augmentation",
+            )
+        )
+
+        add_domain = env.model_admissible_action_targets()["add_subgraph"]
+        self.assertEqual([], add_domain["relations"])
+        self.assertIsNone(add_domain["output_agent_id"])
+        self.assertEqual(
+            ["evidence_retriever"],
+            add_domain["admitted_new_role_families"],
+        )
+
+        add_payload = {
+            "action": "add_subgraph",
+            "agents": [
+                {
+                    "agent_id": "repair_retriever",
+                    "model_id": "cheap",
+                    "contract": "retrieve evidence for the requested relation",
+                    "role_family": "evidence_retriever",
+                    "allowed_tools": [QA_RETRIEVAL_TOOL_ID],
+                    "execution_mode": "react",
+                    "artifact_type": "retrieval_evidence",
+                }
+            ],
+            "relations": [],
+        }
+        inline_relation = json.loads(json.dumps(add_payload))
+        inline_relation["relations"] = [
+            {
+                "source_id": "repair_retriever",
+                "target_id": "reasoner",
+                "source_to_target": True,
+                "target_to_source": False,
+            }
+        ]
+        rejected = await env.step(json.dumps(inline_relation))
+        self.assertFalse(rejected.accepted)
+        self.assertIn("isolated Canvas unit", rejected.feedback)
+
+        observed_execution: list[tuple[tuple[str, ...], str | None]] = []
+
+        async def isolated_success(
+            candidate_graph: AgentGraph,
+            *args: object,
+            **kwargs: object,
+        ) -> AgentRuntimeResult:
+            del args
+            observed_execution.append(
+                (
+                    tuple(node.id for node in candidate_graph.nodes),
+                    candidate_graph.output_agent_id,
+                )
+            )
+            self.assertEqual(
+                {"repair_retriever"},
+                kwargs["dirty_agents"],
+            )
+            return AgentRuntimeResult(
+                run_id="isolated-retriever-success",
+                graph_revision=candidate_graph.revision,
+                output_agent_id=None,
+                final_answer=None,
+                outputs={
+                    "repair_retriever": _test_evidence_retriever_artifact(
+                        "repair-public"
+                    )
+                },
+                output_metadata={
+                    "repair_retriever": {
+                        "tool_receipts": [
+                            _test_read_receipt("repair-public")
+                        ]
+                    }
+                },
+                calls=(),
+                block_completion_order=(("repair_retriever",),),
+                executed_agent_ids=("repair_retriever",),
+            )
+
+        with patch.object(runtime, "execute", side_effect=isolated_success):
+            added = await env.step(json.dumps(add_payload))
+
+        self.assertTrue(added.accepted, added.feedback)
+        self.assertEqual([(("repair_retriever",), None)], observed_execution)
+        self.assertEqual(("set_relation",), env.model_admissible_action_types())
+        self.assertEqual(
+            [
+                {
+                    "source_id": "repair_retriever",
+                    "target_id": "reasoner",
+                    "source_to_target": True,
+                    "target_to_source": False,
+                }
+            ],
+            env.model_admissible_action_targets()["set_relation"][
+                "candidates"
+            ],
+        )
+
+    async def test_pending_isolated_retriever_repairs_before_another_add(
+        self,
+    ) -> None:
+        complete = _hotpot_semantic_graph()
+        graph = AgentGraph(
+            [node for node in complete.nodes if node.id != "reader"],
+            [
+                relation
+                for relation in complete.relations
+                if "reader" not in {relation.source_id, relation.target_id}
+            ],
+            output_agent_id="formatter",
+        )
+        graph.add_agent(
+            AgentNode(
+                "repair_retriever",
+                "cheap",
+                "retrieve evidence for the requested relation",
+                role_family="evidence_retriever",
+                allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                execution_mode="react",
+                artifact_type="retrieval_evidence",
+            )
+        )
+        registry = make_registry()
+        runtime = _hotpot_semantic_runtime(registry, _ImmediateGateway())
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=runtime,
+            graph=graph,
+            problem="What is the capital of France?",
+            execute_on_edit=True,
+            semantic_protocol="hotpotqa_verified_answer_slot_v1",
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+        )
+        env._failed_agent_ids.add("reasoner")
+        env._react_exhausted_agent_ids.add("reasoner")
+        env._repair_exhausted_agent_ids.add("reasoner")
+        env._latest_failure_record_by_agent["reasoner"] = (
+            _react_exhaustion_record(
+                graph,
+                request_id="reasoner-pending-retriever",
+            )
+        )
+        env._unresolved_dirty_agents.add("repair_retriever")
+
+        self.assertEqual(
+            ("repair_retriever",),
+            env._pending_isolated_recovery_auxiliary_agent_ids(),
+        )
+        self.assertEqual(("modify_agent",), env.model_admissible_action_types())
+        self.assertEqual(
+            ["repair_retriever"],
+            env.model_admissible_action_targets()["modify_agent"]["agent_ids"],
+        )
+
+        observed_execution: list[tuple[tuple[str, ...], str | None]] = []
+
+        async def isolated_success(
+            candidate_graph: AgentGraph,
+            *args: object,
+            **kwargs: object,
+        ) -> AgentRuntimeResult:
+            del args
+            observed_execution.append(
+                (
+                    tuple(node.id for node in candidate_graph.nodes),
+                    candidate_graph.output_agent_id,
+                )
+            )
+            self.assertEqual({"repair_retriever"}, kwargs["dirty_agents"])
+            return AgentRuntimeResult(
+                run_id="pending-isolated-retriever-success",
+                graph_revision=candidate_graph.revision,
+                output_agent_id=None,
+                final_answer=None,
+                outputs={
+                    "repair_retriever": _test_evidence_retriever_artifact(
+                        "repair-public"
+                    )
+                },
+                output_metadata={
+                    "repair_retriever": {
+                        "tool_receipts": [
+                            _test_read_receipt("repair-public")
+                        ]
+                    }
+                },
+                calls=(),
+                block_completion_order=(("repair_retriever",),),
+                executed_agent_ids=("repair_retriever",),
+            )
+
+        with patch.object(runtime, "execute", side_effect=isolated_success):
+            repaired = await env.step(
+                json.dumps(
+                    {
+                        "action": "modify_agent",
+                        "agent_id": "repair_retriever",
+                        "contract": (
+                            "continue the bounded evidence retrieval from the "
+                            "preserved public continuation"
+                        ),
+                    }
+                )
+            )
+
+        self.assertTrue(repaired.accepted, repaired.feedback)
+        self.assertEqual([(("repair_retriever",), None)], observed_execution)
+        self.assertEqual(("set_relation",), env.model_admissible_action_types())
 
     async def test_repair_exhausted_auxiliary_replacement_takeover_deletes_first(
         self,
@@ -3572,7 +4451,9 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             recovery_policy="preserve_diagnose_repair_augment",
             required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
         )
-        env._progressive_outputs["reader"] = "grounded replacement evidence"
+        env._progressive_outputs["reader"] = _test_evidence_retriever_artifact(
+            "reader-public"
+        )
         env._progressive_output_metadata["reader"] = {
             "tool_receipts": [_test_read_receipt("reader-public")]
         }
@@ -3662,13 +4543,13 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         )
         env._failed_agent_ids.update({"failed_reader", "reasoner"})
         env._repair_exhausted_agent_ids.update({"failed_reader", "reasoner"})
-        env._latest_failure_record_by_agent["failed_reader"] = AgentFailureRecord(
-            request_id="failed-reader-no-takeover",
-            agent_id="failed_reader",
-            phase=ExecutionPhase.SINGLE,
-            graph_revision=graph.revision,
-            error_type="ReactExecutionError",
-            message="react agent 'failed_reader' exhausted 8 turns",
+        env._latest_failure_record_by_agent["failed_reader"] = (
+            _test_retrieval_failure_record(
+                graph,
+                agent_id="failed_reader",
+                strategies=("initial_retrieval",),
+                passage_ids=("new-public-read",),
+            )
         )
 
         self.assertEqual(("add_subgraph",), env.model_admissible_action_types())
@@ -3705,7 +4586,9 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             recovery_policy="preserve_diagnose_repair_augment",
             required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
         )
-        env._progressive_outputs["reader"] = "grounded replacement evidence"
+        env._progressive_outputs["reader"] = _test_evidence_retriever_artifact(
+            "reader-public"
+        )
         env._progressive_output_metadata["reader"] = {
             "tool_receipts": [_test_read_receipt("reader-public")]
         }
@@ -3955,7 +4838,439 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(unrelated.accepted)
         self.assertIn("strictly reduces terminal_unreachable_agent_ids", unrelated.feedback)
 
-    async def test_grounded_orphan_retriever_routes_into_active_reasoner(
+    async def test_exhausted_semantic_recovery_closes_generic_relation_and_modify_domains(
+        self,
+    ) -> None:
+        graph = _trivia_semantic_graph()
+        registry = make_registry()
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_trivia_semantic_runtime(registry, _ImmediateGateway()),
+            graph=graph,
+            problem="Who wrote the novel?",
+            execute_on_edit=False,
+            max_agents=5,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+        )
+        env._failed_agent_ids.add("reasoner")
+        env._repair_exhausted_agent_ids.add("reasoner")
+        added = await env.step(
+            json.dumps(
+                {
+                    "action": "add_subgraph",
+                    "agents": [
+                        {
+                            "agent_id": "exhausted_reader",
+                            "model_id": "cheap",
+                            "contract": (
+                                _QA_EVIDENCE_RETRIEVER_RECOVERY_CONTRACT
+                            ),
+                            "completion_condition": (
+                                _QA_EVIDENCE_RETRIEVER_RECOVERY_COMPLETION
+                            ),
+                            "role_family": "evidence_retriever",
+                            "allowed_tools": [QA_RETRIEVAL_TOOL_ID],
+                            "execution_mode": "react",
+                            "artifact_type": "retrieval_evidence",
+                        }
+                    ],
+                    "relations": [],
+                    "output_agent_id": None,
+                }
+            )
+        )
+        self.assertTrue(added.accepted, added.feedback)
+        env._failed_agent_ids.update({"reasoner", "exhausted_reader"})
+        env._repair_exhausted_agent_ids.update(
+            {"reasoner", "exhausted_reader"}
+        )
+        env._unresolved_dirty_agents.update(
+            {"reasoner", "verifier", "formatter", "exhausted_reader"}
+        )
+
+        generic_candidates = env._all_model_admissible_relation_candidates()
+        self.assertTrue(generic_candidates)
+        self.assertEqual([], env._model_admissible_relation_candidates())
+        self.assertEqual((), env._model_admissible_modify_agent_ids())
+        action_types = env.model_admissible_action_types()
+        self.assertNotIn("set_relation", action_types)
+        self.assertNotIn("modify_agent", action_types)
+        targets = env.model_admissible_action_targets()
+        self.assertNotIn("set_relation", targets)
+        self.assertNotIn("modify_agent", targets)
+
+        rejected = await env.step(
+            json.dumps({"action": "set_relation", **generic_candidates[0]})
+        )
+        self.assertFalse(rejected.accepted)
+        self.assertIn("artifact-free auxiliary", rejected.feedback)
+
+    def test_modify_domain_targets_are_responsible_for_measured_failure(
+        self,
+    ) -> None:
+        graph = _trivia_semantic_graph()
+        registry = make_registry()
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_trivia_semantic_runtime(registry, _ImmediateGateway()),
+            graph=graph,
+            problem="Who wrote the novel?",
+            execute_on_edit=False,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+        )
+        env._failed_agent_ids.add("reasoner")
+
+        modify_domain = env.model_admissible_action_targets()["modify_agent"]
+
+        self.assertTrue(modify_domain["agent_ids"])
+        self.assertLessEqual(
+            set(modify_domain["agent_ids"]),
+            set(modify_domain["responsible_agent_ids"]),
+        )
+
+    def test_modify_domain_omits_model_field_without_alternative_model(
+        self,
+    ) -> None:
+        provider = ProviderSpec("only-provider", kind="test")
+        registry = ModelRegistry(
+            [provider],
+            [ModelSpec("only-model", "only-provider")],
+        )
+        env = AgentWorkflowEnv(
+            registry,
+            _ImmediateGateway(),
+            graph=AgentGraph(
+                [AgentNode("worker", "only-model", "answer the task")]
+            ),
+            problem="question",
+            execute_on_edit=False,
+        )
+
+        modify_domain = env.model_admissible_action_targets()["modify_agent"]
+        candidate = modify_domain["per_agent_candidates"][0]
+
+        self.assertNotIn("model_id", modify_domain["mutable_fields"])
+        self.assertNotIn("model_id", candidate["mutable_fields"])
+        self.assertNotIn(
+            "model_id",
+            candidate["discrete_value_domains"],
+        )
+        self.assertIn("contract", candidate["mutable_fields"])
+
+    async def test_provider_failure_without_catalog_alternative_is_typed_terminal_and_reset_local(
+        self,
+    ) -> None:
+        provider = ProviderSpec("only-provider", kind="test")
+        registry = ModelRegistry(
+            [provider],
+            [ModelSpec("only-model", "only-provider")],
+        )
+        graph = AgentGraph(
+            [AgentNode("worker", "only-model", "answer the task")]
+        )
+        env = AgentWorkflowEnv(
+            registry,
+            _ImmediateGateway(),
+            graph=graph,
+            problem="first question",
+            execute_on_edit=False,
+            recovery_policy="preserve_diagnose_repair_augment",
+        )
+        record = AgentFailureRecord(
+            request_id="single-model-403",
+            agent_id="worker",
+            phase=ExecutionPhase.SINGLE,
+            graph_revision=graph.revision,
+            error_type="OpenAICompatibleGatewayError",
+            message="provider request failed with HTTP status 403",
+        )
+        env._record_failure_state(
+            (record,),
+            current_agent_ids={"worker"},
+        )
+
+        self.assertEqual((), env.model_admissible_action_types())
+        self.assertNotIn("modify_agent", env.model_admissible_action_targets())
+        feedback = json.loads(
+            env._execution_error_feedback(
+                AgentRuntimeError("gateway failed", failure_records=(record,))
+            ).split("=", 1)[1]
+        )
+        failed_agent = feedback["failed_agents"][0]
+        self.assertNotIn("preferred_repair", failed_agent)
+        self.assertEqual([], failed_agent["admitted_model_ids"])
+        revision = env.revision
+
+        rejected = await env.step(
+            json.dumps(
+                {
+                    "action": "modify_agent",
+                    "agent_id": "worker",
+                    "contract": "change the task contract",
+                }
+            )
+        )
+
+        self.assertFalse(rejected.accepted)
+        self.assertIn("no catalog-backed alternative", rejected.feedback)
+        self.assertEqual(revision, env.revision)
+        self.assertEqual("answer the task", env.graph.get_node("worker").contract)
+
+        env.reset("second question", graph=graph)
+
+        self.assertEqual([], env.model_availability_receipt()["unavailable_model_ids"])
+        self.assertEqual([], env.model_availability_receipt()["failure_receipts"])
+        self.assertIn("modify_agent", env.model_admissible_action_types())
+
+    def test_triviaqa_partial_canvas_keeps_dedicated_retriever_optional(
+        self,
+    ) -> None:
+        complete = _trivia_semantic_graph()
+        graph = AgentGraph(
+            [node for node in complete.nodes if node.id != "reader"],
+            [
+                AgentRelation("reasoner", "verifier", True, False),
+                AgentRelation("verifier", "formatter", True, False),
+            ],
+            output_agent_id="formatter",
+        )
+        registry = make_registry()
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_trivia_semantic_runtime(registry, _ImmediateGateway()),
+            graph=graph,
+            problem="What is the capital of France?",
+            execute_on_edit=False,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+        )
+
+        self.assertEqual((), env._missing_semantic_role_families())
+        self.assertIn("add_subgraph", env.model_admissible_action_types())
+        domain = env.model_admissible_action_targets()["add_subgraph"]
+        self.assertIn(
+            "evidence_retriever",
+            domain["admitted_new_role_families"],
+        )
+        self.assertNotEqual(
+            ["evidence_retriever"],
+            domain["admitted_new_role_families"],
+        )
+
+    async def test_triviaqa_valid_retriever_artifact_admits_any_direct_reasoner_ingress(
+        self,
+    ) -> None:
+        complete = _trivia_semantic_graph(reader_to_reasoner=False)
+        graph = AgentGraph(
+            [node for node in complete.nodes if node.id != "formatter"],
+            [AgentRelation("reasoner", "verifier", True, False)],
+        )
+        graph.add_agent(
+            AgentNode(
+                "reader_b",
+                "fast",
+                "retrieve an independent answer-free evidence artifact",
+                role_family="evidence_retriever",
+                allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                execution_mode="react",
+                artifact_type="retrieval_evidence",
+            )
+        )
+        registry = make_registry()
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_trivia_semantic_runtime(registry, _ImmediateGateway()),
+            graph=graph,
+            problem="What is the capital of France?",
+            execute_on_edit=False,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+        )
+        env._progressive_outputs["reader"] = _test_evidence_retriever_artifact(
+            "p1"
+        )
+        env._progressive_output_metadata["reader"] = {
+            "tool_receipts": [_test_read_receipt("p1")],
+            "artifact_version": "fixture:reader:current",
+        }
+        env._progressive_outputs["reader_b"] = _test_evidence_retriever_artifact(
+            "p1"
+        )
+        env._progressive_output_metadata["reader_b"] = {
+            "tool_receipts": [_test_read_receipt("p1")],
+            "artifact_version": "fixture:reader-b:current",
+        }
+
+        self.assertEqual(("set_relation",), env.model_admissible_action_types())
+        candidates = env.model_admissible_action_targets()["set_relation"][
+            "candidates"
+        ]
+        self.assertIn(
+            {
+                "source_id": "reader",
+                "target_id": "reasoner",
+                "source_to_target": True,
+                "target_to_source": False,
+            },
+            candidates,
+        )
+        self.assertIn(
+            {
+                "source_id": "reader_b",
+                "target_id": "reasoner",
+                "source_to_target": True,
+                "target_to_source": False,
+            },
+            candidates,
+        )
+        revision = env.revision
+
+        rejected = await env.step(
+            json.dumps(
+                {
+                    "action": "set_relation",
+                    "source_id": "reader",
+                    "target_id": "reasoner",
+                    "source_to_target": False,
+                    "target_to_source": True,
+                }
+            )
+        )
+
+        self.assertFalse(rejected.accepted)
+        self.assertIn("exact admitted set_relation candidate", rejected.feedback)
+        self.assertEqual(revision, env.graph.revision)
+
+    async def test_triviaqa_evidence_ingress_mask_matches_preservation_admission_before_output(
+        self,
+    ) -> None:
+        complete = _trivia_semantic_graph(reader_to_reasoner=False)
+        graph = AgentGraph(
+            [node for node in complete.nodes if node.id != "formatter"],
+        )
+        registry = make_registry()
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_trivia_semantic_runtime(registry, _ImmediateGateway()),
+            graph=graph,
+            problem="What is the capital of France?",
+            execute_on_edit=False,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+        )
+        env._progressive_outputs["reader"] = _test_evidence_retriever_artifact(
+            "p1"
+        )
+        env._progressive_output_metadata["reader"] = {
+            "tool_receipts": [_test_read_receipt("p1")],
+            "artifact_version": "fixture:reader:current",
+        }
+
+        self.assertEqual(("set_relation",), env.model_admissible_action_types())
+        self.assertEqual(
+            [
+                {
+                    "source_id": "reader",
+                    "target_id": "reasoner",
+                    "source_to_target": True,
+                    "target_to_source": False,
+                }
+            ],
+            env.model_admissible_action_targets()["set_relation"]["candidates"],
+        )
+
+        routed = await env.step(
+            '{"action":"set_relation","source_id":"reader",'
+            '"target_id":"reasoner","source_to_target":true,'
+            '"target_to_source":false}'
+        )
+
+        self.assertTrue(routed.accepted)
+        self.assertTrue(
+            env.graph.relation_bits("reader", "reasoner").source_to_target
+        )
+        self.assertIn("add_subgraph", env.model_admissible_action_types())
+        self.assertIn(
+            "format",
+            env.model_admissible_action_targets()["add_subgraph"][
+                "admitted_new_role_families"
+            ],
+        )
+
+    async def test_triviaqa_evidence_ingress_precedes_missing_formatter_add(
+        self,
+    ) -> None:
+        complete = _trivia_semantic_graph(reader_to_reasoner=False)
+        graph = AgentGraph(
+            [node for node in complete.nodes if node.id != "formatter"],
+        )
+        registry = make_registry()
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_trivia_semantic_runtime(registry, _ImmediateGateway()),
+            graph=graph,
+            problem="What is the capital of France?",
+            execute_on_edit=False,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+        )
+        env._progressive_outputs["reader"] = _test_evidence_retriever_artifact(
+            "p1"
+        )
+        env._progressive_output_metadata["reader"] = {
+            "tool_receipts": [_test_read_receipt("p1")],
+            "artifact_version": "fixture:reader:current",
+        }
+
+        self.assertEqual(("set_relation",), env.model_admissible_action_types())
+        self.assertEqual(
+            [
+                {
+                    "source_id": "reader",
+                    "target_id": "reasoner",
+                    "source_to_target": True,
+                    "target_to_source": False,
+                }
+            ],
+            env.model_admissible_action_targets()["set_relation"]["candidates"],
+        )
+
+        rejected = await env.step(
+            json.dumps(
+                {
+                    "action": "add_subgraph",
+                    "agents": [
+                        {
+                            "agent_id": "formatter",
+                            "model_id": "fast",
+                            "contract": (
+                                "copy the routed semantic candidate "
+                                "character-for-character into the required "
+                                "answer wrapper"
+                            ),
+                            "role_family": "format",
+                            "allowed_tools": [],
+                            "execution_mode": "reasoning",
+                        }
+                    ],
+                    "relations": [],
+                    "output_agent_id": "formatter",
+                }
+            )
+        )
+
+        self.assertFalse(rejected.accepted)
+        self.assertIn("receipt-grounded Evidence Retriever", rejected.feedback)
+
+    async def test_grounded_orphan_retriever_does_not_invalidate_verified_lineage(
         self,
     ) -> None:
         complete = _hotpot_semantic_graph()
@@ -3985,41 +5300,124 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             agent_id: dict(metadata)
             for agent_id, metadata in initial.output_metadata.items()
         }
+        env._progressive_outputs["reader"] = _test_evidence_retriever_artifact(
+            "p1"
+        )
         # The active Reasoner obtained its own public read in the tc1 shape;
         # keep that receipt while the detached Retriever remains independently
         # grounded and terminal-unreachable.
         env._progressive_output_metadata["reasoner"] = {
+            **env._progressive_output_metadata["reasoner"],
             "tool_receipts": list(
                 env._progressive_output_metadata["reader"]["tool_receipts"]
-            )
+            ),
+            "input_artifact_versions": {},
         }
+        current_outputs = {
+            **dict(initial.outputs),
+            "reader": _test_evidence_retriever_artifact("p1"),
+        }
+        current_metadata = {
+            agent_id: dict(metadata)
+            for agent_id, metadata in env._progressive_output_metadata.items()
+        }
+        current_execution = replace(
+            initial,
+            graph_revision=graph.revision,
+            outputs=current_outputs,
+            output_metadata=current_metadata,
+        )
+        env._progressive_outputs = current_outputs
+        env._progressive_output_metadata = current_metadata
+        env._progressive_execution = current_execution
+        env._progressive_execution_revision = graph.revision
 
         self.assertEqual(
             ("reasoner", "verifier", "formatter"),
             env._active_semantic_lineage_ids(),
         )
         self.assertEqual(("reader",), env._terminal_unreachable_agent_ids())
-        self.assertEqual(("set_relation",), env.model_admissible_action_types())
-        route = {
-            "source_id": "reader",
-            "target_id": "reasoner",
-            "source_to_target": True,
-            "target_to_source": False,
-        }
-        self.assertEqual(
-            [route],
-            env.model_admissible_action_targets()["set_relation"]["candidates"],
-        )
+        self.assertTrue(env.finish_admissibility()["admissible"])
+        self.assertEqual(("finish",), env.model_admissible_action_types())
+        request_count = len(gateway.requests)
 
-        result = await env.step(json.dumps({"action": "set_relation", **route}))
+        result = await env.step(json.dumps({"action": "finish"}))
 
         self.assertTrue(result.accepted, result.feedback)
+        self.assertTrue(result.done)
+        self.assertTrue(result.execution_reused)
         self.assertEqual("<answer>Paris</answer>", result.execution.final_answer)
-        self.assertEqual(("finish",), env.model_admissible_action_types())
-        self.assertIn("reasoner", env._previous_revision_outputs)
-        self.assertIn("verifier", env._previous_revision_outputs)
-        self.assertIn("formatter", env._previous_revision_outputs)
-        self.assertEqual("retrieved passage p1", env._progressive_outputs["reader"])
+        self.assertEqual(request_count, len(gateway.requests))
+        self.assertNotIn(
+            "reasoner",
+            env._directed_successors(graph, "reader"),
+        )
+        self.assertEqual(
+            _test_evidence_retriever_artifact("p1"),
+            env._progressive_outputs["reader"],
+        )
+
+    async def test_orphan_retriever_remains_required_when_reasoner_lacks_read_receipt(
+        self,
+    ) -> None:
+        complete = _hotpot_semantic_graph()
+        registry = make_registry()
+        runtime = _hotpot_semantic_runtime(registry, _HotpotSemanticGateway())
+        initial = await runtime.execute(
+            complete,
+            "What is the capital of France?",
+            require_complete=True,
+            format_output_agent=True,
+        )
+        graph = complete.fork()
+        graph.set_relation("reader", "reasoner", False, False)
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=runtime,
+            graph=graph,
+            problem="What is the capital of France?",
+            execute_on_edit=True,
+            semantic_protocol="hotpotqa_verified_answer_slot_v1",
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+        )
+        outputs = {
+            **dict(initial.outputs),
+            "reader": _test_evidence_retriever_artifact("p1"),
+        }
+        metadata = {
+            agent_id: dict(value)
+            for agent_id, value in initial.output_metadata.items()
+        }
+        metadata["reader"] = dict(
+            initial.output_metadata["reader"]
+        )
+        metadata["reasoner"] = {
+            **metadata["reasoner"],
+            "tool_receipts": [],
+            "input_artifact_versions": {},
+        }
+        env._progressive_outputs = outputs
+        env._progressive_output_metadata = metadata
+        env._progressive_execution = replace(
+            initial,
+            graph_revision=graph.revision,
+            outputs=outputs,
+            output_metadata=metadata,
+        )
+        env._progressive_execution_revision = graph.revision
+
+        self.assertFalse(env.finish_admissibility()["admissible"])
+        self.assertIn("set_relation", env.model_admissible_action_types())
+        self.assertIn(
+            {
+                "source_id": "reader",
+                "target_id": "reasoner",
+                "source_to_target": True,
+                "target_to_source": False,
+            },
+            env.model_admissible_action_targets()["set_relation"]["candidates"],
+        )
 
     async def test_failed_reader_replacement_domain_excludes_cross_role_artifact(
         self,
@@ -4061,13 +5459,13 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         env._progressive_outputs["successful_repair"] = "successful repair artifact"
         env._failed_agent_ids.update({"failed_reader", "reasoner"})
         env._repair_exhausted_agent_ids.update({"failed_reader", "reasoner"})
-        env._latest_failure_record_by_agent["failed_reader"] = AgentFailureRecord(
-            request_id="failed-reader-role-domain",
-            agent_id="failed_reader",
-            phase=ExecutionPhase.SINGLE,
-            graph_revision=graph.revision,
-            error_type="ReactExecutionError",
-            message="react agent 'failed_reader' exhausted 8 turns",
+        env._latest_failure_record_by_agent["failed_reader"] = (
+            _test_retrieval_failure_record(
+                graph,
+                agent_id="failed_reader",
+                strategies=("initial_retrieval",),
+                passage_ids=("new-public-read",),
+            )
         )
 
         self.assertEqual(("add_subgraph",), env.model_admissible_action_types())
@@ -4135,7 +5533,25 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             recovery_policy="preserve_diagnose_repair_augment",
             required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
         )
-        env._progressive_outputs["replacement_reader"] = "replacement evidence"
+        grounded_artifact = {
+            "question_scope": "What is the capital of France?",
+            "entity_identity": {
+                "question_surface": "France",
+                "evidence_surface": "France",
+            },
+            "target_relation": "capital of",
+            "answer_type_constraint": "short_answer",
+            "evidence_proposition": {
+                "subject": "Paris",
+                "predicate": "is the capital of",
+                "object_or_attribute_value": "France",
+            },
+            "evidence_span": "Paris is the capital of France.",
+            "passage_id": "replacement-public",
+        }
+        env._progressive_outputs["replacement_reader"] = json.dumps(
+            grounded_artifact
+        )
         self.assertFalse(
             env._semantic_replacement_has_valid_artifact(
                 "replacement_reader",
@@ -4145,6 +5561,23 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         env._progressive_output_metadata["replacement_reader"] = {
             "tool_receipts": [_test_read_receipt("replacement-public")]
         }
+
+        relation_drift = json.loads(json.dumps(grounded_artifact))
+        relation_drift["target_relation"] = "introduced"
+        relation_drift["evidence_proposition"]["predicate"] = "introduced"
+        env._progressive_outputs["replacement_reader"] = json.dumps(
+            relation_drift
+        )
+        self.assertFalse(
+            env._semantic_replacement_has_valid_artifact(
+                "replacement_reader",
+                "evidence_retriever",
+            )
+        )
+
+        env._progressive_outputs["replacement_reader"] = json.dumps(
+            grounded_artifact
+        )
         self.assertTrue(
             env._semantic_replacement_has_valid_artifact(
                 "replacement_reader",
@@ -4312,6 +5745,14 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         )
         env._failed_agent_ids.update({"failed_reader", "reasoner"})
         env._repair_exhausted_agent_ids.update({"failed_reader", "reasoner"})
+        env._latest_failure_record_by_agent["failed_reader"] = (
+            _test_retrieval_failure_record(
+                graph,
+                agent_id="failed_reader",
+                strategies=("initial_retrieval",),
+                passage_ids=("new-public-read",),
+            )
+        )
         env._unresolved_dirty_agents.update(
             {"replacement_reader", "reasoner", "verifier", "formatter"}
         )
@@ -4328,6 +5769,10 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             ["replacement_reader"],
             modify_domain["agent_ids"],
+        )
+        self.assertLessEqual(
+            set(modify_domain["agent_ids"]),
+            set(modify_domain["responsible_agent_ids"]),
         )
         self.assertEqual(
             ["contract", "completion_condition"],
@@ -4380,6 +5825,791 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             env.graph.get_node("replacement_reader").contract,
         )
 
+    async def test_repair_exhausted_replacement_with_new_progress_exposes_add(
+        self,
+    ) -> None:
+        graph = _trivia_semantic_graph()
+        graph.add_agent(
+            AgentNode(
+                "failed_reader",
+                "cheap",
+                "retrieve replacement evidence",
+                role_family="evidence_retriever",
+                allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                execution_mode="react",
+                artifact_type="retrieval_evidence",
+            )
+        )
+        graph.set_relation("failed_reader", "reasoner", True, False)
+        registry = make_registry()
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_trivia_semantic_runtime(registry, _ImmediateGateway()),
+            graph=graph,
+            problem="Who wrote the novel?",
+            execute_on_edit=False,
+            max_agents=8,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+        )
+        env._failed_agent_ids.update({"failed_reader", "reasoner"})
+        env._repair_exhausted_agent_ids.update(
+            {"failed_reader", "reasoner"}
+        )
+        env._latest_failure_record_by_agent["failed_reader"] = (
+            _test_retrieval_failure_record(
+                graph,
+                agent_id="failed_reader",
+                strategies=("initial_retrieval",),
+                passage_ids=("public-1",),
+            )
+        )
+        added = await env.step(
+            json.dumps(
+                {
+                    "action": "add_subgraph",
+                    "agents": [
+                        {
+                            "agent_id": "replacement_reader",
+                            "model_id": "cheap",
+                            "contract": (
+                                _QA_EVIDENCE_RETRIEVER_RECOVERY_CONTRACT
+                            ),
+                            "completion_condition": (
+                                _QA_EVIDENCE_RETRIEVER_RECOVERY_COMPLETION
+                            ),
+                            "role_family": "evidence_retriever",
+                            "allowed_tools": [QA_RETRIEVAL_TOOL_ID],
+                            "execution_mode": "react",
+                            "artifact_type": "retrieval_evidence",
+                        }
+                    ],
+                    "relations": [],
+                    "output_agent_id": None,
+                }
+            )
+        )
+        self.assertTrue(added.accepted, added.feedback)
+        env._failed_agent_ids.update(
+            {"failed_reader", "replacement_reader", "reasoner"}
+        )
+        env._repair_exhausted_agent_ids.update(
+            {"failed_reader", "replacement_reader", "reasoner"}
+        )
+        env._latest_failure_record_by_agent.update(
+            {
+                "replacement_reader": _test_retrieval_failure_record(
+                    env.graph,
+                    agent_id="replacement_reader",
+                    strategies=(
+                        "initial_retrieval",
+                        "spelling_normalization",
+                    ),
+                    passage_ids=("public-1", "public-2"),
+                ),
+            }
+        )
+        env._unresolved_dirty_agents.update(
+            {"replacement_reader", "reasoner", "verifier", "formatter"}
+        )
+
+        self.assertEqual((), env._dirty_auxiliary_replacement_agent_ids())
+        self.assertEqual(("add_subgraph",), env.model_admissible_action_types())
+        recovery = env.recovery_state()
+        self.assertEqual([], recovery["active_auxiliary_replacement_agent_ids"])
+        add_domain = env.model_admissible_action_targets()["add_subgraph"]
+        self.assertEqual(1, add_domain["min_new_agents"])
+        self.assertEqual(1, add_domain["max_new_agents"])
+        self.assertEqual(
+            ["evidence_retriever"],
+            add_domain["admitted_new_role_families"],
+        )
+        self.assertEqual([], add_domain["relations"])
+        self.assertIsNone(add_domain["output_agent_id"])
+        self.assertEqual(
+            ["retrieval_evidence"],
+            add_domain["role_constraints"]["evidence_retriever"][
+                "artifact_types"
+            ],
+        )
+
+        rejected_modify = await env.step(
+            '{"action":"modify_agent","agent_id":"replacement_reader",'
+            '"contract":"retry the exhausted replacement"}'
+        )
+        self.assertFalse(rejected_modify.accepted)
+        self.assertNotIn(
+            "replacement_reader",
+            env.model_admissible_action_targets().get("modify_agent", {}).get(
+                "agent_ids", []
+            ),
+        )
+        rejected_route = await env.step(
+            '{"action":"set_relation","source_id":"replacement_reader",'
+            '"target_id":"reasoner","source_to_target":true,'
+            '"target_to_source":false}'
+        )
+        self.assertFalse(rejected_route.accepted)
+        rejected_delete = await env.step(
+            '{"action":"delete_agent","agent_id":"replacement_reader"}'
+        )
+        self.assertFalse(rejected_delete.accepted)
+        self.assertTrue(env.graph.has_node("replacement_reader"))
+
+    async def test_tc1_stalled_replacement_closes_recursive_add_domain(
+        self,
+    ) -> None:
+        graph = _trivia_semantic_graph()
+        graph.add_agent(
+            AgentNode(
+                "failed_reader",
+                "cheap",
+                "retrieve grounded evidence",
+                role_family="evidence_retriever",
+                allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                execution_mode="react",
+                artifact_type="retrieval_evidence",
+            )
+        )
+        graph.set_relation("failed_reader", "reasoner", True, False)
+        registry = make_registry()
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_trivia_semantic_runtime(registry, _ImmediateGateway()),
+            graph=graph,
+            problem="Who wrote the novel?",
+            execute_on_edit=False,
+            max_agents=8,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+        )
+        env._failed_agent_ids.add("failed_reader")
+        env._repair_exhausted_agent_ids.add("failed_reader")
+        env._latest_failure_record_by_agent["failed_reader"] = (
+            _test_retrieval_failure_record(
+                graph,
+                agent_id="failed_reader",
+                strategies=(
+                    "initial_retrieval",
+                    "spelling_normalization",
+                ),
+                passage_ids=("same-public-read",),
+            )
+        )
+        added = await env.step(
+            json.dumps(
+                {
+                    "action": "add_subgraph",
+                    "agents": [
+                        {
+                            "agent_id": "replacement_reader",
+                            "model_id": "cheap",
+                            "contract": (
+                                _QA_EVIDENCE_RETRIEVER_RECOVERY_CONTRACT
+                            ),
+                            "completion_condition": (
+                                _QA_EVIDENCE_RETRIEVER_RECOVERY_COMPLETION
+                            ),
+                            "role_family": "evidence_retriever",
+                            "allowed_tools": [QA_RETRIEVAL_TOOL_ID],
+                            "execution_mode": "react",
+                            "artifact_type": "retrieval_evidence",
+                        }
+                    ],
+                    "relations": [],
+                    "output_agent_id": None,
+                }
+            )
+        )
+        self.assertTrue(added.accepted, added.feedback)
+        env._failed_agent_ids.add("replacement_reader")
+        env._repair_exhausted_agent_ids.add("replacement_reader")
+        env._latest_failure_record_by_agent["replacement_reader"] = (
+                _test_retrieval_failure_record(
+                    env.graph,
+                    agent_id="replacement_reader",
+                    strategies=(
+                        "initial_retrieval",
+                        "spelling_normalization",
+                    ),
+                    passage_ids=("same-public-read",),
+                )
+        )
+
+        self.assertEqual(
+            {},
+            env._repair_exhausted_auxiliary_replacement_domains(),
+        )
+        self.assertNotIn(
+            "add_subgraph",
+            env.model_admissible_action_types(),
+        )
+
+    def test_tc5_kbc_at_eight_of_eight_is_typed_terminal_not_add(self) -> None:
+        graph = _trivia_semantic_graph()
+        failed_reader_ids = tuple(f"failed_reader_{index}" for index in range(4))
+        for agent_id in failed_reader_ids:
+            graph.add_agent(
+                AgentNode(
+                    agent_id,
+                    "cheap",
+                    "retrieve grounded evidence",
+                    role_family="evidence_retriever",
+                    allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                    execution_mode="react",
+                    artifact_type="retrieval_evidence",
+                )
+            )
+            graph.set_relation(agent_id, "reasoner", True, False)
+        self.assertEqual(8, len(graph.nodes))
+        registry = make_registry()
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_trivia_semantic_runtime(registry, _ImmediateGateway()),
+            graph=graph,
+            problem="Who wrote the novel?",
+            execute_on_edit=False,
+            max_agents=8,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+        )
+        env._failed_agent_ids.update((*failed_reader_ids, "reasoner"))
+        env._repair_exhausted_agent_ids.update(
+            (*failed_reader_ids, "reasoner")
+        )
+        for index, agent_id in enumerate(failed_reader_ids):
+            env._latest_failure_record_by_agent[agent_id] = (
+                _test_retrieval_failure_record(
+                    graph,
+                    agent_id=agent_id,
+                    public_error_code="knowledge_base_coverage_failure",
+                    strategies=(
+                        "initial_retrieval",
+                        "spelling_normalization",
+                        "alias_expansion",
+                        "entity_disambiguation",
+                        "relation_query_rewriting",
+                    ),
+                    passage_ids=(f"coverage-read-{index}",),
+                    bounded_schedule_exhausted=True,
+                )
+            )
+
+        self.assertEqual(
+            {},
+            env._repair_exhausted_auxiliary_replacement_domains(),
+        )
+        self.assertEqual((), env.model_admissible_action_types())
+        self.assertNotIn(
+            "add_subgraph",
+            env.model_admissible_action_targets(),
+        )
+
+    async def test_tc5_kbc_below_capacity_is_typed_terminal_not_relation_cycle(
+        self,
+    ) -> None:
+        graph = _trivia_semantic_graph()
+        registry = make_registry()
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_trivia_semantic_runtime(registry, _ImmediateGateway()),
+            graph=graph,
+            problem="Who wrote the novel?",
+            execute_on_edit=False,
+            max_agents=8,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+        )
+        record = _test_retrieval_failure_record(
+            graph,
+            agent_id="reader",
+            public_error_code="knowledge_base_coverage_failure",
+            strategies=(
+                "initial_retrieval",
+                "spelling_normalization",
+                "alias_expansion",
+                "entity_disambiguation",
+                "relation_query_rewriting",
+            ),
+            passage_ids=("retained-public-read",),
+            bounded_schedule_exhausted=True,
+        )
+        env._failed_agent_ids.add("reader")
+        env._repair_exhausted_agent_ids.add("reader")
+        env._latest_failure_record_by_agent["reader"] = record
+
+        self.assertEqual(
+            "knowledge_base_coverage_failure",
+            env._typed_retrieval_failure_category(record),
+        )
+        self.assertTrue(env._agent_has_successful_read_receipt("reader"))
+        self.assertEqual(
+            {},
+            env._repair_exhausted_auxiliary_replacement_domains(),
+        )
+        self.assertEqual([], env._model_admissible_relation_candidates())
+        self.assertEqual((), env.model_admissible_action_types())
+        self.assertEqual({}, env.model_admissible_action_targets())
+        self.assertEqual([], env.recovery_state()["preferred_actions"])
+
+        revision = env.revision
+        rejected = await env.step(
+            '{"action":"set_relation","source_id":"reader",'
+            '"target_id":"reasoner","source_to_target":false,'
+            '"target_to_source":false}'
+        )
+        self.assertFalse(rejected.accepted)
+        self.assertIn("no admissible semantic recovery relation", rejected.feedback)
+        self.assertEqual(revision, env.revision)
+        self.assertIn("reader", env.graph.directed_predecessors("reasoner"))
+
+    async def test_failed_artifact_free_retriever_cannot_repair_reachability(
+        self,
+    ) -> None:
+        graph = _trivia_semantic_graph()
+        registry = make_registry()
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_trivia_semantic_runtime(registry, _ImmediateGateway()),
+            graph=graph,
+            problem="Who wrote the novel?",
+            execute_on_edit=False,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+        )
+        env._failed_agent_ids.add("reasoner")
+        env._repair_exhausted_agent_ids.add("reasoner")
+        added = await env.step(
+            json.dumps(
+                {
+                    "action": "add_subgraph",
+                    "agents": [
+                        {
+                            "agent_id": "failed_reader",
+                            "model_id": "cheap",
+                            "contract": (
+                                _QA_EVIDENCE_RETRIEVER_RECOVERY_CONTRACT
+                            ),
+                            "completion_condition": (
+                                _QA_EVIDENCE_RETRIEVER_RECOVERY_COMPLETION
+                            ),
+                            "role_family": "evidence_retriever",
+                            "allowed_tools": [QA_RETRIEVAL_TOOL_ID],
+                            "execution_mode": "react",
+                            "artifact_type": "retrieval_evidence",
+                        }
+                    ],
+                    "relations": [],
+                    "output_agent_id": None,
+                }
+            )
+        )
+        self.assertTrue(added.accepted, added.feedback)
+        env._failed_agent_ids.add("failed_reader")
+        env._repair_exhausted_agent_ids.add("failed_reader")
+        env._latest_failure_record_by_agent["failed_reader"] = (
+            _test_retrieval_failure_record(
+                env.graph,
+                agent_id="failed_reader",
+                public_error_code="knowledge_base_coverage_failure",
+                bounded_schedule_exhausted=True,
+            )
+        )
+
+        self.assertEqual(
+            {"failed_reader"},
+            set(env._terminal_unreachable_agent_ids()),
+        )
+        self.assertEqual(
+            [],
+            env._terminal_reachability_relation_candidates(),
+        )
+        rejected = await env.step(
+            '{"action":"set_relation","source_id":"failed_reader",'
+            '"target_id":"reasoner","source_to_target":true,'
+            '"target_to_source":false}'
+        )
+        self.assertFalse(rejected.accepted)
+        self.assertIn("artifact-free auxiliary", rejected.feedback)
+
+    async def test_replacement_routes_only_to_reasoner_then_preserves_takeover(
+        self,
+    ) -> None:
+        graph = _hotpot_semantic_graph()
+        for agent_id in ("failed_reader", "replacement_reader"):
+            graph.add_agent(
+                AgentNode(
+                    agent_id,
+                    "cheap",
+                    "retrieve grounded evidence",
+                    role_family="evidence_retriever",
+                    allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                    execution_mode="react",
+                    artifact_type="retrieval_evidence",
+                )
+            )
+        graph.set_relation("failed_reader", "reasoner", True, False)
+        registry = make_registry()
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_hotpot_semantic_runtime(registry, _ImmediateGateway()),
+            graph=graph,
+            problem="What is the capital of France?",
+            execute_on_edit=False,
+            semantic_protocol="hotpotqa_verified_answer_slot_v1",
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+        )
+        replacement_receipt = _test_read_receipt("replacement-public")
+        replacement_artifact = _test_evidence_retriever_artifact(
+            "replacement-public"
+        )
+        env._progressive_outputs["replacement_reader"] = replacement_artifact
+        env._progressive_output_metadata["replacement_reader"] = {
+            "tool_receipts": [replacement_receipt]
+        }
+        env._failed_agent_ids.update({"failed_reader", "reasoner"})
+        env._repair_exhausted_agent_ids.update(
+            {"failed_reader", "reasoner"}
+        )
+        env._latest_failure_record_by_agent["failed_reader"] = (
+            _test_retrieval_failure_record(
+                graph,
+                agent_id="failed_reader",
+                strategies=("initial_retrieval",),
+                passage_ids=("failed-public",),
+            )
+        )
+
+        expected_route = {
+            "source_id": "replacement_reader",
+            "target_id": "reasoner",
+            "source_to_target": True,
+            "target_to_source": False,
+        }
+        self.assertEqual(
+            [expected_route],
+            env._repair_exhausted_relation_candidates(),
+        )
+        all_candidates = env._all_model_admissible_relation_candidates()
+        failed_target = {
+            "source_id": "replacement_reader",
+            "target_id": "failed_reader",
+            "source_to_target": True,
+            "target_to_source": False,
+        }
+        self.assertTrue(
+            env._relation_routes_replacement_outside_reasoner(failed_target)
+        )
+        self.assertNotIn(
+            failed_target,
+            env._model_admissible_relation_candidates(),
+        )
+
+        routed = await env.step(
+            json.dumps({"action": "set_relation", **expected_route})
+        )
+        self.assertTrue(routed.accepted, routed.feedback)
+        self.assertEqual(("delete_agent",), env.model_admissible_action_types())
+        deleted = await env.step(
+            '{"action":"delete_agent","agent_id":"failed_reader"}'
+        )
+        self.assertTrue(deleted.accepted, deleted.feedback)
+        self.assertEqual(
+            replacement_artifact,
+            env._progressive_outputs["replacement_reader"],
+        )
+        self.assertEqual(
+            [replacement_receipt],
+            env._progressive_output_metadata["replacement_reader"][
+                "tool_receipts"
+            ],
+        )
+
+    async def test_auxiliary_replacement_add_is_one_isolated_domain_agent(
+        self,
+    ) -> None:
+        graph = _trivia_semantic_graph()
+        graph.add_agent(
+            AgentNode(
+                "failed_reader",
+                "cheap",
+                "retrieve evidence for the target entity and relation",
+                role_family="evidence_retriever",
+                allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                execution_mode="react",
+                artifact_type="retrieval_evidence",
+            )
+        )
+        graph.set_relation("failed_reader", "reasoner", True, False)
+        registry = make_registry()
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_trivia_semantic_runtime(registry, _ImmediateGateway()),
+            graph=graph,
+            problem="Who wrote the novel?",
+            execute_on_edit=False,
+            max_agents=8,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+        )
+        env._failed_agent_ids.add("failed_reader")
+        env._repair_exhausted_agent_ids.add("failed_reader")
+        env._latest_failure_record_by_agent["failed_reader"] = (
+            _test_retrieval_failure_record(
+                graph,
+                agent_id="failed_reader",
+                public_error_code="retrieval_recall_failure",
+                strategies=("initial_retrieval",),
+            )
+        )
+
+        self.assertIn("add_subgraph", env.model_admissible_action_types())
+        add_domain = env.model_admissible_action_targets()["add_subgraph"]
+        self.assertEqual(1, add_domain["max_new_agents"])
+        self.assertEqual([], add_domain["relations"])
+        self.assertIsNone(add_domain["output_agent_id"])
+        retriever_domain = add_domain["role_constraints"][
+            "evidence_retriever"
+        ]
+        self.assertEqual(
+            [_QA_EVIDENCE_RETRIEVER_RECOVERY_CONTRACT],
+            retriever_domain["contracts"],
+        )
+        self.assertEqual(
+            [_QA_EVIDENCE_RETRIEVER_RECOVERY_COMPLETION],
+            retriever_domain["completion_conditions"],
+        )
+
+        replacement_spec = {
+            "model_id": "cheap",
+            "contract": _QA_EVIDENCE_RETRIEVER_RECOVERY_CONTRACT,
+            "completion_condition": (
+                _QA_EVIDENCE_RETRIEVER_RECOVERY_COMPLETION
+            ),
+            "role_family": "evidence_retriever",
+            "allowed_tools": [QA_RETRIEVAL_TOOL_ID],
+            "execution_mode": "react",
+            "artifact_type": "retrieval_evidence",
+        }
+        rejected_multiple = await env.step(
+            json.dumps(
+                {
+                    "action": "add_subgraph",
+                    "agents": [
+                        {"agent_id": "replacement_a", **replacement_spec},
+                        {"agent_id": "replacement_b", **replacement_spec},
+                    ],
+                    "relations": [],
+                }
+            )
+        )
+        self.assertFalse(rejected_multiple.accepted)
+        self.assertIn("exactly one", rejected_multiple.feedback)
+        self.assertFalse(env.graph.has_node("replacement_a"))
+        self.assertFalse(env.graph.has_node("replacement_b"))
+
+        accepted = await env.step(
+            json.dumps(
+                {
+                    "action": "add_subgraph",
+                    "agents": [
+                        {"agent_id": "replacement_reader", **replacement_spec}
+                    ],
+                    "relations": [],
+                    "output_agent_id": None,
+                }
+            )
+        )
+        self.assertTrue(accepted.accepted, accepted.feedback)
+        self.assertTrue(env.graph.has_node("replacement_reader"))
+        self.assertEqual(
+            (),
+            env.graph.directed_predecessors("replacement_reader"),
+        )
+        self.assertEqual(
+            (),
+            env._directed_successors(env.graph, "replacement_reader"),
+        )
+        env._failed_agent_ids.add("replacement_reader")
+        env._repair_exhausted_agent_ids.add("replacement_reader")
+        env._latest_failure_record_by_agent["replacement_reader"] = (
+            _test_retrieval_failure_record(
+                env.graph,
+                agent_id="replacement_reader",
+                public_error_code="retrieval_recall_failure",
+                strategies=("initial_retrieval",),
+                bounded_schedule_exhausted=True,
+            )
+        )
+        self.assertEqual(
+            {},
+            env._repair_exhausted_auxiliary_replacement_domains(),
+        )
+        self.assertNotIn(
+            "add_subgraph",
+            env.model_admissible_action_types(),
+        )
+
+    def test_multigeneration_replacement_handoff_uses_most_advanced_public_state(
+        self,
+    ) -> None:
+        graph = _trivia_semantic_graph()
+        for agent_id in ("failed_reader", "replacement_reader"):
+            graph.add_agent(
+                AgentNode(
+                    agent_id,
+                    "cheap",
+                    "retrieve replacement evidence",
+                    role_family="evidence_retriever",
+                    allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                    execution_mode="react",
+                    artifact_type="retrieval_evidence",
+                )
+            )
+            graph.set_relation(agent_id, "reasoner", True, False)
+        registry = make_registry()
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_trivia_semantic_runtime(registry, _ImmediateGateway()),
+            graph=graph,
+            problem="Who wrote the novel?",
+            execute_on_edit=False,
+            max_agents=8,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+        )
+        first_receipt = _test_read_receipt("first-public")
+        newest_receipts = [
+            _test_read_receipt("newest-public-1"),
+            _test_read_receipt("newest-public-2"),
+        ]
+        env._failed_agent_ids.update({"failed_reader", "replacement_reader"})
+        env._repair_exhausted_agent_ids.update(
+            {"failed_reader", "replacement_reader"}
+        )
+        env._failure_continuations.update(
+            {
+                "failed_reader": {
+                    "execution_phase": "single",
+                    "tool_receipts": [first_receipt],
+                    "private_reasoning": "must not cross the Agent boundary",
+                },
+                "replacement_reader": {
+                    "execution_phase": "single",
+                    "tool_receipts": newest_receipts,
+                    "private_reasoning": "must not cross the Agent boundary",
+                },
+            }
+        )
+        action = env.parser.parse(
+            json.dumps(
+                {
+                    "action": "add_subgraph",
+                    "agents": [
+                        {
+                            "agent_id": "next_reader",
+                            "model_id": "cheap",
+                            "contract": "continue grounded public retrieval",
+                            "role_family": "evidence_retriever",
+                            "allowed_tools": [QA_RETRIEVAL_TOOL_ID],
+                            "execution_mode": "react",
+                            "artifact_type": "retrieval_evidence",
+                        }
+                    ],
+                    "relations": [],
+                }
+            )
+        )
+
+        handoff = env._recovery_continuation_handoff(action)
+
+        self.assertEqual(["next_reader"], list(handoff))
+        projected = handoff["next_reader"]
+        self.assertEqual(
+            "replacement_reader",
+            projected["continuation_source_agent_id"],
+        )
+        self.assertEqual(newest_receipts, projected["tool_receipts"])
+        self.assertNotIn("private_reasoning", projected)
+
+    def test_exhausted_tool_plan_is_not_handed_to_replacement_agent(
+        self,
+    ) -> None:
+        graph = _trivia_semantic_graph()
+        graph.add_agent(
+            AgentNode(
+                "failed_reader",
+                "cheap",
+                "retrieve replacement evidence",
+                role_family="evidence_retriever",
+                allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                execution_mode="react",
+                artifact_type="retrieval_evidence",
+            )
+        )
+        graph.set_relation("failed_reader", "reasoner", True, False)
+        registry = make_registry()
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_trivia_semantic_runtime(registry, _ImmediateGateway()),
+            graph=graph,
+            problem="Who wrote the novel?",
+            execute_on_edit=False,
+            max_agents=8,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+        )
+        receipt = _test_read_receipt("exhausted-public")
+        failure = AgentFailureRecord(
+            request_id="exhausted-reader",
+            agent_id="failed_reader",
+            phase=ExecutionPhase.SINGLE,
+            graph_revision=graph.revision,
+            error_type="ReactExecutionError",
+            message="bounded Tool plan exhausted",
+            metadata={
+                "tool_receipts": [receipt],
+                "tool_plan_exhausted": True,
+            },
+        )
+        continuation = env._failure_continuation_candidate(failure)
+        self.assertIsNotNone(continuation)
+        assert continuation is not None
+        self.assertIs(True, continuation["tool_plan_exhausted"])
+        env._failed_agent_ids.add("failed_reader")
+        env._repair_exhausted_agent_ids.add("failed_reader")
+        env._failure_continuations["failed_reader"] = continuation
+        action = env.parser.parse(
+            json.dumps(
+                {
+                    "action": "add_subgraph",
+                    "agents": [
+                        {
+                            "agent_id": "next_reader",
+                            "model_id": "cheap",
+                            "contract": "start a fresh bounded retrieval plan",
+                            "role_family": "evidence_retriever",
+                            "allowed_tools": [QA_RETRIEVAL_TOOL_ID],
+                            "execution_mode": "react",
+                            "artifact_type": "retrieval_evidence",
+                        }
+                    ],
+                    "relations": [],
+                }
+            )
+        )
+
+        self.assertEqual({}, env._recovery_continuation_handoff(action))
+
     async def test_tc10_reader_replacement_continues_public_tool_state_then_deletes(
         self,
     ) -> None:
@@ -4430,6 +6660,13 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             "turn": 2,
             "observation": {
                 "observation_status": "schema_invalid",
+                "terminal_failure_diagnosis": {
+                    "public_error_code": "retrieval_strategy_failure",
+                    "bounded_schedule_exhausted": False,
+                    "retrieval_strategy_schedule_prefix": [
+                        "initial_retrieval"
+                    ],
+                },
                 "executed_action": {
                     "kind": "complete",
                     "name": "complete",
@@ -4550,7 +6787,11 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
                 graph_revision=candidate_graph.revision,
                 output_agent_id=candidate_graph.output_agent_id,
                 final_answer=None,
-                outputs={"replacement_reader": "replacement evidence"},
+                outputs={
+                    "replacement_reader": _test_evidence_retriever_artifact(
+                        "tc10-public"
+                    )
+                },
                 output_metadata={
                     "replacement_reader": {"tool_receipts": [receipt]}
                 },
@@ -4916,6 +7157,649 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("successful 'qa-retrieval' read receipt", rejected.feedback)
         self.assertFalse(env.finish_admissibility()["admissible"])
 
+    def test_reasoner_scope_relation_and_entity_gate_reuses_read_receipts(
+        self,
+    ) -> None:
+        question = (
+            "In which decade did Billboard magazine first publish an American "
+            "hit chart?"
+        )
+
+        def artifact(evidence_span: str, relation: str) -> str:
+            return json.dumps(
+                {
+                    "question_scope": question,
+                    "answer_slot": {
+                        "answer_type": "date",
+                        "answer_cardinality": "single",
+                        "qualifiers": ["first"],
+                        "proposition_index": 0,
+                        "answer_field": "object_or_attribute_value",
+                    },
+                    "evidence_propositions": [
+                        {
+                            "subject": "Billboard magazine",
+                            "relation": relation,
+                            "object_or_attribute_value": "1961",
+                            "qualifiers": ["first"],
+                            "evidence_span": evidence_span,
+                        }
+                    ],
+                    "multi_hop_chain": [
+                        "identify the requested publication event",
+                        "map 1961 to the 1960s",
+                    ],
+                    "candidate_answer": "1960s",
+                    "evidence": [evidence_span],
+                }
+            )
+
+        read_text = (
+            "Billboard magazine published an American hit chart in 1961."
+        )
+        missing_scope = AgentWorkflowEnv._reasoner_evidence_provenance_issue(
+            artifact(read_text, "published"),
+            [read_text],
+            require_answer_binding=True,
+            original_question=question,
+        )
+        self.assertIn("semantic scope", missing_scope or "")
+
+        grounded_span = (
+            "Billboard magazine first published an American hit chart in 1961."
+        )
+        wrong_relation = AgentWorkflowEnv._reasoner_evidence_provenance_issue(
+            artifact(grounded_span, "launched"),
+            [grounded_span],
+            require_answer_binding=True,
+            original_question=question,
+        )
+        self.assertIn("relation is not grounded", wrong_relation or "")
+        self.assertIsNone(
+            AgentWorkflowEnv._reasoner_evidence_provenance_issue(
+                artifact(grounded_span, "first published"),
+                [grounded_span],
+                require_answer_binding=True,
+                original_question=question,
+            )
+        )
+
+    def test_reasoner_entity_gate_accepts_only_receipt_title_bound_alias(
+        self,
+    ) -> None:
+        question = "Where in England was Dame Judi Dench born?"
+        evidence_span = (
+            "Dench was born in Heworth, North Riding of Yorkshire."
+        )
+        artifact = json.dumps(
+            {
+                "question_scope": question,
+                "answer_slot": {
+                    "answer_type": "location",
+                    "answer_cardinality": "single",
+                    "qualifiers": ["in England"],
+                    "proposition_index": 0,
+                    "answer_field": "object_or_attribute_value",
+                },
+                "evidence_propositions": [
+                    {
+                        "subject": "Dench",
+                        "relation": "was born in",
+                        "object_or_attribute_value": (
+                            "Heworth, North Riding of Yorkshire"
+                        ),
+                        "qualifiers": ["in England"],
+                        "evidence_span": evidence_span,
+                    }
+                ],
+                "multi_hop_chain": [
+                    "bind Dench to the receipt-backed passage entity"
+                ],
+                "candidate_answer": "Heworth, North Riding of Yorkshire",
+                "evidence": ["dench-birthplace"],
+            }
+        )
+
+        def receipt(title: str) -> dict[str, object]:
+            return {
+                "tool_id": QA_RETRIEVAL_TOOL_ID,
+                "tool_version": "test-v1",
+                "request": {
+                    "action": "read",
+                    "arguments": {"passage_id": "dench-birthplace"},
+                },
+                "result": {
+                    "value": {
+                        "operation": "read",
+                        "passage_id": "dench-birthplace",
+                        "passage": {
+                            "passage_id": "dench-birthplace",
+                            "title": title,
+                            "text": evidence_span,
+                        },
+                    },
+                    "completed": True,
+                },
+                "error_type": None,
+            }
+
+        grounded_read = AgentWorkflowEnv._successful_read_text(
+            receipt("Judi Dench"),
+            QA_RETRIEVAL_TOOL_ID,
+        )
+        self.assertIsNotNone(grounded_read)
+        assert grounded_read is not None
+        self.assertIsNone(
+            AgentWorkflowEnv._reasoner_evidence_provenance_issue(
+                artifact,
+                [grounded_read],
+                require_answer_binding=True,
+                original_question=question,
+            )
+        )
+
+        wrong_title_read = AgentWorkflowEnv._successful_read_text(
+            receipt("Judy Dench"),
+            QA_RETRIEVAL_TOOL_ID,
+        )
+        self.assertIsNotNone(wrong_title_read)
+        assert wrong_title_read is not None
+        issue = AgentWorkflowEnv._reasoner_evidence_provenance_issue(
+            artifact,
+            [wrong_title_read],
+            require_answer_binding=True,
+            original_question=question,
+        )
+        self.assertIn("no deterministic entity binding", issue or "")
+
+    def test_reasoner_entity_gate_requires_receipt_grounded_proposition_lineage(
+        self,
+    ) -> None:
+        question = "Where in England was Dr Alice Carter born?"
+        birth_span = "Carter was born in Oakfield, North County."
+        containment_span = (
+            "Oakfield is part of the city of Northbridge in England."
+        )
+
+        def read_text(title: str, text: str) -> str:
+            receipt = {
+                "tool_id": QA_RETRIEVAL_TOOL_ID,
+                "tool_version": "test-v1",
+                "request": {
+                    "action": "read",
+                    "arguments": {"passage_id": title.casefold()},
+                },
+                "result": {
+                    "value": {
+                        "operation": "read",
+                        "passage_id": title.casefold(),
+                        "passage": {
+                            "passage_id": title.casefold(),
+                            "title": title,
+                            "text": text,
+                        },
+                    },
+                    "completed": True,
+                },
+                "error_type": None,
+            }
+            value = AgentWorkflowEnv._successful_read_text(
+                receipt,
+                QA_RETRIEVAL_TOOL_ID,
+            )
+            self.assertIsNotNone(value)
+            assert value is not None
+            return value
+
+        def artifact(
+            propositions: list[dict[str, object]],
+            *,
+            proposition_index: int,
+            answer_field: str,
+            candidate_answer: str,
+        ) -> str:
+            return json.dumps(
+                {
+                    "question_scope": question,
+                    "answer_slot": {
+                        "answer_type": "location",
+                        "answer_cardinality": "single",
+                        "qualifiers": ["in England"],
+                        "proposition_index": proposition_index,
+                        "answer_field": answer_field,
+                    },
+                    "evidence_propositions": propositions,
+                    "multi_hop_chain": [
+                        "bind the question entity to the birthplace",
+                        "resolve the birthplace locality",
+                    ],
+                    "candidate_answer": candidate_answer,
+                    "evidence": [
+                        proposition["evidence_span"]
+                        for proposition in propositions
+                    ],
+                }
+            )
+
+        malformed = artifact(
+            [
+                {
+                    "subject": "Oakfield",
+                    "relation": "was born in",
+                    "object_or_attribute_value": "North County",
+                    "qualifiers": ["in England"],
+                    "evidence_span": birth_span,
+                }
+            ],
+            proposition_index=0,
+            answer_field="subject",
+            candidate_answer="Oakfield",
+        )
+        malformed_issue = AgentWorkflowEnv._reasoner_evidence_provenance_issue(
+            malformed,
+            [
+                read_text("Alice Carter", "A profile of Dr Alice Carter."),
+                read_text("Oakfield", birth_span),
+            ],
+            require_answer_binding=True,
+            original_question=question,
+        )
+        self.assertIn("no deterministic entity binding", malformed_issue or "")
+
+        first_hop = {
+            "subject": "Carter",
+            "relation": "was born in",
+            "object_or_attribute_value": "Oakfield, North County",
+            "qualifiers": ["in England"],
+            "evidence_span": birth_span,
+        }
+        direct = artifact(
+            [first_hop],
+            proposition_index=0,
+            answer_field="object_or_attribute_value",
+            candidate_answer="Oakfield, North County",
+        )
+        birth_read = read_text("Alice Carter", birth_span)
+        self.assertIsNone(
+            AgentWorkflowEnv._reasoner_evidence_provenance_issue(
+                direct,
+                [birth_read],
+                require_answer_binding=True,
+                original_question=question,
+            )
+        )
+
+        second_hop = {
+            "subject": "Oakfield",
+            "relation": "is part of the city of",
+            "object_or_attribute_value": "Northbridge",
+            "qualifiers": ["in England"],
+            "evidence_span": containment_span,
+        }
+        two_hop = artifact(
+            [first_hop, second_hop],
+            proposition_index=1,
+            answer_field="object_or_attribute_value",
+            candidate_answer="Northbridge",
+        )
+        self.assertIsNone(
+            AgentWorkflowEnv._reasoner_evidence_provenance_issue(
+                two_hop,
+                [birth_read, read_text("Oakfield", containment_span)],
+                require_answer_binding=True,
+                original_question=question,
+            )
+        )
+
+    def test_reasoner_provenance_rejects_fabricated_bridge_proposition(
+        self,
+    ) -> None:
+        question = (
+            "Which company acquired the business founded by Dr Alice Carter?"
+        )
+        founder_span = "Dr Alice Carter founded RealCo."
+        acquisition_span = "Widget Holdings acquired RealCo."
+
+        def read_text(passage_id: str, title: str, text: str) -> str:
+            receipt = {
+                "tool_id": QA_RETRIEVAL_TOOL_ID,
+                "tool_version": "test-v1",
+                "request": {
+                    "action": "read",
+                    "arguments": {"passage_id": passage_id},
+                },
+                "result": {
+                    "value": {
+                        "operation": "read",
+                        "passage_id": passage_id,
+                        "passage": {
+                            "passage_id": passage_id,
+                            "title": title,
+                            "text": text,
+                        },
+                    },
+                    "completed": True,
+                },
+                "error_type": None,
+            }
+            value = AgentWorkflowEnv._successful_read_text(
+                receipt,
+                QA_RETRIEVAL_TOOL_ID,
+            )
+            self.assertIsNotNone(value)
+            assert value is not None
+            return value
+
+        def artifact(bridge_company: str) -> str:
+            return json.dumps(
+                {
+                    "question_scope": question,
+                    "answer_slot": {
+                        "answer_type": "entity",
+                        "answer_cardinality": "single",
+                        "qualifiers": [],
+                        "proposition_index": 1,
+                        "answer_field": "subject",
+                    },
+                    "evidence_propositions": [
+                        {
+                            "subject": "Dr Alice Carter",
+                            "relation": "founded",
+                            "object_or_attribute_value": bridge_company,
+                            "qualifiers": [],
+                            "evidence_span": founder_span,
+                        },
+                        {
+                            "subject": "Widget Holdings",
+                            "relation": "acquired",
+                            "object_or_attribute_value": bridge_company,
+                            "qualifiers": [],
+                            "evidence_span": acquisition_span.replace(
+                                "RealCo",
+                                bridge_company,
+                            ),
+                        },
+                    ],
+                    "multi_hop_chain": [
+                        "Dr Alice Carter founded the business",
+                        "Widget Holdings acquired that business",
+                    ],
+                    "candidate_answer": "Widget Holdings",
+                    "evidence": [founder_span, acquisition_span],
+                }
+            )
+
+        reads = [
+            read_text("founder", "Dr Alice Carter", founder_span),
+            read_text("acquisition", "RealCo", acquisition_span),
+        ]
+        self.assertIsNone(
+            AgentWorkflowEnv._reasoner_evidence_provenance_issue(
+                artifact("RealCo"),
+                reads,
+                require_answer_binding=True,
+                original_question=question,
+            )
+        )
+        issue = AgentWorkflowEnv._reasoner_evidence_provenance_issue(
+            artifact("FakeCo"),
+            reads,
+            require_answer_binding=True,
+            original_question=question,
+        )
+        self.assertIn(
+            "evidence_propositions[0].object_or_attribute_value",
+            issue or "",
+        )
+
+    def test_reasoner_subject_answer_binds_question_event_argument(self) -> None:
+        question = "Who wrote The Trial?"
+
+        def issue_for(evidence_span: str, subject: str, work: str) -> str | None:
+            passage_id = "work"
+            receipt = {
+                "tool_id": QA_RETRIEVAL_TOOL_ID,
+                "tool_version": "test-v1",
+                "request": {
+                    "action": "read",
+                    "arguments": {"passage_id": passage_id},
+                },
+                "result": {
+                    "value": {
+                        "operation": "read",
+                        "passage_id": passage_id,
+                        "passage": {
+                            "passage_id": passage_id,
+                            "title": work,
+                            "text": evidence_span,
+                        },
+                    },
+                    "completed": True,
+                },
+                "error_type": None,
+            }
+            read_text = AgentWorkflowEnv._successful_read_text(
+                receipt,
+                QA_RETRIEVAL_TOOL_ID,
+            )
+            self.assertIsNotNone(read_text)
+            assert read_text is not None
+            artifact = json.dumps(
+                {
+                    "question_scope": question,
+                    "answer_slot": {
+                        "answer_type": "entity",
+                        "answer_cardinality": "single",
+                        "qualifiers": [],
+                        "proposition_index": 0,
+                        "answer_field": "subject",
+                    },
+                    "evidence_propositions": [
+                        {
+                            "subject": subject,
+                            "relation": "wrote",
+                            "object_or_attribute_value": work,
+                            "qualifiers": [],
+                            "evidence_span": evidence_span,
+                        }
+                    ],
+                    "multi_hop_chain": [f"{subject} wrote {work}"],
+                    "candidate_answer": subject,
+                    "evidence": [evidence_span],
+                }
+            )
+            return AgentWorkflowEnv._reasoner_evidence_provenance_issue(
+                artifact,
+                [read_text],
+                require_answer_binding=True,
+                original_question=question,
+            )
+
+        self.assertIsNone(
+            issue_for("Franz Kafka wrote The Trial.", "Franz Kafka", "The Trial")
+        )
+        issue = issue_for(
+            "Jane Doe wrote Other Book. The Trial was published later.",
+            "Jane Doe",
+            "Other Book",
+        )
+        self.assertIn("non-answer proposition argument", issue or "")
+
+    def test_successful_read_receipt_requires_completed_matching_passage_ids(
+        self,
+    ) -> None:
+        receipt = _test_read_receipt("p1")
+        self.assertTrue(
+            AgentWorkflowEnv._successful_read_receipt(
+                receipt,
+                QA_RETRIEVAL_TOOL_ID,
+            )
+        )
+        for name, mutate in (
+            (
+                "incomplete",
+                lambda value: value["result"].__setitem__("completed", False),
+            ),
+            (
+                "top-level id mismatch",
+                lambda value: value["result"]["value"].__setitem__(
+                    "passage_id",
+                    "p2",
+                ),
+            ),
+            (
+                "nested id mismatch",
+                lambda value: value["result"]["value"]["passage"].__setitem__(
+                    "passage_id",
+                    "p2",
+                ),
+            ),
+        ):
+            with self.subTest(name=name):
+                invalid = json.loads(json.dumps(receipt))
+                mutate(invalid)
+                self.assertFalse(
+                    AgentWorkflowEnv._successful_read_receipt(
+                        invalid,
+                        QA_RETRIEVAL_TOOL_ID,
+                    )
+                )
+
+    def test_verifier_repair_diagnosis_attributes_false_verdict_upstream(
+        self,
+    ) -> None:
+        verifier_artifact = (
+            "Candidate answer: 1960s\n"
+            "Evidence supported: false\n"
+            "Entity attribute binding correct: false\n"
+            "Alias binding correct: true\n"
+            "Answer type cardinality correct: true\n"
+            "Multi-hop complete: false\n"
+            "Minimal answer surface: true\n"
+            "Scope preserved: false\n"
+            "Verification status: repair_required\n"
+            "Reasoning: the selected event does not preserve the question scope"
+        )
+        candidate, issue = AgentWorkflowEnv._verifier_candidate(
+            verifier_artifact
+        )
+        self.assertIsNone(candidate)
+        self.assertEqual(
+            "Verifier field 'evidence_supported' must be true",
+            issue,
+        )
+
+        registry = make_registry()
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_trivia_semantic_runtime(registry, _ImmediateGateway()),
+            graph=_trivia_semantic_graph(),
+            problem="Who wrote the novel?",
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+        )
+        attribution = env._semantic_repair_attribution(
+            f"Verifier 'verifier' semantic artifact is invalid: {issue}"
+        )
+        self.assertIsNotNone(attribution)
+        assert attribution is not None
+        self.assertEqual("reasoner", attribution["responsible_agent_id"])
+        self.assertEqual(
+            "reasoner_semantic_artifact",
+            attribution["responsible_constraint"],
+        )
+
+    def test_verifier_requires_exact_reasoner_read_receipt_lineage(self) -> None:
+        registry = make_registry()
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_hotpot_semantic_runtime(registry, _ImmediateGateway()),
+            graph=_hotpot_semantic_graph(),
+            problem="What is the capital of France?",
+            semantic_protocol="hotpotqa_verified_answer_slot_v1",
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+        )
+        receipt = _test_read_receipt("lineage-passage")
+        metadata = {
+            "reasoner": {
+                "artifact_version": "reasoner:v1",
+                "tool_receipts": [receipt],
+            },
+            "verifier": {
+                "input_artifact_provenance": [
+                    {
+                        "source_agent_id": "reasoner",
+                        "artifact_version": "reasoner:v1",
+                        "tool_receipts": [],
+                    }
+                ]
+            },
+        }
+        texts, issue = env._verifier_read_receipt_lineage(
+            metadata,
+            reasoner_id="reasoner",
+            verifier_id="verifier",
+        )
+        self.assertIsNone(issue)
+        self.assertEqual(("Paris is the capital of France.",), texts)
+
+        metadata["verifier"]["input_artifact_provenance"][0][
+            "artifact_version"
+        ] = "reasoner:stale"
+        texts, issue = env._verifier_read_receipt_lineage(
+            metadata,
+            reasoner_id="reasoner",
+            verifier_id="verifier",
+        )
+        self.assertEqual((), texts)
+        self.assertIn("current Reasoner", issue or "")
+
+    async def test_unchanged_semantic_failure_exhausts_one_modify_then_augments(
+        self,
+    ) -> None:
+        registry = make_registry()
+        gateway = _HotpotSemanticGateway(verifier_supported=False)
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_hotpot_semantic_runtime(registry, gateway),
+            graph=_hotpot_semantic_graph(),
+            problem="What is the capital of France?",
+            execute_on_edit=True,
+            semantic_protocol="hotpotqa_verified_answer_slot_v1",
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+        )
+        initial = await env.step(
+            '{"action":"modify_agent","agent_id":"reader",'
+            '"contract":"read grounded database evidence"}'
+        )
+        self.assertTrue(initial.accepted, initial.feedback)
+        preserved_reader_artifact = env._progressive_outputs["reader"]
+        self.assertEqual(("reasoner",), env._mandatory_repair_agent_ids())
+        self.assertEqual(("modify_agent",), env.model_admissible_action_types())
+
+        repaired = await env.step(
+            '{"action":"modify_agent","agent_id":"reasoner",'
+            '"contract":"align the same grounded evidence to the answer slot"}'
+        )
+
+        self.assertTrue(repaired.accepted, repaired.feedback)
+        self.assertEqual(
+            preserved_reader_artifact,
+            env._progressive_outputs["reader"],
+        )
+        self.assertIn("reasoner", env._repair_exhausted_agent_ids)
+        self.assertEqual((), env._mandatory_repair_agent_ids())
+        self.assertEqual(("add_subgraph",), env.model_admissible_action_types())
+        add_domain = env.model_admissible_action_targets()["add_subgraph"]
+        self.assertEqual(
+            ["evidence_retriever"],
+            add_domain["admitted_new_role_families"],
+        )
+        self.assertEqual(2, len(env.history))
+
     async def test_hotpot_retrieval_evidence_must_route_through_reasoner(self) -> None:
         graph = _hotpot_semantic_graph()
         graph.set_relation("reader", "reasoner", False, False)
@@ -5036,7 +7920,7 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
                 },
                 {
                     "subject": "France",
-                    "relation": "located in",
+                    "relation": "is a country in",
                     "object_or_attribute_value": "Europe",
                     "qualifiers": [],
                     "evidence_span": "France is a country in Europe.",
@@ -5196,6 +8080,166 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("Paris", candidate)
         self.assertIsNone(issue)
 
+        decade = json.loads(json.dumps(artifact))
+        decade_question = (
+            "In which decade did Billboard magazine first publish a hit chart?"
+        )
+        decade["question_scope"] = decade_question
+        decade["answer_slot"]["answer_type"] = "date"
+        decade["evidence_propositions"][0].update(
+            {
+                "subject": "Billboard magazine",
+                "relation": "published its first music hit parade on",
+                "object_or_attribute_value": "January 4, 1936",
+                "evidence_span": (
+                    "On January 4, 1936, Billboard magazine published its first "
+                    "music hit parade."
+                ),
+            }
+        )
+        decade["candidate_answer"] = "30s"
+        candidate, issue = env._reasoner_candidate(
+            json.dumps(decade),
+            original_question=decade_question,
+        )
+        self.assertEqual("30s", candidate)
+        self.assertIsNone(issue)
+        provenance_issue = env._reasoner_evidence_provenance_issue(
+            json.dumps(decade),
+            [
+                decade["evidence_propositions"][0]["evidence_span"],
+                decade["evidence_propositions"][1]["evidence_span"],
+            ],
+            require_answer_binding=True,
+            original_question=decade_question,
+        )
+        self.assertIsNone(provenance_issue)
+
+        wrong_decade = json.loads(json.dumps(decade))
+        wrong_decade["candidate_answer"] = "40s"
+        candidate, issue = env._reasoner_candidate(
+            json.dumps(wrong_decade),
+            original_question=decade_question,
+        )
+        self.assertIsNone(candidate)
+        self.assertIn("verified year-to-decade", str(issue))
+
+    def test_reasoner_preserves_wh_dependency_and_question_relation(self) -> None:
+        question = (
+            "Which coastal-born novelist won the international fiction prize "
+            "in 1995?"
+        )
+        evidence_span = (
+            "Avery Morgan was a coastal-born novelist. In 1995, Avery Morgan "
+            "received the international fiction prize."
+        )
+        artifact = {
+            "question_scope": question,
+            "answer_slot": {
+                "answer_type": "entity",
+                "answer_cardinality": "single",
+                "qualifiers": ["coastal-born", "1995"],
+                "proposition_index": 0,
+                "answer_field": "subject",
+            },
+            "evidence_propositions": [
+                {
+                    "subject": "Avery Morgan",
+                    "relation": "received",
+                    "object_or_attribute_value": (
+                        "the international fiction prize"
+                    ),
+                    "qualifiers": ["in 1995"],
+                    "evidence_span": evidence_span,
+                }
+            ],
+            "multi_hop_chain": [
+                "Avery Morgan --received in 1995--> international fiction prize"
+            ],
+            "candidate_answer": "Avery Morgan",
+            "evidence": [evidence_span],
+        }
+
+        candidate, issue = AgentWorkflowEnv._reasoner_candidate(
+            json.dumps(artifact),
+            original_question=question,
+            minimum_evidence_propositions=1,
+            minimum_reasoning_steps=1,
+        )
+        self.assertEqual("Avery Morgan", candidate)
+        self.assertIsNone(issue)
+
+        misbound = json.loads(json.dumps(artifact))
+        misbound["answer_slot"]["answer_field"] = "object_or_attribute_value"
+        misbound["candidate_answer"] = "the international fiction prize"
+        candidate, issue = AgentWorkflowEnv._reasoner_candidate(
+            json.dumps(misbound),
+            original_question=question,
+            minimum_evidence_propositions=1,
+            minimum_reasoning_steps=1,
+        )
+        self.assertIsNone(candidate)
+        self.assertIn("overt wh-dependency", str(issue))
+
+        unrelated_relation = json.loads(json.dumps(artifact))
+        unrelated_relation["evidence_propositions"][0]["relation"] = "was"
+        provenance_issue = AgentWorkflowEnv._reasoner_evidence_provenance_issue(
+            json.dumps(unrelated_relation),
+            [evidence_span],
+            require_answer_binding=True,
+            original_question=question,
+        )
+        self.assertIn("requested relation", str(provenance_issue))
+
+    def test_reasoner_rejects_duplicate_subject_object_answer_binding(self) -> None:
+        question = "What is the capital of France?"
+        artifact = {
+            "question_scope": question,
+            "answer_slot": {
+                "answer_type": "short_answer",
+                "answer_cardinality": "single",
+                "qualifiers": [],
+                "proposition_index": 0,
+                "answer_field": "object_or_attribute_value",
+            },
+            "evidence_propositions": [
+                {
+                    "subject": "France",
+                    "relation": "capital",
+                    "object_or_attribute_value": "Paris",
+                    "qualifiers": [],
+                    "evidence_span": "Paris is the capital of France.",
+                },
+                {
+                    "subject": "France",
+                    "relation": "is a country in",
+                    "object_or_attribute_value": "Europe",
+                    "qualifiers": [],
+                    "evidence_span": "France is a country in Europe.",
+                },
+            ],
+            "multi_hop_chain": ["bind France", "select its capital"],
+            "candidate_answer": "Paris",
+            "evidence": ["Paris is the capital of France."],
+        }
+
+        candidate, issue = AgentWorkflowEnv._reasoner_candidate(
+            json.dumps(artifact),
+            original_question=question,
+        )
+        self.assertEqual("Paris", candidate)
+        self.assertIsNone(issue)
+
+        duplicate_binding = json.loads(json.dumps(artifact))
+        duplicate_binding["evidence_propositions"][0]["subject"] = "Paris"
+        candidate, issue = AgentWorkflowEnv._reasoner_candidate(
+            json.dumps(duplicate_binding),
+            original_question=question,
+        )
+        self.assertIsNone(candidate)
+        self.assertIn("distinct subject and object_or_attribute_value", issue or "")
+        self.assertIn("self-reported entity binding", issue or "")
+
     async def test_hotpot_rejects_react_role_but_not_react_execution_semantics(self) -> None:
         registry = make_registry()
         env = AgentWorkflowEnv(
@@ -5262,6 +8306,92 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             env._semantic_edit_issue_for(wrong_reasoner) or "",
         )
         self.assertIsNone(env._semantic_edit_issue_for(exact_reasoner))
+
+    async def test_retriever_reasoner_relation_direction_is_semantic(self) -> None:
+        graph = AgentGraph(
+            [
+                AgentNode(
+                    "reader",
+                    "cheap",
+                    "retrieve evidence",
+                    role_family="evidence_retriever",
+                    artifact_type="retrieval_evidence",
+                ),
+                AgentNode(
+                    "reasoner",
+                    "balanced",
+                    "bind evidence to the answer slot",
+                    role_family="reasoner",
+                    allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                    execution_mode="react",
+                    artifact_type="semantic_candidate",
+                ),
+            ]
+        )
+        registry = make_registry()
+        gateway = _ImmediateGateway()
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_hotpot_semantic_runtime(registry, gateway),
+            graph=graph,
+            problem="What is the capital of France?",
+            execute_on_edit=False,
+            semantic_protocol="hotpotqa_verified_answer_slot_v1",
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+        )
+
+        candidates = env._all_model_admissible_relation_candidates()
+        self.assertIn(
+            {
+                "source_id": "reader",
+                "target_id": "reasoner",
+                "source_to_target": True,
+                "target_to_source": False,
+            },
+            candidates,
+        )
+        self.assertNotIn(
+            {
+                "source_id": "reasoner",
+                "target_id": "reader",
+                "source_to_target": True,
+                "target_to_source": False,
+            },
+            candidates,
+        )
+        self.assertIn(
+            {
+                "source_id": "reader",
+                "target_id": "reasoner",
+                "source_to_target": True,
+                "target_to_source": True,
+            },
+            candidates,
+        )
+
+        revision = env.revision
+        reverse_only = await env.step(
+            '{"action":"set_relation","source_id":"reasoner",'
+            '"target_id":"reader","source_to_target":true,'
+            '"target_to_source":false}'
+        )
+        self.assertFalse(reverse_only.accepted)
+        self.assertIn("invalid one-way semantic handoff", reverse_only.feedback)
+        self.assertEqual(revision, env.revision)
+
+        forward = await env.step(
+            '{"action":"set_relation","source_id":"reader",'
+            '"target_id":"reasoner","source_to_target":true,'
+            '"target_to_source":false}'
+        )
+        self.assertTrue(forward.accepted, forward.feedback)
+        reciprocal = await env.step(
+            '{"action":"set_relation","source_id":"reader",'
+            '"target_id":"reasoner","source_to_target":true,'
+            '"target_to_source":true}'
+        )
+        self.assertTrue(reciprocal.accepted, reciprocal.feedback)
 
     async def test_hotpot_live_action_targets_filter_relation_candidates(self) -> None:
         env = AgentWorkflowEnv(
@@ -5640,6 +8770,353 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(revision, env.revision)
 
+    async def test_triviaqa_retriever_contract_rejects_question_external_literals(
+        self,
+    ) -> None:
+        registry = make_registry()
+        gateway = _ImmediateGateway()
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_trivia_semantic_runtime(registry, gateway),
+            problem=(
+                "In which decade did Billboard magazine first publish an "
+                "American hit chart?"
+            ),
+            execute_on_edit=False,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+        )
+
+        for narrowed_contract in (
+            "Search for the Billboard Hot 100 as the first chart.",
+            "Search the Billboard year-end chart while preserving the relation.",
+            "Search for first publication in 1958 or 1959.",
+            "Search for first publication in 1941.",
+        ):
+            revision = env.revision
+            rejected = await env.step(
+                json.dumps(
+                    {
+                        "action": "add_subgraph",
+                        "agents": [
+                            {
+                                "agent_id": "retriever",
+                                "model_id": "balanced",
+                                "contract": narrowed_contract,
+                                "role_family": "evidence_retriever",
+                                "allowed_tools": [QA_RETRIEVAL_TOOL_ID],
+                                "execution_mode": "react",
+                            }
+                        ],
+                        "relations": [],
+                    }
+                )
+            )
+            self.assertFalse(rejected.accepted)
+            self.assertIn(
+                "question-external semantic literals",
+                rejected.feedback,
+            )
+            self.assertEqual(revision, env.revision)
+            self.assertFalse(env.graph.has_node("retriever"))
+
+        revision = env.revision
+        rejected_completion_literal = await env.step(
+            json.dumps(
+                {
+                    "action": "add_subgraph",
+                    "agents": [
+                        {
+                            "agent_id": "retriever",
+                            "model_id": "balanced",
+                            "contract": "Retrieve evidence for the requested relation",
+                            "completion_condition": (
+                                "Complete after establishing publication in 1941"
+                            ),
+                            "role_family": "evidence_retriever",
+                            "allowed_tools": [QA_RETRIEVAL_TOOL_ID],
+                            "execution_mode": "react",
+                        }
+                    ],
+                    "relations": [],
+                }
+            )
+        )
+        self.assertFalse(rejected_completion_literal.accepted)
+        self.assertIn(
+            "question-external semantic literals",
+            rejected_completion_literal.feedback,
+        )
+        self.assertEqual(revision, env.revision)
+
+        neutral = await env.step(
+            json.dumps(
+                {
+                    "action": "add_subgraph",
+                    "agents": [
+                        {
+                            "agent_id": "retriever",
+                            "model_id": "balanced",
+                            "contract": (
+                                "Use spelling normalization, alias expansion, entity "
+                                "disambiguation, query rewriting, and larger top-k "
+                                "while preserving the original entity, relation, "
+                                "qualifiers, and answer type"
+                            ),
+                            "role_family": "evidence_retriever",
+                            "allowed_tools": [QA_RETRIEVAL_TOOL_ID],
+                            "execution_mode": "react",
+                        }
+                    ],
+                    "relations": [],
+                }
+            )
+        )
+        self.assertTrue(neutral.accepted, neutral.feedback)
+
+        structural_count = await env.step(
+            json.dumps(
+                {
+                    "action": "modify_agent",
+                    "agent_id": "retriever",
+                    "completion_condition": (
+                        "Complete after at least 2 evidence propositions and "
+                        "2 successful read receipts preserve the requested relation"
+                    ),
+                }
+            )
+        )
+        self.assertTrue(structural_count.accepted, structural_count.feedback)
+
+        env._failure_continuations["retriever"] = {
+            "tool_receipts": [
+                {
+                    "tool_id": QA_RETRIEVAL_TOOL_ID,
+                    "tool_version": "test-v1",
+                    "request": {
+                        "action": "read",
+                        "arguments": {"passage_id": "billboard-history"},
+                    },
+                    "result": {
+                        "value": {
+                            "operation": "read",
+                            "passage_id": "billboard-history",
+                            "passage": {
+                                "passage_id": "billboard-history",
+                                "title": "Billboard charts",
+                                "text": (
+                                    "The publication introduced another chart in "
+                                    "1941."
+                                ),
+                            },
+                        },
+                        "completed": True,
+                    },
+                    "error_type": None,
+                }
+            ]
+        }
+        receipt_grounded = await env.step(
+            json.dumps(
+                {
+                    "action": "modify_agent",
+                    "agent_id": "retriever",
+                    "completion_condition": (
+                        "Complete only when a successful read receipt supports 1941"
+                    ),
+                }
+            )
+        )
+        self.assertTrue(receipt_grounded.accepted, receipt_grounded.feedback)
+
+        revision = env.revision
+        rejected_modify = await env.step(
+            json.dumps(
+                {
+                    "action": "modify_agent",
+                    "agent_id": "retriever",
+                    "contract": "Search the Hot 100 first published in 1958.",
+                }
+            )
+        )
+        self.assertFalse(rejected_modify.accepted)
+        self.assertIn(
+            "question-external semantic literals",
+            rejected_modify.feedback,
+        )
+        self.assertEqual(revision, env.revision)
+        self.assertEqual([], gateway.requests)
+
+    async def test_triviaqa_contract_literals_ignore_short_evidence_fragments(
+        self,
+    ) -> None:
+        registry = make_registry()
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_trivia_semantic_runtime(
+                registry,
+                _ImmediateGateway(),
+            ),
+            problem=(
+                "In which decade did Billboard magazine first publish an "
+                "American hit chart?"
+            ),
+            execute_on_edit=False,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+        )
+        copied_evidence = (
+            "The publication introduced its first national chart in spring"
+        )
+        passage_id = "atlas-dpr-wikipedia:000012167575"
+        env._failure_continuations["retriever"] = {
+            "rejected_completion": {
+                "candidate_answer": "1940s",
+                "evidence_span": "For the ",
+                "evidence": [passage_id, copied_evidence],
+            }
+        }
+
+        literals = env._public_semantic_contract_literals()
+
+        self.assertIn("1940s", literals)
+        self.assertIn(copied_evidence, literals)
+        self.assertNotIn("For the", literals)
+        self.assertNotIn(passage_id, literals)
+
+        neutral = await env.step(
+            json.dumps(
+                {
+                    "action": "add_subgraph",
+                    "agents": [
+                        {
+                            "agent_id": "retriever",
+                            "model_id": "balanced",
+                            "contract": (
+                                "Retrieve answer-free evidence for the question "
+                                "entity and requested relation"
+                            ),
+                            "role_family": "evidence_retriever",
+                            "allowed_tools": [QA_RETRIEVAL_TOOL_ID],
+                            "execution_mode": "react",
+                        }
+                    ],
+                    "relations": [],
+                }
+            )
+        )
+        self.assertTrue(neutral.accepted, neutral.feedback)
+
+        revision = env.revision
+        copied_candidate = await env.step(
+            json.dumps(
+                {
+                    "action": "modify_agent",
+                    "agent_id": "retriever",
+                    "contract": "Return 1940s as the candidate answer",
+                }
+            )
+        )
+        self.assertFalse(copied_candidate.accepted)
+        self.assertIn("pre-execution obligations only", copied_candidate.feedback)
+        self.assertEqual(revision, env.revision)
+
+        copied_span = await env.step(
+            json.dumps(
+                {
+                    "action": "modify_agent",
+                    "agent_id": "retriever",
+                    "contract": f"Use {copied_evidence} as evidence",
+                }
+            )
+        )
+        self.assertFalse(copied_span.accepted)
+        self.assertIn("pre-execution obligations only", copied_span.feedback)
+        self.assertEqual(revision, env.revision)
+
+        concrete_query_variation = await env.step(
+            json.dumps(
+                {
+                    "action": "modify_agent",
+                    "agent_id": "retriever",
+                    "contract": (
+                        "Iterate through query variations: 'Billboard first "
+                        "chart' and 'Billboard inaugural chart'"
+                    ),
+                }
+            )
+        )
+        self.assertFalse(concrete_query_variation.accepted)
+        self.assertIn(
+            "without concrete Tool invocation arguments",
+            concrete_query_variation.feedback,
+        )
+        self.assertEqual(revision, env.revision)
+
+        unsupported_canonical_literal = await env.step(
+            json.dumps(
+                {
+                    "action": "modify_agent",
+                    "agent_id": "retriever",
+                    "contract": (
+                        "Require canonical match for 'London' before completion"
+                    ),
+                }
+            )
+        )
+        self.assertFalse(unsupported_canonical_literal.accepted)
+        self.assertIn(
+            "pre-execution obligations only",
+            unsupported_canonical_literal.feedback,
+        )
+        self.assertEqual(revision, env.revision)
+
+    async def test_triviaqa_contract_rejects_question_external_candidate_before_answer_marker(
+        self,
+    ) -> None:
+        registry = make_registry()
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_trivia_semantic_runtime(
+                registry,
+                _ImmediateGateway(),
+            ),
+            problem="Where in England was Dame Judi Dench born?",
+            execute_on_edit=False,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+        )
+
+        rejected = await env.step(
+            json.dumps(
+                {
+                    "action": "add_subgraph",
+                    "agents": [
+                        {
+                            "agent_id": "reasoner",
+                            "model_id": "balanced",
+                            "contract": (
+                                "Reason over receipt-grounded evidence, extracting "
+                                "the specific geographic location (Downing Street, "
+                                "Smith Square, Greater London) as the answer."
+                            ),
+                            "role_family": "reasoner",
+                            "allowed_tools": [QA_RETRIEVAL_TOOL_ID],
+                            "execution_mode": "react",
+                        }
+                    ],
+                    "relations": [],
+                }
+            )
+        )
+
+        self.assertFalse(rejected.accepted)
+        self.assertIn("pre-execution obligations only", rejected.feedback)
+        self.assertEqual((), env.graph.nodes)
+
     async def test_hotpot_formatter_contract_cannot_be_mutated_to_an_answer(self) -> None:
         registry = make_registry()
         env = AgentWorkflowEnv(
@@ -5842,7 +9319,7 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
                 },
                 {
                     "subject": "France",
-                    "relation": "located in",
+                    "relation": "is a country in",
                     "object_or_attribute_value": "Europe",
                     "qualifiers": [],
                     "evidence_span": "France is a country in Europe.",
@@ -5860,17 +9337,23 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             "tool_receipts": [
                 {
                     "tool_id": "qa-retrieval",
-                    "request": {"action": "read"},
+                    "request": {
+                        "action": "read",
+                        "arguments": {"passage_id": "p1"},
+                    },
                     "result": {
                         "value": {
                             "operation": "read",
+                            "passage_id": "p1",
                             "passage": {
+                                "passage_id": "p1",
                                 "text": (
                                     "Paris is the capital of France. "
                                     "France is a country in Europe."
                                 )
                             },
-                        }
+                        },
+                        "completed": True,
                     },
                     "error_type": None,
                 }
@@ -6045,7 +9528,7 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
                     },
                     {
                         "subject": "France",
-                        "relation": "located in",
+                        "relation": "is a country in",
                         "object_or_attribute_value": "Europe",
                         "qualifiers": [],
                         "evidence_span": "France is a country in Europe.",
@@ -6069,7 +9552,7 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         )
         env._progressive_outputs.update(
             {
-                "reader": "retrieved evidence",
+                "reader": _test_evidence_retriever_artifact("p1"),
                 "reasoner": reasoner_artifact,
                 "verifier": verifier_artifact,
                 "formatter": "<answer>Paris</answer>",
@@ -6089,8 +9572,9 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
                     "result": {
                         "value": {
                             "operation": "read",
+                            "passage_id": "p1",
                             "passage": {
-                                "id": "p1",
+                                "passage_id": "p1",
                                 "text": (
                                     "Paris is the capital of France. "
                                     "France is a country in Europe."
@@ -6103,6 +9587,26 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
                 }
             ]
         }
+        env._progressive_output_metadata.update(
+            {
+                "reasoner": {
+                    "artifact_version": "fixture:reasoner:current",
+                    "input_artifact_versions": {},
+                },
+                "verifier": {
+                    "artifact_version": "fixture:verifier:current",
+                    "input_artifact_versions": {
+                        "reasoner": "fixture:reasoner:current"
+                    },
+                },
+                "formatter": {
+                    "artifact_version": "fixture:formatter:current",
+                    "input_artifact_versions": {
+                        "verifier": "fixture:verifier:current"
+                    },
+                },
+            }
+        )
 
         state = env.recovery_state()
         self.assertEqual(

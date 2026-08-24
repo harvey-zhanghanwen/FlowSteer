@@ -250,6 +250,61 @@ class SGLangPolicyPublisher:
             "duration_seconds": max(time.monotonic() - started_monotonic, 0.0),
         }
 
+    def server_runtime_receipt(self) -> Mapping[str, Any]:
+        """Read the deployed SGLang batch/sampling boundary.
+
+        SGLang exposes these resolved values through its public
+        ``GET /server_info`` endpoint.  Evaluation records only the fields that
+        can change request scheduling or deterministic decoding; it does not
+        copy the full server configuration into a trajectory.
+        """
+
+        attempts: dict[str, int] = {}
+        response = self._request(
+            "get",
+            "/server_info",
+            operation="server_info",
+            attempts=attempts,
+        )
+        payload = self._json_object(response, "SGLang server-info response")
+        required_integer_fields = (
+            "context_length",
+            "max_running_requests",
+            "max_total_num_tokens",
+        )
+        for field_name in required_integer_fields:
+            value = payload.get(field_name)
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise _RequestFailure(
+                    f"SGLang server-info {field_name} must be a positive integer"
+                )
+        deterministic = payload.get("enable_deterministic_inference")
+        if not isinstance(deterministic, bool):
+            raise _RequestFailure(
+                "SGLang server-info enable_deterministic_inference must be boolean"
+            )
+        for field_name in ("attention_backend", "sampling_backend"):
+            value = payload.get(field_name)
+            if not isinstance(value, str) or not value.strip():
+                raise _RequestFailure(
+                    f"SGLang server-info {field_name} must be non-empty"
+                )
+        return {
+            "schema_version": "flowsteer.sglang.server-runtime-receipt.v1",
+            "context_length": int(payload["context_length"]),
+            "max_running_requests": int(payload["max_running_requests"]),
+            "max_total_num_tokens": int(payload["max_total_num_tokens"]),
+            "enable_deterministic_inference": deterministic,
+            "sampling_backend": str(payload["sampling_backend"]),
+            "attention_backend": str(payload["attention_backend"]),
+            "cuda_graph_backend_decode": payload.get(
+                "cuda_graph_backend_decode"
+            ),
+            "weight_version": payload.get("weight_version"),
+            "request_attempts": dict(attempts),
+            "recorded_at": _utc_now(),
+        }
+
     def activate_existing_policy(
         self,
         *,

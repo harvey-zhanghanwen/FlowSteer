@@ -27,6 +27,7 @@ from src.interactive.director import (
     DIRECTOR_SGLANG_SAMPLING_SCHEMA_VERSION,
     DIRECTOR_STATE_CONDITIONED_ACTION_SCHEMA_VERSION,
     DIRECTOR_SYSTEM_PROMPT,
+    QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
     director_actions_from_admissible_schema_branch,
     director_action_json_schema_text,
     director_model_admissible_sampling_json_schema_text,
@@ -303,6 +304,7 @@ def _orchestrator(
     sampling_action_schema_version: str = (
         DIRECTOR_STATE_CONDITIONED_ACTION_SCHEMA_VERSION
     ),
+    semantic_protocol: str = "none",
 ) -> AgentGraphOrchestrator:
     coordinate = ScientificSamplingCoordinate(
         sampling_schedule_hash=scientific_sampling_schedule_hash(base_seed=base_seed),
@@ -321,6 +323,7 @@ def _orchestrator(
         sampling_coordinate=coordinate,
         sampling_action_profile=sampling_action_profile,
         sampling_action_schema_version=sampling_action_schema_version,
+        semantic_protocol=semantic_protocol,
     )
 
 
@@ -360,6 +363,7 @@ def test_native_sglang_receipt_uses_real_input_ids_and_separates_versions():
     assert response.metadata["latency_ms"] >= 0.0
     assert response.metadata["attempt_count"] == 1
     assert response.metadata["generation_seed"] == 23
+    assert response.metadata["backend_sampling_seed"] == 23
     assert response.metadata["action_json_schema_version"] == (
         "agentgraph.canvas-action-json-schema.v1"
     )
@@ -371,6 +375,23 @@ def test_native_sglang_receipt_uses_real_input_ids_and_separates_versions():
     consumed = client.executed_prefix_tokens(response, action)
     assert consumed == action.consumed_end
     assert consumed < len(response.metadata["output_token_ids"])
+
+
+def test_native_sglang_projects_uint64_seed_to_signed_backend_receipt():
+    scientific_seed = (1 << 63) + 23
+    client = ScriptedSGLangClient(
+        ['{"action":"finish"}'],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+    )
+
+    response = asyncio.run(
+        client.propose("ordinary prompt", seed=scientific_seed)
+    )
+
+    assert client.payloads[0]["sampling_params"]["sampling_seed"] == 23
+    assert response.metadata["generation_seed"] == scientific_seed
+    assert response.metadata["backend_sampling_seed"] == 23
 
 
 def test_native_sglang_per_request_schema_does_not_mutate_client_default():
@@ -601,6 +622,122 @@ def test_native_sglang_v3_uses_exact_live_relation_candidate_receipt():
     )
     assert finish_response.metadata["selected_action"] == "finish"
     assert finish_response.metadata["request_count"] == 1
+
+
+def test_native_sglang_v3_regenerates_malformed_relation_candidate_selector_once():
+    candidates = [
+        {
+            "source_id": "reasoner",
+            "target_id": "verifier",
+            "source_to_target": True,
+            "target_to_source": False,
+        },
+        {
+            "source_id": "verifier",
+            "target_id": "format",
+            "source_to_target": True,
+            "target_to_source": False,
+        },
+    ]
+    actions = ("set_relation",)
+    domains = {"set_relation": {"candidates": candidates}}
+    domains_json = director_live_action_target_domains_json(actions, domains)
+    selector_schema = director_live_relation_candidate_selector_json_schema_text(
+        domains
+    )
+    malformed = '{"action": "set_relation", "candidate_index": 0的观念}'
+    selected = '{"action":"set_relation","candidate_index":1}'
+    expected_relation = {"action": "set_relation", **candidates[1]}
+    final_text = json.dumps(expected_relation, separators=(",", ":"))
+    client = ScriptedSGLangClient(
+        [malformed, selected, final_text],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+    )
+
+    response = asyncio.run(
+        client.propose(
+            "current Canvas",
+            seed=17,
+            action_json_schema=(
+                director_model_admissible_sampling_json_schema_text_v3(actions)
+            ),
+            action_json_schema_version=(
+                DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3
+            ),
+            action_schema_branch=director_model_admissible_schema_branch_v3(actions),
+            action_target_domains_json=domains_json,
+            action_target_domain_version=(
+                DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION
+            ),
+        )
+    )
+
+    assert len(client.payloads) == 3
+    assert client.payloads[0]["sampling_params"]["json_schema"] == selector_schema
+    assert client.payloads[1]["sampling_params"]["json_schema"] == selector_schema
+    assert client.payloads[2]["sampling_params"]["json_schema"] == (
+        director_live_action_parameter_json_schema_text(
+            "set_relation",
+            domains,
+            relation_candidate_index=1,
+        )
+    )
+    assert [
+        payload["sampling_params"]["sampling_seed"] for payload in client.payloads
+    ] == [17, 17, 17]
+    assert response.text == final_text
+    assert response.metadata["selected_relation_candidate"] == 1
+    assert response.metadata["relation_candidate_regeneration_attempted"] is True
+    assert response.metadata["relation_candidate_regeneration_succeeded"] is True
+    assert response.metadata["request_count"] == 3
+    assert response.metadata["attempt_count"] == 3
+    phases = response.metadata["hierarchical_phase_receipts"]
+    assert set(phases) == {
+        "relation_candidate_serialization_failure",
+        "relation_candidate_selection",
+    }
+    assert phases["relation_candidate_serialization_failure"]["text"] == malformed
+    assert phases["relation_candidate_serialization_failure"]["request_id"] == (
+        "request-1"
+    )
+    assert phases["relation_candidate_selection"]["text"] == selected
+    assert phases["relation_candidate_selection"]["request_id"] == "request-2"
+    regeneration_messages = decode_director_transcript(
+        phases["relation_candidate_selection"]["prompt_text"]
+    )
+    assert regeneration_messages is not None
+    assert regeneration_messages[-2] == {
+        "role": "assistant",
+        "content": malformed,
+    }
+    assert regeneration_messages[-1] == {
+        "role": "user",
+        "content": (
+            "Return one complete JSON object that conforms to the current schema."
+        ),
+    }
+    schema_request = {
+        "action_json_schema": (
+            director_model_admissible_sampling_json_schema_text_v3(actions)
+        ),
+        "action_json_schema_version": (
+            DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3
+        ),
+        "action_schema_branch": director_model_admissible_schema_branch_v3(actions),
+        "action_target_domains_json": domains_json,
+        "action_target_domain_version": (
+            DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION
+        ),
+    }
+    assert _validate_v3_hierarchical_action_receipt(
+        AgentActionParser().parse(final_text),
+        response.metadata,
+        schema_request,
+    ) == {
+        "relation_candidate_serialization_failure",
+        "relation_candidate_selection",
+    }
 
 
 def test_native_sglang_v3_samples_add_declarations_then_complete_exact_action():
@@ -902,6 +1039,135 @@ def test_native_sglang_v3_binds_modify_agent_and_discrete_value():
         "modify_field_selection",
         "modify_agent_selection",
     }
+
+
+def test_native_sglang_v3_regenerates_one_truncated_parameter_with_exact_receipts():
+    actions = ("modify_agent",)
+    domains = {
+        "modify_agent": {
+            "mutable_fields": ["contract"],
+            "per_agent_candidates": [
+                {
+                    "agent_id": "reasoner",
+                    "mutable_fields": ["contract"],
+                }
+            ],
+        }
+    }
+    domains_json = director_live_action_target_domains_json(actions, domains)
+    malformed = (
+        '{"action":"modify_agent","agent_id":"reasoner",'
+        '"contract":"Preserve verified evidence'
+    )
+    repaired = {
+        "action": "modify_agent",
+        "agent_id": "reasoner",
+        "contract": "Preserve verified evidence lineage.",
+    }
+    client = ScriptedSGLangClient(
+        [
+            '{"action":"modify_agent","field":"contract"}',
+            malformed,
+            json.dumps(repaired, separators=(",", ":")),
+        ],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+    )
+
+    response = asyncio.run(
+        client.propose(
+            "repair Canvas",
+            seed=17,
+            action_json_schema=(
+                director_model_admissible_sampling_json_schema_text_v3(actions)
+            ),
+            action_json_schema_version=(
+                DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3
+            ),
+            action_schema_branch=director_model_admissible_schema_branch_v3(actions),
+            action_target_domains_json=domains_json,
+            action_target_domain_version=(
+                DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION
+            ),
+        )
+    )
+
+    parameter_schema = director_live_action_parameter_json_schema_text(
+        "modify_agent",
+        domains,
+        modify_field="contract",
+        modify_agent_id="reasoner",
+    )
+    assert len(client.payloads) == 3
+    assert client.payloads[1]["sampling_params"]["json_schema"] == parameter_schema
+    assert client.payloads[2]["sampling_params"]["json_schema"] == parameter_schema
+    assert client.payloads[1]["sampling_params"]["sampling_seed"] == 17
+    assert client.payloads[2]["sampling_params"]["sampling_seed"] == 17
+    assert response.text == json.dumps(repaired, separators=(",", ":"))
+    assert response.metadata["request_id"] == "request-3"
+    assert response.metadata["request_count"] == 3
+    assert response.metadata["attempt_count"] == 3
+    assert response.metadata["generation_seed"] == 17
+    assert response.metadata["parameter_regeneration_attempted"] is True
+    assert response.metadata["parameter_regeneration_succeeded"] is True
+    failure_receipt = response.metadata["hierarchical_phase_receipts"][
+        "parameter_serialization_failure"
+    ]
+    assert failure_receipt["text"] == malformed
+    assert failure_receipt["request_id"] == "request-2"
+    assert failure_receipt["attempt_count"] == 1
+    assert failure_receipt["generation_seed"] == 17
+    regeneration_messages = decode_director_transcript(
+        response.metadata["prompt_text"]
+    )
+    assert regeneration_messages is not None
+    assert regeneration_messages[-2] == {
+        "role": "assistant",
+        "content": malformed,
+    }
+    assert regeneration_messages[-1] == {
+        "role": "user",
+        "content": (
+            "Return one complete JSON object that conforms to the current schema."
+        ),
+    }
+
+
+def test_native_sglang_does_not_regenerate_well_formed_invalid_parameter():
+    actions = ("finish",)
+    domains = {"finish": {"admissible": True}}
+    invalid = '{"action":"finish","unexpected":true}'
+    client = ScriptedSGLangClient(
+        [invalid],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+    )
+
+    response = asyncio.run(
+        client.propose(
+            "terminal Canvas",
+            action_json_schema=(
+                director_model_admissible_sampling_json_schema_text_v3(actions)
+            ),
+            action_json_schema_version=(
+                DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3
+            ),
+            action_schema_branch=director_model_admissible_schema_branch_v3(actions),
+            action_target_domains_json=director_live_action_target_domains_json(
+                actions,
+                domains,
+            ),
+            action_target_domain_version=(
+                DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION
+            ),
+        )
+    )
+
+    assert response.text == invalid
+    assert len(client.payloads) == 1
+    assert response.metadata["request_count"] == 1
+    assert "parameter_regeneration_attempted" not in response.metadata
+    assert response.metadata["hierarchical_phase_receipts"] == {}
 
 
 def test_v3_receipt_validation_fails_closed_on_phase_and_final_action_mismatch():
@@ -1551,6 +1817,9 @@ def test_collector_materializes_exact_finish_trajectory_and_evidence(tmp_path):
     assert "opaque_runtime_object" not in response_receipt
     assert trajectory.turns[-1].runtime_summary["communication_condition"] == "normal"
     output_metadata = trajectory.turns[-1].runtime_summary["output_metadata"]["solver"]
+    assert output_metadata["artifact_version"].endswith(":solver:single")
+    assert output_metadata["input_artifact_versions"] == {}
+    assert output_metadata["input_artifact_provenance"] == []
     assert output_metadata["tool_receipts"] == response_receipt["tool_receipts"]
     assert output_metadata["continuation_source_agent_id"] == "failed_reasoner"
     assert output_metadata["continued_action_history_count"] == 1
@@ -1710,8 +1979,10 @@ def test_collector_records_model_admissible_schema_on_every_canvas_turn():
 
 def test_collector_preserves_v3_malformed_parameter_sample_as_rejected_turn():
     registry = _registry()
+    first_malformed = '{"action":"finish"'
+    second_malformed = '{"action":"finish",'
     client = ScriptedSGLangClient(
-        ['{"action":"finish"'],
+        [first_malformed, second_malformed],
         policy_version=POLICY_VERSION,
         expected_server_weight_version="default",
     )
@@ -1763,6 +2034,7 @@ def test_collector_preserves_v3_malformed_parameter_sample_as_rejected_turn():
     assert len(trajectory.turns) == 1
     turn = trajectory.turns[0]
     assert turn.action == {}
+    assert turn.policy_response == second_malformed
     assert turn.executed_prefix_tokens == 0
     assert "invalid action" in turn.canvas_feedback
     assert turn.receipt_verified is True
@@ -1770,8 +2042,12 @@ def test_collector_preserves_v3_malformed_parameter_sample_as_rejected_turn():
     assert decoding["strategy"] == HIERARCHICAL_JSON_SCHEMA_STRATEGY
     assert decoding["selected_action"] == "finish"
     assert decoding["parameter_schema_branch"] == "finish"
-    assert decoding["request_count"] == 1
-    assert decoding["phase_receipts"] == {}
+    assert decoding["request_count"] == 2
+    assert decoding["parameter_regeneration_attempted"] is True
+    assert decoding["parameter_regeneration_succeeded"] is False
+    assert decoding["phase_receipts"]["parameter_serialization_failure"][
+        "text"
+    ] == first_malformed
 
 
 @pytest.mark.parametrize(
@@ -2159,6 +2435,108 @@ def test_collector_returns_complete_max_rounds_trajectory():
     assert len(trajectory.turns) == 1
     assert observed["runtime"] is None
     assert observed["final_graph"]["nodes"][0]["id"] == "solver"
+
+
+@pytest.mark.parametrize("retain_valid_lineage", [False, True])
+def test_collector_preserves_turns_at_verified_qa_empty_canvas_domain(
+    retain_valid_lineage,
+):
+    registry = _registry()
+    action = (
+        '{"action":"add_subgraph","agents":['
+        '{"agent_id":"solver","model_id":"cheap-model",'
+        '"contract":"solve directly"}],"relations":[],'
+        '"output_agent_id":"solver"}'
+    )
+    client = ScriptedSGLangClient(
+        [action],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+    )
+
+    class DeadEndAfterOneTurnEnv(AgentWorkflowEnv):
+        def model_admissible_action_types(self):
+            if self.history:
+                return ()
+            return super().model_admissible_action_types()
+
+        async def step(self, action_or_response):
+            result = await super().step(action_or_response)
+            if retain_valid_lineage and result.execution is not None:
+                self._last_valid_evidence_lineage = (  # noqa: SLF001
+                    AgentWorkflowEvidenceLineageSnapshot(
+                        answer=result.execution.final_answer,
+                        runtime=result.execution,
+                        graph_revision=result.revision,
+                        graph_snapshot=result.snapshot.graph,
+                    )
+                )
+            return result
+
+    collector = AgentGraphRolloutCollector(
+        _orchestrator(
+            registry,
+            client,
+            max_rounds=3,
+            sampling_action_profile=(
+                DIRECTOR_MODEL_ADMISSIBLE_ACTION_MASK_PROFILE
+            ),
+            sampling_action_schema_version=(
+                DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION
+            ),
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+        ),
+        DeadEndAfterOneTurnEnv(
+            registry,
+            gateway=FakeGateway(),
+            execute_on_edit=True,
+        ),
+        _versions(),
+    )
+    observed = {}
+
+    def evaluator(task, final_answer, final_graph, runtime):
+        observed.update(final_answer=final_answer, runtime=runtime)
+        return {
+            "evaluator_version": EVALUATOR_VERSION,
+            "valid": True,
+            "reward": 0.0,
+            "metrics": {"f1": 0.0},
+        }
+
+    trajectory = asyncio.run(collector.collect(_task(), 0, evaluator))
+
+    assert len(client.payloads) == 1
+    assert len(trajectory.turns) == 1
+    assert trajectory.turns[0].policy_response == action
+    assert trajectory.turns[0].graph_snapshot["nodes"][0]["id"] == "solver"
+    assert len(trajectory.turns[0].executions) == 1
+    assert trajectory.turns[0].runtime_summary["output_agent_id"] == "solver"
+    assert trajectory.termination_reason == "canvas_action_domain_exhausted"
+    assert trajectory.explicit_finish is False
+    assert trajectory.natural_policy_terminal is True
+    diagnosis = trajectory.turns[-1].runtime_summary[
+        "terminal_canvas_diagnosis"
+    ]
+    assert diagnosis["public_error_code"] == "canvas_action_domain_exhausted"
+    assert diagnosis["graph_revision"] == trajectory.turns[-1].graph_revision
+    assert "finish_admissibility" in diagnosis
+    assert "recovery_state" in diagnosis
+    assert "evaluator" not in json.dumps(diagnosis)
+    assert "ground_truth" not in json.dumps(diagnosis)
+    assert trajectory.valid_lineage_fallback_used is retain_valid_lineage
+    if retain_valid_lineage:
+        assert trajectory.final_answer == "final answer"
+        assert observed["runtime"] is not None
+        assert trajectory.valid_lineage_fallback_receipt["runtime_run_id"] == (
+            observed["runtime"].run_id
+        )
+        assert trajectory.valid_lineage_fallback_receipt["graph_snapshot"] == (
+            trajectory.turns[0].graph_snapshot
+        )
+    else:
+        assert trajectory.final_answer is None
+        assert observed["runtime"] is None
 
 
 def test_collector_uses_only_env_valid_lineage_at_max_rounds():
