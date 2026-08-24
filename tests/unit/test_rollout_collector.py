@@ -956,6 +956,400 @@ def test_native_sglang_v3_samples_add_declarations_then_complete_exact_action():
     }
 
 
+def test_native_sglang_v3_regenerates_malformed_add_role_selection_once():
+    domains = {
+        "add_subgraph": {
+            "min_new_agents": 1,
+            "max_new_agents": 1,
+            "existing_agent_ids": [],
+            "required_agent_fields": [
+                "agent_id",
+                "model_id",
+                "contract",
+                "role_family",
+                "allowed_tools",
+                "execution_mode",
+            ],
+            "model_ids": ["cheap-model"],
+            "role_constraints": {
+                "reasoner": {
+                    "execution_modes": ["reasoning"],
+                    "allowed_tools": [[]],
+                }
+            },
+            "endpoint_scope": {
+                "relation_endpoint_sources": [
+                    "existing_agent_ids",
+                    "same_action_agent_ids",
+                ],
+                "output_agent_id_sources": [
+                    "existing_agent_ids",
+                    "same_action_agent_ids",
+                ],
+            },
+        }
+    }
+    malformed = "select one reasoner"
+    role_selection = {
+        "action": "add_subgraph",
+        "agents": [{"agent_id": "node_1", "role_family": "reasoner"}],
+    }
+    declarations = {
+        "action": "add_subgraph",
+        "agents": [
+            {
+                "agent_id": "node_1",
+                "model_id": "cheap-model",
+                "contract": "answer from evidence",
+                "role_family": "reasoner",
+                "allowed_tools": [],
+                "execution_mode": "reasoning",
+            }
+        ],
+    }
+    final_action = {
+        **declarations,
+        "relations": [],
+        "output_agent_id": "node_1",
+    }
+    actions = ("add_subgraph",)
+    domains_json = director_live_action_target_domains_json(actions, domains)
+    role_selection_text = json.dumps(role_selection, separators=(",", ":"))
+    final_text = json.dumps(final_action, separators=(",", ":"))
+    client = ScriptedSGLangClient(
+        [
+            malformed,
+            role_selection_text,
+            json.dumps(declarations, separators=(",", ":")),
+            final_text,
+        ],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+    )
+
+    response = asyncio.run(
+        client.propose(
+            "current Canvas",
+            seed=17,
+            action_json_schema=(
+                director_model_admissible_sampling_json_schema_text_v3(actions)
+            ),
+            action_json_schema_version=(
+                DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3
+            ),
+            action_schema_branch=director_model_admissible_schema_branch_v3(actions),
+            action_target_domains_json=domains_json,
+            action_target_domain_version=(
+                DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION
+            ),
+        )
+    )
+
+    role_schema = director_live_add_subgraph_role_selection_json_schema_text(
+        domains
+    )
+    assert len(client.payloads) == 4
+    assert client.payloads[0]["sampling_params"]["json_schema"] == role_schema
+    assert client.payloads[1]["sampling_params"]["json_schema"] == role_schema
+    assert [
+        payload["sampling_params"]["sampling_seed"]
+        for payload in client.payloads
+    ] == [17, 17, 17, 17]
+    assert response.text == final_text
+    assert response.metadata["role_selection_regeneration_attempted"] is True
+    assert response.metadata["role_selection_regeneration_succeeded"] is True
+    assert response.metadata["request_count"] == 4
+    assert response.metadata["attempt_count"] == 4
+    phases = response.metadata["hierarchical_phase_receipts"]
+    assert set(phases) == {
+        "add_agent_role_selection_serialization_failure",
+        "add_agent_role_selection",
+        "add_agent_declarations",
+    }
+    failure_receipt = phases[
+        "add_agent_role_selection_serialization_failure"
+    ]
+    repaired_receipt = phases["add_agent_role_selection"]
+    assert failure_receipt["text"] == malformed
+    assert failure_receipt["request_id"] == "request-1"
+    assert repaired_receipt["text"] == role_selection_text
+    assert repaired_receipt["request_id"] == "request-2"
+    regeneration_messages = decode_director_transcript(
+        repaired_receipt["prompt_text"]
+    )
+    assert regeneration_messages is not None
+    assert regeneration_messages[-2] == {
+        "role": "assistant",
+        "content": malformed,
+    }
+    assert regeneration_messages[-1] == {
+        "role": "user",
+        "content": (
+            "Return one complete JSON object that conforms to the current schema."
+        ),
+    }
+    schema_request = {
+        "action_json_schema": (
+            director_model_admissible_sampling_json_schema_text_v3(actions)
+        ),
+        "action_json_schema_version": (
+            DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3
+        ),
+        "action_schema_branch": director_model_admissible_schema_branch_v3(actions),
+        "action_target_domains_json": domains_json,
+        "action_target_domain_version": (
+            DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION
+        ),
+    }
+    assert _validate_v3_hierarchical_action_receipt(
+        AgentActionParser().parse(final_text),
+        response.metadata,
+        schema_request,
+    ) == {
+        "add_agent_role_selection_serialization_failure",
+        "add_agent_role_selection",
+        "add_agent_declarations",
+    }
+
+
+def test_native_sglang_v3_add_role_selection_regeneration_fails_closed_once():
+    domains = {
+        "add_subgraph": {
+            "min_new_agents": 1,
+            "max_new_agents": 1,
+            "existing_agent_ids": [],
+            "required_agent_fields": [
+                "agent_id",
+                "model_id",
+                "contract",
+                "role_family",
+                "allowed_tools",
+                "execution_mode",
+            ],
+            "model_ids": ["cheap-model"],
+            "role_constraints": {
+                "reasoner": {
+                    "execution_modes": ["reasoning"],
+                    "allowed_tools": [[]],
+                }
+            },
+            "endpoint_scope": {
+                "relation_endpoint_sources": [
+                    "existing_agent_ids",
+                    "same_action_agent_ids",
+                ],
+                "output_agent_id_sources": [
+                    "existing_agent_ids",
+                    "same_action_agent_ids",
+                ],
+            },
+        }
+    }
+    actions = ("add_subgraph",)
+    domains_json = director_live_action_target_domains_json(actions, domains)
+    role_schema = director_live_add_subgraph_role_selection_json_schema_text(
+        domains
+    )
+    first_malformed = "not JSON"
+    second_malformed = "still not JSON"
+    client = ScriptedSGLangClient(
+        [first_malformed, second_malformed],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+    )
+    registry = _registry()
+    orchestrator = _orchestrator(registry, client, max_rounds=1)
+    schema_request = {
+        "action_json_schema": (
+            director_model_admissible_sampling_json_schema_text_v3(actions)
+        ),
+        "action_json_schema_version": (
+            DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3
+        ),
+        "action_schema_branch": director_model_admissible_schema_branch_v3(actions),
+        "action_target_domains_json": domains_json,
+        "action_target_domain_version": (
+            DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION
+        ),
+    }
+    orchestrator.action_schema_request = lambda _env: dict(schema_request)
+    collector = AgentGraphRolloutCollector(
+        orchestrator,
+        AgentWorkflowEnv(
+            registry,
+            gateway=FakeGateway(),
+            execute_on_edit=False,
+        ),
+        _versions(),
+    )
+
+    def evaluator(task, final_answer, final_graph, runtime):
+        assert final_answer is None
+        assert runtime is None
+        return {
+            "evaluator_version": EVALUATOR_VERSION,
+            "valid": True,
+            "reward": 0.0,
+            "metrics": {"f1": 0.0},
+        }
+
+    trajectory = asyncio.run(collector.collect(_task(), 0, evaluator))
+
+    # One initial exact sample plus exactly one schema-bound regeneration.
+    # Both are preserved in one rejected Canvas turn; there is no declaration,
+    # fallback role, regex extraction, execution, or third sample.
+    assert len(client.payloads) == 2
+    assert client.actions == []
+    assert all(
+        payload["sampling_params"]["json_schema"] == role_schema
+        for payload in client.payloads
+    )
+    assert len(trajectory.turns) == 1
+    assert trajectory.explicit_finish is False
+    assert trajectory.termination_reason == "max_rounds"
+    assert trajectory.grpo_eligible is False
+    turn = trajectory.turns[0]
+    assert turn.policy_response == second_malformed
+    assert turn.action == {}
+    assert turn.executed_prefix_tokens == 0
+    assert "invalid action" in turn.canvas_feedback
+    assert turn.graph_revision == 0
+    assert turn.graph_snapshot["nodes"] == []
+    assert turn.executions == ()
+    decoding = turn.runtime_summary["director_action_decoding"]
+    assert decoding["strategy"] == ROLE_FIRST_ADD_DECODING_STRATEGY
+    assert decoding["selected_action"] == "add_subgraph"
+    assert decoding["selected_add_agent_roles"] is None
+    assert decoding["selected_add_agent_ids"] is None
+    assert decoding["parameter_schema_branch"] is None
+    assert decoding["parse_failure_phase"] == "add_agent_role_selection"
+    assert decoding["role_selection_regeneration_attempted"] is True
+    assert decoding["role_selection_regeneration_succeeded"] is False
+    assert decoding["request_count"] == 2
+    phases = decoding["phase_receipts"]
+    assert set(phases) == {
+        "add_agent_role_selection_serialization_failure",
+        "add_agent_role_selection",
+    }
+    failure_receipt = phases[
+        "add_agent_role_selection_serialization_failure"
+    ]
+    repair_receipt = phases["add_agent_role_selection"]
+    assert failure_receipt["text"] == first_malformed
+    assert repair_receipt["text"] == second_malformed
+    assert failure_receipt["request_id"] == "request-1"
+    assert repair_receipt["request_id"] == "request-2"
+    assert repair_receipt["prompt_text"] == turn.prompt
+    repair_messages = decode_director_transcript(repair_receipt["prompt_text"])
+    assert repair_messages is not None
+    assert repair_messages[-2] == {
+        "role": "assistant",
+        "content": first_malformed,
+    }
+    assert repair_messages[-1] == {
+        "role": "user",
+        "content": (
+            "Return one complete JSON object that conforms to the current schema."
+        ),
+    }
+    backend_seed = repair_receipt["backend_sampling_seed"]
+    assert [
+        payload["sampling_params"]["sampling_seed"]
+        for payload in client.payloads
+    ] == [backend_seed, backend_seed]
+    for receipt in (failure_receipt, repair_receipt):
+        assert receipt["receipt_verified"] is True
+        assert receipt["generation_seed"] == turn.director_generation_seed
+        assert receipt["backend_sampling_seed"] == backend_seed
+        assert receipt["action_json_schema_version"] == (
+            DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3
+        )
+        assert receipt["action_schema_branch"] == schema_request[
+            "action_schema_branch"
+        ]
+        assert receipt["action_target_domain_version"] == (
+            DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION
+        )
+        assert receipt["action_target_domains_json"] == domains_json
+        assert len(receipt["output_token_ids"]) == len(
+            receipt["behavior_log_probs"]
+        )
+
+
+def test_native_sglang_v3_add_role_selection_does_not_repair_trailing_text():
+    domains = {
+        "add_subgraph": {
+            "min_new_agents": 1,
+            "max_new_agents": 1,
+            "existing_agent_ids": [],
+            "required_agent_fields": [
+                "agent_id",
+                "model_id",
+                "contract",
+                "role_family",
+                "allowed_tools",
+                "execution_mode",
+            ],
+            "model_ids": ["cheap-model"],
+            "role_constraints": {
+                "reasoner": {
+                    "execution_modes": ["reasoning"],
+                    "allowed_tools": [[]],
+                }
+            },
+            "endpoint_scope": {
+                "relation_endpoint_sources": [
+                    "existing_agent_ids",
+                    "same_action_agent_ids",
+                ],
+                "output_agent_id_sources": [
+                    "existing_agent_ids",
+                    "same_action_agent_ids",
+                ],
+            },
+        }
+    }
+    actions = ("add_subgraph",)
+    role_with_trailing_text = (
+        '{"action":"add_subgraph","agents":['
+        '{"agent_id":"node_1","role_family":"reasoner"}]} trailing'
+    )
+    client = ScriptedSGLangClient(
+        [role_with_trailing_text],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+    )
+
+    with pytest.raises(
+        ReceiptValidationError,
+        match="role-selection phase is invalid.*trailing text",
+    ):
+        asyncio.run(
+            client.propose(
+                "current Canvas",
+                action_json_schema=(
+                    director_model_admissible_sampling_json_schema_text_v3(
+                        actions
+                    )
+                ),
+                action_json_schema_version=(
+                    DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3
+                ),
+                action_schema_branch=(
+                    director_model_admissible_schema_branch_v3(actions)
+                ),
+                action_target_domains_json=(
+                    director_live_action_target_domains_json(actions, domains)
+                ),
+                action_target_domain_version=(
+                    DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION
+                ),
+            )
+        )
+
+    assert len(client.payloads) == 1
+
+
 def test_native_sglang_empty_text_cannot_form_an_exact_behavior_receipt():
     client = ScriptedSGLangClient(
         [""],
