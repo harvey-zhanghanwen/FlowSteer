@@ -5706,23 +5706,23 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     )
                     if isinstance(propositions, dict):
                         propositions["minItems"] = 2
-                        propositions["maxItems"] = 2
                         propositions["description"] = (
                             "Encode the preserved first-hop location proposition "
                             "and the successful-read-backed geographic type or "
-                            "administrative-containment proposition as exactly two "
-                            "distinct items in that order. Bind answer_slot to the "
-                            "second item and the field whose value equals "
+                            "administrative-containment proposition as the first two "
+                            "distinct items in that order. Preserve any additional "
+                            "receipt-grounded propositions after them. Bind answer_slot "
+                            "to the second item and the field whose value equals "
                             "candidate_answer."
                         )
                     chain = value_properties.get("multi_hop_chain")
                     if isinstance(chain, dict):
                         chain["minItems"] = 2
-                        chain["maxItems"] = 2
                         chain["description"] = (
-                            "Include exactly two distinct entries in order for the "
+                            "Include the first two distinct entries in order for the "
                             "first-hop entity-to-locality relation and the receipt-"
-                            "backed locality type/containment resolution. The leading component "
+                            "backed locality type/containment resolution, preserving "
+                            "any additional valid lineage entries after them. The leading component "
                             "of a comma-qualified first-hop locality is an admitted "
                             "identity surface; an administrative suffix is not an "
                             "answer."

@@ -2460,17 +2460,17 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             2,
             completion_fields["evidence_propositions"]["minItems"],
         )
-        self.assertEqual(
-            2,
-            completion_fields["evidence_propositions"]["maxItems"],
+        self.assertNotIn(
+            "maxItems",
+            completion_fields["evidence_propositions"],
         )
         self.assertEqual(
             2,
             completion_fields["multi_hop_chain"]["minItems"],
         )
-        self.assertEqual(
-            2,
-            completion_fields["multi_hop_chain"]["maxItems"],
+        self.assertNotIn(
+            "maxItems",
+            completion_fields["multi_hop_chain"],
         )
         self.assertIn(
             "resolution proposition",

@@ -1129,11 +1129,13 @@ estimate.
 v54 keeps Director prompt v6 byte-for-byte and changes neither the Canvas
 action vocabulary nor the topology search space. After a public
 `qa_location_containment_lineage_missing` failure and a successful read that
-explicitly states city/town containment, the existing bounded ReAct
+binds the rejected first-hop locality and the question's named geographic
+scope in one explicit city/town containment clause, the existing bounded ReAct
 `modify_agent` domain exposes only the receipt-conditioned Reasoner contract
 or completion predicate. The completion schema preserves the first-hop
-proposition, places the containment proposition second, and binds answer-slot
-to that second proposition's publicly supported answer field. An explicit
+proposition, places the containment proposition second, preserves any
+additional receipt-grounded propositions after it, and binds answer-slot to
+that second proposition's publicly supported answer field. An explicit
 pre-execution answer assertion containing a question-external one-token entity
 is rejected unless a successful public read already contains it. None of these
 checks consumes Ground Truth, accepted answers or evaluator state.

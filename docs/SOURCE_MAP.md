@@ -1087,7 +1087,10 @@ The v54 post-read repair continues to reuse FlowSteer's accepted Canvas edit
 Reasoner declaration domain, and the corresponding answer-slot JSON Schema are
 `PROJECT_NECESSARY_ADAPTATION`: neither upstream contains TriviaQA location
 containment semantics. The constraint is activated only by successful public
-read text and never by Ground Truth, accepted answers or evaluator output.
+read text whose single clause binds the typed failure's locality anchor and the
+question's named geographic scope. The Environment action mask/admission and
+the completion JSON Schema reuse this same public predicate; neither consumes
+Ground Truth, accepted answers or evaluator output.
 
 Title-conditioned pronoun binding and the bounded
 `introduced ... followed by ...` first-in-sequence validation are likewise

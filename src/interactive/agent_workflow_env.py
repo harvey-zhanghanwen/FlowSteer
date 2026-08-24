@@ -1998,6 +1998,31 @@ class AgentWorkflowEnv:
             )
         ):
             return None
+        raw_trace = record.metadata.get("react_trace", ())
+        trace = (
+            tuple(item for item in raw_trace if isinstance(item, Mapping))
+            if isinstance(raw_trace, (list, tuple))
+            else ()
+        )
+        completion_action: Mapping[str, object] | None = None
+        for entry in reversed(trace):
+            observation = entry.get("observation")
+            source = observation if isinstance(observation, Mapping) else entry
+            public_error_code = source.get("public_error_code")
+            if not (
+                isinstance(public_error_code, str)
+                and "qa_location_containment_lineage_missing"
+                in public_error_code
+            ):
+                continue
+            candidate_action = entry.get("structured_action")
+            if not isinstance(candidate_action, Mapping):
+                candidate_action = source.get("structured_action")
+            if isinstance(candidate_action, Mapping):
+                completion_action = candidate_action
+                break
+        if completion_action is None:
+            return {}
         raw_receipts = record.metadata.get("tool_receipts", ())
         receipts = (
             tuple(item for item in raw_receipts if isinstance(item, Mapping))
@@ -2005,12 +2030,9 @@ class AgentWorkflowEnv:
             else ()
         )
         if self.required_evidence_tool_id is None:
-            return None
-        containment_read = any(
-            read_text is not None
-            and re.search(r"\b(?:part\s+of|belongs?\s+to)\b", read_text, re.I)
-            is not None
-            and re.search(r"\b(?:city|town)\b", read_text, re.I) is not None
+            return {}
+        read_texts = tuple(
+            read_text
             for receipt in receipts
             for read_text in (
                 self._successful_read_text(
@@ -2018,9 +2040,27 @@ class AgentWorkflowEnv:
                     self.required_evidence_tool_id,
                 ),
             )
+            if read_text is not None
         )
-        if not containment_read:
-            return None
+        from .qa_tool_adapter import (
+            _location_containment_repair_anchor,
+            _location_resolution_answer_field_constraint,
+        )
+
+        original_question = hotpotqa_question_scope(self._problem)
+        entity_anchor = _location_containment_repair_anchor(
+            original_question=original_question,
+            completion_action=completion_action,
+        )
+        if not isinstance(entity_anchor, str) or not entity_anchor.strip():
+            return {}
+        answer_field = _location_resolution_answer_field_constraint(
+            original_question=original_question,
+            entity_anchor=entity_anchor,
+            read_evidence_texts=read_texts,
+        )
+        if answer_field != "object_or_attribute_value":
+            return {}
         candidates = {
             "contract": _QA_LOCATION_REASONER_RECOVERY_CONTRACT,
             "completion_condition": _QA_LOCATION_REASONER_RECOVERY_COMPLETION,

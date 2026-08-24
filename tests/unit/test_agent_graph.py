@@ -4429,6 +4429,24 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
                             "qa_semantic_artifact_invalid: "
                             "qa_location_containment_lineage_missing"
                         ),
+                        "structured_action": {
+                            "kind": "complete",
+                            "name": "complete",
+                            "arguments": {
+                                "value": {
+                                    "evidence_propositions": [
+                                        {
+                                            "subject": "Dench",
+                                            "relation": "born in",
+                                            "object_or_attribute_value": (
+                                                "Heworth, North Riding of Yorkshire"
+                                            ),
+                                            "evidence_span": birth_span,
+                                        }
+                                    ]
+                                }
+                            },
+                        },
                     }
                 ],
                 "tool_receipts": [
@@ -4460,6 +4478,55 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [_QA_LOCATION_REASONER_RECOVERY_COMPLETION],
             candidate["discrete_value_domains"]["completion_condition"],
+        )
+
+        unrelated_env = AgentWorkflowEnv(
+            registry,
+            runtime=_trivia_semantic_runtime(registry, _ImmediateGateway()),
+            graph=graph,
+            problem=question,
+            execute_on_edit=False,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+            require_format_agent=True,
+        )
+        unrelated_failure = replace(
+            failure,
+            request_id="reasoner-unrelated-containment-read",
+            metadata={
+                **failure.metadata,
+                "tool_receipts": [
+                    _test_read_receipt(
+                        "greenwich-london",
+                        title="Greenwich",
+                        text=(
+                            "Greenwich is part of the city of London in England."
+                        ),
+                    )
+                ],
+            },
+        )
+        unrelated_env._record_failure_state(
+            (unrelated_failure,),
+            current_agent_ids={node.id for node in graph.nodes},
+        )
+        self.assertEqual(
+            {},
+            unrelated_env._triviaqa_location_reasoner_recovery_field_values(
+                "reasoner"
+            ),
+        )
+        unrelated_targets = unrelated_env.model_admissible_action_targets()
+        self.assertNotIn(
+            "reasoner",
+            {
+                item["agent_id"]
+                for item in unrelated_targets.get("modify_agent", {}).get(
+                    "per_agent_candidates",
+                    (),
+                )
+            },
         )
 
         for field_name, conflicting_value in (
