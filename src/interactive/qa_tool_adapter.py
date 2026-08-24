@@ -2892,13 +2892,13 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         ) in public_error_code:
             return (
                 "Preserve the same successful read receipt, passage_id, passage "
-                "title, question_surface, target_relation, evidence_span, and "
-                "evidence proposition. Do not search or read again. Copy into "
-                "entity_identity.evidence_surface one concise exact entity "
-                "mention or coreferential pronoun that occurs in that same "
-                "evidence_span and is supported by the cited passage title "
-                "identity chain. Repair only evidence_surface, then emit a "
-                "complete action."
+                "title, question_surface, target_relation, and evidence "
+                "proposition. Do not search or read again. From that same read "
+                "receipt, expand evidence_span only as needed to include both "
+                "the exact entity mention and the sentence expressing the "
+                "requested relation, then copy that exact mention into "
+                "entity_identity.evidence_surface. Keep the span contiguous "
+                "and receipt-grounded, and emit a complete action."
             )
         if isinstance(public_error_code, str) and (
             "Evidence Retriever target_relation must preserve the "

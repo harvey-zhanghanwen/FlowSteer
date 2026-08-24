@@ -1882,6 +1882,25 @@ class AgentWorkflowEnv:
                 "or completion_condition while preserving the Agent model, "
                 "role, tools, execution mode, artifact type, and relations"
             )
+        node = self._graph.get_node(action.agent_id)
+        if (
+            isinstance(self.runtime.dataset_id, str)
+            and self.runtime.dataset_id.casefold() == "triviaqa"
+            and (node.role_family or "").casefold()
+            == "evidence_retriever"
+        ):
+            field_name = mutable_fields[0]
+            expected_value = (
+                _QA_EVIDENCE_RETRIEVER_RECOVERY_CONTRACT
+                if field_name == "contract"
+                else _QA_EVIDENCE_RETRIEVER_RECOVERY_COMPLETION
+            )
+            if getattr(action, field_name) != expected_value:
+                return (
+                    "a measured Evidence Retriever repair must preserve its "
+                    "evidence-only responsibility and use the live "
+                    f"{field_name} recovery value"
+                )
         return None
 
     def _semantic_artifact_repair_agent_ids(self) -> Tuple[str, ...]:
@@ -2116,6 +2135,36 @@ class AgentWorkflowEnv:
         if record is None:
             return False
         category, _, _ = self._execution_failure_diagnosis(record)
+        if (
+            isinstance(self.runtime.dataset_id, str)
+            and self.runtime.dataset_id.casefold() == "triviaqa"
+            and category == "react_turn_exhaustion"
+            and not previous_source_ids
+            and not self._tool_continuation_exhausted(record.metadata)
+        ):
+            # The Retriever may have completed search/read while exhausting
+            # its bounded Action--Observation loop on only the structured
+            # evidence artifact.  Preserve those public receipts and admit one
+            # isolated same-role replacement to finish the artifact; do not
+            # open a second replacement generation on unchanged receipts.
+            public_summary = self._react_public_error_summary(record)
+            last_public_error = public_summary.get("last_public_error", {})
+            public_code = (
+                last_public_error.get("public_error_code")
+                if isinstance(last_public_error, Mapping)
+                else None
+            )
+            return bool(
+                public_summary.get("successful_evidence_read_count", 0)
+                and isinstance(last_public_error, Mapping)
+                and last_public_error.get("observation_status")
+                == "schema_invalid"
+                and isinstance(public_code, str)
+                and public_code.startswith("qa_semantic_artifact_invalid:")
+                and isinstance(
+                    last_public_error.get("repair_instruction"), str
+                )
+            )
         if category == "knowledge_base_coverage_failure":
             return False
         if category not in {
@@ -2304,6 +2353,17 @@ class AgentWorkflowEnv:
         """Project the exact live ADD role domain used by Canvas admission."""
 
         admitted = self._admissible_augmentation_role_families()
+        replacement_domains = (
+            self._repair_exhausted_auxiliary_replacement_domains()
+        )
+        if replacement_domains:
+            # A bounded failed Retriever with preserved public Tool state owns
+            # the next execute-and-feedback boundary.  Complete that existing
+            # evidence responsibility before exposing downstream semantic
+            # roles; this is state-conditioned admission, not a fixed topology.
+            return tuple(
+                role for role in admitted if role in replacement_domains
+            )
         missing = self._missing_semantic_role_families()
         if (
             self._uses_semantic_lineage_protocol()
@@ -2315,13 +2375,6 @@ class AgentWorkflowEnv:
             # domain contains responsibilities, not a prescribed topology or
             # fixed Agent sequence.
             return tuple(role for role in admitted if role in missing)
-        replacement_domains = (
-            self._repair_exhausted_auxiliary_replacement_domains()
-        )
-        if replacement_domains:
-            return tuple(
-                role for role in admitted if role in replacement_domains
-            )
         if any(
             auxiliary_id in self._failed_agent_ids
             and auxiliary_id in self._repair_exhausted_agent_ids
@@ -3079,6 +3132,32 @@ class AgentWorkflowEnv:
                         list(value) if isinstance(value, tuple) else value
                     )
                 per_agent_current_values[agent_id] = current_values
+            per_agent_discrete_domains: dict[
+                str, dict[str, list[object]]
+            ] = {}
+            for agent_id, fields in per_agent_mutable_fields.items():
+                node = self._graph.get_node(agent_id)
+                discrete_domains: dict[str, list[object]] = {}
+                if "model_id" in fields:
+                    discrete_domains["model_id"] = list(
+                        per_agent_model_domains[agent_id]
+                    )
+                if (
+                    agent_id in self._react_exhausted_agent_ids
+                    and isinstance(self.runtime.dataset_id, str)
+                    and self.runtime.dataset_id.casefold() == "triviaqa"
+                    and (node.role_family or "").casefold()
+                    == "evidence_retriever"
+                ):
+                    if "contract" in fields:
+                        discrete_domains["contract"] = [
+                            _QA_EVIDENCE_RETRIEVER_RECOVERY_CONTRACT
+                        ]
+                    if "completion_condition" in fields:
+                        discrete_domains["completion_condition"] = [
+                            _QA_EVIDENCE_RETRIEVER_RECOVERY_COMPLETION
+                        ]
+                per_agent_discrete_domains[agent_id] = discrete_domains
             mutable_fields = [
                 field
                 for field in base_mutable_fields
@@ -3130,13 +3209,9 @@ class AgentWorkflowEnv:
                         # value explicit instead of asking the Director to
                         # rediscover it from the full graph serialization.
                         "current_values": per_agent_current_values[agent_id],
-                        "discrete_value_domains": (
-                            {
-                                "model_id": per_agent_model_domains[agent_id]
-                            }
-                            if "model_id" in per_agent_mutable_fields[agent_id]
-                            else {}
-                        ),
+                        "discrete_value_domains": per_agent_discrete_domains[
+                            agent_id
+                        ],
                         **(
                             {"avoid_provider_id": avoid_provider_id}
                             if (
@@ -8287,10 +8362,14 @@ class AgentWorkflowEnv:
             return None
 
         missing_role_families = self._missing_semantic_role_families()
+        replacement_domains = (
+            self._repair_exhausted_auxiliary_replacement_domains()
+        )
         if (
             self._graph.nodes
             and missing_role_families
             and bool(self._failed_agent_ids or self._repair_exhausted_agent_ids)
+            and not replacement_domains
             and not self._dirty_auxiliary_replacement_agent_ids()
             and (
                 self.max_agents is None
@@ -8346,9 +8425,6 @@ class AgentWorkflowEnv:
                 f"{list(takeover_delete_ids)!r}"
             )
 
-        replacement_domains = (
-            self._repair_exhausted_auxiliary_replacement_domains()
-        )
         exhausted_reasoner_ids = self._repair_exhausted_reasoner_ids()
         exhausted_auxiliary_ids = tuple(
             agent_id
@@ -8438,6 +8514,7 @@ class AgentWorkflowEnv:
                     "output_agent_id. The accepted ADD executes immediately; route "
                     "its artifact to the Reasoner only after that execution succeeds"
                 )
+            return None
 
         dirty_replacement_ids = self._dirty_auxiliary_replacement_agent_ids()
         if dirty_replacement_ids:
@@ -8474,6 +8551,7 @@ class AgentWorkflowEnv:
             self._graph.nodes
             and missing_role_families
             and bool(self._failed_agent_ids or self._repair_exhausted_agent_ids)
+            and not replacement_domains
         ):
             sampled_role_families = tuple(
                 (spec.role_family or "").casefold() for spec in action.agents

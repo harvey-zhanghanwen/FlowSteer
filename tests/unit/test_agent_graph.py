@@ -5223,6 +5223,140 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             domain["admitted_new_role_families"],
         )
 
+    async def test_triviaqa_failed_retriever_repairs_or_replaces_before_reasoner(
+        self,
+    ) -> None:
+        complete = _trivia_semantic_graph()
+        graph = AgentGraph([complete.get_node("reader")])
+        registry = make_registry()
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_trivia_semantic_runtime(registry, _ImmediateGateway()),
+            graph=graph,
+            problem="What is the capital of France?",
+            execute_on_edit=False,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+            require_format_agent=True,
+        )
+        record = AgentFailureRecord(
+            request_id="reader-structured-artifact-exhaustion",
+            agent_id="reader",
+            phase=ExecutionPhase.SINGLE,
+            graph_revision=graph.revision,
+            error_type="ReactExecutionError",
+            message="react agent 'reader' exhausted 20 turns",
+            metadata={
+                "react_trace": [
+                    {
+                        "turn": 20,
+                        "observation_status": "schema_invalid",
+                        "public_error_code": (
+                            "qa_semantic_artifact_invalid: Evidence Retriever "
+                            "entity_identity.evidence_surface does not occur "
+                            "in evidence_span"
+                        ),
+                        "repair_instruction": (
+                            "Preserve the same successful read receipt and "
+                            "repair only the structured evidence artifact."
+                        ),
+                    }
+                ],
+                "tool_receipts": [_test_read_receipt("p1")],
+                "tool_plan_exhausted": False,
+            },
+        )
+        env._record_failure_state(
+            (record,),
+            current_agent_ids={"reader"},
+        )
+
+        modify_domain = env.model_admissible_action_targets()["modify_agent"]
+        candidate = modify_domain["per_agent_candidates"][0]
+        self.assertEqual(
+            [_QA_EVIDENCE_RETRIEVER_RECOVERY_CONTRACT],
+            candidate["discrete_value_domains"]["contract"],
+        )
+        self.assertEqual(
+            [_QA_EVIDENCE_RETRIEVER_RECOVERY_COMPLETION],
+            candidate["discrete_value_domains"]["completion_condition"],
+        )
+        wrong_completion = await env.step(
+            '{"action":"modify_agent","agent_id":"reader",'
+            '"completion_condition":"provides exact answer"}'
+        )
+        self.assertFalse(wrong_completion.accepted)
+        self.assertIn(
+            "preserve its evidence-only responsibility",
+            wrong_completion.feedback,
+        )
+
+        # One same-Agent repair has now been measured as exhausted without a
+        # new receipt.  The next executable unit must preserve and hand off the
+        # existing public read, not materialize a blocked downstream role.
+        env._repair_exhausted_agent_ids.add("reader")
+        self.assertEqual(("add_subgraph",), env.model_admissible_action_types())
+        add_domain = env.model_admissible_action_targets()["add_subgraph"]
+        self.assertEqual(
+            ["evidence_retriever"],
+            add_domain["admitted_new_role_families"],
+        )
+        self.assertEqual([], add_domain["relations"])
+        self.assertIsNone(add_domain["output_agent_id"])
+
+        premature_reasoner = await env.step(
+            json.dumps(
+                {
+                    "action": "add_subgraph",
+                    "agents": [
+                        {
+                            "agent_id": "reasoner",
+                            "model_id": "balanced",
+                            "contract": (
+                                "bind grounded evidence to the original answer "
+                                "slot and requested relation, then derive one "
+                                "semantic candidate"
+                            ),
+                            "role_family": "reasoner",
+                            "allowed_tools": [QA_RETRIEVAL_TOOL_ID],
+                            "execution_mode": "react",
+                        }
+                    ],
+                    "relations": [],
+                }
+            )
+        )
+        self.assertFalse(premature_reasoner.accepted)
+        self.assertIn(
+            "same-role/same-artifact replacement",
+            premature_reasoner.feedback,
+        )
+
+        replacement = await env.step(
+            json.dumps(
+                {
+                    "action": "add_subgraph",
+                    "agents": [
+                        {
+                            "agent_id": "replacement_reader",
+                            "model_id": "cheap",
+                            "contract": _QA_EVIDENCE_RETRIEVER_RECOVERY_CONTRACT,
+                            "completion_condition": (
+                                _QA_EVIDENCE_RETRIEVER_RECOVERY_COMPLETION
+                            ),
+                            "role_family": "evidence_retriever",
+                            "allowed_tools": [QA_RETRIEVAL_TOOL_ID],
+                            "execution_mode": "react",
+                            "artifact_type": "retrieval_evidence",
+                        }
+                    ],
+                    "relations": [],
+                }
+            )
+        )
+        self.assertTrue(replacement.accepted, replacement.feedback)
+
     async def test_triviaqa_valid_retriever_artifact_admits_any_direct_reasoner_ingress(
         self,
     ) -> None:

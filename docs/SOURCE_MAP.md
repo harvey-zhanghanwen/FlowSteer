@@ -938,6 +938,20 @@ serialization retry is admitted; both exact receipts remain in the trajectory
 if it fails.  This is a minimal compatibility adaptation around SGLang output,
 not a new Director action, role, workflow template or topology constraint.
 
+The v47 TriviaQA recovery boundary reuses FlowSteer's existing accepted
+Canvas-edit → execute → feedback transaction and SkillFlow's bounded
+StructuredAction → ToolResult → public Observation continuation. Neither
+upstream implements cross-Agent replacement of a receipt-valid but
+schema-invalid factual-QA artifact. The project adaptation therefore exposes
+one isolated same-role/same-artifact Retriever replacement only when the
+recorded failure is `react_turn_exhaustion`, at least one successful read is
+present, the Tool plan is not exhausted, and the latest public Observation is
+`schema_invalid / qa_semantic_artifact_invalid` with a repair instruction. It
+passes only public Tool continuation state, keeps all entity/relation/span/read
+gates authoritative, and prevents downstream Reasoner admission until evidence
+materializes. The Director prompt, action vocabulary and topology search space
+are unchanged.
+
 Provider and bounded-ReAct failures stay typed.  A measured transient or
 permanent-configuration provider failure exposes only an exact `model_id`
 repair, preferring a different provider when the frozen catalog contains one

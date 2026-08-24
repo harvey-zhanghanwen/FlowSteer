@@ -826,6 +826,41 @@ The Director v6 prompt is unchanged and remains topology-neutral.  Static
 verification passes 955 tests and 177 subtests; the fixed 128 task selection is
 unchanged.  These checks are not a v46 accuracy result.
 
+### v47 receipt-preserving structured-artifact recovery
+
+The v46 canary was stopped after its first task. `triviaqa:tc_1` obtained the
+same successful search and read receipt as the earlier v43 successful
+trajectory, but its Evidence Retriever exhausted the bounded ReAct loop while
+constructing the structured evidence artifact. The repair instruction
+simultaneously required the old evidence span to remain unchanged and required
+an entity surface absent from that span. After one same-Agent repair, the live
+Canvas domain then exposed the still-missing downstream roles instead of an
+executable evidence repair, causing the same failed Retriever to run six times
+and grow from 20 to 120 ReAct turns. No downstream artifact or valid lineage
+was produced, so the final `canvas_action_domain_exhausted` and null fallback
+were correct consequences of an earlier recovery-domain defect, not a
+retrieval or database-coverage failure.
+
+v47 keeps the entity, relation, passage ID, successful-read receipt and exact
+contiguous-span gates unchanged. Its public repair instruction permits only an
+evidence-span expansion inside the same read receipt so the exact entity
+mention and requested-relation sentence can coexist. A failed TriviaQA
+Retriever may modify only the state-conditioned evidence recovery contract or
+completion predicate; a generic answer-producing completion predicate is not
+admissible. If that bounded same-Agent repair still ends in
+`schema_invalid / qa_semantic_artifact_invalid` while retaining a successful
+read and an unexhausted public Tool continuation, Canvas admits exactly one
+isolated same-role/same-artifact Retriever replacement. Existing SkillFlow
+Action--Observation receipts are handed to that unit; downstream semantic
+roles remain unavailable until a valid evidence artifact is produced. A
+second replacement generation on unchanged receipts is not admitted.
+
+This is a state-conditioned recovery boundary in the shared AgentGraph, not a
+Director prompt recipe or fixed graph topology. Director prompt v6 is
+unchanged. Static verification passes 956 tests and 177 subtests. These checks
+are not a v47 accuracy result; Stable Zero and the fixed-128 evaluation remain
+live gates.
+
 ### Stable Zero status
 
 Static architecture, 946 unit tests, 177 subtests and the current frozen
@@ -867,9 +902,12 @@ introduced the role-conditional, topology-neutral inference boundaries above,
 but its `triviaqa:tc_3` live canary failed with the measured partial-Canvas
 recovery-domain defect documented above.  v43 retained two valid diagnostic
 trajectories, v44 exposed an empty exact relation domain, and v45 exposed the
-unhandled role-selection serialization failure.  v46 is now statically
-verified; its Stable Zero canary and fixed-128 run remain pending, so no v2
-score is inferred from these static results or failed diagnostics.
+unhandled role-selection serialization failure. v46 failed its first Stable
+Zero task after a successful Tool read because its structured-artifact repair
+path exposed blocked downstream roles and ended in
+`canvas_action_domain_exhausted`. v47 is now statically verified; its Stable
+Zero canary and fixed-128 run remain pending, so no v2 score is inferred from
+these static results or failed diagnostics.
 
 ## Historical comparison condition
 

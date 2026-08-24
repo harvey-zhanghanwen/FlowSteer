@@ -193,8 +193,9 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         assert evidence_surface is not None
         assert question_surface is not None
         assert proposition_binding is not None
-        self.assertIn("Repair only evidence_surface", evidence_surface)
-        self.assertIn("same evidence_span", evidence_surface)
+        self.assertIn("expand evidence_span only as needed", evidence_surface)
+        self.assertIn("same read receipt", evidence_surface)
+        self.assertIn("span contiguous", evidence_surface)
         self.assertIn("Repair only question_surface", question_surface)
         self.assertIn("unchanged original question", question_surface)
         self.assertIn(
