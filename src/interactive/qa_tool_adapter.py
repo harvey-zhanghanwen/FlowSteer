@@ -30,6 +30,7 @@ from .task_dataset import (
     hotpotqa_answer_cardinality_constraint,
     hotpotqa_answer_type_constraint,
     hotpotqa_question_scope,
+    qa_answer_argument_constraint,
     qa_answer_cardinality_constraint,
     qa_answer_type_constraint,
     qa_question_scope,
@@ -2901,6 +2902,22 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 "and receipt-grounded, and emit a complete action."
             )
         if isinstance(public_error_code, str) and (
+            "Evidence Retriever answer-bearing entity surface is a strict "
+            "subset of the resolved passage-title identity"
+        ) in public_error_code:
+            return (
+                "Preserve the original question, requested relation, every "
+                "successful qa-retrieval read receipt, and all already valid "
+                "semantic fields. First select an existing successful read "
+                "whose contiguous body span contains the complete "
+                "passage-title-resolved entity mention in the proposition "
+                "field that answers the original wh-dependency. Copy that "
+                "complete mention into entity_identity.evidence_surface and "
+                "the same proposition field. If no preserved read contains "
+                "such a span, continue the admitted bounded retrieval rather "
+                "than guessing or emitting an ambiguous short-name answer."
+            )
+        if isinstance(public_error_code, str) and (
             "Evidence Retriever target_relation must preserve the "
             "requested relation from the original question"
         ) in public_error_code:
@@ -3938,7 +3955,11 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                                                 "or short-name surface in the exact "
                                                 "evidence_span. The title supplies only "
                                                 "identity context and must never be used "
-                                                "as evidence_span."
+                                                "as evidence_span. When that proposition "
+                                                "field answers the original wh-dependency, "
+                                                "a named surface must preserve the complete "
+                                                "resolved title identity rather than an "
+                                                "ambiguous strict subset."
                                                 if semantic_protocol
                                                 == QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL
                                                 else ""
@@ -5235,7 +5256,10 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                         "differ and question_surface identifies that same read "
                         "receipt's public passage title, evidence_surface may be a "
                         "coreferential pronoun or short-name surface present in the "
-                        "exact evidence_span. The entity/event anchor may occupy the subject, "
+                        "exact evidence_span. If that same named proposition field "
+                        "answers the original wh-dependency, preserve the complete "
+                        "resolved passage-title identity rather than an ambiguous "
+                        "strict subset. The entity/event anchor may occupy the subject, "
                         "the object, or neither binary proposition argument. The "
                         "Reasoner alone owns relation binding, answer-slot binding, and "
                         "semantic answer selection."
@@ -5704,6 +5728,18 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             for token in _scope_tokens(canonical_title)
             if token not in _RELATION_CONTEXT_STOPWORDS and len(token) > 1
         )
+        canonical_title_identity = _canonical_evidence_text(
+            re.sub(
+                r"\s*\([^()]*\)\s*$",
+                "",
+                cited_read_title or "",
+            )
+        )
+        title_identity_tokens = frozenset(
+            token
+            for token in _scope_tokens(canonical_title_identity)
+            if token not in _RELATION_CONTEXT_STOPWORDS and len(token) > 1
+        )
         question_title_binding = bool(
             canonical_title
             and (
@@ -5905,6 +5941,25 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 "to exactly one evidence_proposition relation argument"
             )
         elif entity_in_subject != entity_in_object:
+            evidence_identity_field = (
+                "subject" if entity_in_subject else "object_or_attribute_value"
+            )
+            if (
+                qa_answer_argument_constraint(original_question)
+                == evidence_identity_field
+                and question_title_binding
+                and canonical_evidence_surface
+                not in _ENTITY_COREFERENCE_PRONOUNS
+                and len(title_identity_tokens) > 1
+                and bool(evidence_name_tokens)
+                and evidence_name_tokens < title_identity_tokens
+            ):
+                return (
+                    "Evidence Retriever answer-bearing entity surface is a "
+                    "strict subset of the resolved passage-title identity; "
+                    "preserve the complete receipt-grounded entity mention "
+                    "before Reasoner answer-slot binding"
+                )
             open_argument = (
                 proposition_object if entity_in_subject else proposition_subject
             )

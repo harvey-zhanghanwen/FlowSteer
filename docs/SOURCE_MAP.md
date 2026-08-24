@@ -952,6 +952,26 @@ gates authoritative, and prevents downstream Reasoner admission until evidence
 materializes. The Director prompt, action vocabulary and topology search space
 are unchanged.
 
+The v48 Canvas correction remains inside the same FlowSteer-derived
+transaction. It makes the model-visible missing-responsibility ADD domain and
+authoritative admission accept the same exact functional subgraph, after which
+the ordinary execute-on-edit feedback exposes the next relation/Output
+boundary. Existing receipt-grounded evidence ingress still takes precedence.
+No role order, graph template, Agent count, chain depth, reciprocal edge or
+topology is added to the Director prompt. This priority reconciliation is a
+necessary project adaptation because neither upstream implementation contains
+the shared semantic-lineage admission layer.
+
+The v48 answer-bearing entity-surface rule is likewise a necessary factual-QA
+adaptation over SkillFlow's unchanged public search/read receipts. It combines
+the question-only wh-dependency with the cited read's public passage title and
+contiguous evidence span: a named answer-bearing argument cannot be an
+ambiguous strict subset of a multi-token resolved title identity. Non-answer
+short-name anchors and receipt-grounded pronoun coreference remain legal. The
+repair reuses preserved successful reads before issuing another bounded Tool
+action and never reads accepted answers or evaluator state. FlowSteer and
+SkillFlow are not claimed to provide this Entity Linking policy.
+
 Provider and bounded-ReAct failures stay typed.  A measured transient or
 permanent-configuration provider failure exposes only an exact `model_id`
 repair, preferring a different provider when the frozen catalog contains one

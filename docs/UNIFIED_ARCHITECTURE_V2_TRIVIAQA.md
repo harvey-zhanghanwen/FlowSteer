@@ -63,7 +63,7 @@ with HTTP 403; no existing branch was overwritten.
 
 ### Verified without a live model
 
-- The current complete unit suite passes: 955 tests and 177 subtests across
+- The current complete unit suite passes: 958 tests and 177 subtests across
   AgentGraph, Runtime, Tool adapter, gateway prompts, Director action domains,
   configuration, records, collector, evaluator and reporting.  The only
   warning is the existing Pydantic class-config deprecation in
@@ -861,6 +861,55 @@ unchanged. Static verification passes 956 tests and 177 subtests. These checks
 are not a v47 accuracy result; Stable Zero and the fixed-128 evaluation remain
 live gates.
 
+### v48 progressive Canvas admission and answer-bearing entity surface
+
+The v47 three-task canary was stopped after two persisted trajectories exposed
+two deterministic integration defects; the interrupted third task is not
+scored. `triviaqa:tc_1` formed a complete receipt-valid lineage and explicitly
+FINISHed with `Lewis`, producing official EM `0` and F1 `0.6666667` against
+the accepted full-name surface. The Tool had already read a passage containing
+`Sinclair Lewis`, but the accepted Retriever artifact selected the shorter
+surname from a second read. Reasoner then copied that proposition argument,
+Verifier accepted it, and Formatter correctly copied it unchanged. This is an
+answer-bearing Entity Linking/canonical-surface admission defect, not a
+Formatter or evaluator defect.
+
+`triviaqa:tc_5` never reached retrieval. Its first accepted Canvas revision
+contained `Reasoner -> Verifier` and an isolated Formatter while the Evidence
+Retriever responsibility was still absent. The live action mask and exact JSON
+Schema exposed only `add_subgraph(evidence_retriever)`, but authoritative
+admission rejected that exact action and demanded the unavailable
+`set_relation(Verifier -> Formatter)`. The Director consequently produced the
+same legal-domain ADD for 27 independently seeded turns and reached
+`max_rounds`. All structured-generation receipts were valid; this was an
+action-domain/admission inconsistency, not Director noncompliance.
+
+v48 keeps FlowSteer's accepted Canvas edit -> execute -> feedback boundary and
+changes only that inconsistent admission predicate. When the live mask exposes
+an exact missing-responsibility functional subgraph and no already-valid
+Retriever ingress must be routed first, the identical ADD is transactionally
+admitted. Its execution feedback becomes the next observation; the following
+revision then exposes the exact remaining semantic relation and Output action.
+Existing mandatory repair, replacement, evidence-ingress, illegal relation and
+contract-validation priorities remain unchanged. This is state-conditioned
+progressive construction, not a fixed serial topology.
+
+The factual Retriever gate now also uses the question-only wh-dependency and
+the same successful read receipt's passage-title identity. If a named entity
+surface occupies the answer-bearing proposition field and is a strict token
+subset of a multi-token resolved title identity, it is rejected as ambiguous.
+A complete contiguous body mention is required before Reasoner answer-slot
+binding. Pronoun coreference and short-name aliases used only as non-answer
+entity anchors remain admissible. Public recovery preserves all successful
+read receipts and first reuses a receipt containing the complete mention;
+bounded retrieval remains available only when no preserved receipt supplies
+one. No accepted answer or evaluator state enters this gate.
+
+Director prompt v6, action vocabulary, topology search space and official
+evaluator are unchanged. The complete static suite passes 958 tests and 177
+subtests. These checks are not a v48 score; the new three-task Stable Zero gate
+and fixed-128 evaluation remain pending.
+
 ### Stable Zero status
 
 Static architecture, 946 unit tests, 177 subtests and the current frozen
@@ -905,9 +954,11 @@ trajectories, v44 exposed an empty exact relation domain, and v45 exposed the
 unhandled role-selection serialization failure. v46 failed its first Stable
 Zero task after a successful Tool read because its structured-artifact repair
 path exposed blocked downstream roles and ended in
-`canvas_action_domain_exhausted`. v47 is now statically verified; its Stable
-Zero canary and fixed-128 run remain pending, so no v2 score is inferred from
-these static results or failed diagnostics.
+`canvas_action_domain_exhausted`. v47 then failed its live gate for the measured
+action-domain/admission and answer-bearing entity-surface defects documented
+above. v48 is statically verified; its Stable Zero canary and fixed-128 run
+remain pending, so no v2 score is inferred from these static results or failed
+diagnostics.
 
 ## Historical comparison condition
 

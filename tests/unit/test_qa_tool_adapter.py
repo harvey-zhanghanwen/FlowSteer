@@ -182,6 +182,11 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             "entity_identity.question_surface does not occur in the original "
             "question"
         )
+        short_answer_surface = adapter._public_semantic_repair_instruction(
+            "qa_semantic_artifact_invalid: Evidence Retriever answer-bearing "
+            "entity surface is a strict subset of the resolved passage-title "
+            "identity"
+        )
         proposition_binding = adapter._public_semantic_repair_instruction(
             "qa_semantic_artifact_invalid: Reasoner requested-relation "
             "proposition has no deterministic entity binding"
@@ -189,9 +194,11 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNotNone(evidence_surface)
         self.assertIsNotNone(question_surface)
+        self.assertIsNotNone(short_answer_surface)
         self.assertIsNotNone(proposition_binding)
         assert evidence_surface is not None
         assert question_surface is not None
+        assert short_answer_surface is not None
         assert proposition_binding is not None
         self.assertIn("expand evidence_span only as needed", evidence_surface)
         self.assertIn("same read receipt", evidence_surface)
@@ -200,12 +207,22 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("unchanged original question", question_surface)
         self.assertIn(
             "every successful qa-retrieval read receipt",
+            short_answer_surface,
+        )
+        self.assertIn(
+            "complete passage-title-resolved entity mention",
+            short_answer_surface,
+        )
+        self.assertIn("admitted bounded retrieval", short_answer_surface)
+        self.assertIn(
+            "every successful qa-retrieval read receipt",
             proposition_binding,
         )
         self.assertIn("do not add a search or read", proposition_binding)
         for repair in (
             evidence_surface,
             question_surface,
+            short_answer_surface,
             proposition_binding,
         ):
             self.assertNotIn("Sinclair Lewis", repair)
@@ -6719,6 +6736,84 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(detail)
         assert detail is not None
         self.assertIn("not a wh-word or wh-phrase", detail)
+
+    def test_evidence_retriever_preserves_complete_answer_bearing_title_identity(
+        self,
+    ) -> None:
+        question = (
+            "Who received the Royal Medal in 1848, Ada Lovelace or "
+            "Charles Babbage?"
+        )
+
+        def completion_issue(
+            *,
+            evidence: str,
+            evidence_surface: str,
+            subject: str,
+        ) -> str | None:
+            artifact = {
+                "question_scope": question,
+                "entity_identity": {
+                    "question_surface": "Ada Lovelace",
+                    "evidence_surface": evidence_surface,
+                },
+                "target_relation": "received the Royal Medal in 1848",
+                "answer_type_constraint": "entity",
+                "evidence_proposition": {
+                    "subject": subject,
+                    "predicate": "received",
+                    "object_or_attribute_value": "the Royal Medal",
+                },
+                "evidence_span": evidence,
+                "passage_id": "ada-lovelace",
+            }
+            receipt = {
+                "tool_id": QA_RETRIEVAL_TOOL_ID,
+                "tool_version": "frozen-index-v1",
+                "request": {
+                    "action": "read",
+                    "arguments": {"passage_id": "ada-lovelace"},
+                },
+                "result": {
+                    "value": {
+                        "operation": "read",
+                        "passage_id": "ada-lovelace",
+                        "passage": {
+                            "passage_id": "ada-lovelace",
+                            "title": "Ada Lovelace (mathematician)",
+                            "text": evidence,
+                        },
+                    },
+                    "completed": True,
+                },
+                "error_type": None,
+            }
+            return QARetrievalReactExecutionAdapter._evidence_retriever_completion_issue(
+                original_question=question,
+                artifact=json.dumps(artifact),
+                tool_receipts=[receipt],
+            )
+
+        short_surface_issue = completion_issue(
+            evidence="In 1848, Lovelace received the Royal Medal.",
+            evidence_surface="Lovelace",
+            subject="Lovelace",
+        )
+        self.assertIsNotNone(short_surface_issue)
+        assert short_surface_issue is not None
+        self.assertIn("strict subset", short_surface_issue)
+        self.assertIn(
+            "complete receipt-grounded entity mention",
+            short_surface_issue,
+        )
+
+        self.assertIsNone(
+            completion_issue(
+                evidence="In 1848, Ada Lovelace received the Royal Medal.",
+                evidence_surface="Ada Lovelace",
+                subject="Ada Lovelace",
+            )
+        )
 
     def test_evidence_retriever_accepts_receipt_grounded_inflection_and_rejects_relation_drift(
         self,

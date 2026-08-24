@@ -1,9 +1,10 @@
 # Fixed 128-sample TriviaQA development evaluation for the topology-neutral
 # unified_architecture_v2 Director prompt v6, required semantic lineage, and
-# Tool/Canvas contract v47 with exact relation-domain consistency, bounded
+# Tool/Canvas contract v48 with exact relation-domain consistency, bounded
 # role-selection serialization recovery, Tool-receipt-conditioned strategy
-# observability, and receipt-preserving structured-artifact recovery. Director
-# prompt v6 remains topology-neutral.
+# observability, receipt-preserving structured-artifact recovery, progressive
+# ADD/admission consistency, and answer-bearing entity-surface preservation.
+# Director prompt v6 remains topology-neutral.
 # The sequential selection freezes the original aligned development order.  The
 # first three selected tasks form the Stable Zero canary when --canary-only is
 # requested.  Training and Skills remain disabled.
@@ -14,15 +15,15 @@ experiment:
   name: "triviaqa_unified_architecture_v2_fixed128"
   phase: "triviaqa_evaluation"
   baseline_id: "triviaqa_unified_architecture_v2"
-  step_id: "fixed128_v6_v47_receipt_preserving_artifact_recovery"
+  step_id: "fixed128_v6_v48_canvas_admission_entity_surface"
   training_enabled: false
   seed: 20260817
-  condition_id: "triviaqa_unified_architecture_v2_fixed128_v6_v47_receipt_preserving_artifact_recovery"
-  sampling_schedule_purpose: "triviaqa_fixed128_development_v6_v47_receipt_preserving_artifact_recovery"
+  condition_id: "triviaqa_unified_architecture_v2_fixed128_v6_v48_canvas_admission_entity_surface"
+  sampling_schedule_purpose: "triviaqa_fixed128_development_v6_v48_canvas_admission_entity_surface"
   catalog_order_namespace: "unified_architecture_v2"
   prompt_version: "agentgraph.director.qa-semantic-recovery.v6"
-  tool_version: "skillflow.qa-retrieval.factual-semantic-retry.v47"
-  output_dir: "artifacts/unified_architecture_v2/triviaqa_fixed128_v6_v47_receipt_preserving_artifact_recovery_20260824"
+  tool_version: "skillflow.qa-retrieval.factual-semantic-retry.v48"
+  output_dir: "artifacts/unified_architecture_v2/triviaqa_fixed128_v6_v48_canvas_admission_entity_surface_20260824"
 
 data:
   catalog_path: "config/joint_qa_partitions_v2.yaml"
@@ -56,7 +57,7 @@ triviaqa_evaluation:
 
 qa_tool_runtime:
   enabled: true
-  condition_id: "triviaqa_unified_architecture_v2_fixed128_v6_v47_receipt_preserving_artifact_recovery"
+  condition_id: "triviaqa_unified_architecture_v2_fixed128_v6_v48_canvas_admission_entity_surface"
   mode: "model_driven_search_read"
   passage_source: "external_corpus"
   dataset_scope: ["triviaqa"]
@@ -69,17 +70,17 @@ qa_tool_runtime:
 
 storage:
   schema_version: "flowsteer.completion_benchmark.round.v1"
-  root: "artifacts/unified_architecture_v2/triviaqa_fixed128_v6_v47_receipt_preserving_artifact_recovery_20260824/evidence"
-  selected_tasks_path: "artifacts/unified_architecture_v2/triviaqa_fixed128_v6_v47_receipt_preserving_artifact_recovery_20260824/selected_tasks.jsonl"
-  direct_predictions_path: "artifacts/unified_architecture_v2/triviaqa_fixed128_v6_v47_receipt_preserving_artifact_recovery_20260824/direct_question_only_predictions.jsonl"
-  trajectories_path: "artifacts/unified_architecture_v2/triviaqa_fixed128_v6_v47_receipt_preserving_artifact_recovery_20260824/agentgraph_trajectories.jsonl"
-  failures_path: "artifacts/unified_architecture_v2/triviaqa_fixed128_v6_v47_receipt_preserving_artifact_recovery_20260824/collection_failures.jsonl"
-  paired_results_path: "artifacts/unified_architecture_v2/triviaqa_fixed128_v6_v47_receipt_preserving_artifact_recovery_20260824/paired_results.jsonl"
-  wrong_demos_path: "artifacts/unified_architecture_v2/triviaqa_fixed128_v6_v47_receipt_preserving_artifact_recovery_20260824/wrong_demos.jsonl"
-  manifest_path: "artifacts/unified_architecture_v2/triviaqa_fixed128_v6_v47_receipt_preserving_artifact_recovery_20260824/run_manifest.json"
-  preflight_receipt_path: "artifacts/unified_architecture_v2/triviaqa_fixed128_v6_v47_receipt_preserving_artifact_recovery_20260824/preflight_receipt.json"
-  report_json_path: "reports/unified_architecture_v2/triviaqa_fixed128_v6_v47_receipt_preserving_artifact_recovery_20260824_report.json"
-  report_markdown_path: "reports/unified_architecture_v2/triviaqa_fixed128_v6_v47_receipt_preserving_artifact_recovery_20260824_report.md"
+  root: "artifacts/unified_architecture_v2/triviaqa_fixed128_v6_v48_canvas_admission_entity_surface_20260824/evidence"
+  selected_tasks_path: "artifacts/unified_architecture_v2/triviaqa_fixed128_v6_v48_canvas_admission_entity_surface_20260824/selected_tasks.jsonl"
+  direct_predictions_path: "artifacts/unified_architecture_v2/triviaqa_fixed128_v6_v48_canvas_admission_entity_surface_20260824/direct_question_only_predictions.jsonl"
+  trajectories_path: "artifacts/unified_architecture_v2/triviaqa_fixed128_v6_v48_canvas_admission_entity_surface_20260824/agentgraph_trajectories.jsonl"
+  failures_path: "artifacts/unified_architecture_v2/triviaqa_fixed128_v6_v48_canvas_admission_entity_surface_20260824/collection_failures.jsonl"
+  paired_results_path: "artifacts/unified_architecture_v2/triviaqa_fixed128_v6_v48_canvas_admission_entity_surface_20260824/paired_results.jsonl"
+  wrong_demos_path: "artifacts/unified_architecture_v2/triviaqa_fixed128_v6_v48_canvas_admission_entity_surface_20260824/wrong_demos.jsonl"
+  manifest_path: "artifacts/unified_architecture_v2/triviaqa_fixed128_v6_v48_canvas_admission_entity_surface_20260824/run_manifest.json"
+  preflight_receipt_path: "artifacts/unified_architecture_v2/triviaqa_fixed128_v6_v48_canvas_admission_entity_surface_20260824/preflight_receipt.json"
+  report_json_path: "reports/unified_architecture_v2/triviaqa_fixed128_v6_v48_canvas_admission_entity_surface_20260824_report.json"
+  report_markdown_path: "reports/unified_architecture_v2/triviaqa_fixed128_v6_v48_canvas_admission_entity_surface_20260824_report.md"
 
 director:
   base_model: "${QWEN35_9B_MODEL_PATH:-/home/test/SKILLEV/skillev-new-b2-temp/model/Qwen3.5-9B-modelscope}"

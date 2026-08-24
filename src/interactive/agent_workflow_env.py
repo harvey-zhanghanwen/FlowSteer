@@ -8368,7 +8368,6 @@ class AgentWorkflowEnv:
         if (
             self._graph.nodes
             and missing_role_families
-            and bool(self._failed_agent_ids or self._repair_exhausted_agent_ids)
             and not replacement_domains
             and not self._dirty_auxiliary_replacement_agent_ids()
             and (
@@ -8379,19 +8378,34 @@ class AgentWorkflowEnv:
             sampled_role_families = tuple(
                 (spec.role_family or "").casefold() for spec in action.agents
             )
-            if (
+            exact_missing_role_add = (
                 action.action_type is AgentActionType.ADD_SUBGRAPH
                 and 1 <= len(action.agents) <= len(missing_role_families)
                 and len(sampled_role_families) == len(set(sampled_role_families))
                 and set(sampled_role_families) <= set(missing_role_families)
-            ):
-                return None
-            return (
-                "complete the missing semantic responsibilities before "
-                "auxiliary augmentation or generic relation edits; add only "
-                "roles from admitted_new_role_families="
-                f"{list(missing_role_families)!r}"
             )
+            if (
+                exact_missing_role_add
+                and not self._required_evidence_ingress_relation_candidates()
+            ):
+                # Match the live FlowSteer action mask for both initial
+                # progressive construction and recovery: one admitted
+                # functional subgraph may materialize the still-missing
+                # semantic responsibility before a later Canvas edit closes
+                # any remaining relation.  The accepted edit executes and
+                # feeds back immediately; this orders live edits without
+                # prescribing a complete workflow topology.
+                return None
+            if (
+                bool(self._failed_agent_ids or self._repair_exhausted_agent_ids)
+                and not self._required_evidence_ingress_relation_candidates()
+            ):
+                return (
+                    "complete the missing semantic responsibilities before "
+                    "auxiliary augmentation or generic relation edits; add only "
+                    "roles from admitted_new_role_families="
+                    f"{list(missing_role_families)!r}"
+                )
 
         capacity_recovery_delete_ids = (
             self._capacity_blocking_failed_auxiliary_delete_ids()

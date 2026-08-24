@@ -5499,6 +5499,86 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+    async def test_triviaqa_missing_retriever_add_domain_matches_canvas_admission(
+        self,
+    ) -> None:
+        registry = make_registry()
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_trivia_semantic_runtime(registry, _ImmediateGateway()),
+            problem="What is the capital of France?",
+            execute_on_edit=False,
+            require_format_agent=True,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+        )
+        # Reconstruct the accepted partial revision captured in the tc_5 live
+        # trajectory.  Constructor validation intentionally accepts only
+        # complete Format ownership, while a progressive Canvas can persist
+        # this deferred intermediate revision between edits.
+        complete = _trivia_semantic_graph()
+        env._graph = AgentGraph(
+            [node for node in complete.nodes if node.id != "reader"],
+            [AgentRelation("reasoner", "verifier", True, False)],
+        )
+
+        self.assertEqual(
+            ("evidence_retriever",),
+            env._missing_semantic_role_families(),
+        )
+        self.assertEqual(("add_subgraph",), env.model_admissible_action_types())
+        self.assertEqual(
+            ["evidence_retriever"],
+            env.model_admissible_action_targets()["add_subgraph"][
+                "admitted_new_role_families"
+            ],
+        )
+
+        added = await env.step(
+            json.dumps(
+                {
+                    "action": "add_subgraph",
+                    "agents": [
+                        {
+                            "agent_id": "reader",
+                            "model_id": "cheap",
+                            "contract": (
+                                "retrieve answer-free evidence for the question "
+                                "entity and relation"
+                            ),
+                            "role_family": "evidence_retriever",
+                            "allowed_tools": [QA_RETRIEVAL_TOOL_ID],
+                            "execution_mode": "react",
+                            "artifact_type": "retrieval_evidence",
+                        }
+                    ],
+                    "relations": [
+                        {
+                            "source_id": "reader",
+                            "target_id": "reasoner",
+                            "source_to_target": True,
+                            "target_to_source": False,
+                        }
+                    ],
+                }
+            )
+        )
+
+        self.assertTrue(added.accepted, added.feedback)
+        self.assertEqual(("set_relation",), env.model_admissible_action_types())
+        self.assertEqual(
+            [
+                {
+                    "source_id": "verifier",
+                    "target_id": "formatter",
+                    "source_to_target": True,
+                    "target_to_source": False,
+                }
+            ],
+            env.model_admissible_action_targets()["set_relation"]["candidates"],
+        )
+
     async def test_triviaqa_evidence_ingress_precedes_missing_formatter_add(
         self,
     ) -> None:
