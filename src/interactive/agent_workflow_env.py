@@ -3743,6 +3743,16 @@ class AgentWorkflowEnv:
                 try:
                     prior_failure_metadata = dict(self._failure_continuations)
                     prior_failure_metadata.update(recovery_continuation_handoff)
+                    execution_dirty_agents = (
+                        execution_scope_set
+                        if isolated_execution_scope
+                        else (
+                            set(self._unresolved_dirty_agents)
+                            | self._triviaqa_retrievers_requiring_validation(
+                                self._graph
+                            )
+                        )
+                    )
                     execution = await self.runtime.execute(
                         execution_graph,
                         self._problem,
@@ -3751,11 +3761,7 @@ class AgentWorkflowEnv:
                         prior_output_metadata=prior_output_metadata,
                         prior_failure_metadata=prior_failure_metadata,
                         unavailable_model_ids=self._unavailable_model_ids,
-                        dirty_agents=(
-                            execution_scope_set
-                            if isolated_execution_scope
-                            else self._unresolved_dirty_agents
-                        ),
+                        dirty_agents=execution_dirty_agents,
                         format_output_agent=(
                             False
                             if isolated_execution_scope
@@ -7824,6 +7830,87 @@ class AgentWorkflowEnv:
             )
             for node in self._graph.nodes
         )
+
+    def _triviaqa_retriever_has_current_grounded_artifact(
+        self,
+        graph: AgentGraph,
+        retriever_id: str,
+    ) -> bool:
+        """Validate one direct Retriever cache entry for TriviaQA reuse.
+
+        FlowSteer's accepted edit still enters AgentRuntime once. SkillFlow's
+        completion boundary validates Retriever Action--Observation state
+        before either a one-way successor or the existing reciprocal four-phase
+        block advances to Reasoner. This state-conditioned check only prevents
+        an invalid cached artifact from bypassing that causal execution path.
+        """
+
+        if (
+            self.semantic_protocol != _QA_SEMANTIC_PROTOCOL
+            or not isinstance(self.runtime.dataset_id, str)
+            or self.runtime.dataset_id.casefold() != "triviaqa"
+            or not graph.has_node(retriever_id)
+        ):
+            return True
+        retriever = graph.get_node(retriever_id)
+        if (retriever.role_family or "").casefold() != "evidence_retriever":
+            return False
+        if (
+            retriever_id in self._failed_agent_ids
+            or retriever_id in self._repair_exhausted_agent_ids
+            or not self._has_successful_artifact(retriever_id)
+        ):
+            return False
+        metadata = self._progressive_output_metadata.get(retriever_id)
+        artifact_version = (
+            metadata.get("artifact_version")
+            if isinstance(metadata, Mapping)
+            else None
+        )
+        if (
+            not isinstance(artifact_version, str)
+            or not artifact_version.strip()
+        ):
+            return False
+        return self._semantic_replacement_has_valid_artifact(
+            retriever_id,
+            "evidence_retriever",
+        )
+
+    def _triviaqa_retrievers_requiring_validation(
+        self,
+        graph: AgentGraph,
+    ) -> set[str]:
+        """Return cached Retriever inputs that must execute before Reasoning.
+
+        Missing Retriever outputs are already dirty in AgentRuntime.  This
+        adds only direct TriviaQA Retriever inputs whose cached artifact fails
+        current entity/relation/read-receipt admission, so a stale cache cannot
+        bypass the ordinary Retriever -> Reasoner execution dependency.
+        """
+
+        if (
+            self.semantic_protocol != _QA_SEMANTIC_PROTOCOL
+            or not isinstance(self.runtime.dataset_id, str)
+            or self.runtime.dataset_id.casefold() != "triviaqa"
+        ):
+            return set()
+        result: set[str] = set()
+        for reasoner in graph.nodes:
+            if (reasoner.role_family or "").casefold() != "reasoner":
+                continue
+            for predecessor_id in graph.directed_predecessors(reasoner.id):
+                predecessor = graph.get_node(predecessor_id)
+                if (
+                    predecessor.role_family or ""
+                ).casefold() != "evidence_retriever":
+                    continue
+                if not self._triviaqa_retriever_has_current_grounded_artifact(
+                    graph,
+                    predecessor_id,
+                ):
+                    result.add(predecessor_id)
+        return result
 
     def _allows_grounded_terminal_reachability_ingress(
         self,

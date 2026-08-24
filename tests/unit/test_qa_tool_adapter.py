@@ -3621,7 +3621,7 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             "search",
             {
                 "query": (
-                    "Chart Weekly magazine first published American music hit parade"
+                    "Chart Weekly magazine first published American hit parade"
                 ),
                 "limit": 15,
             },
@@ -3640,14 +3640,14 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
                 search_observation(
                     (
                         "Chart Weekly magazine first published American "
-                        "music hit parade"
+                        "hit parade"
                     ),
                     15,
                 ),
                 search_observation(
                     (
                         "Chart Weekly magazine publication first American "
-                        "music hit parade"
+                        "hit parade history"
                     ),
                     20,
                 ),
@@ -3658,7 +3658,7 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             "search",
             {
                 "query": (
-                    "Chart Weekly magazine published first American music hit parade history"
+                    "Chart Weekly magazine published first American hit parade history"
                 ),
                 "limit": 25,
             },
@@ -3678,14 +3678,21 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
                 search_observation(
                     (
                         "Chart Weekly magazine published first American "
-                        "music hit parade history"
+                        "hit parade history"
                     ),
                     25,
                 ),
             ],
         )
-        self.assertEqual((True, True, True, True, True), state.strategy_semantics)
-        self.assertTrue(state.strategy_semantics_verified)
+        # Spelling normalization and entity disambiguation have no public
+        # title/snippet support in this empty-hit fixture.  They remain legal
+        # action attempts, but cannot be reported as verified merely because
+        # their FTS term sets changed.
+        self.assertEqual(
+            (True, False, True, False, True),
+            state.strategy_semantics,
+        )
+        self.assertFalse(state.strategy_semantics_verified)
         self.assertEqual(
             "knowledge_base_coverage_failure",
             adapter._factual_exhaustion_diagnosis(
@@ -4442,12 +4449,12 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             "Billboard magazine first published American hit chart", 10, "p3"
         )
         append_cycle(
-            "Billboard magazine first published American music hit parade",
+            "Billboard magazine first published American hit parade",
             15,
             "p4",
         )
         append_cycle(
-            "Billboard magazine publication first American music hit parade",
+            "Billboard magazine publication first American hit parade history",
             20,
             "p5",
         )
@@ -4457,7 +4464,7 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             "search",
             {
                 "query": (
-                    "Billboard magazine published first American music hit parade history"
+                    "Billboard magazine published first American hit parade history"
                 ),
                 "limit": 25,
             },
@@ -4472,7 +4479,7 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         )
         observations.pop()
         append_cycle(
-            "Billboard magazine published first American music hit parade history",
+            "Billboard magazine published first American hit parade history",
             25,
             "p6",
         )

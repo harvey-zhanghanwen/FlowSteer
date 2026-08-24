@@ -959,8 +959,51 @@ previously verified missing-role completion behavior is unchanged.
 Director prompt v6 remains short, topology-neutral and unchanged. No fixed
 role order, chain, Agent count, candidate answer or workflow template is added
 to it. The complete static suite passes 960 tests and 177 subtests. Stable Zero
-and fixed-128 are still live gates, so these static results are not an accuracy
-claim.
+subsequently passed all three frozen tasks with valid evaluator and terminal
+receipts: `tc_1` and `tc_3` scored EM/F1 `1.0/1.0`; `tc_5` returned the
+semantically correct `1930s` but the official accepted-answer set contained
+only `30s` variants, so the evaluator recorded EM/F1 `0.0/0.0` and
+`accepted_answer_canonicalization_mismatch`. All three explicitly finished;
+there were no terminal or collection failures. The fixed-128 run was stopped
+before a fourth trajectory was persisted when a requirements trace found that
+retrieval-strategy observability and cached-Retriever admission required a
+stricter implementation. No fixed-128 score is inferred from this canary.
+
+### v51 receipt-verifiable retrieval attempts and Retriever cache admission
+
+v51 keeps SkillFlow's existing bounded `search(query, limit) -> Observation ->
+read(passage_id)` ReAct wire and FlowSteer's accepted Canvas edit -> execute ->
+feedback boundary. Every successful search now has an answer-free structured
+attempt record containing the required strategy frontier, query variant,
+normalized FTS term set, required and observed top-k, hit count, and a strict
+StructuredAction--Observation--Tool-receipt mirror. The mirror requires the
+same query and limit, the exact public hit schema, consecutive rank values,
+and ordered equality between `passage_ids` and hit IDs.
+
+Strategy evidence is deliberately fail-closed. Spelling normalization and
+entity disambiguation are verified only when a previous mirror-valid public
+hit supplies the exact title and snippet support. Alias expansion and query
+rewriting preserve the complete normalized non-relation token multiset and
+may change only a controlled relation surface already required by the
+question. A larger top-k inherits the semantic proof of its existing query
+variant and cannot upgrade an unverified query. An attempted transformation
+without these public invariants remains observable but is labelled
+`unverified_strategy_attempt`; it is not reported as Entity Linking success.
+Ground truth, accepted answers and evaluator state are unavailable to all of
+these checks.
+
+AgentRuntime already executes one-way Retriever -> Reasoner dependencies in
+DAG order and a Director-selected reciprocal Retriever <-> Reasoner block as
+`Retriever DRAFT -> Reasoner DRAFT -> Retriever REVISION -> Reasoner
+REVISION`, with fail-fast completion admission before Reasoner. v51 therefore
+does not project or replace either topology. The only Environment adaptation
+is per-direct-Retriever cache admission: each cached artifact must be current,
+non-dirty, versioned, receipt-valid and entity/relation grounded; an invalid
+fan-in member alone is marked dirty and re-executed, while valid peers remain
+reusable. Director prompt v6, action vocabulary, topology search space,
+official evaluator, Skill state and all training settings remain unchanged.
+The complete v51 static suite passes 969 tests and 180 subtests; this is an
+interface/regression result, not a TriviaQA accuracy claim.
 
 ### Stable Zero status
 
@@ -1013,9 +1056,11 @@ Tool read because full-name title expansion was rejected and the recovery
 domain exposed 25 no-op MODIFY actions; the remaining two canary tasks and the
 fixed-128 run were not started. The expanded-alias v49 preflight candidate was
 rejected before live execution because it could admit Title Case descriptors.
-v50 is statically verified, while its Stable Zero canary and fixed-128 run
-remain pending. No v2 score is inferred from these static results or failed
-diagnostics.
+v50 then passed its three-task Stable Zero terminal gate with two official
+exact matches and one accepted-answer canonicalization mismatch; its fixed-128
+run was stopped before a fourth trajectory was persisted for the v51
+requirements correction above. v51 static and live gates remain separate; no
+fixed-128 v2 score is inferred from unit tests, canaries or failed diagnostics.
 
 ## Historical comparison condition
 

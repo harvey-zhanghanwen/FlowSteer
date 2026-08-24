@@ -994,6 +994,28 @@ same-role replacement exists, downstream semantic roles stay outside the live
 domain. This is a state-conditioned Evidence Grounding boundary, not a prompt
 template or prescribed topology; Director prompt v6 is unchanged.
 
+The v51 retrieval-attempt record directly reuses SkillFlow's bounded public
+`StructuredAction -> Observation` search/read wire and the project's existing
+Tool receipts. SkillFlow does not provide spelling normalization, Entity
+Linking, alias expansion, disambiguation or query-rewrite verification. Those
+five strategy stages are therefore `PROJECT_NECESSARY_ADAPTATION`: each stage
+is bound to the executed query/limit/hit receipt; spelling and disambiguation
+require prior public title/snippet support; controlled relation rewrites keep
+the non-relation token multiset invariant; and top-k expansion inherits rather
+than upgrades the current semantic proof. Attempts lacking these answer-free
+invariants remain `unverified`. No accepted answer, ground truth or evaluator
+state enters the proof.
+
+The v51 cache-admission rule reuses AgentRuntime's existing one-way DAG
+scheduler and its causally ordered reciprocal QA block. It does not alter the
+Director-selected topology: `Retriever DRAFT -> Reasoner DRAFT -> Retriever
+REVISION -> Reasoner REVISION` remains the reciprocal execution order. The
+minimal project adaptation validates every cached direct Retriever separately
+against its current artifact version, entity/relation binding and successful
+read receipt before reuse; only invalid cache members are marked dirty. This
+prevents stale evidence from bypassing the existing completion boundary while
+preserving FlowSteer's accepted edit -> execute -> feedback transaction.
+
 Provider and bounded-ReAct failures stay typed.  A measured transient or
 permanent-configuration provider failure exposes only an exact `model_id`
 repair, preferring a different provider when the frozen catalog contains one

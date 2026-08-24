@@ -1559,6 +1559,55 @@ class _FactualRetrievalStrategyProof:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class _FactualRetrievalAttemptRecord:
+    """Compact answer-free record of one executed public search transition.
+
+    SkillFlow keeps the authoritative StructuredAction, public Observation,
+    and Tool receipt.  This record does not add a new retrieval operation or
+    infer an entity alias.  It only projects the fields that must agree when
+    that existing transition is replayed from the receipt, and states whether
+    the query advanced the bounded strategy schedule or was a top-k recall
+    expansion of the latest query variant.
+    """
+
+    attempt_index: int
+    required_strategy: str | None
+    query_variant: str
+    normalized_query: str
+    fts_term_set: tuple[str, ...]
+    required_top_k: int
+    observed_top_k: int | None
+    strategy_advanced: bool
+    query_variant_verified: bool
+    tool_transition_verified: bool
+    hit_count: int
+
+    @property
+    def verified(self) -> bool:
+        return (
+            self.query_variant_verified
+            and self.tool_transition_verified
+            and self.observed_top_k == self.required_top_k
+        )
+
+    def to_value(self) -> dict[str, object]:
+        return {
+            "attempt_index": self.attempt_index,
+            "required_strategy": self.required_strategy,
+            "query_variant": self.query_variant,
+            "normalized_query": self.normalized_query,
+            "fts_term_set": list(self.fts_term_set),
+            "required_top_k": self.required_top_k,
+            "observed_top_k": self.observed_top_k,
+            "strategy_advanced": self.strategy_advanced,
+            "query_variant_verified": self.query_variant_verified,
+            "tool_transition_verified": self.tool_transition_verified,
+            "hit_count": self.hit_count,
+            "verified": self.verified,
+        }
+
+
 def _relation_surface_replacement_classes(
     *,
     original_question: str,
@@ -1581,6 +1630,45 @@ def _relation_surface_replacement_classes(
         not question_classes
         or not question_classes <= previous.keys()
         or not question_classes <= current.keys()
+    ):
+        return frozenset()
+    # A controlled relation replacement changes only a surface belonging to
+    # one already-required relation class.  Every other normalized query token
+    # (including repetitions) must remain identical; otherwise a model could
+    # smuggle a new subtopic, guessed entity, or candidate into an apparent
+    # alias/rewrite transition.
+    def non_relation_token_multiset(surface: str) -> tuple[str, ...]:
+        tokens = _scope_tokens(surface)
+        occupied_relation_positions: set[int] = set()
+        present_surfaces = _relation_alias_surfaces_in(surface)
+        for relation_class in question_classes:
+            for alias_surface in present_surfaces.get(
+                relation_class,
+                frozenset(),
+            ):
+                width = len(alias_surface)
+                for offset in range(len(tokens) - width + 1):
+                    if all(
+                        _relation_token_variants(token)
+                        & _relation_token_variants(alias)
+                        for token, alias in zip(
+                            tokens[offset : offset + width],
+                            alias_surface,
+                        )
+                    ):
+                        occupied_relation_positions.update(
+                            range(offset, offset + width)
+                        )
+        return tuple(
+            sorted(
+                token
+                for index, token in enumerate(tokens)
+                if index not in occupied_relation_positions
+            )
+        )
+
+    if non_relation_token_multiset(previous_query) != non_relation_token_multiset(
+        query
     ):
         return frozenset()
     return frozenset(
@@ -1678,6 +1766,90 @@ def _factual_strategy_semantics_verified(
     return tuple(verified)
 
 
+def _public_search_transition_mirror(
+    observation: Mapping[str, object],
+) -> tuple[bool, tuple[str, ...]]:
+    """Verify the exact SkillFlow search Action--Observation receipt mirror."""
+
+    executed_action = observation.get("executed_action")
+    result = observation.get("result")
+    if not isinstance(executed_action, Mapping) or not isinstance(result, Mapping):
+        return False, ()
+    arguments = executed_action.get("arguments")
+    if not isinstance(arguments, Mapping):
+        return False, ()
+    action_query = arguments.get("query")
+    action_limit = arguments.get("limit")
+    raw_passage_ids = result.get("passage_ids")
+    raw_hits = result.get("hits")
+    if not isinstance(raw_passage_ids, list) or not isinstance(raw_hits, list):
+        return False, ()
+    if len(raw_passage_ids) != len(raw_hits):
+        return False, ()
+
+    passage_ids: list[str] = []
+    hit_passage_ids: list[str] = []
+    hits_complete = True
+    expected_hit_fields = {
+        "document_id",
+        "passage_id",
+        "rank",
+        "snippet",
+        "title",
+    }
+    for expected_rank, (passage_id, hit) in enumerate(
+        zip(raw_passage_ids, raw_hits),
+        start=1,
+    ):
+        if not isinstance(passage_id, str) or not passage_id.strip():
+            hits_complete = False
+            continue
+        passage_ids.append(passage_id.strip())
+        if not isinstance(hit, Mapping) or set(hit) != expected_hit_fields:
+            hits_complete = False
+            continue
+        hit_passage_id = hit.get("passage_id")
+        document_id = hit.get("document_id")
+        title = hit.get("title")
+        snippet = hit.get("snippet")
+        rank = hit.get("rank")
+        if (
+            not isinstance(hit_passage_id, str)
+            or not hit_passage_id.strip()
+            or not isinstance(document_id, str)
+            or not document_id.strip()
+            or not isinstance(title, str)
+            or not title.strip()
+            or not isinstance(snippet, str)
+            or not snippet.strip()
+            or type(rank) is not int
+            or rank != expected_rank
+        ):
+            hits_complete = False
+            continue
+        hit_passage_ids.append(hit_passage_id.strip())
+
+    verified = bool(
+        observation.get("observation_status") == "success"
+        and executed_action.get("kind") == "tool"
+        and executed_action.get("name") == "search"
+        and executed_action.get("resource_id") == QA_RETRIEVAL_TOOL_ID
+        and set(arguments) == {"query", "limit"}
+        and isinstance(action_query, str)
+        and bool(action_query.strip())
+        and action_query == result.get("query")
+        and type(action_limit) is int
+        and action_limit > 0
+        and action_limit == result.get("top_k")
+        and result.get("operation") == "search"
+        and hits_complete
+        and len(passage_ids) == len(raw_passage_ids)
+        and len(hit_passage_ids) == len(raw_hits)
+        and tuple(passage_ids) == tuple(hit_passage_ids)
+    )
+    return verified, tuple(passage_ids) if verified else ()
+
+
 def _factual_strategy_proofs(
     *,
     original_question: str,
@@ -1695,24 +1867,88 @@ def _factual_strategy_proofs(
         distinct_queries=distinct_queries,
     )
     proofs: list[_FactualRetrievalStrategyProof] = []
-    for index, stage_verified in enumerate(semantics):
+    for index, invariant_verified in enumerate(semantics):
         strategy = _FACTUAL_QA_RETRIEVAL_STRATEGIES[index]
         source_ids: list[str] = []
+        public_support = False
         for observation in search_observations[:index]:
+            transition_verified, verified_passage_ids = (
+                _public_search_transition_mirror(observation)
+            )
+            if not transition_verified:
+                continue
             result = observation.get("result")
-            raw_ids = result.get("passage_ids") if isinstance(result, Mapping) else None
-            if isinstance(raw_ids, list):
-                source_ids.extend(
-                    passage_id.strip()
-                    for passage_id in raw_ids
-                    if isinstance(passage_id, str) and passage_id.strip()
-                )
+            raw_hits = result.get("hits") if isinstance(result, Mapping) else None
+            if not isinstance(raw_hits, list):
+                continue
+            query_tokens = _scope_tokens(distinct_queries[index])
+            entity_anchor = _question_entity_anchor_tokens(original_question)
+            for hit in raw_hits:
+                if not isinstance(hit, Mapping):
+                    continue
+                title = hit.get("title")
+                snippet = hit.get("snippet")
+                if not isinstance(title, str) or not isinstance(snippet, str):
+                    continue
+                title_tokens = _scope_tokens(title)
+                public_surface = f"{title} {snippet}"
+                if (
+                    title_tokens
+                    and any(
+                        tuple(
+                            query_tokens[offset : offset + len(title_tokens)]
+                        )
+                        == title_tokens
+                        for offset in range(
+                            len(query_tokens) - len(title_tokens) + 1
+                        )
+                    )
+                    and (
+                        not entity_anchor
+                        or _surface_binds_entity_anchor(
+                            public_surface,
+                            entity_anchor,
+                        )
+                    )
+                    and not _missing_required_relation_classes(
+                        original_question,
+                        public_surface,
+                    )
+                    and not _missing_question_scope_modifiers(
+                        original_question,
+                        public_surface,
+                    )
+                ):
+                    public_support = True
+                    passage_id = hit.get("passage_id")
+                    if (
+                        isinstance(passage_id, str)
+                        and passage_id.strip() in verified_passage_ids
+                    ):
+                        source_ids.append(passage_id.strip())
+
+        # SkillFlow intentionally exposes no entity-linking oracle.  Therefore
+        # spelling normalization and entity disambiguation are verified only
+        # when the query reuses an exact title from a prior public hit whose
+        # title+snippet preserve the question entity, relation, and scope.  A
+        # novel string alone remains an unverified policy attempt.  Alias
+        # expansion and query rewriting use the deterministic controlled
+        # relation-alternation invariant above and never consult answers.
+        stage_verified = invariant_verified and (
+            public_support
+            if strategy in {"spelling_normalization", "entity_disambiguation"}
+            else True
+        )
         strength = (
             "unverified_strategy_attempt"
             if not stage_verified
             else (
                 "tool_receipt_conditioned_strategy_attempt"
-                if index > 0 and search_observations[:index]
+                if strategy
+                in {"spelling_normalization", "entity_disambiguation"}
+                and public_support
+                else "deterministic_relation_invariant_strategy_attempt"
+                if strategy in {"alias_expansion", "query_rewriting"}
                 else "question_invariant_strategy_attempt"
             )
         )
@@ -1725,6 +1961,134 @@ def _factual_strategy_proofs(
             )
         )
     return tuple(proofs)
+
+
+def _factual_retrieval_attempt_records(
+    *,
+    original_question: str,
+    search_observations: Sequence[Mapping[str, object]],
+) -> tuple[_FactualRetrievalAttemptRecord, ...]:
+    """Project every successful search Action--Observation transition.
+
+    DIRECT_REUSE: SkillFlow's ``QARetrievalEnvironment`` admits only
+    ``search(query, limit)`` and publishes the same query plus ranked public
+    hits in its Observation; the generic FlowSteer Tool runtime serializes
+    that request and result unchanged in the Tool receipt.  This thin adapter
+    verifies that mirror and the existing five-stage/top-k action mask.  It
+    never reads benchmark answers, accepted aliases, or evaluator state.
+    """
+
+    records: list[_FactualRetrievalAttemptRecord] = []
+    distinct_queries: list[str] = []
+    distinct_observations: list[Mapping[str, object]] = []
+    distinct_signatures: list[tuple[str, ...]] = []
+    prior_top_ks_by_signature: dict[tuple[str, ...], list[int]] = {}
+    proof_verified_by_signature: dict[tuple[str, ...], bool] = {}
+
+    for attempt_index, observation in enumerate(search_observations, start=1):
+        executed_action = observation.get("executed_action")
+        result = observation.get("result")
+        action_arguments = (
+            executed_action.get("arguments")
+            if isinstance(executed_action, Mapping)
+            else None
+        )
+        action_query = (
+            action_arguments.get("query")
+            if isinstance(action_arguments, Mapping)
+            else None
+        )
+        action_limit = (
+            action_arguments.get("limit")
+            if isinstance(action_arguments, Mapping)
+            else None
+        )
+        result_query = result.get("query") if isinstance(result, Mapping) else None
+        result_top_k = result.get("top_k") if isinstance(result, Mapping) else None
+        query_variant = (
+            action_query.strip()
+            if isinstance(action_query, str) and action_query.strip()
+            else result_query.strip()
+            if isinstance(result_query, str) and result_query.strip()
+            else ""
+        )
+        observed_top_k = (
+            action_limit
+            if type(action_limit) is int and action_limit > 0
+            else result_top_k
+            if type(result_top_k) is int and result_top_k > 0
+            else None
+        )
+        signature = _retrieval_query_term_set_signature(query_variant)
+        strategy_index = min(
+            len(distinct_signatures),
+            len(_FACTUAL_QA_RETRIEVAL_STRATEGIES) - 1,
+        )
+        required_strategy = (
+            _FACTUAL_QA_RETRIEVAL_STRATEGIES[strategy_index]
+            if len(distinct_signatures) < len(_FACTUAL_QA_RETRIEVAL_STRATEGIES)
+            else None
+        )
+        required_top_k = _FACTUAL_QA_SEARCH_LIMITS[strategy_index]
+        strategy_advanced = bool(
+            query_variant and signature not in distinct_signatures
+        )
+
+        if strategy_advanced:
+            candidate_distinct_queries = (*distinct_queries, query_variant)
+            proofs = _factual_strategy_proofs(
+                original_question=original_question,
+                distinct_queries=candidate_distinct_queries,
+                search_observations=(*distinct_observations, observation),
+            )
+            query_variant_verified = bool(
+                len(proofs) == len(candidate_distinct_queries)
+                and proofs[-1].verified
+            )
+        else:
+            # The existing action admission allows only the latest normalized
+            # FTS term set at a strictly larger top-k.  Such an attempt expands
+            # recall but deliberately does not claim completion of the next
+            # spelling/alias/disambiguation/rewrite strategy.
+            prior_limits = prior_top_ks_by_signature.get(signature, [])
+            query_variant_verified = bool(
+                distinct_signatures
+                and signature == distinct_signatures[-1]
+                and observed_top_k is not None
+                and prior_limits
+                and observed_top_k > max(prior_limits)
+                and proof_verified_by_signature.get(signature, False)
+            )
+
+        tool_transition_verified, passage_ids = (
+            _public_search_transition_mirror(observation)
+        )
+        records.append(
+            _FactualRetrievalAttemptRecord(
+                attempt_index=attempt_index,
+                required_strategy=required_strategy,
+                query_variant=query_variant,
+                normalized_query=_normalized_retrieval_query(query_variant),
+                fts_term_set=signature,
+                required_top_k=required_top_k,
+                observed_top_k=observed_top_k,
+                strategy_advanced=strategy_advanced,
+                query_variant_verified=query_variant_verified,
+                tool_transition_verified=tool_transition_verified,
+                hit_count=len(passage_ids),
+            )
+        )
+        if observed_top_k is not None:
+            prior_top_ks_by_signature.setdefault(signature, []).append(
+                observed_top_k
+            )
+        if strategy_advanced:
+            distinct_signatures.append(signature)
+            distinct_queries.append(query_variant)
+            distinct_observations.append(observation)
+            proof_verified_by_signature[signature] = query_variant_verified
+
+    return tuple(records)
 
 
 def _verified_transformed_relation_classes(
@@ -2194,6 +2558,7 @@ class _RequiredEvidenceState:
     strategy_progress_count: int
     strategy_semantics: tuple[bool, ...]
     strategy_proofs: tuple[_FactualRetrievalStrategyProof, ...]
+    retrieval_attempts: tuple[_FactualRetrievalAttemptRecord, ...]
     recall_expansion_count: int
     successful_search_hit_counts: tuple[int, ...]
     tool_error_count: int
@@ -2247,6 +2612,14 @@ class _RequiredEvidenceState:
             self.strategy_progress_count > 0
             and len(self.strategy_semantics) == self.strategy_progress_count
             and all(self.strategy_semantics)
+        )
+
+    @property
+    def retrieval_attempts_verified(self) -> bool:
+        return (
+            bool(self.retrieval_attempts)
+            and len(self.retrieval_attempts) == self.search_attempt_count
+            and all(attempt.verified for attempt in self.retrieval_attempts)
         )
 
 
@@ -3491,6 +3864,10 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         strategy_semantics = tuple(
             proof.verified for proof in strategy_proofs
         )
+        retrieval_attempts = _factual_retrieval_attempt_records(
+            original_question=qa_question_scope(request.problem),
+            search_observations=successful_search_observations,
+        )
         completed_location_evidence_repair = bool(
             location_containment_repair_read_count > 0
             and isinstance(
@@ -3580,6 +3957,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             strategy_progress_count=len(distinct_term_set_signatures),
             strategy_semantics=strategy_semantics,
             strategy_proofs=strategy_proofs,
+            retrieval_attempts=retrieval_attempts,
             recall_expansion_count=(
                 len(search_queries) - len(distinct_term_set_signatures)
             ),
@@ -4766,6 +5144,12 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             "strategy_proofs": [
                 proof.to_value() for proof in state.strategy_proofs
             ],
+            "retrieval_attempts": [
+                attempt.to_value() for attempt in state.retrieval_attempts
+            ],
+            "retrieval_attempts_verified": (
+                state.retrieval_attempts_verified
+            ),
             "strategy_schedule_length": len(
                 _FACTUAL_QA_RETRIEVAL_STRATEGIES
             ),
@@ -5055,6 +5439,13 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     ),
                     "strategy_semantics_prefix": list(
                         state.strategy_semantics
+                    ),
+                    "retrieval_attempts": [
+                        attempt.to_value()
+                        for attempt in state.retrieval_attempts
+                    ],
+                    "retrieval_attempts_verified": (
+                        state.retrieval_attempts_verified
                     ),
                     "successful_search_with_hits_count": sum(
                         hit_count > 0
@@ -6044,6 +6435,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             if receipt.get("tool_id") == QA_RETRIEVAL_TOOL_ID
         )
         successful_search_queries: list[str] = []
+        successful_search_observations: list[Mapping[str, object]] = []
         successful_search_hit_counts: list[int] = []
         tool_error_count = 0
         for receipt in qa_receipts:
@@ -6068,6 +6460,21 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             if not isinstance(query, str) or not query.strip():
                 continue
             successful_search_queries.append(query.strip())
+            successful_search_observations.append(
+                {
+                    "observation_status": "success",
+                    "executed_action": {
+                        "kind": "tool",
+                        "name": "search",
+                        "resource_id": QA_RETRIEVAL_TOOL_ID,
+                        "skill_id": None,
+                        "arguments": dict(arguments)
+                        if isinstance(arguments, Mapping)
+                        else {},
+                    },
+                    "result": dict(value),
+                }
+            )
             raw_passage_ids = value.get("passage_ids")
             successful_search_hit_counts.append(
                 len(
@@ -6081,26 +6488,32 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 else 0
             )
         distinct_successful_queries: list[str] = []
+        distinct_search_observations: list[Mapping[str, object]] = []
         distinct_signatures: list[tuple[str, ...]] = []
-        for query in successful_search_queries:
+        for query, observation in zip(
+            successful_search_queries,
+            successful_search_observations,
+        ):
             signature = _retrieval_query_term_set_signature(query)
             if signature in distinct_signatures:
                 continue
             distinct_signatures.append(signature)
             distinct_successful_queries.append(query)
+            distinct_search_observations.append(observation)
         strategy_progress_count = len(distinct_successful_queries)
         strategy_question = (
             self._semantic_reasoner_question.get()
             or self._semantic_evidence_retriever_question.get()
             or ""
         )
-        strategy_semantics = _factual_strategy_semantics_verified(
+        strategy_proofs = _factual_strategy_proofs(
             original_question=strategy_question,
             distinct_queries=distinct_successful_queries,
+            search_observations=distinct_search_observations,
         )
         strategy_semantics_verified = (
-            len(strategy_semantics) == strategy_progress_count
-            and all(strategy_semantics)
+            len(strategy_proofs) == strategy_progress_count
+            and all(proof.verified for proof in strategy_proofs)
         )
         tool_call_budget_exhausted = len(qa_receipts) >= self._max_tool_calls
         retrieval_budget_exhausted = (

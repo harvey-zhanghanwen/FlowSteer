@@ -5442,6 +5442,166 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("exact admitted set_relation candidate", rejected.feedback)
         self.assertEqual(revision, env.graph.revision)
 
+    async def test_triviaqa_reciprocal_runtime_keeps_four_phase_causal_order(
+        self,
+    ) -> None:
+        graph = _trivia_semantic_graph()
+        graph.set_relation("reader", "reasoner", True, True)
+        registry = make_registry()
+        gateway = _ImmediateGateway()
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_trivia_semantic_runtime(registry, gateway),
+            graph=graph,
+            problem="What is the capital of France?",
+            execute_on_edit=True,
+            require_format_agent=True,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+        )
+
+        executed = await env.step(
+            '{"action":"modify_agent","agent_id":"reader",'
+            '"contract":"retrieve answer-free public evidence for the original '
+            'entity and requested relation"}'
+        )
+
+        self.assertTrue(executed.accepted, executed.feedback)
+        self.assertIsNotNone(executed.execution)
+        assert executed.execution is not None
+        self.assertEqual(
+            [
+                "reader",
+                "reasoner",
+                "reader",
+                "reasoner",
+                "verifier",
+                "formatter",
+            ],
+            [item.agent.id for item in gateway.requests],
+        )
+        self.assertEqual((), executed.execution.deferred_agent_ids)
+        # AgentRuntime owns the existing Retriever DRAFT -> Reasoner DRAFT ->
+        # Retriever REVISION -> Reasoner REVISION causal block.  Env cache
+        # admission must not rewrite the Director-selected reciprocal Canvas.
+        self.assertTrue(
+            env.graph.relation_bits("reader", "reasoner").is_bidirectional
+        )
+
+    async def test_triviaqa_relation_mismatched_cache_reexecutes_before_reasoner(
+        self,
+    ) -> None:
+        graph = _trivia_semantic_graph()
+        registry = make_registry()
+        gateway = _ImmediateGateway()
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_trivia_semantic_runtime(registry, gateway),
+            graph=graph,
+            problem="What is the capital of France?",
+            execute_on_edit=True,
+            require_format_agent=True,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+        )
+        mismatched = json.loads(_test_evidence_retriever_artifact("p1"))
+        mismatched["target_relation"] = "birth place"
+        mismatched["evidence_proposition"]["predicate"] = "was born in"
+        env._progressive_outputs["reader"] = json.dumps(mismatched)
+        env._progressive_output_metadata["reader"] = {
+            "artifact_version": "reader:current",
+            "tool_receipts": [_test_read_receipt("p1")],
+        }
+        self.assertFalse(
+            env._triviaqa_retriever_has_current_grounded_artifact(
+                env.graph,
+                "reader",
+            )
+        )
+
+        executed = await env.step(
+            '{"action":"modify_agent","agent_id":"reasoner",'
+            '"contract":"bind grounded propositions to the original requested '
+            'answer slot and relation, then derive one semantic candidate"}'
+        )
+
+        self.assertTrue(executed.accepted, executed.feedback)
+        self.assertIsNotNone(executed.execution)
+        assert executed.execution is not None
+        request_ids = [item.agent.id for item in gateway.requests]
+        self.assertEqual("reader", request_ids[0])
+        self.assertEqual("reasoner", request_ids[1])
+        self.assertNotIn("reader", executed.execution.reused_agent_ids)
+        self.assertNotIn("reasoner", executed.execution.deferred_agent_ids)
+
+    async def test_triviaqa_fan_in_reexecutes_only_invalid_retriever_cache(
+        self,
+    ) -> None:
+        graph = _trivia_semantic_graph()
+        graph.add_agent(
+            AgentNode(
+                "reader_b",
+                "fast",
+                "retrieve independent answer-free evidence for the question",
+                role_family="evidence_retriever",
+                allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                execution_mode="react",
+                artifact_type="retrieval_evidence",
+            )
+        )
+        graph.set_relation("reader_b", "reasoner", True, False)
+        registry = make_registry()
+        gateway = _ImmediateGateway()
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_trivia_semantic_runtime(registry, gateway),
+            graph=graph,
+            problem="What is the capital of France?",
+            execute_on_edit=True,
+            require_format_agent=True,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+        )
+        env._progressive_outputs["reader"] = (
+            _test_evidence_retriever_artifact("valid-passage")
+        )
+        env._progressive_output_metadata["reader"] = {
+            "artifact_version": "reader:current",
+            "tool_receipts": [_test_read_receipt("valid-passage")],
+        }
+        mismatched = json.loads(
+            _test_evidence_retriever_artifact("invalid-passage")
+        )
+        mismatched["target_relation"] = "birth place"
+        mismatched["evidence_proposition"]["predicate"] = "was born in"
+        env._progressive_outputs["reader_b"] = json.dumps(mismatched)
+        env._progressive_output_metadata["reader_b"] = {
+            "artifact_version": "reader-b:current",
+            "tool_receipts": [_test_read_receipt("invalid-passage")],
+        }
+
+        self.assertEqual(
+            {"reader_b"},
+            env._triviaqa_retrievers_requiring_validation(env.graph),
+        )
+        executed = await env.step(
+            '{"action":"modify_agent","agent_id":"reasoner",'
+            '"contract":"bind grounded propositions to the original requested '
+            'answer slot and relation, then derive one semantic candidate"}'
+        )
+
+        self.assertTrue(executed.accepted, executed.feedback)
+        self.assertIsNotNone(executed.execution)
+        assert executed.execution is not None
+        request_ids = [item.agent.id for item in gateway.requests]
+        self.assertEqual("reader_b", request_ids[0])
+        self.assertEqual("reasoner", request_ids[1])
+        self.assertIn("reader", executed.execution.reused_agent_ids)
+        self.assertNotIn("reader_b", executed.execution.reused_agent_ids)
+
     async def test_triviaqa_evidence_ingress_mask_matches_preservation_admission_before_output(
         self,
     ) -> None:

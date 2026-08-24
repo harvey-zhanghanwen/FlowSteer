@@ -16,7 +16,9 @@ from src.interactive.qa_tool_adapter import (
     QARetrievalReactExecutionAdapter,
     QA_RETRIEVAL_TOOL_ID,
     QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+    _factual_retrieval_attempt_records,
     _factual_strategy_proofs,
+    _relation_surface_replacement_classes,
     build_qa_tool_registry,
 )
 from src.interactive.react_execution import ReactExecutionError
@@ -31,7 +33,7 @@ QUERIES = (
     "Chart Weekly magazine first published American hit chart decade",
     "Chart Weekly magazine first publication American hit chart decade",
     "Chart Weekly magazine first publication American hit chart history decade",
-    "Chart Weekly magazine first publication American music hit parade history decade",
+    "Chart Weekly magazine first publication American hit parade history decade",
 )
 
 
@@ -59,8 +61,10 @@ def search_observation(
             "hits": [
                 {
                     "passage_id": passage_id,
+                    "document_id": f"document-{passage_id}",
                     "title": title,
                     "snippet": snippet,
+                    "rank": 1,
                 }
             ],
         },
@@ -179,6 +183,185 @@ def request() -> AgentRequest:
 
 
 class QAToolStrategyProofTests(unittest.TestCase):
+    def test_prior_hit_support_requires_verified_action_observation_mirror(
+        self,
+    ) -> None:
+        mismatched_prior = json.loads(json.dumps(OBSERVATIONS[0]))
+        mismatched_prior["result"]["query"] = "different public query"
+
+        proofs = _factual_strategy_proofs(
+            original_question=QUESTION,
+            distinct_queries=QUERIES[:2],
+            search_observations=(mismatched_prior,),
+        )
+
+        self.assertFalse(proofs[-1].verified)
+        self.assertEqual("unverified_strategy_attempt", proofs[-1].proof_strength)
+        self.assertEqual((), proofs[-1].source_passage_ids)
+
+    def test_controlled_relation_replacement_rejects_added_subtopic(self) -> None:
+        allowed = _relation_surface_replacement_classes(
+            original_question=QUESTION,
+            previous_query=QUERIES[1],
+            query=QUERIES[2],
+        )
+        injected = _relation_surface_replacement_classes(
+            original_question=QUESTION,
+            previous_query=QUERIES[1],
+            query=QUERIES[2] + " unrelated candidate",
+        )
+
+        self.assertTrue(allowed)
+        self.assertEqual(frozenset(), injected)
+
+    def test_search_mirror_rejects_malformed_missing_or_reordered_hits(
+        self,
+    ) -> None:
+        malformed = json.loads(json.dumps(OBSERVATIONS[0]))
+        del malformed["result"]["hits"][0]["document_id"]
+
+        unequal = json.loads(json.dumps(OBSERVATIONS[0]))
+        unequal["result"]["passage_ids"].append("public-extra")
+
+        reordered = json.loads(json.dumps(OBSERVATIONS[0]))
+        second_hit = json.loads(json.dumps(reordered["result"]["hits"][0]))
+        second_hit.update(
+            {
+                "document_id": "document-public-second",
+                "passage_id": "public-second",
+                "rank": 2,
+            }
+        )
+        reordered["result"]["passage_ids"] = [
+            "public-second",
+            "public-0",
+        ]
+        reordered["result"]["hits"].append(second_hit)
+
+        for observation in (malformed, unequal, reordered):
+            with self.subTest(observation=observation):
+                (record,) = _factual_retrieval_attempt_records(
+                    original_question=QUESTION,
+                    search_observations=(observation,),
+                )
+                self.assertFalse(record.tool_transition_verified)
+                self.assertFalse(record.verified)
+
+    def test_recall_expansion_inherits_unverified_query_proof_and_zero_is_false(
+        self,
+    ) -> None:
+        unsupported_initial = search_observation(
+            QUERIES[0],
+            limit=5,
+            passage_id="irrelevant",
+            title="Unrelated Topic",
+            snippet="An unrelated public passage with no matching entity or relation.",
+        )
+        unsupported_spelling = search_observation(
+            QUERIES[1],
+            limit=10,
+            passage_id="still-irrelevant",
+            title="Another Topic",
+            snippet="Another unrelated public passage.",
+        )
+        spelling_recall_expansion = search_observation(
+            QUERIES[1],
+            limit=15,
+            passage_id="expanded-irrelevant",
+            title="Third Topic",
+            snippet="A larger top-k still does not verify the spelling query.",
+        )
+        records = _factual_retrieval_attempt_records(
+            original_question=QUESTION,
+            search_observations=(
+                unsupported_initial,
+                unsupported_spelling,
+                spelling_recall_expansion,
+            ),
+        )
+
+        self.assertFalse(records[1].query_variant_verified)
+        self.assertFalse(records[2].strategy_advanced)
+        self.assertFalse(records[2].query_variant_verified)
+        self.assertFalse(records[2].verified)
+
+        adapter = QARetrievalReactExecutionAdapter(
+            gateway=SimpleNamespace(generate=lambda agent_request: None),
+            tool_registry=build_qa_tool_registry(CountingIndex()),
+            max_turns=8,
+            max_tool_calls=12,
+            task_type="factual_qa",
+            completion_policy="required_evidence",
+        )
+        empty_state = adapter._required_evidence_state(request(), [])
+        self.assertFalse(empty_state.retrieval_attempts_verified)
+
+    def test_every_search_variant_has_receipt_replayable_attempt_record(
+        self,
+    ) -> None:
+        recall_expansion = search_observation(
+            QUERIES[0],
+            limit=10,
+            passage_id="public-recall",
+            title="Chart Weekly",
+            snippet=(
+                "Chart Weekly magazine first published an American hit chart."
+            ),
+        )
+        records = _factual_retrieval_attempt_records(
+            original_question=QUESTION,
+            search_observations=(
+                OBSERVATIONS[0],
+                recall_expansion,
+                OBSERVATIONS[1],
+                *OBSERVATIONS[2:],
+            ),
+        )
+
+        self.assertEqual(6, len(records))
+        self.assertEqual(
+            (
+                "initial_retrieval",
+                "spelling_normalization",
+                "spelling_normalization",
+                "alias_expansion",
+                "entity_disambiguation",
+                "query_rewriting",
+            ),
+            tuple(record.required_strategy for record in records),
+        )
+        self.assertEqual(
+            (True, False, True, True, True, True),
+            tuple(record.strategy_advanced for record in records),
+        )
+        self.assertEqual(
+            (5, 10, 10, 15, 20, 25),
+            tuple(record.required_top_k for record in records),
+        )
+        self.assertEqual(
+            (5, 10, 10, 15, 20, 25),
+            tuple(record.observed_top_k for record in records),
+        )
+        self.assertTrue(all(record.verified for record in records))
+        self.assertEqual(
+            list(records[1].fts_term_set),
+            records[1].to_value()["fts_term_set"],
+        )
+
+    def test_attempt_record_rejects_action_observation_receipt_mismatch(
+        self,
+    ) -> None:
+        mismatched = json.loads(json.dumps(OBSERVATIONS[0]))
+        mismatched["result"]["top_k"] = 10
+
+        (record,) = _factual_retrieval_attempt_records(
+            original_question=QUESTION,
+            search_observations=(mismatched,),
+        )
+
+        self.assertFalse(record.tool_transition_verified)
+        self.assertFalse(record.verified)
+
     def test_five_stage_proofs_are_answer_free_and_receipt_derived(self) -> None:
         proofs = _factual_strategy_proofs(
             original_question=QUESTION,
@@ -192,9 +375,9 @@ class QAToolStrategyProofTests(unittest.TestCase):
             (
                 "question_invariant_strategy_attempt",
                 "tool_receipt_conditioned_strategy_attempt",
+                "deterministic_relation_invariant_strategy_attempt",
                 "tool_receipt_conditioned_strategy_attempt",
-                "tool_receipt_conditioned_strategy_attempt",
-                "tool_receipt_conditioned_strategy_attempt",
+                "deterministic_relation_invariant_strategy_attempt",
             ),
             tuple(proof.proof_strength for proof in proofs),
         )
@@ -246,9 +429,9 @@ class QAToolStrategyProofTests(unittest.TestCase):
             search_observations=OBSERVATIONS[:2],
         )
 
-        self.assertTrue(question_invariant[-1].verified)
+        self.assertFalse(question_invariant[-1].verified)
         self.assertEqual(
-            "question_invariant_strategy_attempt",
+            "unverified_strategy_attempt",
             question_invariant[-1].proof_strength,
         )
         self.assertEqual(
