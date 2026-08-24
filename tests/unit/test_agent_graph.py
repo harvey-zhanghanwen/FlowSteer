@@ -6427,6 +6427,150 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             env.model_admissible_action_types(),
         )
 
+    def test_tc1_recovery_saturated_retriever_closes_noop_modify_domain(
+        self,
+    ) -> None:
+        graph = AgentGraph(
+            [
+                AgentNode(
+                    "failed_reader",
+                    "cheap",
+                    "retrieve grounded evidence",
+                    role_family="evidence_retriever",
+                    allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                    execution_mode="react",
+                    artifact_type="retrieval_evidence",
+                ),
+                AgentNode(
+                    "replacement_reader",
+                    "cheap",
+                    _QA_EVIDENCE_RETRIEVER_RECOVERY_CONTRACT,
+                    role_family="evidence_retriever",
+                    allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                    execution_mode="react",
+                    artifact_type="retrieval_evidence",
+                    completion_condition=(
+                        _QA_EVIDENCE_RETRIEVER_RECOVERY_COMPLETION
+                    ),
+                ),
+            ]
+        )
+        registry = make_registry()
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_trivia_semantic_runtime(registry, _ImmediateGateway()),
+            graph=graph,
+            problem="Who wrote the novel?",
+            execute_on_edit=False,
+            max_agents=8,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+        )
+        env._failed_agent_ids.add("failed_reader")
+        env._repair_exhausted_agent_ids.add("failed_reader")
+        env._latest_failure_record_by_agent["failed_reader"] = (
+            _test_retrieval_failure_record(
+                graph,
+                agent_id="failed_reader",
+                passage_ids=("same-public-read",),
+            )
+        )
+        replacement_failure = _test_retrieval_failure_record(
+            graph,
+            agent_id="replacement_reader",
+            passage_ids=("same-public-read",),
+        )
+
+        env._record_failure_state(
+            (replacement_failure,),
+            current_agent_ids={"failed_reader", "replacement_reader"},
+        )
+
+        self.assertIn(
+            "replacement_reader",
+            env._repair_exhausted_agent_ids,
+        )
+        self.assertEqual(
+            {},
+            env._triviaqa_evidence_retriever_recovery_field_values(
+                "replacement_reader"
+            ),
+        )
+        self.assertEqual(
+            {},
+            env._repair_exhausted_auxiliary_replacement_domains(),
+        )
+        self.assertEqual((), env.model_admissible_action_types())
+        self.assertEqual({}, env.model_admissible_action_targets())
+
+        # The live MODIFY projection is independently fail-closed even if an
+        # old receipt omitted the saturated repair-exhausted marker.
+        env._repair_exhausted_agent_ids.discard("replacement_reader")
+        self.assertEqual((), env._model_admissible_modify_agent_ids())
+
+    def test_triviaqa_valid_retriever_allows_missing_role_after_repair_failure(
+        self,
+    ) -> None:
+        complete = _trivia_semantic_graph()
+        graph = AgentGraph(
+            [node for node in complete.nodes if node.id != "formatter"],
+            [
+                relation
+                for relation in complete.relations
+                if "formatter"
+                not in {relation.source_id, relation.target_id}
+            ],
+        )
+        graph.add_agent(
+            AgentNode(
+                "failed_repair",
+                "cheap",
+                "repair an incomplete evidence retrieval",
+                role_family="repair",
+                allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                execution_mode="react",
+                artifact_type="repair_evidence",
+            )
+        )
+        registry = make_registry()
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_trivia_semantic_runtime(registry, _ImmediateGateway()),
+            graph=graph,
+            problem="What is the capital of France?",
+            execute_on_edit=False,
+            max_agents=8,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+            require_format_agent=True,
+        )
+        env._progressive_outputs["reader"] = (
+            _test_evidence_retriever_artifact("valid-public-read")
+        )
+        env._progressive_output_metadata["reader"] = {
+            "tool_receipts": [_test_read_receipt("valid-public-read")],
+        }
+        env._failed_agent_ids.add("failed_repair")
+        env._repair_exhausted_agent_ids.add("failed_repair")
+        env._latest_failure_record_by_agent["failed_repair"] = (
+            _test_retrieval_failure_record(
+                graph,
+                agent_id="failed_repair",
+                public_error_code="knowledge_base_coverage_failure",
+                bounded_schedule_exhausted=True,
+            )
+        )
+
+        self.assertTrue(env._has_valid_evidence_retriever_artifact())
+        self.assertEqual(("add_subgraph",), env.model_admissible_action_types())
+        add_domain = env.model_admissible_action_targets()["add_subgraph"]
+        self.assertEqual(
+            ["format"],
+            add_domain["admitted_new_role_families"],
+        )
+
     def test_tc5_kbc_at_eight_of_eight_is_typed_terminal_not_add(self) -> None:
         graph = _trivia_semantic_graph()
         failed_reader_ids = tuple(f"failed_reader_{index}" for index in range(4))

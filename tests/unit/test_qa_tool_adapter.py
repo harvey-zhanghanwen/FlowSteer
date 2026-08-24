@@ -187,6 +187,11 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             "entity surface is a strict subset of the resolved passage-title "
             "identity"
         )
+        expanded_identity = adapter._public_semantic_repair_instruction(
+            "qa_semantic_artifact_invalid: Evidence Retriever "
+            "entity_identity.evidence_surface is not supported by the cited "
+            "passage title identity chain"
+        )
         proposition_binding = adapter._public_semantic_repair_instruction(
             "qa_semantic_artifact_invalid: Reasoner requested-relation "
             "proposition has no deterministic entity binding"
@@ -195,10 +200,12 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(evidence_surface)
         self.assertIsNotNone(question_surface)
         self.assertIsNotNone(short_answer_surface)
+        self.assertIsNotNone(expanded_identity)
         self.assertIsNotNone(proposition_binding)
         assert evidence_surface is not None
         assert question_surface is not None
         assert short_answer_surface is not None
+        assert expanded_identity is not None
         assert proposition_binding is not None
         self.assertIn("expand evidence_span only as needed", evidence_surface)
         self.assertIn("same read receipt", evidence_surface)
@@ -210,10 +217,22 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             short_answer_surface,
         )
         self.assertIn(
-            "complete passage-title-resolved entity mention",
+            "complete public passage-title identity",
+            short_answer_surface,
+        )
+        self.assertIn(
+            "expanded full-name surface",
             short_answer_surface,
         )
         self.assertIn("admitted bounded retrieval", short_answer_surface)
+        self.assertIn(
+            "set evidence_surface to the complete public passage-title identity",
+            expanded_identity,
+        )
+        self.assertIn(
+            "expanded full-name proposition argument",
+            expanded_identity,
+        )
         self.assertIn(
             "every successful qa-retrieval read receipt",
             proposition_binding,
@@ -223,6 +242,7 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             evidence_surface,
             question_surface,
             short_answer_surface,
+            expanded_identity,
             proposition_binding,
         ):
             self.assertNotIn("Sinclair Lewis", repair)
@@ -6750,6 +6770,7 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             evidence: str,
             evidence_surface: str,
             subject: str,
+            title: str = "Ada Lovelace (mathematician)",
         ) -> str | None:
             artifact = {
                 "question_scope": question,
@@ -6780,7 +6801,7 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
                         "passage_id": "ada-lovelace",
                         "passage": {
                             "passage_id": "ada-lovelace",
-                            "title": "Ada Lovelace (mathematician)",
+                            "title": title,
                             "text": evidence,
                         },
                     },
@@ -6813,6 +6834,61 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
                 evidence_surface="Ada Lovelace",
                 subject="Ada Lovelace",
             )
+        )
+        self.assertIsNone(
+            completion_issue(
+                evidence=(
+                    "Ada Lovelace Augusta Ada Lovelace (10 December 1815 "
+                    "– 27 November 1852) received the Royal Medal in 1848."
+                ),
+                evidence_surface="Ada Lovelace",
+                subject="Augusta Ada Lovelace",
+                title="Ada Lovelace",
+            )
+        )
+
+        expanded_identity_issue = completion_issue(
+            evidence=(
+                "Ada Lovelace Augusta Ada Lovelace (10 December 1815 "
+                "– 27 November 1852) received the Royal Medal in 1848."
+            ),
+            evidence_surface="Augusta Ada Lovelace",
+            subject="Augusta Ada Lovelace",
+            title="Ada Lovelace",
+        )
+        self.assertIsNotNone(expanded_identity_issue)
+        assert expanded_identity_issue is not None
+        self.assertIn(
+            "passage title identity chain",
+            expanded_identity_issue,
+        )
+
+        descriptive_surface_issue = completion_issue(
+            evidence=(
+                "In 1848, American writer Ada Lovelace received the Royal Medal."
+            ),
+            evidence_surface="American writer Ada Lovelace",
+            subject="American writer Ada Lovelace",
+            title="Ada Lovelace",
+        )
+        self.assertIsNotNone(descriptive_surface_issue)
+        assert descriptive_surface_issue is not None
+        self.assertIn("passage title identity chain", descriptive_surface_issue)
+
+        title_case_descriptor_issue = completion_issue(
+            evidence=(
+                "Ada Lovelace American Writer Ada Lovelace (10 December "
+                "1815 – 27 November 1852) received the Royal Medal in 1848."
+            ),
+            evidence_surface="American Writer Ada Lovelace",
+            subject="American Writer Ada Lovelace",
+            title="Ada Lovelace",
+        )
+        self.assertIsNotNone(title_case_descriptor_issue)
+        assert title_case_descriptor_issue is not None
+        self.assertIn(
+            "passage title identity chain",
+            title_case_descriptor_issue,
         )
 
     def test_evidence_retriever_accepts_receipt_grounded_inflection_and_rejects_relation_drift(

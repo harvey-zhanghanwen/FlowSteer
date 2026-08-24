@@ -972,6 +972,28 @@ repair reuses preserved successful reads before issuing another bounded Tool
 action and never reads accepted answers or evaluator state. FlowSteer and
 SkillFlow are not claimed to provide this Entity Linking policy.
 
+The first v49 expanded-alias preflight candidate was rejected before commit or
+live execution: an article-lead position and capitalization do not prove that
+additional tokens are part of a name rather than a Title Case descriptor. v50
+therefore keeps the SkillFlow receipt's complete passage-title identity in
+`entity_identity.evidence_surface`, while preserving an expanded exact body
+surface in the answer-bearing `evidence_proposition` argument. FlowSteer's
+Reasoner then owns answer-slot binding from that proposition. This is a minimal
+Entity Linking/structured-artifact repair over the unchanged public receipt;
+it neither consumes accepted answers nor changes the Director search space.
+
+The v50 non-no-op recovery rule reuses FlowSteer's Canvas mutation semantics:
+an admitted action must change graph state before the ordinary
+edit -> execute -> feedback transition can occur. The project's hierarchical
+target projection now removes the current declaration value from the bounded
+TriviaQA Retriever recovery domain, and `_record_failure_state` closes that
+repair after a measured bounded ReAct failure at the unique recovery
+declaration. SkillFlow's public Action--Observation continuation and Tool
+receipts remain preserved. If no valid evidence artifact or strict-progress
+same-role replacement exists, downstream semantic roles stay outside the live
+domain. This is a state-conditioned Evidence Grounding boundary, not a prompt
+template or prescribed topology; Director prompt v6 is unchanged.
+
 Provider and bounded-ReAct failures stay typed.  A measured transient or
 permanent-configuration provider failure exposes only an exact `model_id`
 repair, preferring a different provider when the frozen catalog contains one

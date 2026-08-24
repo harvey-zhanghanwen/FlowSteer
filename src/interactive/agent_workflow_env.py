@@ -784,6 +784,9 @@ class AgentWorkflowEnv:
             if agent_id in self._failed_agent_ids
             and agent_id in self._repair_exhausted_agent_ids
         )
+        auxiliary_replacement_domains = (
+            self._repair_exhausted_auxiliary_replacement_domains()
+        )
 
         if (
             dirty_replacement_ids
@@ -806,6 +809,18 @@ class AgentWorkflowEnv:
             and AgentActionType.ADD_SUBGRAPH.value
             in self._allowed_action_type_set
         ):
+            if (
+                isinstance(self.runtime.dataset_id, str)
+                and self.runtime.dataset_id.casefold() == "triviaqa"
+                and exhausted_auxiliary_ids
+                and not auxiliary_replacement_domains
+                and not self._has_valid_evidence_retriever_artifact()
+            ):
+                # A bounded Retriever generation exhausted the only
+                # non-destructive declaration repair and produced no valid
+                # artifact. Missing downstream responsibilities cannot bypass
+                # Evidence Grounding, so the live Canvas domain is exhausted.
+                return ()
             required_evidence_ingress_candidates = (
                 self._required_evidence_ingress_relation_candidates()
             )
@@ -1756,17 +1771,33 @@ class AgentWorkflowEnv:
         node_ids = tuple(node.id for node in self._graph.nodes)
         if self.recovery_policy != _PRESERVE_REPAIR_RECOVERY_POLICY:
             return node_ids
+
+        def has_non_noop_repair(agent_id: str) -> bool:
+            if self._provider_repair_required(agent_id):
+                return bool(self._provider_repair_model_ids(agent_id))
+            if agent_id not in self._react_exhausted_agent_ids:
+                return True
+            recovery_values = (
+                self._triviaqa_evidence_retriever_recovery_field_values(
+                    agent_id
+                )
+            )
+            return recovery_values is None or bool(recovery_values)
+
         mandatory_repair_ids = self._mandatory_repair_agent_ids()
         if mandatory_repair_ids:
             return tuple(
                 agent_id
                 for agent_id in mandatory_repair_ids
-                if not self._provider_repair_required(agent_id)
-                or bool(self._provider_repair_model_ids(agent_id))
+                if has_non_noop_repair(agent_id)
             )
         dirty_replacement_ids = self._dirty_auxiliary_replacement_agent_ids()
         if dirty_replacement_ids:
-            return dirty_replacement_ids
+            return tuple(
+                agent_id
+                for agent_id in dirty_replacement_ids
+                if has_non_noop_repair(agent_id)
+            )
         measured_failed = (
             self._failed_agent_ids - self._repair_exhausted_agent_ids
         ).intersection(node_ids)
@@ -1776,7 +1807,9 @@ class AgentWorkflowEnv:
             # should repair every measured root failure, not mutate downstream
             # Agents that merely could not execute because their input is absent.
             return tuple(
-                node_id for node_id in node_ids if node_id in measured_failed
+                node_id
+                for node_id in node_ids
+                if node_id in measured_failed and has_non_noop_repair(node_id)
             )
         if self._failed_agent_ids.intersection(node_ids):
             # Every measured failure is terminal for MODIFY at this boundary.
@@ -1795,6 +1828,31 @@ class AgentWorkflowEnv:
             if node_id not in self._repair_exhausted_agent_ids
             and (node_id not in protected or node_id in responsible)
         )
+
+    def _triviaqa_evidence_retriever_recovery_field_values(
+        self,
+        agent_id: str,
+    ) -> Optional[dict[str, str]]:
+        """Return only recovery declaration values that change public state."""
+
+        if (
+            not isinstance(self.runtime.dataset_id, str)
+            or self.runtime.dataset_id.casefold() != "triviaqa"
+            or not self._graph.has_node(agent_id)
+        ):
+            return None
+        node = self._graph.get_node(agent_id)
+        if (node.role_family or "").casefold() != "evidence_retriever":
+            return None
+        candidates = {
+            "contract": _QA_EVIDENCE_RETRIEVER_RECOVERY_CONTRACT,
+            "completion_condition": _QA_EVIDENCE_RETRIEVER_RECOVERY_COMPLETION,
+        }
+        return {
+            field_name: value
+            for field_name, value in candidates.items()
+            if getattr(node, field_name) != value
+        }
 
     def _provider_repair_admission_issue(
         self,
@@ -2364,6 +2422,21 @@ class AgentWorkflowEnv:
             return tuple(
                 role for role in admitted if role in replacement_domains
             )
+        if (
+            isinstance(self.runtime.dataset_id, str)
+            and self.runtime.dataset_id.casefold() == "triviaqa"
+            and any(
+                auxiliary_id in self._failed_agent_ids
+                and auxiliary_id in self._repair_exhausted_agent_ids
+                for auxiliary_id in self._recovery_auxiliary_agent_ids()
+            )
+            and not self._has_valid_evidence_retriever_artifact()
+        ):
+            # No current receipt-grounded evidence artifact can satisfy the
+            # downstream lineage, and the bounded same-responsibility
+            # replacement domain is closed. Do not expose missing semantic
+            # roles as a bypass around the Evidence Grounding gate.
+            return ()
         missing = self._missing_semantic_role_families()
         if (
             self._uses_semantic_lineage_protocol()
@@ -2375,15 +2448,6 @@ class AgentWorkflowEnv:
             # domain contains responsibilities, not a prescribed topology or
             # fixed Agent sequence.
             return tuple(role for role in admitted if role in missing)
-        if any(
-            auxiliary_id in self._failed_agent_ids
-            and auxiliary_id in self._repair_exhausted_agent_ids
-            for auxiliary_id in self._recovery_auxiliary_agent_ids()
-        ):
-            # A measured auxiliary generation already owns this recovery
-            # responsibility. If its strict replacement domain is closed, do
-            # not bypass the terminal/progress gate through a generic ADD.
-            return ()
         if self._repair_exhausted_reasoner_ids():
             # A recovery branch must materialize evidence before it is wired
             # into the exhausted Reasoner. A reasoning-only Repair Agent has
@@ -3092,12 +3156,27 @@ class AgentWorkflowEnv:
                 )
                 for agent_id in modifiable_node_ids
             }
+            per_agent_recovery_field_values = {
+                agent_id: (
+                    self._triviaqa_evidence_retriever_recovery_field_values(
+                        agent_id
+                    )
+                    if agent_id in self._react_exhausted_agent_ids
+                    else None
+                )
+                for agent_id in modifiable_node_ids
+            }
             per_agent_mutable_fields = {
                 agent_id: [
                     field
                     for field in (
                         ["model_id"]
                         if agent_id in provider_failure_agent_ids
+                        else list(
+                            per_agent_recovery_field_values[agent_id]
+                        )
+                        if per_agent_recovery_field_values[agent_id]
+                        is not None
                         else ["contract", "completion_condition"]
                         if agent_id in dirty_replacement_ids
                         else ["contract", "completion_condition"]
@@ -3142,21 +3221,15 @@ class AgentWorkflowEnv:
                     discrete_domains["model_id"] = list(
                         per_agent_model_domains[agent_id]
                     )
-                if (
-                    agent_id in self._react_exhausted_agent_ids
-                    and isinstance(self.runtime.dataset_id, str)
-                    and self.runtime.dataset_id.casefold() == "triviaqa"
-                    and (node.role_family or "").casefold()
-                    == "evidence_retriever"
-                ):
-                    if "contract" in fields:
-                        discrete_domains["contract"] = [
-                            _QA_EVIDENCE_RETRIEVER_RECOVERY_CONTRACT
-                        ]
-                    if "completion_condition" in fields:
-                        discrete_domains["completion_condition"] = [
-                            _QA_EVIDENCE_RETRIEVER_RECOVERY_COMPLETION
-                        ]
+                recovery_field_values = per_agent_recovery_field_values[
+                    agent_id
+                ]
+                if recovery_field_values is not None:
+                    for field in fields:
+                        if field in recovery_field_values:
+                            discrete_domains[field] = [
+                                recovery_field_values[field]
+                            ]
                 per_agent_discrete_domains[agent_id] = discrete_domains
             mutable_fields = [
                 field
@@ -4743,10 +4816,16 @@ class AgentWorkflowEnv:
                 if continuation is None
                 else self._failure_continuation_weight(continuation)[0]
             )
+            recovery_field_values = (
+                self._triviaqa_evidence_retriever_recovery_field_values(
+                    record.agent_id
+                )
+            )
             if (
                 category in _BOUNDED_REACT_FAILURE_CATEGORIES
                 and (
-                    (
+                    recovery_field_values == {}
+                    or (
                         baseline_receipt_count is not None
                         and new_receipt_count <= baseline_receipt_count
                     )
@@ -7727,6 +7806,23 @@ class AgentWorkflowEnv:
             isinstance(artifact, str)
             and bool(artifact.strip())
             and agent_id not in self._unresolved_dirty_agents
+        )
+
+    def _has_valid_evidence_retriever_artifact(self) -> bool:
+        """Return whether any current Retriever owns valid grounded evidence."""
+
+        if self.required_evidence_tool_id is None:
+            return False
+        return any(
+            (node.role_family or "").casefold() == "evidence_retriever"
+            and node.id not in self._failed_agent_ids
+            and node.id not in self._repair_exhausted_agent_ids
+            and self._has_successful_artifact(node.id)
+            and self._semantic_replacement_has_valid_artifact(
+                node.id,
+                "evidence_retriever",
+            )
+            for node in self._graph.nodes
         )
 
     def _allows_grounded_terminal_reachability_ingress(

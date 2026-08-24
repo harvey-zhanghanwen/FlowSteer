@@ -910,6 +910,58 @@ evaluator are unchanged. The complete static suite passes 958 tests and 177
 subtests. These checks are not a v48 score; the new three-task Stable Zero gate
 and fixed-128 evaluation remain pending.
 
+### v49 rejected expanded-alias preflight candidate
+
+The v48 canary was stopped after its first persisted task; the remaining two
+tasks were not scored. `triviaqa:tc_1` searched once and read the correct
+receipt-backed passage on the second ReAct turn. Its first structured artifact
+contained the complete body surface `Harry Sinclair Lewis` and the requested
+1930 Nobel relation, but the validator rejected that full name because the
+passage title was the shorter canonical surface `Sinclair Lewis`. This was an
+Entity Linking false negative, not retrieval recall or database coverage.
+
+After the first Retriever and its isolated replacement exhausted their
+bounded artifact repairs, the replacement was already declared with the only
+admissible recovery contract and completion condition. Nevertheless, rounds
+3--27 exposed MODIFY with one discrete value equal to the current value. The
+Director emitted 25 legal-domain choices, all rejected as no-op, and no Agent
+executed after graph revision 3. The resulting `max_rounds` terminal therefore
+came from an action-mask/state-transition mismatch.
+
+The first v49 preflight candidate attempted to accept a receipt-body full-name
+expansion from an article-lead title/name/parenthetical pattern. Read-only
+adversarial review showed that the same positional pattern could admit a
+Title Case descriptor such as `American Writer Ada Lovelace`. That candidate
+was therefore rejected before commit and before any canary or fixed-128 run.
+Its prepared directory is not an accepted architecture or score.
+
+### v50 canonical title identity and non-no-op recovery admission
+
+v50 keeps `entity_identity.evidence_surface` on the complete public passage-
+title identity. A longer receipt-grounded body name remains unchanged in the
+answer-bearing `evidence_proposition` argument; the Reasoner, rather than the
+Retriever identity field, owns answer-slot binding. Thus a passage title such
+as `Sinclair Lewis` can bind the exact body proposition subject
+`Harry Sinclair Lewis` without admitting a surname subset or a descriptor as
+an entity identity. The structured repair instruction preserves the same read,
+span and proposition, and changes only `entity_identity` to that complete title
+surface. No accepted answer or evaluator state enters this rule.
+
+The recovery state now marks a TriviaQA Evidence Retriever as
+`repair_exhausted` when a bounded ReAct failure occurs after both unique
+recovery declaration values are already active. The live MODIFY projection
+publishes only values different from the current Canvas state. If no valid
+evidence artifact and no strict-progress same-responsibility replacement are
+available, missing Reasoner/Verifier/Formatter roles cannot bypass Evidence
+Grounding. This fail-closed boundary is TriviaQA-conditioned; HotpotQA's
+previously verified missing-role completion behavior is unchanged.
+
+Director prompt v6 remains short, topology-neutral and unchanged. No fixed
+role order, chain, Agent count, candidate answer or workflow template is added
+to it. The complete static suite passes 960 tests and 177 subtests. Stable Zero
+and fixed-128 are still live gates, so these static results are not an accuracy
+claim.
+
 ### Stable Zero status
 
 Static architecture, 946 unit tests, 177 subtests and the current frozen
@@ -956,8 +1008,13 @@ Zero task after a successful Tool read because its structured-artifact repair
 path exposed blocked downstream roles and ended in
 `canvas_action_domain_exhausted`. v47 then failed its live gate for the measured
 action-domain/admission and answer-bearing entity-surface defects documented
-above. v48 is statically verified; its Stable Zero canary and fixed-128 run
-remain pending, so no v2 score is inferred from these static results or failed
+above. v48 then failed its first persisted Stable Zero task after a correct
+Tool read because full-name title expansion was rejected and the recovery
+domain exposed 25 no-op MODIFY actions; the remaining two canary tasks and the
+fixed-128 run were not started. The expanded-alias v49 preflight candidate was
+rejected before live execution because it could admit Title Case descriptors.
+v50 is statically verified, while its Stable Zero canary and fixed-128 run
+remain pending. No v2 score is inferred from these static results or failed
 diagnostics.
 
 ## Historical comparison condition
