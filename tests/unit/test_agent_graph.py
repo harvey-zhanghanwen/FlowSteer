@@ -4312,6 +4312,83 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+    def test_exhausted_reasoner_routes_new_evidence_before_output_selection(
+        self,
+    ) -> None:
+        """A partial Canvas must not strand a successful recovery artifact."""
+
+        complete = _trivia_semantic_graph()
+        graph = AgentGraph(
+            [node for node in complete.nodes if node.id != "formatter"],
+            [
+                relation
+                for relation in complete.relations
+                if "formatter"
+                not in {relation.source_id, relation.target_id}
+            ],
+        )
+        graph.add_agent(
+            AgentNode(
+                "repair_retriever",
+                "cheap",
+                "retrieve additional evidence for the requested relation",
+                role_family="evidence_retriever",
+                allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                execution_mode="react",
+                artifact_type="retrieval_evidence",
+            )
+        )
+        registry = make_registry()
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_trivia_semantic_runtime(
+                registry,
+                _ImmediateGateway(),
+            ),
+            graph=graph,
+            problem="What is the capital of France?",
+            execute_on_edit=False,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+        )
+        for agent_id, passage_id in (
+            ("reader", "initial-public"),
+            ("repair_retriever", "repair-public"),
+        ):
+            env._progressive_outputs[agent_id] = (
+                _test_evidence_retriever_artifact(passage_id)
+            )
+            env._progressive_output_metadata[agent_id] = {
+                "tool_receipts": [_test_read_receipt(passage_id)]
+            }
+        env._failed_agent_ids.add("reasoner")
+        env._react_exhausted_agent_ids.add("reasoner")
+        env._repair_exhausted_agent_ids.add("reasoner")
+
+        expected_route = {
+            "source_id": "repair_retriever",
+            "target_id": "reasoner",
+            "source_to_target": True,
+            "target_to_source": False,
+        }
+        self.assertIsNone(env.graph.output_agent_id)
+        self.assertEqual(
+            [],
+            env._required_evidence_ingress_relation_candidates(),
+        )
+        self.assertEqual(
+            [expected_route],
+            env._repair_exhausted_relation_candidates(),
+        )
+        self.assertEqual(("set_relation",), env.model_admissible_action_types())
+        self.assertEqual(
+            [expected_route],
+            env.model_admissible_action_targets()["set_relation"][
+                "candidates"
+            ],
+        )
+
     async def test_pending_isolated_retriever_repairs_before_another_add(
         self,
     ) -> None:

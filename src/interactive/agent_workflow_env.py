@@ -1274,7 +1274,20 @@ class AgentWorkflowEnv:
                 if issue.code == "cannot_reach_output"
                 for agent_id in issue.agent_ids
             }
-            if candidate_unreachable < current_unreachable:
+            if (
+                self._graph.output_agent_id is None
+                or candidate_unreachable < current_unreachable
+            ):
+                # FlowSteer's execute-after-edit recovery can materialize a
+                # receipt-grounded auxiliary before the Director selects an
+                # Output Agent.  At that partial-Canvas boundary there is no
+                # terminal node from which ``cannot_reach_output`` can measure
+                # strict progress, but routing the preserved artifact into the
+                # measured exhausted Reasoner is itself the exact executable
+                # recovery edit.  Once an Output exists, retain the stricter
+                # reachability-reduction gate.  This does not prescribe a
+                # workflow topology: source and target still come entirely
+                # from the live, validated Canvas candidate domain above.
                 result.append(dict(item))
         return result
 

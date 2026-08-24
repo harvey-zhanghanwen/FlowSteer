@@ -625,15 +625,34 @@ prompt contains no fixed Agent count, role order, communication topology,
 workflow template, retrieval-strategy recipe, candidate answer or unlisted
 Skill.
 
-The r56 configuration uses the local Qwen3.5-9B Supervisor on GPU 0 at port
-8015, explicitly sets `require_format_agent: false`, and keeps training, GRPO,
+The r56 configuration used the local Qwen3.5-9B Supervisor on GPU 0 at port
+8015, explicitly set `require_format_agent: false`, and kept training, GRPO,
 backward, optimizer updates, LoRA publication/policy synchronization, Skills,
-MACE/Bayesian exploration and gradient-replica use disabled.  Prepare-only
-selected the frozen `triviaqa:tc_3` canary.  At this documentation update the
-live r56 manifest was still in `agentgraph` status with zero completed
-AgentGraph records; therefore this report does not claim an r56 canary score
-or a fixed-128 v2 score.  Either result is authoritative only after its own
-manifest/report completes.
+MACE/Bayesian exploration and gradient-replica use disabled.  Its frozen
+`triviaqa:tc_3` canary failed Stable Zero at official EM/F1 `0.0/0.0`, with
+`final_answer=null`, `canvas_action_domain_exhausted`, 27 Director turns, 25
+accepted edits, two rejected edits, eight Agents, one directed relation and no
+Output Agent.  This is a terminal architecture failure, not a fixed-128 score.
+
+The receipt trace establishes two separate facts.  First, the Retriever read
+grounded `Dame Judi Dench -> born in -> Heworth`, the Reasoner later read that
+Heworth is part of York, and upstream Tool receipts reached the Reasoner
+without loss; retrieval and database coverage therefore succeeded.  Second,
+the Reasoner never bound `York` to the answer slot, and later successful
+recovery Retrievers remained isolated.  The live recovery relation projection
+had required a strict reduction in `cannot_reach_output`, but a partial Canvas
+with no Output has no such measurable set.  It consequently exposed repeated
+Retriever augmentation until Agent capacity was exhausted.
+
+The minimal post-r56 correction changes only that progress predicate.  Before
+Output selection, an already materialized, receipt-valid recovery Retriever
+may be routed one-way to the measured exhausted Reasoner through an ordinary
+live `set_relation` candidate; after Output selection, the existing strict
+terminal-reachability reduction remains mandatory.  No role, Agent identifier,
+edge, order, topology or retrieval recipe is inserted into the Director
+prompt.  A regression test reproduces the no-Output partial Canvas and proves
+that the exact recovery edge, rather than another isolated ADD, is the sole
+model-admissible action.
 
 ### v6 topology-neutral Director instruction
 
@@ -659,12 +678,13 @@ The v5 prompt and its compact-history policy remain versioned and replayable.
 The fixed-128 condition is separately frozen to v6/Tool v41 under a new output
 root, selects the same 128 development tasks in the same order, and keeps
 training, GRPO, Skills and policy synchronization disabled.  At this document
-update v6 had passed the complete static suite and prepare-only freeze but had
-not yet produced a live canary or fixed-128 score.
+update v6 and the post-r56 recovery correction passed the complete static suite
+and prepare-only freeze but had not yet produced a live canary or fixed-128
+score.
 
 ### Stable Zero status
 
-Static architecture, 943 unit tests, 177 subtests and the current frozen
+Static architecture, 944 unit tests, 177 subtests and the current frozen
 data-selection preconditions are complete.  The initial, r2, r3 and r4 canaries failed for
 the documented causes; r5 **passed Stable Zero** but its incomplete fixed-128
 run was stopped after measured recovery defects appeared.  Recovery revision
@@ -699,10 +719,11 @@ missing from the live relation domain.  Recovery revision r17 passed both the
 main `2/2` and isolated `tc_9`/`tc_10` `2/2` live gates, so its fixed-128 run
 was admitted.  No fixed-128 score is inferred from unit tests, four canary
 tasks, an incomplete run, or the previous architecture.  r56 subsequently
-introduced the role-conditional, topology-neutral inference boundaries above;
-its `triviaqa:tc_3` live canary had started but had not produced a completed
-trajectory at this documentation update, so no r56 or fixed-128 v2 score is
-reported here.
+introduced the role-conditional, topology-neutral inference boundaries above,
+but its `triviaqa:tc_3` live canary failed with the measured partial-Canvas
+recovery-domain defect documented above.  The post-r56 correction is
+statically verified; no v6 canary or fixed-128 v2 score is inferred from that
+static result.
 
 ## Historical comparison condition
 
