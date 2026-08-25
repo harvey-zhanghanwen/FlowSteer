@@ -404,7 +404,7 @@ def _reportable_terminal_failure_matches(
     condition_id: str,
     versions: Mapping[str, str],
 ) -> bool:
-    """Admit one frozen AIME terminal failure to reporting, not evaluation.
+    """Admit one frozen completion terminal failure to reporting, not evaluation.
 
     A trajectory that naturally exhausts the Director budget without a legal
     ``FINISH`` is a completed execution receipt under the project terminal
@@ -416,7 +416,7 @@ def _reportable_terminal_failure_matches(
     evaluation = value.get("evaluation")
     details = evaluation.get("details") if isinstance(evaluation, Mapping) else None
     return bool(
-        _dataset_key(task) == "aime_2026"
+        _dataset_key(task) in {"aime_2026", "healthbench_professional"}
         and _trajectory_identity_matches(
             value,
             task=task,

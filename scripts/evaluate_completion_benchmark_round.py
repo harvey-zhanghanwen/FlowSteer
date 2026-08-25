@@ -1745,7 +1745,10 @@ def _failure_type(
         return "direct_operational_or_evaluator_failure"
     if graph_value is None:
         return "agentgraph_operational_or_evaluator_failure"
-    if dataset_key == "aime_2026" and graph_value.get("explicit_finish") is not True:
+    if (
+        dataset_key in {"aime_2026", "healthbench_professional"}
+        and graph_value.get("explicit_finish") is not True
+    ):
         return "agentgraph_terminal_failure"
     if not graph_valid:
         return "agentgraph_operational_or_evaluator_failure"
@@ -2636,7 +2639,7 @@ def _agentgraph_execution_receipts(
     }
 
 
-def _is_reportable_aime_terminal_failure(value: Mapping[str, Any]) -> bool:
+def _is_reportable_noninteractive_terminal_failure(value: Mapping[str, Any]) -> bool:
     evaluation = value.get("evaluation")
     details = evaluation.get("details") if isinstance(evaluation, Mapping) else None
     return bool(
@@ -2822,8 +2825,10 @@ def _report(
             or (
                 row["agentgraph"].get("valid") is not True
                 and not (
-                    dataset_key == "aime_2026"
-                    and _is_reportable_aime_terminal_failure(row["agentgraph"])
+                    dataset_key in {"aime_2026", "healthbench_professional"}
+                    and _is_reportable_noninteractive_terminal_failure(
+                        row["agentgraph"]
+                    )
                 )
             )
             for row in rows

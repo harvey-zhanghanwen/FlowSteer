@@ -302,7 +302,7 @@ template, training update, or Skill was added in response to the score.
 
 ---
 
-## HealthBench Professional initial-adaptation log
+# HealthBench Professional initial-adaptation log
 
 ### Scope and current status
 
@@ -312,7 +312,8 @@ This bounded adaptation covers:
 
 It is an inference/evaluation adaptation only. The source and interface
 decisions below were frozen before execution. The implementation and two-case
-Stable Zero chain are complete; the 525-case paired evaluation is pending.
+Stable Zero chain are complete; the 525-case paired request population has
+been executed and the final reference-compatible report is persisted.
 Canary scores are retained only as chain diagnostics and are not reported as a
 benchmark estimate.
 
@@ -363,6 +364,15 @@ This boundary follows SkillEval's session/evaluator separation in
 HealthBench contract in
 `protocol_v10_official.py::{HealthBenchOfficialGrader,HealthBenchNativeBackend}`.
 
+The dataset manifest's `model_visible_fields` name refers to fields retained
+in the public transport record, not to automatic prompt concatenation. The
+runtime uses `TaskRecord.question` as `_workflow_problem`; for Professional it
+is the lossless conversation rendering that the gateway restores to native
+roles. `TaskRecord.metadata`, `task_id`, `evaluator_route`, and
+`evaluator_source_id` are dataset/evaluator routing and receipt fields and do
+not enter the Director or Agent task text. The source-preservation
+`conversation` copy is not injected a second time.
+
 ### 3. Evaluator and metric
 
 **Decision:** Use OpenAI `simple-evals` commit
@@ -412,6 +422,13 @@ The following existing semantics remain unchanged:
 - one admitted Canvas edit followed by current-graph execution and real
   feedback before the next Director turn; and
 - explicit terminal admission plus complete trajectory receipts.
+
+The first three fields are the Agent's graph-semantic identity. Optional
+`role_family`, `allowed_tools`, `execution_mode`, `artifact_type`, and
+`completion_condition` values are shared execution/receipt metadata rather
+than predefined Agent classes. For this frozen condition, all final nodes used
+reasoning mode and an empty Tool set; Director-authored free-text role labels
+were neither required nor used by graph validity or topology rules.
 
 The upstream reference calls are
 `workflow_env.py::{InteractiveWorkflowEnv.step,InteractiveWorkflowEnv._execute_workflow}`
@@ -468,20 +485,18 @@ errors to insert a fixed medical workflow.
 | --- | --- | --- |
 | AgentGraph, Canvas action loop, communication, Output Agent, model interface, trajectory | **Direct reuse** | Existing core; no HealthBench-specific change planned. |
 | SkillFlow bounded execution/session and private-evaluator separation | **Direct semantic reuse** | Mapped to existing runtime and evaluator boundary; no training session activated. |
-| Official 525-row schema conversion and full-conversation rendering | **Necessary HealthBench adaptation** | Implementation/smoke evidence pending. |
-| Public reference rubric grader, signed scoring, length adjustment, and clipped aggregation | **Necessary HealthBench adaptation** | Implementation/grader compatibility evidence pending. |
-| Paired Direct/AgentGraph configuration and report fields | **Necessary wiring** | Full-run evidence pending. |
+| Official 525-row schema conversion and full-conversation rendering | **Necessary HealthBench adaptation** | Validated on all 525 source-ordered public records and by the two-case chain. |
+| Public reference rubric grader, signed scoring, length adjustment, and clipped aggregation | **Necessary HealthBench adaptation** | Validated with the pinned reference grader and persisted rubric-level receipts; evaluator/provider failures remain invalid grades. |
+| Paired Direct/AgentGraph configuration and report fields | **Necessary wiring** | Validated by the complete 525-request Direct/AgentGraph run. |
 | Medical Tool/retrieval adapter | **Not enabled** | Empty Tool condition in both lanes. |
 | Medical role or topology template | **Not implemented** | Explicitly excluded from Stable Zero. |
 | GRPO/backward/optimizer/LoRA, MACE, Bayesian posterior/EVSI, Skill retrieval/injection/evolution | **Not enabled** | No training or learning-state mutation authorized. |
 | OpenAI internal Professional evaluator | **Unavailable** | Do not claim internal-evaluator equivalence. |
 
-No implementation status may be promoted from pending to validated until
-receipts establish schema preservation, evaluator-only rubric visibility,
-same-condition Direct/AgentGraph execution, reference scorer behavior,
-explicit terminal accounting, and persisted grader/runtime failures. Formal
-scores and Wrong Demo conclusions belong in the run report, not in this
-pre-execution decision record.
+The evidence gate is satisfied by schema tests, the two-case canary, the
+complete paired request run, and the persisted final report. Raw conversations,
+rubric text, physician responses, grader explanations, and full model answers
+remain outside this public adaptation log.
 
 ### 8. Stable Zero evidence
 
@@ -506,3 +521,45 @@ bug: `LiveSmokeBackend.evaluate_final_graph` did not pass the attached private
 Professional grader into `evaluate_task`. The fix adds only that callback at
 the existing terminal evaluator boundary. It does not change Director prompts,
 Canvas actions, Agent contracts, relations, topology search, or FINISH rules.
+
+Receipt reconciliation after the full run found a second evaluator-routing
+bug. Twenty-two frozen trajectories had `termination_reason=max_rounds`,
+`explicit_finish=false`, and an empty terminal answer, but the completion
+runner initially sent the empty value to the Professional grader and reported
+the resulting local validation error as an operational evaluator failure.
+The correction directly reuses the existing AIME non-interactive terminal
+boundary: an empty submission without legal `FINISH` is retained as a
+reportable terminal-failure trajectory, the formal grader is not called, and
+no prior candidate is recovered. Historical append-only retry receipts remain
+preserved. This routing correction does not resample any Director or Agent,
+change a score, or alter the unified orchestration search space.
+
+### 9. Full 525-case paired evaluation outcome
+
+The final report is
+`reports/healthbench_professional_official_v1/evaluation_report.json` with a
+concise rendering at `evaluation_report.md`. Both lanes used the same complete
+conversation, local Qwen3.5-9B model condition, generation settings, empty Tool
+condition, and pinned reference grader.
+
+| Condition | Requested | Evaluator valid | Strict raw | Strict length-adjusted | Valid-only length-adjusted |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Direct | 525 | 525 | 18.97% | 19.17% | 19.17% |
+| AgentGraph | 525 | 503 | 22.65% | 20.24% | 21.12% |
+
+The AgentGraph minus Direct strict length-adjusted difference is +1.07
+percentage points. There are 503 graded explicit `FINISH` trajectories and 22
+reportable `max_rounds` terminal failures; current operational/evaluator
+failures are zero. The 22 workflows were not regenerated and were not
+converted to fabricated valid grades. The fixed two-case canary remains
+Stable Zero-confirmed; the formal 525-case manifest does not pass the stronger
+all-task Stable Zero criterion because those workflows never reached legal
+`FINISH`.
+
+Across all 525 terminal receipts, AgentGraph naturally produced 347
+single-node, 80 serial-2, 17 serial-3-plus, 39 reciprocal, 18 fan-in, 4
+fan-out, 4 parallel, and 16 mixed topologies. Agent counts ranged from one to
+eight and relation counts ranged from zero to six. These are observed Director
+choices, not medical role or topology templates. No training, GRPO, backward
+pass, optimizer step, LoRA update/publication, MACE, Bayesian posterior/EVSI,
+Skill retrieval, injection, or evolution ran; optimizer updates remain zero.

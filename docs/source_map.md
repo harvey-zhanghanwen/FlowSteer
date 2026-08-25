@@ -178,11 +178,16 @@ baseline.
 
 ---
 
-## HealthBench Professional initial-adaptation source map
+# HealthBench Professional initial-adaptation source map
 
 This section records the sources selected for the HealthBench Professional
-inference/evaluation adaptation. The implementation and two-case Stable Zero
-smoke chain are validated; the complete 525-case evaluation remains pending.
+inference/evaluation adaptation. The implementation, two-case Stable Zero
+smoke chain, and complete 525-case request execution are validated. The
+full panel contains 503 evaluator-valid AgentGraph completions and 22
+receipt-confirmed `max_rounds` terminal failures. The machine-readable and
+concise reports are
+`reports/healthbench_professional_official_v1/evaluation_report.json` and
+`reports/healthbench_professional_official_v1/evaluation_report.md`.
 The source order
 is the project MD contract, SkillFlow/SkillEval execution boundaries,
 FlowSteer's progressive Canvas boundaries, and only then the minimum
@@ -260,6 +265,14 @@ The project already adapts these boundaries in
 Professional must attach to these existing calls. It does not add another
 Canvas, runtime, communication mechanism, or trajectory type.
 
+The MD identity `Agent = agent_id + model_id + free-text contract` is the
+graph-semantic identity used here. The shared serializer also retains optional
+execution/receipt metadata (`role_family`, `allowed_tools`, `execution_mode`,
+`artifact_type`, and `completion_condition`). Those fields do not define Agent
+classes or topology semantics. In this HealthBench condition, every final node
+used `execution_mode=reasoning` and `allowed_tools=[]`; any `role_family` label
+was free text authored by the Director, not a predefined medical role.
+
 ### HealthBench Professional implementation classification
 
 | Boundary | Classification | Required state |
@@ -294,12 +307,34 @@ rewrite, or task-specific Formatter is applied. The sole terminal processing
 is whatever minimal transport normalization the pinned reference evaluator
 requires.
 
+The preparation manifest's `model_visible_fields` label describes fields kept
+in the public transport record; it does not mean every listed routing field is
+concatenated into a model prompt. The executed boundary is recorded by
+`run_manifest.json::model_visible_task_boundary`: the prompt source is
+`TaskRecord.question`, which is the lossless rendering of the complete
+conversation and is restored to native roles by the gateway. `task_id`,
+`evaluator_route`, and `evaluator_source_id` are routing, private-evaluator
+join, and receipt metadata. The top-level `conversation` copy is retained for
+source preservation and is not injected a second time.
+
 ### Status boundary
 
 Source/schema/evaluator mapping, code integration, and the two-case Stable Zero
 chain are complete. Persisted receipts show 2/2 valid Direct grades, 2/2 valid
 AgentGraph grades, 2/2 legal explicit `FINISH`, complete trajectories, and
 successful bounded recovery from transient grader-provider failures. These
-two cases are a chain-validation canary, not a benchmark estimate. The complete
-525-case Direct-versus-AgentGraph score, topology distribution, and Wrong Demo
-conclusions remain pending formal execution.
+two cases are a chain-validation canary, not a benchmark estimate.
+
+The complete public-test request population was executed under one frozen
+condition. Direct completed and graded 525/525. AgentGraph produced 503 valid
+reference-compatible grades with 503 explicit `FINISH`; the other 22
+trajectories exhausted 20 Director turns without legal `FINISH` and are
+reportable `max_rounds` terminal failures. Current operational/evaluator
+failures are zero. With the full requested denominator of 525, the strict
+raw/length-adjusted scores are 18.97%/19.17% for Direct and 22.65%/20.24% for
+AgentGraph; the strict length-adjusted delta is +1.07 percentage points.
+Among the 503 valid AgentGraph grades, the valid-only length-adjusted score is
+21.12%. The result remains reference-compatible, not internal-official, and
+the 22 non-submissions are not fabricated as valid grades. Consequently, the
+two-case Stable Zero canary is confirmed, but the formal 525-case manifest's
+all-task Stable Zero criterion is false because 22 workflows did not finish.

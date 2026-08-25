@@ -239,6 +239,130 @@ def test_healthbench_final_graph_uses_attached_professional_grader():
     assert calls[0][2]["healthbench_grader"] is professional_grade
 
 
+def test_healthbench_without_explicit_finish_never_calls_professional_grader():
+    task = _MODULE.TaskRecord(
+        task_id="healthbench-professional:terminal-failure",
+        question="Conversation:\n\n[user] Help me.\n\n[assistant]",
+        ground_truth=None,
+        split="test",
+        metadata={"dataset_key": "healthbench_professional"},
+    )
+
+    for final_answer in (None, ""):
+        with patch("train_agentgraph_smoke.evaluate_task") as evaluate:
+            outcome = asyncio.run(
+                _MODULE.LiveSmokeBackend.evaluate_final_graph(
+                    SimpleNamespace(),
+                    task,
+                    final_answer,
+                    {"nodes": [], "relations": [], "revision": 0},
+                    rollout_index=0,
+                )
+            )
+
+        evaluate.assert_not_called()
+        assert outcome.valid is False
+        assert outcome.reward is None
+        assert outcome.reason == "not_evaluated_without_explicit_finish"
+        assert outcome.details == {
+            "terminal_failure": True,
+            "formal_evaluator_called": False,
+        }
+        assert (
+            outcome.evaluator_version
+            == _MODULE.HEALTHBENCH_PROFESSIONAL_EVALUATOR_VERSION
+        )
+
+
+def test_healthbench_terminal_failure_is_reportable_not_operational():
+    task = _MODULE.TaskRecord(
+        task_id="healthbench-professional:terminal-failure",
+        question="Conversation:\n\n[user] Help me.\n\n[assistant]",
+        ground_truth=None,
+        split="test",
+        metadata={"dataset_key": "healthbench_professional"},
+    )
+    evaluator_version = _MODULE.HEALTHBENCH_PROFESSIONAL_EVALUATOR_VERSION
+    versions = {"evaluator": evaluator_version}
+    evaluation = {
+        "valid": False,
+        "reward": None,
+        "metrics": {},
+        "reason": "not_evaluated_without_explicit_finish",
+        "details": {
+            "terminal_failure": True,
+            "formal_evaluator_called": False,
+        },
+        "evaluator_version": evaluator_version,
+    }
+    trajectory = {
+        "trajectory_id": "trajectory:healthbench-terminal-failure",
+        "task": task.to_dict(),
+        "condition_id": "healthbench-condition",
+        "versions": versions,
+        "turns": [],
+        "final_answer": None,
+        "explicit_finish": False,
+        "termination_reason": "max_rounds",
+        "evaluation": evaluation,
+    }
+
+    assert _MODULE.hotpot_round._reportable_terminal_failure_matches(
+        trajectory,
+        task=task,
+        condition_id="healthbench-condition",
+        versions=versions,
+    )
+
+    assert (
+        _MODULE._failure_type(
+            {"valid": True},
+            {
+                "valid": False,
+                "explicit_finish": False,
+                "evaluation": evaluation,
+            },
+            direct_valid=True,
+            graph_valid=False,
+            direct_score=0.5,
+            graph_score=0.0,
+            dataset_key="healthbench_professional",
+        )
+        == "agentgraph_terminal_failure"
+    )
+
+    row = {
+        "task_id": task.task_id,
+        "failure_type": "agentgraph_terminal_failure",
+        "direct": {
+            "available": True,
+            "valid": True,
+            "overall_score": 0.5,
+            "overall_score_length_adjusted": 0.5,
+            "telemetry": {},
+            "evaluation": {"valid": True, "details": {}},
+            "execution": None,
+        },
+        "agentgraph": {
+            "available": True,
+            "valid": False,
+            "overall_score": 0.0,
+            "overall_score_length_adjusted": 0.0,
+            "explicit_finish": False,
+            "termination_reason": "max_rounds",
+            "evaluation": evaluation,
+            "telemetry": {},
+            "graph_diagnostic": None,
+        },
+    }
+    report = _MODULE._report(
+        [row], _evaluation_config("healthbench_professional")
+    )
+    assert report["terminal_failure_count"] == 1
+    assert report["max_rounds_count"] == 1
+    assert report["operational_failure_count"] == 0
+
+
 def test_aime_terminal_failure_is_reportable_without_evaluator_retry_or_double_count():
     task = _MODULE.TaskRecord(
         task_id="aime-2026/01",

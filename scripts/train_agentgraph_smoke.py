@@ -2928,11 +2928,14 @@ class LiveSmokeBackend:
         """
 
         source_key = _dataset_key(task)
-        if source_key == "aime_2026" and final_answer is None:
-            # The formal AIME adapter is reachable only after a legal FINISH.
-            # Preserve max-round trajectories for diagnosis, but do not turn
-            # an empty submission into an evaluated zero or recover a prior
-            # progressive candidate.
+        if (
+            source_key in {"aime_2026", "healthbench_professional"}
+            and final_answer in (None, "")
+        ):
+            # These formal completion evaluators are reachable only after a
+            # legal FINISH. Preserve max-round trajectories for diagnosis,
+            # but do not turn an empty submission into an evaluated zero or
+            # route it into an evaluator-only infrastructure retry.
             return EvaluationOutcome(
                 valid=False,
                 reward=None,
@@ -2942,7 +2945,11 @@ class LiveSmokeBackend:
                     "terminal_failure": True,
                     "formal_evaluator_called": False,
                 },
-                evaluator_version=AIME2026_EVALUATOR_VERSION,
+                evaluator_version=(
+                    AIME2026_EVALUATOR_VERSION
+                    if source_key == "aime_2026"
+                    else HEALTHBENCH_EVALUATOR_VERSION
+                ),
             )
         if source_key in {"webshop", "alfworld"} and final_answer is None:
             # A natural Director budget exhaustion is already a real
