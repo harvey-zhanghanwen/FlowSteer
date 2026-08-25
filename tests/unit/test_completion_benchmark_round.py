@@ -179,6 +179,39 @@ def test_aime_runtime_v2_config_preserves_the_evaluation_only_search_space():
     }
 
 
+def test_webshop_initial_adapter_config_preserves_free_scalar_agentgraph():
+    config = load_yaml(
+        _ROOT / "config" / "evaluation_webshop_initial_adapter_v1.yaml"
+    )
+
+    _MODULE.validate_completion_benchmark_config(config)
+
+    assert config["experiment"]["training_enabled"] is False
+    assert config["experiment"]["prompt_version"] == (
+        "agentgraph.director.minimal-neutral-scalar.v2"
+    )
+    assert config["webshop_evaluation"]["sample_count"] == 128
+    assert config["webshop_evaluation"]["split"] == "validation"
+    assert config["environment_runtime"]["max_environment_steps_by_source"] == {
+        "webshop": 10
+    }
+    assert config["director"]["lora"]["enabled"] is False
+    assert config["grpo"]["enabled"] is False
+    assert config["skills"]["enabled"] is False
+    assert config["agent_graph"]["require_format_agent"] is False
+    assert config["agent_graph"]["actions"] == [
+        "add_agent",
+        "modify_agent",
+        "delete_agent",
+        "set_relation",
+        "set_output",
+        "finish",
+    ]
+    assert config["agent_graph"]["terminal_protocol_by_source"] == {
+        "webshop": "none"
+    }
+
+
 def test_aime_without_explicit_finish_never_calls_formal_evaluator():
     task = _MODULE.TaskRecord(
         task_id="aime-2026/01",
@@ -201,6 +234,33 @@ def test_aime_without_explicit_finish_never_calls_formal_evaluator():
     assert outcome.valid is False
     assert outcome.reward is None
     assert outcome.reason == "not_evaluated_without_explicit_finish"
+    assert outcome.details["formal_evaluator_called"] is False
+
+
+def test_webshop_without_explicit_finish_never_calls_formal_evaluator():
+    task = _MODULE.TaskRecord(
+        task_id="webshop:00500",
+        question="buy the requested item",
+        ground_truth="environment_success",
+        split="validation",
+        metadata={"dataset_key": "webshop"},
+    )
+
+    outcome = asyncio.run(
+        _MODULE.LiveSmokeBackend.evaluate_final_graph(
+            SimpleNamespace(),
+            task,
+            None,
+            {"nodes": [], "relations": [], "revision": 0},
+            rollout_index=0,
+        )
+    )
+
+    assert outcome.valid is False
+    assert outcome.reward is None
+    assert outcome.metrics == {}
+    assert outcome.reason == "not_evaluated_without_explicit_finish"
+    assert outcome.details["terminal_failure"] is True
     assert outcome.details["formal_evaluator_called"] is False
 
 
@@ -287,6 +347,46 @@ def test_aime_terminal_failure_is_reportable_without_evaluator_retry_or_double_c
     assert direct_receipts["finish_reason_distribution"] == {"length": 1}
     assert direct_receipts["terminal_output_parsing_failure_count"] == 1
     assert report["operational_failure_count"] == 0
+
+
+def test_webshop_terminal_failure_is_reportable_without_formal_evaluator_retry():
+    task = _MODULE.TaskRecord(
+        task_id="webshop:00500",
+        question="buy the requested item",
+        ground_truth="environment_success",
+        split="validation",
+        metadata={"dataset_key": "webshop"},
+    )
+    evaluator_version = _MODULE.evaluator_version_for(task)
+    versions = {"evaluator": evaluator_version}
+    trajectory = {
+        "trajectory_id": "trajectory:webshop-terminal-failure",
+        "task": task.to_dict(),
+        "condition_id": "webshop-condition",
+        "versions": versions,
+        "turns": [],
+        "final_answer": None,
+        "explicit_finish": False,
+        "termination_reason": "max_rounds",
+        "evaluation": {
+            "valid": False,
+            "reward": None,
+            "metrics": {},
+            "reason": "not_evaluated_without_explicit_finish",
+            "details": {
+                "terminal_failure": True,
+                "formal_evaluator_called": False,
+            },
+            "evaluator_version": evaluator_version,
+        },
+    }
+
+    assert _MODULE.hotpot_round._reportable_terminal_failure_matches(
+        trajectory,
+        task=task,
+        condition_id="webshop-condition",
+        versions=versions,
+    )
 
 
 def test_graph_task_timeout_must_be_positive_when_configured():
@@ -749,10 +849,18 @@ def test_reports_aime_accuracy_and_healthbench_raw_score():
     environment = _MODULE._aggregate(
         [
             {
-                "direct": {"available": True, "valid": True, "success": 0.0},
+                "direct": {
+                    "available": True,
+                    "valid": True,
+                    "average_score": 0.25,
+                    "success_rate": 0.0,
+                    "success": 0.0,
+                },
                 "agentgraph": {
                     "available": True,
                     "valid": True,
+                    "average_score": 1.0,
+                    "success_rate": 1.0,
                     "success": 1.0,
                     "explicit_finish": True,
                 },
@@ -761,7 +869,137 @@ def test_reports_aime_accuracy_and_healthbench_raw_score():
         "agentgraph",
         "webshop",
     )
+    assert environment["strict_average_score"] == 1.0
+    assert environment["strict_success_rate"] == 1.0
     assert environment["strict_success"] == 1.0
+
+
+def test_webshop_diagnostics_count_native_actions_and_first_invalid_turn():
+    evaluation = {
+        "valid": True,
+        "reason": "environment_step_limit",
+        "metrics": {
+            "average_score": 0.0,
+            "success_rate": 0.0,
+            "success": 0.0,
+            "terminal": 0.0,
+        },
+        "details": {
+            "trace": [
+                {
+                    "step": 0,
+                    "action": "search[blue table]",
+                    "state_advanced": True,
+                },
+                {
+                    "step": 1,
+                    "action": "<INVALID>",
+                    "state_advanced": False,
+                    "parse_error": True,
+                },
+            ]
+        },
+    }
+    graph_value = {
+        "evaluation": evaluation,
+        "explicit_finish": True,
+        "termination_reason": "finish",
+        "turns": [],
+    }
+    rows = [
+        {
+            "direct": {"evaluation": evaluation},
+            "agentgraph": {"evaluation": evaluation},
+        }
+    ]
+
+    diagnostics = _MODULE._environment_arm_diagnostics(rows, "agentgraph")
+    diagnosis = _MODULE._webshop_wrong_demo_diagnosis(graph_value)
+
+    assert diagnostics["environment_turn_count"] == 2
+    assert diagnostics["state_advancing_action_count"] == 1
+    assert diagnostics["invalid_action_count"] == 1
+    assert diagnostics["environment_step_limit_count"] == 1
+    assert diagnosis["failure_layer"] == "environment_action"
+    assert diagnosis["first_error_turn"] == 1
+    assert diagnosis["error"] == "invalid_native_environment_action"
+
+
+def test_webshop_terminal_failure_keeps_runtime_environment_prefix_in_report():
+    evaluation = {
+        "valid": False,
+        "reward": None,
+        "metrics": {},
+        "reason": "not_evaluated_without_explicit_finish",
+        "details": {
+            "terminal_failure": True,
+            "formal_evaluator_called": False,
+        },
+    }
+    arm = {
+        "available": True,
+        "valid": False,
+        "explicit_finish": False,
+        "termination_reason": "max_rounds",
+        "evaluation": evaluation,
+        "turns": [
+            {
+                "runtime_summary": {
+                    "output_metadata": {
+                        "environment-agent": {
+                            "evaluator_environment_trace": [
+                                {
+                                    "step": 0,
+                                    "action": "search[desk lamp]",
+                                    "state_advanced": True,
+                                    "done": False,
+                                }
+                            ]
+                        }
+                    }
+                }
+            }
+        ],
+    }
+    trace = _MODULE._saved_environment_trace(arm)
+    rows = [
+        {
+            "agentgraph": {
+                **arm,
+                "environment_trace": [dict(item) for item in trace],
+            }
+        }
+    ]
+
+    diagnostics = _MODULE._environment_arm_diagnostics(rows, "agentgraph")
+
+    assert [item["action"] for item in trace] == ["search[desk lamp]"]
+    assert diagnostics["environment_turn_count"] == 1
+    assert diagnostics["state_advancing_action_count"] == 1
+    assert diagnostics["formal_evaluator_skipped_count"] == 1
+    assert diagnostics["environment_or_evaluator_failure_count"] == 0
+
+
+def test_webshop_native_metric_receipt_fails_closed_when_one_metric_is_missing():
+    valid, metrics = _MODULE._metrics(
+        {
+            "evaluation": {
+                "valid": True,
+                "metrics": {
+                    "average_score": 0.5,
+                    "success": 0.0,
+                },
+            }
+        },
+        "webshop",
+    )
+
+    assert valid is False
+    assert metrics == {
+        "average_score": 0.0,
+        "success_rate": 0.0,
+        "success": 0.0,
+    }
 
 
 def test_aime_wrong_demo_uses_first_runtime_failure_receipt():

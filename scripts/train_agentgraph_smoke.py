@@ -2941,15 +2941,19 @@ class LiveSmokeBackend:
                 evaluator_version=AIME2026_EVALUATOR_VERSION,
             )
         if source_key in {"webshop", "alfworld"} and final_answer is None:
-            # A natural Director budget exhaustion is already a real
-            # terminal failure in the MD/SkillFlow boundary.  Do not start
-            # a fresh interactive environment after the workflow itself
-            # failed to finish.
+            # The formal stateful-environment adapter is reachable only after
+            # a legal AgentGraph FINISH.  Preserve the Canvas and the public
+            # environment prefix for diagnosis, but do not turn Director
+            # budget exhaustion into a formally evaluated zero.
             return EvaluationOutcome(
-                valid=True,
-                reward=0.0,
-                metrics={"success": 0.0},
-                reason="director_max_rounds_without_explicit_finish",
+                valid=False,
+                reward=None,
+                metrics={},
+                reason="not_evaluated_without_explicit_finish",
+                details={
+                    "terminal_failure": True,
+                    "formal_evaluator_called": False,
+                },
                 evaluator_version=RAGEN_EVALUATOR_VERSION,
             )
 

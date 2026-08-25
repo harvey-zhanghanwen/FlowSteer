@@ -1603,17 +1603,28 @@ async def _evaluate_environment(
             success = False
         reward = 1.0 if success else 0.0
     else:
+        # DIRECT_REUSE: WebShop's native environment score is the terminal
+        # reward in [0, 1], and the upstream WebShop/SkillFlow success
+        # predicate is exact full credit (reward == 1.0).  Keep the historical
+        # ``success`` alias for persisted consumers while exposing the two
+        # benchmark-native report metrics named by SkillFlow.
         reward = _clip_unit(terminal_reward)
-        success = reward >= 1.0
+        success = reward == 1.0
+    environment_metrics = {
+        "success": float(success),
+        "environment_return": terminal_reward,
+        "steps": float(len(trace)),
+        "terminal": float(terminal),
+    }
+    if dataset == "webshop":
+        environment_metrics.update(
+            average_score=reward,
+            success_rate=float(success),
+        )
     return EvaluationOutcome(
         valid=True,
         reward=reward,
-        metrics={
-            "success": float(success),
-            "environment_return": terminal_reward,
-            "steps": float(len(trace)),
-            "terminal": float(terminal),
-        },
+        metrics=environment_metrics,
         reason="evaluated" if terminal else "environment_step_limit",
         details={
             "env_type": env_type,

@@ -402,6 +402,9 @@ class EnvironmentEvaluatorTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(outcome.valid)
         self.assertEqual(0.75, outcome.reward)
+        self.assertEqual(0.75, outcome.metrics["average_score"])
+        self.assertEqual(0.0, outcome.metrics["success_rate"])
+        self.assertEqual(0.0, outcome.metrics["success"])
         self.assertEqual(1, len(prompts))
         self.assertIn("Your task is to: secret dataset wrapper text.", prompts[0])
         self.assertIn("already taken 0 step(s)", prompts[0])
@@ -459,6 +462,8 @@ class EnvironmentEvaluatorTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(outcome.valid)
         self.assertEqual(1.0, outcome.reward)
+        self.assertEqual(1.0, outcome.metrics["average_score"])
+        self.assertEqual(1.0, outcome.metrics["success_rate"])
         self.assertEqual(
             ["search[matching mug]", "click[B000000001]"], stepped_actions
         )

@@ -123,8 +123,11 @@ _BENCHMARKS: Mapping[str, Mapping[str, Any]] = {
         "label": "WebShop",
         "section_names": ("webshop_evaluation",),
         "phase_names": ("webshop_evaluation",),
-        "primary_metric": "success",
-        "metric_names": ("success",),
+        "primary_metric": "average_score",
+        # ``success`` is retained as a receipt-compatible alias for older
+        # consumers; Average Score and Success Rate are the two native
+        # WebShop metrics reported by SkillFlow and the upstream benchmark.
+        "metric_names": ("average_score", "success_rate", "success"),
     },
     "alfworld": {
         "label": "ALFWorld",
@@ -1652,7 +1655,10 @@ def _failure_type(
         return "direct_operational_or_evaluator_failure"
     if graph_value is None:
         return "agentgraph_operational_or_evaluator_failure"
-    if dataset_key == "aime_2026" and graph_value.get("explicit_finish") is not True:
+    if (
+        dataset_key in {"aime_2026", "webshop", "alfworld"}
+        and graph_value.get("explicit_finish") is not True
+    ):
         return "agentgraph_terminal_failure"
     if not graph_valid:
         return "agentgraph_operational_or_evaluator_failure"
@@ -2057,6 +2063,141 @@ def _aime_wrong_demo_diagnosis(
     }
 
 
+def _webshop_wrong_demo_diagnosis(
+    graph_value: Optional[Mapping[str, Any]],
+) -> Mapping[str, Any]:
+    """Classify only the first failure visible in saved WebShop receipts.
+
+    The native reward and hidden goal are never model-visible.  This offline
+    report adapter may identify an invalid public action, missing environment
+    termination, evaluator failure, or a below-full terminal score; it does
+    not infer which earlier shopping decision was causally wrong.
+    """
+
+    generic = dict(_aime_wrong_demo_diagnosis(graph_value))
+    if graph_value is None:
+        return generic
+    evaluation = graph_value.get("evaluation")
+    evaluation = evaluation if isinstance(evaluation, Mapping) else {}
+    trace = _saved_environment_trace(graph_value)
+    invalid = next(
+        (
+            entry
+            for entry in trace
+            if isinstance(entry, Mapping)
+            and (
+                entry.get("parse_error") is True
+                or entry.get("action") == "<INVALID>"
+                or entry.get("state_advanced") is False
+            )
+        ),
+        None,
+    )
+    if invalid is not None:
+        return {
+            "diagnosis_scope": "first_observable_failure",
+            "failure_layer": "environment_action",
+            "first_error_turn": invalid.get("step"),
+            "first_error_action": invalid.get("action"),
+            "first_error_agent_id": None,
+            "error": "invalid_native_environment_action",
+            "subsequent_error_propagation": {
+                "interpretation": "subsequent_receipt_span_not_proven_causality",
+                "later_environment_turn_count": max(
+                    0, len(trace) - int(invalid.get("step", 0)) - 1
+                ),
+            },
+            "terminal_result": graph_value.get("termination_reason"),
+        }
+    # Reuse the existing graph/runtime/provider diagnosis whenever it found a
+    # concrete observable fault instead of its AIME-only semantic fallback.
+    if generic.get("error") != "incorrect_terminal_integer_without_observable_runtime_failure":
+        return generic
+    metrics = evaluation.get("metrics")
+    metrics = metrics if isinstance(metrics, Mapping) else {}
+    reason = evaluation.get("reason")
+    terminal = float(metrics.get("terminal", 0.0) or 0.0) == 1.0
+    score = metrics.get("average_score", metrics.get("environment_return"))
+    if evaluation.get("valid") is not True:
+        layer = "environment_runtime"
+        error = str(reason or "environment_evaluator_failure")
+    elif not terminal or reason == "environment_step_limit":
+        layer = "environment_termination"
+        error = "environment_step_limit_without_terminal"
+    else:
+        layer = "environment_outcome"
+        error = "native_terminal_score_below_full"
+    return {
+        "diagnosis_scope": "first_observable_failure",
+        "failure_layer": layer,
+        "first_error_turn": (len(trace) - 1) if trace else None,
+        "first_error_action": (
+            trace[-1].get("action") if trace and isinstance(trace[-1], Mapping) else None
+        ),
+        "first_error_agent_id": None,
+        "error": error,
+        "native_average_score": score,
+        "causal_decision_identified": False,
+        "subsequent_error_propagation": {
+            "interpretation": (
+                "the first causally wrong shopping decision is not observable "
+                "from terminal reward alone"
+            ),
+            "environment_turn_count": len(trace),
+        },
+        "terminal_result": graph_value.get("termination_reason"),
+    }
+
+
+def _saved_environment_trace(
+    value: Optional[Mapping[str, Any]],
+) -> tuple[Mapping[str, Any], ...]:
+    """Return the formal trace or the latest saved public execution prefix."""
+
+    if not isinstance(value, Mapping):
+        return ()
+    evaluation = value.get("evaluation")
+    details = evaluation.get("details") if isinstance(evaluation, Mapping) else None
+    raw_trace = details.get("trace") if isinstance(details, Mapping) else None
+    if isinstance(raw_trace, Sequence) and not isinstance(raw_trace, (str, bytes)):
+        trace = tuple(dict(item) for item in raw_trace if isinstance(item, Mapping))
+        if trace:
+            return trace
+
+    turns = value.get("turns", ())
+    if not isinstance(turns, Sequence) or isinstance(turns, (str, bytes)):
+        return ()
+    for turn in reversed(turns):
+        if not isinstance(turn, Mapping):
+            continue
+        runtime = turn.get("runtime_summary")
+        output_metadata = (
+            runtime.get("output_metadata") if isinstance(runtime, Mapping) else None
+        )
+        if not isinstance(output_metadata, Mapping):
+            continue
+        candidates: list[tuple[Mapping[str, Any], ...]] = []
+        for metadata in output_metadata.values():
+            if not isinstance(metadata, Mapping):
+                continue
+            raw_candidate = metadata.get("evaluator_environment_trace")
+            if not isinstance(raw_candidate, Sequence) or isinstance(
+                raw_candidate, (str, bytes)
+            ):
+                continue
+            candidate = tuple(
+                dict(item) for item in raw_candidate if isinstance(item, Mapping)
+            )
+            if candidate:
+                candidates.append(candidate)
+        if candidates:
+            # AgentRuntime admits only one owner of a stateful environment
+            # resource.  Longest is a deterministic fail-closed reporting
+            # projection if malformed legacy metadata contains duplicates.
+            return max(candidates, key=len)
+    return ()
+
+
 def _paired_rows(
     selected: Sequence[TaskRecord],
     direct: Mapping[str, Mapping[str, Any]],
@@ -2094,6 +2235,9 @@ def _paired_rows(
                     ),
                     "telemetry": _direct_telemetry(direct_value),
                     "execution": direct_execution,
+                    "environment_trace": [
+                        dict(item) for item in _saved_environment_trace(direct_value)
+                    ],
                 },
                 "agentgraph": {
                     "available": graph_value is not None,
@@ -2127,6 +2271,9 @@ def _paired_rows(
                         if graph_value is not None
                         else None
                     ),
+                    "environment_trace": [
+                        dict(item) for item in _saved_environment_trace(graph_value)
+                    ],
                 },
                 **{
                     f"delta_{name}": graph_metrics[name] - direct_metrics[name]
@@ -2144,11 +2291,83 @@ def _paired_rows(
                 "wrong_demo_diagnosis": (
                     _aime_wrong_demo_diagnosis(graph_value)
                     if dataset_key == "aime_2026" and graph_score < 1.0
+                    else _webshop_wrong_demo_diagnosis(graph_value)
+                    if dataset_key == "webshop" and graph_score < 1.0
                     else None
                 ),
             }
         )
     return rows
+
+
+def _environment_arm_diagnostics(
+    rows: Sequence[Mapping[str, Any]], condition: str
+) -> Mapping[str, int]:
+    """Aggregate public environment transitions without exposing hidden state."""
+
+    evaluator_valid = 0
+    terminal_episodes = 0
+    step_limit_episodes = 0
+    environment_timeouts = 0
+    environment_turns = 0
+    state_advancing_actions = 0
+    invalid_actions = 0
+    environment_or_evaluator_failures = 0
+    formal_evaluator_skipped = 0
+    for row in rows:
+        arm = row.get(condition)
+        arm = arm if isinstance(arm, Mapping) else {}
+        evaluation = arm.get("evaluation")
+        evaluation = evaluation if isinstance(evaluation, Mapping) else {}
+        skipped = _is_reportable_terminal_failure(arm)
+        if evaluation.get("valid") is True:
+            evaluator_valid += 1
+        elif skipped:
+            formal_evaluator_skipped += 1
+        else:
+            environment_or_evaluator_failures += 1
+        reason = str(evaluation.get("reason", ""))
+        if reason == "environment_step_limit":
+            step_limit_episodes += 1
+        if "timeout" in reason.casefold():
+            environment_timeouts += 1
+        metrics = evaluation.get("metrics")
+        metrics = metrics if isinstance(metrics, Mapping) else {}
+        if float(metrics.get("terminal", 0.0) or 0.0) == 1.0:
+            terminal_episodes += 1
+        raw_trace = arm.get("environment_trace")
+        if not isinstance(raw_trace, Sequence) or isinstance(
+            raw_trace, (str, bytes)
+        ):
+            raw_trace = _saved_environment_trace(arm)
+        trace = (
+            raw_trace
+            if isinstance(raw_trace, Sequence)
+            and not isinstance(raw_trace, (str, bytes))
+            else ()
+        )
+        environment_turns += len(trace)
+        for entry in trace:
+            if not isinstance(entry, Mapping):
+                continue
+            invalid = (
+                entry.get("parse_error") is True
+                or entry.get("action") == "<INVALID>"
+                or entry.get("state_advanced") is False
+            )
+            invalid_actions += int(invalid)
+            state_advancing_actions += int(not invalid)
+    return {
+        "evaluator_valid_count": evaluator_valid,
+        "terminal_episode_count": terminal_episodes,
+        "environment_step_limit_count": step_limit_episodes,
+        "environment_timeout_count": environment_timeouts,
+        "environment_turn_count": environment_turns,
+        "state_advancing_action_count": state_advancing_actions,
+        "invalid_action_count": invalid_actions,
+        "formal_evaluator_skipped_count": formal_evaluator_skipped,
+        "environment_or_evaluator_failure_count": environment_or_evaluator_failures,
+    }
 
 
 def _aggregate(
@@ -2390,7 +2609,9 @@ def _agentgraph_execution_receipts(
     }
 
 
-def _is_reportable_aime_terminal_failure(value: Mapping[str, Any]) -> bool:
+def _is_reportable_terminal_failure(value: Mapping[str, Any]) -> bool:
+    """Recognize a saved terminal Canvas that correctly skipped evaluation."""
+
     evaluation = value.get("evaluation")
     details = evaluation.get("details") if isinstance(evaluation, Mapping) else None
     return bool(
@@ -2493,6 +2714,8 @@ def _report(
                 else "SWE_bench_Verified_official_Docker_harness_resolved_rate"
             )
             if dataset_key == "swe_bench"
+            else "WebShop_official_environment_Average_Score_and_Success_Rate"
+            if dataset_key == "webshop"
             else "SkillFlow_RAGEN_official_environment_terminal_success"
         ),
         "direct_local_baseline": direct,
@@ -2517,6 +2740,14 @@ def _report(
             "direct": _telemetry_totals(rows, "direct"),
             "agentgraph": _telemetry_totals(rows, "agentgraph"),
         },
+        "environment_diagnostics": (
+            {
+                "direct": _environment_arm_diagnostics(rows, "direct"),
+                "agentgraph": _environment_arm_diagnostics(rows, "agentgraph"),
+            }
+            if dataset_key in _INTERACTIVE_BENCHMARKS
+            else None
+        ),
         "execution_receipts": {
             "direct": _direct_execution_receipts(rows),
             "agentgraph": _agentgraph_execution_receipts(trajectories),
@@ -2562,10 +2793,7 @@ def _report(
             or row["agentgraph"].get("available") is not True
             or (
                 row["agentgraph"].get("valid") is not True
-                and not (
-                    dataset_key == "aime_2026"
-                    and _is_reportable_aime_terminal_failure(row["agentgraph"])
-                )
+                and not _is_reportable_terminal_failure(row["agentgraph"])
             )
             for row in rows
         ),
@@ -2603,6 +2831,48 @@ def _report_markdown(report: Mapping[str, Any]) -> str:
         if report.get("protocol_equivalent_to_direct") is True
         else "Direct and AgentGraph are separate protocols; their delta is descriptive, not a paired causal estimate."
     )
+    if report["dataset_key"] == "webshop":
+        environment = report.get("environment_diagnostics") or {}
+        direct_environment = environment.get("direct", {})
+        graph_environment = environment.get("agentgraph", {})
+        execution_receipts = report.get("execution_receipts") or {}
+        graph_receipts = execution_receipts.get("agentgraph", {})
+        return f"""# WebShop Architecture Validation
+
+Fixed {report['project_split']} samples: **{report['sample_count']}**. No training, GRPO, backward pass, optimizer update, LoRA publication, Bayesian update, or Skill publication ran. {skill_sentence}
+
+Native evaluator: **WebShop Average Score** and **Success Rate** (`{report['metric_scope']}`). AgentGraph explicit FINISH: **{report['explicit_finished_count']}/{report['sample_count']}**; terminal failures: **{report['terminal_failure_count']}**; operational/evaluator failures: **{report['operational_failure_count']}**.
+
+| Condition | Completed | Evaluator valid | Average Score (/100) | Success Rate |
+|---|---:|---:|---:|---:|
+| Qwen3.5-9B Direct Local Baseline | {direct['completed']} | {direct['evaluator_valid']} | {100 * float(direct['strict_average_score']):.2f} | {100 * float(direct['strict_success_rate']):.2f}% |
+| AgentGraph | {graph['completed']} | {graph['evaluator_valid']} | {100 * float(graph['strict_average_score']):.2f} | {100 * float(graph['strict_success_rate']):.2f}% |
+
+AgentGraph - Direct: **{100 * float(report['agentgraph_minus_direct']['average_score']):+.2f} Average Score**, **{100 * float(report['agentgraph_minus_direct']['success_rate']):+.2f} percentage points Success Rate**.
+
+{protocol_sentence}
+
+## Environment receipts
+
+| Condition | Environment turns | State-advancing actions | Invalid actions | Terminal episodes | Step-limit episodes | Evaluator skipped (no FINISH) | Timeouts |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Direct | {direct_environment.get('environment_turn_count', 0)} | {direct_environment.get('state_advancing_action_count', 0)} | {direct_environment.get('invalid_action_count', 0)} | {direct_environment.get('terminal_episode_count', 0)} | {direct_environment.get('environment_step_limit_count', 0)} | {direct_environment.get('formal_evaluator_skipped_count', 0)} | {direct_environment.get('environment_timeout_count', 0)} |
+| AgentGraph | {graph_environment.get('environment_turn_count', 0)} | {graph_environment.get('state_advancing_action_count', 0)} | {graph_environment.get('invalid_action_count', 0)} | {graph_environment.get('terminal_episode_count', 0)} | {graph_environment.get('environment_step_limit_count', 0)} | {graph_environment.get('formal_evaluator_skipped_count', 0)} | {graph_environment.get('environment_timeout_count', 0)} |
+
+## Natural AgentGraph structure
+
+- Agent count distribution: `{report['agent_count_distribution']}`
+- Relation count distribution: `{report['relation_count_distribution']}`
+- Topology distribution: `{report['topology_distribution']}`
+- Director `max_rounds`: **{report['max_rounds_count']}**
+- Runtime failed turns: **{graph_receipts.get('runtime_failed_turn_count', 0)}**
+- Runtime failure types: `{graph_receipts.get('runtime_failure_type_distribution', {})}`
+- Executor/provider error types: `{graph_receipts.get('execution_error_type_distribution', {})}`
+
+## Failure types
+
+{failures}
+"""
     if tuple(report["agentgraph_minus_direct"]) == ("exact_match", "token_f1"):
         return f"""# {report['dataset']} Architecture Validation
 

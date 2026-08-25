@@ -1,0 +1,20 @@
+# Runtime registry for the WebShop initial adapter condition.  The aligned
+# data are intentionally stored outside disposable Git worktrees; absolute
+# paths are resolved from FLOWSTEER_SHARED_ROOT without copying task records.
+
+schema_version: "flowsteer.agentgraph.runtime-datasets.v2"
+task_schema_version: "flowsteer.agentgraph.task.v1"
+
+datasets:
+  webshop:
+    protocol_label: "skillflow_ragen_webshop_native_validation_initial_v1"
+    preparation_catalog_path: "${FLOWSTEER_SHARED_ROOT:-/ssd1/iclr/1/FlowSteer}/config/datasets_webshop.yaml"
+    preparation_catalog_schema_version: "flowsteer.agentgraph.datasets.v1"
+    manifest:
+      path: "${FLOWSTEER_SHARED_ROOT:-/ssd1/iclr/1/FlowSteer}/data/webshop_v3/manifest.json"
+      schema_version: "flowsteer.agentgraph.datasets.v1"
+      provenance_field: "catalog"
+    paths:
+      train: "${FLOWSTEER_SHARED_ROOT:-/ssd1/iclr/1/FlowSteer}/data/webshop_v3/train.jsonl"
+      validation: "${FLOWSTEER_SHARED_ROOT:-/ssd1/iclr/1/FlowSteer}/data/webshop_v3/validation.jsonl"
+      test: "${FLOWSTEER_SHARED_ROOT:-/ssd1/iclr/1/FlowSteer}/data/webshop_v3/test.jsonl"
