@@ -227,3 +227,26 @@ executed by this adaptation:
 
 Any later activation requires a separate, explicitly authorized experiment and
 must not retroactively change the Stable Zero source condition recorded here.
+
+## Stable Zero canary correction: progressive relation editing
+
+The first real AIME canary exposed a generic Canvas admission deadlock rather
+than a mathematical-reasoning failure. With `execute_on_edit=true`, each
+independent `ADD_AGENT` immediately produced a successful artifact. The local
+PRESERVE guard then treated every successful Agent's predecessor identity as
+immutable, so all later `SET_RELATION` candidates were removed. Once an Output
+Agent was selected, the independent Agents could not reach it, `FINISH` could
+not become admissible, and the trajectory ended at `max_rounds`.
+
+**FlowSteer-aligned correction:** free AgentGraphs now reuse the existing
+relation dirty-closure and downstream re-execution semantics after each
+accepted Canvas edit. The stronger predecessor-identity guard remains limited
+to the project's verified semantic-lineage protocols, where it protects
+receipt-bound evidence lineage. This is a unified-core correction, not an AIME
+special case, topology template, role prior, or answer-dependent repair.
+
+The AIME bounded evaluation section now also supplies
+`task_timeout_seconds=600` to the shared collector. The former root-level
+execution timeout remains a model/runtime setting; it did not bound a complete
+trajectory. The interrupted pre-correction canary is retained only as failure
+evidence and is not reused as a post-correction result.

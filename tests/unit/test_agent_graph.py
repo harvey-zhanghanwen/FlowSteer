@@ -1885,6 +1885,7 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             gateway,
             problem="question",
             execute_on_edit=True,
+            recovery_policy="preserve_diagnose_repair_augment",
         )
 
         first = await env.step(
@@ -1913,6 +1914,7 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             gateway,
             problem="question",
             execute_on_edit=True,
+            recovery_policy="preserve_diagnose_repair_augment",
         )
         await env.step(
             '{"action":"add_agent","agent_id":"a","model_id":"balanced","contract":"proposal"}'
@@ -1932,6 +1934,73 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             {"draft", "revision"},
             {call.request.phase.value for call in block_calls},
         )
+
+    async def test_nonsemantic_preserve_repairs_terminal_reachability_before_finish(
+        self,
+    ) -> None:
+        registry = make_registry()
+        gateway = _ImmediateGateway()
+        env = AgentWorkflowEnv(
+            registry,
+            gateway,
+            problem="question",
+            execute_on_edit=True,
+            recovery_policy="preserve_diagnose_repair_augment",
+        )
+        for agent_id in ("a", "b", "output"):
+            added = await env.step(
+                json.dumps(
+                    {
+                        "action": "add_agent",
+                        "agent_id": agent_id,
+                        "model_id": "balanced",
+                        "contract": f"produce {agent_id}",
+                    }
+                )
+            )
+            self.assertTrue(added.accepted, added.feedback)
+        selected = await env.step(
+            '{"action":"set_output","agent_id":"output"}'
+        )
+        self.assertTrue(selected.accepted, selected.feedback)
+        self.assertFalse(env.finish_admissibility()["admissible"])
+        self.assertEqual(
+            ("set_relation",),
+            env.model_admissible_action_types(),
+        )
+
+        for source_id in ("a", "b"):
+            candidates = env.model_admissible_action_targets()["set_relation"][
+                "candidates"
+            ]
+            self.assertIn(
+                {
+                    "source_id": source_id,
+                    "target_id": "output",
+                    "source_to_target": True,
+                    "target_to_source": False,
+                },
+                candidates,
+            )
+            related = await env.step(
+                json.dumps(
+                    {
+                        "action": "set_relation",
+                        "source_id": source_id,
+                        "target_id": "output",
+                        "source_to_target": True,
+                        "target_to_source": False,
+                    }
+                )
+            )
+            self.assertTrue(related.accepted, related.feedback)
+            self.assertEqual(("output",), related.execution.executed_agent_ids)
+            self.assertIn(source_id, related.execution.reused_agent_ids)
+
+        self.assertTrue(env.finish_admissibility()["admissible"])
+        finished = await env.step('{"action":"finish"}')
+        self.assertTrue(finished.accepted, finished.feedback)
+        self.assertEqual("answer:output", finished.final_answer)
 
     async def test_format_agent_is_terminal_singleton_with_one_semantic_input(self) -> None:
         registry = make_registry()

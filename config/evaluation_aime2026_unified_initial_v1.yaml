@@ -39,6 +39,7 @@ aime2026_evaluation:
   stable_zero_sample_count: 2
   rollouts_per_task: 1
   concurrency: 4
+  task_timeout_seconds: 600.0
   direct_model_id: "qwen3.5-9b-local"
   direct_protocol: "skillev_private_static_integer_submission_v1"
   protocol_equivalent_to_direct: true

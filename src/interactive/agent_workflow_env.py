@@ -8447,7 +8447,16 @@ class AgentWorkflowEnv:
     def _preserved_input_agent_ids(self) -> Tuple[str, ...]:
         """Return successful Agents whose current input identity is immutable."""
 
-        if self.recovery_policy != _PRESERVE_REPAIR_RECOVERY_POLICY:
+        if (
+            self.recovery_policy != _PRESERVE_REPAIR_RECOVERY_POLICY
+            or not self._uses_semantic_lineage_protocol()
+        ):
+            # FlowSteer's progressive Canvas permits a later relation edit to
+            # invalidate and re-execute only the changed downstream closure.
+            # Predecessor-identity preservation is a stricter invariant of the
+            # project's verified semantic-lineage protocols; applying it to a
+            # free AgentGraph would make execute-on-edit ADD_AGENT irreversible
+            # and remove every later SET_RELATION candidate.
             return ()
         repairable_ids = self._failed_agent_ids | self._unresolved_dirty_agents
         return tuple(

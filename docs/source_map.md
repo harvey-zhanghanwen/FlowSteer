@@ -133,3 +133,15 @@ the same target-blind problem input and the same evaluator.
 Those exclusions define the initial Stable Zero condition.  They are not
 claims that the unified repository lacks optional implementations for later,
 separately authorized experiments.
+
+## Stable Zero runtime correction source boundary
+
+The AIME canary confirmed that FlowSteer's accepted-edit execution boundary
+requires later relation edits to invalidate and re-execute the affected
+downstream closure. The existing project implementation already provides this
+through `AgentGraph.dirty_closure()` and the progressive-output invalidation
+path. A local predecessor-identity guard had been applied more broadly than its
+verified semantic-lineage purpose and made free AgentGraph relation editing
+unreachable after successful `ADD_AGENT` execution. The guard is now scoped to
+semantic-lineage protocols; no AIME-specific graph operation or mathematical
+workflow was added.
