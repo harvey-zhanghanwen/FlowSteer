@@ -72,6 +72,7 @@ def turn(*, receipt: bool = True, policy: str = "policy-v1") -> TurnRecord:
         executed_prefix_tokens=2,
         action={"action": "finish"},
         canvas_feedback="done",
+        feedback_code="accepted_finish",
         graph_revision=1,
         graph_snapshot=snapshot.to_dict()["graph"],
         policy_version=policy,
@@ -114,6 +115,11 @@ class RecordTests(unittest.TestCase):
             json.dumps(original.to_dict(), sort_keys=True),
             json.dumps(restored.to_dict(), sort_keys=True),
         )
+        self.assertEqual("accepted_finish", restored.turns[0].feedback_code)
+
+        legacy = original.to_dict()
+        legacy["turns"][0].pop("feedback_code")
+        self.assertIsNone(TrajectoryRecord.from_dict(legacy).turns[0].feedback_code)
 
         tampered = original.to_dict()
         tampered["grpo_eligible"] = False

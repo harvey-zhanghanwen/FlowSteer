@@ -1,0 +1,2073 @@
+{
+  "comparison": "agentgraph_runtime_v2_minus_unified_initial_v1",
+  "controls": {
+    "api_calls": 0,
+    "evaluator_calls": 0,
+    "failure_flags_are_nonexclusive": true,
+    "missing_or_invalid_agentgraph_rows_remain_in_denominator": true,
+    "model_calls": 0,
+    "offline_persisted_artifacts_only": true,
+    "training_steps": 0
+  },
+  "dataset_key": "aime_2026",
+  "denominator": 30,
+  "paired_task_ids_verified": true,
+  "primary_metric": "accuracy",
+  "schema_version": "flowsteer.aime2026.runtime_comparison.v1",
+  "source_mapping": {
+    "aime_failure_type": "scripts/evaluate_completion_benchmark_round.py::_failure_type",
+    "alignment": "scripts/report_joint_qa_progressive_experiment.py: strict same-order task_id comparison",
+    "first_observable_failure": "scripts/evaluate_completion_benchmark_round.py::_aime_wrong_demo_diagnosis",
+    "paired_row_schema": "scripts/evaluate_completion_benchmark_round.py::_paired_rows"
+  },
+  "sources": {
+    "v1_paired_results": "/ssd1/iclr/1/FlowSteer/artifacts/aime2026_unified_initial_v1/evaluation/paired_results.jsonl",
+    "v2_paired_results": "/ssd1/iclr/1/FlowSteer/artifacts/aime2026_runtime_v2/evaluation/paired_results.jsonl"
+  },
+  "task_ids": [
+    "aime-2026/01",
+    "aime-2026/02",
+    "aime-2026/03",
+    "aime-2026/04",
+    "aime-2026/05",
+    "aime-2026/06",
+    "aime-2026/07",
+    "aime-2026/08",
+    "aime-2026/09",
+    "aime-2026/10",
+    "aime-2026/11",
+    "aime-2026/12",
+    "aime-2026/13",
+    "aime-2026/14",
+    "aime-2026/15",
+    "aime-2026/16",
+    "aime-2026/17",
+    "aime-2026/18",
+    "aime-2026/19",
+    "aime-2026/20",
+    "aime-2026/21",
+    "aime-2026/22",
+    "aime-2026/23",
+    "aime-2026/24",
+    "aime-2026/25",
+    "aime-2026/26",
+    "aime-2026/27",
+    "aime-2026/28",
+    "aime-2026/29",
+    "aime-2026/30"
+  ],
+  "tasks": [
+    {
+      "accuracy_delta_v2_minus_v1": -1.0,
+      "ground_truth": "277",
+      "task_id": "aime-2026/01",
+      "transition": "regressed",
+      "v1": {
+        "accuracy": 1.0,
+        "available": true,
+        "evaluator_reason": "evaluated",
+        "explicit_finish": true,
+        "failure_flags": {
+          "graph_failure": false,
+          "parsing_failure": false,
+          "runtime_failure": false,
+          "terminal_failure": false
+        },
+        "failure_type": "both_correct",
+        "final_answer": "277",
+        "first_observable_failure": null,
+        "first_observable_failure_layer": null,
+        "parsing_failure_reason": null,
+        "parsing_succeeded": true,
+        "result_state": "correct",
+        "termination_reason": "finish",
+        "trajectory_id": "trajectory_feba98acb4982b53fb39b0e0",
+        "valid": true
+      },
+      "v2": {
+        "accuracy": 0.0,
+        "available": true,
+        "evaluator_reason": "evaluated",
+        "explicit_finish": true,
+        "failure_flags": {
+          "graph_failure": false,
+          "parsing_failure": false,
+          "runtime_failure": false,
+          "terminal_failure": false
+        },
+        "failure_type": "agentgraph_accuracy_regression",
+        "final_answer": "19",
+        "first_observable_failure": {
+          "diagnosis_scope": "first_observable_failure",
+          "error": "incorrect_terminal_integer_without_observable_runtime_failure",
+          "failure_layer": "agent",
+          "first_error_action": null,
+          "first_error_agent_id": "alice",
+          "first_error_turn": null,
+          "terminal_result": "finish"
+        },
+        "first_observable_failure_layer": "agent",
+        "parsing_failure_reason": null,
+        "parsing_succeeded": true,
+        "result_state": "incorrect",
+        "termination_reason": "finish",
+        "trajectory_id": "trajectory_a1509850424ccb381dd9d583",
+        "valid": true
+      }
+    },
+    {
+      "accuracy_delta_v2_minus_v1": 0.0,
+      "ground_truth": "62",
+      "task_id": "aime-2026/02",
+      "transition": "unchanged_incorrect",
+      "v1": {
+        "accuracy": 0.0,
+        "available": true,
+        "evaluator_reason": "evaluated",
+        "explicit_finish": true,
+        "failure_flags": {
+          "graph_failure": true,
+          "parsing_failure": false,
+          "runtime_failure": false,
+          "terminal_failure": false
+        },
+        "failure_type": "both_incorrect",
+        "final_answer": "56",
+        "first_observable_failure": {
+          "diagnosis_scope": "first_observable_failure",
+          "error": "canvas_action_rejected",
+          "failure_layer": "graph",
+          "first_error_action": "set_relation",
+          "first_error_agent_id": null,
+          "first_error_turn": 4,
+          "terminal_result": "finish"
+        },
+        "first_observable_failure_layer": "graph",
+        "parsing_failure_reason": null,
+        "parsing_succeeded": true,
+        "result_state": "graph_failure",
+        "termination_reason": "finish",
+        "trajectory_id": "trajectory_422c2049c0effb17947a20fa",
+        "valid": true
+      },
+      "v2": {
+        "accuracy": 0.0,
+        "available": true,
+        "evaluator_reason": "evaluated",
+        "explicit_finish": true,
+        "failure_flags": {
+          "graph_failure": false,
+          "parsing_failure": false,
+          "runtime_failure": false,
+          "terminal_failure": false
+        },
+        "failure_type": "both_incorrect",
+        "final_answer": "20",
+        "first_observable_failure": {
+          "diagnosis_scope": "first_observable_failure",
+          "error": "incorrect_terminal_integer_without_observable_runtime_failure",
+          "failure_layer": "agent",
+          "first_error_action": null,
+          "first_error_agent_id": "solver",
+          "first_error_turn": null,
+          "terminal_result": "finish"
+        },
+        "first_observable_failure_layer": "agent",
+        "parsing_failure_reason": null,
+        "parsing_succeeded": true,
+        "result_state": "incorrect",
+        "termination_reason": "finish",
+        "trajectory_id": "trajectory_101d2a684da74c5186bdc431",
+        "valid": true
+      }
+    },
+    {
+      "accuracy_delta_v2_minus_v1": -1.0,
+      "ground_truth": "79",
+      "task_id": "aime-2026/03",
+      "transition": "regressed",
+      "v1": {
+        "accuracy": 1.0,
+        "available": true,
+        "evaluator_reason": "evaluated",
+        "explicit_finish": true,
+        "failure_flags": {
+          "graph_failure": false,
+          "parsing_failure": false,
+          "runtime_failure": false,
+          "terminal_failure": false
+        },
+        "failure_type": "both_correct",
+        "final_answer": "79",
+        "first_observable_failure": null,
+        "first_observable_failure_layer": null,
+        "parsing_failure_reason": null,
+        "parsing_succeeded": true,
+        "result_state": "correct",
+        "termination_reason": "finish",
+        "trajectory_id": "trajectory_18f53a22568096ef03fe52cc",
+        "valid": true
+      },
+      "v2": {
+        "accuracy": 0.0,
+        "available": true,
+        "evaluator_reason": "evaluated",
+        "explicit_finish": true,
+        "failure_flags": {
+          "graph_failure": false,
+          "parsing_failure": true,
+          "runtime_failure": false,
+          "terminal_failure": false
+        },
+        "failure_type": "output_parsing_failure",
+        "final_answer": "To find the area of region \\(\\mathcal{T}\\) where a sphere of radius \\(42\\) can be placed on the disk and lie completely inside the hemisphere, we start by determining the height of the hemisphere.\n\nThe hemisphere has a radius of \\(200\\), so its height is also \\(200\\). The center of the hemisphere is at the point \\((0, 0, 200)\\) in a 3D coordinate system, and the disk lies in the plane \\(z = 0\\) with a radius of \\(200\\).\n\nWhen placing a sphere of radius \\(42\\) at a point \\(P\\) on the disk, the center of the sphere will be at \\((x, y, 42)\\) where \\((x, y)\\) are the coordinates of point \\(P\\). For the sphere to lie completely inside the hemisphere, the distance from the center of the sphere to the top of the hemisphere must be greater than or equal to the radius of the sphere.\n\nThe equation of the hemisphere is given by:\n\\[\nx^2 + y^2 + z^2 = 200^2 \\quad \\text{for } z \\geq 0\n\\]\nAt the height of the center of the sphere, \\(z = 42\\), we substitute \\(z\\) into the hemisphere's equation:\n\\[\nx^2 + y^2 + 42^2 \\leq 200^2\n\\]\nCalculating \\(42^2\\) and \\(200^2\\):\n\\[\n42^2 = 1764, \\quad 200^2 = 40000\n\\]\nThus, we have:\n\\[\nx^2 + y^2 + 1764 \\leq 40000\n\\]\nThis simplifies to:\n\\[\nx^2 + y^2 \\leq 40000 - 1764 = 38236\n\\]\nTaking the square root gives:\n\\[\n\\sqrt{x^2 + y^2} \\leq \\sqrt{38236} = 196\n\\]\nThis means that the region \\(\\mathcal{T}\\) is a circle of radius \\(196\\) centered at the origin.\n\nNext, we calculate the area of region \\(\\mathcal{T}\\):\n\\[\n\\text{Area of } \\mathcal{T} = \\pi (196^2) = \\pi \\cdot 38416\n\\]\n\nThe area of the disk is:\n\\[\n\\text{Area of disk} = \\pi (200^2) = \\pi \\cdot 40000\n\\]\n\nNow, we find the ratio of the area of \\(\\mathcal{T}\\) to the area of the disk:\n\\[\n\\frac{\\text{Area of } \\mathcal{T}}{\\text{Area of disk}} = \\frac{\\pi \\cdot 38416}{\\pi \\cdot 40000} = \\frac{38416}{40000}\n\\]\n\nTo simplify \\(\\frac{38416}{40000}\\), we find the greatest common divisor (GCD) of \\(38416\\) and \\(40000\\). The GCD is \\(16\\):\n\\[\n\\frac{38416 \\div 16}{40000 \\div 16} = \\frac{2401}{2500}\n\\]\n\nHere, \\(2401\\) and \\(2500\\) are relatively prime. Thus, we have:\n\\[\np = 2401, \\quad q = 2500\n\\]\nFinally, we compute \\(p + q\\):\n\\[\np + q = 2401 + 2500 = 4901\n\\]\n\nThe final answer is:\n\\[\n\\boxed{4901}\n\\]",
+        "first_observable_failure": {
+          "diagnosis_scope": "first_observable_failure",
+          "error": "aime_integer_out_of_range",
+          "failure_layer": "output_extraction",
+          "first_error_action": "finish",
+          "first_error_agent_id": "verifier",
+          "first_error_turn": 4,
+          "terminal_result": "finish"
+        },
+        "first_observable_failure_layer": "output_extraction",
+        "parsing_failure_reason": "aime_integer_out_of_range",
+        "parsing_succeeded": false,
+        "result_state": "parsing_failure",
+        "termination_reason": "finish",
+        "trajectory_id": "trajectory_ff052d97b1559e2b89937830",
+        "valid": true
+      }
+    },
+    {
+      "accuracy_delta_v2_minus_v1": 0.0,
+      "ground_truth": "70",
+      "task_id": "aime-2026/04",
+      "transition": "unchanged_incorrect",
+      "v1": {
+        "accuracy": 0.0,
+        "available": true,
+        "evaluator_reason": "evaluated",
+        "explicit_finish": true,
+        "failure_flags": {
+          "graph_failure": false,
+          "parsing_failure": false,
+          "runtime_failure": false,
+          "terminal_failure": false
+        },
+        "failure_type": "agentgraph_accuracy_regression",
+        "final_answer": "69",
+        "first_observable_failure": {
+          "diagnosis_scope": "first_observable_failure",
+          "error": "incorrect_terminal_integer_without_observable_runtime_failure",
+          "failure_layer": "agent",
+          "first_error_action": null,
+          "first_error_agent_id": "solver",
+          "first_error_turn": null,
+          "terminal_result": "finish"
+        },
+        "first_observable_failure_layer": "agent",
+        "parsing_failure_reason": null,
+        "parsing_succeeded": true,
+        "result_state": "incorrect",
+        "termination_reason": "finish",
+        "trajectory_id": "trajectory_d5eb2e20a729d624c28c3099",
+        "valid": true
+      },
+      "v2": {
+        "accuracy": 0.0,
+        "available": true,
+        "evaluator_reason": "evaluated",
+        "explicit_finish": true,
+        "failure_flags": {
+          "graph_failure": false,
+          "parsing_failure": false,
+          "runtime_failure": false,
+          "terminal_failure": false
+        },
+        "failure_type": "both_incorrect",
+        "final_answer": "4",
+        "first_observable_failure": {
+          "diagnosis_scope": "first_observable_failure",
+          "error": "incorrect_terminal_integer_without_observable_runtime_failure",
+          "failure_layer": "agent",
+          "first_error_action": null,
+          "first_error_agent_id": "solver",
+          "first_error_turn": null,
+          "terminal_result": "finish"
+        },
+        "first_observable_failure_layer": "agent",
+        "parsing_failure_reason": null,
+        "parsing_succeeded": true,
+        "result_state": "incorrect",
+        "termination_reason": "finish",
+        "trajectory_id": "trajectory_c84dc97654d04a92158013d4",
+        "valid": true
+      }
+    },
+    {
+      "accuracy_delta_v2_minus_v1": 1.0,
+      "ground_truth": "65",
+      "task_id": "aime-2026/05",
+      "transition": "repaired",
+      "v1": {
+        "accuracy": 0.0,
+        "available": true,
+        "evaluator_reason": "not_evaluated_without_explicit_finish",
+        "explicit_finish": false,
+        "failure_flags": {
+          "graph_failure": true,
+          "parsing_failure": false,
+          "runtime_failure": false,
+          "terminal_failure": true
+        },
+        "failure_type": "agentgraph_terminal_failure",
+        "final_answer": null,
+        "first_observable_failure": {
+          "diagnosis_scope": "first_observable_failure",
+          "error": "canvas_action_rejected",
+          "failure_layer": "graph",
+          "first_error_action": "add_agent",
+          "first_error_agent_id": "verifier_001",
+          "first_error_turn": 1,
+          "terminal_result": "max_rounds"
+        },
+        "first_observable_failure_layer": "graph",
+        "parsing_failure_reason": null,
+        "parsing_succeeded": null,
+        "result_state": "terminal_failure",
+        "termination_reason": "max_rounds",
+        "trajectory_id": "trajectory_392093368fa22d3885c3b29b",
+        "valid": false
+      },
+      "v2": {
+        "accuracy": 1.0,
+        "available": true,
+        "evaluator_reason": "evaluated",
+        "explicit_finish": true,
+        "failure_flags": {
+          "graph_failure": false,
+          "parsing_failure": false,
+          "runtime_failure": false,
+          "terminal_failure": false
+        },
+        "failure_type": "both_correct",
+        "final_answer": "65",
+        "first_observable_failure": null,
+        "first_observable_failure_layer": null,
+        "parsing_failure_reason": null,
+        "parsing_succeeded": true,
+        "result_state": "correct",
+        "termination_reason": "finish",
+        "trajectory_id": "trajectory_e901019deada490f1683bf9f",
+        "valid": true
+      }
+    },
+    {
+      "accuracy_delta_v2_minus_v1": 0.0,
+      "ground_truth": "441",
+      "task_id": "aime-2026/06",
+      "transition": "unchanged_incorrect",
+      "v1": {
+        "accuracy": 0.0,
+        "available": true,
+        "evaluator_reason": "evaluated",
+        "explicit_finish": true,
+        "failure_flags": {
+          "graph_failure": false,
+          "parsing_failure": true,
+          "runtime_failure": false,
+          "terminal_failure": false
+        },
+        "failure_type": "output_parsing_failure",
+        "final_answer": "\\[\n\\boxed{441}\n\\]",
+        "first_observable_failure": {
+          "diagnosis_scope": "first_observable_failure",
+          "error": "integer_conversion_failed",
+          "failure_layer": "output_extraction",
+          "first_error_action": "finish",
+          "first_error_agent_id": "validator",
+          "first_error_turn": 4,
+          "terminal_result": "finish"
+        },
+        "first_observable_failure_layer": "output_extraction",
+        "parsing_failure_reason": "integer_conversion_failed",
+        "parsing_succeeded": false,
+        "result_state": "parsing_failure",
+        "termination_reason": "finish",
+        "trajectory_id": "trajectory_2d77eda18931900491aa160a",
+        "valid": true
+      },
+      "v2": {
+        "accuracy": 0.0,
+        "available": true,
+        "evaluator_reason": "evaluated",
+        "explicit_finish": true,
+        "failure_flags": {
+          "graph_failure": false,
+          "parsing_failure": false,
+          "runtime_failure": false,
+          "terminal_failure": false
+        },
+        "failure_type": "both_incorrect",
+        "final_answer": "12",
+        "first_observable_failure": {
+          "diagnosis_scope": "first_observable_failure",
+          "error": "incorrect_terminal_integer_without_observable_runtime_failure",
+          "failure_layer": "agent",
+          "first_error_action": null,
+          "first_error_agent_id": "solver",
+          "first_error_turn": null,
+          "terminal_result": "finish"
+        },
+        "first_observable_failure_layer": "agent",
+        "parsing_failure_reason": null,
+        "parsing_succeeded": true,
+        "result_state": "incorrect",
+        "termination_reason": "finish",
+        "trajectory_id": "trajectory_3f3f8af802765485c026da07",
+        "valid": true
+      }
+    },
+    {
+      "accuracy_delta_v2_minus_v1": 0.0,
+      "ground_truth": "396",
+      "task_id": "aime-2026/07",
+      "transition": "unchanged_incorrect",
+      "v1": {
+        "accuracy": 0.0,
+        "available": true,
+        "evaluator_reason": "evaluated",
+        "explicit_finish": true,
+        "failure_flags": {
+          "graph_failure": false,
+          "parsing_failure": false,
+          "runtime_failure": false,
+          "terminal_failure": false
+        },
+        "failure_type": "agentgraph_accuracy_regression",
+        "final_answer": "540",
+        "first_observable_failure": {
+          "diagnosis_scope": "first_observable_failure",
+          "error": "incorrect_terminal_integer_without_observable_runtime_failure",
+          "failure_layer": "agent",
+          "first_error_action": null,
+          "first_error_agent_id": "A1",
+          "first_error_turn": null,
+          "terminal_result": "finish"
+        },
+        "first_observable_failure_layer": "agent",
+        "parsing_failure_reason": null,
+        "parsing_succeeded": true,
+        "result_state": "incorrect",
+        "termination_reason": "finish",
+        "trajectory_id": "trajectory_130998f1b4e92aaf8bc9284c",
+        "valid": true
+      },
+      "v2": {
+        "accuracy": 0.0,
+        "available": true,
+        "evaluator_reason": "evaluated",
+        "explicit_finish": true,
+        "failure_flags": {
+          "graph_failure": false,
+          "parsing_failure": false,
+          "runtime_failure": false,
+          "terminal_failure": false
+        },
+        "failure_type": "agentgraph_accuracy_regression",
+        "final_answer": "The number of functions \\(\\pi: A \\to A\\) such that \\(\\pi^6(a) = a\\) for all \\(a \\in A\\) is given by the number of permutations of the set \\(A\\) whose order divides 6. \n\nTo find this, we need to consider the cycle structure of permutations. The possible cycle lengths that divide 6 are 1, 2, 3, and 6. We can have cycles of these lengths in various combinations.\n\nThe cycle types that satisfy \\(\\pi^6(a) = a\\) are:\n1. All cycles of length 1 (identity permutation).\n2. Cycles of length 2.\n3. Cycles of length 3.\n4. A single cycle of length 6.\n5. Combinations of these cycles.\n\nWe can count the permutations for each valid cycle type:\n\n1. **All cycles of length 1**: There is 1 permutation (the identity).\n\n2. **Cycles of length 2**: The number of ways to partition 6 elements into pairs is given by:\n   \\[\n   \\frac{6!}{2^3 \\cdot 3!} = \\frac{720}{8 \\cdot 6} = 15.\n   \\]\n\n3. **Cycles of length 3**: The number of ways to partition 6 elements into two cycles of length 3 is given by:\n   \\[\n   \\frac{6!}{3^2 \\cdot 2!} = \\frac{720}{9 \\cdot 2} = 40.\n   \\]\n\n4. **One cycle of length 6**: There are \\((6-1)! = 5! = 120\\) permutations.\n\n5. **Combinations of cycles**: We can also have combinations of cycles of lengths 2 and 3. The valid combinations are:\n   - Two cycles of length 3 and one cycle of length 2.\n   - One cycle of length 2 and one cycle of length 4 (not valid since 4 does not divide 6).\n\nNow we can summarize the counts:\n- Identity: 1\n- Pairs of 2: 15\n- Two cycles of 3: 40\n- One cycle of 6: 120\n\nAdding these counts gives:\n\\[\n1 + 15 + 40 + 120 = 176.\n\\]\n\nThus, the total number of functions \\(\\pi\\) mapping \\(A\\) onto \\(A\\) such that \\(\\pi^6(a) = a\\) for all \\(a\\) is \\(\\boxed{176}\\).",
+        "first_observable_failure": {
+          "diagnosis_scope": "first_observable_failure",
+          "error": "incorrect_terminal_integer_without_observable_runtime_failure",
+          "failure_layer": "agent",
+          "first_error_action": null,
+          "first_error_agent_id": "aider",
+          "first_error_turn": null,
+          "terminal_result": "finish"
+        },
+        "first_observable_failure_layer": "agent",
+        "parsing_failure_reason": null,
+        "parsing_succeeded": true,
+        "result_state": "incorrect",
+        "termination_reason": "finish",
+        "trajectory_id": "trajectory_f1f0b2700ede06d9c4839168",
+        "valid": true
+      }
+    },
+    {
+      "accuracy_delta_v2_minus_v1": 0.0,
+      "ground_truth": "244",
+      "task_id": "aime-2026/08",
+      "transition": "unchanged_incorrect",
+      "v1": {
+        "accuracy": 0.0,
+        "available": true,
+        "evaluator_reason": "evaluated",
+        "explicit_finish": true,
+        "failure_flags": {
+          "graph_failure": false,
+          "parsing_failure": true,
+          "runtime_failure": false,
+          "terminal_failure": false
+        },
+        "failure_type": "output_parsing_failure",
+        "final_answer": "N = 288",
+        "first_observable_failure": {
+          "diagnosis_scope": "first_observable_failure",
+          "error": "integer_conversion_failed",
+          "failure_layer": "output_extraction",
+          "first_error_action": "finish",
+          "first_error_agent_id": "solver",
+          "first_error_turn": 2,
+          "terminal_result": "finish"
+        },
+        "first_observable_failure_layer": "output_extraction",
+        "parsing_failure_reason": "integer_conversion_failed",
+        "parsing_succeeded": false,
+        "result_state": "parsing_failure",
+        "termination_reason": "finish",
+        "trajectory_id": "trajectory_29411e682ce65d7b64c06d1b",
+        "valid": true
+      },
+      "v2": {
+        "accuracy": 0.0,
+        "available": true,
+        "evaluator_reason": "not_evaluated_without_explicit_finish",
+        "explicit_finish": false,
+        "failure_flags": {
+          "graph_failure": true,
+          "parsing_failure": false,
+          "runtime_failure": false,
+          "terminal_failure": true
+        },
+        "failure_type": "agentgraph_terminal_failure",
+        "final_answer": null,
+        "first_observable_failure": {
+          "diagnosis_scope": "first_observable_failure",
+          "error": "canvas_action_rejected",
+          "failure_layer": "graph",
+          "first_error_action": "set_relation",
+          "first_error_agent_id": null,
+          "first_error_turn": 6,
+          "terminal_result": "max_rounds"
+        },
+        "first_observable_failure_layer": "graph",
+        "parsing_failure_reason": null,
+        "parsing_succeeded": null,
+        "result_state": "terminal_failure",
+        "termination_reason": "max_rounds",
+        "trajectory_id": "trajectory_e67cd6982dc479ce961f9c62",
+        "valid": false
+      }
+    },
+    {
+      "accuracy_delta_v2_minus_v1": 0.0,
+      "ground_truth": "29",
+      "task_id": "aime-2026/09",
+      "transition": "unchanged_incorrect",
+      "v1": {
+        "accuracy": 0.0,
+        "available": true,
+        "evaluator_reason": "evaluated",
+        "explicit_finish": true,
+        "failure_flags": {
+          "graph_failure": false,
+          "parsing_failure": true,
+          "runtime_failure": false,
+          "terminal_failure": false
+        },
+        "failure_type": "output_parsing_failure",
+        "final_answer": "To find the conditional probability \\( p \\) that exactly one face has been left blank given that all the even-numbered stickers (2, 4, 6) are visible on the faces of the die, we need to analyze the situation step by step.\n\n1. **Understanding the Process**: Joanne rolls the die and places stickers in the order of 1 to 6. If a sticker lands on a face that already has a sticker, it covers the old sticker.\n\n2. **Condition Given**: We know that stickers 2, 4, and 6 are visible. This means that stickers 1, 3, and 5 must either be on the die or have been covered.\n\n3. **Total Faces**: The die has 6 faces. We want to find the probability that exactly one face remains blank.\n\n4. **Possible Configurations**: For exactly one face to be blank, 5 faces must have stickers. Since we know that stickers 2, 4, and 6 are visible, we need to consider the placement of stickers 1, 3, and 5.\n\n5. **Scenarios for Blank Face**:\n   - If sticker 1 is placed on a face that is not blank, it can either cover an existing sticker or be placed on a blank face.\n   - Stickers 3 and 5 must also be placed such that they do not cover the even-numbered stickers and do not leave more than one face blank.\n\n6. **Counting Favorable Outcomes**:\n   - The only way to have exactly one face blank while ensuring stickers 2, 4, and 6 are visible is if one of the odd-numbered stickers (1, 3, or 5) covers a face that is already occupied by another odd-numbered sticker.\n   - The configurations that allow for this are limited and must be counted carefully.\n\n7. **Calculating Total Outcomes**:\n   - The total number of ways to arrange the stickers while ensuring that 2, 4, and 6 are visible can be calculated based on the rolls and placements.\n\n8. **Final Calculation**:\n   - After analyzing the configurations and counting the valid arrangements, we find that the probability \\( p \\) can be expressed as a fraction \\( \\frac{m}{n} \\) where \\( m \\) and \\( n \\) are coprime.\n\nAfter performing the calculations, we find that \\( p = \\frac{1}{3} \\). Thus, \\( m = 1 \\) and \\( n = 3 \\), leading to \\( m + n = 4 \\).\n\nThe final answer is:\n\n\\[\n\\boxed{4}\n\\]",
+        "first_observable_failure": {
+          "diagnosis_scope": "first_observable_failure",
+          "error": "integer_conversion_failed",
+          "failure_layer": "output_extraction",
+          "first_error_action": "finish",
+          "first_error_agent_id": "solver",
+          "first_error_turn": 2,
+          "terminal_result": "finish"
+        },
+        "first_observable_failure_layer": "output_extraction",
+        "parsing_failure_reason": "integer_conversion_failed",
+        "parsing_succeeded": false,
+        "result_state": "parsing_failure",
+        "termination_reason": "finish",
+        "trajectory_id": "trajectory_aee746c6522c6d7addd7fc16",
+        "valid": true
+      },
+      "v2": {
+        "accuracy": 0.0,
+        "available": true,
+        "evaluator_reason": "evaluated",
+        "explicit_finish": true,
+        "failure_flags": {
+          "graph_failure": false,
+          "parsing_failure": true,
+          "runtime_failure": false,
+          "terminal_failure": false
+        },
+        "failure_type": "output_parsing_failure",
+        "final_answer": "The problem asks for the conditional probability $p$ that exactly one face remains blank given that all even-numbered stickers (2, 4, 6) are visible. We need to find $m+n$ where $p = m/n$.\n\nLet the faces of the die be indexed $1, \\dots, 6$. Let $X_k$ be the face chosen for sticker $k$ in the $k$-th roll, for $k=1, \\dots, 6$. Each $X_k$ is chosen uniformly from $\\{1, \\dots, 6\\}$ independently. The total number of outcomes is $6^6$.\n\n**Event E: All even-numbered stickers are visible.**\nSticker $k$ is visible if no subsequent sticker $j > k$ is placed on the same face $X_k$.\n- Sticker 6 is always visible (last placed).\n- Sticker 4 is visible if $X_4 \\neq X_5$ and $X_4 \\neq X_6$.\n- Sticker 2 is visible if $X_2 \\neq X_3$, $X_2 \\neq X_4$, $X_2 \\neq X_5$, and $X_2 \\neq X_6$.\nThe conditions for $E$ are:\n1. $X_4 \\neq X_5$\n2. $X_4 \\neq X_6$\n3. $X_2 \\neq X_3$\n4. $X_2 \\neq X_4$\n5. $X_2 \\neq X_5$\n6. $X_2 \\neq X_6$\n\nTo count $N(E)$:\n- $X_1$: 6 choices.\n- $X_2$: 6 choices.\n- $X_3$: Must not equal $X_2$ (5 choices).\n- $X_4$: Must not equal $X_2$ (5 choices). Note $X_4 \\neq X_2$ is required.\n- $X_5$: Must not equal $X_2$ and $X_4$. Since $X_2 \\neq X_4$, there are 2 forbidden values. So 4 choices.\n- $X_6$: Must not equal $X_2$ and $X_4$. Similarly, 4 choices.\n$N(E) = 6 \\times 6 \\times 5 \\times 5 \\times 4 \\times 4 = 14400$.\n\n**Event B: Exactly one face remains blank.**\nThis means exactly 5 faces have stickers. With 6 stickers, this implies exactly one pair of stickers lands on the same face, and the other 4 land on distinct faces. This corresponds to the image of the mapping $X$ having size 5.\nLet the colliding pair be $\\{u, v\\}$ with $u < v$. Then $X_u = X_v$, and for all other pairs $\\{a, b\\} \\neq \\{u, v\\}$, $X_a \\neq X_b$.\n\n**Intersection $B \\cap E$:**\nFor $B \\cap E$ to occur, the unique collision pair $\\{u, v\\}$ must not violate any of the inequalities in $E$. The inequalities forbid specific pairs from colliding.\nForbidden pairs (where $X_a = X_b$ would violate $E$):\n$\\{4, 5\\}, \\{4, 6\\}, \\{2, 3\\}, \\{2, 4\\}, \\{2, 5\\}, \\{2, 6\\}$.\nThere are 6 forbidden pairs.\nTotal possible pairs of indices is $\\binom{6}{2} = 15$.\nAllowed collision pairs = $15 - 6 = 9$.\nFor each allowed pair $\\{u, v\\}$, the number of sequences is:\n- Choose the common face value: 6 choices.\n- Assign the remaining 4 indices to the remaining 5 faces bijectively: $P(5, 4) = 120$ choices.\nTotal for one pair = $6 \\times 120 = 720$.\n$N(B \\cap E) = 9 \\times 720 = 6480$.\n\n**Probability Calculation:**\n$p = \\frac{N(B \\cap E)}{N(E)} = \\frac{6480}{14400} = \\frac{648}{1440} = \\frac{54}{120} = \\frac{9}{20}$.\nHere $m=9, n=20$. They are relatively prime.\n$m + n = 9 + 20 = 29$.\n\n29",
+        "first_observable_failure": {
+          "diagnosis_scope": "first_observable_failure",
+          "error": "aime_integer_not_found",
+          "failure_layer": "output_extraction",
+          "first_error_action": "finish",
+          "first_error_agent_id": "solver",
+          "first_error_turn": 2,
+          "terminal_result": "finish"
+        },
+        "first_observable_failure_layer": "output_extraction",
+        "parsing_failure_reason": "aime_integer_not_found",
+        "parsing_succeeded": false,
+        "result_state": "parsing_failure",
+        "termination_reason": "finish",
+        "trajectory_id": "trajectory_8262e025aa6a599dd96768e3",
+        "valid": true
+      }
+    },
+    {
+      "accuracy_delta_v2_minus_v1": 1.0,
+      "ground_truth": "156",
+      "task_id": "aime-2026/10",
+      "transition": "repaired",
+      "v1": {
+        "accuracy": 0.0,
+        "available": true,
+        "evaluator_reason": "evaluated",
+        "explicit_finish": true,
+        "failure_flags": {
+          "graph_failure": false,
+          "parsing_failure": false,
+          "runtime_failure": false,
+          "terminal_failure": false
+        },
+        "failure_type": "both_incorrect",
+        "final_answer": "108",
+        "first_observable_failure": {
+          "diagnosis_scope": "first_observable_failure",
+          "error": "incorrect_terminal_integer_without_observable_runtime_failure",
+          "failure_layer": "agent",
+          "first_error_action": null,
+          "first_error_agent_id": "validator",
+          "first_error_turn": null,
+          "terminal_result": "finish"
+        },
+        "first_observable_failure_layer": "agent",
+        "parsing_failure_reason": null,
+        "parsing_succeeded": true,
+        "result_state": "incorrect",
+        "termination_reason": "finish",
+        "trajectory_id": "trajectory_e969ce8289a8444a4ccc4130",
+        "valid": true
+      },
+      "v2": {
+        "accuracy": 1.0,
+        "available": true,
+        "evaluator_reason": "evaluated",
+        "explicit_finish": true,
+        "failure_flags": {
+          "graph_failure": false,
+          "parsing_failure": false,
+          "runtime_failure": false,
+          "terminal_failure": false
+        },
+        "failure_type": "agentgraph_accuracy_gain",
+        "final_answer": "156",
+        "first_observable_failure": null,
+        "first_observable_failure_layer": null,
+        "parsing_failure_reason": null,
+        "parsing_succeeded": true,
+        "result_state": "correct",
+        "termination_reason": "finish",
+        "trajectory_id": "trajectory_4b171242c478befe54cf7937",
+        "valid": true
+      }
+    },
+    {
+      "accuracy_delta_v2_minus_v1": -1.0,
+      "ground_truth": "896",
+      "task_id": "aime-2026/11",
+      "transition": "regressed",
+      "v1": {
+        "accuracy": 1.0,
+        "available": true,
+        "evaluator_reason": "evaluated",
+        "explicit_finish": true,
+        "failure_flags": {
+          "graph_failure": false,
+          "parsing_failure": false,
+          "runtime_failure": false,
+          "terminal_failure": false
+        },
+        "failure_type": "agentgraph_accuracy_gain",
+        "final_answer": "896",
+        "first_observable_failure": null,
+        "first_observable_failure_layer": null,
+        "parsing_failure_reason": null,
+        "parsing_succeeded": true,
+        "result_state": "correct",
+        "termination_reason": "finish",
+        "trajectory_id": "trajectory_3d08a7fb3f5c9bd51c5ec06f",
+        "valid": true
+      },
+      "v2": {
+        "accuracy": 0.0,
+        "available": true,
+        "evaluator_reason": "not_evaluated_without_explicit_finish",
+        "explicit_finish": false,
+        "failure_flags": {
+          "graph_failure": false,
+          "parsing_failure": false,
+          "runtime_failure": true,
+          "terminal_failure": true
+        },
+        "failure_type": "agentgraph_terminal_failure",
+        "final_answer": null,
+        "first_observable_failure": {
+          "diagnosis_scope": "first_observable_failure",
+          "error": "agent_or_provider_execution_failure",
+          "failure_layer": "runtime",
+          "first_error_action": "set_relation",
+          "first_error_agent_id": null,
+          "first_error_turn": 3,
+          "terminal_result": "max_rounds"
+        },
+        "first_observable_failure_layer": "runtime",
+        "parsing_failure_reason": null,
+        "parsing_succeeded": null,
+        "result_state": "runtime_failure",
+        "termination_reason": "max_rounds",
+        "trajectory_id": "trajectory_ada52ce590aa9ae1750fb15b",
+        "valid": false
+      }
+    },
+    {
+      "accuracy_delta_v2_minus_v1": 1.0,
+      "ground_truth": "161",
+      "task_id": "aime-2026/12",
+      "transition": "repaired",
+      "v1": {
+        "accuracy": 0.0,
+        "available": true,
+        "evaluator_reason": "evaluated",
+        "explicit_finish": true,
+        "failure_flags": {
+          "graph_failure": false,
+          "parsing_failure": true,
+          "runtime_failure": false,
+          "terminal_failure": false
+        },
+        "failure_type": "output_parsing_failure",
+        "final_answer": "To find the value of \\( r \\), we first need to determine the coordinates of points \\( A \\), \\( B \\), and \\( C \\) in triangle \\( \\triangle ABC \\).\n\nGiven:\n- \\( AB = 6 \\)\n- \\( AC = 4 \\)\n- \\( \\angle BAC = 90^\\circ \\)\n\nWe can place the points in the coordinate system as follows:\n- Let \\( A = (0, 0) \\)\n- Let \\( B = (6, 0) \\)\n- Let \\( C = (0, 4) \\)\n\nNext, we find the centroid \\( G \\) of triangle \\( ABC \\):\n\\[\nG = \\left( \\frac{x_A + x_B + x_C}{3}, \\frac{y_A + y_B + y_C}{3} \\right) = \\left( \\frac{0 + 6 + 0}{3}, \\frac{0 + 0 + 4}{3} \\right) = \\left( 2, \\frac{4}{3} \\right)\n\\]\n\nNow, we need to find the reflection \\( D \\) of point \\( G \\) across line \\( BC \\). The line \\( BC \\) can be represented by the equation derived from points \\( B \\) and \\( C \\):\n- The slope of line \\( BC \\) is \\( \\frac{4 - 0}{0 - 6} = -\\frac{2}{3} \\).\n- The equation of line \\( BC \\) in point-slope form is:\n\\[\ny - 0 = -\\frac{2}{3}(x - 6) \\implies y = -\\frac{2}{3}x + 4\n\\]\n\nTo find the reflection of point \\( G \\) across line \\( BC \\), we first find the perpendicular line from \\( G \\) to \\( BC \\). The slope of the perpendicular line is the negative reciprocal of the slope of \\( BC \\), which is \\( \\frac{3}{2} \\). The equation of the line through \\( G \\) is:\n\\[\ny - \\frac{4}{3} = \\frac{3}{2}(x - 2)\n\\]\n\nNext, we find the intersection point \\( P \\) of this line with line \\( BC \\). Setting the equations equal:\n\\[\n-\\frac{2}{3}x + 4 = \\frac{3}{2}(x - 2) + \\frac{4}{3}\n\\]\n\nSolving this will give us the coordinates of point \\( P \\). After finding \\( P \\), we can find \\( D \\) by reflecting \\( G \\) across \\( P \\).\n\nNext, we need to find the distances from the spheres to the planes. The spheres are tangent to plane \\( \\mathcal{P} \\) at points \\( A \\), \\( B \\), \\( C \\), and \\( D \\) with radii \\( 1, 2, 3, \\) and \\( r \\) respectively. The distances from the centers of the spheres to plane \\( \\mathcal{T} \\) will be \\( 1 + h_1, 2 + h_2, 3 + h_3, r + h_4 \\) where \\( h_i \\) are the heights of the spheres above plane \\( \\mathcal{P} \\).\n\nSince all spheres are tangent to the same plane \\( \\mathcal{T} \\), we can set up the equation:\n\\[\n1 + h_1 = 2 + h_2 = 3 + h_3 = r + h_4\n\\]\n\nFrom the tangency conditions, we can derive relationships between the heights \\( h_1, h_2, h_3, h_4 \\) and the radii of the spheres. \n\nAfter solving these equations, we find that:\n\\[\nr = 6 - 1 - 2 - 3 = 0\n\\]\n\nHowever, since \\( r \\) must be a positive integer, we need to adjust our calculations based on the relationships derived from the tangency conditions.\n\nAfter careful calculations, we find:\n\\[\nr = \\frac{12}{5}\n\\]\n\nThus, \\( m = 12 \\) and \\( n = 5 \\) are relatively prime. Therefore, \\( m+n = 12 + 5 = 17 \\).\n\nThe final answer is:\n\\[\n\\boxed{017}\n\\]",
+        "first_observable_failure": {
+          "diagnosis_scope": "first_observable_failure",
+          "error": "integer_conversion_failed",
+          "failure_layer": "output_extraction",
+          "first_error_action": "finish",
+          "first_error_agent_id": "solver",
+          "first_error_turn": 2,
+          "terminal_result": "finish"
+        },
+        "first_observable_failure_layer": "output_extraction",
+        "parsing_failure_reason": "integer_conversion_failed",
+        "parsing_succeeded": false,
+        "result_state": "parsing_failure",
+        "termination_reason": "finish",
+        "trajectory_id": "trajectory_58228ae4ac6e046b0329f894",
+        "valid": true
+      },
+      "v2": {
+        "accuracy": 1.0,
+        "available": true,
+        "evaluator_reason": "evaluated",
+        "explicit_finish": true,
+        "failure_flags": {
+          "graph_failure": false,
+          "parsing_failure": false,
+          "runtime_failure": false,
+          "terminal_failure": false
+        },
+        "failure_type": "agentgraph_accuracy_gain",
+        "final_answer": "The value of \\( r \\) can be expressed as \\( \\frac{122}{39} \\). Here, \\( m = 122 \\) and \\( n = 39 \\) are relatively prime integers. Therefore, the sum \\( m+n = 122 + 39 = 161 \\).\n\nThe final answer is:\n\\[\n\\boxed{161}\n\\]",
+        "first_observable_failure": null,
+        "first_observable_failure_layer": null,
+        "parsing_failure_reason": null,
+        "parsing_succeeded": true,
+        "result_state": "correct",
+        "termination_reason": "finish",
+        "trajectory_id": "trajectory_f2769a645f9b40085540e5ac",
+        "valid": true
+      }
+    },
+    {
+      "accuracy_delta_v2_minus_v1": 0.0,
+      "ground_truth": "39",
+      "task_id": "aime-2026/13",
+      "transition": "unchanged_incorrect",
+      "v1": {
+        "accuracy": 0.0,
+        "available": false,
+        "evaluator_reason": null,
+        "explicit_finish": false,
+        "failure_flags": {
+          "graph_failure": false,
+          "parsing_failure": false,
+          "runtime_failure": true,
+          "terminal_failure": false
+        },
+        "failure_type": "agentgraph_operational_or_evaluator_failure",
+        "final_answer": null,
+        "first_observable_failure": {
+          "diagnosis_scope": "first_observable_failure",
+          "error": "trajectory_missing",
+          "failure_layer": "runtime",
+          "first_error_action": null,
+          "first_error_agent_id": null,
+          "first_error_turn": null,
+          "terminal_result": "collection_failed"
+        },
+        "first_observable_failure_layer": "runtime",
+        "parsing_failure_reason": null,
+        "parsing_succeeded": null,
+        "result_state": "runtime_failure",
+        "termination_reason": "collection_failed",
+        "trajectory_id": null,
+        "valid": false
+      },
+      "v2": {
+        "accuracy": 0.0,
+        "available": true,
+        "evaluator_reason": "evaluated",
+        "explicit_finish": true,
+        "failure_flags": {
+          "graph_failure": false,
+          "parsing_failure": false,
+          "runtime_failure": false,
+          "terminal_failure": false
+        },
+        "failure_type": "both_incorrect",
+        "final_answer": "250",
+        "first_observable_failure": {
+          "diagnosis_scope": "first_observable_failure",
+          "error": "incorrect_terminal_integer_without_observable_runtime_failure",
+          "failure_layer": "agent",
+          "first_error_action": null,
+          "first_error_agent_id": "solver-aime-2026",
+          "first_error_turn": null,
+          "terminal_result": "finish"
+        },
+        "first_observable_failure_layer": "agent",
+        "parsing_failure_reason": null,
+        "parsing_succeeded": true,
+        "result_state": "incorrect",
+        "termination_reason": "finish",
+        "trajectory_id": "trajectory_b466267add0cbf4fc6b0fbec",
+        "valid": true
+      }
+    },
+    {
+      "accuracy_delta_v2_minus_v1": 0.0,
+      "ground_truth": "681",
+      "task_id": "aime-2026/14",
+      "transition": "unchanged_incorrect",
+      "v1": {
+        "accuracy": 0.0,
+        "available": true,
+        "evaluator_reason": "evaluated",
+        "explicit_finish": true,
+        "failure_flags": {
+          "graph_failure": false,
+          "parsing_failure": true,
+          "runtime_failure": false,
+          "terminal_failure": false
+        },
+        "failure_type": "output_parsing_failure",
+        "final_answer": "To find the square of the perimeter of the equiangular pentagon, we denote the side lengths of the pentagon as \\( a, b, c, d, e \\). Since the pentagon is equiangular, all sides are equal, so we can let \\( s \\) be the length of each side. Thus, we have:\n\n\\[\n5s^2 = 308 \\implies s^2 = \\frac{308}{5} = 61.6\n\\]\n\nNext, we need to find the sum of the squares of the diagonals. In an equiangular pentagon, the diagonals can be expressed in terms of the side length \\( s \\). The diagonals of an equiangular pentagon can be calculated as follows:\n\n- There are 5 diagonals in total.\n- The lengths of the diagonals can be derived from the geometry of the pentagon, but for our purposes, we can use the given information directly.\n\nThe sum of the squares of the diagonals is given as:\n\n\\[\n\\text{Sum of squares of diagonals} = 800\n\\]\n\nNow, we can use the relationship between the sides and the diagonals in an equiangular pentagon. The formula relating the sum of the squares of the sides and the sum of the squares of the diagonals is:\n\n\\[\n\\text{Sum of squares of diagonals} = 5s^2 + 5 \\cdot \\text{(length of a diagonal)}^2\n\\]\n\nHowever, we can also use the known values directly. The perimeter \\( P \\) of the pentagon is:\n\n\\[\nP = 5s\n\\]\n\nThus, the square of the perimeter is:\n\n\\[\nP^2 = (5s)^2 = 25s^2\n\\]\n\nSubstituting \\( s^2 = 61.6 \\):\n\n\\[\nP^2 = 25 \\cdot 61.6 = 1540\n\\]\n\nNow, we need to express \\( 1540 \\) in the form \\( m \\sqrt{n} \\). We can factor \\( 1540 \\):\n\n\\[\n1540 = 4 \\cdot 385 = 4 \\cdot 5 \\cdot 77 = 4 \\cdot 5 \\cdot 7 \\cdot 11\n\\]\n\nThus, we can express \\( 1540 \\) as:\n\n\\[\n1540 = 4 \\cdot 385 = 2^2 \\cdot 5 \\cdot 7 \\cdot 11\n\\]\n\nThis means we can write:\n\n\\[\n1540 = 2 \\sqrt{1540}\n\\]\n\nIn this case, \\( m = 2 \\) and \\( n = 385 \\). Therefore, we find:\n\n\\[\nm + n = 2 + 385 = 387\n\\]\n\nThus, the final answer is:\n\n\\[\n\\boxed{387}\n\\]",
+        "first_observable_failure": {
+          "diagnosis_scope": "first_observable_failure",
+          "error": "integer_conversion_failed",
+          "failure_layer": "output_extraction",
+          "first_error_action": "finish",
+          "first_error_agent_id": "solver",
+          "first_error_turn": 2,
+          "terminal_result": "finish"
+        },
+        "first_observable_failure_layer": "output_extraction",
+        "parsing_failure_reason": "integer_conversion_failed",
+        "parsing_succeeded": false,
+        "result_state": "parsing_failure",
+        "termination_reason": "finish",
+        "trajectory_id": "trajectory_38091670b7f2b923f7460fd8",
+        "valid": true
+      },
+      "v2": {
+        "accuracy": 0.0,
+        "available": true,
+        "evaluator_reason": "not_evaluated_without_explicit_finish",
+        "explicit_finish": false,
+        "failure_flags": {
+          "graph_failure": false,
+          "parsing_failure": false,
+          "runtime_failure": true,
+          "terminal_failure": true
+        },
+        "failure_type": "agentgraph_terminal_failure",
+        "final_answer": null,
+        "first_observable_failure": {
+          "diagnosis_scope": "first_observable_failure",
+          "error": "agent_or_provider_execution_failure",
+          "failure_layer": "runtime",
+          "first_error_action": "set_relation",
+          "first_error_agent_id": null,
+          "first_error_turn": 2,
+          "terminal_result": "max_rounds"
+        },
+        "first_observable_failure_layer": "runtime",
+        "parsing_failure_reason": null,
+        "parsing_succeeded": null,
+        "result_state": "runtime_failure",
+        "termination_reason": "max_rounds",
+        "trajectory_id": "trajectory_4351675548ef823bb3a50e16",
+        "valid": false
+      }
+    },
+    {
+      "accuracy_delta_v2_minus_v1": 0.0,
+      "ground_truth": "83",
+      "task_id": "aime-2026/15",
+      "transition": "unchanged_incorrect",
+      "v1": {
+        "accuracy": 0.0,
+        "available": true,
+        "evaluator_reason": "not_evaluated_without_explicit_finish",
+        "explicit_finish": false,
+        "failure_flags": {
+          "graph_failure": false,
+          "parsing_failure": false,
+          "runtime_failure": true,
+          "terminal_failure": true
+        },
+        "failure_type": "agentgraph_terminal_failure",
+        "final_answer": null,
+        "first_observable_failure": {
+          "diagnosis_scope": "first_observable_failure",
+          "error": "agent_or_provider_execution_failure",
+          "failure_layer": "runtime",
+          "first_error_action": "set_relation",
+          "first_error_agent_id": null,
+          "first_error_turn": 3,
+          "terminal_result": "max_rounds"
+        },
+        "first_observable_failure_layer": "runtime",
+        "parsing_failure_reason": null,
+        "parsing_succeeded": null,
+        "result_state": "runtime_failure",
+        "termination_reason": "max_rounds",
+        "trajectory_id": "trajectory_0ca7b2a1b810963a380c77f3",
+        "valid": false
+      },
+      "v2": {
+        "accuracy": 0.0,
+        "available": true,
+        "evaluator_reason": "not_evaluated_without_explicit_finish",
+        "explicit_finish": false,
+        "failure_flags": {
+          "graph_failure": false,
+          "parsing_failure": false,
+          "runtime_failure": true,
+          "terminal_failure": true
+        },
+        "failure_type": "agentgraph_terminal_failure",
+        "final_answer": null,
+        "first_observable_failure": {
+          "diagnosis_scope": "first_observable_failure",
+          "error": "OpenAICompatibleGatewayError",
+          "failure_layer": "runtime",
+          "first_error_action": "add_agent",
+          "first_error_agent_id": "calculator_1",
+          "first_error_turn": 3,
+          "terminal_result": "max_rounds"
+        },
+        "first_observable_failure_layer": "runtime",
+        "parsing_failure_reason": null,
+        "parsing_succeeded": null,
+        "result_state": "runtime_failure",
+        "termination_reason": "max_rounds",
+        "trajectory_id": "trajectory_a469b29a0658979bea904080",
+        "valid": false
+      }
+    },
+    {
+      "accuracy_delta_v2_minus_v1": -1.0,
+      "ground_truth": "178",
+      "task_id": "aime-2026/16",
+      "transition": "regressed",
+      "v1": {
+        "accuracy": 1.0,
+        "available": true,
+        "evaluator_reason": "evaluated",
+        "explicit_finish": true,
+        "failure_flags": {
+          "graph_failure": false,
+          "parsing_failure": false,
+          "runtime_failure": false,
+          "terminal_failure": false
+        },
+        "failure_type": "both_correct",
+        "final_answer": "178",
+        "first_observable_failure": null,
+        "first_observable_failure_layer": null,
+        "parsing_failure_reason": null,
+        "parsing_succeeded": true,
+        "result_state": "correct",
+        "termination_reason": "finish",
+        "trajectory_id": "trajectory_3920817dbe4fd0f2e6ce9bb1",
+        "valid": true
+      },
+      "v2": {
+        "accuracy": 0.0,
+        "available": true,
+        "evaluator_reason": "evaluated",
+        "explicit_finish": true,
+        "failure_flags": {
+          "graph_failure": false,
+          "parsing_failure": false,
+          "runtime_failure": false,
+          "terminal_failure": false
+        },
+        "failure_type": "agentgraph_accuracy_regression",
+        "final_answer": "The 10th term of all arithmetic sequences of integers starting at 4 that contain both 24 and 34 as terms is 94. \n\nThe sum of these values is 94. \n\nFinal answer: 94",
+        "first_observable_failure": {
+          "diagnosis_scope": "first_observable_failure",
+          "error": "incorrect_terminal_integer_without_observable_runtime_failure",
+          "failure_layer": "agent",
+          "first_error_action": null,
+          "first_error_agent_id": "solver",
+          "first_error_turn": null,
+          "terminal_result": "finish"
+        },
+        "first_observable_failure_layer": "agent",
+        "parsing_failure_reason": null,
+        "parsing_succeeded": true,
+        "result_state": "incorrect",
+        "termination_reason": "finish",
+        "trajectory_id": "trajectory_86f9f09a0d6ee35d658602b8",
+        "valid": true
+      }
+    },
+    {
+      "accuracy_delta_v2_minus_v1": 1.0,
+      "ground_truth": "243",
+      "task_id": "aime-2026/17",
+      "transition": "repaired",
+      "v1": {
+        "accuracy": 0.0,
+        "available": true,
+        "evaluator_reason": "not_evaluated_without_explicit_finish",
+        "explicit_finish": false,
+        "failure_flags": {
+          "graph_failure": false,
+          "parsing_failure": false,
+          "runtime_failure": true,
+          "terminal_failure": true
+        },
+        "failure_type": "agentgraph_terminal_failure",
+        "final_answer": null,
+        "first_observable_failure": {
+          "diagnosis_scope": "first_observable_failure",
+          "error": "agent_or_provider_execution_failure",
+          "failure_layer": "runtime",
+          "first_error_action": "set_relation",
+          "first_error_agent_id": null,
+          "first_error_turn": 6,
+          "terminal_result": "max_rounds"
+        },
+        "first_observable_failure_layer": "runtime",
+        "parsing_failure_reason": null,
+        "parsing_succeeded": null,
+        "result_state": "runtime_failure",
+        "termination_reason": "max_rounds",
+        "trajectory_id": "trajectory_6d9fc0e4ea99cde5c5116e50",
+        "valid": false
+      },
+      "v2": {
+        "accuracy": 1.0,
+        "available": true,
+        "evaluator_reason": "evaluated",
+        "explicit_finish": true,
+        "failure_flags": {
+          "graph_failure": false,
+          "parsing_failure": false,
+          "runtime_failure": false,
+          "terminal_failure": false
+        },
+        "failure_type": "agentgraph_accuracy_gain",
+        "final_answer": "243",
+        "first_observable_failure": null,
+        "first_observable_failure_layer": null,
+        "parsing_failure_reason": null,
+        "parsing_succeeded": true,
+        "result_state": "correct",
+        "termination_reason": "finish",
+        "trajectory_id": "trajectory_96211effc25f237f7512356f",
+        "valid": true
+      }
+    },
+    {
+      "accuracy_delta_v2_minus_v1": 0.0,
+      "ground_truth": "503",
+      "task_id": "aime-2026/18",
+      "transition": "unchanged_incorrect",
+      "v1": {
+        "accuracy": 0.0,
+        "available": true,
+        "evaluator_reason": "evaluated",
+        "explicit_finish": true,
+        "failure_flags": {
+          "graph_failure": false,
+          "parsing_failure": false,
+          "runtime_failure": false,
+          "terminal_failure": false
+        },
+        "failure_type": "both_incorrect",
+        "final_answer": "14",
+        "first_observable_failure": {
+          "diagnosis_scope": "first_observable_failure",
+          "error": "incorrect_terminal_integer_without_observable_runtime_failure",
+          "failure_layer": "agent",
+          "first_error_action": null,
+          "first_error_agent_id": "verifier",
+          "first_error_turn": null,
+          "terminal_result": "finish"
+        },
+        "first_observable_failure_layer": "agent",
+        "parsing_failure_reason": null,
+        "parsing_succeeded": true,
+        "result_state": "incorrect",
+        "termination_reason": "finish",
+        "trajectory_id": "trajectory_7f9d2af4e96c1f8466410b8e",
+        "valid": true
+      },
+      "v2": {
+        "accuracy": 0.0,
+        "available": true,
+        "evaluator_reason": "evaluated",
+        "explicit_finish": true,
+        "failure_flags": {
+          "graph_failure": false,
+          "parsing_failure": true,
+          "runtime_failure": false,
+          "terminal_failure": false
+        },
+        "failure_type": "output_parsing_failure",
+        "final_answer": "",
+        "first_observable_failure": {
+          "diagnosis_scope": "first_observable_failure",
+          "error": "empty_answer",
+          "failure_layer": "output_extraction",
+          "first_error_action": "finish",
+          "first_error_agent_id": "solver",
+          "first_error_turn": 2,
+          "terminal_result": "finish"
+        },
+        "first_observable_failure_layer": "output_extraction",
+        "parsing_failure_reason": "empty_answer",
+        "parsing_succeeded": false,
+        "result_state": "parsing_failure",
+        "termination_reason": "finish",
+        "trajectory_id": "trajectory_e1751f8574666d39b012ce12",
+        "valid": true
+      }
+    },
+    {
+      "accuracy_delta_v2_minus_v1": 1.0,
+      "ground_truth": "279",
+      "task_id": "aime-2026/19",
+      "transition": "repaired",
+      "v1": {
+        "accuracy": 0.0,
+        "available": true,
+        "evaluator_reason": "evaluated",
+        "explicit_finish": true,
+        "failure_flags": {
+          "graph_failure": false,
+          "parsing_failure": false,
+          "runtime_failure": true,
+          "terminal_failure": false
+        },
+        "failure_type": "both_incorrect",
+        "final_answer": "49",
+        "first_observable_failure": {
+          "diagnosis_scope": "first_observable_failure",
+          "error": "OpenAICompatibleGatewayError",
+          "failure_layer": "runtime",
+          "first_error_action": "add_agent",
+          "first_error_agent_id": "math_solver",
+          "first_error_turn": 0,
+          "terminal_result": "finish"
+        },
+        "first_observable_failure_layer": "runtime",
+        "parsing_failure_reason": null,
+        "parsing_succeeded": true,
+        "result_state": "runtime_failure",
+        "termination_reason": "finish",
+        "trajectory_id": "trajectory_86b36f30541ea25724d4e385",
+        "valid": true
+      },
+      "v2": {
+        "accuracy": 1.0,
+        "available": true,
+        "evaluator_reason": "evaluated",
+        "explicit_finish": true,
+        "failure_flags": {
+          "graph_failure": false,
+          "parsing_failure": false,
+          "runtime_failure": false,
+          "terminal_failure": false
+        },
+        "failure_type": "agentgraph_accuracy_gain",
+        "final_answer": "279",
+        "first_observable_failure": null,
+        "first_observable_failure_layer": null,
+        "parsing_failure_reason": null,
+        "parsing_succeeded": true,
+        "result_state": "correct",
+        "termination_reason": "finish",
+        "trajectory_id": "trajectory_0b99c143f3231e61f0f1de08",
+        "valid": true
+      }
+    },
+    {
+      "accuracy_delta_v2_minus_v1": 1.0,
+      "ground_truth": "190",
+      "task_id": "aime-2026/20",
+      "transition": "repaired",
+      "v1": {
+        "accuracy": 0.0,
+        "available": true,
+        "evaluator_reason": "evaluated",
+        "explicit_finish": true,
+        "failure_flags": {
+          "graph_failure": false,
+          "parsing_failure": false,
+          "runtime_failure": false,
+          "terminal_failure": false
+        },
+        "failure_type": "both_incorrect",
+        "final_answer": "240",
+        "first_observable_failure": {
+          "diagnosis_scope": "first_observable_failure",
+          "error": "incorrect_terminal_integer_without_observable_runtime_failure",
+          "failure_layer": "agent",
+          "first_error_action": null,
+          "first_error_agent_id": "verifier",
+          "first_error_turn": null,
+          "terminal_result": "finish"
+        },
+        "first_observable_failure_layer": "agent",
+        "parsing_failure_reason": null,
+        "parsing_succeeded": true,
+        "result_state": "incorrect",
+        "termination_reason": "finish",
+        "trajectory_id": "trajectory_1c44c54d1ece978a81fe6c6b",
+        "valid": true
+      },
+      "v2": {
+        "accuracy": 1.0,
+        "available": true,
+        "evaluator_reason": "evaluated",
+        "explicit_finish": true,
+        "failure_flags": {
+          "graph_failure": false,
+          "parsing_failure": false,
+          "runtime_failure": false,
+          "terminal_failure": false
+        },
+        "failure_type": "agentgraph_accuracy_gain",
+        "final_answer": "190",
+        "first_observable_failure": null,
+        "first_observable_failure_layer": null,
+        "parsing_failure_reason": null,
+        "parsing_succeeded": true,
+        "result_state": "correct",
+        "termination_reason": "finish",
+        "trajectory_id": "trajectory_5c65a5a424d199c21d7b25ba",
+        "valid": true
+      }
+    },
+    {
+      "accuracy_delta_v2_minus_v1": 0.0,
+      "ground_truth": "50",
+      "task_id": "aime-2026/21",
+      "transition": "unchanged_incorrect",
+      "v1": {
+        "accuracy": 0.0,
+        "available": true,
+        "evaluator_reason": "evaluated",
+        "explicit_finish": true,
+        "failure_flags": {
+          "graph_failure": false,
+          "parsing_failure": false,
+          "runtime_failure": false,
+          "terminal_failure": false
+        },
+        "failure_type": "both_incorrect",
+        "final_answer": "400",
+        "first_observable_failure": {
+          "diagnosis_scope": "first_observable_failure",
+          "error": "incorrect_terminal_integer_without_observable_runtime_failure",
+          "failure_layer": "agent",
+          "first_error_action": null,
+          "first_error_agent_id": "solver",
+          "first_error_turn": null,
+          "terminal_result": "finish"
+        },
+        "first_observable_failure_layer": "agent",
+        "parsing_failure_reason": null,
+        "parsing_succeeded": true,
+        "result_state": "incorrect",
+        "termination_reason": "finish",
+        "trajectory_id": "trajectory_f937faac89c4887a733fb014",
+        "valid": true
+      },
+      "v2": {
+        "accuracy": 0.0,
+        "available": false,
+        "evaluator_reason": null,
+        "explicit_finish": false,
+        "failure_flags": {
+          "graph_failure": false,
+          "parsing_failure": false,
+          "runtime_failure": true,
+          "terminal_failure": false
+        },
+        "failure_type": "agentgraph_operational_or_evaluator_failure",
+        "final_answer": null,
+        "first_observable_failure": {
+          "diagnosis_scope": "first_observable_failure",
+          "error": "trajectory_missing",
+          "failure_layer": "runtime",
+          "first_error_action": null,
+          "first_error_agent_id": null,
+          "first_error_turn": null,
+          "terminal_result": "collection_failed"
+        },
+        "first_observable_failure_layer": "runtime",
+        "parsing_failure_reason": null,
+        "parsing_succeeded": null,
+        "result_state": "runtime_failure",
+        "termination_reason": "collection_failed",
+        "trajectory_id": null,
+        "valid": false
+      }
+    },
+    {
+      "accuracy_delta_v2_minus_v1": 1.0,
+      "ground_truth": "754",
+      "task_id": "aime-2026/22",
+      "transition": "repaired",
+      "v1": {
+        "accuracy": 0.0,
+        "available": true,
+        "evaluator_reason": "evaluated",
+        "explicit_finish": true,
+        "failure_flags": {
+          "graph_failure": false,
+          "parsing_failure": false,
+          "runtime_failure": false,
+          "terminal_failure": false
+        },
+        "failure_type": "both_incorrect",
+        "final_answer": "106",
+        "first_observable_failure": {
+          "diagnosis_scope": "first_observable_failure",
+          "error": "incorrect_terminal_integer_without_observable_runtime_failure",
+          "failure_layer": "agent",
+          "first_error_action": null,
+          "first_error_agent_id": "verifier",
+          "first_error_turn": null,
+          "terminal_result": "finish"
+        },
+        "first_observable_failure_layer": "agent",
+        "parsing_failure_reason": null,
+        "parsing_succeeded": true,
+        "result_state": "incorrect",
+        "termination_reason": "finish",
+        "trajectory_id": "trajectory_3a24d3395289c2a567d0f249",
+        "valid": true
+      },
+      "v2": {
+        "accuracy": 1.0,
+        "available": true,
+        "evaluator_reason": "evaluated",
+        "explicit_finish": true,
+        "failure_flags": {
+          "graph_failure": false,
+          "parsing_failure": false,
+          "runtime_failure": false,
+          "terminal_failure": false
+        },
+        "failure_type": "agentgraph_accuracy_gain",
+        "final_answer": "754",
+        "first_observable_failure": null,
+        "first_observable_failure_layer": null,
+        "parsing_failure_reason": null,
+        "parsing_succeeded": true,
+        "result_state": "correct",
+        "termination_reason": "finish",
+        "trajectory_id": "trajectory_2dc0bd2aed34b0af993c8791",
+        "valid": true
+      }
+    },
+    {
+      "accuracy_delta_v2_minus_v1": 0.0,
+      "ground_truth": "245",
+      "task_id": "aime-2026/23",
+      "transition": "unchanged_incorrect",
+      "v1": {
+        "accuracy": 0.0,
+        "available": true,
+        "evaluator_reason": "evaluated",
+        "explicit_finish": true,
+        "failure_flags": {
+          "graph_failure": false,
+          "parsing_failure": false,
+          "runtime_failure": false,
+          "terminal_failure": false
+        },
+        "failure_type": "both_incorrect",
+        "final_answer": "125",
+        "first_observable_failure": {
+          "diagnosis_scope": "first_observable_failure",
+          "error": "incorrect_terminal_integer_without_observable_runtime_failure",
+          "failure_layer": "agent",
+          "first_error_action": null,
+          "first_error_agent_id": "checker",
+          "first_error_turn": null,
+          "terminal_result": "finish"
+        },
+        "first_observable_failure_layer": "agent",
+        "parsing_failure_reason": null,
+        "parsing_succeeded": true,
+        "result_state": "incorrect",
+        "termination_reason": "finish",
+        "trajectory_id": "trajectory_72868d8c1e1ceb2bdb3b3911",
+        "valid": true
+      },
+      "v2": {
+        "accuracy": 0.0,
+        "available": true,
+        "evaluator_reason": "evaluated",
+        "explicit_finish": true,
+        "failure_flags": {
+          "graph_failure": false,
+          "parsing_failure": false,
+          "runtime_failure": false,
+          "terminal_failure": false
+        },
+        "failure_type": "both_incorrect",
+        "final_answer": "30",
+        "first_observable_failure": {
+          "diagnosis_scope": "first_observable_failure",
+          "error": "incorrect_terminal_integer_without_observable_runtime_failure",
+          "failure_layer": "agent",
+          "first_error_action": null,
+          "first_error_agent_id": "solver",
+          "first_error_turn": null,
+          "terminal_result": "finish"
+        },
+        "first_observable_failure_layer": "agent",
+        "parsing_failure_reason": null,
+        "parsing_succeeded": true,
+        "result_state": "incorrect",
+        "termination_reason": "finish",
+        "trajectory_id": "trajectory_0c035d3863b139fbee0cc202",
+        "valid": true
+      }
+    },
+    {
+      "accuracy_delta_v2_minus_v1": 0.0,
+      "ground_truth": "669",
+      "task_id": "aime-2026/24",
+      "transition": "unchanged_incorrect",
+      "v1": {
+        "accuracy": 0.0,
+        "available": true,
+        "evaluator_reason": "evaluated",
+        "explicit_finish": true,
+        "failure_flags": {
+          "graph_failure": false,
+          "parsing_failure": false,
+          "runtime_failure": true,
+          "terminal_failure": false
+        },
+        "failure_type": "both_incorrect",
+        "final_answer": "499",
+        "first_observable_failure": {
+          "diagnosis_scope": "first_observable_failure",
+          "error": "OpenAICompatibleGatewayError",
+          "failure_layer": "runtime",
+          "first_error_action": "add_agent",
+          "first_error_agent_id": "solver",
+          "first_error_turn": 0,
+          "terminal_result": "finish"
+        },
+        "first_observable_failure_layer": "runtime",
+        "parsing_failure_reason": null,
+        "parsing_succeeded": true,
+        "result_state": "runtime_failure",
+        "termination_reason": "finish",
+        "trajectory_id": "trajectory_ddc9a61a1418239b65c64606",
+        "valid": true
+      },
+      "v2": {
+        "accuracy": 0.0,
+        "available": true,
+        "evaluator_reason": "evaluated",
+        "explicit_finish": true,
+        "failure_flags": {
+          "graph_failure": false,
+          "parsing_failure": true,
+          "runtime_failure": false,
+          "terminal_failure": false
+        },
+        "failure_type": "output_parsing_failure",
+        "final_answer": "The final integer result is 123.",
+        "first_observable_failure": {
+          "diagnosis_scope": "first_observable_failure",
+          "error": "aime_integer_not_found",
+          "failure_layer": "output_extraction",
+          "first_error_action": "finish",
+          "first_error_agent_id": "verifier",
+          "first_error_turn": 4,
+          "terminal_result": "finish"
+        },
+        "first_observable_failure_layer": "output_extraction",
+        "parsing_failure_reason": "aime_integer_not_found",
+        "parsing_succeeded": false,
+        "result_state": "parsing_failure",
+        "termination_reason": "finish",
+        "trajectory_id": "trajectory_0f479c2a096599ab38f9b121",
+        "valid": true
+      }
+    },
+    {
+      "accuracy_delta_v2_minus_v1": 0.0,
+      "ground_truth": "850",
+      "task_id": "aime-2026/25",
+      "transition": "unchanged_incorrect",
+      "v1": {
+        "accuracy": 0.0,
+        "available": true,
+        "evaluator_reason": "evaluated",
+        "explicit_finish": true,
+        "failure_flags": {
+          "graph_failure": false,
+          "parsing_failure": false,
+          "runtime_failure": false,
+          "terminal_failure": false
+        },
+        "failure_type": "agentgraph_accuracy_regression",
+        "final_answer": "425",
+        "first_observable_failure": {
+          "diagnosis_scope": "first_observable_failure",
+          "error": "incorrect_terminal_integer_without_observable_runtime_failure",
+          "failure_layer": "agent",
+          "first_error_action": null,
+          "first_error_agent_id": "explorer",
+          "first_error_turn": null,
+          "terminal_result": "finish"
+        },
+        "first_observable_failure_layer": "agent",
+        "parsing_failure_reason": null,
+        "parsing_succeeded": true,
+        "result_state": "incorrect",
+        "termination_reason": "finish",
+        "trajectory_id": "trajectory_2768c8bb09adfdfd126c6a33",
+        "valid": true
+      },
+      "v2": {
+        "accuracy": 0.0,
+        "available": true,
+        "evaluator_reason": "evaluated",
+        "explicit_finish": true,
+        "failure_flags": {
+          "graph_failure": false,
+          "parsing_failure": true,
+          "runtime_failure": false,
+          "terminal_failure": false
+        },
+        "failure_type": "output_parsing_failure",
+        "final_answer": "The sum of all possible values of \\( BC \\) is \\( 425 \\).",
+        "first_observable_failure": {
+          "diagnosis_scope": "first_observable_failure",
+          "error": "aime_integer_not_found",
+          "failure_layer": "output_extraction",
+          "first_error_action": "finish",
+          "first_error_agent_id": "solver",
+          "first_error_turn": 2,
+          "terminal_result": "finish"
+        },
+        "first_observable_failure_layer": "output_extraction",
+        "parsing_failure_reason": "aime_integer_not_found",
+        "parsing_succeeded": false,
+        "result_state": "parsing_failure",
+        "termination_reason": "finish",
+        "trajectory_id": "trajectory_2c89d85184e0caa697faf3a3",
+        "valid": true
+      }
+    },
+    {
+      "accuracy_delta_v2_minus_v1": 0.0,
+      "ground_truth": "132",
+      "task_id": "aime-2026/26",
+      "transition": "unchanged_incorrect",
+      "v1": {
+        "accuracy": 0.0,
+        "available": true,
+        "evaluator_reason": "evaluated",
+        "explicit_finish": true,
+        "failure_flags": {
+          "graph_failure": false,
+          "parsing_failure": false,
+          "runtime_failure": false,
+          "terminal_failure": false
+        },
+        "failure_type": "both_incorrect",
+        "final_answer": "999",
+        "first_observable_failure": {
+          "diagnosis_scope": "first_observable_failure",
+          "error": "incorrect_terminal_integer_without_observable_runtime_failure",
+          "failure_layer": "agent",
+          "first_error_action": null,
+          "first_error_agent_id": "verifier",
+          "first_error_turn": null,
+          "terminal_result": "finish"
+        },
+        "first_observable_failure_layer": "agent",
+        "parsing_failure_reason": null,
+        "parsing_succeeded": true,
+        "result_state": "incorrect",
+        "termination_reason": "finish",
+        "trajectory_id": "trajectory_e4ea82c80ccacd83db0b72ac",
+        "valid": true
+      },
+      "v2": {
+        "accuracy": 0.0,
+        "available": false,
+        "evaluator_reason": null,
+        "explicit_finish": false,
+        "failure_flags": {
+          "graph_failure": false,
+          "parsing_failure": false,
+          "runtime_failure": true,
+          "terminal_failure": false
+        },
+        "failure_type": "agentgraph_operational_or_evaluator_failure",
+        "final_answer": null,
+        "first_observable_failure": {
+          "diagnosis_scope": "first_observable_failure",
+          "error": "trajectory_missing",
+          "failure_layer": "runtime",
+          "first_error_action": null,
+          "first_error_agent_id": null,
+          "first_error_turn": null,
+          "terminal_result": "collection_failed"
+        },
+        "first_observable_failure_layer": "runtime",
+        "parsing_failure_reason": null,
+        "parsing_succeeded": null,
+        "result_state": "runtime_failure",
+        "termination_reason": "collection_failed",
+        "trajectory_id": null,
+        "valid": false
+      }
+    },
+    {
+      "accuracy_delta_v2_minus_v1": 0.0,
+      "ground_truth": "223",
+      "task_id": "aime-2026/27",
+      "transition": "unchanged_incorrect",
+      "v1": {
+        "accuracy": 0.0,
+        "available": true,
+        "evaluator_reason": "evaluated",
+        "explicit_finish": true,
+        "failure_flags": {
+          "graph_failure": false,
+          "parsing_failure": false,
+          "runtime_failure": false,
+          "terminal_failure": false
+        },
+        "failure_type": "both_incorrect",
+        "final_answer": "13",
+        "first_observable_failure": {
+          "diagnosis_scope": "first_observable_failure",
+          "error": "incorrect_terminal_integer_without_observable_runtime_failure",
+          "failure_layer": "agent",
+          "first_error_action": null,
+          "first_error_agent_id": "verifier",
+          "first_error_turn": null,
+          "terminal_result": "finish"
+        },
+        "first_observable_failure_layer": "agent",
+        "parsing_failure_reason": null,
+        "parsing_succeeded": true,
+        "result_state": "incorrect",
+        "termination_reason": "finish",
+        "trajectory_id": "trajectory_05ea1aac74e34c0ef7220c9a",
+        "valid": true
+      },
+      "v2": {
+        "accuracy": 0.0,
+        "available": true,
+        "evaluator_reason": "evaluated",
+        "explicit_finish": true,
+        "failure_flags": {
+          "graph_failure": false,
+          "parsing_failure": false,
+          "runtime_failure": true,
+          "terminal_failure": false
+        },
+        "failure_type": "both_incorrect",
+        "final_answer": "5",
+        "first_observable_failure": {
+          "diagnosis_scope": "first_observable_failure",
+          "error": "OpenAICompatibleGatewayError",
+          "failure_layer": "runtime",
+          "first_error_action": "add_agent",
+          "first_error_agent_id": "submitter",
+          "first_error_turn": 2,
+          "terminal_result": "finish"
+        },
+        "first_observable_failure_layer": "runtime",
+        "parsing_failure_reason": null,
+        "parsing_succeeded": true,
+        "result_state": "runtime_failure",
+        "termination_reason": "finish",
+        "trajectory_id": "trajectory_25c6b55d8a385dcd1dbb41d7",
+        "valid": true
+      }
+    },
+    {
+      "accuracy_delta_v2_minus_v1": 0.0,
+      "ground_truth": "107",
+      "task_id": "aime-2026/28",
+      "transition": "unchanged_incorrect",
+      "v1": {
+        "accuracy": 0.0,
+        "available": true,
+        "evaluator_reason": "not_evaluated_without_explicit_finish",
+        "explicit_finish": false,
+        "failure_flags": {
+          "graph_failure": false,
+          "parsing_failure": false,
+          "runtime_failure": false,
+          "terminal_failure": true
+        },
+        "failure_type": "agentgraph_terminal_failure",
+        "final_answer": null,
+        "first_observable_failure": {
+          "diagnosis_scope": "first_observable_failure",
+          "error": "invalid_or_unparsed_director_action",
+          "failure_layer": "director",
+          "first_error_action": null,
+          "first_error_agent_id": null,
+          "first_error_turn": 4,
+          "terminal_result": "max_rounds"
+        },
+        "first_observable_failure_layer": "director",
+        "parsing_failure_reason": null,
+        "parsing_succeeded": null,
+        "result_state": "terminal_failure",
+        "termination_reason": "max_rounds",
+        "trajectory_id": "trajectory_27acf17f4cfd13cebd1b9fa3",
+        "valid": false
+      },
+      "v2": {
+        "accuracy": 0.0,
+        "available": true,
+        "evaluator_reason": "not_evaluated_without_explicit_finish",
+        "explicit_finish": false,
+        "failure_flags": {
+          "graph_failure": false,
+          "parsing_failure": false,
+          "runtime_failure": true,
+          "terminal_failure": true
+        },
+        "failure_type": "agentgraph_terminal_failure",
+        "final_answer": null,
+        "first_observable_failure": {
+          "diagnosis_scope": "first_observable_failure",
+          "error": "agent_or_provider_execution_failure",
+          "failure_layer": "runtime",
+          "first_error_action": "set_relation",
+          "first_error_agent_id": null,
+          "first_error_turn": 2,
+          "terminal_result": "max_rounds"
+        },
+        "first_observable_failure_layer": "runtime",
+        "parsing_failure_reason": null,
+        "parsing_succeeded": null,
+        "result_state": "runtime_failure",
+        "termination_reason": "max_rounds",
+        "trajectory_id": "trajectory_518b559338859c9bd37b7b44",
+        "valid": false
+      }
+    },
+    {
+      "accuracy_delta_v2_minus_v1": 0.0,
+      "ground_truth": "157",
+      "task_id": "aime-2026/29",
+      "transition": "unchanged_incorrect",
+      "v1": {
+        "accuracy": 0.0,
+        "available": true,
+        "evaluator_reason": "evaluated",
+        "explicit_finish": true,
+        "failure_flags": {
+          "graph_failure": false,
+          "parsing_failure": false,
+          "runtime_failure": false,
+          "terminal_failure": false
+        },
+        "failure_type": "both_incorrect",
+        "final_answer": "105",
+        "first_observable_failure": {
+          "diagnosis_scope": "first_observable_failure",
+          "error": "incorrect_terminal_integer_without_observable_runtime_failure",
+          "failure_layer": "agent",
+          "first_error_action": null,
+          "first_error_agent_id": "solver",
+          "first_error_turn": null,
+          "terminal_result": "finish"
+        },
+        "first_observable_failure_layer": "agent",
+        "parsing_failure_reason": null,
+        "parsing_succeeded": true,
+        "result_state": "incorrect",
+        "termination_reason": "finish",
+        "trajectory_id": "trajectory_a3ef67dfb0991cc00c979bb7",
+        "valid": true
+      },
+      "v2": {
+        "accuracy": 0.0,
+        "available": true,
+        "evaluator_reason": "evaluated",
+        "explicit_finish": true,
+        "failure_flags": {
+          "graph_failure": false,
+          "parsing_failure": false,
+          "runtime_failure": true,
+          "terminal_failure": false
+        },
+        "failure_type": "both_incorrect",
+        "final_answer": "12",
+        "first_observable_failure": {
+          "diagnosis_scope": "first_observable_failure",
+          "error": "OpenAICompatibleGatewayError",
+          "failure_layer": "runtime",
+          "first_error_action": "add_agent",
+          "first_error_agent_id": "verifier",
+          "first_error_turn": 1,
+          "terminal_result": "finish"
+        },
+        "first_observable_failure_layer": "runtime",
+        "parsing_failure_reason": null,
+        "parsing_succeeded": true,
+        "result_state": "runtime_failure",
+        "termination_reason": "finish",
+        "trajectory_id": "trajectory_80dfc2a00e0f4aa0506dbf31",
+        "valid": true
+      }
+    },
+    {
+      "accuracy_delta_v2_minus_v1": 0.0,
+      "ground_truth": "393",
+      "task_id": "aime-2026/30",
+      "transition": "unchanged_incorrect",
+      "v1": {
+        "accuracy": 0.0,
+        "available": true,
+        "evaluator_reason": "evaluated",
+        "explicit_finish": true,
+        "failure_flags": {
+          "graph_failure": false,
+          "parsing_failure": false,
+          "runtime_failure": false,
+          "terminal_failure": false
+        },
+        "failure_type": "both_incorrect",
+        "final_answer": "729",
+        "first_observable_failure": {
+          "diagnosis_scope": "first_observable_failure",
+          "error": "incorrect_terminal_integer_without_observable_runtime_failure",
+          "failure_layer": "agent",
+          "first_error_action": null,
+          "first_error_agent_id": "validator",
+          "first_error_turn": null,
+          "terminal_result": "finish"
+        },
+        "first_observable_failure_layer": "agent",
+        "parsing_failure_reason": null,
+        "parsing_succeeded": true,
+        "result_state": "incorrect",
+        "termination_reason": "finish",
+        "trajectory_id": "trajectory_b60ff5d3f916ccab3d80911d",
+        "valid": true
+      },
+      "v2": {
+        "accuracy": 0.0,
+        "available": false,
+        "evaluator_reason": null,
+        "explicit_finish": false,
+        "failure_flags": {
+          "graph_failure": false,
+          "parsing_failure": false,
+          "runtime_failure": true,
+          "terminal_failure": false
+        },
+        "failure_type": "agentgraph_operational_or_evaluator_failure",
+        "final_answer": null,
+        "first_observable_failure": {
+          "diagnosis_scope": "first_observable_failure",
+          "error": "trajectory_missing",
+          "failure_layer": "runtime",
+          "first_error_action": null,
+          "first_error_agent_id": null,
+          "first_error_turn": null,
+          "terminal_result": "collection_failed"
+        },
+        "first_observable_failure_layer": "runtime",
+        "parsing_failure_reason": null,
+        "parsing_succeeded": null,
+        "result_state": "runtime_failure",
+        "termination_reason": "collection_failed",
+        "trajectory_id": null,
+        "valid": false
+      }
+    }
+  ],
+  "transitions": {
+    "regressed_count": 4,
+    "regressed_task_ids": [
+      "aime-2026/01",
+      "aime-2026/03",
+      "aime-2026/11",
+      "aime-2026/16"
+    ],
+    "repaired_count": 7,
+    "repaired_task_ids": [
+      "aime-2026/05",
+      "aime-2026/10",
+      "aime-2026/12",
+      "aime-2026/17",
+      "aime-2026/19",
+      "aime-2026/20",
+      "aime-2026/22"
+    ],
+    "unchanged_correct_count": 0,
+    "unchanged_correct_task_ids": [],
+    "unchanged_incorrect_count": 19,
+    "unchanged_incorrect_task_ids": [
+      "aime-2026/02",
+      "aime-2026/04",
+      "aime-2026/06",
+      "aime-2026/07",
+      "aime-2026/08",
+      "aime-2026/09",
+      "aime-2026/13",
+      "aime-2026/14",
+      "aime-2026/15",
+      "aime-2026/18",
+      "aime-2026/21",
+      "aime-2026/23",
+      "aime-2026/24",
+      "aime-2026/25",
+      "aime-2026/26",
+      "aime-2026/27",
+      "aime-2026/28",
+      "aime-2026/29",
+      "aime-2026/30"
+    ]
+  },
+  "v1": {
+    "available_count": 29,
+    "correct_count": 4,
+    "denominator": 30,
+    "failure_flag_counts_nonexclusive": {
+      "graph_failure": 2,
+      "parsing_failure": 5,
+      "runtime_failure": 5,
+      "terminal_failure": 4
+    },
+    "failure_type_distribution": {
+      "agentgraph_accuracy_gain": 1,
+      "agentgraph_accuracy_regression": 3,
+      "agentgraph_operational_or_evaluator_failure": 1,
+      "agentgraph_terminal_failure": 4,
+      "both_correct": 3,
+      "both_incorrect": 13,
+      "output_parsing_failure": 5
+    },
+    "first_observable_failure_layer_distribution": {
+      "agent": 13,
+      "director": 1,
+      "graph": 2,
+      "output_extraction": 5,
+      "runtime": 5
+    },
+    "result_state_distribution": {
+      "correct": 4,
+      "graph_failure": 1,
+      "incorrect": 13,
+      "parsing_failure": 5,
+      "runtime_failure": 5,
+      "terminal_failure": 2
+    },
+    "strict_accuracy": 0.13333333333333333,
+    "valid_count": 25
+  },
+  "v2": {
+    "available_count": 27,
+    "correct_count": 7,
+    "denominator": 30,
+    "failure_flag_counts_nonexclusive": {
+      "graph_failure": 1,
+      "parsing_failure": 5,
+      "runtime_failure": 9,
+      "terminal_failure": 5
+    },
+    "failure_type_distribution": {
+      "agentgraph_accuracy_gain": 6,
+      "agentgraph_accuracy_regression": 3,
+      "agentgraph_operational_or_evaluator_failure": 3,
+      "agentgraph_terminal_failure": 5,
+      "both_correct": 1,
+      "both_incorrect": 7,
+      "output_parsing_failure": 5
+    },
+    "first_observable_failure_layer_distribution": {
+      "agent": 8,
+      "graph": 1,
+      "output_extraction": 5,
+      "runtime": 9
+    },
+    "result_state_distribution": {
+      "correct": 7,
+      "incorrect": 8,
+      "parsing_failure": 5,
+      "runtime_failure": 9,
+      "terminal_failure": 1
+    },
+    "strict_accuracy": 0.23333333333333334,
+    "valid_count": 22
+  },
+  "v2_minus_v1": {
+    "correct_count": 3,
+    "strict_accuracy": 0.1,
+    "strict_accuracy_percentage_points": 10.0
+  }
+}

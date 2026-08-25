@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 from collections import Counter
+from copy import deepcopy
 from dataclasses import asdict, replace
 from datetime import datetime, timezone
 import json
@@ -2866,6 +2867,103 @@ def _existing_trajectory_checkpoint(
     return existing
 
 
+async def _rescore_static_trajectory_checkpoint(
+    backend: LiveSmokeBackend,
+    selected: Sequence[TaskRecord],
+    trajectories: Mapping[str, Mapping[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Re-evaluate persisted explicit terminal outputs without model calls.
+
+    This mirrors the existing Direct rescore boundary above.  It is used only
+    by ``--direct-only`` when an evaluator/output-parser version changes while
+    the frozen AgentGraph execution receipt remains unchanged.
+    """
+
+    rescored: dict[str, dict[str, Any]] = {}
+    for task in selected:
+        candidate = trajectories.get(task.task_id)
+        if not isinstance(candidate, Mapping):
+            continue
+        updated = deepcopy(dict(candidate))
+        backfilled_execution_count = 0
+        turns = updated.get("turns")
+        if isinstance(turns, list):
+            for turn in turns:
+                if not isinstance(turn, dict):
+                    continue
+                # Historical typed feedback cannot always be reconstructed
+                # exactly; preserve that uncertainty instead of guessing.
+                turn.setdefault("feedback_code", None)
+                executions = turn.get("executions")
+                if not isinstance(executions, list):
+                    continue
+                for execution in executions:
+                    if not isinstance(execution, dict):
+                        continue
+                    metadata = execution.get("metadata")
+                    if not isinstance(metadata, dict):
+                        continue
+                    request = metadata.get("request")
+                    response = metadata.get("response")
+                    if not isinstance(request, Mapping) or not isinstance(response, dict):
+                        continue
+                    request_id = request.get("request_id")
+                    output = execution.get("output")
+                    if not isinstance(request_id, str) or not isinstance(output, str):
+                        continue
+                    inputs: list[Mapping[str, Any]] = []
+                    upstream = request.get("upstream")
+                    if isinstance(upstream, list):
+                        inputs.extend(item for item in upstream if isinstance(item, Mapping))
+                    peer_draft = request.get("peer_draft")
+                    if isinstance(peer_draft, Mapping):
+                        inputs.append(peer_draft)
+                    response["artifact_version"] = request_id
+                    response["artifact_id"] = request_id
+                    response["raw_output"] = output
+                    response["upstream_dependencies"] = [
+                        {
+                            "source_agent": item.get("source_agent_id"),
+                            "artifact_id": item.get("artifact_id"),
+                            "raw_output": item.get("raw_output", item.get("content")),
+                        }
+                        for item in inputs
+                    ]
+                    backfilled_execution_count += 1
+        updated["artifact_receipt_backfill"] = {
+            "mode": "deterministic_from_persisted_request_response",
+            "execution_count": backfilled_execution_count,
+            "model_calls": 0,
+            "historical_feedback_code_backfilled": False,
+        }
+        evaluation = candidate.get("evaluation")
+        final_answer = candidate.get("final_answer")
+        target_version = evaluator_version_for(task)
+        if (
+            candidate.get("explicit_finish") is True
+            and isinstance(final_answer, str)
+            and (
+                not isinstance(evaluation, Mapping)
+                or evaluation.get("evaluator_version") != target_version
+            )
+        ):
+            updated["evaluation"] = asdict(
+                await _evaluate_prediction(backend, task, final_answer)
+            )
+            updated["evaluation_rescore_receipt"] = {
+                "mode": "offline_existing_terminal_artifact",
+                "source_evaluator_version": (
+                    evaluation.get("evaluator_version")
+                    if isinstance(evaluation, Mapping)
+                    else None
+                ),
+                "target_evaluator_version": target_version,
+                "model_calls": 0,
+            }
+        rescored[task.task_id] = updated
+    return rescored
+
+
 async def run_completion_benchmark_round(
     config_path: str | Path,
     *,
@@ -2892,6 +2990,14 @@ async def run_completion_benchmark_round(
     paths = _paths(config, root)
     selected = _select_tasks(config, root, paths["selected"])
     failures = _read_jsonl(paths["failures"])
+    failure_reuse_source = bounded.get("collection_failures_reused_from")
+    if (
+        direct_only
+        and not failures
+        and isinstance(failure_reuse_source, str)
+        and failure_reuse_source.strip()
+    ):
+        failures = _read_jsonl(_resolve(root, failure_reuse_source))
     gpu = _mapping(config["gpu"], "gpu")
     director_config = _mapping(config["director"], "director")
     configured_rollout_gpu = int(gpu["rollout_physical"])
@@ -3059,14 +3165,28 @@ async def run_completion_benchmark_round(
 
     if direct_only:
         manifest["status"] = "paired_report_from_existing_agentgraph"
+        trajectory_source = paths["trajectories"]
+        configured_trajectory_source = bounded.get("agentgraph_reused_from")
+        if (
+            isinstance(configured_trajectory_source, str)
+            and configured_trajectory_source.strip()
+        ):
+            trajectory_source = _resolve(root, configured_trajectory_source)
         trajectories = _existing_trajectory_checkpoint(
             active,
-            paths["trajectories"],
+            trajectory_source,
             condition_id=str(config["experiment"]["condition_id"]),
         )
+        trajectories = await _rescore_static_trajectory_checkpoint(
+            backend,
+            active,
+            trajectories,
+        )
+        hotpot_round._persist_ordered(paths["trajectories"], active, trajectories)
         manifest["agentgraph_progress"] = {
             "completed": len(trajectories),
             "reused_without_execution": True,
+            "source": str(trajectory_source),
         }
         _write_json(paths["manifest"], manifest)
     else:

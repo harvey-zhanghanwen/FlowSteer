@@ -347,3 +347,63 @@ fail-closed parsing, same-model provider retry, partial failure state,
 repeated-action rejection, and evaluator-target isolation. No training,
 optimizer, LoRA, MACE, Bayesian, Skill, retrieval, or answer lookup path was
 enabled.
+
+The v2 Wrong Demo for `aime-2026/08` also showed candidate anchoring: after
+an Agent emitted `244`, later sampled contracts copied that unverified value
+into new Agent obligations and the Director spent the remaining turns editing
+relations without issuing `FINISH`. Canvas now rejects such target-blind
+candidate copying as `unverified_candidate_in_contract`; the artifact remains
+available through provenance for execution-time checking. The guard neither
+judges the candidate nor prescribes an Agent role, count, relation, or topology.
+
+The same-30 v2 evaluation exposed one output-protocol false negative:
+`aime-2026/09` ended with an isolated final line `29`, but the initial v2
+projection rejected all explanation-bearing responses. SkillFlow's real
+`training/reward.py::extract_math_answer` already includes a final-lines
+numeric fallback. v2.1 ports only its deterministic narrow subset—an entire
+final non-empty line containing one legal AIME integer—and also admits
+SkillFlow's explicit `The answer is N` marker. It still rejects arbitrary last
+numbers, out-of-range values, conflicts, and any target-dependent repair.
+
+## Empty-artifact runtime correction
+
+The first candidate-guard canary exposed a separate runtime defect on
+`aime-2026/02`: a reciprocal revision returned HTTP 200 with
+`finish_reason=length` and an empty public response. The runtime had classified
+that response as a successful fresh artifact, replacing the same Agent's prior
+non-empty `62`; pointer-only `SET_OUTPUT` and no-resampling `FINISH` then
+faithfully consumed the invalid empty artifact.
+
+The unified runtime now records such a completion as `EmptyAgentResponse`,
+retains the exact call/retry and input-provenance receipt, leaves the failed
+node without a fresh artifact, and preserves already successful upstream
+artifacts in the partial result. It does not retry with or route to another
+model. The corrected two-task canary completed both tasks with legal explicit
+`FINISH`; task 02 again terminated with `62`.
+
+## Runtime/artifact protocol v2.3 fixed-30 outcome
+
+The final condition
+`config/evaluation_aime2026_runtime_v2_3_artifact_guard.yaml` preserves the
+same 30 tasks, catalog order, base Director weights, generation seed, neutral
+prompt, action space, and 600-second task timeout. It reuses the frozen Direct
+responses and reruns only AgentGraph under the accepted candidate-anchoring and
+empty-artifact guards.
+
+- Direct: `6/30 = 20.00%` strict Accuracy.
+- AgentGraph v2.3: `10/30 = 33.33%` strict Accuracy, `+13.33` percentage
+  points over the paired Direct condition.
+- Initial AgentGraph v1: `4/30 = 13.33%`; v2.3 therefore changes eight tasks
+  from incorrect to correct, two from correct to incorrect, keeps two correct,
+  and keeps eighteen incorrect (`+20.00` percentage points net).
+- Twenty-eight AgentGraph trajectories completed. Twenty-six issued legal
+  explicit `FINISH`; two reached `max_rounds`; tasks 18 and 27 reached the
+  unchanged collection timeout. Missing/invalid outcomes remain in the fixed
+  denominator of 30.
+- One explicit terminal output failed the fail-closed parser. Seven execution
+  turns recorded structured runtime failures (`EmptyAgentResponse` six,
+  `OpenAICompatibleGatewayError` one); successful local recovery remained
+  visible in the same trajectory rather than being hidden or relabelled.
+
+No optimizer step, backward pass, LoRA update, training, Tool, answer lookup,
+GRPO, MACE, Bayesian update, Skill retrieval, or Skill evolution occurred.

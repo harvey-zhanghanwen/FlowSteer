@@ -2177,6 +2177,10 @@ def test_collector_materializes_exact_finish_trajectory_and_evidence(tmp_path):
     assert request_receipt["rendered_messages"][0]["role"] == "system"
     assert request_receipt["rendered_messages"][1]["role"] == "user"
     response_receipt = trajectory.turns[-1].executions[0].metadata["response"]
+    assert response_receipt["artifact_id"] == request_receipt["request_id"]
+    assert response_receipt["artifact_version"] == request_receipt["request_id"]
+    assert response_receipt["raw_output"] == "final answer"
+    assert response_receipt["upstream_dependencies"] == []
     assert response_receipt["execution_mode"] == "react"
     assert response_receipt["react_turns_used"] == 2
     assert response_receipt["new_react_turns_used"] == 1

@@ -27,10 +27,14 @@ def test_integer_scorer_uses_target_blind_explicit_math_forms() -> None:
     assert score_aime2026_integer("042", ["42"]).accuracy == 1.0
     assert score_aime2026_integer("+42", ["42"]).accuracy == 1.0
     assert score_aime2026_integer("42.0", ["42"]).accuracy == 0.0
-    assert score_aime2026_integer("The answer is 42", ["42"]).accuracy == 0.0
+    assert score_aime2026_integer("The answer is 42", ["42"]).accuracy == 1.0
     assert score_aime2026_integer("100%", ["1"]).accuracy == 0.0
     assert score_aime2026_integer(r"\boxed{42}", ["42"]).accuracy == 1.0
     assert score_aime2026_integer("Final Answer: 42", ["42"]).accuracy == 1.0
+    assert (
+        score_aime2026_integer("Reasoning without a final marker.\n42", ["42"]).accuracy
+        == 1.0
+    )
     assert (
         score_aime2026_integer(
             "\\boxed{41}\nFinal Answer: 42",

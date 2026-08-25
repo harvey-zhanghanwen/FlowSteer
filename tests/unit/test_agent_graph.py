@@ -1901,6 +1901,40 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             [item.source_agent_id for item in merge_request.upstream],
         )
 
+    async def test_aime_recovery_contract_cannot_anchor_unverified_candidate(self) -> None:
+        registry = make_registry()
+
+        class CandidateGateway(_ImmediateGateway):
+            async def generate(self, request: AgentRequest) -> str:
+                self.requests.append(request)
+                return "244"
+
+        gateway = CandidateGateway()
+        env = AgentWorkflowEnv(
+            registry,
+            gateway,
+            problem="Find the requested AIME integer.",
+            execute_on_edit=True,
+            artifact_candidate_extractor=extract_aime2026_candidate,
+        )
+        first = await env.step(
+            '{"action":"add_agent","agent_id":"solver",'
+            '"model_id":"cheap","contract":"Solve the public problem."}'
+        )
+        anchored = await env.step(
+            '{"action":"add_agent","agent_id":"next",'
+            '"model_id":"fast","contract":"Check the solver answer 244 and output 244."}'
+        )
+
+        self.assertTrue(first.accepted)
+        self.assertFalse(anchored.accepted)
+        self.assertEqual(
+            "unverified_candidate_in_contract",
+            anchored.feedback_code,
+        )
+        self.assertIn("keep the contract answer-free", anchored.feedback)
+        self.assertEqual(1, len(gateway.requests))
+
     async def test_finish_requires_the_configured_environment_actor(self) -> None:
         registry = make_registry()
         gateway = _ImmediateGateway()

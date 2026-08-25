@@ -3067,6 +3067,28 @@ def _execution_record(call: AgentCallRecord) -> ExecutionRecord:
         "attempt_count": attempt_count,
         "generation_seed": _optional_int(metadata.get("generation_seed")),
     }
+    artifact_inputs = list(request.upstream)
+    if request.peer_draft is not None:
+        artifact_inputs.append(request.peer_draft)
+    response_receipt.update(
+        {
+            # AgentRuntime uses the exact request identity as the immutable
+            # artifact identity.  Deriving these fields from this call avoids
+            # incorrectly assigning a block's final artifact to its earlier
+            # DRAFT/REVISION calls.
+            "artifact_version": request.request_id,
+            "artifact_id": request.request_id,
+            "raw_output": response.text,
+            "upstream_dependencies": [
+                {
+                    "source_agent": item.source_agent_id,
+                    "artifact_id": item.artifact_id,
+                    "raw_output": item.content,
+                }
+                for item in artifact_inputs
+            ],
+        }
+    )
     _copy_json_safe_fields(
         metadata,
         response_receipt,
@@ -3876,6 +3898,7 @@ class AgentGraphRolloutCollector:
                 # Skill prior in ``available_skills``. Forced paired-probe
                 # conditions are rendered separately and excluded above.
                 visible_skill_ids=current_retrieved_skill_ids,
+                feedback_code=canvas.feedback_code,
             )
             turns.append(turn)
             snapshots.append(snapshot)

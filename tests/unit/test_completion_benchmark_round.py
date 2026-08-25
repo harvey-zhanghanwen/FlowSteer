@@ -1470,6 +1470,116 @@ def test_direct_only_checkpoint_loader_never_schedules_missing_agentgraph_tasks(
     assert existing["aime-2026/01"]["trajectory_id"] == "kept"
 
 
+def test_direct_only_rescores_only_explicit_terminal_artifacts_without_model_calls():
+    selected = (
+        _MODULE.TaskRecord(
+            task_id="aime-2026/01",
+            question="one",
+            ground_truth="1",
+            split="test",
+            metadata={"dataset_key": "aime_2026"},
+        ),
+        _MODULE.TaskRecord(
+            task_id="aime-2026/02",
+            question="two",
+            ground_truth="2",
+            split="test",
+            metadata={"dataset_key": "aime_2026"},
+        ),
+    )
+    trajectories = {
+        "aime-2026/01": {
+            "task": {"task_id": "aime-2026/01"},
+            "explicit_finish": True,
+            "final_answer": "Reasoning\n1",
+            "evaluation": {"evaluator_version": "old"},
+            "turns": [
+                {
+                    "executions": [
+                        {
+                            "output": "1",
+                            "metadata": {
+                                "request": {
+                                    "request_id": "run:1:out:single",
+                                    "upstream": [
+                                        {
+                                            "source_agent_id": "source",
+                                            "artifact_id": "source-artifact",
+                                            "raw_output": "unverified 1",
+                                        }
+                                    ],
+                                    "peer_draft": None,
+                                },
+                                "response": {},
+                            },
+                        }
+                    ]
+                }
+            ],
+        },
+        "aime-2026/02": {
+            "task": {"task_id": "aime-2026/02"},
+            "explicit_finish": False,
+            "final_answer": None,
+            "evaluation": {"evaluator_version": "old"},
+        },
+    }
+    calls = []
+
+    async def fake_evaluate(_backend, task, prediction, *, run_graph=None):
+        calls.append((task.task_id, prediction, run_graph))
+        return EvaluationOutcome(
+            valid=True,
+            reward=1.0,
+            metrics={"accuracy": 1.0},
+            reason="evaluated",
+            evaluator_version=AIME2026_EVALUATOR_VERSION,
+        )
+
+    with patch.object(_MODULE, "_evaluate_prediction", new=fake_evaluate):
+        rescored = asyncio.run(
+            _MODULE._rescore_static_trajectory_checkpoint(
+                SimpleNamespace(), selected, trajectories
+            )
+        )
+
+    assert calls == [("aime-2026/01", "Reasoning\n1", None)]
+    assert rescored["aime-2026/01"]["evaluation"]["metrics"] == {
+        "accuracy": 1.0
+    }
+    assert rescored["aime-2026/01"]["evaluation_rescore_receipt"] == {
+        "mode": "offline_existing_terminal_artifact",
+        "source_evaluator_version": "old",
+        "target_evaluator_version": AIME2026_EVALUATOR_VERSION,
+        "model_calls": 0,
+    }
+    turn = rescored["aime-2026/01"]["turns"][0]
+    assert turn["feedback_code"] is None
+    assert turn["executions"][0]["metadata"]["response"] == {
+        "artifact_version": "run:1:out:single",
+        "artifact_id": "run:1:out:single",
+        "raw_output": "1",
+        "upstream_dependencies": [
+            {
+                "source_agent": "source",
+                "artifact_id": "source-artifact",
+                "raw_output": "unverified 1",
+            }
+        ],
+    }
+    assert rescored["aime-2026/01"]["artifact_receipt_backfill"] == {
+        "mode": "deterministic_from_persisted_request_response",
+        "execution_count": 1,
+        "model_calls": 0,
+        "historical_feedback_code_backfilled": False,
+    }
+    assert rescored["aime-2026/02"]["evaluation"] == {"evaluator_version": "old"}
+    assert "evaluation_rescore_receipt" not in rescored["aime-2026/02"]
+    assert rescored["aime-2026/02"]["artifact_receipt_backfill"][
+        "execution_count"
+    ] == 0
+
+
 def test_interactive_direct_condition_records_every_environment_policy_call():
     registry = load_model_registry(
         _ROOT / "config" / "model_catalog_hotpotqa_deep_v6.yaml"

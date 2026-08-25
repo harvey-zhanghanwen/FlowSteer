@@ -20,7 +20,7 @@ from typing import Sequence
 
 AIME2026_DATASET_KEY = "aime_2026"
 AIME2026_TASK_FAMILY = "aime-2026/integer-answer"
-AIME2026_EVALUATOR_VERSION = "skillev.integer.target-blind-extraction.v2"
+AIME2026_EVALUATOR_VERSION = "skillev.integer.target-blind-extraction.v2.1"
 AIME2026_ANSWER_FORMAT = "integer-000-to-999"
 
 _ANSWER_TAG = re.compile(
@@ -31,6 +31,10 @@ _THINKING_END = "</think>"
 _BOXED_INTEGER = re.compile(r"\\boxed\s*\{\s*([+]?\d+)\s*\}")
 _FINAL_INTEGER = re.compile(
     r"(?im)^\s*(?:final\s+answer|answer)\s*[:=]\s*"
+    r"\$?\s*([+]?\d+)\s*\$?\s*[.!]?\s*$"
+)
+_ANSWER_IS_INTEGER = re.compile(
+    r"(?im)^\s*(?:the\s+)?answer\s+is\s*[:=]?\s*"
     r"\$?\s*([+]?\d+)\s*\$?\s*[.!]?\s*$"
 )
 _BARE_INTEGER = re.compile(r"[+]?\d+")
@@ -124,6 +128,7 @@ def extract_aime2026_candidate(
     marked = [
         *(_BOXED_INTEGER.findall(visible)),
         *(_FINAL_INTEGER.findall(visible)),
+        *(_ANSWER_IS_INTEGER.findall(visible)),
     ]
     if marked:
         try:
@@ -134,10 +139,20 @@ def extract_aime2026_candidate(
             return None, structured, "conflicting_explicit_candidates"
         return next(iter(candidates)), structured, None
 
-    if _BARE_INTEGER.fullmatch(visible) is None:
-        return None, structured, "aime_integer_not_found"
+    candidate = visible
+    if _BARE_INTEGER.fullmatch(candidate) is None:
+        # SkillFlow's real ``extract_math_answer`` falls back to a number in
+        # the final three lines.  The formal adapter ports only the narrower,
+        # target-blind case where the final non-empty line is exactly one
+        # integer; arbitrary last-number selection remains inadmissible.
+        candidate = next(
+            (line.strip() for line in reversed(visible.splitlines()) if line.strip()),
+            "",
+        )
+        if _BARE_INTEGER.fullmatch(candidate) is None:
+            return None, structured, "aime_integer_not_found"
     try:
-        return canonical_aime_integer(visible), structured, None
+        return canonical_aime_integer(candidate), structured, None
     except ValueError:
         return None, structured, "aime_integer_out_of_range"
 

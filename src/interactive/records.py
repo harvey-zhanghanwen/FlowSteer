@@ -211,6 +211,7 @@ class TurnRecord:
     created_at: str = field(default_factory=utc_now)
     retrieved_skill_ids: Sequence[str] = field(default_factory=tuple)
     visible_skill_ids: Sequence[str] = field(default_factory=tuple)
+    feedback_code: Optional[str] = None
 
     def __post_init__(self) -> None:
         if self.round_index < 0:
@@ -247,6 +248,11 @@ class TurnRecord:
             raise ValueError("director_generation_seed must be non-negative when supplied")
         if not isinstance(self.runtime_summary, Mapping):
             raise ValueError("runtime_summary must be a mapping")
+        if self.feedback_code is not None and (
+            not isinstance(self.feedback_code, str)
+            or not self.feedback_code.strip()
+        ):
+            raise ValueError("feedback_code must be non-empty when supplied")
         retrieved_skill_ids = ordered_skill_ids(
             self.retrieved_skill_ids,
             field_name="retrieved_skill_ids",
@@ -333,6 +339,7 @@ class TurnRecord:
             created_at=value.get("created_at", utc_now()),
             retrieved_skill_ids=tuple(value.get("retrieved_skill_ids", ())),
             visible_skill_ids=tuple(value.get("visible_skill_ids", ())),
+            feedback_code=value.get("feedback_code"),
         )
 
 

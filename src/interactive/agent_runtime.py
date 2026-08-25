@@ -2170,8 +2170,38 @@ class AgentRuntime:
                 failure_records=nested_records,
                 pending_agent_ids=(request.agent.id,),
             ) from exc
-        response = raw_response if isinstance(raw_response, AgentResponse) else AgentResponse(raw_response)
+        response = (
+            raw_response
+            if isinstance(raw_response, AgentResponse)
+            else AgentResponse(raw_response)
+        )
         calls.append(AgentCallRecord(request=request, response=response))
+        if not response.text.strip():
+            failure_metadata = MappingProxyType(
+                {
+                    **dict(response.metadata),
+                    **dict(input_artifact_metadata()),
+                }
+            )
+            raise AgentRuntimeError(
+                f"gateway returned an empty artifact for agent "
+                f"{request.agent.id!r} during {request.phase.value}",
+                failure_records=(
+                    AgentFailureRecord(
+                        request_id=request.request_id,
+                        agent_id=request.agent.id,
+                        phase=request.phase,
+                        graph_revision=request.graph_revision,
+                        error_type="EmptyAgentResponse",
+                        message=(
+                            "Provider completed without a non-empty Agent "
+                            "artifact"
+                        ),
+                        metadata=failure_metadata,
+                    ),
+                ),
+                pending_agent_ids=(request.agent.id,),
+            )
         return response
 
 

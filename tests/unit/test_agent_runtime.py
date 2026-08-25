@@ -694,6 +694,133 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("FAILURE", partial.agent_statuses["a"])
         self.assertEqual("BLOCKED_BY_UPSTREAM", partial.agent_statuses["c"])
 
+    async def test_empty_provider_response_is_failure_with_receipt(self) -> None:
+        catalog = registry()
+
+        class EmptyResponseGateway:
+            async def generate(self, request: AgentRequest) -> AgentResponse:
+                return AgentResponse(
+                    "",
+                    metadata={
+                        "finish_reason": "length",
+                        "retry_receipts": (
+                            {
+                                "attempt": 1,
+                                "model_id": request.model.model_id,
+                                "status": "success",
+                            },
+                        ),
+                    },
+                )
+
+        graph = AgentGraph(
+            [AgentNode("a", "m1", "answer")],
+            output_agent_id="a",
+        )
+
+        with self.assertRaises(AgentRuntimeError) as raised:
+            await AgentRuntime(catalog, EmptyResponseGateway()).execute(
+                graph,
+                "question",
+                require_complete=False,
+            )
+
+        failure = raised.exception.failure_records[0]
+        self.assertEqual("EmptyAgentResponse", failure.error_type)
+        self.assertEqual("a", failure.agent_id)
+        self.assertEqual("length", failure.metadata["finish_reason"])
+        self.assertEqual("m1", failure.metadata["retry_receipts"][0]["model_id"])
+
+        partial = raised.exception.partial_result
+        self.assertIsNotNone(partial)
+        assert partial is not None
+        self.assertEqual({}, dict(partial.outputs))
+        self.assertIsNone(partial.final_answer)
+        self.assertEqual("FAILURE", partial.agent_statuses["a"])
+        self.assertEqual(1, len(partial.calls))
+        self.assertEqual("", partial.calls[0].response.text)
+        self.assertEqual("length", partial.calls[0].response.metadata["finish_reason"])
+
+    async def test_empty_downstream_response_preserves_successful_upstream_artifact(
+        self,
+    ) -> None:
+        catalog = registry()
+
+        class EmptyDownstreamGateway:
+            async def generate(self, request: AgentRequest) -> AgentResponse:
+                if request.agent.id == "upstream":
+                    return AgentResponse(
+                        "durable-upstream",
+                        metadata={"provider_request_id": "up-ok"},
+                    )
+                return AgentResponse(
+                    "   ",
+                    metadata={
+                        "http_status": 200,
+                        "finish_reason": "length",
+                        "provider_request_id": "output-empty",
+                        "retry_receipts": ({"attempt": 1, "status": 200},),
+                    },
+                )
+
+        graph = AgentGraph(
+            [
+                AgentNode("upstream", "m1", "produce an artifact"),
+                AgentNode("output", "m2", "consume the upstream artifact"),
+            ],
+            [AgentRelation("upstream", "output", True, False)],
+            output_agent_id="output",
+        )
+
+        with self.assertRaises(AgentRuntimeError) as raised:
+            await AgentRuntime(catalog, EmptyDownstreamGateway()).execute(
+                graph,
+                "question",
+                require_complete=False,
+            )
+
+        partial = raised.exception.partial_result
+        self.assertIsNotNone(partial)
+        assert partial is not None
+        self.assertEqual(
+            {"upstream": "durable-upstream"},
+            dict(partial.outputs),
+        )
+        self.assertIsNone(partial.final_answer)
+        self.assertEqual("SUCCESS", partial.agent_statuses["upstream"])
+        self.assertEqual("FAILURE", partial.agent_statuses["output"])
+        self.assertEqual(("upstream",), partial.executed_agent_ids)
+        self.assertEqual(("output",), raised.exception.pending_agent_ids)
+        self.assertEqual((), raised.exception.blocked_agent_ids)
+
+        calls_by_agent = {
+            call.request.agent.id: call for call in partial.calls
+        }
+        self.assertEqual(
+            "durable-upstream",
+            calls_by_agent["upstream"].response.text,
+        )
+        self.assertEqual("   ", calls_by_agent["output"].response.text)
+        self.assertEqual(
+            "output-empty",
+            calls_by_agent["output"].response.metadata["provider_request_id"],
+        )
+
+        failure = raised.exception.failure_records[0]
+        self.assertEqual("EmptyAgentResponse", failure.error_type)
+        self.assertEqual("length", failure.metadata["finish_reason"])
+        self.assertEqual(
+            calls_by_agent["upstream"].request.request_id,
+            failure.metadata["input_artifact_versions"]["upstream"],
+        )
+        provenance = failure.metadata["input_artifact_provenance"][0]
+        self.assertEqual("upstream", provenance["source_agent_id"])
+        self.assertEqual("durable-upstream", provenance["raw_output"])
+        self.assertEqual(
+            calls_by_agent["upstream"].request.request_id,
+            provenance["artifact_id"],
+        )
+
     async def test_react_failure_keeps_public_action_observation_receipts(self) -> None:
         catalog = registry()
 

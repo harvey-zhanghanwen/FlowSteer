@@ -4009,6 +4009,13 @@ class AgentWorkflowEnv:
                 action,
                 "edit rejected: " + contract_obligation_issue,
             )
+        candidate_contract_issue = self._unverified_candidate_contract_issue(action)
+        if candidate_contract_issue is not None:
+            return self._reject_after_count(
+                action,
+                "edit rejected: " + candidate_contract_issue,
+                feedback_code="unverified_candidate_in_contract",
+            )
         try:
             # Reuse the Runtime's execution-contract boundary before the
             # candidate Canvas revision is committed.  FlowSteer's edit then
@@ -6646,6 +6653,89 @@ class AgentWorkflowEnv:
                 )
             return None
         return None
+
+    def _unverified_candidate_contract_issue(
+        self,
+        action: AgentAction,
+    ) -> Optional[str]:
+        """Reject target-blind candidate anchoring in a new Agent contract.
+
+        Artifact candidates remain visible as unverified work products through
+        Canvas feedback and routed provenance.  They may be checked through
+        execution, but recovery must not turn one into a precommitted contract
+        literal.  This admission reads no evaluator state or trusted target and
+        introduces no Agent role or topology prior.
+        """
+
+        if self.artifact_candidate_extractor is None:
+            return None
+        if action.action_type is AgentActionType.ADD_SUBGRAPH:
+            obligations = tuple(
+                value
+                for spec in action.agents
+                for value in (spec.contract, spec.completion_condition)
+                if isinstance(value, str) and value.strip()
+            )
+        elif action.action_type is AgentActionType.ADD_AGENT:
+            obligations = tuple(
+                value
+                for value in (action.contract, action.completion_condition)
+                if isinstance(value, str) and value.strip()
+            )
+        elif action.action_type is AgentActionType.MODIFY_AGENT:
+            obligations = tuple(
+                value
+                for value in (action.contract, action.completion_condition)
+                if isinstance(value, str) and value.strip()
+            )
+        else:
+            return None
+        if not obligations:
+            return None
+
+        candidates: set[str] = set()
+        for raw_output in (
+            *self._progressive_outputs.values(),
+            *self._previous_revision_outputs.values(),
+        ):
+            try:
+                candidate, _, _ = self.artifact_candidate_extractor(raw_output)
+            except (TypeError, ValueError):
+                candidate = None
+            if isinstance(candidate, str) and candidate.strip():
+                candidates.add(candidate.strip())
+        if not candidates:
+            return None
+
+        candidate_context = re.compile(
+            r"\b(?:answer|candidate|result|value|return|emit|output|copy|"
+            r"consolidate|solver|verifier)\b",
+            flags=re.IGNORECASE,
+        )
+        copied: list[str] = []
+        for candidate in sorted(candidates):
+            pattern = re.compile(
+                rf"(?<![A-Za-z0-9]){re.escape(candidate)}(?![A-Za-z0-9])"
+            )
+            for obligation in obligations:
+                for match in pattern.finditer(obligation):
+                    window = obligation[
+                        max(0, match.start() - 72) : min(
+                            len(obligation), match.end() + 72
+                        )
+                    ]
+                    if candidate_context.search(window) is not None:
+                        copied.append(candidate)
+                        break
+                if candidate in copied:
+                    break
+        if not copied:
+            return None
+        return (
+            "unverified artifact candidate copied into a pre-execution Agent "
+            f"contract: {copied!r}; keep the contract answer-free and route "
+            "the source artifact for execution-time checking instead"
+        )
 
     @classmethod
     def _reasoner_candidate(
@@ -10396,6 +10486,8 @@ class AgentWorkflowEnv:
             return "bidirectional_block_too_large"
         if "action made no graph change" in normalized:
             return "no_graph_change"
+        if "unverified artifact candidate" in normalized:
+            return "unverified_candidate_in_contract"
         if normalized.startswith("invalid action:"):
             return "invalid_action"
         if "outside the configured canvas action set" in normalized:
