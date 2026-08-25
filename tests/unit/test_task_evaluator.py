@@ -10,6 +10,7 @@ from unittest.mock import patch
 from src.interactive.records import TaskRecord
 from src.interactive.task_evaluator import (
     GRADER_TEMPLATE,
+    HEALTHBENCH_EVALUATOR_VERSION,
     HOTPOTQA_ANSWER_EVALUATOR_VERSION,
     TRIVIAQA_ANSWER_EVALUATOR_VERSION,
     _webshop_instruction_matches,
@@ -225,6 +226,82 @@ class StaticEvaluatorTests(unittest.IsolatedAsyncioTestCase):
 
 
 class HealthBenchEvaluatorTests(unittest.IsolatedAsyncioTestCase):
+    async def test_professional_private_grader_receipt_is_the_primary_metric(self) -> None:
+        record = task("HealthBench Professional")
+        seen: list[tuple[str, str]] = []
+
+        async def grader(task_id: str, candidate: str):
+            seen.append((task_id, candidate))
+            return {
+                "evaluator_version": HEALTHBENCH_EVALUATOR_VERSION,
+                "grader_model": "gpt-5.4-2026-03-05",
+                "grader_reasoning_effort": "low",
+                "grader_error": None,
+                "termination": "graded",
+                "response_characters": len(candidate),
+                "overall_score": 0.75,
+                "overall_score_length_adjusted": 0.72,
+                "rubric_level_receipts": [
+                    {
+                        "criterion": "synthetic criterion",
+                        "points": 1.0,
+                        "tags": [],
+                        "criteria_met": True,
+                        "explanation": "met",
+                    }
+                ],
+                "grader_api_calls": 1,
+                "grader_latency_ms": 12.5,
+                "grader_token_usage": {"total_tokens": 10},
+                "provider_errors": [],
+                "api_call_receipts": [{"status": "success"}],
+            }
+
+        outcome = await evaluate_task(
+            record,
+            "Complete assistant response.",
+            healthbench_grader=grader,
+        )
+
+        self.assertTrue(outcome.valid)
+        self.assertEqual(0.75, outcome.metrics["overall_score"])
+        self.assertEqual(
+            0.72, outcome.metrics["overall_score_length_adjusted"]
+        )
+        self.assertEqual(0.72, outcome.reward)
+        self.assertEqual([(record.task_id, "Complete assistant response.")], seen)
+        self.assertEqual("low", outcome.details["grader_reasoning_effort"])
+        self.assertEqual(1, outcome.details["grader_telemetry"]["api_calls"])
+
+    async def test_professional_grader_failure_is_invalid_not_zero(self) -> None:
+        async def grader(task_id: str, candidate: str):
+            return {
+                "evaluator_version": HEALTHBENCH_EVALUATOR_VERSION,
+                "grader_model": "gpt-5.4-2026-03-05",
+                "grader_reasoning_effort": "low",
+                "grader_error": {"error_type": "ProviderError"},
+                "termination": "grader_error",
+                "response_characters": len(candidate),
+                "overall_score": None,
+                "overall_score_length_adjusted": None,
+                "rubric_level_receipts": [],
+                "grader_api_calls": 1,
+                "grader_latency_ms": 5.0,
+                "grader_token_usage": {},
+                "provider_errors": [{"error_type": "ProviderError"}],
+                "api_call_receipts": [{"status": "provider_error"}],
+            }
+
+        outcome = await evaluate_task(
+            task("HealthBench Professional"),
+            "response",
+            healthbench_grader=grader,
+        )
+
+        self.assertFalse(outcome.valid)
+        self.assertIsNone(outcome.reward)
+        self.assertEqual("healthbench_grader_error", outcome.reason)
+
     async def test_official_signed_weighting_records_raw_and_clips_grpo_reward(self) -> None:
         record = task(
             "HealthBench Professional",

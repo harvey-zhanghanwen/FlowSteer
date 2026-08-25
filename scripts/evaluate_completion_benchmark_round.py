@@ -60,6 +60,10 @@ from src.interactive.graph_diagnostics import (
     aggregate_trajectory_diagnostics,
     diagnose_trajectory,
 )
+from src.interactive.healthbench_professional_grader import (
+    HEALTHBENCH_PROFESSIONAL_EVALUATOR_VERSION,
+    HealthBenchProfessionalGrader,
+)
 from src.interactive.records import TaskRecord
 from src.interactive.rollout_collector import execution_record_from_call
 from src.interactive.swebench_adapter import OfficialSWEbenchHarness
@@ -116,8 +120,8 @@ _BENCHMARKS: Mapping[str, Mapping[str, Any]] = {
             "healthbench_evaluation",
             "healthbench_professional_evaluation",
         ),
-        "primary_metric": "raw_score",
-        "metric_names": ("raw_score",),
+        "primary_metric": "overall_score_length_adjusted",
+        "metric_names": ("overall_score", "overall_score_length_adjusted"),
     },
     "webshop": {
         "label": "WebShop",
@@ -262,6 +266,43 @@ def validate_completion_benchmark_config(config: Mapping[str, Any]) -> None:
         checks["evaluation.healthbench_judge_catalog_path"] = bool(
             str(evaluation.get("healthbench_judge_catalog_path", "")).strip()
         )
+        checks["evaluation.healthbench_professional_mode"] = (
+            evaluation.get("healthbench_grader_mode")
+            == "openai_simple_evals_healthbench_professional_reference"
+        )
+        checks["evaluation.healthbench_private_cases_path"] = bool(
+            str(evaluation.get("healthbench_private_cases_path", "")).strip()
+        )
+        checks["evaluation.healthbench_official_source_root"] = bool(
+            str(evaluation.get("healthbench_official_source_root", "")).strip()
+        )
+        checks["evaluation.healthbench_worker_interpreter"] = bool(
+            str(evaluation.get("healthbench_worker_interpreter", "")).strip()
+        )
+        checks["evaluation.healthbench_reasoning_effort"] = (
+            evaluation.get("healthbench_reasoning_effort") == "low"
+        )
+        checks["evaluation.healthbench_length_adjustment_center"] = (
+            evaluation.get("healthbench_length_adjustment_center") == 2000.0
+        )
+        checks[
+            "evaluation.healthbench_length_adjustment_penalty_per_500_chars"
+        ] = (
+            evaluation.get(
+                "healthbench_length_adjustment_penalty_per_500_chars"
+            )
+            == 0.0147
+        )
+        max_provider_attempts = evaluation.get(
+            "healthbench_max_provider_attempts"
+        )
+        checks["evaluation.healthbench_max_provider_attempts"] = bool(
+            type(max_provider_attempts) is int and max_provider_attempts > 0
+        )
+        tool_runtime = config.get("healthbench_tool_runtime")
+        checks["healthbench_tool_runtime.disabled"] = not isinstance(
+            tool_runtime, Mapping
+        ) or tool_runtime.get("enabled") is False
     if dataset_key in _INTERACTIVE_BENCHMARKS:
         evaluation = _mapping(config.get("evaluation"), "evaluation")
         per_source = evaluation.get("max_environment_steps_by_source")
@@ -320,7 +361,13 @@ def validate_completion_benchmark_config(config: Mapping[str, Any]) -> None:
         bounded.get("official_2026_only") is True
         or bounded.get("benchmark_slice") == "official_aime_2026"
     )
-    maximum = 30 if official_aime else 128
+    maximum = (
+        30
+        if official_aime
+        else 525
+        if dataset_key == "healthbench_professional"
+        else 128
+    )
     if (
         isinstance(sample_count, bool)
         or not isinstance(sample_count, int)
@@ -864,6 +911,12 @@ async def _evaluate_prediction(
             prediction,
             judge=backend.judge,
             judge_model=backend.judge_model,
+            healthbench_grader=getattr(
+                backend, "healthbench_professional_grader", None
+            ).grade
+            if getattr(backend, "healthbench_professional_grader", None)
+            is not None
+            else None,
         )
     if dataset_key in _INTERACTIVE_BENCHMARKS:
         evaluation = _mapping(backend.config["evaluation"], "evaluation")
@@ -1047,6 +1100,42 @@ async def _run_evaluator_preflight(
     dataset_key: str,
 ) -> Mapping[str, Any]:
     """Exercise the evaluator without consulting the selected benchmark set."""
+
+    if dataset_key == "healthbench_professional":
+        grader = getattr(backend, "healthbench_professional_grader", None)
+        if grader is None:
+            raise CompletionBenchmarkRoundError(
+                "HealthBench Professional private grader is not attached"
+            )
+        receipt = await grader.preflight()
+        passed = bool(
+            receipt.get("termination") == "graded"
+            and receipt.get("grader_error") is None
+            and receipt.get("evaluator_version")
+            == HEALTHBENCH_PROFESSIONAL_EVALUATOR_VERSION
+            and isinstance(receipt.get("overall_score"), (int, float))
+            and not isinstance(receipt.get("overall_score"), bool)
+            and isinstance(
+                receipt.get("overall_score_length_adjusted"), (int, float)
+            )
+            and not isinstance(
+                receipt.get("overall_score_length_adjusted"), bool
+            )
+        )
+        if not passed:
+            raise CompletionBenchmarkRoundError(
+                "synthetic HealthBench Professional evaluator preflight failed"
+            )
+        return {
+            "passed": True,
+            "fixture": "synthetic_non_benchmark",
+            "evaluator_version": str(receipt["evaluator_version"]),
+            "grader_model": str(receipt["grader_model"]),
+            "grader_reasoning_effort": str(receipt["grader_reasoning_effort"]),
+            "grader_api_calls": int(receipt["grader_api_calls"]),
+            "grader_latency_ms": float(receipt["grader_latency_ms"]),
+            "provider_error_count": len(receipt["provider_errors"]),
+        }
 
     if dataset_key in _INTERACTIVE_BENCHMARKS:
         task = _non_test_environment_preflight_task(config, root, dataset_key)
@@ -1386,6 +1475,10 @@ async def _collect_direct(
             and (
                 not isinstance(evaluation, Mapping)
                 or evaluation.get("evaluator_version") != evaluator_version_for(task)
+                or (
+                    _dataset_key(task) == "healthbench_professional"
+                    and evaluation.get("valid") is not True
+                )
             )
         ):
             updated = dict(candidate)
@@ -2057,6 +2150,95 @@ def _aime_wrong_demo_diagnosis(
     }
 
 
+def _healthbench_wrong_demo_diagnosis(
+    graph_value: Optional[Mapping[str, Any]],
+) -> Mapping[str, Any]:
+    """Report the first observable Professional failure boundary.
+
+    Runtime/Canvas failures reuse the existing trajectory diagnosis above.
+    When execution and FINISH are valid, the first *observable* shortfall is
+    the private evaluator receipt: rubric criteria are summarized by counts so
+    the report does not publish benchmark rubrics or invent a medical role.
+    """
+
+    trajectory_diagnosis = dict(_aime_wrong_demo_diagnosis(graph_value))
+    if graph_value is None:
+        return trajectory_diagnosis
+    if trajectory_diagnosis.get("failure_layer") != "agent":
+        return trajectory_diagnosis
+
+    evaluation = graph_value.get("evaluation")
+    evaluation = evaluation if isinstance(evaluation, Mapping) else {}
+    details = evaluation.get("details")
+    details = details if isinstance(details, Mapping) else {}
+    if evaluation.get("valid") is not True:
+        return {
+            "diagnosis_scope": "first_observable_failure",
+            "failure_layer": "evaluator",
+            "first_error_turn": None,
+            "first_error_action": "healthbench_reference_grade",
+            "first_error_agent_id": None,
+            "error": evaluation.get("reason") or "healthbench_evaluator_invalid",
+            "grader_termination": details.get("termination"),
+            "grader_error": details.get("grader_error"),
+            "terminal_result": graph_value.get("termination_reason"),
+        }
+
+    raw_rubrics = details.get("rubric_grades")
+    rubrics = (
+        [item for item in raw_rubrics if isinstance(item, Mapping)]
+        if isinstance(raw_rubrics, Sequence)
+        and not isinstance(raw_rubrics, (str, bytes))
+        else []
+    )
+    unmet_positive = sum(
+        float(item.get("points", 0.0)) > 0.0
+        and item.get("criteria_met") is not True
+        for item in rubrics
+    )
+    triggered_negative = sum(
+        float(item.get("points", 0.0)) < 0.0
+        and item.get("criteria_met") is True
+        for item in rubrics
+    )
+    metrics = evaluation.get("metrics")
+    metrics = metrics if isinstance(metrics, Mapping) else {}
+    raw_score = metrics.get("overall_score")
+    adjusted_score = metrics.get("overall_score_length_adjusted")
+    length_only = (
+        isinstance(raw_score, (int, float))
+        and not isinstance(raw_score, bool)
+        and float(raw_score) >= 1.0
+        and isinstance(adjusted_score, (int, float))
+        and not isinstance(adjusted_score, bool)
+        and float(adjusted_score) < 1.0
+    )
+    return {
+        "diagnosis_scope": "first_observable_failure",
+        "failure_layer": (
+            "terminal_response_length_adjustment"
+            if length_only
+            else "rubric_evaluation"
+        ),
+        "first_error_turn": None,
+        "first_error_action": "healthbench_reference_grade",
+        "first_error_agent_id": (_evaluated_graph(graph_value) or {}).get(
+            "output_agent_id"
+        ),
+        "error": (
+            "length_adjustment_reduced_full_raw_score"
+            if length_only
+            else "rubric_criteria_not_fully_satisfied"
+        ),
+        "rubric_receipt_summary": {
+            "rubric_count": len(rubrics),
+            "unmet_positive_rubric_count": unmet_positive,
+            "triggered_negative_rubric_count": triggered_negative,
+        },
+        "terminal_result": graph_value.get("termination_reason"),
+    }
+
+
 def _paired_rows(
     selected: Sequence[TaskRecord],
     direct: Mapping[str, Mapping[str, Any]],
@@ -2144,7 +2326,12 @@ def _paired_rows(
                 "wrong_demo_diagnosis": (
                     _aime_wrong_demo_diagnosis(graph_value)
                     if dataset_key == "aime_2026" and graph_score < 1.0
-                    else None
+                    else (
+                        _healthbench_wrong_demo_diagnosis(graph_value)
+                        if dataset_key == "healthbench_professional"
+                        and graph_score < 1.0
+                        else None
+                    )
                 ),
             }
         )
@@ -2174,6 +2361,13 @@ def _aggregate(
             if valid
             else None
         )
+        # OpenAI simple-evals applies clipping after dataset-level aggregation,
+        # not to individual Professional examples. Keep per-example signed
+        # values above, then reproduce that final aggregation boundary here.
+        if dataset_key == "healthbench_professional":
+            strict = min(1.0, max(0.0, strict))
+            if completed_only is not None:
+                completed_only = min(1.0, max(0.0, completed_only))
         result[f"strict_{metric_name}"] = strict
         result[f"completed_only_{metric_name}"] = completed_only
     if dataset_key == "aime_2026":
@@ -2193,6 +2387,58 @@ def _telemetry_totals(
             for row in rows
         )
         for field in fields
+    }
+
+
+def _healthbench_grader_telemetry_totals(
+    rows: Sequence[Mapping[str, Any]], condition: str
+) -> Mapping[str, Any]:
+    """Aggregate evaluator-only receipts without exposing private rubrics."""
+
+    calls = 0
+    latency_ms = 0.0
+    provider_errors = 0
+    invalid_grades = 0
+    token_fields = (
+        "input_tokens",
+        "input_cached_tokens",
+        "output_tokens",
+        "output_reasoning_tokens",
+        "total_tokens",
+    )
+    tokens = {field: 0 for field in token_fields}
+    for row in rows:
+        value = row.get(condition)
+        evaluation = value.get("evaluation") if isinstance(value, Mapping) else None
+        if not isinstance(evaluation, Mapping):
+            continue
+        details = evaluation.get("details")
+        details = details if isinstance(details, Mapping) else {}
+        telemetry = details.get("grader_telemetry")
+        telemetry = telemetry if isinstance(telemetry, Mapping) else {}
+        api_calls = telemetry.get("api_calls")
+        if isinstance(api_calls, (int, float)) and not isinstance(api_calls, bool):
+            calls += int(api_calls)
+        latency = telemetry.get("latency_ms")
+        if isinstance(latency, (int, float)) and not isinstance(latency, bool):
+            latency_ms += float(latency)
+        errors = telemetry.get("provider_errors")
+        if isinstance(errors, Sequence) and not isinstance(errors, (str, bytes)):
+            provider_errors += len(errors)
+        usage = telemetry.get("token_usage")
+        usage = usage if isinstance(usage, Mapping) else {}
+        for field in token_fields:
+            number = usage.get(field)
+            if isinstance(number, (int, float)) and not isinstance(number, bool):
+                tokens[field] += int(number)
+        if evaluation.get("valid") is not True:
+            invalid_grades += 1
+    return {
+        "api_calls": calls,
+        "latency_ms": latency_ms,
+        "provider_error_count": provider_errors,
+        "invalid_grade_count": invalid_grades,
+        "token_usage": tokens,
     }
 
 
@@ -2482,7 +2728,10 @@ def _report(
             if dataset_key == "triviaqa"
             else "SkillEval_canonicalized_integer_exact_accuracy"
             if dataset_key == "aime_2026"
-            else "OpenAI_simple_evals_HealthBench_rubric_raw_score"
+            else (
+                "OpenAI_simple_evals_HealthBench_Professional_reference_"
+                "rubric_score_with_character_length_adjustment"
+            )
             if dataset_key == "healthbench_professional"
             else (
                 "SWE_bench_regular_dev_official_Docker_harness_resolved_rate"
@@ -2517,6 +2766,16 @@ def _report(
             "direct": _telemetry_totals(rows, "direct"),
             "agentgraph": _telemetry_totals(rows, "agentgraph"),
         },
+        "healthbench_grader_telemetry_totals": (
+            {
+                "direct": _healthbench_grader_telemetry_totals(rows, "direct"),
+                "agentgraph": _healthbench_grader_telemetry_totals(
+                    rows, "agentgraph"
+                ),
+            }
+            if dataset_key == "healthbench_professional"
+            else None
+        ),
         "execution_receipts": {
             "direct": _direct_execution_receipts(rows),
             "agentgraph": _agentgraph_execution_receipts(trajectories),
@@ -2625,6 +2884,45 @@ AgentGraph - Direct: **{100 * float(report['agentgraph_minus_direct']['exact_mat
 
 {failures}
 """
+    if tuple(report["agentgraph_minus_direct"]) == (
+        "overall_score",
+        "overall_score_length_adjusted",
+    ):
+        direct_valid_adjusted = direct[
+            "completed_only_overall_score_length_adjusted"
+        ]
+        graph_valid_adjusted = graph[
+            "completed_only_overall_score_length_adjusted"
+        ]
+        direct_valid_text = (
+            "n/a"
+            if direct_valid_adjusted is None
+            else f"{100 * float(direct_valid_adjusted):.2f}%"
+        )
+        graph_valid_text = (
+            "n/a"
+            if graph_valid_adjusted is None
+            else f"{100 * float(graph_valid_adjusted):.2f}%"
+        )
+        return f"""# {report['dataset']} Architecture Validation
+
+Public test samples: **{report['sample_count']}**. No training, GRPO, backward pass, optimizer update, LoRA publication, MACE, Bayesian update, or Skill evolution ran. {skill_sentence}
+
+Primary metric: **overall_score_length_adjusted** using the OpenAI simple-evals HealthBench Professional reference protocol. AgentGraph explicit FINISH: **{report['explicit_finished_count']}/{report['sample_count']}**; terminal failures: **{report['terminal_failure_count']}**; operational/evaluator failures: **{report['operational_failure_count']}**.
+
+| Condition | Completed | Evaluator valid | Strict raw score | Strict length-adjusted score | Valid-only length-adjusted score |
+|---|---:|---:|---:|---:|---:|
+| Qwen3.5-9B Direct Local Baseline | {direct['completed']} | {direct['evaluator_valid']} | {100 * float(direct['strict_overall_score']):.2f}% | {100 * float(direct['strict_overall_score_length_adjusted']):.2f}% | {direct_valid_text} |
+| AgentGraph | {graph['completed']} | {graph['evaluator_valid']} | {100 * float(graph['strict_overall_score']):.2f}% | {100 * float(graph['strict_overall_score_length_adjusted']):.2f}% | {graph_valid_text} |
+
+AgentGraph - Direct (strict length-adjusted): **{100 * float(report['agentgraph_minus_direct']['overall_score_length_adjusted']):+.2f} percentage points**.
+
+{protocol_sentence}
+
+## Failure types
+
+{failures}
+"""
     return f"""# {report['dataset']} Architecture Validation
 
 Fixed {report['project_split']} samples: **{report['sample_count']}**. No training, GRPO, backward pass, optimizer update, LoRA publication, Bayesian update, or Skill publication ran. {skill_sentence}
@@ -2662,8 +2960,8 @@ def _attach_healthbench_reference_judge(
     backend: LiveSmokeBackend,
     config: Mapping[str, Any],
     root: Path,
-) -> Mapping[str, str]:
-    """Attach the existing HealthBench grader without exposing it to Director."""
+) -> Mapping[str, Any]:
+    """Attach SkillEval's private-worker boundary around pinned simple-evals."""
 
     evaluation = _mapping(config["evaluation"], "evaluation")
     catalog_path = _resolve(root, str(evaluation["healthbench_judge_catalog_path"]))
@@ -2672,18 +2970,64 @@ def _attach_healthbench_reference_judge(
             f"HealthBench judge catalog does not exist: {catalog_path}"
         )
     judge_registry = load_model_registry(catalog_path)
-    judge, provider_model = LiveSmokeBackend._build_healthbench_judge(
-        judge_registry,
-        os.environ.get("VECTOR_ENGINE_API_KEY", ""),
-        str(evaluation["healthbench_judge_model"]),
+    configured_model_id = str(evaluation["healthbench_judge_model"])
+    model = judge_registry.require_model(configured_model_id)
+    provider = judge_registry.provider_for(model.model_id)
+    if model.model_name != "gpt-5.4-2026-03-05":
+        raise ConfigurationError(
+            "HealthBench Professional reference grader must use the exact "
+            "gpt-5.4-2026-03-05 provider model"
+        )
+    if provider.api_key_env != "VECTOR_ENGINE_API_KEY":
+        raise ConfigurationError(
+            "HealthBench Professional grader must use VECTOR_ENGINE_API_KEY"
+        )
+    if not provider.endpoint:
+        raise ConfigurationError("HealthBench Professional grader has no endpoint")
+    grader = HealthBenchProfessionalGrader.from_private_cases_jsonl(
+        private_cases_path=_resolve(
+            root, str(evaluation["healthbench_private_cases_path"])
+        ),
+        official_source_root=_resolve(
+            root, str(evaluation["healthbench_official_source_root"])
+        ),
+        interpreter_path=_resolve(
+            root, str(evaluation["healthbench_worker_interpreter"])
+        ),
+        api_key_environment=provider.api_key_env,
+        api_base_url=provider.endpoint,
+        request_timeout_seconds=float(
+            evaluation["healthbench_request_timeout_seconds"]
+        ),
+        worker_timeout_seconds=float(
+            evaluation["healthbench_worker_timeout_seconds"]
+        ),
+        max_parse_attempts=int(evaluation["healthbench_max_parse_attempts"]),
+        max_provider_attempts=int(
+            evaluation["healthbench_max_provider_attempts"]
+        ),
     )
-    backend.judge = judge
+    backend.healthbench_professional_grader = grader
+    backend.judge = None
+    provider_model = model.model_name
     backend.judge_model = provider_model
     return {
-        "mode": "openai_simple_evals_compatible_reference",
-        "configured_model_id": str(evaluation["healthbench_judge_model"]),
+        "mode": "openai_simple_evals_healthbench_professional_reference",
+        "configured_model_id": configured_model_id,
         "provider_model": provider_model,
         "catalog_path": str(catalog_path),
+        "reasoning_effort": "low",
+        "length_adjustment_center": 2000.0,
+        "length_adjustment_penalty_per_500_chars": 0.0147,
+        "private_cases_path": str(
+            _resolve(root, str(evaluation["healthbench_private_cases_path"]))
+        ),
+        "simple_evals_source_root": str(
+            _resolve(root, str(evaluation["healthbench_official_source_root"]))
+        ),
+        "simple_evals_source_revision": str(
+            evaluation.get("healthbench_official_source_revision", "")
+        ),
         "official_private_evaluator": "unavailable",
     }
 

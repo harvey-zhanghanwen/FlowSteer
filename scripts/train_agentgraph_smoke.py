@@ -1960,6 +1960,11 @@ class LiveSmokeBackend:
         self.publisher = publisher
         self.judge = judge
         self.judge_model = judge_model
+        # Dataset adapters may attach the private Professional grader after
+        # the backend has loaded the evaluator-only model catalog.  Keeping
+        # this callback on the terminal-evaluator boundary preserves the
+        # existing FlowSteer collector and never exposes rubrics to Canvas.
+        self.healthbench_professional_grader: Any = None
         self.swe_harness = swe_harness
         self.skill_pipeline = skill_pipeline
         self.skill_epoch = skill_epoch
@@ -2993,6 +2998,7 @@ class LiveSmokeBackend:
         configured_steps = _mapping(self.config["evaluation"], "evaluation").get(
             "max_environment_steps_by_source", {}
         )
+        professional_grader = self.healthbench_professional_grader
         if not isinstance(configured_steps, Mapping):
             configured_steps = {}
         evaluator_kwargs: dict[str, Any] = {}
@@ -3006,6 +3012,12 @@ class LiveSmokeBackend:
             final_answer or "",
             judge=self.judge,
             judge_model=self.judge_model,
+            healthbench_grader=(
+                professional_grader.grade
+                if source_key == "healthbench_professional"
+                and professional_grader is not None
+                else None
+            ),
             # The explicit environment runtime already owns a terminal or
             # budget-exhausted episode.  Its evaluator may replay that episode
             # but must never resume through the legacy stateless callback.

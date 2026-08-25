@@ -36,6 +36,9 @@ from .aime2026_adapter import (
     AIME2026_EVALUATOR_VERSION,
     score_aime2026_integer,
 )
+from .healthbench_professional_grader import (
+    HEALTHBENCH_PROFESSIONAL_EVALUATOR_VERSION,
+)
 from .records import TaskRecord
 from .task_dataset import verified_year_to_decade_normalization
 
@@ -47,13 +50,16 @@ DEFAULT_RAGEN_ADAPTER_PATH = Path(
 SKILLFLOW_REWARD_VERSION = "skillflow.training.reward.v1"
 HOTPOTQA_ANSWER_EVALUATOR_VERSION = "hotpotqa.official.answer.v1"
 TRIVIAQA_ANSWER_EVALUATOR_VERSION = "triviaqa.official.answer.v1"
-HEALTHBENCH_EVALUATOR_VERSION = "openai.simple-evals.healthbench.v1"
+HEALTHBENCH_EVALUATOR_VERSION = HEALTHBENCH_PROFESSIONAL_EVALUATOR_VERSION
 RAGEN_EVALUATOR_VERSION = "skillflow.ragen_adapter.v2"
 SWEBENCH_EVALUATOR_VERSION = "swebench.harness.v1"
 UNAVAILABLE_EVALUATOR_VERSION = "agentgraph.evaluator.unavailable.v1"
 
 
 JudgeCallback = Callable[[Sequence[Mapping[str, str]], str], Awaitable[Any]]
+HealthBenchGraderCallback = Callable[
+    [str, str], Awaitable[Mapping[str, Any]] | Mapping[str, Any]
+]
 RunGraphCallback = Callable[[str], Awaitable[str]]
 SWEHarnessCallback = Callable[[TaskRecord | Mapping[str, Any], str], Awaitable[Any]]
 
@@ -680,7 +686,94 @@ async def _evaluate_healthbench(
     *,
     judge: Optional[JudgeCallback],
     judge_model: str,
+    professional_grader: Optional[HealthBenchGraderCallback] = None,
 ) -> EvaluationOutcome:
+    if professional_grader is not None:
+        task_id = str(_record_field(record, "task_id", "")).strip()
+        if not task_id:
+            return _invalid(
+                "healthbench_task_id_missing",
+                evaluator_version=HEALTHBENCH_EVALUATOR_VERSION,
+            )
+        try:
+            result = professional_grader(task_id, prediction)
+            receipt = await result if inspect.isawaitable(result) else result
+        except BaseException as exc:
+            return _invalid(
+                "healthbench_grader_error",
+                evaluator_version=HEALTHBENCH_EVALUATOR_VERSION,
+                details={"error_type": type(exc).__name__, "error": str(exc)},
+            )
+        if not isinstance(receipt, Mapping):
+            return _invalid(
+                "healthbench_grader_receipt_invalid",
+                evaluator_version=HEALTHBENCH_EVALUATOR_VERSION,
+            )
+        receipt_details = _detail_value(receipt)
+        evaluator_version = receipt.get("evaluator_version")
+        if evaluator_version != HEALTHBENCH_EVALUATOR_VERSION:
+            return _invalid(
+                "healthbench_grader_version_mismatch",
+                evaluator_version=HEALTHBENCH_EVALUATOR_VERSION,
+                details={"reference_evaluator_receipt": receipt_details},
+            )
+        grader_error = receipt.get("grader_error")
+        termination = receipt.get("termination")
+        rubric_grades = receipt.get("rubric_level_receipts")
+        telemetry = {
+            "api_calls": receipt.get("grader_api_calls"),
+            "latency_ms": receipt.get("grader_latency_ms"),
+            "token_usage": receipt.get("grader_token_usage"),
+            "provider_errors": receipt.get("provider_errors"),
+            "api_call_receipts": receipt.get("api_call_receipts"),
+        }
+        common_details = {
+            "judge_model": receipt.get("grader_model"),
+            "grader_reasoning_effort": receipt.get("grader_reasoning_effort"),
+            "grader_error": grader_error,
+            "termination": termination,
+            "response_characters": receipt.get("response_characters"),
+            "rubric_grades": rubric_grades,
+            "grader_telemetry": telemetry,
+            "reference_evaluator_receipt": receipt_details,
+        }
+        if termination != "graded" or grader_error is not None:
+            return _invalid(
+                "healthbench_grader_error",
+                evaluator_version=HEALTHBENCH_EVALUATOR_VERSION,
+                details=common_details,
+            )
+        raw_score = receipt.get("overall_score")
+        adjusted_score = receipt.get("overall_score_length_adjusted")
+        if (
+            isinstance(raw_score, bool)
+            or not isinstance(raw_score, (int, float))
+            or not math.isfinite(float(raw_score))
+            or isinstance(adjusted_score, bool)
+            or not isinstance(adjusted_score, (int, float))
+            or not math.isfinite(float(adjusted_score))
+            or not isinstance(rubric_grades, list)
+            or not rubric_grades
+        ):
+            return _invalid(
+                "healthbench_grader_receipt_invalid",
+                evaluator_version=HEALTHBENCH_EVALUATOR_VERSION,
+                details=common_details,
+            )
+        adjusted = float(adjusted_score)
+        return EvaluationOutcome(
+            valid=True,
+            reward=_clip_unit(adjusted),
+            metrics={
+                "overall_score": float(raw_score),
+                "overall_score_length_adjusted": adjusted,
+                "rubric_count": float(len(rubric_grades)),
+            },
+            reason="evaluated",
+            details=common_details,
+            evaluator_version=HEALTHBENCH_EVALUATOR_VERSION,
+        )
+
     if judge is None:
         return _invalid(
             "healthbench_judge_unavailable",
@@ -1678,6 +1771,7 @@ async def evaluate_task(
     *,
     judge: Optional[JudgeCallback] = None,
     judge_model: str = "",
+    healthbench_grader: Optional[HealthBenchGraderCallback] = None,
     run_graph: Optional[RunGraphCallback] = None,
     swe_harness: Optional[SWEHarnessCallback] = None,
     max_environment_steps: int = 50,
@@ -1708,6 +1802,7 @@ async def evaluate_task(
             str(prediction),
             judge=judge,
             judge_model=judge_model,
+            professional_grader=healthbench_grader,
         )
     if dataset in {"webshop", "alfworld"}:
         return await _evaluate_environment(
@@ -1729,6 +1824,8 @@ __all__ = [
     "GRADER_TEMPLATE",
     "AIME2026_EVALUATOR_VERSION",
     "HOTPOTQA_ANSWER_EVALUATOR_VERSION",
+    "HEALTHBENCH_EVALUATOR_VERSION",
+    "HealthBenchGraderCallback",
     "SWEHarnessCallback",
     "TRIVIAQA_ANSWER_EVALUATOR_VERSION",
     "evaluate_task",

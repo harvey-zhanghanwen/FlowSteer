@@ -175,3 +175,131 @@ AgentGraph search space, Tool catalog, and saved AgentGraph trajectories are
 unchanged. The earlier bare-integer one-call outputs are retained only as a
 pre-source-alignment diagnostic and are not reported as the final Direct
 baseline.
+
+---
+
+## HealthBench Professional initial-adaptation source map
+
+This section records the sources selected for the HealthBench Professional
+inference/evaluation adaptation. The implementation and two-case Stable Zero
+smoke chain are validated; the complete 525-case evaluation remains pending.
+The source order
+is the project MD contract, SkillFlow/SkillEval execution boundaries,
+FlowSteer's progressive Canvas boundaries, and only then the minimum
+HealthBench Professional compatibility layer.
+
+The exact user-provided references rechecked for this adaptation are:
+
+- `/ssd1/iclr/1/.codex/attachments/d26515b1-d405-4a96-86f9-a611b9a8385c/FlowSteer_MACE_Bayesian_Skill_Design.md`;
+- `/ssd1/iclr/1/.codex/attachments/d53b2d0d-5a02-4ecb-9b23-1769e59731a5/SkillFlow.pdf`; and
+- `/ssd1/iclr/1/.codex/attachments/4efb630d-b545-4a0d-beac-28a3aa32d453/FlowSteer__Towards_Agents_Designing_Agentic_Workflows_via_Reinforced_Progressive_Canvas_Editing__3_(1).pdf`.
+
+They are source references, not runtime instructions. Training, MACE,
+Bayesian updates, and Skill evolution described by those sources remain
+disabled in this evaluation-only round.
+
+### Official public data and reference evaluator
+
+| Source | Reused contract | Local boundary |
+| --- | --- | --- |
+| `openai/healthbench-professional` public dataset and the official `assets.zip` file `healthbench_professional_eval.jsonl` | The only public split is `test`, containing exactly 525 records. The checked local source is `/ssd1/iclr/2/datasets/healthbench_professional/healthbench_professional_eval.jsonl`. | The dataset adapter must preserve all 525 IDs and source order and must not invent train/development examples from this public test population. |
+| Public HealthBench Professional record schema | Every row has `id`, `conversation`, `rubric_items`, `use_case`, `type`, `difficulty`, `specialty`, `physician_response`, and `canary_string`; `conversation` is an object with a `messages` array; each rubric item has `criterion_text` and `points`. | The full `conversation.messages` sequence becomes task input. Rubrics, the physician response, the canary, and analysis metadata remain evaluator/report-only. |
+| OpenAI `simple-evals` commit `652c89d0ca9df547706735883097e9537d40dc47` | `healthbench_eval.py::{RubricItem,calculate_score,calculate_length_adjusted_score,HealthBenchEval.grade_sample,_aggregate_get_clipped_mean}` define the public reference grading and aggregation path. `simple_evals.py` supplies the Professional option bundle. | The project may thin-port these functions into the existing evaluator receipt interface; it must not substitute EM, token F1, string Accuracy, or a physician-response similarity score. |
+| HealthBench Professional paper/evaluation protocol | The Professional primary score uses rubric-level grading, the reference grader `gpt-5.4-2026-03-05` with low reasoning effort, per-example length adjustment with center `2000` characters and penalty `0.0147` per 500 characters, and clipping of the final mean to `[0,1]`. | The paired runner must persist both unadjusted rubric score and length-adjusted score plus grader errors. A different grader condition is a local diagnostic, not a paper-comparable Professional score. |
+
+OpenAI's internal production evaluator is not published in this repository.
+Therefore the public implementation above is described as a
+**HealthBench Professional reference-compatible evaluator**, not as the
+unavailable internal evaluator. If the exact reference grader or its low
+reasoning setting cannot be invoked, formal reference-compatible evaluation
+is blocked rather than silently relabelled.
+
+The reference score for one response is computed from rubric judgements as
+follows: positive rubric points form the denominator; every rubric whose
+`criteria_met` value is true contributes its signed points, so triggered
+negative criteria reduce the numerator. Length adjustment is applied to that
+per-example score. The reported primary aggregate is the clipped mean of the
+length-adjusted per-example scores. Rubric text and grading responses never
+cross the evaluator boundary.
+
+### SkillFlow / SkillEval runtime and private-evaluator boundaries
+
+The public SkillFlow code does not contain a HealthBench Professional task
+adapter. The downstream SkillEval production tree provides the closest
+reusable private-session and trusted-evaluator interfaces:
+
+| Production source | Reused boundary | HealthBench Professional decision |
+| --- | --- | --- |
+| `/home/test/SKILLEV/skillflow-bayesian-improve-deploy/src/skillev/rollout/session.py::{UnskilledRolloutSessionBundle,RolloutSessionBundle}` | An environment/session and its terminal evaluator are bundled explicitly; evaluator truth is not model state. | Reuse the separation semantically. This round is unskilled, so no retrieved-skill context is injected. |
+| `/home/test/SKILLEV/skillflow-bayesian-improve-deploy/src/skillev/runtime/bounded_agent.py::BoundedAgent.execute_turn` | Execute an already generated action, commit one measured public observation, and keep scoring authority outside the Agent. | Reuse the execution/observation boundary through the existing project runtime; do not move rubrics into Agent feedback. |
+| `/home/test/SKILLEV/skillflow-bayesian-improve-deploy/src/skillev/rollout/engine.py::RolloutEngine.run` | Bounded multi-turn rollout with an explicit terminal submission and a separate terminal evaluator. | Reuse the rollout/terminal separation through the project's existing collector and trajectory records; no SkillFlow training loop is activated. |
+| `/home/test/SKILLEV/skillflow-bayesian-improve-deploy/packages/private-evaluation/src/skillev_private/benchmarks/protocol_v10_official.py::{HealthBenchGrade,HealthBenchOfficialGrader,HealthBenchNativeBackend.evaluate_native}` | Rubric truth stays behind the grader protocol; only task ID and candidate answer cross into grading; failure is surfaced as evaluator failure. | Reuse the private-evaluator contract. The open public rubrics are still evaluator-only in this project and never enter the Director/Agent transcript. |
+| `/home/test/SKILLEV/skillflow-bayesian-improve-deploy/packages/private-evaluation/src/skillev_private/benchmarks/protocol_v10_workers.py::{PrivateJSONWorker,OfficialHealthBenchProcessGrader.grade}` | A private worker owns rubric data and the grader client and returns typed score evidence. | Use as the source for fail-closed grader isolation and receipt fields. The worker itself is not copied because the public reference evaluator grades each rubric and exposes richer rubric-level receipts. |
+| `/home/test/SKILLEV/skillflow-bayesian-improve-deploy/packages/private-evaluation/src/skillev_private/benchmarks/protocol_v10_evaluator.py::{ProtocolV10NativeResult,ProtocolV10TerminalEvaluator.evaluate}` | Trusted native fields are projected only after terminal evaluation. | Preserve the evaluator-only projection; training reward projection is outside this round. |
+| `/home/test/SKILLEV/skillflow-bayesian-improve-deploy/packages/private-evaluation/src/skillev_private/benchmarks/protocol_v10_population.py::{ProtocolV10TrainingSessionFactory,ProtocolV10PopulationSessionRegistry}` | Session factories bind public rollout tasks to private evaluators without copying private truth into tasks. | Source reference only. Protocol-v10 population building and training-session materialization are not enabled for this public 525-case evaluation. |
+
+### FlowSteer progressive Canvas mapping
+
+The concrete upstream FlowSteer revision `1c9f2ab` reference points remain:
+
+- `src/interactive/workflow_env.py::InteractiveWorkflowEnv.step` for one
+  admitted edit followed by execution and observable feedback;
+- `src/interactive/workflow_env.py::InteractiveWorkflowEnv._execute_workflow`
+  for workflow execution after an accepted Canvas change;
+- `src/interactive/workflow_env.py`'s explicit `ActionType.FINISH` branch for
+  terminal admission;
+- `src/interactive/workflow_graph.py::WorkflowGraph` for graph state; and
+- `src/interactive/workflow_builder.py::{TurnRecord,Trajectory,InteractiveWorkflowBuilder.run_loop,InteractiveWorkflowBuilder.run_loop_async}`
+  for action/feedback turns and trajectory materialization.
+
+The project already adapts these boundaries in
+`src/interactive/agent_graph.py::AgentGraph`,
+`src/interactive/agent_workflow_env.py::{AgentWorkflowEnv.step,AgentWorkflowEnv.execute}`,
+`src/interactive/rollout_collector.py::AgentGraphRolloutCollector.collect`, and
+`src/interactive/records.py::{TurnRecord,TrajectoryRecord}`. HealthBench
+Professional must attach to these existing calls. It does not add another
+Canvas, runtime, communication mechanism, or trajectory type.
+
+### HealthBench Professional implementation classification
+
+| Boundary | Classification | Required state |
+| --- | --- | --- |
+| Free AgentGraph, six Canvas actions, incremental execute/feedback loop, unique Output Agent, model routing, relation execution, and trajectory serialization | **Direct reuse** of the current project core and its FlowSteer-derived boundaries | No HealthBench-specific mutation semantics and no fixed topology. |
+| Model gateway and Agent execution receipts | **Direct reuse** of the current project/SkillFlow-aligned interface | Preserve provider errors, token counts, latency, node/model identity, actual communication, and termination. |
+| 525-row JSONL loader and full-conversation projection | **Necessary task-specific adaptation** | Convert the official schema to `TaskRecord` without changing conversation contents or exposing evaluator-only fields. |
+| Rubric item conversion (`criterion_text` to the reference evaluator's criterion field), rubric-level grading, signed-point scoring, length adjustment, and final clipped aggregation | **Necessary task-specific adaptation** over OpenAI `simple-evals` commit `652c89d` | Return reference-compatible `overall_score_length_adjusted` and unadjusted rubric receipts; never EM/F1/Accuracy. |
+| Direct versus AgentGraph paired runner configuration | **Necessary wiring** in the existing evaluation runner | Same 525 IDs, generation/model condition, Tool condition, evaluator, and grader condition. |
+| Medical retrieval or Web browsing | **Not enabled** | The public Professional base protocol declares no Tool interface. Direct and AgentGraph both run with an empty task Tool condition. Existing MedRAG code is not activated. |
+| Doctor, Researcher, Reviewer, Verifier, or other medical role classes/templates | **Not implemented and prohibited as an initial prior** | Agents remain `agent_id + model_id + free-text contract`; the Director chooses Agent count, contracts, models, and relations from feedback. |
+| GRPO, optimizer/backward, LoRA update, MACE, Bayesian posterior/EVSI, Skill retrieval, Skill injection, or Skill evolution | **Not enabled in this round** | No training or learning state may change. |
+| OpenAI internal Professional evaluator | **Unavailable** | Do not claim official internal-evaluator equivalence; use the pinned public reference implementation or report the grader condition as blocked. |
+
+### Model-visible and evaluator-only projections
+
+The model-visible projection contains the complete ordered
+`conversation.messages` and no benchmark answer key. `id` may be retained as
+a receipt identity but is not task content. The following stay outside every
+Director prompt, Agent contract, Agent input, Canvas feedback, Tool
+observation, recovery message, and model-visible trajectory:
+
+- `rubric_items`;
+- `physician_response`;
+- `canary_string`; and
+- `use_case`, `type`, `difficulty`, and `specialty`, unless a later official
+  protocol explicitly authorizes a particular metadata field as model input.
+
+The terminal submission is the complete assistant response. No AIME-style
+short-answer extractor, QA answer tag, answer compression, physician-response
+rewrite, or task-specific Formatter is applied. The sole terminal processing
+is whatever minimal transport normalization the pinned reference evaluator
+requires.
+
+### Status boundary
+
+Source/schema/evaluator mapping, code integration, and the two-case Stable Zero
+chain are complete. Persisted receipts show 2/2 valid Direct grades, 2/2 valid
+AgentGraph grades, 2/2 legal explicit `FINISH`, complete trajectories, and
+successful bounded recovery from transient grader-provider failures. These
+two cases are a chain-validation canary, not a benchmark estimate. The complete
+525-case Direct-versus-AgentGraph score, topology distribution, and Wrong Demo
+conclusions remain pending formal execution.

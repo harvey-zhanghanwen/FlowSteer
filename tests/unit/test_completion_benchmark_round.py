@@ -65,9 +65,24 @@ def _evaluation_config(dataset_key: str) -> dict:
         **extra,
     }
     if dataset_key == "healthbench_professional":
-        config["evaluation"]["healthbench_judge_catalog_path"] = (
-            "config/model_catalog_healthbench_reference_judge.yaml"
+        config["evaluation"].update(
+            {
+                "healthbench_grader_mode": (
+                    "openai_simple_evals_healthbench_professional_reference"
+                ),
+                "healthbench_judge_catalog_path": (
+                    "config/model_catalog_healthbench_professional_grader_v1.yaml"
+                ),
+                "healthbench_private_cases_path": "private_cases.jsonl",
+                "healthbench_official_source_root": "simple-evals",
+                "healthbench_worker_interpreter": "python",
+                "healthbench_reasoning_effort": "low",
+                "healthbench_length_adjustment_center": 2000.0,
+                "healthbench_length_adjustment_penalty_per_500_chars": 0.0147,
+                "healthbench_max_provider_attempts": 3,
+            }
         )
+        config["healthbench_tool_runtime"] = {"enabled": False}
     if dataset_key in {"webshop", "alfworld"}:
         config["evaluation"]["max_environment_steps_by_source"] = {
             dataset_key: 10
@@ -176,6 +191,52 @@ def test_aime_without_explicit_finish_never_calls_formal_evaluator():
     assert outcome.reward is None
     assert outcome.reason == "not_evaluated_without_explicit_finish"
     assert outcome.details["formal_evaluator_called"] is False
+
+
+def test_healthbench_final_graph_uses_attached_professional_grader():
+    task = _MODULE.TaskRecord(
+        task_id="healthbench-professional:one",
+        question="Conversation:\n\n[user] Help me.\n\n[assistant]",
+        ground_truth=None,
+        split="test",
+        metadata={"dataset_key": "healthbench_professional"},
+    )
+    calls = []
+
+    async def professional_grade(task_id, candidate):
+        del task_id, candidate
+
+    async def fake_evaluate(record, prediction, **kwargs):
+        calls.append((record, prediction, kwargs))
+        return EvaluationOutcome(
+            valid=True,
+            reward=0.5,
+            metrics={"overall_score_length_adjusted": 0.5},
+            reason="evaluated",
+        )
+
+    backend = SimpleNamespace(
+        config={"evaluation": {"max_environment_steps": 20}},
+        healthbench_professional_grader=SimpleNamespace(
+            grade=professional_grade
+        ),
+        judge=None,
+        judge_model="gpt-5.4-2026-03-05",
+        swe_harness=None,
+    )
+    with patch("train_agentgraph_smoke.evaluate_task", side_effect=fake_evaluate):
+        outcome = asyncio.run(
+            _MODULE.LiveSmokeBackend.evaluate_final_graph(
+                backend,
+                task,
+                "complete response",
+                {"nodes": [], "relations": [], "revision": 0},
+                rollout_index=0,
+            )
+        )
+
+    assert outcome.valid is True
+    assert calls[0][2]["healthbench_grader"] is professional_grade
 
 
 def test_aime_terminal_failure_is_reportable_without_evaluator_retry_or_double_count():
@@ -666,7 +727,7 @@ def test_environment_stable_zero_uses_terminal_receipt_not_free_text_answer():
     assert failed["checks"][0]["environment_terminal_receipt_valid"] is False
 
 
-def test_reports_aime_accuracy_and_healthbench_raw_score():
+def test_reports_aime_accuracy_and_healthbench_professional_scores():
     aime_rows = [
         {
             "direct": {"available": True, "valid": True, "accuracy": 0.0},
@@ -695,20 +756,32 @@ def test_reports_aime_accuracy_and_healthbench_raw_score():
 
     health_rows = [
         {
-            "direct": {"available": True, "valid": True, "raw_score": 0.25},
+            "direct": {
+                "available": True,
+                "valid": True,
+                "overall_score": 0.25,
+                "overall_score_length_adjusted": 0.20,
+            },
             "agentgraph": {
                 "available": True,
                 "valid": True,
-                "raw_score": 0.75,
+                "overall_score": 0.75,
+                "overall_score_length_adjusted": 0.70,
                 "explicit_finish": True,
             },
         },
         {
-            "direct": {"available": True, "valid": True, "raw_score": 0.50},
+            "direct": {
+                "available": True,
+                "valid": True,
+                "overall_score": 0.50,
+                "overall_score_length_adjusted": 0.45,
+            },
             "agentgraph": {
                 "available": True,
                 "valid": True,
-                "raw_score": -0.25,
+                "overall_score": -0.25,
+                "overall_score_length_adjusted": -0.30,
                 "explicit_finish": True,
             },
         },
@@ -717,8 +790,13 @@ def test_reports_aime_accuracy_and_healthbench_raw_score():
         health_rows, "agentgraph", "healthbench_professional"
     )
     assert health["denominator"] == 2
-    assert health["strict_raw_score"] == 0.25
-    assert health["completed_only_raw_score"] == 0.25
+    assert health["strict_overall_score"] == 0.25
+    assert health["completed_only_overall_score"] == 0.25
+    assert abs(health["strict_overall_score_length_adjusted"] - 0.20) < 1e-12
+    assert (
+        abs(health["completed_only_overall_score_length_adjusted"] - 0.20)
+        < 1e-12
+    )
 
     environment = _MODULE._aggregate(
         [
@@ -785,6 +863,93 @@ def test_aime_wrong_demo_uses_first_runtime_failure_receipt():
         diagnosis["subsequent_error_propagation"]["interpretation"]
         == "subsequent_receipt_span_not_proven_causality"
     )
+
+
+def test_healthbench_wrong_demo_reports_private_rubric_counts_not_text():
+    diagnosis = _MODULE._healthbench_wrong_demo_diagnosis(
+        {
+            "turns": [],
+            "explicit_finish": True,
+            "termination_reason": "finish",
+            "final_answer": "A complete assistant response.",
+            "evaluation": {
+                "valid": True,
+                "reason": "evaluated",
+                "metrics": {
+                    "overall_score": 0.5,
+                    "overall_score_length_adjusted": 0.48,
+                },
+                "details": {
+                    "rubric_grades": [
+                        {
+                            "criterion": "private criterion must not be copied",
+                            "points": 1.0,
+                            "criteria_met": False,
+                        },
+                        {
+                            "criterion": "private negative criterion",
+                            "points": -1.0,
+                            "criteria_met": True,
+                        },
+                    ]
+                },
+            },
+        }
+    )
+
+    assert diagnosis["failure_layer"] == "rubric_evaluation"
+    assert diagnosis["rubric_receipt_summary"] == {
+        "rubric_count": 2,
+        "unmet_positive_rubric_count": 1,
+        "triggered_negative_rubric_count": 1,
+    }
+    assert "criterion" not in repr(diagnosis)
+
+
+def test_healthbench_grader_telemetry_totals_are_separate_from_candidate_calls():
+    rows = [
+        {
+            "direct": {
+                "evaluation": {
+                    "valid": True,
+                    "details": {
+                        "grader_telemetry": {
+                            "api_calls": 3,
+                            "latency_ms": 12.5,
+                            "provider_errors": [{"error_type": "Timeout"}],
+                            "token_usage": {
+                                "input_tokens": 100,
+                                "output_tokens": 20,
+                                "total_tokens": 120,
+                            },
+                        }
+                    },
+                }
+            }
+        },
+        {
+            "direct": {
+                "evaluation": {
+                    "valid": False,
+                    "details": {
+                        "grader_telemetry": {
+                            "api_calls": 1,
+                            "latency_ms": 7.5,
+                            "provider_errors": [],
+                            "token_usage": {"input_tokens": 10},
+                        }
+                    },
+                }
+            }
+        },
+    ]
+    totals = _MODULE._healthbench_grader_telemetry_totals(rows, "direct")
+    assert totals["api_calls"] == 4
+    assert totals["latency_ms"] == 20.0
+    assert totals["provider_error_count"] == 1
+    assert totals["invalid_grade_count"] == 1
+    assert totals["token_usage"]["input_tokens"] == 110
+    assert totals["token_usage"]["total_tokens"] == 120
 
 
 def test_qa_reports_native_exact_match_and_token_f1_together():

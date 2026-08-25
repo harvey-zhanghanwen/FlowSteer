@@ -20,6 +20,9 @@ from .agent_runtime import (
     ExecutionPhase,
     UpstreamMessage,
 )
+from .healthbench_professional_adapter import (
+    parse_model_visible_conversation,
+)
 
 
 class OpenAICompatibleGatewayError(RuntimeError):
@@ -591,6 +594,15 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
             "Do not present a task-level final answer and "
             "do not use <answer> tags."
         )
+    healthbench_messages: tuple[dict[str, str], ...] | None = None
+    if not request.is_format_agent:
+        try:
+            healthbench_messages = parse_model_visible_conversation(
+                request.problem
+            )
+        except ValueError:
+            # Every non-HealthBench task retains the existing text transport.
+            healthbench_messages = None
     if request.is_format_agent:
         # FlowSteer's Format Operator normally receives the problem and the
         # computed solution under its fixed extraction prompt.  Do not inject
@@ -683,6 +695,12 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
                 "sentence or explanation inside the wrapper. If the computed solution "
                 "does not contain one answer candidate, return exactly <answer></answer>."
             )
+    elif healthbench_messages is not None:
+        # SkillEval's HealthBench task source preserves the native multi-turn
+        # roles. Keep those messages intact, then append only the current
+        # AgentGraph execution context. Rubrics and reference responses never
+        # enter ``request.problem`` and therefore cannot cross this boundary.
+        common = "External upstream messages:\n" + upstream_text
     else:
         common = (
             f"Task:\n{request.problem}\n\n"
@@ -732,6 +750,15 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
         )
     else:  # pragma: no cover - enum exhaustiveness guard
         raise OpenAICompatibleGatewayError(f"unsupported execution phase: {request.phase}")
+    if healthbench_messages is not None:
+        return [
+            {"role": "system", "content": system},
+            *[dict(message) for message in healthbench_messages],
+            {
+                "role": "user",
+                "content": "AgentGraph execution context:\n" + common + "\n\n" + phase,
+            },
+        ]
     return [
         {"role": "system", "content": system},
         {"role": "user", "content": common + "\n\n" + phase},

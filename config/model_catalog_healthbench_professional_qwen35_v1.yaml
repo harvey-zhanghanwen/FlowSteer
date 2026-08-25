@@ -1,0 +1,29 @@
+providers:
+  - provider_id: "local-qwen35-healthbench"
+    kind: "openai-compatible"
+    endpoint: "http://127.0.0.1:${FLOWSTEER_SUPERVISOR_PORT:-8015}/v1"
+    max_concurrency: 8
+
+# The paired Direct/AgentGraph arm intentionally admits one Executor model so
+# the architecture comparison does not confound topology with model choice.
+# The unified AgentGraph still owns a per-node model_id and the general model
+# selection interface remains unchanged.
+models:
+  - model_id: "qwen3.5-9b-local"
+    provider_id: "local-qwen35-healthbench"
+    model_name: "supervisor_theta"
+    selection_weight: 1.0
+    cheap_weight: 1.0
+    fast_weight: 1.0
+    context_window: 32768
+    metadata:
+      family: "qwen"
+      profile: "provider=local;instruction=chat;capabilities=text"
+      text_capable: "true"
+      tool_capable: "false"
+      coding_capable: "false"
+      chat_template_enable_thinking: "false"
+      sampling_backend: "sglang"
+      deployment_locality: "local"
+      supports_top_k: "true"
+      max_tokens: "4096"

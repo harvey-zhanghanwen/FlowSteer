@@ -14,6 +14,9 @@ from src.interactive.agent_runtime import (
     UpstreamMessage,
 )
 from src.interactive.model_registry import ModelSpec, ProviderSpec
+from src.interactive.healthbench_professional_adapter import (
+    render_model_visible_conversation,
+)
 from src.interactive.openai_gateway import (
     OpenAICompatibleGateway,
     OpenAICompatibleGatewayError,
@@ -94,6 +97,29 @@ def request(
 
 
 class MessageTests(unittest.TestCase):
+    def test_healthbench_conversation_preserves_native_roles_and_content(self) -> None:
+        problem = render_model_visible_conversation(
+            (
+                {"role": "user", "content": "First question."},
+                {"role": "assistant", "content": "Prior response."},
+                {"role": "user", "content": "Follow-up question."},
+            )
+        )
+        messages = build_agent_messages(request(problem=problem))
+
+        self.assertEqual("system", messages[0]["role"])
+        self.assertEqual(
+            [
+                {"role": "user", "content": "First question."},
+                {"role": "assistant", "content": "Prior response."},
+                {"role": "user", "content": "Follow-up question."},
+            ],
+            messages[1:4],
+        )
+        self.assertEqual("user", messages[4]["role"])
+        self.assertIn("AgentGraph execution context", messages[4]["content"])
+        self.assertNotIn("rubric", "\n".join(item["content"] for item in messages))
+
     def test_semantic_lineage_projects_only_artifact_referenced_read_receipts(
         self,
     ) -> None:

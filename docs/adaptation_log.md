@@ -299,3 +299,210 @@ passed, but the complete 30-task run did not satisfy full-panel Stable Zero.
 These results are retained as the initial untrained architecture condition.
 No loose parsing, historical-candidate recovery, answer lookup, workflow
 template, training update, or Skill was added in response to the score.
+
+---
+
+## HealthBench Professional initial-adaptation log
+
+### Scope and current status
+
+This bounded adaptation covers:
+
+`full conversation -> Direct or Director/Canvas/AgentGraph -> complete assistant response -> rubric evaluator -> trajectory/evaluation receipt`
+
+It is an inference/evaluation adaptation only. The source and interface
+decisions below were frozen before execution. The implementation and two-case
+Stable Zero chain are complete; the 525-case paired evaluation is pending.
+Canary scores are retained only as chain diagnostics and are not reported as a
+benchmark estimate.
+
+### 1. Official public population and schema
+
+**Decision:** Use the complete 525-record public `test` population from
+`openai/healthbench-professional`, represented locally by
+`/ssd1/iclr/2/datasets/healthbench_professional/healthbench_professional_eval.jsonl`.
+Preserve source IDs and source order.
+
+**Observed official row schema:**
+
+- `id`;
+- `conversation = {messages: [...]}`;
+- `rubric_items = [{criterion_text, points}, ...]`;
+- `use_case`;
+- `type`;
+- `difficulty`;
+- `specialty`;
+- `physician_response`; and
+- `canary_string`.
+
+**Necessary local adaptation:** Convert each record to the existing
+`TaskRecord` transport and retain the complete ordered conversation as model
+input. The public test population is not reshuffled, cycled into 512 training
+examples, or split to manufacture development data in this adaptation.
+
+### 2. Public/private information boundary
+
+**Decision:** Only the conversation is task content for Direct and AgentGraph.
+The complete candidate assistant response is appended only at terminal
+grading.
+
+The following are evaluator/report-only: `rubric_items`,
+`physician_response`, `canary_string`, `use_case`, `type`, `difficulty`, and
+`specialty`. A task ID is allowed as a receipt key but not as medical
+evidence. No evaluator field may enter:
+
+- the Director observation or prompt;
+- a free-text Agent contract;
+- Agent input or Agent-to-Agent communication;
+- Canvas feedback or failure recovery;
+- Tool arguments/observations; or
+- model-visible trajectory text.
+
+This boundary follows SkillEval's session/evaluator separation in
+`src/skillev/rollout/session.py::UnskilledRolloutSessionBundle` and the private
+HealthBench contract in
+`protocol_v10_official.py::{HealthBenchOfficialGrader,HealthBenchNativeBackend}`.
+
+### 3. Evaluator and metric
+
+**Decision:** Use OpenAI `simple-evals` commit
+`652c89d0ca9df547706735883097e9537d40dc47` as the pinned public reference
+implementation. The internal production evaluator is not public, so the
+result is named **HealthBench Professional reference-compatible score**.
+
+The reference path is:
+
+`complete assistant response -> one grade per rubric -> signed-point per-example score -> Professional length adjustment -> clipped dataset mean`
+
+Required implementation details from `healthbench_eval.py` are:
+
+1. `HealthBenchEval.grade_sample` grades each rubric independently and records
+   `explanation` and boolean `criteria_met`;
+2. `calculate_score` divides achieved signed rubric points by total positive
+   points; a met negative rubric contributes its negative point value;
+3. `calculate_length_adjusted_score` uses center 2000 characters and penalty
+   0.0147 per 500 characters for the Professional option bundle; and
+4. `_aggregate_get_clipped_mean` clips the final mean to `[0,1]`.
+
+The reference grader condition is `gpt-5.4-2026-03-05` with low reasoning
+effort. A provider/model/grader error is persisted and reported separately
+from valid grades; it is not converted to a fabricated score. The final report
+must state both the requested and valid denominators. If the exact reference
+grader condition is unavailable, the runner must stop the reference-compatible
+lane or label a separate local diagnostic condition. It must not silently
+substitute a guessed model ID.
+
+**Rejected evaluators:** EM, token F1, string Accuracy, medical keyword match,
+embedding similarity, LLM preference without per-rubric receipts, or
+similarity to `physician_response`.
+
+### 4. Unified AgentGraph and FlowSteer boundary
+
+**Decision:** Adapt HealthBench Professional to the current unified core; do
+not add a medical orchestration core.
+
+The following existing semantics remain unchanged:
+
+- `Agent = agent_id + model_id + free-text contract`;
+- free Agent count and per-node model selection;
+- independent, directed, or bounded bidirectional relations;
+- one unique Output Agent;
+- `ADD_AGENT`, `MODIFY_AGENT`, `DELETE_AGENT`, `SET_RELATION`, `SET_OUTPUT`,
+  and `FINISH`;
+- one admitted Canvas edit followed by current-graph execution and real
+  feedback before the next Director turn; and
+- explicit terminal admission plus complete trajectory receipts.
+
+The upstream reference calls are
+`workflow_env.py::{InteractiveWorkflowEnv.step,InteractiveWorkflowEnv._execute_workflow}`
+and
+`workflow_builder.py::{InteractiveWorkflowBuilder.run_loop,TurnRecord,Trajectory}`.
+The existing local counterparts are
+`agent_workflow_env.py::{AgentWorkflowEnv.step,AgentWorkflowEnv.execute}` and
+`rollout_collector.py::AgentGraphRolloutCollector.collect`.
+
+**Prohibited initial priors:** `Doctor -> Researcher -> Reviewer`, mandatory
+Doctor/Verifier/Researcher roles, a fixed medical chain, a minimum medical
+Agent count, fixed role-to-model routing, or a task-type-to-topology table.
+Medical responsibilities may emerge as ordinary free-text contracts selected
+by the Director after real feedback; they are not Agent types.
+
+### 5. Tool condition
+
+**Decision:** Use no task Tool for the initial Professional base condition.
+The official public base data and public reference evaluator specify no
+medical-retrieval action protocol. Existing MedRAG or Web-search adapters are
+therefore disabled rather than treated as official baseline behavior.
+
+Direct and AgentGraph must share this same empty Tool condition. Neither lane
+may retrieve a HealthBench case, rubric, physician/reference response,
+benchmark answer database, or data-derived proxy. ReAct remains an optional
+per-Agent execution mode in the unified runtime, not an Agent role; with an
+empty Tool catalog it does not create a hidden retrieval path.
+
+### 6. Direct versus AgentGraph protocol
+
+**Decision:** Run a smoke test first, then the complete public 525-case test
+population, pairing Direct and AgentGraph on identical task IDs and conditions.
+
+Frozen comparison dimensions are:
+
+- complete source conversation;
+- candidate model condition and generation settings;
+- empty Tool condition;
+- rubric reference evaluator and grader condition;
+- length-adjusted aggregation; and
+- timeout/provider-error accounting.
+
+AgentGraph alone additionally records every Director action, graph revision,
+Agent ID/model/contract, executed relation and communication payload, Output
+Agent input/output, terminal state, token usage, latency, and provider error.
+The final report must include valid/invalid grading counts, `FINISH`,
+`max_rounds`, runtime failures, natural Agent-count/topology distribution, and
+the first observable failure layer for Wrong Demos. It must not use test-set
+errors to insert a fixed medical workflow.
+
+### 7. Implementation classification and evidence gate
+
+| Boundary | Classification | Status at this log entry |
+| --- | --- | --- |
+| AgentGraph, Canvas action loop, communication, Output Agent, model interface, trajectory | **Direct reuse** | Existing core; no HealthBench-specific change planned. |
+| SkillFlow bounded execution/session and private-evaluator separation | **Direct semantic reuse** | Mapped to existing runtime and evaluator boundary; no training session activated. |
+| Official 525-row schema conversion and full-conversation rendering | **Necessary HealthBench adaptation** | Implementation/smoke evidence pending. |
+| Public reference rubric grader, signed scoring, length adjustment, and clipped aggregation | **Necessary HealthBench adaptation** | Implementation/grader compatibility evidence pending. |
+| Paired Direct/AgentGraph configuration and report fields | **Necessary wiring** | Full-run evidence pending. |
+| Medical Tool/retrieval adapter | **Not enabled** | Empty Tool condition in both lanes. |
+| Medical role or topology template | **Not implemented** | Explicitly excluded from Stable Zero. |
+| GRPO/backward/optimizer/LoRA, MACE, Bayesian posterior/EVSI, Skill retrieval/injection/evolution | **Not enabled** | No training or learning-state mutation authorized. |
+| OpenAI internal Professional evaluator | **Unavailable** | Do not claim internal-evaluator equivalence. |
+
+No implementation status may be promoted from pending to validated until
+receipts establish schema preservation, evaluator-only rubric visibility,
+same-condition Direct/AgentGraph execution, reference scorer behavior,
+explicit terminal accounting, and persisted grader/runtime failures. Formal
+scores and Wrong Demo conclusions belong in the run report, not in this
+pre-execution decision record.
+
+### 8. Stable Zero evidence
+
+The fixed two-case canary completed the full terminal path for both conditions:
+
+- Direct: 2/2 model outputs and 2/2 valid reference-compatible grades;
+- AgentGraph: 2/2 complete trajectories, 2/2 legal explicit `FINISH`, and 2/2
+  valid reference-compatible grades;
+- evaluator privacy: rubric/reference fields were joined only by task ID in
+  the private worker after candidate generation;
+- Tool condition: empty for both conditions;
+- training state: no backward pass, optimizer update, LoRA publication, MACE,
+  Bayesian update, Skill retrieval, or Skill evolution; and
+- provider recovery: transient grader HTTP 500 responses were persisted and
+  retried with the bounded exponential-backoff behavior sourced from the
+  official `simple-evals` sampler. Frozen candidate responses and AgentGraph
+  trajectories were reused; no Director/Agent generation was repeated for an
+  evaluator-only retry.
+
+The initial AgentGraph terminal-grader wiring omission was an implementation
+bug: `LiveSmokeBackend.evaluate_final_graph` did not pass the attached private
+Professional grader into `evaluate_task`. The fix adds only that callback at
+the existing terminal evaluator boundary. It does not change Director prompts,
+Canvas actions, Agent contracts, relations, topology search, or FINISH rules.

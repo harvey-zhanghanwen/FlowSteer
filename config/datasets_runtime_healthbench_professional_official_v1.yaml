@@ -1,0 +1,24 @@
+# Runtime binding for the complete HealthBench Professional public test set.
+# The private evaluator cases are a separate task-id join and must not enter a
+# Director, Agent, Canvas observation, Tool query, or model request.
+
+schema_version: "flowsteer.agentgraph.runtime-datasets.v2"
+task_schema_version: "flowsteer.agentgraph.task.v1"
+
+datasets:
+  healthbench_professional:
+    protocol_label: "healthbench_professional_public_test_reference_evaluator_v1"
+    preparation_catalog_path: "config/datasets_healthbench_professional_official_v1.yaml"
+    preparation_catalog_schema_version: "flowsteer.agentgraph.healthbench-professional.dataset.v1"
+    manifest:
+      path: "data/healthbench_professional_official_v1/manifest.json"
+      schema_version: "flowsteer.agentgraph.healthbench-professional.dataset.v1"
+      provenance_field: "catalog"
+    paths:
+      train: "data/healthbench_professional_official_v1/train.jsonl"
+      validation: "data/healthbench_professional_official_v1/validation.jsonl"
+      test: "data/healthbench_professional_official_v1/test.jsonl"
+    evaluator_private_cases:
+      path: "data/healthbench_professional_official_v1/private_cases.jsonl"
+      schema_version: "flowsteer.healthbench-professional.evaluator-case.v1"
+      join_key: "task_id"
