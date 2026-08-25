@@ -2203,11 +2203,19 @@ def _direct_execution_receipts(
     provider_ids: Counter[str] = Counter()
     provider_models: Counter[str] = Counter()
     error_types: Counter[str] = Counter()
+    finish_reasons: Counter[str] = Counter()
     attempt_count = 0
     call_count = 0
+    terminal_output_parsing_failure_count = 0
     for row in rows:
         direct = row.get("direct")
         execution = direct.get("execution") if isinstance(direct, Mapping) else None
+        evaluation = direct.get("evaluation") if isinstance(direct, Mapping) else None
+        details = (
+            evaluation.get("details") if isinstance(evaluation, Mapping) else None
+        )
+        if isinstance(details, Mapping) and details.get("parsing_succeeded") is False:
+            terminal_output_parsing_failure_count += 1
         if not isinstance(execution, Mapping):
             continue
         call_count += 1
@@ -2225,12 +2233,15 @@ def _direct_execution_receipts(
         if isinstance(response, Mapping):
             response_provider = response.get("provider_id")
             response_model = response.get("provider_model")
+            finish_reason = response.get("finish_reason")
             if isinstance(response_provider, str) and response_provider:
                 provider_ids[response_provider] += int(
                     not (isinstance(provider_id, str) and provider_id == response_provider)
                 )
             if isinstance(response_model, str) and response_model:
                 provider_models[response_model] += 1
+            if isinstance(finish_reason, str) and finish_reason:
+                finish_reasons[finish_reason] += 1
             raw_attempts = response.get("attempt_count", 1)
             if isinstance(raw_attempts, int) and not isinstance(raw_attempts, bool):
                 attempt_count += raw_attempts
@@ -2241,6 +2252,10 @@ def _direct_execution_receipts(
         "provider_id_distribution": dict(sorted(provider_ids.items())),
         "provider_model_distribution": dict(sorted(provider_models.items())),
         "error_type_distribution": dict(sorted(error_types.items())),
+        "finish_reason_distribution": dict(sorted(finish_reasons.items())),
+        "terminal_output_parsing_failure_count": (
+            terminal_output_parsing_failure_count
+        ),
     }
 
 
@@ -2351,7 +2366,10 @@ def _agentgraph_execution_receipts(
                 runtime_failure_types[str(failure_type)] += 1
 
     return {
-        "evaluated_node_model_distribution": dict(sorted(node_models.items())),
+        "reported_graph_node_model_distribution": dict(sorted(node_models.items())),
+        "reported_graph_scope": (
+            "evaluated_graph_for_explicit_finish_else_terminal_canvas_graph"
+        ),
         "executor_call_count": execution_call_count,
         "executor_model_distribution": dict(sorted(executor_models.items())),
         "provider_attempt_count": provider_attempt_count,
@@ -2528,6 +2546,15 @@ def _report(
             row["agentgraph"].get("termination_reason") == "max_rounds"
             for row in rows
         ),
+        "direct_parsing_failure_count": sum(
+            isinstance(row["direct"].get("evaluation"), Mapping)
+            and isinstance(row["direct"]["evaluation"].get("details"), Mapping)
+            and row["direct"]["evaluation"]["details"].get(
+                "parsing_succeeded"
+            )
+            is False
+            for row in rows
+        ),
         "parsing_failure_count": parsing_failure_count,
         "operational_failure_count": sum(
             row["direct"].get("available") is not True
@@ -2583,6 +2610,8 @@ Fixed {report['project_split']} samples: **{report['sample_count']}**. No traini
 
 Native metrics: **exact_match** and **token_f1** (`{report['metric_scope']}`). AgentGraph explicit FINISH: **{report['explicit_finished_count']}/{report['sample_count']}**; terminal failures: **{report['terminal_failure_count']}**; operational/evaluator failures: **{report['operational_failure_count']}**.
 
+Terminal-output parsing failures: **Direct {report['direct_parsing_failure_count']}**, **AgentGraph {report['parsing_failure_count']}**.
+
 | Condition | Completed | Evaluator valid | Strict EM | Strict F1 |
 |---|---:|---:|---:|---:|
 | Qwen3.5-9B Direct Local Baseline | {direct['completed']} | {direct['evaluator_valid']} | {100 * float(direct['strict_exact_match']):.2f}% | {100 * float(direct['strict_token_f1']):.2f}% |
@@ -2601,6 +2630,8 @@ AgentGraph - Direct: **{100 * float(report['agentgraph_minus_direct']['exact_mat
 Fixed {report['project_split']} samples: **{report['sample_count']}**. No training, GRPO, backward pass, optimizer update, LoRA publication, Bayesian update, or Skill publication ran. {skill_sentence}
 
 Primary metric: **{metric_name}** (`{report['metric_scope']}`). AgentGraph explicit FINISH: **{report['explicit_finished_count']}/{report['sample_count']}**; terminal failures: **{report['terminal_failure_count']}**; operational/evaluator failures: **{report['operational_failure_count']}**.
+
+Terminal-output parsing failures: **Direct {report['direct_parsing_failure_count']}**, **AgentGraph {report['parsing_failure_count']}**.
 
 | Condition | Completed | Evaluator valid | Strict {metric_name} |
 |---|---:|---:|---:|

@@ -224,6 +224,23 @@ def test_aime_terminal_failure_is_reportable_without_evaluator_retry_or_double_c
             "valid": True,
             "accuracy": 0.0,
             "telemetry": {},
+            "evaluation": {
+                "valid": True,
+                "details": {"parsing_succeeded": False},
+            },
+            "execution": {
+                "model_id": "qwen3.5-9b-local",
+                "provider": "local-director",
+                "error_type": None,
+                "metadata": {
+                    "response": {
+                        "provider_id": "local-director",
+                        "provider_model": "supervisor_theta",
+                        "attempt_count": 1,
+                        "finish_reason": "length",
+                    }
+                },
+            },
         },
         "agentgraph": {
             "available": True,
@@ -239,6 +256,10 @@ def test_aime_terminal_failure_is_reportable_without_evaluator_retry_or_double_c
     report = _MODULE._report([row], _evaluation_config("aime_2026"))
     assert report["terminal_failure_count"] == 1
     assert report["max_rounds_count"] == 1
+    assert report["direct_parsing_failure_count"] == 1
+    direct_receipts = report["execution_receipts"]["direct"]
+    assert direct_receipts["finish_reason_distribution"] == {"length": 1}
+    assert direct_receipts["terminal_output_parsing_failure_count"] == 1
     assert report["operational_failure_count"] == 0
 
 

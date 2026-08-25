@@ -64,13 +64,13 @@ an exact comparison with canonicalized accepted answers.
 and `PrivateStaticBenchmarkEvaluator.evaluate`.
 
 **Required local adaptation:** SkillEval admits exactly `{"answer": str}`.
-The active initial condition therefore asks both Direct and AgentGraph for one
-bare decimal integer and gives both lanes the same evaluator input. For
-compatibility with an already-produced FlowSteer terminal envelope,
-`src/interactive/aime2026_adapter.py` may unwrap one complete
-`<answer>...</answer>` boundary identically in either lane before applying the
-production integer rule. The AgentGraph terminal protocol does not add an
-extra tag-admission constraint; only explicit `FINISH` is mandatory.
+The AgentGraph terminal protocol does not require a tag; it may return a bare
+decimal integer or one complete `<answer>...</answer>` envelope. The final
+Direct comparator intentionally uses FlowSteer's `AnswerGenerate` XML
+protocol. `src/interactive/aime2026_adapter.py` applies the same optional
+single-envelope unwrapping to either lane before submitting the resulting
+string to the production integer rule. Only explicit `FINISH` is mandatory for
+AgentGraph evaluator admission.
 
 The adapter:
 
@@ -162,7 +162,7 @@ HotpotQA token-F1 and QA retrieval metrics do not apply.
 | Fixed AIME 2026 Parquet source plan, PyArrow reader, and exact row schema | Downstream SkillEval reused/thin-ported | The official-only catalog retains the exact 30-row MathArena population, source order, question text, and dataset revision; train and validation files are empty. |
 | Private integer scorer | Downstream SkillEval reused | Integer canonicalization and exact comparison define Accuracy. |
 | `TaskRecord` dataset conversion | Project-specific thin adaptation | Necessary because the unified runtime consumes its existing dataset schema. |
-| Optional `<answer>` to `{"answer": str}` conversion | Project-specific compatibility adaptation | Applied identically to Direct and AgentGraph; the active task contract requests the native bare integer submission and does not require a formatting topology. |
+| Optional `<answer>` to `{"answer": str}` conversion | Project-specific compatibility adaptation | Applied identically to Direct and AgentGraph. FlowSteer Direct uses its upstream XML protocol; AgentGraph remains free to emit a bare integer or one complete envelope and does not require a formatting topology. |
 | Unified `EvaluationOutcome` receipt | Project-specific thin adaptation | Carries Accuracy and parsing diagnostics without changing the scoring rule. |
 | Fixed FlowSteer mathematical workflows and loose answer extraction | Not migrated | Incompatible with the no-orchestration-prior and strict-evaluator requirements. |
 | Public SkillFlow generic AIME train/eval materializer | Not used for official AIME 2026 evaluation | Incompatible with the fixed 30-task production population and private target boundary. |
@@ -279,3 +279,23 @@ does not schedule any new Director or AgentGraph call. The report additionally
 aggregates actual node/model/provider/runtime and collection-failure receipts
 from the existing trajectories. No training, Skill, MACE, Bayesian update, or
 Tool was introduced.
+
+## Initial full-evaluation outcome
+
+The final source-aligned condition ran the fixed 30 official tasks. The
+Qwen3.5-9B Direct comparator produced `9/30 = 30.00%` Accuracy. Twenty Direct
+responses ended with `finish_reason=length` at the upstream-aligned 4096-token
+limit and had no complete admissible answer; all twenty correctly failed
+integer conversion. Of the ten normally stopped Direct responses, nine were
+correct.
+
+The frozen AgentGraph checkpoint contains 29 trajectories: 25 legal explicit
+`FINISH` trajectories, four reportable `max_rounds` terminal failures, and one
+collection timeout. AgentGraph produced `4/30 = 13.33%` strict Accuracy, a
+paired difference of `-16.67` percentage points from Direct. Five explicit
+`FINISH` outputs failed strict terminal parsing. The two-task Stable Zero canary
+passed, but the complete 30-task run did not satisfy full-panel Stable Zero.
+
+These results are retained as the initial untrained architecture condition.
+No loose parsing, historical-candidate recovery, answer lookup, workflow
+template, training update, or Skill was added in response to the score.
