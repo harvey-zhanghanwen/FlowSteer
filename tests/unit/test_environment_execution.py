@@ -387,7 +387,7 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, len(error.model_calls))
         self.assertEqual("room zero", error.environment_reset_receipt["observation"])
 
-    async def test_canvas_finish_requires_measured_terminal_transition(self) -> None:
+    async def test_canvas_finish_accepts_terminal_or_budget_truncation(self) -> None:
         for raw_action, expected_terminal in (("look", False), ("finish", True)):
             with self.subTest(raw_action=raw_action):
                 session = FakeSession()
@@ -432,15 +432,17 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
 
                 finished = await canvas.step('{"action":"finish"}')
 
-                self.assertEqual(expected_terminal, finished.accepted)
-                self.assertEqual(expected_terminal, finished.done)
-                if not expected_terminal:
-                    self.assertIn(
-                        "terminal Action--Observation transition",
-                        finished.feedback,
-                    )
+                self.assertTrue(finished.accepted)
+                self.assertTrue(finished.done)
+                assert added.execution is not None
+                metadata = added.execution.output_metadata["actor"]
+                self.assertEqual(
+                    not expected_terminal,
+                    metadata["environment_truncated"],
+                )
+                self.assertEqual(1, metadata["environment_max_turns"])
 
-    async def test_fresh_finish_caches_and_returns_nonterminal_execution(self) -> None:
+    async def test_fresh_finish_accepts_and_returns_budget_truncation(self) -> None:
         session = FakeSession()
         gateway = SequenceGateway(["look"])
         environment = resources(
@@ -474,30 +476,125 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
 
         first = await canvas.step('{"action":"finish"}')
 
-        self.assertFalse(first.accepted)
-        self.assertFalse(first.done)
+        self.assertTrue(first.accepted)
+        self.assertTrue(first.done)
         self.assertFalse(first.execution_reused)
         self.assertIsNotNone(first.execution)
         self.assertIsNone(first.partial_execution)
         self.assertEqual("room one", first.execution.outputs["actor"])
         actor_metadata = first.execution.output_metadata["actor"]
         self.assertFalse(actor_metadata["environment_terminal"])
+        self.assertTrue(actor_metadata["environment_truncated"])
+        self.assertEqual(1, actor_metadata["environment_max_turns"])
         self.assertEqual(1, len(actor_metadata["environment_receipts"]))
         self.assertEqual(1, len(actor_metadata["tool_receipts"]))
-        self.assertIn(
-            "terminal Action--Observation transition",
-            first.feedback,
-        )
-
-        second = await canvas.step('{"action":"finish"}')
-
-        self.assertFalse(second.accepted)
-        self.assertFalse(second.done)
-        self.assertFalse(second.execution_reused)
-        self.assertIsNone(second.execution)
-        self.assertEqual("repeated_rejected_action", second.feedback_code)
         self.assertEqual(["look"], session.actions)
         self.assertEqual(1, len(gateway.requests))
+
+    async def test_required_environment_capability_uses_atomic_live_repair_domain(
+        self,
+    ) -> None:
+        session = FakeSession()
+        gateway = SequenceGateway([])
+        environment = resources(session=session, gateway=gateway, max_turns=1)
+        model_registry = ModelRegistry(
+            [ProviderSpec("fake", kind="test")],
+            [ModelSpec("m", "fake")],
+        )
+        runtime = AgentRuntime(
+            model_registry,
+            gateway,
+            execution_adapters={"react": environment.execution_adapter},
+            tool_registry=environment.tool_registry,
+            dataset_id="alfworld",
+        )
+        allowed_actions = (
+            "add_agent",
+            "modify_agent",
+            "delete_agent",
+            "set_relation",
+            "set_output",
+            "finish",
+        )
+
+        empty = AgentWorkflowEnv(
+            model_registry,
+            runtime=runtime,
+            problem="complete the task",
+            execute_on_edit=True,
+            required_tool_id=environment.tool_id,
+            allowed_actions=allowed_actions,
+        )
+        self.assertEqual(("add_agent",), empty.model_admissible_action_types())
+        self.assertEqual(
+            ["agent_id", "model_id", "contract"],
+            empty.model_admissible_action_targets()["add_agent"][
+                "required_agent_fields"
+            ],
+        )
+
+        reasoning_graph = AgentGraph(
+            [AgentNode("arbitrary", "m", "Use the available interface.")]
+        )
+        reasoning = AgentWorkflowEnv(
+            model_registry,
+            runtime=runtime,
+            problem="complete the task",
+            graph=reasoning_graph,
+            execute_on_edit=True,
+            required_tool_id=environment.tool_id,
+            allowed_actions=allowed_actions,
+        )
+        self.assertEqual(
+            ("modify_agent",), reasoning.model_admissible_action_types()
+        )
+        repair = reasoning.model_admissible_action_targets()["modify_agent"]
+        self.assertEqual(["execution_mode"], repair["mutable_fields"])
+        self.assertEqual(
+            {"execution_mode": ["react"]},
+            repair["per_agent_candidates"][0]["discrete_value_domains"],
+        )
+
+        react_graph = AgentGraph(
+            [
+                AgentNode(
+                    "arbitrary",
+                    "m",
+                    "Use the available interface.",
+                    execution_mode="react",
+                )
+            ]
+        )
+        react = AgentWorkflowEnv(
+            model_registry,
+            runtime=runtime,
+            problem="complete the task",
+            graph=react_graph,
+            execute_on_edit=True,
+            required_tool_id=environment.tool_id,
+            allowed_actions=allowed_actions,
+        )
+        repair = react.model_admissible_action_targets()["modify_agent"]
+        self.assertEqual(["allowed_tools"], repair["mutable_fields"])
+        self.assertEqual(
+            {"allowed_tools": [[environment.tool_id]]},
+            repair["per_agent_candidates"][0]["discrete_value_domains"],
+        )
+
+        actor_graph = AgentGraph([make_request().agent])
+        actor = AgentWorkflowEnv(
+            model_registry,
+            runtime=runtime,
+            problem="complete the task",
+            graph=actor_graph,
+            execute_on_edit=True,
+            required_tool_id=environment.tool_id,
+            allowed_actions=allowed_actions,
+        )
+        restored = actor.model_admissible_action_types()
+        self.assertIn("add_agent", restored)
+        self.assertIn("set_output", restored)
+        self.assertNotEqual(("modify_agent",), restored)
 
     async def test_webshop_search_action_uses_public_search_bar_semantics(self) -> None:
         class WebShopSession(FakeSession):

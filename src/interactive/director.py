@@ -3242,7 +3242,10 @@ class AgentGraphOrchestrator:
                     ),
                 }
             )
-        if verified_qa_semantic_protocol(self.semantic_protocol):
+        if (
+            self.prompt_version == SCALAR_DIRECTOR_PROMPT_VERSION
+            or verified_qa_semantic_protocol(self.semantic_protocol)
+        ):
             payload["action_target_domains"] = (
                 env.model_admissible_action_targets()
             )
@@ -3344,7 +3347,10 @@ class AgentGraphOrchestrator:
         # revision-local gate and its first measured failure stage so the
         # Director repairs the responsible semantic node instead of probing
         # FINISH or repeatedly modifying the Formatter.
-        if verified_qa_semantic_protocol(self.semantic_protocol):
+        if (
+            self.prompt_version == SCALAR_DIRECTOR_PROMPT_VERSION
+            or verified_qa_semantic_protocol(self.semantic_protocol)
+        ):
             payload["finish_admissibility"] = _director_neutral_state_projection(
                 env.finish_admissibility()
             )

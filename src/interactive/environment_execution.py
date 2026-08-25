@@ -1156,6 +1156,7 @@ class EnvironmentExecutionAdapter:
                 if terminal:
                     break
 
+            truncated = not terminal and len(receipts) == self._max_turns
             return AgentResponse(
                 observation,
                 {
@@ -1167,6 +1168,8 @@ class EnvironmentExecutionAdapter:
                     "environment_reset_receipt": reset_receipt,
                     "environment_receipts": receipts,
                     "environment_terminal": terminal,
+                    "environment_truncated": truncated,
+                    "environment_max_turns": self._max_turns,
                     "environment_turns_used": len(receipts),
                     "environment_steps": revision,
                     "tool_receipts": tool_receipts,

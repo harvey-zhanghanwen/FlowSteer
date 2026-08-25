@@ -1727,6 +1727,13 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([], observation["current_relations"])
         self.assertEqual(["other", "qwen"], sorted(observation["available_model_ids"]))
         self.assertEqual(1, observation["remaining_rounds"])
+        self.assertEqual(
+            ["agent_id", "model_id", "contract"],
+            observation["action_target_domains"]["add_agent"][
+                "required_agent_fields"
+            ],
+        )
+        self.assertFalse(observation["finish_admissibility"]["admissible"])
         self.assertNotIn("plan", SCALAR_DIRECTOR_SYSTEM_PROMPT.casefold())
         self.assertNotIn("solver", SCALAR_DIRECTOR_SYSTEM_PROMPT.casefold())
         self.assertNotIn("verify", SCALAR_DIRECTOR_SYSTEM_PROMPT.casefold())
