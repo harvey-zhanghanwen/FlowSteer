@@ -289,7 +289,7 @@ class RepositoryToolBackendTests(unittest.TestCase):
             require_task_environment=True,
         )
         bash = backend.invoke(
-            ToolRequest("bash", {"command": "printf task-env"})
+            ToolRequest("bash", {"command": "pwd"})
         ).value
         tested = backend.invoke(
             ToolRequest(
@@ -298,7 +298,7 @@ class RepositoryToolBackendTests(unittest.TestCase):
             )
         ).value
         self.assertEqual(0, bash["returncode"])
-        self.assertIn("task-env", bash["output"])
+        self.assertEqual(str(self.root), bash["output"].strip())
         self.assertTrue(tested["passed"])
         self.assertEqual(receipt, bash["task_environment"])
         self.assertEqual(receipt, tested["task_environment"])

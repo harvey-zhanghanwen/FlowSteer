@@ -8,10 +8,10 @@ Condition：`swebench_skillflow_v3_initial_v1`
 
 Dataset、Repository Environment、Tool Adapter、Evaluator 与统一 evaluation runner 的
 初版接线已经完成，且 no-model read-only repository smoke 通过。正式 Direct vs AgentGraph
-evaluation 没有开始：固定 128 个 task 中只有 4 个能完成 repository/base-state
-setup/cleanup，128 个 task 的 SkillFlow Python/Conda environment 均不可用，official
-Docker harness preflight 也不可用。Runner 在创建模型 runtime 前按 fail-closed 语义停止，
-没有调用模型、没有生成 patch、没有分配 Resolved/Failed 标签。
+evaluation 没有开始：固定 128 个 task 的 repository/base-state setup/cleanup 已全部
+通过，但目前只有 1/128 个 task 的 SkillFlow Python/Conda environment 可用，且当前
+执行用户无 official Docker daemon socket 权限。Runner 在创建模型 runtime 前按
+fail-closed 语义停止，没有调用模型、没有生成 patch、没有分配 Resolved/Failed 标签。
 
 因此本轮真实结果是：
 
@@ -62,6 +62,14 @@ evaluation config、official evaluator adapter 和 SWE-bench reporting。
 - model/API calls：0；
 - official evaluator call：0。
 
+进一步 environment canary 使用同一个 `astropy__astropy-14182`：
+
+- `swe_astropy_astropy_51` 按 official harness spec 安装完成；
+- exact runtime prefix：`conda run -n swe_astropy_astropy_51 --no-capture-output`；
+- 独立 detached base worktree cwd：正确；
+- `astropy/io/ascii/tests/test_rst.py`：9/9 passed；
+- 上游 `bash -lc` 在本机重置 cwd 的兼容性问题已最小适配为 `bash -c`。
+
 Smoke 发现并修复了一个可复现的 Tool Adapter bug：以点开头的合法路径
 `.pyinstaller/...` 曾被错误规范化成 `pyinstaller/...`，导致 `list_files` 的结果不能被
 `view_file` 回读。修复后用同一个真实 worktree 复测通过。
@@ -72,13 +80,13 @@ Smoke 发现并修复了一个可复现的 Tool Adapter bug：以点开头的合
 
 Repository availability：
 
-- setup/base-state/cleanup ready：4 tasks，1 个 repository（astropy）；
-- setup/base-state unavailable：124 tasks，9 个 repositories。
+- setup/base-state/cleanup ready：128/128 tasks，10/10 repositories；
+- setup/base-state unavailable：0。
 
 Task execution environment：
 
-- SkillFlow `_env_python(repo, version)` ready：0/128；
-- unavailable：128/128；
+- SkillFlow `_env_python(repo, version)` ready：1/128；
+- unavailable：127/128（剩余 47 个唯一 repo/version environment）；
 - strict `bash/run_tests` host fallback：禁用。
 
 Official evaluator：
@@ -86,14 +94,15 @@ Official evaluator：
 - SkillFlow evaluator source：已定位；
 - SWE-bench Verified dataset：已定位；
 - pinned SWE-bench harness checkout：已定位；
-- Docker harness runtime：**blocked**；
+- Docker harness runtime：**blocked**；daemon 正常，但当前用户无
+  `/var/run/docker.sock` 访问权限；
 - proxy metric：未使用；
 - task labels assigned：0。
 
-正式 runner 状态：`failed_runtime_preflight`。最早可观察 failure layer 是
-**repository/base-state population preflight**；同次 receipt 还记录 task environment 与
-official Docker harness 两个独立 blocker。这些都不是某一道 SWE-bench task 的 Wrong
-Demo，不能归因于 Director、Agent topology 或 patch quality。
+正式 runner 状态：`failed_runtime_preflight`。repository/base-state population blocker
+已经解除；当前最早可观察 failure layer 是 **task environment population preflight**，
+official Docker harness 权限是另一个独立 blocker。这些都不是某一道 SWE-bench task 的
+Wrong Demo，不能归因于 Director、Agent topology 或 patch quality。
 
 ## 本轮未运行
 
@@ -115,8 +124,8 @@ Demo，不能归因于 Director、Agent topology 或 patch quality。
 - Formal runner manifest：
   `artifacts/swebench_skillflow_v3_initial_v1/run_manifest.json`
 
-在缺失 repositories、SkillFlow task environments 与 official Docker harness 全部就绪
-前，不应启动 128-task paired model evaluation；环境就绪后必须继续使用同一固定
+在剩余 SkillFlow task environments 与 official Docker harness 全部就绪前，不应启动
+128-task paired model evaluation；环境就绪后必须继续使用同一固定
 selection、snapshot、Tool surface、task-global repository episode budget 和 official
 evaluator。AgentGraph 另有 Director/多 Agent inference，因此 Direct/AgentGraph delta
 只能作 descriptive architecture comparison，不能声称总计算预算等价。

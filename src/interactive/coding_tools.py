@@ -123,7 +123,12 @@ class RepositoryToolBackend:
 
     def _shell_invocation(self, command: str) -> tuple[str | list[str], bool]:
         if self._task_command_prefix:
-            return [*self._task_command_prefix, "bash", "-lc", command], False
+            # NECESSARY_ADAPTATION: SkillFlow's deployed handler uses
+            # ``bash -lc``.  On this host the login shell changes directory to
+            # the account's project root, overriding subprocess ``cwd`` and
+            # executing repository commands outside the task worktree.  A
+            # non-login shell preserves the already validated task-scoped cwd.
+            return [*self._task_command_prefix, "bash", "-c", command], False
         return command, True
 
     def invoke(self, request: ToolRequest) -> ToolResult:

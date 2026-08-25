@@ -170,6 +170,11 @@ repository state 与 SkillFlow task environment receipt。
 executable 时不回退到 host Python。Workspace patch 以 SkillFlow `git diff` 为主，并
 补入 `bash` 可能创建的非 test untracked 文件；test 文件仍保持上游排除语义。
 
+SkillFlow deployed handler 的 `bash -lc` 在当前宿主机会由 login shell 覆盖
+`subprocess cwd`，使命令离开 task worktree。本项目在同一 task environment command
+prefix 后只做最小兼容性适配为 `bash -c`，保留已验证 worktree cwd；Tool 名称、schema
+与 Action/Observation 语义不变。
+
 SkillFlow 原始 episode 是单一 bounded episode，而 progressive Canvas 可能执行多个
 Agent。为避免换 Agent 后重置预算，`CodingExecutionAdapter` 增加 task-global 计数：
 
@@ -230,11 +235,14 @@ classification、phase、retryable、test/report presence、container exit/OOM �
   时 strict SkillFlow Tool registration 明确不可构造；
 - smoke 期间修复了 `.pyinstaller/...` 被错误去掉前导点、导致 list/view 不可组合的
   path normalization bug；
-- full repository population preflight：固定 128 tasks 中 4 个 astropy tasks 完成
-  setup/base-state/cleanup，另外 124 tasks 对应的 9 个 repository 不可准备；
-- SkillFlow task environment preflight：0/128 ready，128/128 unavailable；
-- official evaluator preflight：Docker harness 当前不可用；runner 在模型 runtime 创建前
-  以 `failed_runtime_preflight` 停止；
+- full repository population preflight：补齐 9 个缺失 repository 后，固定 128 tasks
+  全部完成 setup/base-state/cleanup（128/128 ready）；
+- SkillFlow task environment preflight：首个 `swe_astropy_astropy_51` 已按 official spec
+  建立并在独立 detached worktree 完成 9/9 定向测试；当前 1/128 ready、127/128
+  unavailable；
+- official evaluator preflight：Docker daemon 正常，但当前执行用户无
+  `/var/run/docker.sock` 权限；runner 在模型 runtime 创建前以
+  `failed_runtime_preflight` 停止；
 - model/API calls：0；official task labels：0；Resolved Rate：`null`（不可测）；
 - training/optimizer/Skill evolution：均未运行。
 
