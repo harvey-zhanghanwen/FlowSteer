@@ -2235,11 +2235,29 @@ def _execution_environment_receipts(
         episodes.append(episode)
         return True
 
-    def append_from_execution(execution: object) -> bool:
+    def append_from_execution(
+        execution: object,
+        runtime_output_metadata: Optional[Mapping[str, Any]] = None,
+    ) -> bool:
         if not isinstance(execution, Mapping):
             return False
         metadata = execution.get("metadata")
         response = metadata.get("response") if isinstance(metadata, Mapping) else None
+        if isinstance(response, Mapping) and not response.get("artifact_id"):
+            agent_id = execution.get("agent_id")
+            runtime_metadata = (
+                runtime_output_metadata.get(agent_id)
+                if isinstance(agent_id, str)
+                and isinstance(runtime_output_metadata, Mapping)
+                else None
+            )
+            runtime_artifact_id = (
+                runtime_metadata.get("artifact_id")
+                if isinstance(runtime_metadata, Mapping)
+                else None
+            )
+            if isinstance(runtime_artifact_id, str) and runtime_artifact_id.strip():
+                response = {**dict(response), "artifact_id": runtime_artifact_id}
         return append_from_metadata(response)
 
     direct_executions = value.get("executions")
@@ -2254,6 +2272,10 @@ def _execution_environment_receipts(
         for turn in turns:
             if not isinstance(turn, Mapping):
                 continue
+            runtime = turn.get("runtime_summary")
+            output_metadata = (
+                runtime.get("output_metadata") if isinstance(runtime, Mapping) else None
+            )
             found_execution_episode = False
             executions = turn.get("executions")
             if isinstance(executions, Sequence) and not isinstance(
@@ -2261,16 +2283,13 @@ def _execution_environment_receipts(
             ):
                 for execution in executions:
                     found_execution_episode = (
-                        append_from_execution(execution) or found_execution_episode
+                        append_from_execution(execution, output_metadata)
+                        or found_execution_episode
                     )
             if found_execution_episode:
                 continue
             # Cancellation/failure prefixes can survive only in Runtime output
             # metadata after the execution Task has been normalized.
-            runtime = turn.get("runtime_summary")
-            output_metadata = (
-                runtime.get("output_metadata") if isinstance(runtime, Mapping) else None
-            )
             if not isinstance(output_metadata, Mapping):
                 continue
             for metadata in output_metadata.values():

@@ -1279,9 +1279,9 @@ def test_webshop_rollout_diagnostics_deduplicate_reused_execution_artifact():
             {
                 "executions": [
                     {
+                        "agent_id": "actor",
                         "metadata": {
                             "response": {
-                                "artifact_id": "artifact-x",
                                 "environment_receipts": episode_x,
                             }
                         }
@@ -1310,6 +1310,7 @@ def test_webshop_rollout_diagnostics_deduplicate_reused_execution_artifact():
             {
                 "executions": [
                     {
+                        "agent_id": "actor",
                         "metadata": {
                             "response": {
                                 "artifact_id": "artifact-y",
