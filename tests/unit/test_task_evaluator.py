@@ -288,6 +288,49 @@ class SWEbenchEvaluatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1.0, outcome.reward)
         self.assertEqual("repo__1", outcome.details["instance_id"])
 
+    async def test_harness_infrastructure_diagnostic_is_preserved_structurally(
+        self,
+    ) -> None:
+        diagnostic = SimpleNamespace(
+            classification="docker_daemon_unavailable",
+            phase="docker",
+            retryable=True,
+            test_output_present=False,
+            report_present=False,
+            container_exit_code=137,
+            container_oom_killed=True,
+            log_relative_path="must-not-be-copied.log",
+        )
+
+        class HarnessInfrastructureError(RuntimeError):
+            def __init__(self) -> None:
+                self.diagnostic = diagnostic
+                super().__init__("unstructured diagnostic prose")
+
+        async def harness(record, prediction):
+            raise HarnessInfrastructureError()
+
+        outcome = await evaluate_task(task("SWE-bench"), "patch", swe_harness=harness)
+
+        self.assertFalse(outcome.valid)
+        self.assertIsNone(outcome.reward)
+        self.assertEqual("swebench_harness_failed", outcome.reason)
+        self.assertEqual(
+            {
+                "error_type": "HarnessInfrastructureError",
+                "error": "unstructured diagnostic prose",
+                "classification": "docker_daemon_unavailable",
+                "phase": "docker",
+                "retryable": True,
+                "test_output_present": False,
+                "report_present": False,
+                "container_exit_code": 137,
+                "oom_killed": True,
+            },
+            outcome.details,
+        )
+        self.assertNotIn("log_relative_path", outcome.details)
+
 
 class EnvironmentEvaluatorTests(unittest.IsolatedAsyncioTestCase):
     def test_deployed_ragen_module_is_reused_within_the_process(self) -> None:

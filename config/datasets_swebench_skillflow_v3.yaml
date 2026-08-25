@@ -1,0 +1,39 @@
+# SkillFlow paper-protocol SWE-bench catalog.
+#
+# The two public task populations come from SkillFlow's v3 mixture and are
+# filtered to ``task_type=code_generation`` without resampling.  Evaluation
+# payloads are joined from the official SWE-bench Verified release by exact
+# ``instance_id``.  No model service, repository environment, evaluator, or
+# training process is started by the dataset preparer.
+
+schema_version: "flowsteer.agentgraph.swebench.skillflow-v3.dataset.v1"
+task_schema_version: "flowsteer.agentgraph.task.v1"
+
+aligned_dir: "data/swebench_skillflow_v3"
+aligned_files:
+  train: "data/swebench_skillflow_v3/train.jsonl"
+  validation: "data/swebench_skillflow_v3/validation.jsonl"
+  test: "data/swebench_skillflow_v3/test.jsonl"
+  manifest: "data/swebench_skillflow_v3/manifest.json"
+
+sources:
+  skillflow_v3:
+    path: "${SKILLFLOW_PRIVATE_DATA_ROOT:-/home/test/SKILLEV/skillflow-private-data}"
+    train_file: "train_v3.json"
+    iid_test_file: "test_iid_v3.json"
+  verified:
+    path: "${FLOWSTEER_SWEBENCH_VERIFIED_PATH:-/ssd1/iclr/.private/skillflow-resources/swebench-verified}"
+
+split_policy:
+  filter_task_type: "code_generation"
+  selection: "preserve_source_order"
+  train_source: "skillflow_train_v3"
+  train_count: 500
+  train_unique_instance_ids: 372
+  train_repeated_rows: 128
+  validation_population: "none"
+  test_source: "skillflow_test_iid_v3"
+  test_count: 128
+  test_unique_instance_ids: 128
+  require_train_test_disjoint_instance_ids: true
+  evaluator_join: "official_verified_by_instance_id"

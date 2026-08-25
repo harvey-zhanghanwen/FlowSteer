@@ -22,7 +22,7 @@ import re
 import shutil
 import subprocess
 import tempfile
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 
 class SWEbenchWorktreeUnavailable(RuntimeError):
@@ -348,6 +348,126 @@ def prepare_swebench_worktree_for_task(
     )
 
 
+def _task_id_for_preflight(record: object) -> str | None:
+    """Return a public task identifier without consulting evaluator payloads."""
+
+    value = (
+        record.get("task_id")
+        if isinstance(record, Mapping)
+        else getattr(record, "task_id", None)
+    )
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def preflight_swebench_worktree_population(
+    records: Iterable[object],
+    *,
+    repository_store: Path | str | None = None,
+    worktree_root: Path | str | None = None,
+    setup_timeout_seconds: float = 30.0,
+    cleanup_timeout_seconds: float = 10.0,
+) -> dict[str, object]:
+    """Operationally verify repository/base state for every active task.
+
+    Each record is passed through the same task-pinned setup and cleanup used
+    by an actual episode.  The returned receipt lets a runner fail closed
+    before any model call when even one selected task cannot establish and
+    cleanly release its isolated repository state.  This is runtime state
+    verification, not source-integrity or hash auditing.
+
+    The helper deliberately completes cleanup before moving to the next
+    record.  Consequently it neither shares mutable repository state between
+    tasks nor requires enough disk space for the whole population at once.
+    """
+
+    rows: list[dict[str, object]] = []
+    for index, record in enumerate(records):
+        task_id = _task_id_for_preflight(record)
+        row: dict[str, object] = {
+            "index": index,
+            "task_id": task_id,
+            "instance_id": None,
+            "repo": None,
+            "expected_base_commit": None,
+            "observed_pinned_commit": None,
+            "base_state_verified": False,
+            "workspace": None,
+            "setup_status": "not_started",
+            "cleanup_status": "not_required",
+            "ready": False,
+            "failure_phase": None,
+            "error_type": None,
+            "error": None,
+        }
+        prepared: PreparedSWEbenchWorktree | None = None
+        try:
+            identity = SWEbenchRepositoryIdentity.from_task_record(record)
+            row.update(
+                {
+                    "instance_id": identity.instance_id,
+                    "repo": identity.repo,
+                    "expected_base_commit": identity.base_commit,
+                }
+            )
+            prepared = prepare_swebench_worktree(
+                identity,
+                repository_store=repository_store,
+                worktree_root=worktree_root,
+                setup_timeout_seconds=setup_timeout_seconds,
+                cleanup_timeout_seconds=cleanup_timeout_seconds,
+            )
+            row.update(
+                {
+                    "observed_pinned_commit": prepared.pinned_commit,
+                    "base_state_verified": True,
+                    "workspace": str(prepared.repo_root),
+                    "setup_status": "ready",
+                }
+            )
+        except Exception as exc:
+            row.update(
+                {
+                    "setup_status": "unavailable",
+                    "failure_phase": "setup",
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                }
+            )
+        finally:
+            if prepared is not None:
+                try:
+                    prepared.cleanup()
+                    row["cleanup_status"] = "cleaned"
+                except Exception as exc:
+                    row.update(
+                        {
+                            "cleanup_status": "failed",
+                            "failure_phase": "cleanup",
+                            "error_type": type(exc).__name__,
+                            "error": str(exc),
+                        }
+                    )
+
+        row["ready"] = (
+            row["setup_status"] == "ready"
+            and row["cleanup_status"] == "cleaned"
+            and row["base_state_verified"] is True
+        )
+        rows.append(row)
+
+    ready = sum(1 for row in rows if row["ready"] is True)
+    counts = {
+        "total": len(rows),
+        "ready": ready,
+        "unavailable": len(rows) - ready,
+    }
+    return {
+        "all_ready": counts["total"] > 0 and counts["unavailable"] == 0,
+        "counts": counts,
+        "rows": rows,
+    }
+
+
 __all__ = [
     "PreparedSWEbenchWorktree",
     "SWEbenchRepositoryIdentity",
@@ -355,4 +475,5 @@ __all__ = [
     "SWEbenchWorktreeUnavailable",
     "prepare_swebench_worktree",
     "prepare_swebench_worktree_for_task",
+    "preflight_swebench_worktree_population",
 ]

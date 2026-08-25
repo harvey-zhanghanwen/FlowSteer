@@ -63,6 +63,14 @@ from src.interactive.graph_diagnostics import (
 from src.interactive.records import TaskRecord
 from src.interactive.rollout_collector import execution_record_from_call
 from src.interactive.swebench_adapter import OfficialSWEbenchHarness
+from src.interactive.swe_worktree import (
+    SWEbenchRepositoryIdentity,
+    preflight_swebench_worktree_population,
+)
+from src.interactive.swebench_reporting import (
+    aggregate_swebench_receipts,
+    diagnose_swebench_wrong_demo,
+)
 from src.interactive.task_dataset import TASK_SCHEMA_VERSION, iter_task_records
 from src.interactive.task_evaluator import evaluate_task
 
@@ -309,6 +317,51 @@ def validate_completion_benchmark_config(config: Mapping[str, Any]) -> None:
             checks["swe_bench.direct_completion_condition"] = bool(
                 str(bounded.get("direct_completion_condition", "")).strip()
             )
+            # SkillFlow has one bounded repository episode.  A progressive
+            # FlowSteer Canvas can execute more than one Agent, so the initial
+            # SWE-bench condition must keep one task-global budget rather than
+            # silently resetting the Tool/turn allowance per Canvas node.
+            # This validation is scoped to the new strict profile and leaves
+            # older, explicitly different compatibility conditions readable.
+            strict_skillflow_profile = (
+                swe_runtime.get("tool_profile") == "skillflow_training_v1"
+            )
+            if strict_skillflow_profile:
+                checks["swe_bench.workspace_diff_completion"] = (
+                    swe_runtime.get("completion_policy") == "workspace_diff"
+                )
+                checks["swe_bench.paired_budget_protocol"] = (
+                    bounded.get("paired_budget_protocol")
+                    == "task_global_equal_v1"
+                )
+                checks["swe_bench.total_compute_not_claimed_equivalent"] = (
+                    bounded.get("protocol_equivalent_to_direct") is False
+                )
+                checks["swe_bench.repository_episode_budget_equivalent"] = (
+                    bounded.get("repository_episode_budget_equivalent") is True
+                )
+                checks["swe_bench.require_task_environment"] = (
+                    swe_runtime.get("require_task_environment") is True
+                )
+                direct_baseline = bounded.get("direct_baseline")
+                checks["swe_bench.same_repository_tools"] = bool(
+                    isinstance(direct_baseline, Mapping)
+                    and direct_baseline.get(
+                        "require_same_repository_tools_as_agentgraph"
+                    )
+                    is True
+                )
+                for task_field, call_field in (
+                    ("task_max_turns", "max_turns_per_agent_call"),
+                    ("task_max_tool_calls", "max_tool_calls_per_agent_call"),
+                ):
+                    task_limit = swe_runtime.get(task_field)
+                    call_limit = swe_runtime.get(call_field)
+                    checks[f"swe_bench.{task_field}"] = bool(
+                        type(task_limit) is int
+                        and task_limit > 0
+                        and task_limit == call_limit
+                    )
     failed = [name for name, valid in checks.items() if not valid]
     if failed:
         raise ConfigurationError(
@@ -2062,6 +2115,8 @@ def _paired_rows(
     direct: Mapping[str, Mapping[str, Any]],
     trajectories: Mapping[str, Mapping[str, Any]],
     dataset_key: str,
+    *,
+    collection_failures: Sequence[Mapping[str, Any]] = (),
 ) -> list[dict[str, Any]]:
     metric_name = str(_BENCHMARKS[dataset_key]["primary_metric"])
     metric_names = tuple(_BENCHMARKS[dataset_key]["metric_names"])
@@ -2074,13 +2129,23 @@ def _paired_rows(
         direct_score = direct_metrics[metric_name]
         graph_score = graph_metrics[metric_name]
         direct_execution = direct_value.get("execution") if direct_value else None
-        rows.append(
-            {
+        row = {
                 "schema_version": "flowsteer.completion_benchmark.paired_result.v1",
                 "dataset_key": dataset_key,
                 "task_id": task.task_id,
                 "question": task.question,
-                "ground_truth": task.ground_truth,
+                # SWE-bench gold patches belong to the evaluator checkpoint,
+                # not public paired/ wrong-demo diagnostics.  Static QA keeps
+                # its existing report contract; SWE reports carry only the
+                # public issue and generated patches.
+                "ground_truth": (
+                    None if dataset_key == "swe_bench" else task.ground_truth
+                ),
+                "ground_truth_role": (
+                    "evaluator_only_redacted"
+                    if dataset_key == "swe_bench"
+                    else "reported_reference_answer"
+                ),
                 "primary_metric": metric_name,
                 "direct": {
                     "available": direct_value is not None,
@@ -2147,7 +2212,22 @@ def _paired_rows(
                     else None
                 ),
             }
-        )
+        if dataset_key == "swe_bench":
+            identity = SWEbenchRepositoryIdentity.from_task_record(task)
+            row["repository_state"] = {
+                "instance_id": identity.instance_id,
+                "repo": identity.repo,
+                "base_commit": identity.base_commit,
+                "workspace_isolation": "task_scoped_detached_worktree",
+                "state_source": "public_task_repository_identity",
+            }
+            if graph_score < 1.0:
+                row["wrong_demo_diagnosis"] = diagnose_swebench_wrong_demo(
+                    row,
+                    trajectory=graph_value,
+                    collection_failures=collection_failures,
+                )
+        rows.append(row)
     return rows
 
 
@@ -2179,6 +2259,19 @@ def _aggregate(
     if dataset_key == "aime_2026":
         result["correct"] = sum(
             float(value.get("accuracy", 0.0)) == 1.0 for value in values
+        )
+    elif dataset_key == "swe_bench":
+        result["resolved"] = sum(
+            float(value.get("resolved", 0.0)) == 1.0 for value in values
+        )
+        complete_official_coverage = len(valid) == total
+        result["official_resolved_rate"] = (
+            result["strict_resolved"] if complete_official_coverage else None
+        )
+        result["official_resolved_rate_status"] = (
+            "complete_official_evaluator_coverage"
+            if complete_official_coverage
+            else "incomplete_official_evaluator_coverage"
         )
     return result
 
@@ -2453,6 +2546,26 @@ def _report(
         is False
         for row in rows
     )
+    swebench_offline_receipts = (
+        aggregate_swebench_receipts(
+            rows,
+            trajectories,
+            collection_failures,
+        )
+        if dataset_key == "swe_bench"
+        else None
+    )
+    swebench_official_delta = None
+    if dataset_key == "swe_bench":
+        direct_official = direct.get("official_resolved_rate")
+        graph_official = graph.get("official_resolved_rate")
+        if isinstance(direct_official, (int, float)) and isinstance(
+            graph_official,
+            (int, float),
+        ):
+            swebench_official_delta = float(graph_official) - float(
+                direct_official
+            )
     return {
         "schema_version": "flowsteer.completion_benchmark.round_report.v1",
         "dataset_key": dataset_key,
@@ -2470,10 +2583,17 @@ def _report(
         "protocol_equivalent_to_direct": bool(
             bounded.get("protocol_equivalent_to_direct", False)
         ),
+        "repository_episode_budget_equivalent": bool(
+            bounded.get("repository_episode_budget_equivalent", False)
+        ),
         "comparison_interpretation": (
             "paired_architecture_comparison"
             if bounded.get("protocol_equivalent_to_direct") is True
-            else "separate_protocol_descriptive_comparison"
+            else (
+                "paired_same_tasks_repository_episode_budget_descriptive_comparison"
+                if bounded.get("repository_episode_budget_equivalent") is True
+                else "separate_protocol_descriptive_comparison"
+            )
         ),
         "metric_scope": (
             "HotpotQA_official_normalization_exact_match_and_token_F1"
@@ -2529,6 +2649,8 @@ def _report(
                 for failure in collection_failures
             ],
         },
+        "swebench_offline_receipts": swebench_offline_receipts,
+        "swebench_official_resolved_rate_delta": swebench_official_delta,
         "failure_types": dict(sorted(failure_counts.items())),
         "below_full_score_demo_count": len(below_full),
         "typical_below_full_score_task_ids": [
@@ -2601,8 +2723,75 @@ def _report_markdown(report: Mapping[str, Any]) -> str:
     protocol_sentence = (
         "Direct and AgentGraph use protocol-equivalent task/evaluator conditions."
         if report.get("protocol_equivalent_to_direct") is True
-        else "Direct and AgentGraph are separate protocols; their delta is descriptive, not a paired causal estimate."
+        else (
+            "Direct and AgentGraph share tasks, repository snapshots, repository "
+            "Tools, and the task-global repository episode budget; AgentGraph has "
+            "additional Director/Agent inference, so the delta is descriptive."
+            if report.get("repository_episode_budget_equivalent") is True
+            else "Direct and AgentGraph are separate protocols; their delta is "
+            "descriptive, not a paired causal estimate."
+        )
     )
+    if report.get("dataset_key") == "swe_bench":
+        receipts = report.get("swebench_offline_receipts")
+        arms = receipts.get("arms", {}) if isinstance(receipts, Mapping) else {}
+        direct_tools = (
+            arms.get("direct", {}).get("tool_action_group_counts", {})
+            if isinstance(arms, Mapping)
+            else {}
+        )
+        graph_tools = (
+            arms.get("agentgraph", {}).get("tool_action_group_counts", {})
+            if isinstance(arms, Mapping)
+            else {}
+        )
+        wrong_demo_count = (
+            receipts.get("wrong_demo_count", 0)
+            if isinstance(receipts, Mapping)
+            else 0
+        )
+        direct_official = direct.get("official_resolved_rate")
+        graph_official = graph.get("official_resolved_rate")
+        direct_rate = (
+            f"{100 * float(direct_official):.2f}%"
+            if isinstance(direct_official, (int, float))
+            else "N/A (incomplete official evaluator coverage)"
+        )
+        graph_rate = (
+            f"{100 * float(graph_official):.2f}%"
+            if isinstance(graph_official, (int, float))
+            else "N/A (incomplete official evaluator coverage)"
+        )
+        official_delta = report.get("swebench_official_resolved_rate_delta")
+        delta_sentence = (
+            f"AgentGraph - Direct official Resolved Rate: "
+            f"**{100 * float(official_delta):+.2f} percentage points**."
+            if isinstance(official_delta, (int, float))
+            else "AgentGraph - Direct official Resolved Rate is not reportable until both arms have complete official evaluator coverage."
+        )
+        return f"""# {report['dataset']} Architecture Validation
+
+Fixed {report['project_split']} tasks: **{report['sample_count']}**. No training, GRPO, backward pass, optimizer update, LoRA publication, Bayesian update, or Skill evolution ran. {skill_sentence}
+
+Official primary metric: **Resolved Rate** (`{report['metric_scope']}`). Only the official SWE-bench harness result is a valid task label; model prose and local `run_tests` output are not rewards.
+
+| Condition | Completed | Evaluator valid | Resolved | Resolved Rate |
+|---|---:|---:|---:|---:|
+| Qwen3.5-9B Direct Local Baseline | {direct['completed']} | {direct['evaluator_valid']} | {direct['resolved']} | {direct_rate} |
+| AgentGraph | {graph['completed']} | {graph['evaluator_valid']} | {graph['resolved']} | {graph_rate} |
+
+{delta_sentence} {protocol_sentence}
+
+AgentGraph explicit FINISH: **{report['explicit_finished_count']}/{report['sample_count']}**; max_rounds: **{report['max_rounds_count']}**; terminal failures: **{report['terminal_failure_count']}**; operational/evaluator failures: **{report['operational_failure_count']}**.
+
+Repository Tool action groups (`search/view/edit/test/command`): Direct **{direct_tools}**; AgentGraph **{graph_tools}**. First-observable Wrong Demo diagnoses: **{wrong_demo_count}**.
+
+Agent count distribution: **{report['agent_count_distribution']}**. Natural topology distribution: **{report['topology_distribution']}**.
+
+## Failure types
+
+{failures}
+"""
     if tuple(report["agentgraph_minus_direct"]) == ("exact_match", "token_f1"):
         return f"""# {report['dataset']} Architecture Validation
 
@@ -2688,16 +2877,14 @@ def _attach_healthbench_reference_judge(
     }
 
 
-def _attach_swebench_official_harness(
-    backend: LiveSmokeBackend,
+def _swebench_harness_from_config(
     config: Mapping[str, Any],
     root: Path,
-    selected: Sequence[TaskRecord],
-) -> Mapping[str, Any]:
-    """Attach SkillFlow's official SWE-bench Docker evaluator or fail closed."""
+) -> OfficialSWEbenchHarness:
+    """Build the pinned SkillFlow/official harness boundary from configuration."""
 
     evaluation = _mapping(config["evaluation"], "evaluation")
-    harness = OfficialSWEbenchHarness(
+    return OfficialSWEbenchHarness(
         evaluator_path=_resolve(root, str(evaluation["swebench_evaluator_path"])),
         harness_path=_resolve(root, str(evaluation["swebench_harness_path"])),
         dataset_source=str(evaluation["swebench_dataset_source"]),
@@ -2706,6 +2893,17 @@ def _attach_swebench_official_harness(
         docker_namespace=str(evaluation["swebench_docker_namespace"]),
         timeout_seconds=int(evaluation["swebench_timeout_seconds"]),
     )
+
+
+def _attach_swebench_official_harness(
+    backend: LiveSmokeBackend,
+    config: Mapping[str, Any],
+    root: Path,
+    selected: Sequence[TaskRecord],
+) -> Mapping[str, Any]:
+    """Attach SkillFlow's official SWE-bench Docker evaluator or fail closed."""
+
+    harness = _swebench_harness_from_config(config, root)
     instance_ids: list[str] = []
     for task in selected:
         payload = task.metadata.get("evaluator_payload", {})
@@ -2960,10 +3158,82 @@ async def run_completion_benchmark_round(
         _write_json(paths["manifest"], manifest)
         return manifest
 
+    stable_zero_sample_count = int(
+        bounded.get("stable_zero_sample_count", min(2, len(selected)))
+    )
+    active = selected[:stable_zero_sample_count] if canary_only else selected
+    preflight: dict[str, Any] = {}
     try:
+        preflight_harness = None
+        swebench_harness_receipt = None
+        if dataset_key == "swe_bench":
+            swe_runtime = _mapping(
+                config.get("swe_coding_runtime"), "swe_coding_runtime"
+            )
+            worktree_root = _resolve(root, str(swe_runtime["worktree_root"]))
+            worktree_root.mkdir(parents=True, exist_ok=True)
+            repository_population = await asyncio.to_thread(
+                preflight_swebench_worktree_population,
+                active,
+                repository_store=_resolve(
+                    root, str(swe_runtime["repository_store"])
+                ),
+                worktree_root=worktree_root,
+                setup_timeout_seconds=float(
+                    swe_runtime["setup_timeout_seconds"]
+                ),
+                cleanup_timeout_seconds=float(
+                    swe_runtime["cleanup_timeout_seconds"]
+                ),
+            )
+            preflight["repository_population"] = repository_population
+            preflight_harness = _swebench_harness_from_config(config, root)
+            try:
+                task_environment_population = await asyncio.to_thread(
+                    preflight_harness.preflight_task_environments,
+                    active,
+                )
+            except Exception as exc:
+                task_environment_population = {
+                    "all_ready": False,
+                    "total": len(active),
+                    "ready": 0,
+                    "unavailable": len(active),
+                    "error": _safe_error(exc),
+                    "rows": [],
+                }
+            preflight["task_environment_population"] = (
+                task_environment_population
+            )
+            try:
+                swebench_harness_receipt = dict(
+                    await asyncio.to_thread(preflight_harness.preflight, active)
+                )
+                swebench_harness_receipt["status"] = "passed"
+            except Exception as exc:
+                swebench_harness_receipt = {
+                    "status": "blocked",
+                    "error": _safe_error(exc),
+                    "selected_instances": len(active),
+                    "proxy_metric_used": False,
+                }
+            preflight["swebench_harness_receipt"] = swebench_harness_receipt
+            _write_json(paths["preflight"], preflight)
+            if not repository_population.get("all_ready"):
+                raise CompletionBenchmarkRoundError(
+                    "selected SWE-bench repository/base states are not all ready"
+                )
+            if not task_environment_population.get("all_ready"):
+                raise CompletionBenchmarkRoundError(
+                    "selected SkillFlow SWE-bench task environments are not all ready"
+                )
+            if swebench_harness_receipt.get("status") != "passed":
+                raise CompletionBenchmarkRoundError(
+                    "official SWE-bench Docker harness preflight did not pass"
+                )
+
         backend = LiveSmokeBackend.from_config(config, root, evaluation_only=True)
         judge_receipt = None
-        swebench_harness_receipt = None
         if dataset_key == "healthbench_professional":
             judge_receipt = _attach_healthbench_reference_judge(
                 backend,
@@ -2971,12 +3241,8 @@ async def run_completion_benchmark_round(
                 root,
             )
         elif dataset_key == "swe_bench":
-            swebench_harness_receipt = _attach_swebench_official_harness(
-                backend,
-                config,
-                root,
-                selected,
-            )
+            assert preflight_harness is not None
+            backend.swe_harness = preflight_harness
         director = _mapping(config["director"], "director")
         behavior_adapter = director.get("behavior_adapter_name")
         behavior_checkpoint = director.get("behavior_adapter_checkpoint")
@@ -3011,7 +3277,7 @@ async def run_completion_benchmark_round(
             root,
             dataset_key,
         )
-        preflight = {
+        preflight.update({
             **dict(adapter_preflight),
             "sglang_server_runtime": sglang_server_runtime,
             "evaluator_preflight": evaluator_preflight,
@@ -3022,13 +3288,17 @@ async def run_completion_benchmark_round(
             ),
             "healthbench_judge_receipt": judge_receipt,
             "swebench_harness_receipt": swebench_harness_receipt,
-        }
+        })
         manifest["runtime_resource"]["sglang_server_runtime"] = (
             sglang_server_runtime
         )
         _write_json(paths["manifest"], manifest)
         _write_json(paths["preflight"], preflight)
     except Exception as exc:
+        if preflight:
+            preflight.setdefault("status", "failed")
+            preflight.setdefault("error", _safe_error(exc))
+            _write_json(paths["preflight"], preflight)
         manifest.update(
             status="failed_runtime_preflight",
             error=_safe_error(exc),
@@ -3039,10 +3309,6 @@ async def run_completion_benchmark_round(
             f"{dataset_key} runtime preflight failed"
         ) from exc
 
-    stable_zero_sample_count = int(
-        bounded.get("stable_zero_sample_count", min(2, len(selected)))
-    )
-    active = selected[:stable_zero_sample_count] if canary_only else selected
     manifest["status"] = "direct_baseline"
     _write_json(paths["manifest"], manifest)
     direct = await _collect_direct(
@@ -3084,7 +3350,13 @@ async def run_completion_benchmark_round(
         )
         _atomic_jsonl(paths["failures"], failures)
 
-    rows = _paired_rows(active, direct, trajectories, dataset_key)
+    rows = _paired_rows(
+        active,
+        direct,
+        trajectories,
+        dataset_key,
+        collection_failures=failures,
+    )
     _atomic_jsonl(paths["paired"], rows)
     metric_name = str(_BENCHMARKS[dataset_key]["primary_metric"])
     wrong = [

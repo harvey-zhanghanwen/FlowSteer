@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from copy import deepcopy
 import importlib.util
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -763,6 +764,85 @@ def test_reports_aime_accuracy_and_healthbench_raw_score():
     )
     assert environment["strict_success"] == 1.0
 
+    swebench = _MODULE._aggregate(
+        [
+            {
+                "direct": {"available": True, "valid": True, "resolved": 0.0},
+                "agentgraph": {
+                    "available": True,
+                    "valid": True,
+                    "resolved": 1.0,
+                },
+            },
+            {
+                "direct": {"available": True, "valid": True, "resolved": 1.0},
+                "agentgraph": {
+                    "available": False,
+                    "valid": False,
+                    "resolved": 0.0,
+                },
+            },
+        ],
+        "agentgraph",
+        "swe_bench",
+    )
+    assert swebench["resolved"] == 1
+    assert swebench["strict_resolved"] == 0.5
+    assert swebench["official_resolved_rate"] is None
+    assert (
+        swebench["official_resolved_rate_status"]
+        == "incomplete_official_evaluator_coverage"
+    )
+
+
+def test_swebench_markdown_does_not_turn_infrastructure_gaps_into_zero_rate():
+    report = {
+        "dataset_key": "swe_bench",
+        "dataset": "SWE-bench Verified",
+        "project_split": "test",
+        "sample_count": 128,
+        "primary_metric": "resolved",
+        "metric_scope": "official_harness",
+        "protocol_equivalent_to_direct": True,
+        "skill_injection_performed": False,
+        "direct_local_baseline": {
+            "completed": 0,
+            "evaluator_valid": 0,
+            "resolved": 0,
+            "strict_resolved": 0.0,
+            "official_resolved_rate": None,
+        },
+        "agentgraph": {
+            "completed": 0,
+            "evaluator_valid": 0,
+            "resolved": 0,
+            "strict_resolved": 0.0,
+            "official_resolved_rate": None,
+        },
+        "agentgraph_minus_direct": {"resolved": 0.0},
+        "swebench_official_resolved_rate_delta": None,
+        "swebench_offline_receipts": {
+            "arms": {
+                "direct": {"tool_action_group_counts": {}},
+                "agentgraph": {"tool_action_group_counts": {}},
+            },
+            "wrong_demo_count": 0,
+        },
+        "explicit_finished_count": 0,
+        "max_rounds_count": 0,
+        "terminal_failure_count": 0,
+        "operational_failure_count": 128,
+        "agent_count_distribution": {},
+        "topology_distribution": {},
+        "failure_types": {"runtime_preflight": 128},
+    }
+
+    markdown = _MODULE._report_markdown(report)
+
+    assert markdown.count("N/A (incomplete official evaluator coverage)") == 2
+    assert "official Resolved Rate is not reportable" in markdown
+    assert "0.00%" not in markdown
+
 
 def test_aime_wrong_demo_uses_first_runtime_failure_receipt():
     diagnosis = _MODULE._aime_wrong_demo_diagnosis(
@@ -916,6 +996,48 @@ def test_qa_paired_rows_preserve_exact_match_and_token_f1():
     assert row["agentgraph"]["token_f1"] == 1.0
     assert row["delta_exact_match"] == 1.0
     assert row["delta_token_f1"] == 1.0
+
+
+def test_swebench_public_paired_row_redacts_evaluator_gold_patch():
+    sentinel = "PRIVATE_SWE_GOLD_PATCH_SENTINEL"
+    task = _MODULE.TaskRecord(
+        task_id="swe-bench:owner__repo-1",
+        question="Fix the public repository issue.",
+        ground_truth=sentinel,
+        split="test",
+        metadata={
+            "dataset_key": "swe_bench",
+            "skillflow": {
+                "extra": {
+                    "instance_id": "owner__repo-1",
+                    "repo": "owner/repo",
+                    "base_commit": "base-commit",
+                }
+            },
+        },
+    )
+    direct = {
+        task.task_id: {
+            "final_answer": "diff --git a/a.py b/a.py",
+            "evaluation": {"valid": True, "metrics": {"resolved": 0.0}},
+        }
+    }
+    trajectory = {
+        "task": task.to_dict(),
+        "final_answer": "diff --git a/a.py b/a.py",
+        "explicit_finish": True,
+        "termination_reason": "explicit_finish",
+        "evaluation": {"valid": True, "metrics": {"resolved": 0.0}},
+        "turns": [],
+    }
+
+    row = _MODULE._paired_rows(
+        (task,), direct, {task.task_id: trajectory}, "swe_bench"
+    )[0]
+
+    assert row["ground_truth"] is None
+    assert row["ground_truth_role"] == "evaluator_only_redacted"
+    assert sentinel not in json.dumps(row, sort_keys=True)
 
 
 def test_trivia_failure_taxonomy_uses_evaluator_and_public_runtime_receipts():

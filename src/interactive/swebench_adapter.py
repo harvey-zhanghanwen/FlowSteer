@@ -14,6 +14,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
 import sys
 from typing import Any, Mapping, Sequence
 
@@ -45,6 +46,50 @@ _EXPECTED_SPLIT_BY_SOURCE = {
 
 class SWEbenchHarnessUnavailable(RuntimeError):
     """The official SWE-bench harness cannot produce a resolved-rate result."""
+
+
+class SWEbenchTaskEnvironmentUnavailable(RuntimeError):
+    """SkillFlow's task-specific SWE-bench execution environment is unavailable."""
+
+
+@dataclass(frozen=True, slots=True)
+class SkillFlowSWEbenchTaskEnvironment:
+    """Resolved SkillFlow Conda environment for one SWE-bench instance.
+
+    SkillFlow's deployed ``_handle_bash`` enters the environment returned by
+    ``_env_python(repo, version)`` through ``conda run``.  This immutable
+    binding lets the unified repository Tool adapter use that same execution
+    boundary without importing SkillFlow's monolithic episode object.
+    """
+
+    instance_id: str
+    repo: str
+    version: str
+    environment_name: str
+    python_executable: str
+    conda_executable: str
+
+    @property
+    def command_prefix(self) -> tuple[str, ...]:
+        return (
+            self.conda_executable,
+            "run",
+            "-n",
+            self.environment_name,
+            "--no-capture-output",
+        )
+
+    def receipt(self) -> Mapping[str, Any]:
+        return {
+            "source": "SkillFlow training.swe_bench_eval._env_python",
+            "instance_id": self.instance_id,
+            "repo": self.repo,
+            "version": self.version,
+            "environment_name": self.environment_name,
+            "python_executable": self.python_executable,
+            "conda_executable": self.conda_executable,
+            "task_environment_ready": True,
+        }
 
 
 def _load_skillflow_evaluator(path: Path) -> Any:
@@ -333,6 +378,124 @@ class OfficialSWEbenchHarness:
             "proxy_metric_used": False,
         }
 
+    @staticmethod
+    def _task_environment_from_module(
+        module: Any,
+        record: TaskRecord | Mapping[str, Any],
+    ) -> SkillFlowSWEbenchTaskEnvironment:
+        """Resolve one task environment through SkillFlow's actual helpers."""
+
+        instance_id = _instance_id(record)
+        verified_cache = getattr(module, "_verified_cache", None)
+        if not isinstance(verified_cache, Mapping):
+            raise SWEbenchTaskEnvironmentUnavailable(
+                "SkillFlow evaluator has no loaded SWE-bench task cache"
+            )
+        row = verified_cache.get(instance_id)
+        if not isinstance(row, Mapping):
+            raise SWEbenchTaskEnvironmentUnavailable(
+                "selected SWE-bench instance is absent from SkillFlow's task cache"
+            )
+        repo = row.get("repo")
+        version = row.get("version")
+        if not isinstance(repo, str) or not repo.strip():
+            raise SWEbenchTaskEnvironmentUnavailable(
+                "SkillFlow task row has no repository identity"
+            )
+        if not isinstance(version, str):
+            raise SWEbenchTaskEnvironmentUnavailable(
+                "SkillFlow task row has no repository version"
+            )
+        env_name_fn = getattr(module, "_env_name", None)
+        env_python_fn = getattr(module, "_env_python", None)
+        if not callable(env_name_fn) or not callable(env_python_fn):
+            raise SWEbenchTaskEnvironmentUnavailable(
+                "SkillFlow task environment helpers are unavailable"
+            )
+        environment_name = env_name_fn(repo, version)
+        python_executable = env_python_fn(repo, version)
+        if (
+            not isinstance(environment_name, str)
+            or not environment_name.strip()
+            or not isinstance(python_executable, str)
+            or not Path(python_executable).is_file()
+            or not os.access(python_executable, os.X_OK)
+        ):
+            raise SWEbenchTaskEnvironmentUnavailable(
+                "SkillFlow task-specific SWE-bench Python environment is unavailable"
+            )
+
+        configured_conda = str(
+            getattr(module, "CONDA", "")
+            or os.environ.get("CONDA_EXE", "")
+            or "conda"
+        ).strip()
+        if Path(configured_conda).is_absolute():
+            conda_executable = (
+                str(Path(configured_conda).expanduser().resolve())
+                if Path(configured_conda).expanduser().is_file()
+                and os.access(Path(configured_conda).expanduser(), os.X_OK)
+                else None
+            )
+        else:
+            conda_executable = shutil.which(configured_conda)
+        if not conda_executable:
+            raise SWEbenchTaskEnvironmentUnavailable(
+                "SkillFlow Conda executable is unavailable"
+            )
+        return SkillFlowSWEbenchTaskEnvironment(
+            instance_id=instance_id,
+            repo=repo.strip(),
+            version=version.strip(),
+            environment_name=environment_name.strip(),
+            python_executable=str(Path(python_executable).expanduser().resolve()),
+            conda_executable=str(Path(conda_executable).expanduser().resolve()),
+        )
+
+    def task_environment(
+        self,
+        record: TaskRecord | Mapping[str, Any],
+    ) -> SkillFlowSWEbenchTaskEnvironment:
+        """Return the task-specific SkillFlow environment or fail closed."""
+
+        _require_source_split(record, self.dataset_source)
+        module = self._configured_module((record,))
+        return self._task_environment_from_module(module, record)
+
+    def preflight_task_environments(
+        self,
+        records: Sequence[TaskRecord | Mapping[str, Any]],
+    ) -> Mapping[str, Any]:
+        """Resolve every selected task environment without running a model."""
+
+        module = self._configured_module(records)
+        rows: list[dict[str, Any]] = []
+        for record in records:
+            instance_id = _instance_id(record)
+            try:
+                binding = self._task_environment_from_module(module, record)
+            except Exception as exc:
+                rows.append(
+                    {
+                        "instance_id": instance_id,
+                        "status": "unavailable",
+                        "task_environment_ready": False,
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                    }
+                )
+            else:
+                rows.append({"status": "ready", **dict(binding.receipt())})
+        ready = sum(row["status"] == "ready" for row in rows)
+        return {
+            "source": "SkillFlow training.swe_bench_eval._env_python",
+            "total": len(rows),
+            "ready": ready,
+            "unavailable": len(rows) - ready,
+            "all_ready": bool(rows) and ready == len(rows),
+            "rows": rows,
+        }
+
     async def __call__(
         self,
         record: TaskRecord | Mapping[str, Any],
@@ -361,8 +524,10 @@ __all__ = [
     "DEFAULT_SWEBENCH_HARNESS",
     "DEFAULT_SWEBENCH_VERIFIED",
     "OfficialSWEbenchHarness",
+    "SkillFlowSWEbenchTaskEnvironment",
     "SWEBENCH_DATASET_SOURCE_REGULAR_DEV",
     "SWEBENCH_DATASET_SOURCE_VERIFIED",
     "SWEBENCH_EVALUATION_SOURCES",
     "SWEbenchHarnessUnavailable",
+    "SWEbenchTaskEnvironmentUnavailable",
 ]

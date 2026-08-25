@@ -1642,10 +1642,45 @@ async def _evaluate_swebench(
         callback_result = swe_harness(record, prediction)
         result = await callback_result if inspect.isawaitable(callback_result) else callback_result
     except Exception as exc:
+        details: dict[str, Any] = {
+            "error_type": type(exc).__name__,
+            "error": str(exc),
+        }
+        diagnostic = getattr(exc, "diagnostic", None)
+        if diagnostic is not None:
+            if isinstance(diagnostic, Mapping):
+                diagnostic_value = diagnostic.get
+            else:
+                diagnostic_value = lambda name, default=None: getattr(  # noqa: E731
+                    diagnostic, name, default
+                )
+
+            for field_name in ("classification", "phase"):
+                value = diagnostic_value(field_name)
+                if isinstance(value, str) and value:
+                    details[field_name] = value
+            for field_name in (
+                "retryable",
+                "test_output_present",
+                "report_present",
+            ):
+                value = diagnostic_value(field_name)
+                if isinstance(value, bool):
+                    details[field_name] = value
+            container_exit_code = diagnostic_value("container_exit_code")
+            if isinstance(container_exit_code, int) and not isinstance(
+                container_exit_code, bool
+            ):
+                details["container_exit_code"] = container_exit_code
+            oom_killed = diagnostic_value(
+                "oom_killed", diagnostic_value("container_oom_killed")
+            )
+            if isinstance(oom_killed, bool):
+                details["oom_killed"] = oom_killed
         return _invalid(
             "swebench_harness_failed",
             evaluator_version=SWEBENCH_EVALUATOR_VERSION,
-            details={"error_type": type(exc).__name__, "error": str(exc)},
+            details=details,
         )
 
     details: dict[str, Any]

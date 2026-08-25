@@ -33,7 +33,13 @@ from src.interactive.config_loader import (
 )
 from src.interactive.computation_tools import create_aime_computation_registry
 from src.interactive.coding_execution import CodingExecutionAdapter
-from src.interactive.coding_tools import create_swebench_repository_registry
+from src.interactive.coding_tools import (
+    SWEBENCH_TOOL_PROFILE_COMPATIBILITY,
+    SWEBENCH_TOOL_PROFILE_SKILLFLOW_TRAINING,
+    SWEBENCH_TOOL_PROFILES,
+    create_swebench_repository_registration,
+    create_swebench_repository_registry,
+)
 from src.interactive.director import (
     AgentGraphOrchestrator,
     DIRECTOR_MODEL_ADMISSIBLE_ACTION_MASK_PROFILE,
@@ -127,6 +133,7 @@ from src.interactive.task_evaluator import (
     TRIVIAQA_ANSWER_EVALUATOR_VERSION,
     evaluate_task,
 )
+from src.interactive.tool_runtime import ToolRegistry
 from src.interactive.versioning import VersionBundle
 
 
@@ -1136,6 +1143,49 @@ def _swe_coding_runtime_settings(
             raise ConfigurationError(
                 f"swe_coding_runtime.{field_name} must be an integer >= 1"
             )
+    tool_profile = section.get(
+        "tool_profile", SWEBENCH_TOOL_PROFILE_COMPATIBILITY
+    )
+    if tool_profile not in SWEBENCH_TOOL_PROFILES:
+        raise ConfigurationError(
+            "swe_coding_runtime.tool_profile is unsupported"
+        )
+    completion_policy = section.get(
+        "completion_policy", CodingExecutionAdapter.TESTED_DIFF_COMPLETION
+    )
+    if completion_policy not in {
+        CodingExecutionAdapter.TESTED_DIFF_COMPLETION,
+        CodingExecutionAdapter.WORKSPACE_DIFF_COMPLETION,
+    }:
+        raise ConfigurationError(
+            "swe_coding_runtime.completion_policy is unsupported"
+        )
+    require_task_environment = section.get("require_task_environment", False)
+    if type(require_task_environment) is not bool:
+        raise ConfigurationError(
+            "swe_coding_runtime.require_task_environment must be boolean"
+        )
+    if (
+        tool_profile == SWEBENCH_TOOL_PROFILE_SKILLFLOW_TRAINING
+        and require_task_environment is not True
+    ):
+        raise ConfigurationError(
+            "the SkillFlow SWE-bench Tool profile requires its task environment"
+        )
+    task_max_turns = section.get(
+        "task_max_turns", section["max_turns_per_agent_call"]
+    )
+    task_max_tool_calls = section.get(
+        "task_max_tool_calls", section["max_tool_calls_per_agent_call"]
+    )
+    for field_name, value in (
+        ("task_max_turns", task_max_turns),
+        ("task_max_tool_calls", task_max_tool_calls),
+    ):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ConfigurationError(
+                f"swe_coding_runtime.{field_name} must be an integer >= 1"
+            )
     for field_name in (
         "max_test_timeout_seconds",
         "setup_timeout_seconds",
@@ -1156,6 +1206,11 @@ def _swe_coding_runtime_settings(
         "worktree_root": section["worktree_root"].strip(),
         "max_turns": int(section["max_turns_per_agent_call"]),
         "max_tool_calls": int(section["max_tool_calls_per_agent_call"]),
+        "tool_profile": str(tool_profile),
+        "completion_policy": str(completion_policy),
+        "require_task_environment": require_task_environment,
+        "task_max_turns": int(task_max_turns),
+        "task_max_tool_calls": int(task_max_tool_calls),
         "max_test_timeout_seconds": float(
             section["max_test_timeout_seconds"]
         ),
@@ -2126,19 +2181,107 @@ class LiveSmokeBackend:
                 ),
             )
             try:
-                tool_registry = create_swebench_repository_registry(
-                    prepared.repo_root,
-                    dataset_scope=(source_key,),
-                    timeout_seconds=float(
-                        swe_coding_settings["max_test_timeout_seconds"]
-                    ),
+                compatibility_runtime = (
+                    swe_coding_settings["tool_profile"]
+                    == SWEBENCH_TOOL_PROFILE_COMPATIBILITY
+                    and swe_coding_settings["completion_policy"]
+                    == CodingExecutionAdapter.TESTED_DIFF_COMPLETION
+                    and swe_coding_settings["task_max_turns"]
+                    == swe_coding_settings["max_turns"]
+                    and swe_coding_settings["task_max_tool_calls"]
+                    == swe_coding_settings["max_tool_calls"]
                 )
+                workspace_diff = None
+                repository_runtime_receipt = None
+                if compatibility_runtime:
+                    # Preserve frozen legacy conditions and their monkeypatch
+                    # seam exactly; new SWE-bench v1 conditions use the
+                    # explicit SkillFlow profile below.
+                    tool_registry = create_swebench_repository_registry(
+                        prepared.repo_root,
+                        dataset_scope=(source_key,),
+                        timeout_seconds=float(
+                            swe_coding_settings["max_test_timeout_seconds"]
+                        ),
+                    )
+                else:
+                    task_environment = None
+                    if swe_coding_settings["require_task_environment"]:
+                        environment_resolver = getattr(
+                            self.swe_harness,
+                            "task_environment",
+                            None,
+                        )
+                        if not callable(environment_resolver):
+                            raise ConfigurationError(
+                                "strict SWE-bench runtime has no SkillFlow task "
+                                "environment resolver"
+                            )
+                        task_environment = environment_resolver(task)
+                    repository_state = {
+                        "instance_id": prepared.identity.instance_id,
+                        "repo": prepared.identity.repo,
+                        "expected_base_commit": prepared.identity.base_commit,
+                        "observed_pinned_commit": prepared.pinned_commit,
+                        "workspace": str(prepared.repo_root),
+                        "workspace_isolation": "task_scoped_detached_worktree",
+                        "base_state_verified": (
+                            prepared.pinned_commit == prepared.identity.base_commit
+                        ),
+                    }
+                    registration = create_swebench_repository_registration(
+                        prepared.repo_root,
+                        dataset_scope=(source_key,),
+                        timeout_seconds=float(
+                            swe_coding_settings["max_test_timeout_seconds"]
+                        ),
+                        action_profile=str(
+                            swe_coding_settings["tool_profile"]
+                        ),
+                        task_command_prefix=(
+                            task_environment.command_prefix
+                            if task_environment is not None
+                            else ()
+                        ),
+                        task_environment_receipt=(
+                            task_environment.receipt()
+                            if task_environment is not None
+                            else None
+                        ),
+                        require_task_environment=bool(
+                            swe_coding_settings["require_task_environment"]
+                        ),
+                        repository_state_receipt=repository_state,
+                    )
+                    tool_registry = ToolRegistry((registration,))
+                    materializer = getattr(
+                        registration.backend,
+                        "materialize_workspace_diff",
+                        None,
+                    )
+                    if not callable(materializer):
+                        raise ConfigurationError(
+                            "SWE-bench repository backend has no workspace diff materializer"
+                        )
+                    workspace_diff = materializer
+                    repository_runtime_receipt = lambda: registration.backend.repository_runtime_receipt
                 adapter = CodingExecutionAdapter(
                     gateway=self.runtime.gateway,
                     tool_registry=tool_registry,
                     max_turns=int(swe_coding_settings["max_turns"]),
                     max_tool_calls=int(swe_coding_settings["max_tool_calls"]),
                     max_action_tokens=tool_action_tokens,
+                    completion_policy=str(
+                        swe_coding_settings["completion_policy"]
+                    ),
+                    workspace_diff=workspace_diff,
+                    repository_runtime_receipt=repository_runtime_receipt,
+                    task_max_turns=int(
+                        swe_coding_settings["task_max_turns"]
+                    ),
+                    task_max_tool_calls=int(
+                        swe_coding_settings["task_max_tool_calls"]
+                    ),
                 )
                 runtime = AgentRuntime(
                     self.registry,

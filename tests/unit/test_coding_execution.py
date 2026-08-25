@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 import sys
@@ -11,9 +12,13 @@ from src.interactive.agent_runtime import AgentRequest, AgentResponse, Execution
 from src.interactive.coding_execution import CodingExecutionAdapter
 from src.interactive.coding_tools import (
     SWEBENCH_REPOSITORY_TOOL_ID,
+    SWEBENCH_TOOL_PROFILE_SKILLFLOW_TRAINING,
+    create_swebench_repository_registration,
     create_swebench_repository_registry,
 )
 from src.interactive.model_registry import ModelSpec, ProviderSpec
+from src.interactive.react_execution import ReactExecutionError
+from src.interactive.tool_runtime import ToolRegistry
 
 
 def tool(name: str, arguments: object) -> str:
@@ -69,7 +74,201 @@ class SequenceGateway:
         return AgentResponse(self.outputs.pop(0))
 
 
+class ConcurrentCompleteGateway:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.active = 0
+        self.max_active = 0
+
+    async def generate(self, request: AgentRequest) -> AgentResponse:
+        del request
+        self.calls += 1
+        self.active += 1
+        self.max_active = max(self.max_active, self.active)
+        try:
+            await asyncio.sleep(0.01)
+            return AgentResponse(complete("done"))
+        finally:
+            self.active -= 1
+
+
 class CodingExecutionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_parallel_graph_nodes_share_serial_task_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "bug.py").write_text("VALUE = 1\n", encoding="utf-8")
+            registration = create_swebench_repository_registration(
+                root,
+                action_profile=SWEBENCH_TOOL_PROFILE_SKILLFLOW_TRAINING,
+                task_command_prefix=("/usr/bin/env",),
+                task_environment_receipt={"task_environment_ready": True},
+                require_task_environment=True,
+            )
+            gateway = ConcurrentCompleteGateway()
+            adapter = CodingExecutionAdapter(
+                gateway=gateway,
+                tool_registry=ToolRegistry((registration,)),
+                max_turns=1,
+                max_tool_calls=1,
+                completion_policy=CodingExecutionAdapter.WORKSPACE_DIFF_COMPLETION,
+                workspace_diff=lambda: "diff --git a/bug.py b/bug.py\n",
+                task_max_turns=1,
+                task_max_tool_calls=1,
+            )
+
+            results = await asyncio.gather(
+                adapter.execute(coding_request()),
+                adapter.execute(coding_request()),
+                return_exceptions=True,
+            )
+
+            self.assertEqual(1, gateway.calls)
+            self.assertEqual(1, gateway.max_active)
+            self.assertEqual(
+                1,
+                sum(isinstance(value, AgentResponse) for value in results),
+            )
+            self.assertEqual(
+                1,
+                sum(isinstance(value, ReactExecutionError) for value in results),
+            )
+
+    async def test_skillflow_profile_submits_materialized_workspace_diff(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "bug.py").write_text(
+                "def add(a, b):\n    return a - b\n",
+                encoding="utf-8",
+            )
+            registration = create_swebench_repository_registration(
+                root,
+                action_profile=SWEBENCH_TOOL_PROFILE_SKILLFLOW_TRAINING,
+                task_command_prefix=("/usr/bin/env",),
+                task_environment_receipt={"task_environment_ready": True},
+                require_task_environment=True,
+            )
+            registry = ToolRegistry((registration,))
+            gateway = SequenceGateway(
+                [
+                    tool(
+                        "str_replace_editor",
+                        {
+                            "command": "str_replace",
+                            "path": "bug.py",
+                            "old_str": "return a - b",
+                            "new_str": "return a + b",
+                        },
+                    ),
+                    complete("model prose is not the submitted patch"),
+                ]
+            )
+            adapter = CodingExecutionAdapter(
+                gateway=gateway,
+                tool_registry=registry,
+                max_turns=4,
+                max_tool_calls=3,
+                completion_policy=CodingExecutionAdapter.WORKSPACE_DIFF_COMPLETION,
+                workspace_diff=registration.backend.materialize_workspace_diff,
+                repository_runtime_receipt=lambda: {
+                    "repository": {"observed_pinned_commit": "fixture-base"},
+                    "task_environment": {"task_environment_ready": True},
+                },
+                task_max_turns=4,
+                task_max_tool_calls=3,
+            )
+
+            response = await adapter.execute(coding_request())
+
+            self.assertIn("+    return a + b", response.text)
+            self.assertEqual(
+                ["str_replace_editor"],
+                [
+                    receipt["request"]["action"]
+                    for receipt in response.metadata["tool_receipts"]
+                ],
+            )
+            self.assertEqual(
+                {
+                    "max_turns": 4,
+                    "turns_used": 2,
+                    "max_tool_calls": 3,
+                    "tool_calls_used": 1,
+                },
+                response.metadata["task_global_budget"],
+            )
+            self.assertEqual(
+                "fixture-base",
+                response.metadata["repository_runtime"]["repository"][
+                    "observed_pinned_commit"
+                ],
+            )
+
+    async def test_task_global_turn_budget_survives_new_agent_call(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "bug.py").write_text(
+                "def add(a, b):\n    return a - b\n",
+                encoding="utf-8",
+            )
+            registration = create_swebench_repository_registration(
+                root,
+                action_profile=SWEBENCH_TOOL_PROFILE_SKILLFLOW_TRAINING,
+                task_command_prefix=("/usr/bin/env",),
+                task_environment_receipt={"task_environment_ready": True},
+                require_task_environment=True,
+            )
+            registry = ToolRegistry((registration,))
+            gateway = SequenceGateway(
+                [
+                    tool(
+                        "str_replace_editor",
+                        {
+                            "command": "str_replace",
+                            "path": "bug.py",
+                            "old_str": "return a - b",
+                            "new_str": "return a + b",
+                        },
+                    ),
+                    complete("done"),
+                ]
+            )
+            adapter = CodingExecutionAdapter(
+                gateway=gateway,
+                tool_registry=registry,
+                max_turns=4,
+                max_tool_calls=3,
+                completion_policy=CodingExecutionAdapter.WORKSPACE_DIFF_COMPLETION,
+                workspace_diff=registration.backend.materialize_workspace_diff,
+                task_max_turns=2,
+                task_max_tool_calls=3,
+            )
+
+            await adapter.execute(coding_request())
+            second = coding_request()
+            second = AgentRequest(
+                request_id="run:2:repair:single",
+                run_id=second.run_id,
+                graph_revision=2,
+                problem=second.problem,
+                agent=AgentNode(
+                    "repair",
+                    "m",
+                    "repair the current repository state",
+                    allowed_tools=(SWEBENCH_REPOSITORY_TOOL_ID,),
+                    execution_mode="coding",
+                    artifact_type="patch_candidate",
+                    completion_condition="return the workspace patch",
+                ),
+                model=second.model,
+                provider=second.provider,
+                phase=second.phase,
+            )
+            with self.assertRaisesRegex(
+                ReactExecutionError,
+                "task-global turn budget is exhausted",
+            ):
+                await adapter.execute(second)
+
     async def test_edit_test_diff_then_complete_patch(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -9,6 +10,8 @@ import unittest
 from src.interactive.coding_tools import (
     RepositoryToolBackend,
     SWEBENCH_REPOSITORY_TOOL_ID,
+    SWEBENCH_TOOL_PROFILE_SKILLFLOW_TRAINING,
+    create_swebench_repository_registration,
     create_swebench_repository_registry,
 )
 from src.interactive.tool_runtime import ToolRequest
@@ -67,6 +70,29 @@ class RepositoryToolBackendTests(unittest.TestCase):
         self.assertEqual("def add(left, right):", viewed["lines"][0]["text"])
         outside = self.invoke("view_file", path="../outside.py")
         self.assertFalse(outside["ok"])
+
+    def test_listed_hidden_repository_path_can_be_viewed(self) -> None:
+        hidden = self.root / ".pyinstaller" / "hooks"
+        hidden.mkdir(parents=True)
+        (hidden / "hook-skyfield.py").write_text(
+            "hidden_value = 1\n",
+            encoding="utf-8",
+        )
+
+        listing = self.invoke("list_files")
+        self.assertIn(
+            ".pyinstaller/hooks/hook-skyfield.py",
+            listing["files"],
+        )
+        viewed = self.invoke(
+            "view_file",
+            path=".pyinstaller/hooks/hook-skyfield.py",
+        )
+        self.assertTrue(viewed["ok"])
+        self.assertEqual(
+            ".pyinstaller/hooks/hook-skyfield.py",
+            viewed["path"],
+        )
 
     def test_explicit_file_pattern_searches_tests_docs_and_non_python_files(
         self,
@@ -254,8 +280,115 @@ class RepositoryToolBackendTests(unittest.TestCase):
         passed = self.invoke("run_tests", command=command)
         self.assertTrue(passed["passed"], passed)
 
+    def test_strict_commands_use_supplied_task_environment_prefix(self) -> None:
+        receipt = {"environment_name": "fixture", "task_environment_ready": True}
+        backend = RepositoryToolBackend(
+            self.root,
+            task_command_prefix=("/usr/bin/env",),
+            task_environment_receipt=receipt,
+            require_task_environment=True,
+        )
+        bash = backend.invoke(
+            ToolRequest("bash", {"command": "printf task-env"})
+        ).value
+        tested = backend.invoke(
+            ToolRequest(
+                "run_tests",
+                {"test_cmd": f'{sys.executable} -c "print(\'test-env\')"'},
+            )
+        ).value
+        self.assertEqual(0, bash["returncode"])
+        self.assertIn("task-env", bash["output"])
+        self.assertTrue(tested["passed"])
+        self.assertEqual(receipt, bash["task_environment"])
+        self.assertEqual(receipt, tested["task_environment"])
+
+    def test_required_task_environment_fails_closed_without_prefix(self) -> None:
+        with self.assertRaisesRegex(ValueError, "task-specific"):
+            RepositoryToolBackend(
+                self.root,
+                require_task_environment=True,
+            )
+
+    def test_workspace_diff_includes_untracked_non_test_file(self) -> None:
+        subprocess.run(
+            ["git", "init", "-q"], cwd=self.root, check=True, capture_output=True
+        )
+        subprocess.run(
+            ["git", "add", "."], cwd=self.root, check=True, capture_output=True
+        )
+        subprocess.run(
+            ["git", "-c", "user.email=fixture@example.invalid", "-c", "user.name=Fixture", "commit", "-q", "-m", "base"],
+            cwd=self.root,
+            check=True,
+            capture_output=True,
+        )
+        (self.root / "pkg" / "generated.py").write_text(
+            "GENERATED = True\n", encoding="utf-8"
+        )
+        (self.root / "tests" / "test_generated.py").write_text(
+            "assert True\n", encoding="utf-8"
+        )
+
+        patch_text = self.backend.materialize_workspace_diff()
+
+        self.assertIn("pkg/generated.py", patch_text)
+        self.assertIn("+GENERATED = True", patch_text)
+        self.assertNotIn("test_generated.py", patch_text)
+
 
 class RepositoryToolRegistryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_skillflow_training_profile_uses_deployed_action_schemas(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "module.py").write_text("VALUE = 1\n", encoding="utf-8")
+            registration = create_swebench_repository_registration(
+                root,
+                action_profile=SWEBENCH_TOOL_PROFILE_SKILLFLOW_TRAINING,
+                task_command_prefix=("/usr/bin/env",),
+                task_environment_receipt={"task_environment_ready": True},
+                require_task_environment=True,
+            )
+            capability = registration.capability
+            assert capability is not None
+            self.assertEqual(
+                (
+                    "bash",
+                    "list_files",
+                    "run_tests",
+                    "search_code",
+                    "str_replace_editor",
+                    "view_file",
+                ),
+                capability.action_names,
+            )
+            self.assertEqual(
+                ["test_cmd"], capability.action_schemas["run_tests"]["required"]
+            )
+            self.assertEqual(
+                ["command"], capability.action_schemas["bash"]["required"]
+            )
+            self.assertIn(
+                "create",
+                capability.action_schemas["str_replace_editor"]["properties"][
+                    "command"
+                ]["enum"],
+            )
+            self.assertNotIn("diff", capability.action_schemas)
+            self.assertNotIn("apply_patch", capability.action_schemas)
+
+    async def test_skillflow_training_profile_requires_task_environment(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(ValueError, "task-specific"):
+                create_swebench_repository_registration(
+                    Path(directory),
+                    action_profile=SWEBENCH_TOOL_PROFILE_SKILLFLOW_TRAINING,
+                )
+
     async def test_registered_backend_runs_through_async_tool_registry(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

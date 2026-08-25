@@ -12,11 +12,11 @@ The ``apply_patch`` action delegates to the local official Codex CLI's
 ``--codex-run-as-apply-patch`` entry point instead of reimplementing Codex's
 patch grammar or hunk matcher.
 
-SkillFlow's worktree setup and ``_run_tests_in_swe_env`` depend on its private
-Verified-dataset cache, repository store, environment resolver, and monolithic
-episode state.  They are intentionally not reproduced here.  Callers must pass
-an already prepared repository root; official patch evaluation remains in
-``swebench_adapter.py``.
+SkillFlow's worktree setup and task-environment lookup remain in the thin
+``swe_worktree.py`` and ``swebench_adapter.py`` boundaries.  Callers pass an
+already prepared repository root plus the command prefix resolved through
+SkillFlow's ``_env_python(repo, version)`` contract.  Official patch evaluation
+remains in ``swebench_adapter.py``.
 """
 
 from __future__ import annotations
@@ -43,6 +43,17 @@ from .tool_runtime import (
 
 SWEBENCH_REPOSITORY_TOOL_ID = "swebench_repository"
 SWEBENCH_REPOSITORY_TOOL_VERSION = "skillflow.repository-tools.v2"
+SWEBENCH_SKILLFLOW_TRAINING_TOOL_VERSION = (
+    "skillflow.training.repository-tools.v1+flowsteer.workspace-diff.v1"
+)
+SWEBENCH_TOOL_PROFILE_COMPATIBILITY = "compatibility_v2"
+SWEBENCH_TOOL_PROFILE_SKILLFLOW_TRAINING = "skillflow_training_v1"
+SWEBENCH_TOOL_PROFILES = frozenset(
+    {
+        SWEBENCH_TOOL_PROFILE_COMPATIBILITY,
+        SWEBENCH_TOOL_PROFILE_SKILLFLOW_TRAINING,
+    }
+)
 CODEX_APPLY_PATCH_EXECUTABLE = "/home/test/.local/bin/codex"
 _SOURCE_SUFFIXES = frozenset({".py"})
 _IGNORED_SOURCE_DIRECTORIES = frozenset(
@@ -65,6 +76,10 @@ class RepositoryToolBackend:
         max_view_lines: int = 140,
         max_search_matches: int = 50,
         max_test_timeout_seconds: float = 60.0,
+        task_command_prefix: Sequence[str] = (),
+        task_environment_receipt: Mapping[str, object] | None = None,
+        require_task_environment: bool = False,
+        repository_state_receipt: Mapping[str, object] | None = None,
     ) -> None:
         root = Path(repo_root).expanduser().resolve()
         if not root.is_dir():
@@ -73,10 +88,21 @@ class RepositoryToolBackend:
             raise ValueError("view and search limits must be positive")
         if max_test_timeout_seconds <= 0:
             raise ValueError("test timeout must be positive")
+        prefix = tuple(task_command_prefix)
+        if any(not isinstance(item, str) or not item for item in prefix):
+            raise ValueError("task command prefix must contain non-empty text")
+        if type(require_task_environment) is not bool:
+            raise TypeError("require_task_environment must be boolean")
+        if require_task_environment and not prefix:
+            raise ValueError("task-specific SWE-bench environment is required")
         self.repo_root = root
         self.max_view_lines = int(max_view_lines)
         self.max_search_matches = int(max_search_matches)
         self.max_test_timeout_seconds = float(max_test_timeout_seconds)
+        self._task_command_prefix = prefix
+        self._task_environment_receipt = dict(task_environment_receipt or {})
+        self._require_task_environment = require_task_environment
+        self._repository_state_receipt = dict(repository_state_receipt or {})
         # ``None`` records that a path did not exist before the first edit.
         # This lets the workspace diff represent SkillFlow ``create`` actions.
         self._original_contents: dict[str, str | None] = {}
@@ -84,6 +110,21 @@ class RepositoryToolBackend:
         # path and consumes it on ``undo_edit``.
         self._edit_history: dict[str, str] = {}
         self._lock = threading.RLock()
+
+    @property
+    def repository_runtime_receipt(self) -> Mapping[str, object]:
+        """Return the task repository/environment identity persisted in traces."""
+
+        return {
+            "repository": dict(self._repository_state_receipt),
+            "task_environment": dict(self._task_environment_receipt),
+            "task_environment_required": self._require_task_environment,
+        }
+
+    def _shell_invocation(self, command: str) -> tuple[str | list[str], bool]:
+        if self._task_command_prefix:
+            return [*self._task_command_prefix, "bash", "-lc", command], False
+        return command, True
 
     def invoke(self, request: ToolRequest) -> ToolResult:
         handlers = {
@@ -109,7 +150,15 @@ class RepositoryToolBackend:
             raise ValueError("path is required")
         if Path(path).is_absolute():
             raise ValueError("path must be repository-relative")
-        candidate = (self.repo_root / path.lstrip("./")).resolve()
+        # ``str.lstrip('./')`` removes every leading dot character, not one
+        # optional ``./`` path prefix.  It therefore changed legitimate paths
+        # such as ``.pyinstaller/hooks/...`` into a different repository path.
+        # SkillFlow returns those relative names from list_files, so preserve
+        # them and remove only explicit current-directory segments.
+        normalized_path = path
+        while normalized_path.startswith("./"):
+            normalized_path = normalized_path[2:]
+        candidate = (self.repo_root / normalized_path).resolve()
         try:
             relative = candidate.relative_to(self.repo_root).as_posix()
         except ValueError as exc:
@@ -594,10 +643,11 @@ class RepositoryToolBackend:
             for marker in ("rm -rf /", "mkfs", "dd if=", "> /dev/")
         ):
             return _error("bash", "command rejected by the SkillFlow bash contract")
+        invocation, use_shell = self._shell_invocation(command)
         try:
             completed = subprocess.run(
-                command,
-                shell=True,
+                invocation,
+                shell=use_shell,
                 cwd=self.repo_root,
                 capture_output=True,
                 text=True,
@@ -623,6 +673,7 @@ class RepositoryToolBackend:
                     "stdout": stdout[-5000:],
                     "stderr": stderr[-5000:],
                     "output": self._truncate_bash_output(stdout + stderr),
+                    "task_environment": dict(self._task_environment_receipt),
                 }
             )
         except OSError as exc:
@@ -638,6 +689,7 @@ class RepositoryToolBackend:
                 "stdout": completed.stdout[-5000:],
                 "stderr": completed.stderr[-5000:],
                 "output": output,
+                "task_environment": dict(self._task_environment_receipt),
             }
         )
 
@@ -733,6 +785,84 @@ class RepositoryToolBackend:
         )
 
     def _workspace_diff(self) -> str:
+        """Materialize the patch from the current repository state.
+
+        DIRECT_REUSE: SkillFlow
+        ``training/environment.py::_generate_workspace_diff`` reads the
+        detached worktree with ``git diff`` and excludes test files.  The
+        tracked-worktree path is authoritative because a legitimate
+        repository command may change a file without going through one of the
+        editor helpers below.  The dependency-light difflib path is retained
+        only for synthetic unit-test directories that are not Git worktrees.
+        """
+
+        try:
+            completed = subprocess.run(
+                [
+                    "git",
+                    "diff",
+                    "--",
+                    ".",
+                    ":(exclude)tests/",
+                    ":(exclude)*/tests/",
+                    ":(exclude)test_*",
+                    ":(exclude)*/test_*",
+                ],
+                cwd=self.repo_root,
+                capture_output=True,
+                text=True,
+                timeout=10,
+                env={**os.environ, "CUDA_VISIBLE_DEVICES": ""},
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            completed = None
+        if completed is not None and completed.returncode == 0:
+            diff = completed.stdout
+            # ``git diff`` omits untracked files.  SkillFlow's deployed
+            # ``str_replace_editor.create`` and ``bash`` actions can
+            # legitimately create a source file.  Preserve the upstream test
+            # exclusions and append each non-test untracked file as a normal
+            # ``/dev/null`` unified diff so the final repository patch is
+            # complete rather than silently dropping that artifact.
+            try:
+                untracked = subprocess.run(
+                    ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+                    cwd=self.repo_root,
+                    capture_output=True,
+                    timeout=10,
+                    env={**os.environ, "CUDA_VISIBLE_DEVICES": ""},
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                untracked = None
+            if untracked is not None and untracked.returncode == 0:
+                for raw_relative in untracked.stdout.split(b"\0"):
+                    if not raw_relative:
+                        continue
+                    relative = raw_relative.decode("utf-8", errors="replace")
+                    parts = Path(relative).parts
+                    if (
+                        "tests" in parts[:-1]
+                        or (parts and parts[-1].startswith("test_"))
+                    ):
+                        continue
+                    path = self.repo_root / relative
+                    if not path.is_file() or path.is_symlink():
+                        continue
+                    created = subprocess.run(
+                        ["git", "diff", "--no-index", "--", "/dev/null", relative],
+                        cwd=self.repo_root,
+                        capture_output=True,
+                        text=True,
+                        errors="replace",
+                        timeout=10,
+                        env={**os.environ, "CUDA_VISIBLE_DEVICES": ""},
+                    )
+                    if created.returncode in {0, 1} and created.stdout:
+                        diff += created.stdout
+            if diff and not diff.endswith("\n"):
+                diff += "\n"
+            return diff
+
         parts: list[str] = []
         for relative in sorted(self._original_contents):
             original = self._original_contents[relative]
@@ -762,6 +892,12 @@ class RepositoryToolBackend:
             )
         return "\n".join(parts)
 
+    def materialize_workspace_diff(self) -> str:
+        """Return the current task worktree patch without a model Tool call."""
+
+        with self._lock:
+            return self._workspace_diff()
+
     def _diff(self, arguments: Mapping[str, object]) -> ToolResult:
         del arguments
         diff = self._workspace_diff()
@@ -775,12 +911,31 @@ class RepositoryToolBackend:
         )
 
     def _run_tests(self, arguments: Mapping[str, object]) -> ToolResult:
+        # DIRECT_REUSE: SkillFlow's deployed SWE-bench schema names the
+        # argument ``test_cmd`` and executes it as a command string.  The
+        # legacy project profile accepted an argv list under ``command``;
+        # retain that branch only for frozen older conditions.
+        test_cmd = arguments.get("test_cmd")
         command = arguments.get("command")
-        if not isinstance(command, Sequence) or isinstance(command, (str, bytes)):
-            return _error("run_tests", "command must be a non-empty argument array")
-        argv = list(command)
-        if not argv or any(not isinstance(item, str) or not item for item in argv):
-            return _error("run_tests", "command must contain non-empty text arguments")
+        if isinstance(test_cmd, str) and test_cmd.strip():
+            invocation, use_shell = self._shell_invocation(test_cmd.strip())
+        elif isinstance(command, Sequence) and not isinstance(
+            command, (str, bytes)
+        ):
+            argv = list(command)
+            if not argv or any(
+                not isinstance(item, str) or not item for item in argv
+            ):
+                return _error(
+                    "run_tests", "command must contain non-empty text arguments"
+                )
+            invocation = argv
+            use_shell = False
+        else:
+            return _error(
+                "run_tests",
+                "test_cmd must be non-empty text or command must be an argument array",
+            )
         raw_timeout = arguments.get("timeout_seconds", self.max_test_timeout_seconds)
         try:
             timeout = float(raw_timeout)
@@ -795,7 +950,8 @@ class RepositoryToolBackend:
             # targeted test.  It does not alter the prepared repository.
             with tempfile.TemporaryDirectory(prefix="flowsteer-pycache-") as cache:
                 completed = subprocess.run(
-                    argv,
+                    invocation,
+                    shell=use_shell,
                     cwd=self.repo_root,
                     capture_output=True,
                     text=True,
@@ -816,6 +972,7 @@ class RepositoryToolBackend:
                     "timeout_seconds": timeout,
                     "stdout": str(exc.stdout or "")[-2000:],
                     "stderr": str(exc.stderr or "")[-1000:],
+                    "task_environment": dict(self._task_environment_receipt),
                 }
             )
         except OSError as exc:
@@ -829,6 +986,7 @@ class RepositoryToolBackend:
                 "returncode": completed.returncode,
                 "stdout": completed.stdout[-2000:],
                 "stderr": completed.stderr[-1000:],
+                "task_environment": dict(self._task_environment_receipt),
             }
         )
 
@@ -839,15 +997,33 @@ def create_swebench_repository_registration(
     tool_id: str = SWEBENCH_REPOSITORY_TOOL_ID,
     dataset_scope: tuple[str, ...] = ("swe_bench",),
     timeout_seconds: float = 60.0,
-    version: str = SWEBENCH_REPOSITORY_TOOL_VERSION,
+    version: str | None = None,
+    action_profile: str = SWEBENCH_TOOL_PROFILE_COMPATIBILITY,
+    task_command_prefix: Sequence[str] = (),
+    task_environment_receipt: Mapping[str, object] | None = None,
+    require_task_environment: bool = False,
+    repository_state_receipt: Mapping[str, object] | None = None,
 ) -> ToolRegistration:
     """Create one registry entry for a prepared SWE-bench repository."""
+
+    if action_profile not in SWEBENCH_TOOL_PROFILES:
+        raise ValueError("unsupported SWE-bench repository Tool profile")
+    if action_profile == SWEBENCH_TOOL_PROFILE_SKILLFLOW_TRAINING:
+        if require_task_environment is not True or not tuple(task_command_prefix):
+            raise ValueError(
+                "SkillFlow SWE-bench training Tool profile requires a "
+                "task-specific command environment"
+            )
 
     backend = RepositoryToolBackend(
         repo_root,
         max_test_timeout_seconds=timeout_seconds,
+        task_command_prefix=task_command_prefix,
+        task_environment_receipt=task_environment_receipt,
+        require_task_environment=require_task_environment,
+        repository_state_receipt=repository_state_receipt,
     )
-    action_schemas = {
+    compatibility_action_schemas = {
         "apply_patch": {
             "type": "object",
             "additionalProperties": False,
@@ -946,6 +1122,60 @@ def create_swebench_repository_registration(
             },
         },
     }
+    # NECESSARY_ADAPTATION: deployed SkillFlow's code_generation mask exposes
+    # list/search/view/edit_file, but edit_file is inseparable from its private
+    # M_exec episode object and natural-language edit generator.  Reuse the
+    # same deployed source's deterministic str_replace_editor instead of
+    # inventing another editor.  bash and run_tests are existing deployed
+    # handler/schema pairs and are explicitly enabled for repository command
+    # and test execution in this evaluation adapter.
+    # Patch publication remains the upstream internal workspace-diff
+    # materialization, not a model-visible ``diff`` action.
+    skillflow_training_action_schemas = {
+        "bash": compatibility_action_schemas["bash"],
+        "list_files": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {},
+        },
+        "search_code": compatibility_action_schemas["search_code"],
+        "view_file": compatibility_action_schemas["view_file"],
+        "str_replace_editor": {
+            **compatibility_action_schemas["str_replace_editor"],
+            "properties": {
+                **compatibility_action_schemas["str_replace_editor"]["properties"],
+                "command": {
+                    "type": "string",
+                    "enum": [
+                        "view",
+                        "create",
+                        "str_replace",
+                        "insert",
+                        "undo_edit",
+                    ],
+                },
+            },
+        },
+        "run_tests": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["test_cmd"],
+            "properties": {
+                "test_cmd": {"type": "string", "minLength": 1},
+            },
+        },
+    }
+    action_schemas = (
+        skillflow_training_action_schemas
+        if action_profile == SWEBENCH_TOOL_PROFILE_SKILLFLOW_TRAINING
+        else compatibility_action_schemas
+    )
+    if version is None:
+        version = (
+            SWEBENCH_SKILLFLOW_TRAINING_TOOL_VERSION
+            if action_profile == SWEBENCH_TOOL_PROFILE_SKILLFLOW_TRAINING
+            else SWEBENCH_REPOSITORY_TOOL_VERSION
+        )
     capability = ToolCapability(
         tool_id=tool_id,
         dataset_scope=dataset_scope,
@@ -975,6 +1205,10 @@ __all__ = [
     "RepositoryToolBackend",
     "SWEBENCH_REPOSITORY_TOOL_ID",
     "SWEBENCH_REPOSITORY_TOOL_VERSION",
+    "SWEBENCH_SKILLFLOW_TRAINING_TOOL_VERSION",
+    "SWEBENCH_TOOL_PROFILE_COMPATIBILITY",
+    "SWEBENCH_TOOL_PROFILE_SKILLFLOW_TRAINING",
+    "SWEBENCH_TOOL_PROFILES",
     "create_swebench_repository_registration",
     "create_swebench_repository_registry",
 ]

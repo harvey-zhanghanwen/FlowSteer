@@ -10,6 +10,7 @@ from src.interactive.records import TaskRecord
 from src.interactive.swe_worktree import (
     SWEbenchRepositoryIdentity,
     SWEbenchWorktreeUnavailable,
+    preflight_swebench_worktree_population,
     prepare_swebench_worktree,
     prepare_swebench_worktree_for_task,
 )
@@ -189,4 +190,96 @@ def test_missing_base_commit_fails_before_returning_a_worktree() -> None:
                 worktree_root=worktrees,
             )
 
+        assert list(worktrees.iterdir()) == []
+
+
+def _task_record(base_commit: str, *, instance_id: str) -> TaskRecord:
+    return TaskRecord(
+        task_id=f"swe-bench:{instance_id}",
+        question="Fix the public issue.",
+        ground_truth="DO_NOT_READ_GOLD_PATCH",
+        split="validation",
+        metadata={
+            "dataset_key": "swe_bench",
+            "skillflow": {
+                "extra": {
+                    "instance_id": instance_id,
+                    "repo": "owner/repo",
+                    "base_commit": base_commit,
+                }
+            },
+        },
+    )
+
+
+def test_population_preflight_prepares_and_cleans_every_active_task() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        store = root / "repos"
+        worktrees = root / "worktrees"
+        store.mkdir()
+        worktrees.mkdir()
+        _source, base_commit, later_commit = _repository(store)
+
+        report = preflight_swebench_worktree_population(
+            [
+                _task_record(base_commit, instance_id="owner__repo-1"),
+                _task_record(later_commit, instance_id="owner__repo-2"),
+            ],
+            repository_store=store,
+            worktree_root=worktrees,
+        )
+
+        assert report["all_ready"] is True
+        assert report["counts"] == {"total": 2, "ready": 2, "unavailable": 0}
+        rows = report["rows"]
+        assert isinstance(rows, list)
+        assert [row["task_id"] for row in rows] == [
+            "swe-bench:owner__repo-1",
+            "swe-bench:owner__repo-2",
+        ]
+        assert [row["expected_base_commit"] for row in rows] == [
+            base_commit,
+            later_commit,
+        ]
+        assert [row["observed_pinned_commit"] for row in rows] == [
+            base_commit,
+            later_commit,
+        ]
+        assert all(row["setup_status"] == "ready" for row in rows)
+        assert all(row["base_state_verified"] is True for row in rows)
+        assert all(row["cleanup_status"] == "cleaned" for row in rows)
+        assert all(not Path(str(row["workspace"])).exists() for row in rows)
+        assert list(worktrees.iterdir()) == []
+
+
+def test_population_preflight_reports_unavailable_task_for_fail_closed_runner() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        store = root / "repos"
+        worktrees = root / "worktrees"
+        store.mkdir()
+        worktrees.mkdir()
+        _source, base_commit, _later_commit = _repository(store)
+
+        report = preflight_swebench_worktree_population(
+            [
+                _task_record(base_commit, instance_id="owner__repo-1"),
+                _task_record("missing-base", instance_id="owner__repo-missing"),
+            ],
+            repository_store=store,
+            worktree_root=worktrees,
+        )
+
+        assert report["all_ready"] is False
+        assert report["counts"] == {"total": 2, "ready": 1, "unavailable": 1}
+        ready, unavailable = report["rows"]
+        assert ready["ready"] is True
+        assert ready["cleanup_status"] == "cleaned"
+        assert unavailable["ready"] is False
+        assert unavailable["setup_status"] == "unavailable"
+        assert unavailable["base_state_verified"] is False
+        assert unavailable["cleanup_status"] == "not_required"
+        assert unavailable["failure_phase"] == "setup"
+        assert unavailable["error_type"] == "SWEbenchWorktreeUnavailable"
         assert list(worktrees.iterdir()) == []
