@@ -20,6 +20,7 @@ import random
 import re
 from types import MappingProxyType
 from typing import Any, Optional, Protocol, Union
+from uuid import uuid4
 
 from .agent_runtime import AgentGateway, AgentRequest, AgentResponse, GatewayResponse
 from .tool_runtime import (
@@ -91,6 +92,8 @@ class EnvironmentSession(Protocol):
         Awaitable[tuple[str, object, bool, Mapping[str, object]]],
     ]: ...
 
+    def close(self) -> Union[None, Awaitable[None]]: ...
+
 
 EnvironmentSessionFactory = Callable[[AgentRequest], EnvironmentSession]
 
@@ -107,19 +110,29 @@ class _EnvironmentTransition:
 class _EnvironmentEpisode:
     session: EnvironmentSession
     observation: str
+    episode_id: str
     revision: int = 0
+    terminal: bool = False
     pending_transition: Optional[_EnvironmentTransition] = None
+    reset_receipt: Mapping[str, object] = field(default_factory=dict)
+    receipts: list[dict[str, object]] = field(default_factory=list)
+    evaluator_trace: list[dict[str, object]] = field(default_factory=list)
+    tool_receipts: list[dict[str, object]] = field(default_factory=list)
+    model_calls: list[dict[str, object]] = field(default_factory=list)
 
 
 class EnvironmentToolBackend:
-    """Request-scoped backend for one real RAGEN environment resource.
+    """Rollout-scoped backend for one real RAGEN environment resource.
 
     The backend is registered in the same :class:`ToolRegistry` exposed to the
-    Director and AgentRuntime.  An episode is bound only while its execution
-    adapter is active, so concurrent requests cannot address each other's
-    simulator state.  Public ``ToolResult`` values intentionally omit reward
-    and evaluator ``info``; the adapter consumes those fields through the
-    private episode boundary solely to build deterministic evaluator replay.
+    Director and AgentRuntime.  One backend is created by ``_runtime_for_task``
+    for one rollout, and it lazily creates exactly one environment session.
+    Canvas repair or re-execution therefore continues the same world revision
+    instead of resetting the game.  A lock serializes all state mutations;
+    independent rollouts use independent backend instances and sessions.
+    Public ``ToolResult`` values intentionally omit reward and evaluator
+    ``info``; the adapter consumes those fields through the private episode
+    boundary solely to build deterministic evaluator replay.
     """
 
     def __init__(
@@ -143,6 +156,9 @@ class EnvironmentToolBackend:
         self._episode: ContextVar[Optional[_EnvironmentEpisode]] = ContextVar(
             f"environment_episode_{id(self)}", default=None
         )
+        self._rollout_episode: Optional[_EnvironmentEpisode] = None
+        self._execution_lock = asyncio.Lock()
+        self._closed = False
 
     async def begin(
         self, request: AgentRequest
@@ -151,21 +167,79 @@ class EnvironmentToolBackend:
             raise EnvironmentExecutionError(
                 "environment episode is already active in this execution context"
             )
-        session = self.session_factory(request)
-        if str(session.task_family).strip().lower() != self.task_family:
-            raise EnvironmentExecutionError(
-                "environment session task family does not match its tool capability"
-            )
-        observation = await _resolve(session.reset())
-        if not isinstance(observation, str):
-            raise EnvironmentExecutionError("environment reset must return text")
-        if observation.startswith("[ENV_UNAVAILABLE]"):
-            raise EnvironmentExecutionError(observation)
-        episode = _EnvironmentEpisode(session=session, observation=observation)
-        return episode, self._episode.set(episode)
+        await self._execution_lock.acquire()
+        created_session: Optional[EnvironmentSession] = None
+        try:
+            if self._closed:
+                raise EnvironmentExecutionError("environment rollout is already closed")
+            episode = self._rollout_episode
+            if episode is None:
+                session = self.session_factory(request)
+                created_session = session
+                if str(session.task_family).strip().lower() != self.task_family:
+                    raise EnvironmentExecutionError(
+                        "environment session task family does not match its tool capability"
+                    )
+                observation = await _resolve(session.reset())
+                if not isinstance(observation, str):
+                    raise EnvironmentExecutionError("environment reset must return text")
+                if observation.startswith("[ENV_UNAVAILABLE]"):
+                    raise EnvironmentExecutionError(observation)
+                episode_id = f"{session.environment_id}:{uuid4()}"
+                reset_actions, _ = _admissible_actions(
+                    session.task_family, session.available_actions
+                )
+                episode = _EnvironmentEpisode(
+                    session=session,
+                    observation=observation,
+                    episode_id=episode_id,
+                    reset_receipt={
+                        "receipt_type": "environment_reset",
+                        "episode_id": episode_id,
+                        "environment_id": session.environment_id,
+                        "environment_revision": 0,
+                        "observation": observation,
+                        "admissible_actions": list(reset_actions),
+                        "terminal": False,
+                    },
+                )
+                self._rollout_episode = episode
+                created_session = None
+            return episode, self._episode.set(episode)
+        except BaseException:
+            if created_session is not None:
+                close = getattr(created_session, "close", None)
+                if callable(close):
+                    result = close()
+                    if inspect.isawaitable(result):
+                        await result
+            self._execution_lock.release()
+            raise
 
     def end(self, token: Token[Optional[_EnvironmentEpisode]]) -> None:
         self._episode.reset(token)
+        self._execution_lock.release()
+
+    def close(self) -> None:
+        """Close the one rollout-owned simulator session exactly once."""
+
+        if self._closed:
+            return
+        if self._execution_lock.locked():
+            raise EnvironmentExecutionError(
+                "cannot close an environment rollout while an execution is active"
+            )
+        self._closed = True
+        episode = self._rollout_episode
+        if episode is None:
+            return
+        close = getattr(episode.session, "close", None)
+        if callable(close):
+            result = close()
+            if inspect.isawaitable(result):
+                raise EnvironmentExecutionError(
+                    "asynchronous environment close is unsupported by this runtime"
+                )
 
     async def invoke(self, request: ToolRequest) -> ToolResult:
         episode = self._episode.get()
@@ -173,26 +247,43 @@ class EnvironmentToolBackend:
             raise EnvironmentExecutionError(
                 "environment tool requires an active request-scoped episode"
             )
-        if dict(request.arguments):
+        if episode.terminal:
             raise EnvironmentExecutionError(
-                "environment actions do not accept an arguments object"
+                "environment tool cannot mutate a terminal episode"
             )
+        if self.task_family == "alfworld":
+            if request.action != "act" or set(request.arguments) != {"command"}:
+                raise EnvironmentExecutionError(
+                    "ALFWorld requires SkillFlow act(command) Tool actions"
+                )
+            native_action = request.arguments["command"]
+            if not isinstance(native_action, str) or not native_action.strip():
+                raise EnvironmentExecutionError(
+                    "ALFWorld act(command) requires a non-empty command"
+                )
+            native_action = native_action.strip()
+        else:
+            if dict(request.arguments):
+                raise EnvironmentExecutionError(
+                    "environment actions do not accept an arguments object"
+                )
+            native_action = request.action
         admissible_actions, has_search_bar = _admissible_actions(
             self.task_family, episode.session.available_actions
         )
         if (
             _parse_action(
-                request.action,
+                native_action,
                 task_family=self.task_family,
                 admissible_actions=admissible_actions,
                 webshop_has_search_bar=has_search_bar,
             )
-            != request.action
+            != native_action
         ):
             raise EnvironmentExecutionError(
                 "environment tool action is not currently admissible"
             )
-        transition = await _resolve(episode.session.step(request.action))
+        transition = await _resolve(episode.session.step(native_action))
         if not isinstance(transition, tuple) or len(transition) != 4:
             raise EnvironmentExecutionError(
                 "environment step must return observation, reward, terminal, and info"
@@ -208,6 +299,7 @@ class EnvironmentToolBackend:
             raise EnvironmentExecutionError(observation)
         episode.revision += 1
         episode.observation = observation
+        episode.terminal = terminal
         episode.pending_transition = _EnvironmentTransition(
             observation=observation,
             reward=reward,
@@ -296,6 +388,15 @@ class RAGENEnvironmentSession:
         if not isinstance(info, Mapping):
             raise EnvironmentExecutionError("environment info must be a mapping")
         return str(observation), reward, terminal, info
+
+    def close(self) -> None:
+        """Close SkillFlow's live TextWorld session when the rollout ends."""
+
+        environment = getattr(self.adapter, "_env", None)
+        live_environment = getattr(environment, "alfred_env", None)
+        close = getattr(live_environment, "close", None)
+        if callable(close):
+            close()
 
 
 @dataclass(frozen=True, slots=True)
@@ -488,7 +589,13 @@ def _alfworld_task_facts(task: str) -> dict[str, object]:
         "count": 1,
         "examine_with_desklamp": False,
     }
-    text = " ".join(str(task or "").lower().rstrip(".").split())
+    # ``_workflow_problem`` appends the public environment interface after a
+    # blank line.  SkillFlow parses the immutable ALFWorld instruction stored
+    # on the environment, not that runtime prose.  Keep the same boundary here
+    # so end-anchored official task patterns cannot be invalidated by the
+    # appended Tool contract.
+    instruction = str(task or "").split("\n\n", 1)[0]
+    text = " ".join(instruction.lower().rstrip(".").split())
     if not text:
         return facts
     match = re.search(
@@ -794,32 +901,70 @@ def _action_prompt(
     turn: int,
     max_observation_chars: int = 0,
 ) -> str:
-    """Render SkillFlow's state/action/history boundary without a fixed role."""
+    """Render the same SkillFlow ReAct prompt used by the Direct condition.
 
-    actions = "\n".join(admissible_actions)
+    ``task_evaluator._environment_prompt`` is the existing thin copy of
+    SkillFlow ``training/react_prompts.py``.  Reusing it here keeps Direct and
+    AgentGraph on the same action syntax, observation, and bounded history
+    protocol.  The Director-authored Agent contract remains on ``request``;
+    this function supplies no fixed role or topology.
+    """
+
     visible_observation, _ = _prompt_observation(
         observation, max_observation_chars
     )
-    public_state = _public_state_feedback(
-        request,
-        task_family=task_family,
-        observation=observation,
-        admissible_actions=admissible_actions,
-        receipts=receipts,
-    )
-    format_instruction = (
-        "Return exactly one native WebShop action: search[keywords] or click[value]."
-        if task_family.lower() == "webshop"
-        else "Return exactly one native action copied from the admissible action list."
-    )
-    return (
-        f"Task:\n{request.problem}\n\n"
-        f"Previous environment turns:\n{_history_text(receipts)}\n\n"
-        f"{public_state}\n\n"
-        f"Current observation (turn {turn}):\n{visible_observation}\n\n"
-        f"Admissible actions:\n{actions}\n\n"
-        f"{format_instruction} You may enclose that native action in one <action> "
-        "tag. Do not return JSON, an object, a code fence, or an explanation."
+    if task_family.lower() != "alfworld":
+        actions = "\n".join(admissible_actions)
+        public_state = _public_state_feedback(
+            request,
+            task_family=task_family,
+            observation=observation,
+            admissible_actions=admissible_actions,
+            receipts=receipts,
+        )
+        return (
+            f"Task:\n{request.problem}\n\n"
+            f"Previous environment turns:\n{_history_text(receipts)}\n\n"
+            f"{public_state}\n\n"
+            f"Current observation (turn {turn}):\n{visible_observation}\n\n"
+            f"Admissible actions:\n{actions}\n\n"
+            "Return exactly one native WebShop action: search[keywords] or "
+            "click[value]. You may enclose that native action in one <action> "
+            "tag. Do not return JSON, an object, a code fence, or an explanation."
+        )
+
+    # Local import avoids making the generic environment resource import the
+    # evaluator (and its optional dependencies) until ALFWorld is enabled.
+    from .task_evaluator import _environment_prompt
+
+    instruction = str(request.problem).split("\n\n", 1)[0].strip()
+    trace: list[dict[str, object]] = []
+    for index, receipt in enumerate(receipts):
+        parse_error = receipt.get("observation_status") == "parse_error"
+        trace.append(
+            {
+                "step": index,
+                "observation": str(receipt.get("observation", "")),
+                "action": (
+                    "<INVALID>"
+                    if parse_error
+                    else str(receipt.get("action", ""))
+                ),
+                "next_observation": str(receipt.get("next_observation", "")),
+                "feedback": (
+                    "[INVALID] No valid <action> tag found."
+                    if parse_error
+                    else str(receipt.get("next_observation", ""))
+                ),
+            }
+        )
+    return _environment_prompt(
+        dataset=task_family.lower(),
+        task_description=instruction,
+        observation=visible_observation,
+        legal_actions=admissible_actions,
+        trace=trace,
+        step_index=turn - 1,
     )
 
 
@@ -884,6 +1029,11 @@ class EnvironmentExecutionAdapter:
 
         return self._cancelled_prefixes.pop(request_id, MappingProxyType({}))
 
+    def close(self) -> None:
+        """Close the rollout-scoped environment backend."""
+
+        self._environment_backend.close()
+
     async def execute(self, request: AgentRequest) -> GatewayResponse:
         if request.agent.allowed_tools != (self._tool_id,):
             raise EnvironmentExecutionError(
@@ -893,26 +1043,21 @@ class EnvironmentExecutionAdapter:
         session = episode.session
         observation = episode.observation
 
-        revision = 0
-        terminal = False
-        receipts: list[dict[str, object]] = []
-        evaluator_trace: list[dict[str, object]] = []
-        tool_receipts: list[dict[str, object]] = []
-        model_calls: list[dict[str, object]] = []
-        reset_actions, _ = _admissible_actions(
-            session.task_family, session.available_actions
-        )
-        reset_receipt: dict[str, object] = {
-            "receipt_type": "environment_reset",
-            "environment_id": session.environment_id,
-            "environment_revision": revision,
-            "observation": observation,
-            "admissible_actions": list(reset_actions),
-            "terminal": False,
-        }
+        revision = episode.revision
+        terminal = episode.terminal
+        receipts = episode.receipts
+        evaluator_trace = episode.evaluator_trace
+        tool_receipts = episode.tool_receipts
+        model_calls = episode.model_calls
+        reset_receipt = dict(episode.reset_receipt)
 
         try:
-            for turn in range(1, self._max_turns + 1):
+            # SkillFlow's episode limit applies to the complete rollout-owned
+            # session.  A Canvas retry continues from the first unconsumed
+            # turn rather than resetting either the simulator or the budget.
+            for turn in range(len(receipts) + 1, self._max_turns + 1):
+                if terminal:
+                    break
                 admissible_actions, has_search_bar = _admissible_actions(
                     session.task_family, session.available_actions
                 )
@@ -944,22 +1089,12 @@ class EnvironmentExecutionAdapter:
                     request_id=f"{request.request_id}:environment:{turn}",
                     problem=prompt,
                     # RAGEN exposes native admissible actions rather than the
-                    # generic StructuredAction protocol.  Like FlowSteer's Format
-                    # Operator boundary, the Canvas-authored contract remains in
-                    # the trajectory but cannot override the executor's native
-                    # action grammar for this provider turn.
+                    # generic StructuredAction protocol.  Preserve the
+                    # Director-authored free-text contract; the prompt above
+                    # appends only SkillFlow's state-dependent action grammar.
                     agent=replace(
                         request.agent,
                         execution_mode="reasoning",
-                        contract=(
-                            "Select exactly one native action permitted by the "
-                            "current admissible-action list."
-                        ),
-                        artifact_type="environment_action",
-                        completion_condition=(
-                            "The response parses as one currently admissible native "
-                            "environment action."
-                        ),
                     ),
                     model=replace(
                         request.model,
@@ -995,6 +1130,7 @@ class EnvironmentExecutionAdapter:
                     receipts.append(
                         {
                             "receipt_type": "environment_transition",
+                            "episode_id": episode.episode_id,
                             "environment_id": session.environment_id,
                             "turn": turn,
                             "environment_revision_before": revision,
@@ -1012,6 +1148,7 @@ class EnvironmentExecutionAdapter:
                     )
                     evaluator_trace.append(
                         {
+                            "episode_id": episode.episode_id,
                             "step": turn - 1,
                             "observation": observation,
                             "legal_actions": list(admissible_actions),
@@ -1030,8 +1167,13 @@ class EnvironmentExecutionAdapter:
                     continue
 
                 previous_revision = revision
+                tool_request = (
+                    ToolRequest("act", {"command": action})
+                    if session.task_family.lower() == "alfworld"
+                    else ToolRequest(action, {})
+                )
                 result, tool_receipt = await self._tool_registry.ainvoke_with_receipt(
-                    self._tool_id, ToolRequest(action, {})
+                    self._tool_id, tool_request
                 )
                 tool_receipts.append(tool_receipt.to_value())
                 if result is None:
@@ -1056,6 +1198,7 @@ class EnvironmentExecutionAdapter:
                 receipts.append(
                     {
                         "receipt_type": "environment_transition",
+                        "episode_id": episode.episode_id,
                         "environment_id": session.environment_id,
                         "turn": turn,
                         "environment_revision_before": previous_revision,
@@ -1073,6 +1216,7 @@ class EnvironmentExecutionAdapter:
                 )
                 evaluator_trace.append(
                     {
+                        "episode_id": episode.episode_id,
                         "step": turn - 1,
                         "observation": observation,
                         "legal_actions": list(admissible_actions),
@@ -1095,19 +1239,20 @@ class EnvironmentExecutionAdapter:
                 observation,
                 {
                     "execution_mode": "react",
-                    "model_calls": model_calls,
+                    "model_calls": list(model_calls),
+                    "episode_id": episode.episode_id,
                     "environment_id": session.environment_id,
                     "task_family": session.task_family,
                     "environment_revision": revision,
                     "environment_reset_receipt": reset_receipt,
-                    "environment_receipts": receipts,
+                    "environment_receipts": list(receipts),
                     "environment_terminal": terminal,
                     "environment_turns_used": len(receipts),
                     "environment_steps": revision,
-                    "tool_receipts": tool_receipts,
+                    "tool_receipts": list(tool_receipts),
                     # Evaluator-only replay data. AgentRuntime never renders this
                     # metadata into downstream prompts or Director feedback.
-                    "evaluator_environment_trace": evaluator_trace,
+                    "evaluator_environment_trace": list(evaluator_trace),
                 },
             )
         except asyncio.CancelledError as exc:
@@ -1174,6 +1319,11 @@ class EnvironmentExecutionResources:
     tool_registry: ToolRegistry
     execution_adapter: EnvironmentExecutionAdapter
 
+    def close(self) -> None:
+        """Release the rollout-owned environment session, if it was opened."""
+
+        self.execution_adapter.close()
+
 
 def build_environment_execution_resources(
     *,
@@ -1204,25 +1354,55 @@ def build_environment_execution_resources(
     if timeout_seconds is not None and timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be positive when supplied")
     family = task_family.strip().lower()
-    tool_id = f"{family}.environment"
+    # DIRECT_REUSE: SkillFlow's public ALFWorld item registers resource_id
+    # ``alfworld`` and exposes exactly one StructuredAction ``act(command)``.
+    # WebShop retains the repository's existing dynamic-action compatibility
+    # surface because it is outside this ALFWorld-only adaptation.
+    tool_id = "alfworld" if family == "alfworld" else f"{family}.environment"
     backend = EnvironmentToolBackend(
         session_factory=session_factory,
         task_family=family,
         tool_id=tool_id,
     )
-    capability = ToolCapability(
-        tool_id=tool_id,
-        dataset_scope=(family,),
-        # The executable domain is the live session's admissible native
-        # actions, not a fixed StructuredAction name catalog.
-        action_schemas={},
-        input_schema={
+    alfworld_arguments_schema = {
+        "type": "object",
+        "required": ["command"],
+        "additionalProperties": False,
+        "properties": {
+            "command": {
+                "type": "string",
+                "minLength": 1,
+                "description": "one current ALFWorld admissible command",
+            }
+        },
+    }
+    action_schemas = (
+        {"act": alfworld_arguments_schema} if family == "alfworld" else {}
+    )
+    input_schema = (
+        {
+            "type": "object",
+            "required": ["action", "arguments"],
+            "additionalProperties": False,
+            "properties": {
+                "action": {"const": "act"},
+                "arguments": alfworld_arguments_schema,
+            },
+        }
+        if family == "alfworld"
+        else {
             "action": {
                 "type": "string",
                 "description": "one action from the current admissible action list",
             },
             "arguments": {"type": "object", "maxProperties": 0},
-        },
+        }
+    )
+    capability = ToolCapability(
+        tool_id=tool_id,
+        dataset_scope=(family,),
+        action_schemas=action_schemas,
+        input_schema=input_schema,
         output_schema={
             "type": "object",
             "required": ["environment_revision", "observation", "terminal"],

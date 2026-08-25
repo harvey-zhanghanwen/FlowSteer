@@ -321,7 +321,22 @@ def validate_completion_benchmark_config(config: Mapping[str, Any]) -> None:
         bounded.get("official_2026_only") is True
         or bounded.get("benchmark_slice") == "official_aime_2026"
     )
-    maximum = 30 if official_aime else 128
+    official_alfworld_split = (
+        str(bounded.get("official_split", "")).strip()
+        if dataset_key == "alfworld"
+        else ""
+    )
+    official_alfworld_maximum = {
+        "valid_seen": 140,
+        "valid_unseen": 134,
+    }.get(official_alfworld_split)
+    maximum = (
+        30
+        if official_aime
+        else official_alfworld_maximum
+        if official_alfworld_maximum is not None
+        else 128
+    )
     if (
         isinstance(sample_count, bool)
         or not isinstance(sample_count, int)
@@ -366,6 +381,15 @@ def validate_completion_benchmark_config(config: Mapping[str, Any]) -> None:
             )
     if bounded.get("official_2026_only") is True and dataset_key != "aime_2026":
         raise ConfigurationError("official_2026_only is valid only for AIME 2026")
+    if official_alfworld_split:
+        if (
+            bounded.get("stage") != "final_evaluation"
+            or bounded.get("split") != "test"
+            or sample_count != official_alfworld_maximum
+        ):
+            raise ConfigurationError(
+                "official ALFWorld split evaluation must use the full test population"
+            )
     registry_coordinates = _runtime_dataset_registry_coordinates(data)
     if (
         registry_coordinates is not None
@@ -2058,6 +2082,153 @@ def _aime_wrong_demo_diagnosis(
     }
 
 
+def _alfworld_trace(value: Optional[Mapping[str, Any]]) -> tuple[Mapping[str, Any], ...]:
+    """Return the evaluator-replayed native ALFWorld transition ledger."""
+
+    evaluation = value.get("evaluation") if isinstance(value, Mapping) else None
+    details = evaluation.get("details") if isinstance(evaluation, Mapping) else None
+    trace = details.get("trace") if isinstance(details, Mapping) else None
+    if not isinstance(trace, Sequence) or isinstance(trace, (str, bytes)):
+        return ()
+    return tuple(item for item in trace if isinstance(item, Mapping))
+
+
+def _alfworld_episode_statistics(
+    value: Optional[Mapping[str, Any]],
+) -> Mapping[str, Any]:
+    """Derive native action statistics without changing the environment reward."""
+
+    trace = _alfworld_trace(value)
+    actions = [
+        str(item.get("action"))
+        for item in trace
+        if isinstance(item.get("action"), str)
+        and item.get("action") != "<INVALID>"
+    ]
+    invalid_actions = 0
+    no_effect_actions = 0
+    for item in trace:
+        info = item.get("info")
+        if not isinstance(info, Mapping):
+            continue
+        if info.get("action_is_valid") is False:
+            invalid_actions += 1
+        if info.get("action_is_effective") is False:
+            no_effect_actions += 1
+    repeated_actions = sum(
+        current == previous
+        for previous, current in zip(actions, actions[1:])
+    )
+    parse_errors = sum(item.get("parse_error") is True for item in trace)
+    evaluation = value.get("evaluation") if isinstance(value, Mapping) else None
+    metrics = evaluation.get("metrics") if isinstance(evaluation, Mapping) else None
+    return {
+        "environment_turn_count": len(trace),
+        "environment_action_count": len(actions),
+        "invalid_action_count": invalid_actions,
+        "no_effect_action_count": no_effect_actions,
+        "repeated_action_count": repeated_actions,
+        "action_parse_error_count": parse_errors,
+        "terminal": bool(
+            trace and isinstance(trace[-1], Mapping) and trace[-1].get("done") is True
+        ),
+        "episode_score": (
+            metrics.get("episode_score") if isinstance(metrics, Mapping) else None
+        ),
+    }
+
+
+def _alfworld_wrong_demo_diagnosis(
+    graph_value: Optional[Mapping[str, Any]],
+) -> Mapping[str, Any]:
+    """Locate the first observable ALFWorld failure in persisted receipts."""
+
+    if graph_value is None:
+        return {
+            "diagnosis_scope": "first_observable_failure",
+            "failure_layer": "runtime",
+            "first_error_turn": None,
+            "error": "trajectory_missing",
+        }
+    evaluation = graph_value.get("evaluation")
+    reason = evaluation.get("reason") if isinstance(evaluation, Mapping) else None
+    details = evaluation.get("details") if isinstance(evaluation, Mapping) else None
+    trace = _alfworld_trace(graph_value)
+    for entry in trace:
+        step = entry.get("step")
+        if entry.get("parse_error") is True:
+            return {
+                "diagnosis_scope": "first_observable_failure",
+                "failure_layer": "agent_action_parsing",
+                "first_error_turn": step,
+                "error": "native_action_parse_error",
+                "action": entry.get("raw_graph_output"),
+            }
+        info = entry.get("info")
+        if isinstance(info, Mapping) and info.get("error"):
+            return {
+                "diagnosis_scope": "first_observable_failure",
+                "failure_layer": "environment",
+                "first_error_turn": step,
+                "error": "environment_step_failure",
+                "action": entry.get("action"),
+            }
+        if isinstance(info, Mapping) and info.get("action_is_valid") is False:
+            return {
+                "diagnosis_scope": "first_observable_failure",
+                "failure_layer": "agent_action_grounding",
+                "first_error_turn": step,
+                "error": "action_not_admissible_at_observed_state",
+                "action": entry.get("action"),
+            }
+        if isinstance(info, Mapping) and info.get("action_is_effective") is False:
+            return {
+                "diagnosis_scope": "first_observable_failure",
+                "failure_layer": "agent_action_grounding",
+                "first_error_turn": step,
+                "error": "environment_action_had_no_effect",
+                "action": entry.get("action"),
+            }
+    if graph_value.get("explicit_finish") is not True:
+        return {
+            "diagnosis_scope": "first_observable_failure",
+            "failure_layer": "director",
+            "first_error_turn": None,
+            "error": "missing_explicit_finish",
+        }
+    if isinstance(evaluation, Mapping) and evaluation.get("valid") is not True:
+        return {
+            "diagnosis_scope": "first_observable_failure",
+            "failure_layer": "environment_or_evaluator",
+            "first_error_turn": None,
+            "error": reason or "environment_evaluator_failure",
+        }
+    terminal = bool(trace and trace[-1].get("done") is True)
+    terminal_info = (
+        details.get("terminal_info") if isinstance(details, Mapping) else None
+    )
+    if not terminal:
+        return {
+            "diagnosis_scope": "first_observable_failure",
+            "failure_layer": "agent_policy",
+            "first_error_turn": len(trace),
+            "error": "action_budget_exhausted_before_environment_terminal",
+        }
+    if isinstance(terminal_info, Mapping) and terminal_info.get("won") is False:
+        return {
+            "diagnosis_scope": "first_observable_failure",
+            "failure_layer": "agent_policy",
+            "first_error_turn": len(trace) - 1,
+            "error": "environment_terminal_without_goal_satisfaction",
+        }
+    return {
+        "diagnosis_scope": "first_observable_failure",
+        "failure_layer": "agent_policy",
+        "first_error_turn": None,
+        "error": "unsuccessful_episode_without_earlier_observable_runtime_failure",
+    }
+
+
 def _paired_rows(
     selected: Sequence[TaskRecord],
     direct: Mapping[str, Mapping[str, Any]],
@@ -2095,6 +2266,11 @@ def _paired_rows(
                     ),
                     "telemetry": _direct_telemetry(direct_value),
                     "execution": direct_execution,
+                    **(
+                        {"environment": _alfworld_episode_statistics(direct_value)}
+                        if dataset_key == "alfworld"
+                        else {}
+                    ),
                 },
                 "agentgraph": {
                     "available": graph_value is not None,
@@ -2128,6 +2304,11 @@ def _paired_rows(
                         if graph_value is not None
                         else None
                     ),
+                    **(
+                        {"environment": _alfworld_episode_statistics(graph_value)}
+                        if dataset_key == "alfworld"
+                        else {}
+                    ),
                 },
                 **{
                     f"delta_{name}": graph_metrics[name] - direct_metrics[name]
@@ -2145,6 +2326,8 @@ def _paired_rows(
                 "wrong_demo_diagnosis": (
                     _aime_wrong_demo_diagnosis(graph_value)
                     if dataset_key == "aime_2026" and graph_score < 1.0
+                    else _alfworld_wrong_demo_diagnosis(graph_value)
+                    if dataset_key == "alfworld" and graph_score < 1.0
                     else None
                 ),
             }
@@ -2181,6 +2364,14 @@ def _aggregate(
         result["correct"] = sum(
             float(value.get("accuracy", 0.0)) == 1.0 for value in values
         )
+    if dataset_key == "alfworld":
+        result["success_count"] = sum(
+            float(value.get("success", 0.0)) == 1.0 for value in values
+        )
+        result["success_rate_total"] = result["strict_success"]
+        result["success_rate_evaluator_valid"] = result[
+            "completed_only_success"
+        ]
     return result
 
 
@@ -2194,6 +2385,51 @@ def _telemetry_totals(
             for row in rows
         )
         for field in fields
+    }
+
+
+def _alfworld_runtime_totals(
+    rows: Sequence[Mapping[str, Any]], condition: str
+) -> Mapping[str, Any]:
+    """Aggregate native episode receipts for one ALFWorld condition."""
+
+    fields = (
+        "environment_turn_count",
+        "environment_action_count",
+        "invalid_action_count",
+        "no_effect_action_count",
+        "repeated_action_count",
+        "action_parse_error_count",
+    )
+    values = [
+        row.get(condition, {}).get("environment", {})
+        for row in rows
+        if isinstance(row.get(condition), Mapping)
+    ]
+    numeric_scores = [
+        float(value["episode_score"])
+        for value in values
+        if isinstance(value, Mapping)
+        and not isinstance(value.get("episode_score"), bool)
+        and isinstance(value.get("episode_score"), (int, float))
+    ]
+    return {
+        **{
+            field: sum(
+                int(value.get(field, 0))
+                for value in values
+                if isinstance(value, Mapping)
+            )
+            for field in fields
+        },
+        "terminal_episode_count": sum(
+            value.get("terminal") is True
+            for value in values
+            if isinstance(value, Mapping)
+        ),
+        "mean_episode_score": (
+            sum(numeric_scores) / len(numeric_scores) if numeric_scores else None
+        ),
     }
 
 
@@ -2454,6 +2690,14 @@ def _report(
         is False
         for row in rows
     )
+    alfworld_wrong_demos = [
+        {
+            "task_id": row.get("task_id"),
+            **dict(row["wrong_demo_diagnosis"]),
+        }
+        for row in below_full
+        if isinstance(row.get("wrong_demo_diagnosis"), Mapping)
+    ]
     return {
         "schema_version": "flowsteer.completion_benchmark.round_report.v1",
         "dataset_key": dataset_key,
@@ -2518,6 +2762,32 @@ def _report(
             "direct": _telemetry_totals(rows, "direct"),
             "agentgraph": _telemetry_totals(rows, "agentgraph"),
         },
+        **(
+            {
+                "alfworld_environment_totals": {
+                    "direct": _alfworld_runtime_totals(rows, "direct"),
+                    "agentgraph": _alfworld_runtime_totals(rows, "agentgraph"),
+                },
+                "alfworld_official_split": bounded.get("official_split"),
+                "alfworld_policy_action_budget": _mapping(
+                    config["evaluation"], "evaluation"
+                ).get("max_environment_steps_by_source", {}).get("alfworld"),
+                "alfworld_simulator_hard_limit": 50,
+                "alfworld_wrong_demo_first_observable_failures": (
+                    alfworld_wrong_demos[:10]
+                ),
+                "alfworld_failure_layer_distribution": dict(
+                    sorted(
+                        Counter(
+                            str(value.get("failure_layer", "unknown"))
+                            for value in alfworld_wrong_demos
+                        ).items()
+                    )
+                ),
+            }
+            if dataset_key == "alfworld"
+            else {}
+        ),
         "execution_receipts": {
             "direct": _direct_execution_receipts(rows),
             "agentgraph": _agentgraph_execution_receipts(trajectories),
@@ -2604,6 +2874,88 @@ def _report_markdown(report: Mapping[str, Any]) -> str:
         if report.get("protocol_equivalent_to_direct") is True
         else "Direct and AgentGraph are separate protocols; their delta is descriptive, not a paired causal estimate."
     )
+    alfworld_section = ""
+    if report.get("dataset_key") == "alfworld":
+        environment_totals = report.get("alfworld_environment_totals", {})
+        direct_environment = (
+            environment_totals.get("direct", {})
+            if isinstance(environment_totals, Mapping)
+            else {}
+        )
+        graph_environment = (
+            environment_totals.get("agentgraph", {})
+            if isinstance(environment_totals, Mapping)
+            else {}
+        )
+        direct_receipts = report.get("execution_receipts", {}).get("direct", {})
+        graph_receipts = report.get("execution_receipts", {}).get(
+            "agentgraph", {}
+        )
+        collection_failures = report.get("execution_receipts", {}).get(
+            "collection_failures", ()
+        )
+        wrong_demos = report.get(
+            "alfworld_wrong_demo_first_observable_failures", ()
+        )
+        wrong_demo_rows = "\n".join(
+            "| {task_id} | {layer} | {turn} | {error} |".format(
+                task_id=value.get("task_id"),
+                layer=value.get("failure_layer"),
+                turn=value.get("first_error_turn"),
+                error=value.get("error"),
+            )
+            for value in wrong_demos
+            if isinstance(value, Mapping)
+        ) or "| None | None | None | None |"
+        direct_error_distribution = direct_receipts.get(
+            "error_type_distribution", {}
+        )
+        graph_execution_error_distribution = graph_receipts.get(
+            "execution_error_type_distribution", {}
+        )
+        graph_runtime_failure_distribution = graph_receipts.get(
+            "runtime_failure_type_distribution", {}
+        )
+        alfworld_section = f"""
+
+## ALFWorld native outcome
+
+Official split: **{report.get('alfworld_official_split')}**; policy action budget: **{report.get('alfworld_policy_action_budget')}**; TextWorld hard limit: **{report.get('alfworld_simulator_hard_limit')}**.
+
+Success Rate over total tasks treats missing/invalid episodes as unsuccessful. Success Rate over evaluator-valid tasks excludes them.
+
+| Condition | Success | Total | Evaluator valid | SR (total) | SR (evaluator-valid) |
+|---|---:|---:|---:|---:|---:|
+| Direct | {direct.get('success_count', 0)} | {direct.get('denominator', 0)} | {direct.get('evaluator_valid', 0)} | {100 * float(direct.get('success_rate_total', 0.0)):.2f}% | {('N/A' if direct.get('success_rate_evaluator_valid') is None else f"{100 * float(direct['success_rate_evaluator_valid']):.2f}%")} |
+| AgentGraph | {graph.get('success_count', 0)} | {graph.get('denominator', 0)} | {graph.get('evaluator_valid', 0)} | {100 * float(graph.get('success_rate_total', 0.0)):.2f}% | {('N/A' if graph.get('success_rate_evaluator_valid') is None else f"{100 * float(graph['success_rate_evaluator_valid']):.2f}%")} |
+
+AgentGraph termination: explicit FINISH **{report.get('explicit_finished_count', 0)}/{report.get('sample_count', 0)}**; max_rounds **{report.get('max_rounds_count', 0)}**; terminal failures **{report.get('terminal_failure_count', 0)}**.
+
+## ALFWorld environment receipts
+
+| Condition | Environment actions | Invalid | Repeated | No effect | Parse errors | Terminal episodes | Mean episode score |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Direct | {direct_environment.get('environment_action_count', 0)} | {direct_environment.get('invalid_action_count', 0)} | {direct_environment.get('repeated_action_count', 0)} | {direct_environment.get('no_effect_action_count', 0)} | {direct_environment.get('action_parse_error_count', 0)} | {direct_environment.get('terminal_episode_count', 0)} | {direct_environment.get('mean_episode_score')} |
+| AgentGraph | {graph_environment.get('environment_action_count', 0)} | {graph_environment.get('invalid_action_count', 0)} | {graph_environment.get('repeated_action_count', 0)} | {graph_environment.get('no_effect_action_count', 0)} | {graph_environment.get('action_parse_error_count', 0)} | {graph_environment.get('terminal_episode_count', 0)} | {graph_environment.get('mean_episode_score')} |
+
+## AgentGraph structure
+
+- Agent count distribution: `{json.dumps(report.get('agent_count_distribution', {}), ensure_ascii=False, sort_keys=True)}`
+- Topology distribution: `{json.dumps(report.get('topology_distribution', {}), ensure_ascii=False, sort_keys=True)}`
+
+## Runtime and provider receipts
+
+- Direct execution error distribution: `{json.dumps(direct_error_distribution, ensure_ascii=False, sort_keys=True)}`
+- AgentGraph execution error distribution: `{json.dumps(graph_execution_error_distribution, ensure_ascii=False, sort_keys=True)}`
+- AgentGraph runtime failed turns: **{graph_receipts.get('runtime_failed_turn_count', 0)}**; structured runtime failure distribution: `{json.dumps(graph_runtime_failure_distribution, ensure_ascii=False, sort_keys=True)}`
+- Collection failures: **{len(collection_failures)}**
+
+## Wrong Demo: first observable failure
+
+| Task | Failure layer | First error turn | Error |
+|---|---|---:|---|
+{wrong_demo_rows}
+"""
     if tuple(report["agentgraph_minus_direct"]) == ("exact_match", "token_f1"):
         return f"""# {report['dataset']} Architecture Validation
 
@@ -2625,6 +2977,7 @@ AgentGraph - Direct: **{100 * float(report['agentgraph_minus_direct']['exact_mat
 ## Failure types
 
 {failures}
+{alfworld_section}
 """
     return f"""# {report['dataset']} Architecture Validation
 
@@ -2646,6 +2999,7 @@ AgentGraph - Direct: **{100 * float(delta):+.2f} percentage points**.
 ## Failure types
 
 {failures}
+{alfworld_section}
 """
 
 

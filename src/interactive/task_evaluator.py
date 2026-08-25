@@ -1602,15 +1602,25 @@ async def _evaluate_environment(
         else:
             success = False
         reward = 1.0 if success else 0.0
+        raw_episode_score = terminal_info.get("score", 0.0)
+        episode_score = (
+            float(raw_episode_score)
+            if not isinstance(raw_episode_score, bool)
+            and isinstance(raw_episode_score, (int, float))
+            and math.isfinite(float(raw_episode_score))
+            else 0.0
+        )
     else:
         reward = _clip_unit(terminal_reward)
         success = reward >= 1.0
+        episode_score = terminal_reward
     return EvaluationOutcome(
         valid=True,
         reward=reward,
         metrics={
             "success": float(success),
             "environment_return": terminal_reward,
+            "episode_score": episode_score,
             "steps": float(len(trace)),
             "terminal": float(terminal),
         },

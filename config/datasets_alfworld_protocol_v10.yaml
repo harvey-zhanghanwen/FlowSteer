@@ -1,0 +1,54 @@
+# SkillFlow protocol-v10 ALFWorld evaluation populations.
+#
+# The preparation script enumerates the deployed RAGENAdapter inventory for
+# both official evaluation modes and resets every game once to persist the
+# canonical public instruction.  Generated JSONL remains under ignored data/.
+
+schema_version: "flowsteer.agentgraph.datasets.v1"
+protocol_version: "skillflow.protocol.v10"
+
+aligned_dir: "data/alfworld_protocol_v10"
+aligned_files:
+  preflight_train: "data/alfworld_protocol_v10/preflight_train.jsonl"
+  valid_seen: "data/alfworld_protocol_v10/valid_seen.jsonl"
+  valid_unseen: "data/alfworld_protocol_v10/valid_unseen.jsonl"
+  manifest: "data/alfworld_protocol_v10/manifest.json"
+
+# The model may issue at most 20 environment actions.  The official simulator
+# remains registered with its independent 50-step safety cap.
+action_policy_budget: 20
+simulator_step_cap: 50
+
+official_populations:
+  valid_seen:
+    mode: "eval_in_distribution"
+    output_file: "valid_seen.jsonl"
+  valid_unseen:
+    mode: "eval_out_of_distribution"
+    output_file: "valid_unseen.jsonl"
+
+# The shared evaluator preflight intentionally uses one non-test task so no
+# final-evaluation episode is touched before the formal run.
+evaluator_preflight:
+  mode: "train"
+  output_file: "preflight_train.jsonl"
+  sample_count: 1
+
+# Existing train-inventory held-out tasks remain a smoke-only population; this
+# protocol catalog references their materialization instead of copying it.
+train_heldout_smoke:
+  task_file: "data/alfworld_v2/validation.jsonl"
+  manifest_file: "data/alfworld_v2/manifest.json"
+  project_split: "validation"
+  scope: "train_inventory_heldout_smoke_only"
+
+sources:
+  alfworld:
+    enabled: true
+    display_name: "ALFWorld"
+    task_type: "interactive_agent"
+    metric: "success_rate"
+    ragen_adapter_path: "${FLOWSTEER_RAGEN_ADAPTER_PATH:-/home/test/SKILLEV/skillflow-bayesian-improve-deploy/src/ragen_adapter.py}"
+    alfworld_path: "${SKILLRL_ALFWORLD_PATH:-/home/test/datasets/ALFWorld/repo}"
+    alfworld_data: "${ALFWORLD_DATA:-/home/test/datasets/ALFWorld/data}"
+    config_file: "${ALFWORLD_CONFIG_FILE:-/home/test/datasets/ALFWorld/repo/configs/base_config.yaml}"

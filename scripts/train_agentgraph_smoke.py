@@ -460,13 +460,19 @@ def _workflow_problem(
             if isinstance(contract, str) and contract.strip()
             else "Return exactly one currently admissible environment action."
         )
+        environment_resource_id = (
+            "alfworld" if source_key == "alfworld" else f"{source_key}.environment"
+        )
         return (
             f"{task.question}\n\n"
             "Execution interface: a node using execution_mode `react` may select "
-            f"the `{source_key}.environment` tool. Its single execution owns one "
+            f"the `{environment_resource_id}` tool. Its single execution owns one "
             "bounded request-scoped episode; each environment turn receives the "
             "current observation and admissible actions before selecting one "
-            f"action. {action_contract} The episode ends at the environment "
+            "action. The stateful environment tool must have exactly one graph "
+            "Agent owner; that owner uses execution_mode `react`, cannot be in a "
+            "reciprocal relation, and Agents without the tool use execution_mode "
+            f"`reasoning`. {action_contract} The episode ends at the environment "
             "terminal state or the fixed evaluator step budget. Do not return a "
             "prose answer or product summary."
         )
@@ -2257,15 +2263,16 @@ class LiveSmokeBackend:
                 semantic_protocol=semantic_protocol,
             )
 
-            # EnvironmentExecutionAdapter closes the request-scoped simulator
-            # in its own ``finally`` block.  This explicit task lifecycle hook
-            # prevents callers from treating the resource set as process-wide.
+            # The environment session belongs to this rollout/task runtime.
+            # Release it only after every Canvas execution for the task has
+            # completed so retries continue the same world state.
             closed = False
 
             def close_environment_runtime() -> None:
                 nonlocal closed
                 if closed:
                     return
+                resources.close()
                 closed = True
 
             return (
@@ -3268,6 +3275,18 @@ class LiveSmokeBackend:
                 self.config,
                 task,
             )
+            environment_required_tool_id: Optional[str] = None
+            if environment_runtime_settings is not None:
+                environment_resource_ids = task_tool_registry.resource_ids
+                if len(environment_resource_ids) != 1:
+                    raise ConfigurationError(
+                        "environment runtime must expose exactly one Tool resource"
+                    )
+                # Bind the FINISH gate to the capability actually registered by
+                # the reused environment runtime.  SkillFlow names ALFWorld's
+                # public resource ``alfworld`` while the existing WebShop
+                # compatibility resource remains ``webshop.environment``.
+                environment_required_tool_id = environment_resource_ids[0]
             orchestrator = AgentGraphOrchestrator(
                 self.registry,
                 self.director_client,
@@ -3311,11 +3330,7 @@ class LiveSmokeBackend:
                     graph_config,
                     terminal_protocol=terminal_protocol,
                 ),
-                required_tool_id=(
-                    f"{_dataset_key(task)}.environment"
-                    if environment_runtime_settings is not None
-                    else None
-                ),
+                required_tool_id=environment_required_tool_id,
                 semantic_protocol=semantic_protocol,
                 recovery_policy=recovery_policy,
                 required_evidence_tool_id=required_evidence_tool_id,

@@ -1,0 +1,187 @@
+# ALFWorld initial official valid_unseen evaluation.  This condition differs
+# from valid_seen only in its pinned official population and artifact namespace.
+
+schema_version: "flowsteer.agentgraph.config.v1"
+execution_timeout: 600.0
+experiment:
+  name: "alfworld_valid_unseen_unified_architecture_v1"
+  phase: "alfworld_evaluation"
+  training_enabled: false
+  seed: 20260825
+  condition_id: "alfworld_valid_unseen_unified_architecture_v1"
+  sampling_schedule_purpose: "alfworld_valid_unseen_full_paired_evaluation_v1"
+  catalog_order_namespace: "alfworld_initial_adapter_v1"
+  prompt_version: "agentgraph.director.minimal-neutral.v10"
+  tool_version: "skillflow.ragen-alfworld.rollout-session.v1"
+  output_dir: "artifacts/alfworld_initial_adapter_v1/valid_unseen"
+
+data:
+  catalog_path: "config/datasets_alfworld_protocol_v10.yaml"
+  train_path: "data/alfworld_protocol_v10/preflight_train.jsonl"
+  validation_path: "data/alfworld_v2/validation.jsonl"
+  test_path: "data/alfworld_protocol_v10/valid_unseen.jsonl"
+  enforce_split_isolation: true
+  task_schema_version: "flowsteer.agentgraph.task.v1"
+
+alfworld_evaluation:
+  dataset_key: "alfworld"
+  stage: "final_evaluation"
+  split: "test"
+  official_split: "valid_unseen"
+  selection: "sequential"
+  sample_count: 134
+  stable_zero_sample_count: 2
+  rollouts_per_task: 1
+  concurrency: 2
+  task_timeout_seconds: 600.0
+  direct_model_id: "qwen3.5-9b-local"
+  direct_protocol: "skillflow_ragen_alfworld_react_20step_v1"
+  protocol_equivalent_to_direct: true
+  direct_contract: "Return exactly one ALFWorld action copied from the current admissible-action list."
+  direct_generation_seed: 20260825
+
+environment_runtime:
+  enabled: true
+  condition_id: "alfworld_valid_unseen_unified_architecture_v1"
+  mode: "model_driven_ragen_react"
+  dataset_scope: ["alfworld"]
+  ragen_adapter_path: "/home/test/SKILLEV/skillflow-bayesian-improve-deploy/src/ragen_adapter.py"
+  tool_timeout_seconds: 30.0
+  max_action_tokens: 128
+  max_observation_chars: 12000
+  max_environment_steps_by_source:
+    alfworld: 20
+
+storage:
+  schema_version: "flowsteer.alfworld.initial-adapter.v1"
+  root: "artifacts/alfworld_initial_adapter_v1/valid_unseen/evidence"
+  selected_tasks_path: "artifacts/alfworld_initial_adapter_v1/valid_unseen/selected_tasks.jsonl"
+  direct_predictions_path: "artifacts/alfworld_initial_adapter_v1/valid_unseen/direct_predictions.jsonl"
+  trajectories_path: "artifacts/alfworld_initial_adapter_v1/valid_unseen/agentgraph_trajectories.jsonl"
+  failures_path: "artifacts/alfworld_initial_adapter_v1/valid_unseen/collection_failures.jsonl"
+  paired_results_path: "artifacts/alfworld_initial_adapter_v1/valid_unseen/paired_results.jsonl"
+  wrong_demos_path: "artifacts/alfworld_initial_adapter_v1/valid_unseen/wrong_demos.jsonl"
+  manifest_path: "artifacts/alfworld_initial_adapter_v1/valid_unseen/run_manifest.json"
+  preflight_receipt_path: "artifacts/alfworld_initial_adapter_v1/valid_unseen/preflight_receipt.json"
+  report_json_path: "reports/alfworld_initial_adapter_v1/valid_unseen_report.json"
+  report_markdown_path: "reports/alfworld_initial_adapter_v1/valid_unseen_report.md"
+
+director:
+  base_model: "${QWEN35_9B_MODEL_PATH:-/home/test/SKILLEV/skillev-new-b2-temp/model/Qwen3.5-9B-modelscope}"
+  tokenizer_path: "${QWEN35_9B_TOKENIZER_PATH:-/home/test/SKILLEV/skillev-new-b2-temp/tokenizer/Qwen3.5-9B}"
+  backend: "sglang"
+  api_base: "http://127.0.0.1:${FLOWSTEER_SUPERVISOR_PORT:-8015}/v1"
+  served_model_name: "supervisor_theta"
+  behavior_policy_version: "qwen35-9b-base-alfworld-initial-v1"
+  behavior_adapter_name: null
+  behavior_adapter_checkpoint: null
+  updated_policy_version: "unused-evaluation-only"
+  expected_server_weight_version: "default"
+  prompt_profile: "minimal"
+  dtype: "bfloat16"
+  max_context_tokens: 8192
+  max_action_tokens: 1024
+  action_decoding: "json_schema"
+  action_schema_version: "agentgraph.canvas-action-json-schema.v1"
+  sampling_schema_version: "agentgraph.model-admissible-action-mask.v2"
+  sampling_action_profile: "model_admissible_canvas_actions"
+  temperature: 1.0
+  top_p: 1.0
+  top_k: -1
+  max_rounds: 20
+  execute_on_edit: true
+  history_window: 4
+  lora:
+    enabled: false
+
+agent_graph:
+  max_agents: 8
+  contract_type: "free_text"
+  relation_encoding: "two_bit"
+  actions: [add_agent, modify_agent, delete_agent, set_relation, set_output, finish]
+  executor_selection: "director_catalog_choice"
+  max_bidirectional_block_size: 2
+  require_unique_output: true
+  require_all_agents_reach_output: true
+  require_format_agent: false
+  semantic_protocol_by_source:
+    alfworld: "none"
+  recovery_policy: "default"
+  terminal_protocol_by_source:
+    alfworld: "none"
+  model_catalog_path: "config/model_catalog_alfworld_paired_qwen35_v1.yaml"
+
+evaluation:
+  healthbench_judge_model: ""
+  max_environment_steps: 20
+  max_environment_steps_by_source:
+    alfworld: 20
+  swebench_harness_enabled: false
+  invalid_evaluator_action: "persist_and_exclude"
+
+grpo:
+  enabled: false
+  objective: "action_masked_one_pass"
+  group_key: [task_id, condition_id, policy_version]
+  samples_per_problem: 1
+  advantage_epsilon: 1.0e-8
+  equal_weight_per_problem: true
+  terminal_task_reward_only: true
+  structural_reward: 0.0
+  exploration_reward: 0.0
+  skill_usage_reward: 0.0
+  require_valid_evaluator: true
+  reject_forced_probes: true
+  reject_fallback_or_manual_repair: true
+  reject_reconstructed_context: true
+  require_exact_behavior_receipt: true
+  optimization_passes_per_rollout_batch: 0
+  max_optimizer_updates: 0
+  learning_rate: 0.0
+  gradient_checkpointing: false
+  max_grad_norm: 0.0
+
+policy_sync:
+  enabled: false
+  api_base: "http://127.0.0.1:${FLOWSTEER_SUPERVISOR_PORT:-8015}"
+  adapter_name_prefix: "unused_alfworld_initial_v1_"
+  request_timeout_seconds: 120
+  max_retries: 0
+  retry_backoff_seconds: 1
+
+exploration:
+  enabled: false
+  strategy: "none"
+  forced_probe_rollouts: 0
+
+skills:
+  enabled: false
+  initial_library: []
+  retrieval_top_k: 0
+  library_version: "none"
+
+gpu:
+  learner_physical: 3
+  rollout_physical: 0
+  gradient_replica_physical: 5
+  learner_device: "cuda:3"
+  rollout_engine: "sglang"
+  gradient_replica_device: "cuda:5"
+  supervisor_gpu_id: 0
+  supervisor_api_base: "http://127.0.0.1:8015/v1"
+  training_enabled: false
+  oom_policy:
+    status: "inactive_evaluation_only"
+    micro_batch_size: 1
+    minimum_micro_batch_size: 1
+    micro_batch_schedule: [1]
+    retry_on_cuda_oom: false
+    split_items_across_learner_and_replica: false
+    gradient_accumulation_steps: 1
+    gradient_checkpointing: false
+
+deployment:
+  exploration_beta: 0.0
+  allow_forced_probes: false
+  active_skills_only: false
+  require_version_compatible_skills: true

@@ -277,6 +277,8 @@ def test_explicit_environment_runtime_exposes_its_episode_contract():
     assert "execution_mode `react`" in value
     assert "`webshop.environment`" in value
     assert "request-scoped episode" in value
+    assert "exactly one graph Agent owner" in value
+    assert "Agents without the tool use execution_mode `reasoning`" in value
     assert "terminal state or the fixed evaluator step budget" in value
     assert "same graph is invoked once per environment step" not in value
     assert "reward" not in value.lower()
@@ -1655,6 +1657,7 @@ class EnvironmentRuntimeWiringTests(unittest.TestCase):
         self.assertEqual(50, built.call_args.kwargs["max_turns"])
         self.assertEqual("alfworld", runtime.dataset_id)
         self.assertIs(shared_registry, runtime.tool_registry)
+        self.assertEqual(("alfworld",), shared_registry.resource_ids)
         close()
 
     def test_condition_scope_and_budget_mismatches_are_rejected(self) -> None:

@@ -764,6 +764,207 @@ def test_reports_aime_accuracy_and_healthbench_raw_score():
     assert environment["strict_success"] == 1.0
 
 
+def test_alfworld_aggregate_distinguishes_total_and_evaluator_valid_sr():
+    rows = [
+        {
+            "direct": {"available": True, "valid": True, "success": 1.0},
+            "agentgraph": {"available": True, "valid": True, "success": 1.0},
+        },
+        {
+            "direct": {"available": False, "valid": False, "success": 0.0},
+            "agentgraph": {
+                "available": True,
+                "valid": False,
+                "success": 0.0,
+            },
+        },
+    ]
+
+    aggregate = _MODULE._aggregate(rows, "agentgraph", "alfworld")
+
+    assert aggregate["success_count"] == 1
+    assert aggregate["denominator"] == 2
+    assert aggregate["evaluator_valid"] == 1
+    assert aggregate["success_rate_total"] == 0.5
+    assert aggregate["success_rate_evaluator_valid"] == 1.0
+
+
+def test_alfworld_report_summarizes_native_outcomes_receipts_and_wrong_demo():
+    config = _evaluation_config("alfworld")
+    config["alfworld_evaluation"]["official_split"] = "valid_seen"
+    environments = (
+        {
+            "environment_turn_count": 3,
+            "environment_action_count": 3,
+            "invalid_action_count": 0,
+            "no_effect_action_count": 0,
+            "repeated_action_count": 0,
+            "action_parse_error_count": 0,
+            "terminal": True,
+            "episode_score": 1.0,
+        },
+        {
+            "environment_turn_count": 2,
+            "environment_action_count": 2,
+            "invalid_action_count": 1,
+            "no_effect_action_count": 1,
+            "repeated_action_count": 1,
+            "action_parse_error_count": 0,
+            "terminal": False,
+            "episode_score": 0.0,
+        },
+    )
+    rows = [
+        {
+            "task_id": "alfworld:valid_seen:00000",
+            "failure_type": "equal_success",
+            "wrong_demo_diagnosis": None,
+            "direct": {
+                "available": True,
+                "valid": True,
+                "success": 1.0,
+                "evaluation": {"valid": True, "details": {}},
+                "telemetry": {},
+                "execution": {
+                    "model_id": "qwen3.5-9b-local",
+                    "provider": "local-director",
+                    "error_type": None,
+                    "metadata": {"response": {"attempt_count": 1}},
+                },
+                "environment": environments[0],
+            },
+            "agentgraph": {
+                "available": True,
+                "valid": True,
+                "success": 1.0,
+                "evaluation": {"valid": True, "details": {}},
+                "telemetry": {},
+                "explicit_finish": True,
+                "termination_reason": "finish",
+                "graph_diagnostic": {
+                    "agent_count": 2,
+                    "relation_count": 1,
+                    "topology_family": "chain",
+                },
+                "environment": environments[0],
+            },
+        },
+        {
+            "task_id": "alfworld:valid_seen:00001",
+            "failure_type": "agentgraph_terminal_failure",
+            "wrong_demo_diagnosis": {
+                "diagnosis_scope": "first_observable_failure",
+                "failure_layer": "agent_action_grounding",
+                "first_error_turn": 1,
+                "error": "action_not_admissible_at_observed_state",
+            },
+            "direct": {
+                "available": True,
+                "valid": False,
+                "success": 0.0,
+                "evaluation": {"valid": False, "details": {}},
+                "telemetry": {},
+                "execution": {
+                    "model_id": "qwen3.5-9b-local",
+                    "provider": "local-director",
+                    "error_type": "ProviderRequestError",
+                    "metadata": {"response": {"attempt_count": 2}},
+                },
+                "environment": environments[1],
+            },
+            "agentgraph": {
+                "available": True,
+                "valid": False,
+                "success": 0.0,
+                "evaluation": {"valid": False, "details": {}},
+                "telemetry": {},
+                "explicit_finish": False,
+                "termination_reason": "max_rounds",
+                "graph_diagnostic": {
+                    "agent_count": 3,
+                    "relation_count": 2,
+                    "topology_family": "branching",
+                },
+                "environment": environments[1],
+            },
+        },
+    ]
+    trajectories = [
+        {
+            "turns": [
+                {
+                    "graph_snapshot": {
+                        "nodes": [
+                            {"agent_id": "a", "model_id": "qwen3.5-9b-local"}
+                        ],
+                        "relations": [],
+                        "output_agent_id": "a",
+                    },
+                    "executions": [
+                        {
+                            "model_id": "qwen3.5-9b-local",
+                            "provider": "local-director",
+                            "error_type": "ProviderRequestError",
+                            "metadata": {"response": {"attempt_count": 1}},
+                        }
+                    ],
+                    "runtime_summary": {
+                        "execution_status": "failed",
+                        "failure_records": [
+                            {"error_type": "ProviderRequestError"}
+                        ],
+                    },
+                }
+            ]
+        }
+    ]
+
+    report = _MODULE._report(
+        rows,
+        config,
+        trajectories,
+        collection_failures=[
+            {
+                "task_id": "alfworld:valid_seen:00001",
+                "condition": "agentgraph",
+                "stage": "collect",
+                "error": "provider unavailable",
+            }
+        ],
+    )
+    markdown = _MODULE._report_markdown(report)
+
+    assert report["direct_local_baseline"]["success_count"] == 1
+    assert report["agentgraph"]["success_rate_total"] == 0.5
+    assert report["agentgraph"]["success_rate_evaluator_valid"] == 1.0
+    assert report["explicit_finished_count"] == 1
+    assert report["max_rounds_count"] == 1
+    assert report["alfworld_environment_totals"]["agentgraph"] == {
+        "environment_turn_count": 5,
+        "environment_action_count": 5,
+        "invalid_action_count": 1,
+        "no_effect_action_count": 1,
+        "repeated_action_count": 1,
+        "action_parse_error_count": 0,
+        "terminal_episode_count": 1,
+        "mean_episode_score": 0.5,
+    }
+    assert report["agent_count_distribution"] == {"2": 1, "3": 1}
+    assert report["topology_distribution"] == {"branching": 1, "chain": 1}
+    assert report["alfworld_failure_layer_distribution"] == {
+        "agent_action_grounding": 1
+    }
+    assert report["alfworld_wrong_demo_first_observable_failures"][0][
+        "diagnosis_scope"
+    ] == "first_observable_failure"
+    assert "| Direct | 1 | 2 | 1 | 50.00% | 100.00% |" in markdown
+    assert "explicit FINISH **1/2**; max_rounds **1**" in markdown
+    assert "Agent count distribution: `{" in markdown
+    assert "AgentGraph runtime failed turns: **1**" in markdown
+    assert "Collection failures: **1**" in markdown
+    assert "| alfworld:valid_seen:00001 | agent_action_grounding | 1 |" in markdown
+
+
 def test_aime_wrong_demo_uses_first_runtime_failure_receipt():
     diagnosis = _MODULE._aime_wrong_demo_diagnosis(
         {

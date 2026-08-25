@@ -1,0 +1,32 @@
+# Paired ALFWorld initial-evaluation catalog.  This is a filtered view of the
+# already probed local entry in model_catalog_multidataset_tool_v2.yaml so the
+# Direct and AgentGraph arms use the same Qwen3.5-9B model condition.  It does
+# not constrain Agent count, free-text contract, relations, topology, or the
+# Output Agent selected by the Director.
+providers:
+  - provider_id: "local-director"
+    kind: "openai-compatible"
+    endpoint: "http://127.0.0.1:${FLOWSTEER_SUPERVISOR_PORT:-8015}/v1"
+    max_concurrency: 32
+
+models:
+  - model_id: "qwen3.5-9b-local"
+    provider_id: "local-director"
+    model_name: "supervisor_theta"
+    selection_weight: 1.0
+    cheap_weight: 1.0
+    fast_weight: 1.0
+    context_window: 8192
+    metadata:
+      family: "qwen"
+      profile: "provider=local-director;locality=local;instruction=chat;context=8192;capabilities=text,structured-action"
+      capability_canary: "passed_2026-08-20"
+      canary_source: "artifacts/model_capability_canary/local_qwen35_9b_nonthinking_20260820.json"
+      text_capable: "true"
+      tool_capable: "true"
+      tool_capability_scope: "flowsteer-structured-action"
+      chat_template_enable_thinking: "false"
+      sampling_backend: "sglang"
+      deployment_locality: "local"
+      supports_top_k: "true"
+      max_tokens: "4096"

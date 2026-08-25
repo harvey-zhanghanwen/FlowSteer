@@ -29,6 +29,7 @@ from src.interactive.tool_runtime import ToolRequest
 def make_request(task_family: str = "alfworld") -> AgentRequest:
     provider = ProviderSpec("fake", kind="test")
     model = ModelSpec("m", "fake")
+    tool_id = "alfworld" if task_family == "alfworld" else f"{task_family}.environment"
     return AgentRequest(
         request_id="run:0:actor:single",
         run_id="run",
@@ -38,7 +39,7 @@ def make_request(task_family: str = "alfworld") -> AgentRequest:
             "actor",
             "m",
             "select an admissible environment action",
-            allowed_tools=(f"{task_family}.environment",),
+            allowed_tools=(tool_id,),
             execution_mode="react",
             artifact_type="environment_observation",
         ),
@@ -55,6 +56,7 @@ class FakeSession:
 
     def __init__(self) -> None:
         self.reset_count = 0
+        self.close_count = 0
         self.actions: list[str] = []
         self._available: object = ("look", "finish")
 
@@ -72,6 +74,9 @@ class FakeSession:
             self._available = ("finish",)
             return "room one", 0.5, False, {"won": False}
         return "task terminal observation", 1.0, True, {"won": True}
+
+    def close(self) -> None:
+        self.close_count += 1
 
 
 class SequenceGateway:
@@ -141,7 +146,7 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
         )
 
         result, receipt = await runtime.tool_registry.ainvoke_with_receipt(
-            runtime.tool_id, ToolRequest("look", {})
+            runtime.tool_id, ToolRequest("act", {"command": "look"})
         )
 
         self.assertIsNone(result)
@@ -163,7 +168,7 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(response.metadata["environment_terminal"])
         self.assertEqual(2, len(response.metadata["tool_receipts"]))
         self.assertEqual(
-            "alfworld.environment",
+            "alfworld",
             response.metadata["tool_receipts"][0]["tool_id"],
         )
         self.assertEqual("react", response.metadata["execution_mode"])
@@ -177,13 +182,16 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
         capability = runtime.tool_registry.require_capability(runtime.tool_id)
         self.assertTrue(capability.availability)
         self.assertEqual(("alfworld",), capability.dataset_scope)
-        self.assertEqual({}, dict(capability.action_schemas))
-        self.assertEqual((), capability.action_names)
+        self.assertEqual(("act",), capability.action_names)
+        self.assertEqual(
+            {"command"},
+            set(capability.action_schemas["act"]["properties"]),
+        )
         receipts = response.metadata["environment_receipts"]
         self.assertEqual([1, 2], [item["environment_revision_after"] for item in receipts])
         self.assertEqual("room one", receipts[0]["next_observation"])
         self.assertIn("room one", gateway.requests[1].problem)
-        self.assertIn("action='look'", gateway.requests[1].problem)
+        self.assertIn("Action: 'look'", gateway.requests[1].problem)
         self.assertNotIn("next_observation='room one'", gateway.requests[1].problem)
         self.assertEqual("512", gateway.requests[0].model.metadata["max_tokens"])
         self.assertEqual("512", gateway.requests[1].model.metadata["max_tokens"])
@@ -192,6 +200,175 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("reward", receipts[0])
         self.assertNotIn("info", receipts[1])
         self.assertNotIn("won", str(receipts))
+
+    async def test_provider_failure_retries_same_rollout_episode_and_budget(self) -> None:
+        class RetryGateway(SequenceGateway):
+            async def generate(self, request: AgentRequest) -> AgentResponse:
+                self.requests.append(request)
+                if len(self.requests) == 1:
+                    return AgentResponse(
+                        "look",
+                        {"provider_request_id": "provider-1"},
+                    )
+                if len(self.requests) == 2:
+                    raise TimeoutError("provider timeout")
+                return AgentResponse(
+                    "finish",
+                    {"provider_request_id": "provider-3"},
+                )
+
+        session = FakeSession()
+        factory_requests: list[AgentRequest] = []
+
+        def session_factory(request: AgentRequest) -> FakeSession:
+            factory_requests.append(request)
+            return session
+
+        gateway = RetryGateway([])
+        runtime = build_environment_execution_resources(
+            gateway=gateway,
+            session_factory=session_factory,
+            task_family="alfworld",
+            max_turns=3,
+        )
+
+        with self.assertRaises(EnvironmentExecutionError) as caught:
+            await runtime.execution_adapter.execute(make_request())
+
+        failed_reset = caught.exception.environment_reset_receipt
+        self.assertIsNotNone(failed_reset)
+        self.assertEqual(1, caught.exception.environment_revision)
+        self.assertEqual(["look"], session.actions)
+
+        response = await runtime.execution_adapter.execute(make_request())
+
+        self.assertEqual(1, len(factory_requests))
+        self.assertEqual(1, session.reset_count)
+        self.assertEqual(["look", "finish"], session.actions)
+        self.assertEqual(2, response.metadata["environment_revision"])
+        self.assertTrue(response.metadata["environment_terminal"])
+        self.assertEqual(
+            failed_reset["episode_id"],
+            response.metadata["environment_reset_receipt"]["episode_id"],
+        )
+        self.assertEqual(
+            ["look", "finish"],
+            [item["action"] for item in response.metadata["environment_receipts"]],
+        )
+        self.assertEqual(
+            [0, 1],
+            [item["step"] for item in response.metadata["evaluator_environment_trace"]],
+        )
+        # The failed provider call is not an environment action; the shared
+        # rollout budget is charged only by persisted Action--Observation turns.
+        self.assertEqual(2, response.metadata["environment_turns_used"])
+
+    async def test_terminal_and_budget_exhaustion_do_not_restart_episode(self) -> None:
+        cases = (
+            ("finish", True, "task terminal observation"),
+            ("look", False, "room one"),
+        )
+        for action, terminal, observation in cases:
+            with self.subTest(action=action):
+                session = FakeSession()
+                gateway = SequenceGateway([action])
+                runtime = resources(session=session, gateway=gateway, max_turns=1)
+
+                first = await runtime.execution_adapter.execute(make_request())
+                second = await runtime.execution_adapter.execute(make_request())
+
+                self.assertEqual(observation, first.text)
+                self.assertEqual(observation, second.text)
+                self.assertEqual(terminal, second.metadata["environment_terminal"])
+                self.assertEqual(1, session.reset_count)
+                self.assertEqual([action], session.actions)
+                self.assertEqual(1, len(gateway.requests))
+                self.assertEqual(1, second.metadata["environment_revision"])
+                self.assertEqual(1, len(second.metadata["environment_receipts"]))
+                self.assertEqual(
+                    first.metadata["environment_reset_receipt"]["episode_id"],
+                    second.metadata["environment_reset_receipt"]["episode_id"],
+                )
+
+    async def test_resource_instances_isolate_rollout_episode_state(self) -> None:
+        first_session = FakeSession()
+        second_session = FakeSession()
+        first = resources(
+            session=first_session,
+            gateway=SequenceGateway(["look"]),
+            max_turns=1,
+        )
+        second = resources(
+            session=second_session,
+            gateway=SequenceGateway(["finish"]),
+            max_turns=1,
+        )
+
+        first_response = await first.execution_adapter.execute(make_request())
+        second_response = await second.execution_adapter.execute(make_request())
+
+        self.assertNotEqual(
+            first_response.metadata["environment_reset_receipt"]["episode_id"],
+            second_response.metadata["environment_reset_receipt"]["episode_id"],
+        )
+        self.assertEqual(["look"], first_session.actions)
+        self.assertEqual(["finish"], second_session.actions)
+        self.assertEqual("room one", first_response.text)
+        self.assertEqual("task terminal observation", second_response.text)
+        self.assertFalse(first_response.metadata["environment_terminal"])
+        self.assertTrue(second_response.metadata["environment_terminal"])
+
+    async def test_resources_close_closes_rollout_session_exactly_once(self) -> None:
+        session = FakeSession()
+        runtime = resources(
+            session=session,
+            gateway=SequenceGateway(["finish"]),
+            max_turns=1,
+        )
+        await runtime.execution_adapter.execute(make_request())
+
+        runtime.close()
+        runtime.close()
+
+        self.assertEqual(1, session.close_count)
+
+    async def test_native_action_subcall_preserves_director_contract(self) -> None:
+        original = make_request()
+        director_contract = (
+            "Use the shared evidence to complete the task while preserving "
+            "the requested object and destination."
+        )
+        request = AgentRequest(
+            request_id=original.request_id,
+            run_id=original.run_id,
+            graph_revision=original.graph_revision,
+            problem=original.problem,
+            agent=AgentNode(
+                original.agent.id,
+                original.agent.model_id,
+                director_contract,
+                allowed_tools=original.agent.allowed_tools,
+                execution_mode=original.agent.execution_mode,
+                artifact_type=original.agent.artifact_type,
+            ),
+            model=original.model,
+            provider=original.provider,
+            phase=original.phase,
+            communication_condition=original.communication_condition,
+        )
+        session = FakeSession()
+        gateway = SequenceGateway(["finish"])
+        runtime = resources(session=session, gateway=gateway, max_turns=1)
+
+        await runtime.execution_adapter.execute(request)
+
+        provider_request = gateway.requests[0]
+        self.assertEqual(director_contract, provider_request.agent.contract)
+        self.assertIn(
+            "You are an expert agent operating in the ALFRED Embodied Environment.",
+            provider_request.problem,
+        )
+        self.assertIn("Your admissible actions", provider_request.problem)
 
     async def test_parse_error_consumes_turn_without_advancing_environment(self) -> None:
         session = FakeSession()
@@ -207,8 +384,11 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(0, receipts[0]["environment_revision_after"])
         self.assertEqual(["finish"], session.actions)
         self.assertEqual(1, response.metadata["environment_revision"])
-        self.assertIn("Format repair", gateway.requests[1].problem)
-        self.assertIn("environment state did not change", gateway.requests[1].problem)
+        self.assertIn("Action: '<INVALID>'", gateway.requests[1].problem)
+        self.assertIn(
+            "Result: '[INVALID] No valid <action> tag found.'",
+            gateway.requests[1].problem,
+        )
 
     async def test_alfworld_public_state_retains_target_coreference_and_count(self) -> None:
         class CountSession(FakeSession):
@@ -244,13 +424,13 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
 
         response = await runtime.execution_adapter.execute(request)
 
-        first_prompt = gateway.requests[0].problem
-        second_prompt = gateway.requests[1].problem
-        self.assertIn("target_class=newspaper", first_prompt)
-        self.assertIn("destination_class=sidetable", first_prompt)
-        self.assertIn("count=2", first_prompt)
-        self.assertIn("`them` refers to the required `newspaper` instances", first_prompt)
-        self.assertIn("Visible placement progress: 1/2", second_prompt)
+        first_state = response.metadata["model_calls"][0]["public_state"]
+        second_state = response.metadata["model_calls"][1]["public_state"]
+        self.assertIn("target_class=newspaper", first_state)
+        self.assertIn("destination_class=sidetable", first_state)
+        self.assertIn("count=2", first_state)
+        self.assertIn("`them` refers to the required `newspaper` instances", first_state)
+        self.assertIn("Visible placement progress: 1/2", second_state)
         self.assertEqual(
             "newspaper",
             response.metadata["model_calls"][0]["public_state"]
@@ -275,11 +455,38 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
         gateway = SequenceGateway(["finish"])
         runtime = resources(session=session, gateway=gateway, max_turns=1)
 
-        await runtime.execution_adapter.execute(request)
+        response = await runtime.execution_adapter.execute(request)
 
-        prompt = gateway.requests[0].problem
-        self.assertIn("required_transform=heat", prompt)
-        self.assertIn("`it` refers to `egg`", prompt)
+        public_state = response.metadata["model_calls"][0]["public_state"]
+        self.assertIn("required_transform=heat", public_state)
+        self.assertIn("`it` refers to `egg`", public_state)
+
+    async def test_alfworld_public_state_ignores_appended_runtime_contract(self) -> None:
+        request = make_request()
+        request = AgentRequest(
+            request_id=request.request_id,
+            run_id=request.run_id,
+            graph_revision=request.graph_revision,
+            problem=(
+                "Put two toiletpaper in toilet.\n\n"
+                "Execution interface: use the request-scoped environment Tool."
+            ),
+            agent=request.agent,
+            model=request.model,
+            provider=request.provider,
+            phase=request.phase,
+            communication_condition=request.communication_condition,
+        )
+        session = FakeSession()
+        gateway = SequenceGateway(["finish"])
+        runtime = resources(session=session, gateway=gateway, max_turns=1)
+
+        response = await runtime.execution_adapter.execute(request)
+
+        model_state = response.metadata["model_calls"][0]["public_state"]
+        self.assertIn("target_class=toiletpaper", model_state)
+        self.assertIn("destination_class=toilet", model_state)
+        self.assertIn("count=2", model_state)
 
     async def test_webshop_public_state_retains_visible_instruction_constraints(self) -> None:
         class WebShopSession(FakeSession):
@@ -421,7 +628,7 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
                     '{"action":"add_subgraph","agents":['
                     '{"agent_id":"actor","model_id":"m",'
                     '"contract":"act in the environment",'
-                    '"allowed_tools":["alfworld.environment"],'
+                    '"allowed_tools":["alfworld"],'
                     '"execution_mode":"react",'
                     '"artifact_type":"environment_observation",'
                     '"completion_condition":"reach a terminal observation"}'
@@ -527,11 +734,10 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Do not return JSON", gateway.requests[0].problem)
         self.assertNotIn("Agent contract:", gateway.requests[0].problem)
         self.assertEqual(
-            "environment_action", gateway.requests[0].agent.artifact_type
+            "environment_observation", gateway.requests[0].agent.artifact_type
         )
         self.assertEqual(
-            "Select exactly one native action permitted by the current "
-            "admissible-action list.",
+            "select an admissible environment action",
             gateway.requests[0].agent.contract,
         )
 
