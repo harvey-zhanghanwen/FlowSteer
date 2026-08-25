@@ -1,5 +1,10 @@
 # WebShop initial adapter v1：实现来源与适配边界
 
+> **状态：rejected condition。** v1 运行发现 WebShop 原始 terminal
+> observation 内嵌的 hidden Purchased/Target block 与 `Your score` 会进入公共
+> Agent/Canvas/Director feedback。原始 artifacts 仅保留用于诊断，不得作为正式指标；
+> 修复与新条件见 `webshop_initial_adapter_v2_source_map.md`。
+
 ## 1. 本轮范围
 
 本轮只接入 WebShop 的 Dataset / Environment Adapter、环境执行闭环、正式终止与
@@ -140,10 +145,12 @@ catalog path/configuration 和 `env_seed` 锁定 episode identity。smoke test �
 - 已完成 action 的 public observation feedback；
 - 正常 AgentGraph 上游 artifact。
 
-`EnvironmentToolBackend` 返回给模型的 `ToolResult` 明确不包含 reward 和 evaluator `info`。
-隐藏 goal attributes、目标商品 identity、terminal reward、success label 和 evaluator replay
-metadata 只保留在 evaluator/trajectory 的非模型可见 receipt 中。Direct 和 AgentGraph 均
-不得从 TaskRecord metadata、报告或 Wrong Demo 获取这些字段作为生成上下文。
+v1 的 `ToolResult` 虽未直接添加 reward 字段或 evaluator `info`，但 WebShop 原始 terminal
+observation 本身包含 hidden Purchased/Target block 与 `Your score`，因此 v1 没有真正满足
+该隔离要求。v2 将 raw terminal observation 仅保留在 evaluator replay trace，公共
+ToolResult、Agent artifact、Canvas feedback 与 Director observation 只接收 WebShop 上游
+可见的终局确认文本。Direct 和 AgentGraph 均不得从 TaskRecord metadata、报告或 Wrong
+Demo 获取 evaluator-only 字段作为生成上下文。
 
 完整 episode 证据至少保存：
 

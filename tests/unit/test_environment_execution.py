@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from src.interactive.agent_graph import AgentGraph, AgentNode
+from src.interactive.agent_graph import AgentGraph, AgentNode, AgentRelation
 from src.interactive.agent_runtime import (
     AgentRequest,
     AgentResponse,
@@ -634,6 +634,12 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_evaluator_replays_adapter_trace_without_model_callback(self) -> None:
+        raw_terminal_observation = (
+            "Thank you for shopping with us! [SEP] Purchased [SEP] asin [SEP] "
+            "B000TEST [SEP] Reward [SEP] Your score (min 0.0, max 1.0) "
+            "[SEP] 1.0 [SEP] Reward Details [SEP] None"
+        )
+
         class WebShopSession(FakeSession):
             environment_id = "fake:webshop"
             task_family = "webshop"
@@ -648,7 +654,7 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
 
             def step(self, action: str):  # type: ignore[no-untyped-def]
                 self.actions.append(action)
-                return "Purchased", 1.0, True, {"graded_score": 1.0}
+                return raw_terminal_observation, 1.0, True, {"graded_score": 1.0}
 
         live_session = WebShopSession()
         runtime = resources(
@@ -670,7 +676,7 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
                 return "Product page"
 
             def step(self, action):  # type: ignore[no-untyped-def]
-                return "Purchased", 1.0, True, {"graded_score": 1.0}
+                return raw_terminal_observation, 1.0, True, {"graded_score": 1.0}
 
         record = TaskRecord(
             task_id="webshop:7",
@@ -710,9 +716,97 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(outcome.valid)
         self.assertEqual(1.0, outcome.metrics["success"])
         self.assertFalse(callback_called)
-        # Evaluator truth is absent from public receipts and model calls.
+        # The upstream terminal page embeds the native score.  Preserve that
+        # exact raw page only in the evaluator replay trace; the Agent output,
+        # public Action--Observation receipt, and model calls receive the
+        # reward-free observation projection.
+        self.assertEqual("Thank you for shopping with us!", response.text)
+        self.assertNotIn("B000TEST", response.text)
+        self.assertNotIn("Your score", response.text)
+        self.assertNotIn("Reward Details", response.text)
+        self.assertEqual(
+            raw_terminal_observation,
+            response.metadata["evaluator_environment_trace"][0][
+                "next_observation"
+            ],
+        )
+        self.assertEqual(
+            1.0,
+            response.metadata["evaluator_environment_trace"][0]["reward"],
+        )
+        self.assertNotIn(
+            "Your score", str(response.metadata["environment_receipts"])
+        )
+        self.assertNotIn("Reward Details", str(response.metadata["model_calls"]))
         self.assertNotIn("graded_score", str(response.metadata["environment_receipts"]))
         self.assertNotIn("graded_score", str(response.metadata["model_calls"]))
+
+    async def test_webshop_terminal_private_fields_do_not_reach_downstream_agent(
+        self,
+    ) -> None:
+        class WebShopSession(FakeSession):
+            environment_id = "fake:webshop"
+            task_family = "webshop"
+
+            def __init__(self) -> None:
+                super().__init__()
+                self._available = {"has_search_bar": False, "clickables": ["Buy Now"]}
+
+            def reset(self) -> str:
+                return "Product page"
+
+            def step(self, action: str):  # type: ignore[no-untyped-def]
+                self.actions.append(action)
+                return (
+                    "Thank you for shopping with us! [SEP] Purchased [SEP] asin "
+                    "[SEP] B000PRIVATE [SEP] Target [SEP] secret attributes "
+                    "[SEP] Reward [SEP] Your score (min 0.0, max 1.0) "
+                    "[SEP] 0.75 [SEP] Reward Details [SEP] private details",
+                    0.75,
+                    True,
+                    {"graded_score": 0.75},
+                )
+
+        gateway = SequenceGateway(["click[Buy Now]", "public terminal summary"])
+        session = WebShopSession()
+        environment = resources(session=session, gateway=gateway, max_turns=1)
+        registry = ModelRegistry(
+            [ProviderSpec("fake", kind="test")],
+            [ModelSpec("m", "fake")],
+        )
+        actor = make_request("webshop").agent
+        downstream = AgentNode(
+            "downstream",
+            "m",
+            "Use the upstream public environment artifact.",
+            execution_mode="reasoning",
+        )
+        runtime = AgentRuntime(
+            registry,
+            gateway,
+            execution_adapters={"react": environment.execution_adapter},
+            tool_registry=environment.tool_registry,
+            dataset_id="webshop",
+        )
+        graph = AgentGraph(
+            [actor, downstream],
+            [AgentRelation("actor", "downstream", True, False)],
+            output_agent_id="downstream",
+        )
+
+        result = await runtime.execute(graph, "buy the requested item")
+
+        self.assertEqual("public terminal summary", result.final_answer)
+        upstream = str(gateway.requests[1].upstream)
+        self.assertIn("Thank you for shopping with us!", upstream)
+        for private_value in (
+            "B000PRIVATE",
+            "secret attributes",
+            "Your score",
+            "Reward Details",
+            "graded_score",
+        ):
+            self.assertNotIn(private_value, upstream)
 
 
 if __name__ == "__main__":

@@ -97,7 +97,10 @@ EnvironmentSessionFactory = Callable[[AgentRequest], EnvironmentSession]
 
 @dataclass(slots=True)
 class _EnvironmentTransition:
+    # ``observation`` is retained verbatim for official evaluator replay.
+    # ``public_observation`` is the projection returned to the Agent/Canvas.
     observation: str
+    public_observation: str
     reward: object
     terminal: bool
     info: Mapping[str, object]
@@ -107,8 +110,52 @@ class _EnvironmentTransition:
 class _EnvironmentEpisode:
     session: EnvironmentSession
     observation: str
+    raw_observation: str
     revision: int = 0
     pending_transition: Optional[_EnvironmentTransition] = None
+
+
+_WEBSHOP_SCORE_MARKER = re.compile(
+    r"Your\s+score\s*\(\s*min\s+0\.0\s*,\s*max\s+1\.0\s*\)",
+    re.IGNORECASE,
+)
+
+
+def _public_environment_observation(
+    task_family: str,
+    observation: str,
+    *,
+    terminal: bool,
+) -> str:
+    """Remove WebShop's evaluator-only score block from public feedback.
+
+    WebShop's upstream ``done_page.html`` renders purchased/target details in a
+    hidden ``div`` and renders ``Your score`` in the visible terminal page.
+    ``WebAgentTextEnv`` flattens both blocks into text.  The raw page is required
+    for deterministic evaluator replay, while the public policy boundary may
+    receive only the upstream visible acknowledgement without hidden target or
+    reward fields.
+    """
+
+    if task_family.strip().lower() != "webshop" or not terminal:
+        return observation
+    acknowledgement = "Thank you for shopping with us!"
+    if acknowledgement.casefold() in observation.casefold():
+        return acknowledgement
+    marker = _WEBSHOP_SCORE_MARKER.search(observation)
+    if marker is None:
+        return observation
+    prefix = observation[: marker.start()]
+    # ``observation_mode=text`` separates the HTML labels with ``[SEP]``;
+    # ``text_rich`` uses whitespace/newlines.  Both formats originate from the
+    # same upstream ``Reward`` label immediately before the score marker.
+    prefix = re.sub(
+        r"(?:\s*\[SEP\]\s*|\s+)Reward\s*(?:\[SEP\]\s*)?$",
+        "",
+        prefix,
+        flags=re.IGNORECASE,
+    )
+    return prefix.rstrip()
 
 
 class EnvironmentToolBackend:
@@ -156,12 +203,21 @@ class EnvironmentToolBackend:
             raise EnvironmentExecutionError(
                 "environment session task family does not match its tool capability"
             )
-        observation = await _resolve(session.reset())
-        if not isinstance(observation, str):
+        raw_observation = await _resolve(session.reset())
+        if not isinstance(raw_observation, str):
             raise EnvironmentExecutionError("environment reset must return text")
-        if observation.startswith("[ENV_UNAVAILABLE]"):
-            raise EnvironmentExecutionError(observation)
-        episode = _EnvironmentEpisode(session=session, observation=observation)
+        if raw_observation.startswith("[ENV_UNAVAILABLE]"):
+            raise EnvironmentExecutionError(raw_observation)
+        observation = _public_environment_observation(
+            self.task_family,
+            raw_observation,
+            terminal=False,
+        )
+        episode = _EnvironmentEpisode(
+            session=session,
+            observation=observation,
+            raw_observation=raw_observation,
+        )
         return episode, self._episode.set(episode)
 
     def end(self, token: Token[Optional[_EnvironmentEpisode]]) -> None:
@@ -197,19 +253,26 @@ class EnvironmentToolBackend:
             raise EnvironmentExecutionError(
                 "environment step must return observation, reward, terminal, and info"
             )
-        observation, reward, terminal, info = transition
-        if not isinstance(observation, str):
+        raw_observation, reward, terminal, info = transition
+        if not isinstance(raw_observation, str):
             raise EnvironmentExecutionError("environment observation must be text")
         if type(terminal) is not bool:
             raise EnvironmentExecutionError("environment terminal flag must be boolean")
         if not isinstance(info, Mapping):
             raise EnvironmentExecutionError("environment info must be a mapping")
-        if observation.startswith(("[ENV_UNAVAILABLE]", "[ERROR]")):
-            raise EnvironmentExecutionError(observation)
+        if raw_observation.startswith(("[ENV_UNAVAILABLE]", "[ERROR]")):
+            raise EnvironmentExecutionError(raw_observation)
+        public_observation = _public_environment_observation(
+            self.task_family,
+            raw_observation,
+            terminal=terminal,
+        )
         episode.revision += 1
-        episode.observation = observation
+        episode.observation = public_observation
+        episode.raw_observation = raw_observation
         episode.pending_transition = _EnvironmentTransition(
-            observation=observation,
+            observation=raw_observation,
+            public_observation=public_observation,
             reward=reward,
             terminal=terminal,
             info=MappingProxyType(dict(info)),
@@ -217,7 +280,7 @@ class EnvironmentToolBackend:
         return ToolResult(
             {
                 "environment_revision": episode.revision,
-                "observation": observation,
+                "observation": public_observation,
                 "terminal": terminal,
             }
         )
@@ -892,6 +955,7 @@ class EnvironmentExecutionAdapter:
         episode, token = await self._environment_backend.begin(request)
         session = episode.session
         observation = episode.observation
+        raw_observation = episode.raw_observation
 
         revision = 0
         terminal = False
@@ -1013,11 +1077,11 @@ class EnvironmentExecutionAdapter:
                     evaluator_trace.append(
                         {
                             "step": turn - 1,
-                            "observation": observation,
+                            "observation": raw_observation,
                             "legal_actions": list(admissible_actions),
                             "action": "<INVALID>",
                             "raw_graph_output": raw_action,
-                            "next_observation": observation,
+                            "next_observation": raw_observation,
                             "feedback": "[INVALID] No valid <action> tag found.",
                             "reward": 0.0,
                             "done": False,
@@ -1043,7 +1107,7 @@ class EnvironmentExecutionAdapter:
                 value = result.value
                 if (
                     not isinstance(value, dict)
-                    or value.get("observation") != transition.observation
+                    or value.get("observation") != transition.public_observation
                     or value.get("terminal") is not transition.terminal
                     or value.get("environment_revision") != episode.revision
                 ):
@@ -1051,7 +1115,7 @@ class EnvironmentExecutionAdapter:
                         "registered environment tool returned an incompatible result"
                     )
                 revision = episode.revision
-                next_observation = transition.observation
+                next_observation = transition.public_observation
                 done = transition.terminal
                 receipts.append(
                     {
@@ -1074,11 +1138,11 @@ class EnvironmentExecutionAdapter:
                 evaluator_trace.append(
                     {
                         "step": turn - 1,
-                        "observation": observation,
+                        "observation": raw_observation,
                         "legal_actions": list(admissible_actions),
                         "action": action,
                         "raw_graph_output": raw_action,
-                        "next_observation": next_observation,
+                        "next_observation": transition.observation,
                         "reward": transition.reward,
                         "done": done,
                         "info": dict(transition.info),
@@ -1087,6 +1151,7 @@ class EnvironmentExecutionAdapter:
                     }
                 )
                 observation = next_observation
+                raw_observation = transition.observation
                 terminal = done
                 if terminal:
                     break

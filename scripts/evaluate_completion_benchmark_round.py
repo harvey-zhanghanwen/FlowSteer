@@ -2198,6 +2198,171 @@ def _saved_environment_trace(
     return ()
 
 
+def _execution_environment_receipts(
+    value: Optional[Mapping[str, Any]],
+) -> tuple[tuple[Mapping[str, Any], ...], ...]:
+    """Return every saved public environment episode in one rollout.
+
+    The formal evaluator replay trace describes the single episode that
+    determines reward.  FlowSteer's execute-on-edit loop may additionally run
+    request-scoped WebShop episodes while the Director edits the Canvas.  Those
+    public receipts are diagnostic execution cost and must not be conflated
+    with the formal evaluator episode.
+    """
+
+    if not isinstance(value, Mapping):
+        return ()
+    episodes: list[tuple[Mapping[str, Any], ...]] = []
+
+    def append_from_execution(execution: object) -> bool:
+        if not isinstance(execution, Mapping):
+            return False
+        metadata = execution.get("metadata")
+        response = metadata.get("response") if isinstance(metadata, Mapping) else None
+        receipts = (
+            response.get("environment_receipts")
+            if isinstance(response, Mapping)
+            else None
+        )
+        if not isinstance(receipts, Sequence) or isinstance(receipts, (str, bytes)):
+            return False
+        episode = tuple(dict(item) for item in receipts if isinstance(item, Mapping))
+        if not episode:
+            return False
+        episodes.append(episode)
+        return True
+
+    direct_executions = value.get("executions")
+    if isinstance(direct_executions, Sequence) and not isinstance(
+        direct_executions, (str, bytes)
+    ):
+        for execution in direct_executions:
+            append_from_execution(execution)
+
+    turns = value.get("turns")
+    if isinstance(turns, Sequence) and not isinstance(turns, (str, bytes)):
+        for turn in turns:
+            if not isinstance(turn, Mapping):
+                continue
+            found_execution_episode = False
+            executions = turn.get("executions")
+            if isinstance(executions, Sequence) and not isinstance(
+                executions, (str, bytes)
+            ):
+                for execution in executions:
+                    found_execution_episode = (
+                        append_from_execution(execution) or found_execution_episode
+                    )
+            if found_execution_episode:
+                continue
+            # Cancellation/failure prefixes can survive only in Runtime output
+            # metadata after the execution Task has been normalized.
+            runtime = turn.get("runtime_summary")
+            output_metadata = (
+                runtime.get("output_metadata") if isinstance(runtime, Mapping) else None
+            )
+            if not isinstance(output_metadata, Mapping):
+                continue
+            for metadata in output_metadata.values():
+                if not isinstance(metadata, Mapping):
+                    continue
+                receipts = metadata.get("environment_receipts")
+                if not isinstance(receipts, Sequence) or isinstance(
+                    receipts, (str, bytes)
+                ):
+                    continue
+                episode = tuple(
+                    dict(item) for item in receipts if isinstance(item, Mapping)
+                )
+                if episode:
+                    episodes.append(episode)
+    return tuple(episodes)
+
+
+def _rollout_environment_diagnostics(
+    value: Optional[Mapping[str, Any]],
+) -> Mapping[str, int]:
+    """Summarize all public environment attempts across execute-on-edit."""
+
+    episodes = _execution_environment_receipts(value)
+    # Direct evaluation owns one continuous evaluator episode, so its policy
+    # calls do not carry EnvironmentExecutionAdapter receipts.  In that arm the
+    # formal trace is also the complete rollout trace.
+    if not episodes:
+        formal = _saved_environment_trace(value)
+        episodes = (formal,) if formal else ()
+    attempt_count = 0
+    state_advancing = 0
+    invalid = 0
+    terminal_episodes = 0
+    for episode in episodes:
+        attempt_count += len(episode)
+        terminal_episodes += int(
+            any(
+                isinstance(item, Mapping) and item.get("terminal") is True
+                for item in episode
+            )
+        )
+        for item in episode:
+            if not isinstance(item, Mapping):
+                continue
+            item_invalid = (
+                item.get("parse_error") is True
+                or item.get("observation_status") == "parse_error"
+                or item.get("action") in {None, "<INVALID>"}
+                or item.get("state_advanced") is False
+            )
+            invalid += int(item_invalid)
+            state_advancing += int(not item_invalid)
+    return {
+        "episode_count": len(episodes),
+        "environment_attempt_count": attempt_count,
+        "state_advancing_action_count": state_advancing,
+        "invalid_action_count": invalid,
+        "terminal_episode_count": terminal_episodes,
+    }
+
+
+def _direct_execution_receipt_projection(
+    value: Optional[Mapping[str, Any]],
+) -> tuple[Mapping[str, Any], ...]:
+    """Keep the provider receipt fields needed by the aggregate report."""
+
+    if not isinstance(value, Mapping):
+        return ()
+    recorded = value.get("executions")
+    fallback = value.get("execution")
+    executions = (
+        [item for item in recorded if isinstance(item, Mapping)]
+        if isinstance(recorded, Sequence) and not isinstance(recorded, (str, bytes))
+        else [fallback]
+        if isinstance(fallback, Mapping)
+        else []
+    )
+    projected: list[Mapping[str, Any]] = []
+    for execution in executions:
+        metadata = execution.get("metadata")
+        response = metadata.get("response") if isinstance(metadata, Mapping) else None
+        projected.append(
+            {
+                "model_id": execution.get("model_id"),
+                "provider": execution.get("provider"),
+                "error_type": execution.get("error_type"),
+                "response": {
+                    key: response.get(key)
+                    for key in (
+                        "provider_id",
+                        "provider_model",
+                        "finish_reason",
+                        "attempt_count",
+                    )
+                    if isinstance(response, Mapping) and key in response
+                },
+            }
+        )
+    return tuple(projected)
+
+
 def _paired_rows(
     selected: Sequence[TaskRecord],
     direct: Mapping[str, Mapping[str, Any]],
@@ -2235,9 +2400,16 @@ def _paired_rows(
                     ),
                     "telemetry": _direct_telemetry(direct_value),
                     "execution": direct_execution,
+                    "execution_receipts": [
+                        dict(item)
+                        for item in _direct_execution_receipt_projection(direct_value)
+                    ],
                     "environment_trace": [
                         dict(item) for item in _saved_environment_trace(direct_value)
                     ],
+                    "rollout_environment_diagnostics": dict(
+                        _rollout_environment_diagnostics(direct_value)
+                    ),
                 },
                 "agentgraph": {
                     "available": graph_value is not None,
@@ -2274,6 +2446,9 @@ def _paired_rows(
                     "environment_trace": [
                         dict(item) for item in _saved_environment_trace(graph_value)
                     ],
+                    "rollout_environment_diagnostics": dict(
+                        _rollout_environment_diagnostics(graph_value)
+                    ),
                 },
                 **{
                     f"delta_{name}": graph_metrics[name] - direct_metrics[name]
@@ -2314,6 +2489,11 @@ def _environment_arm_diagnostics(
     invalid_actions = 0
     environment_or_evaluator_failures = 0
     formal_evaluator_skipped = 0
+    rollout_episode_count = 0
+    rollout_environment_attempts = 0
+    rollout_state_advancing_actions = 0
+    rollout_invalid_actions = 0
+    rollout_terminal_episodes = 0
     for row in rows:
         arm = row.get(condition)
         arm = arm if isinstance(arm, Mapping) else {}
@@ -2357,6 +2537,20 @@ def _environment_arm_diagnostics(
             )
             invalid_actions += int(invalid)
             state_advancing_actions += int(not invalid)
+        rollout = arm.get("rollout_environment_diagnostics")
+        if not isinstance(rollout, Mapping):
+            rollout = _rollout_environment_diagnostics(arm)
+        rollout_episode_count += int(rollout.get("episode_count", 0) or 0)
+        rollout_environment_attempts += int(
+            rollout.get("environment_attempt_count", 0) or 0
+        )
+        rollout_state_advancing_actions += int(
+            rollout.get("state_advancing_action_count", 0) or 0
+        )
+        rollout_invalid_actions += int(rollout.get("invalid_action_count", 0) or 0)
+        rollout_terminal_episodes += int(
+            rollout.get("terminal_episode_count", 0) or 0
+        )
     return {
         "evaluator_valid_count": evaluator_valid,
         "terminal_episode_count": terminal_episodes,
@@ -2365,6 +2559,14 @@ def _environment_arm_diagnostics(
         "environment_turn_count": environment_turns,
         "state_advancing_action_count": state_advancing_actions,
         "invalid_action_count": invalid_actions,
+        "formal_environment_action_count": environment_turns,
+        "formal_state_advancing_action_count": state_advancing_actions,
+        "formal_invalid_action_count": invalid_actions,
+        "rollout_environment_episode_count": rollout_episode_count,
+        "rollout_environment_attempt_count": rollout_environment_attempts,
+        "rollout_state_advancing_action_count": rollout_state_advancing_actions,
+        "rollout_invalid_action_count": rollout_invalid_actions,
+        "rollout_terminal_episode_count": rollout_terminal_episodes,
         "formal_evaluator_skipped_count": formal_evaluator_skipped,
         "environment_or_evaluator_failure_count": environment_or_evaluator_failures,
     }
@@ -2429,41 +2631,60 @@ def _direct_execution_receipts(
     for row in rows:
         direct = row.get("direct")
         execution = direct.get("execution") if isinstance(direct, Mapping) else None
+        receipt_projection = (
+            direct.get("execution_receipts") if isinstance(direct, Mapping) else None
+        )
+        executions = (
+            [item for item in receipt_projection if isinstance(item, Mapping)]
+            if isinstance(receipt_projection, Sequence)
+            and not isinstance(receipt_projection, (str, bytes))
+            else [execution]
+            if isinstance(execution, Mapping)
+            else []
+        )
         evaluation = direct.get("evaluation") if isinstance(direct, Mapping) else None
         details = (
             evaluation.get("details") if isinstance(evaluation, Mapping) else None
         )
         if isinstance(details, Mapping) and details.get("parsing_succeeded") is False:
             terminal_output_parsing_failure_count += 1
-        if not isinstance(execution, Mapping):
-            continue
-        call_count += 1
-        model_id = execution.get("model_id")
-        provider_id = execution.get("provider")
-        if isinstance(model_id, str) and model_id:
-            model_ids[model_id] += 1
-        if isinstance(provider_id, str) and provider_id:
-            provider_ids[provider_id] += 1
-        error_type = execution.get("error_type")
-        if isinstance(error_type, str) and error_type:
-            error_types[error_type] += 1
-        metadata = execution.get("metadata")
-        response = metadata.get("response") if isinstance(metadata, Mapping) else None
-        if isinstance(response, Mapping):
-            response_provider = response.get("provider_id")
-            response_model = response.get("provider_model")
-            finish_reason = response.get("finish_reason")
-            if isinstance(response_provider, str) and response_provider:
-                provider_ids[response_provider] += int(
-                    not (isinstance(provider_id, str) and provider_id == response_provider)
-                )
-            if isinstance(response_model, str) and response_model:
-                provider_models[response_model] += 1
-            if isinstance(finish_reason, str) and finish_reason:
-                finish_reasons[finish_reason] += 1
-            raw_attempts = response.get("attempt_count", 1)
-            if isinstance(raw_attempts, int) and not isinstance(raw_attempts, bool):
-                attempt_count += raw_attempts
+        for receipt in executions:
+            call_count += 1
+            model_id = receipt.get("model_id")
+            provider_id = receipt.get("provider")
+            if isinstance(model_id, str) and model_id:
+                model_ids[model_id] += 1
+            if isinstance(provider_id, str) and provider_id:
+                provider_ids[provider_id] += 1
+            error_type = receipt.get("error_type")
+            if isinstance(error_type, str) and error_type:
+                error_types[error_type] += 1
+            metadata = receipt.get("metadata")
+            response = (
+                receipt.get("response")
+                if isinstance(receipt.get("response"), Mapping)
+                else metadata.get("response")
+                if isinstance(metadata, Mapping)
+                else None
+            )
+            if isinstance(response, Mapping):
+                response_provider = response.get("provider_id")
+                response_model = response.get("provider_model")
+                finish_reason = response.get("finish_reason")
+                if isinstance(response_provider, str) and response_provider:
+                    provider_ids[response_provider] += int(
+                        not (
+                            isinstance(provider_id, str)
+                            and provider_id == response_provider
+                        )
+                    )
+                if isinstance(response_model, str) and response_model:
+                    provider_models[response_model] += 1
+                if isinstance(finish_reason, str) and finish_reason:
+                    finish_reasons[finish_reason] += 1
+                raw_attempts = response.get("attempt_count", 1)
+                if isinstance(raw_attempts, int) and not isinstance(raw_attempts, bool):
+                    attempt_count += raw_attempts
     return {
         "call_count": call_count,
         "provider_attempt_count": attempt_count,
@@ -2852,12 +3073,19 @@ AgentGraph - Direct: **{100 * float(report['agentgraph_minus_direct']['average_s
 
 {protocol_sentence}
 
-## Environment receipts
+## Formal evaluator episode
 
-| Condition | Environment turns | State-advancing actions | Invalid actions | Terminal episodes | Step-limit episodes | Evaluator skipped (no FINISH) | Timeouts |
+| Condition | Formal actions | State-advancing actions | Invalid actions | Terminal episodes | Step-limit episodes | Evaluator skipped (no FINISH) | Timeouts |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| Direct | {direct_environment.get('environment_turn_count', 0)} | {direct_environment.get('state_advancing_action_count', 0)} | {direct_environment.get('invalid_action_count', 0)} | {direct_environment.get('terminal_episode_count', 0)} | {direct_environment.get('environment_step_limit_count', 0)} | {direct_environment.get('formal_evaluator_skipped_count', 0)} | {direct_environment.get('environment_timeout_count', 0)} |
-| AgentGraph | {graph_environment.get('environment_turn_count', 0)} | {graph_environment.get('state_advancing_action_count', 0)} | {graph_environment.get('invalid_action_count', 0)} | {graph_environment.get('terminal_episode_count', 0)} | {graph_environment.get('environment_step_limit_count', 0)} | {graph_environment.get('formal_evaluator_skipped_count', 0)} | {graph_environment.get('environment_timeout_count', 0)} |
+| Direct | {direct_environment.get('formal_environment_action_count', 0)} | {direct_environment.get('formal_state_advancing_action_count', 0)} | {direct_environment.get('formal_invalid_action_count', 0)} | {direct_environment.get('terminal_episode_count', 0)} | {direct_environment.get('environment_step_limit_count', 0)} | {direct_environment.get('formal_evaluator_skipped_count', 0)} | {direct_environment.get('environment_timeout_count', 0)} |
+| AgentGraph | {graph_environment.get('formal_environment_action_count', 0)} | {graph_environment.get('formal_state_advancing_action_count', 0)} | {graph_environment.get('formal_invalid_action_count', 0)} | {graph_environment.get('terminal_episode_count', 0)} | {graph_environment.get('environment_step_limit_count', 0)} | {graph_environment.get('formal_evaluator_skipped_count', 0)} | {graph_environment.get('environment_timeout_count', 0)} |
+
+## Full rollout environment execution
+
+| Condition | Request-scoped episodes | Action attempts | State-advancing actions | Invalid actions | Terminal episodes |
+|---|---:|---:|---:|---:|---:|
+| Direct | {direct_environment.get('rollout_environment_episode_count', 0)} | {direct_environment.get('rollout_environment_attempt_count', 0)} | {direct_environment.get('rollout_state_advancing_action_count', 0)} | {direct_environment.get('rollout_invalid_action_count', 0)} | {direct_environment.get('rollout_terminal_episode_count', 0)} |
+| AgentGraph | {graph_environment.get('rollout_environment_episode_count', 0)} | {graph_environment.get('rollout_environment_attempt_count', 0)} | {graph_environment.get('rollout_state_advancing_action_count', 0)} | {graph_environment.get('rollout_invalid_action_count', 0)} | {graph_environment.get('rollout_terminal_episode_count', 0)} |
 
 ## Natural AgentGraph structure
 

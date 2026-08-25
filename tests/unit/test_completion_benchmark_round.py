@@ -980,6 +980,87 @@ def test_webshop_terminal_failure_keeps_runtime_environment_prefix_in_report():
     assert diagnostics["environment_or_evaluator_failure_count"] == 0
 
 
+def test_webshop_report_separates_formal_episode_from_execute_on_edit_attempts():
+    formal_trace = [
+        {
+            "step": 0,
+            "action": "click[buy now]",
+            "state_advanced": True,
+            "done": True,
+        }
+    ]
+    trajectory = {
+        "evaluation": {
+            "valid": True,
+            "reason": "evaluated",
+            "metrics": {"terminal": 1.0},
+            "details": {"trace": formal_trace},
+        },
+        "turns": [
+            {
+                "executions": [
+                    {
+                        "metadata": {
+                            "response": {
+                                "environment_receipts": [
+                                    {
+                                        "action": "search[blue table]",
+                                        "state_advanced": True,
+                                        "terminal": False,
+                                    },
+                                    {
+                                        "action": None,
+                                        "state_advanced": False,
+                                        "observation_status": "parse_error",
+                                        "terminal": False,
+                                    },
+                                ]
+                            }
+                        }
+                    }
+                ]
+            },
+            {
+                "executions": [
+                    {
+                        "metadata": {
+                            "response": {
+                                "environment_receipts": [
+                                    {
+                                        "action": "click[buy now]",
+                                        "state_advanced": True,
+                                        "terminal": True,
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                ]
+            },
+        ],
+    }
+    rollout = _MODULE._rollout_environment_diagnostics(trajectory)
+    rows = [
+        {
+            "agentgraph": {
+                "evaluation": trajectory["evaluation"],
+                "environment_trace": formal_trace,
+                "rollout_environment_diagnostics": rollout,
+            }
+        }
+    ]
+
+    diagnostics = _MODULE._environment_arm_diagnostics(rows, "agentgraph")
+
+    assert diagnostics["formal_environment_action_count"] == 1
+    assert diagnostics["formal_invalid_action_count"] == 0
+    assert diagnostics["rollout_environment_episode_count"] == 2
+    assert diagnostics["rollout_environment_attempt_count"] == 3
+    assert diagnostics["rollout_state_advancing_action_count"] == 2
+    assert diagnostics["rollout_invalid_action_count"] == 1
+    assert diagnostics["rollout_terminal_episode_count"] == 1
+
+
 def test_webshop_native_metric_receipt_fails_closed_when_one_metric_is_missing():
     valid, metrics = _MODULE._metrics(
         {
