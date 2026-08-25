@@ -604,7 +604,7 @@ class AgentWorkflowEnv:
 
     @staticmethod
     def _qa_role_contract_responsibility_issue(node: AgentNode) -> Optional[str]:
-        """Reject a bare contract that names a different QA responsibility.
+        """Reject a contract that names a different QA responsibility.
 
         FlowSteer keeps the Agent contract model-authored, while SkillFlow's
         role-specific execution schema remains authoritative at Runtime.  This
@@ -620,7 +620,16 @@ class AgentWorkflowEnv:
         normalized = " ".join(node.contract.casefold().split()).strip(" .,:;")
         normalized = re.sub(r"^(?:a|an|the)\s+", "", normalized)
         normalized = re.sub(r"\s+(?:agent|role|task)$", "", normalized)
-        if normalized not in conflicting_labels:
+        canonical_conflicts = frozenset(
+            " ".join(responsibility.casefold().split()).strip(" .,:;")
+            for other_role, responsibility
+            in _QA_ROLE_CONTRACT_RESPONSIBILITIES.items()
+            if other_role != role
+        )
+        if (
+            normalized not in conflicting_labels
+            and normalized not in canonical_conflicts
+        ):
             return None
         responsibility = _QA_ROLE_CONTRACT_RESPONSIBILITIES[role]
         return (

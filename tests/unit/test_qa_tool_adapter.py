@@ -32,6 +32,7 @@ from src.interactive.qa_tool_adapter import (
     _public_read_transition_mirror,
     _public_search_candidate_compatibility,
     _query_replaces_relation_surface,
+    _relation_surface_rewrite_query_candidates,
     _question_entity_anchor_tokens,
     _question_named_constraint_tokens,
     _scope_tokens,
@@ -4172,6 +4173,292 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
                 action=new_hit_chart_surface,
                 observations=observations,
             )
+        )
+
+    def test_v24_evidence_recovery_masks_to_remaining_relation_rewrite(
+        self,
+    ) -> None:
+        question = (
+            "In which decade did Chart Weekly magazine first publish an "
+            "American hit chart?"
+        )
+        previous_query = (
+            "Chart Weekly magazine first publication American hit chart"
+        )
+        candidates = _relation_surface_rewrite_query_candidates(
+            original_question=question,
+            previous_query=previous_query,
+            remaining_relation_classes=("hit_chart",),
+        )
+        self.assertEqual(
+            (
+                "chart weekly magazine first publication american hit parade",
+                "chart weekly magazine first publication american music hit parade",
+            ),
+            candidates,
+        )
+        self.assertTrue(all("193" not in candidate for candidate in candidates))
+
+        request = AgentRequest(
+            request_id="factual:v24-relation-recovery-mask",
+            run_id="factual",
+            graph_revision=1,
+            problem=question,
+            agent=AgentNode(
+                "retriever",
+                "model",
+                "retrieve public evidence for the requested relation",
+                role_family="evidence_retriever",
+                allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                execution_mode="react",
+            ),
+            model=ModelSpec("model", "provider"),
+            provider=ProviderSpec("provider", kind="test"),
+            phase=ExecutionPhase.SINGLE,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+        )
+        adapter = QARetrievalReactExecutionAdapter(
+            gateway=SimpleNamespace(generate=lambda request: None),
+            tool_registry=build_qa_tool_registry(FakeIndex()),
+            max_turns=16,
+            max_tool_calls=16,
+            task_type="factual_qa",
+            completion_policy="required_evidence",
+        )
+
+        def search(query: str, limit: int) -> dict[str, object]:
+            hit = {
+                "document_id": "document",
+                "passage_id": "passage",
+                "rank": 1,
+                "snippet": "Chart Weekly magazine later published another chart.",
+                "title": "Chart Weekly magazine",
+            }
+            return {
+                "observation_status": "success",
+                "executed_action": {
+                    "kind": "tool",
+                    "name": "search",
+                    "resource_id": QA_RETRIEVAL_TOOL_ID,
+                    "arguments": {"query": query, "limit": limit},
+                },
+                "result": {
+                    "operation": "search",
+                    "query": query,
+                    "top_k": limit,
+                    "passage_ids": ["passage"],
+                    "hits": [hit],
+                },
+            }
+
+        initial_query = (
+            "Chart Weekly magazine first publish American hit chart"
+        )
+        observations = [
+            search(initial_query, limit)
+            for limit in (5, 10, 15, 20, 25)
+        ]
+        observations.append(search(previous_query, 25))
+        observations.extend(
+            [
+                {
+                    "observation_status": "success",
+                    "executed_action": {
+                        "kind": "tool",
+                        "name": "read",
+                        "resource_id": QA_RETRIEVAL_TOOL_ID,
+                        "arguments": {"passage_id": "passage"},
+                    },
+                    "result": {
+                        "operation": "read",
+                        "passage_id": "passage",
+                        "passage": {
+                            "document_id": "document",
+                            "passage_id": "passage",
+                            "title": "Chart Weekly magazine",
+                            "text": "Chart Weekly magazine later published another chart.",
+                        },
+                    },
+                },
+                {
+                    "observation_status": "schema_invalid",
+                    "public_error_code": (
+                        "qa_semantic_evidence_provenance_invalid: "
+                        "requested first publication relation is absent"
+                    ),
+                },
+            ]
+        )
+        schema = adapter._state_conditioned_response_schema(
+            request,
+            observations,
+        )
+        assert schema is not None
+        self.assertEqual("search", schema["properties"]["name"]["const"])
+        query_schema = schema["properties"]["arguments"]["properties"][
+            "query"
+        ]
+        self.assertEqual(list(candidates), query_schema["enum"])
+        self.assertEqual(
+            25,
+            schema["properties"]["arguments"]["properties"]["limit"][
+                "const"
+            ],
+        )
+        for candidate in candidates:
+            self.assertIsNone(
+                adapter._tool_action_error(
+                    request=request,
+                    action=StructuredAction(
+                        ActionKind.TOOL,
+                        "search",
+                        {"query": candidate, "limit": 25},
+                        resource_id=QA_RETRIEVAL_TOOL_ID,
+                    ),
+                    observations=observations,
+                )
+            )
+
+    def test_v24_rejected_completion_cites_unread_search_hit_then_reads_it(
+        self,
+    ) -> None:
+        question = (
+            "In which decade did Chart Weekly magazine first publish an "
+            "American hit chart?"
+        )
+        request = AgentRequest(
+            request_id="factual:v24-provenance-read-repair",
+            run_id="factual",
+            graph_revision=1,
+            problem=question,
+            agent=AgentNode(
+                "retriever",
+                "model",
+                "retrieve public evidence for the requested relation",
+                role_family="evidence_retriever",
+                allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                execution_mode="react",
+            ),
+            model=ModelSpec("model", "provider"),
+            provider=ProviderSpec("provider", kind="test"),
+            phase=ExecutionPhase.SINGLE,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+        )
+        adapter = QARetrievalReactExecutionAdapter(
+            gateway=SimpleNamespace(generate=lambda request: None),
+            tool_registry=build_qa_tool_registry(FakeIndex()),
+            max_turns=16,
+            max_tool_calls=12,
+            task_type="factual_qa",
+            completion_policy="required_evidence",
+        )
+        query = "Chart Weekly magazine first publish American hit chart"
+        hits = [
+            {
+                "document_id": f"document-{index}",
+                "passage_id": passage_id,
+                "rank": index,
+                "snippet": "Chart Weekly magazine published a chart.",
+                "title": "Chart Weekly magazine",
+            }
+            for index, passage_id in enumerate(("p1", "p2"), start=1)
+        ]
+        observations = [
+            {
+                "observation_status": "success",
+                "executed_action": {
+                    "kind": "tool",
+                    "name": "search",
+                    "resource_id": QA_RETRIEVAL_TOOL_ID,
+                    "arguments": {"query": query, "limit": 5},
+                },
+                "result": {
+                    "operation": "search",
+                    "query": query,
+                    "top_k": 5,
+                    "passage_ids": ["p1", "p2"],
+                    "hits": hits,
+                },
+            },
+            {
+                "observation_status": "success",
+                "executed_action": {
+                    "kind": "tool",
+                    "name": "read",
+                    "resource_id": QA_RETRIEVAL_TOOL_ID,
+                    "arguments": {"passage_id": "p1"},
+                },
+                "result": {
+                    "operation": "read",
+                    "passage_id": "p1",
+                    "passage": {
+                        "document_id": "document-1",
+                        "passage_id": "p1",
+                        "title": "Chart Weekly magazine",
+                        "text": "Chart Weekly magazine later published a chart.",
+                    },
+                },
+            },
+            {
+                "observation_status": "schema_invalid",
+                "public_error_code": (
+                    "qa_semantic_evidence_provenance_invalid: Evidence Retriever "
+                    "passage_id has no matching successful qa-retrieval read receipt"
+                ),
+                "executed_action": {
+                    "kind": "complete",
+                    "name": "complete",
+                    "resource_id": None,
+                    "arguments": {"value": {"passage_id": "p2"}},
+                },
+            },
+        ]
+
+        actions, completion = adapter._state_conditioned_action_domain(
+            request,
+            observations,
+        )
+        self.assertEqual(
+            frozenset({(QA_RETRIEVAL_TOOL_ID, "read")}),
+            actions,
+        )
+        self.assertFalse(completion)
+        schema = adapter._state_conditioned_response_schema(
+            request,
+            observations,
+        )
+        assert schema is not None
+        self.assertEqual("read", schema["properties"]["name"]["const"])
+        self.assertEqual(
+            ["p2"],
+            schema["properties"]["arguments"]["properties"]["passage_id"][
+                "enum"
+            ],
+        )
+        self.assertIsNone(
+            adapter._tool_action_error(
+                request=request,
+                action=StructuredAction(
+                    ActionKind.TOOL,
+                    "read",
+                    {"passage_id": "p2"},
+                    resource_id=QA_RETRIEVAL_TOOL_ID,
+                ),
+                observations=observations,
+            )
+        )
+        self.assertEqual(
+            "qa_read_passage_id_not_from_search",
+            adapter._tool_action_error(
+                request=request,
+                action=StructuredAction(
+                    ActionKind.TOOL,
+                    "read",
+                    {"passage_id": "p1"},
+                    resource_id=QA_RETRIEVAL_TOOL_ID,
+                ),
+                observations=observations,
+            ),
         )
 
     def test_v23_strong_candidate_binds_entity_composite_relation_and_ordinal(

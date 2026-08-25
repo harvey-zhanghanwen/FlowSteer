@@ -2002,6 +2002,75 @@ def _relation_surface_replacement_classes(
     )
 
 
+def _relation_surface_rewrite_query_candidates(
+    *,
+    original_question: str,
+    previous_query: str,
+    remaining_relation_classes: Sequence[str],
+) -> tuple[str, ...]:
+    """Project legal answer-free relation-surface replacements.
+
+    SkillFlow constrains each next ``StructuredAction`` at the provider
+    boundary, while FlowSteer exposes only actions admitted by the current
+    Canvas state.  When a read-backed evidence rejection leaves a known
+    question relation class untransformed, use the existing controlled
+    relation alternatives to enumerate that one part of the live search
+    domain.  Every candidate is rechecked by the same relation-replacement
+    predicate used by Tool admission; no entity, answer, date, passage ID, or
+    evaluator value is introduced here.
+    """
+
+    query_tokens = list(_scope_tokens(previous_query))
+    if not query_tokens:
+        return ()
+    present_surfaces = _relation_alias_surfaces_in(previous_query)
+    candidates: list[str] = []
+    for relation_class in sorted(set(remaining_relation_classes)):
+        controlled_surfaces = _FACTUAL_RELATION_ALIAS_SURFACES.get(
+            relation_class
+        )
+        current_surfaces = present_surfaces.get(relation_class)
+        if not controlled_surfaces or not current_surfaces:
+            continue
+        for current_surface in sorted(
+            current_surfaces,
+            key=lambda surface: (-len(surface), surface),
+        ):
+            width = len(current_surface)
+            for offset in range(len(query_tokens) - width + 1):
+                if not all(
+                    _relation_token_variants(token)
+                    & _relation_token_variants(expected)
+                    for token, expected in zip(
+                        query_tokens[offset : offset + width],
+                        current_surface,
+                    )
+                ):
+                    continue
+                for replacement in controlled_surfaces:
+                    if replacement == current_surface:
+                        continue
+                    replaced = (
+                        query_tokens[:offset]
+                        + list(replacement)
+                        + query_tokens[offset + width :]
+                    )
+                    candidate = " ".join(replaced)
+                    if (
+                        _retrieval_query_term_set_signature(candidate)
+                        == _retrieval_query_term_set_signature(previous_query)
+                        or relation_class
+                        not in _relation_surface_replacement_classes(
+                            original_question=original_question,
+                            previous_query=previous_query,
+                            query=candidate,
+                        )
+                    ):
+                        continue
+                    candidates.append(candidate)
+    return tuple(dict.fromkeys(candidates))
+
+
 def _query_replaces_relation_surface(
     *,
     original_question: str,
@@ -4908,6 +4977,58 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         return None
 
     @staticmethod
+    def _rejected_completion_unread_passage_id(
+        observations: Sequence[Mapping[str, object]],
+        *,
+        unread_passage_ids: Sequence[str],
+    ) -> str | None:
+        """Return one receipt-published unread ID cited by a rejected draft.
+
+        A model-authored completion can cite a SearchHit before executing the
+        corresponding SkillFlow ``read`` action.  Provenance remains invalid,
+        but the opaque ID is already public and can be repaired by exactly one
+        read before any semantic claim is reconsidered.  This does not admit
+        the snippet as evidence or relax the downstream entity/relation/scope
+        gates.
+        """
+
+        unread = frozenset(unread_passage_ids)
+        if not unread:
+            return None
+        for observation in reversed(observations):
+            if observation.get("observation_status") != "schema_invalid":
+                continue
+            action = observation.get("executed_action")
+            if not isinstance(action, Mapping):
+                continue
+            if action.get("kind") != "complete" or action.get("name") != "complete":
+                continue
+            public_error_code = observation.get("public_error_code")
+            if (
+                not isinstance(public_error_code, str)
+                or "passage_id has no matching successful qa-retrieval read receipt"
+                not in public_error_code
+            ):
+                return None
+            arguments = action.get("arguments")
+            value = (
+                arguments.get("value")
+                if isinstance(arguments, Mapping)
+                else None
+            )
+            passage_id = (
+                value.get("passage_id")
+                if isinstance(value, Mapping)
+                else None
+            )
+            return (
+                passage_id
+                if isinstance(passage_id, str) and passage_id in unread
+                else None
+            )
+        return None
+
+    @staticmethod
     def _evidence_retriever_repair_mutable_paths(
         public_error_code: str,
     ) -> frozenset[tuple[str, ...]]:
@@ -5735,6 +5856,24 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
 
         if self._unified_factual_protocol(request):
             tool_actions, completion = self._unified_factual_action_domain(state)
+            rejected_completion_passage_id = (
+                self._rejected_completion_unread_passage_id(
+                    observations,
+                    unread_passage_ids=state.latest_unread_passage_ids,
+                )
+            )
+            if (
+                rejected_completion_passage_id is not None
+                and state.dispatched_tool_calls < self._max_tool_calls
+            ):
+                # DIRECT_REUSE: SkillFlow repairs provenance through the same
+                # one-Action/one-Observation search/read wire. The rejected
+                # draft selected one public SearchHit; require its exact opaque
+                # ID to be read before FlowSteer performs another Canvas repair.
+                return admitted(
+                    frozenset({(QA_RETRIEVAL_TOOL_ID, "read")}),
+                    False,
+                )
             location_containment_repair = (
                 state.semantic_repair_kind == "evidence"
                 and isinstance(state.semantic_repair_error_code, str)
@@ -6492,7 +6631,40 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             required_relation_alternatives = (
                 _question_relation_surface_alternatives(original_question)
             )
-            argument_properties["query"] = {
+            transformed_relation_classes = (
+                _verified_transformed_relation_classes(
+                    original_question=original_question,
+                    distinct_queries=tuple(
+                        dict.fromkeys(state.search_queries)
+                    ),
+                )
+            )
+            remaining_relation_classes = tuple(
+                sorted(
+                    frozenset(required_relation_alternatives)
+                    - transformed_relation_classes
+                )
+            )
+            relation_rewrite_candidates = ()
+            if (
+                state.semantic_repair_kind == "evidence"
+                and state.successful_read_count > 0
+                and state.search_queries
+                and state.search_top_ks
+                and state.search_top_ks[-1]
+                >= _FACTUAL_QA_SEARCH_LIMITS[-1]
+                and remaining_relation_classes
+            ):
+                relation_rewrite_candidates = (
+                    _relation_surface_rewrite_query_candidates(
+                        original_question=original_question,
+                        previous_query=state.search_queries[-1],
+                        remaining_relation_classes=(
+                            remaining_relation_classes
+                        ),
+                    )
+                )
+            query_schema: dict[str, object] = {
                 "type": "string",
                 "minLength": 1,
                 "description": (
@@ -6546,6 +6718,17 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     "do not include an orchestration strategy name or metaword in query."
                 ),
             }
+            if relation_rewrite_candidates:
+                query_schema["enum"] = list(relation_rewrite_candidates)
+                query_schema["description"] = (
+                    "Choose one answer-free query from the current dynamic "
+                    "action mask. Each candidate preserves the public entity, "
+                    "named and ordinal scope, and every requested relation "
+                    "class while replacing one still-untransformed relation "
+                    "surface. These candidates are retrieval actions, not "
+                    "evidence or answer hypotheses."
+                )
+            argument_properties["query"] = query_schema
             argument_properties["limit"] = {
                 "const": self._factual_search_limit(
                     state.search_attempt_count
@@ -6804,6 +6987,12 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 )
                 if isinstance(part, str) and part.strip()
             )
+        rejected_completion_passage_id = (
+            self._rejected_completion_unread_passage_id(
+                observations,
+                unread_passage_ids=state.latest_unread_passage_ids,
+            )
+        )
         public_candidates = self._latest_public_search_candidates(
             observations,
             unread_passage_ids=state.latest_unread_passage_ids,
@@ -6821,7 +7010,9 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             ),
         )
         admitted_passage_ids = (
-            state.location_containment_repair_candidate_ids
+            (rejected_completion_passage_id,)
+            if rejected_completion_passage_id is not None
+            else state.location_containment_repair_candidate_ids
             if location_containment_repair
             else (
                 tuple(
@@ -9606,19 +9797,10 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                             if candidate
                             not in covered_transition_strategies
                         )
-                        if (
-                            transition_strategy
-                            in covered_transition_strategies
-                            and remaining_transition_strategies
-                        ):
-                            return (
-                                _RETRIEVAL_QUERY_STRATEGY_SEMANTICS_MISMATCH
-                                + ": remaining_transition_strategies="
-                                + json.dumps(
-                                    remaining_transition_strategies,
-                                    ensure_ascii=False,
-                                )
-                            )
+                        remaining_relation_classes: frozenset[str] = (
+                            frozenset()
+                        )
+                        replacement_classes: frozenset[str] = frozenset()
                         if transition_strategy == "alias_expansion":
                             distinct_prior_queries: list[str] = []
                             prior_signatures: set[tuple[str, ...]] = set()
@@ -9651,6 +9833,26 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                                     ),
                                 )
                             )
+                        alias_advances_remaining_relation = bool(
+                            transition_strategy == "alias_expansion"
+                            and replacement_classes
+                            & remaining_relation_classes
+                        )
+                        if (
+                            transition_strategy
+                            in covered_transition_strategies
+                            and remaining_transition_strategies
+                            and not alias_advances_remaining_relation
+                        ):
+                            return (
+                                _RETRIEVAL_QUERY_STRATEGY_SEMANTICS_MISMATCH
+                                + ": remaining_transition_strategies="
+                                + json.dumps(
+                                    remaining_transition_strategies,
+                                    ensure_ascii=False,
+                                )
+                            )
+                        if transition_strategy == "alias_expansion":
                             if (
                                 remaining_relation_classes
                                 and replacement_classes
@@ -9785,27 +9987,36 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 state.location_containment_repair_candidate_ids
             )
         else:
-            public_candidates = self._latest_public_search_candidates(
-                observations,
-                unread_passage_ids=state.latest_unread_passage_ids,
-                original_question=qa_question_scope(request.problem),
-                enable_title_entity_topic_priority=(
-                    self._unified_factual_protocol(request)
-                ),
-                candidate_limit=(
-                    1
-                    if self._unified_factual_protocol(request)
-                    and _question_ordinal_classes(
-                        qa_question_scope(request.problem)
-                    )
-                    else None
-                ),
+            rejected_completion_passage_id = (
+                self._rejected_completion_unread_passage_id(
+                    observations,
+                    unread_passage_ids=state.latest_unread_passage_ids,
+                )
             )
-            admitted_passage_ids = {
-                candidate["passage_id"]
-                for candidate in public_candidates
-                if isinstance(candidate.get("passage_id"), str)
-            } or set(state.latest_unread_passage_ids)
+            if rejected_completion_passage_id is not None:
+                admitted_passage_ids = {rejected_completion_passage_id}
+            else:
+                public_candidates = self._latest_public_search_candidates(
+                    observations,
+                    unread_passage_ids=state.latest_unread_passage_ids,
+                    original_question=qa_question_scope(request.problem),
+                    enable_title_entity_topic_priority=(
+                        self._unified_factual_protocol(request)
+                    ),
+                    candidate_limit=(
+                        1
+                        if self._unified_factual_protocol(request)
+                        and _question_ordinal_classes(
+                            qa_question_scope(request.problem)
+                        )
+                        else None
+                    ),
+                )
+                admitted_passage_ids = {
+                    candidate["passage_id"]
+                    for candidate in public_candidates
+                    if isinstance(candidate.get("passage_id"), str)
+                } or set(state.latest_unread_passage_ids)
         if not admitted_passage_ids:
             return "qa_read_requires_successful_search"
         if passage_id not in admitted_passage_ids:

@@ -10985,7 +10985,14 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
     async def test_triviaqa_reasoner_contract_rejects_bare_foreign_role_labels(
         self,
     ) -> None:
-        for conflicting_contract in ("format", "retrieval"):
+        for conflicting_contract in (
+            "format",
+            "retrieval",
+            (
+                "ground answer-free evidence for the original entity and "
+                "requested relation in matching successful read Tool receipts"
+            ),
+        ):
             registry = make_registry()
             gateway = _ImmediateGateway()
             env = AgentWorkflowEnv(
@@ -11044,7 +11051,14 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         )
         original = env.graph.get_node("reasoner")
 
-        for conflicting_contract in ("format", "retrieval"):
+        for conflicting_contract in (
+            "format",
+            "retrieval",
+            (
+                "ground answer-free evidence for the original entity and "
+                "requested relation in matching successful read Tool receipts"
+            ),
+        ):
             revision = env.revision
             rejected = await env.step(
                 json.dumps(
