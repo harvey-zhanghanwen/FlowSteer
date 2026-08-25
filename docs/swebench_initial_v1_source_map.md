@@ -141,6 +141,7 @@ execution mode，不是 Agent role，也不是 Director action。
 | 直接复用 | `src/interactive/react_execution.py` | SkillFlow bounded Tool Action–Observation loop |
 | 直接复用 | `src/interactive/records.py`, `rollout_collector.py` | trajectory/execution/Tool/evaluator receipts |
 | 必要适配 | `scripts/prepare_swebench_skillflow_v3_dataset.py` | SkillFlow v3 population + evaluator-only Verified join |
+| 必要适配 | `scripts/prepare_swebench_skillflow_task_environments.py` | SkillFlow `_env_name` + official `make_test_spec` environment/repository scripts；48 个唯一 repo/version 的可恢复物化 |
 | 必要适配 | `src/interactive/swe_worktree.py` | SkillFlow detached worktree lifecycle + active-population setup/base/cleanup preflight |
 | 必要适配 | `src/interactive/coding_tools.py` | deployed repository handlers + typed ToolRegistry envelope + strict task environment binding |
 | 必要适配 | `src/interactive/coding_execution.py` | task workspace diff completion + task-global budget |
@@ -169,6 +170,8 @@ repository state 与 SkillFlow task environment receipt。
 `_env_python(repo, version)` 解析的 Conda environment 执行。解析不到环境或 Conda
 executable 时不回退到 host Python。Workspace patch 以 SkillFlow `git diff` 为主，并
 补入 `bash` 可能创建的非 test untracked 文件；test 文件仍保持上游排除语义。
+Conda executable、environment directory 与 persistent setup repository root 已写入
+condition config，preflight/runner 不依赖调用者手工 export。
 
 SkillFlow deployed handler 的 `bash -lc` 在当前宿主机会由 login shell 覆盖
 `subprocess cwd`，使命令离开 task worktree。本项目在同一 task environment command
@@ -228,7 +231,7 @@ classification、phase、retryable、test/report presence、container exit/OOM �
 - 数据准备：500 train / 0 validation / 128 fixed IID test，128 个 test instance 唯一且
   与 train 无交叉；
 - 定向与兼容性测试：Dataset、worktree、Tool、ReAct、CodingExecution、config、
-  evaluator、reporting、Canvas/runtime 和 unified runner 共 551 项通过，另有 103 个
+  evaluator、reporting、Canvas/runtime 和 unified runner 共 558 项通过，另有 103 个
   subtests 通过；
 - 真实 repository smoke：`astropy__astropy-14182` 的 detached worktree、只读
   `list_files`、`view_file`、clean initial diff 与 cleanup 通过；task environment 未就绪
@@ -240,6 +243,8 @@ classification、phase、retryable、test/report presence、container exit/OOM �
 - SkillFlow task environment preflight：首个 `swe_astropy_astropy_51` 已按 official spec
   建立并在独立 detached worktree 完成 9/9 定向测试；当前 1/128 ready、127/128
   unavailable；
+- environment builder plan-only：固定 128 tasks 映射为 48 个唯一 repo/version；剩余
+  47 个支持最多 2 并发、per-environment source/log/receipt 与失败后阶段恢复；
 - official evaluator preflight：Docker daemon 正常，但当前执行用户无
   `/var/run/docker.sock` 权限；runner 在模型 runtime 创建前以
   `failed_runtime_preflight` 停止；
@@ -271,6 +276,17 @@ No-model repository/evaluator preflight：
   scripts/preflight_swebench_initial_adapter.py \
   --config config/evaluation_swebench_skillflow_v3_initial_v1.yaml \
   --output reports/swebench_skillflow_v3_initial_v1_preflight.json
+```
+
+Task environment plan / materialization（直接复用 SkillFlow environment name 与
+official harness scripts）：
+
+```bash
+/ssd1/iclr/gpf/venvs/skillflow/bin/python \
+  scripts/prepare_swebench_skillflow_task_environments.py \
+  --conda-executable /ssd1/iclr/TTT/miniconda3/bin/conda \
+  --conda-envs-dir /ssd1/iclr/TTT/miniconda3/envs \
+  --jobs 2
 ```
 
 只有当 128 个 task repository、128 个 SkillFlow task environment、官方 Docker harness

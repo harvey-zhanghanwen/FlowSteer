@@ -250,6 +250,9 @@ class OfficialSWEbenchHarness:
     evaluation_root: Path = Path("artifacts/swebench_official_evaluation")
     docker_namespace: str = "swebench"
     timeout_seconds: int = 900
+    conda_executable: Path | None = None
+    conda_envs_dir: Path | None = None
+    environment_repository_root: Path | None = None
 
     @property
     def verified_path(self) -> Path:
@@ -287,8 +290,7 @@ class OfficialSWEbenchHarness:
         if self.timeout_seconds <= 0:
             raise SWEbenchHarnessUnavailable("SWE-bench timeout must be positive")
         evaluation_root.mkdir(parents=True, exist_ok=True)
-        os.environ.update(
-            {
+        environment = {
                 "SKILLEV_FORMAL_RUNTIME": "1",
                 # SkillFlow names this variable after Verified.  The thin
                 # regular-dev adapter primes its evaluator cache directly and
@@ -297,9 +299,38 @@ class OfficialSWEbenchHarness:
                 "SWEBENCH_HARNESS_PATH": str(harness),
                 "SWE_BENCH_EVALUATION_ROOT": str(evaluation_root),
                 "SWE_BENCH_DOCKER_NAMESPACE": self.docker_namespace.strip(),
-            }
-        )
+        }
+        if self.conda_executable is not None:
+            conda_executable = self.conda_executable.expanduser().resolve()
+            if not conda_executable.is_file() or not os.access(
+                conda_executable, os.X_OK
+            ):
+                raise SWEbenchHarnessUnavailable(
+                    "configured SkillFlow Conda executable is unavailable"
+                )
+            environment["CONDA_EXE"] = str(conda_executable)
+        if self.conda_envs_dir is not None:
+            conda_envs_dir = self.conda_envs_dir.expanduser().resolve()
+            if not conda_envs_dir.is_dir():
+                raise SWEbenchHarnessUnavailable(
+                    "configured SkillFlow Conda environment directory is unavailable"
+                )
+            environment["CONDA_ENVS_DIR"] = str(conda_envs_dir)
+        if self.environment_repository_root is not None:
+            environment_repository_root = (
+                self.environment_repository_root.expanduser().resolve()
+            )
+            if not environment_repository_root.is_dir():
+                raise SWEbenchHarnessUnavailable(
+                    "configured SkillFlow environment repository root is unavailable"
+                )
+            environment["SWE_BENCH_ENVS"] = str(environment_repository_root)
+        os.environ.update(environment)
         module = _load_skillflow_evaluator(evaluator)
+        if self.conda_executable is not None:
+            module.CONDA = environment["CONDA_EXE"]
+        if self.environment_repository_root is not None:
+            module.SWE_ENVS = Path(environment["SWE_BENCH_ENVS"])
         module.VERIFIED_DS_PATH = str(dataset_path)
         source_receipt = (self.dataset_source, str(dataset_path))
         if getattr(module, "_flowsteer_dataset_source_receipt", None) != source_receipt:

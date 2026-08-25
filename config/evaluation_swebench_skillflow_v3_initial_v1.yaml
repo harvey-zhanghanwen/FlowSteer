@@ -69,6 +69,9 @@ swe_coding_runtime:
   completion_policy: "workspace_diff"
   require_task_environment: true
   repository_store: "/ssd1/iclr/.private/skillflow-resources/swe-repositories"
+  conda_executable: "/ssd1/iclr/TTT/miniconda3/bin/conda"
+  conda_envs_dir: "/ssd1/iclr/TTT/miniconda3/envs"
+  environment_repository_root: "/ssd1/iclr/.private/skillflow-resources/swe-env-repositories"
   worktree_root: "artifacts/swebench_skillflow_v3_initial_v1/worktrees"
   max_turns_per_agent_call: 12
   max_tool_calls_per_agent_call: 10

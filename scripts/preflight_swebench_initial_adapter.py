@@ -184,6 +184,11 @@ def run(config_path: Path, output_path: Path | None = None) -> Mapping[str, Any]
         evaluation_root=_resolve(root, evaluation.get("swebench_evaluation_root")),
         docker_namespace=str(evaluation.get("swebench_docker_namespace")),
         timeout_seconds=int(evaluation.get("swebench_timeout_seconds")),
+        conda_executable=_resolve(root, runtime.get("conda_executable")),
+        conda_envs_dir=_resolve(root, runtime.get("conda_envs_dir")),
+        environment_repository_root=_resolve(
+            root, runtime.get("environment_repository_root")
+        ),
     )
     try:
         task_environment_population = dict(

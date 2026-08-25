@@ -343,6 +343,15 @@ def validate_completion_benchmark_config(config: Mapping[str, Any]) -> None:
                 checks["swe_bench.require_task_environment"] = (
                     swe_runtime.get("require_task_environment") is True
                 )
+                for field_name in (
+                    "conda_executable",
+                    "conda_envs_dir",
+                    "environment_repository_root",
+                ):
+                    checks[f"swe_bench.{field_name}"] = bool(
+                        isinstance(swe_runtime.get(field_name), str)
+                        and str(swe_runtime[field_name]).strip()
+                    )
                 direct_baseline = bounded.get("direct_baseline")
                 checks["swe_bench.same_repository_tools"] = bool(
                     isinstance(direct_baseline, Mapping)
@@ -2884,6 +2893,14 @@ def _swebench_harness_from_config(
     """Build the pinned SkillFlow/official harness boundary from configuration."""
 
     evaluation = _mapping(config["evaluation"], "evaluation")
+    runtime = _mapping(config["swe_coding_runtime"], "swe_coding_runtime")
+
+    def optional_runtime_path(field_name: str) -> Path | None:
+        value = runtime.get(field_name)
+        if not isinstance(value, str) or not value.strip():
+            return None
+        return _resolve(root, value)
+
     return OfficialSWEbenchHarness(
         evaluator_path=_resolve(root, str(evaluation["swebench_evaluator_path"])),
         harness_path=_resolve(root, str(evaluation["swebench_harness_path"])),
@@ -2892,6 +2909,11 @@ def _swebench_harness_from_config(
         evaluation_root=_resolve(root, str(evaluation["swebench_evaluation_root"])),
         docker_namespace=str(evaluation["swebench_docker_namespace"]),
         timeout_seconds=int(evaluation["swebench_timeout_seconds"]),
+        conda_executable=optional_runtime_path("conda_executable"),
+        conda_envs_dir=optional_runtime_path("conda_envs_dir"),
+        environment_repository_root=optional_runtime_path(
+            "environment_repository_root"
+        ),
     )
 
 

@@ -1,6 +1,6 @@
 {
   "config_path": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/config/evaluation_swebench_skillflow_v3_initial_v1.yaml",
-  "created_at": "2026-08-25T12:20:57.015177+00:00",
+  "created_at": "2026-08-25T12:34:50.077735+00:00",
   "model_calls": 0,
   "official_harness_preflight": {
     "error": "official SWE-bench Docker harness is unavailable",
@@ -40,7 +40,7 @@
         "repo": "astropy/astropy",
         "setup_status": "ready",
         "task_id": "swe-bench:astropy__astropy-14182",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_astropy__astropy-14182_x1tbxmxn"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_astropy__astropy-14182_fo6r_wpw"
       },
       {
         "base_state_verified": true,
@@ -56,7 +56,7 @@
         "repo": "django/django",
         "setup_status": "ready",
         "task_id": "swe-bench:django__django-13417",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-13417_mlvcvakx"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-13417_zy2b4j_u"
       },
       {
         "base_state_verified": true,
@@ -72,7 +72,7 @@
         "repo": "sympy/sympy",
         "setup_status": "ready",
         "task_id": "swe-bench:sympy__sympy-16886",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_sympy__sympy-16886_35f1ag66"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_sympy__sympy-16886_rkg0k4ud"
       },
       {
         "base_state_verified": true,
@@ -88,7 +88,7 @@
         "repo": "django/django",
         "setup_status": "ready",
         "task_id": "swe-bench:django__django-14999",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-14999_1fh3_d7g"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-14999_pbag0moo"
       },
       {
         "base_state_verified": true,
@@ -104,7 +104,7 @@
         "repo": "pytest-dev/pytest",
         "setup_status": "ready",
         "task_id": "swe-bench:pytest-dev__pytest-10051",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_pytest-dev__pytest-10051_x5aqbu0x"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_pytest-dev__pytest-10051_uqsemne6"
       },
       {
         "base_state_verified": true,
@@ -120,7 +120,7 @@
         "repo": "django/django",
         "setup_status": "ready",
         "task_id": "swe-bench:django__django-11087",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-11087_he58cn0j"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-11087_xls98qur"
       },
       {
         "base_state_verified": true,
@@ -136,7 +136,7 @@
         "repo": "sphinx-doc/sphinx",
         "setup_status": "ready",
         "task_id": "swe-bench:sphinx-doc__sphinx-9230",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_sphinx-doc__sphinx-9230_im1rp83w"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_sphinx-doc__sphinx-9230_b641ap4l"
       },
       {
         "base_state_verified": true,
@@ -152,7 +152,7 @@
         "repo": "scikit-learn/scikit-learn",
         "setup_status": "ready",
         "task_id": "swe-bench:scikit-learn__scikit-learn-15100",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_scikit-learn__scikit-learn-151_pxa3gqee"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_scikit-learn__scikit-learn-151_bptw0kfq"
       },
       {
         "base_state_verified": true,
@@ -168,7 +168,7 @@
         "repo": "django/django",
         "setup_status": "ready",
         "task_id": "swe-bench:django__django-16527",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-16527_tbbejhco"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-16527_dk_3f1ng"
       },
       {
         "base_state_verified": true,
@@ -184,7 +184,7 @@
         "repo": "sympy/sympy",
         "setup_status": "ready",
         "task_id": "swe-bench:sympy__sympy-13852",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_sympy__sympy-13852_eprgzp2e"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_sympy__sympy-13852_j5fszuxj"
       },
       {
         "base_state_verified": true,
@@ -200,7 +200,7 @@
         "repo": "django/django",
         "setup_status": "ready",
         "task_id": "swe-bench:django__django-14752",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-14752_0iv03iwv"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-14752_sq22a3_l"
       },
       {
         "base_state_verified": true,
@@ -216,7 +216,7 @@
         "repo": "django/django",
         "setup_status": "ready",
         "task_id": "swe-bench:django__django-16255",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-16255_nehiajsl"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-16255_n9cb85tp"
       },
       {
         "base_state_verified": true,
@@ -232,7 +232,7 @@
         "repo": "pytest-dev/pytest",
         "setup_status": "ready",
         "task_id": "swe-bench:pytest-dev__pytest-10356",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_pytest-dev__pytest-10356_4jv4av_o"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_pytest-dev__pytest-10356_nqwoahmv"
       },
       {
         "base_state_verified": true,
@@ -248,7 +248,7 @@
         "repo": "sympy/sympy",
         "setup_status": "ready",
         "task_id": "swe-bench:sympy__sympy-12489",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_sympy__sympy-12489_w0ui4xn8"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_sympy__sympy-12489_fxejjvgq"
       },
       {
         "base_state_verified": true,
@@ -264,7 +264,7 @@
         "repo": "pytest-dev/pytest",
         "setup_status": "ready",
         "task_id": "swe-bench:pytest-dev__pytest-5840",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_pytest-dev__pytest-5840_ke_fnv67"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_pytest-dev__pytest-5840_lcgkvs6e"
       },
       {
         "base_state_verified": true,
@@ -280,7 +280,7 @@
         "repo": "django/django",
         "setup_status": "ready",
         "task_id": "swe-bench:django__django-16116",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-16116_9ndng7xc"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-16116_zrf08k37"
       },
       {
         "base_state_verified": true,
@@ -296,7 +296,7 @@
         "repo": "django/django",
         "setup_status": "ready",
         "task_id": "swe-bench:django__django-16662",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-16662_zyx_1f0j"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-16662__96hrh18"
       },
       {
         "base_state_verified": true,
@@ -312,7 +312,7 @@
         "repo": "sympy/sympy",
         "setup_status": "ready",
         "task_id": "swe-bench:sympy__sympy-14976",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_sympy__sympy-14976_8bjisidw"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_sympy__sympy-14976_3jinrsw1"
       },
       {
         "base_state_verified": true,
@@ -328,7 +328,7 @@
         "repo": "astropy/astropy",
         "setup_status": "ready",
         "task_id": "swe-bench:astropy__astropy-7671",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_astropy__astropy-7671_n_akgndn"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_astropy__astropy-7671_lwajpatf"
       },
       {
         "base_state_verified": true,
@@ -344,7 +344,7 @@
         "repo": "sympy/sympy",
         "setup_status": "ready",
         "task_id": "swe-bench:sympy__sympy-13615",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_sympy__sympy-13615_tid2uuxz"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_sympy__sympy-13615_op_68vt9"
       },
       {
         "base_state_verified": true,
@@ -360,7 +360,7 @@
         "repo": "astropy/astropy",
         "setup_status": "ready",
         "task_id": "swe-bench:astropy__astropy-7606",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_astropy__astropy-7606_ynls8t5a"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_astropy__astropy-7606_01vpsfo1"
       },
       {
         "base_state_verified": true,
@@ -376,7 +376,7 @@
         "repo": "pylint-dev/pylint",
         "setup_status": "ready",
         "task_id": "swe-bench:pylint-dev__pylint-6528",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_pylint-dev__pylint-6528_uw5yzoxn"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_pylint-dev__pylint-6528_102n95c6"
       },
       {
         "base_state_verified": true,
@@ -392,7 +392,7 @@
         "repo": "django/django",
         "setup_status": "ready",
         "task_id": "swe-bench:django__django-13551",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-13551_s6ypczef"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-13551_zqvo5v1n"
       },
       {
         "base_state_verified": true,
@@ -408,7 +408,7 @@
         "repo": "pydata/xarray",
         "setup_status": "ready",
         "task_id": "swe-bench:pydata__xarray-6992",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_pydata__xarray-6992_6d1l8lk5"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_pydata__xarray-6992_y_nivi9d"
       },
       {
         "base_state_verified": true,
@@ -424,7 +424,7 @@
         "repo": "django/django",
         "setup_status": "ready",
         "task_id": "swe-bench:django__django-13933",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-13933_37nbsy6j"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-13933_8444h0uy"
       },
       {
         "base_state_verified": true,
@@ -440,7 +440,7 @@
         "repo": "sphinx-doc/sphinx",
         "setup_status": "ready",
         "task_id": "swe-bench:sphinx-doc__sphinx-11445",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_sphinx-doc__sphinx-11445_p_kj0999"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_sphinx-doc__sphinx-11445_39tfcjf5"
       },
       {
         "base_state_verified": true,
@@ -456,7 +456,7 @@
         "repo": "sphinx-doc/sphinx",
         "setup_status": "ready",
         "task_id": "swe-bench:sphinx-doc__sphinx-8265",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_sphinx-doc__sphinx-8265_un4_i2qp"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_sphinx-doc__sphinx-8265_4a14ysbx"
       },
       {
         "base_state_verified": true,
@@ -472,7 +472,7 @@
         "repo": "matplotlib/matplotlib",
         "setup_status": "ready",
         "task_id": "swe-bench:matplotlib__matplotlib-20488",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_matplotlib__matplotlib-20488_v_0joacy"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_matplotlib__matplotlib-20488_9yf54unl"
       },
       {
         "base_state_verified": true,
@@ -488,7 +488,7 @@
         "repo": "django/django",
         "setup_status": "ready",
         "task_id": "swe-bench:django__django-10914",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-10914_lf6ulotc"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-10914_dj6yrr2c"
       },
       {
         "base_state_verified": true,
@@ -504,7 +504,7 @@
         "repo": "django/django",
         "setup_status": "ready",
         "task_id": "swe-bench:django__django-16136",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-16136_err9_yie"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-16136_e63n5wfx"
       },
       {
         "base_state_verified": true,
@@ -520,7 +520,7 @@
         "repo": "django/django",
         "setup_status": "ready",
         "task_id": "swe-bench:django__django-11815",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-11815_dellj7py"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-11815_3i26vz8d"
       },
       {
         "base_state_verified": true,
@@ -536,7 +536,7 @@
         "repo": "sympy/sympy",
         "setup_status": "ready",
         "task_id": "swe-bench:sympy__sympy-13480",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_sympy__sympy-13480_3v4wuub4"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_sympy__sympy-13480_fyxhz8i_"
       },
       {
         "base_state_verified": true,
@@ -552,7 +552,7 @@
         "repo": "sympy/sympy",
         "setup_status": "ready",
         "task_id": "swe-bench:sympy__sympy-12096",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_sympy__sympy-12096_n7jorztu"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_sympy__sympy-12096_tskc6du3"
       },
       {
         "base_state_verified": true,
@@ -568,7 +568,7 @@
         "repo": "django/django",
         "setup_status": "ready",
         "task_id": "swe-bench:django__django-12155",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-12155_kwfhg9yh"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-12155_vhbe7yzs"
       },
       {
         "base_state_verified": true,
@@ -584,7 +584,7 @@
         "repo": "django/django",
         "setup_status": "ready",
         "task_id": "swe-bench:django__django-16493",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-16493_v96hteb2"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-16493_5oqny_pk"
       },
       {
         "base_state_verified": true,
@@ -600,7 +600,7 @@
         "repo": "django/django",
         "setup_status": "ready",
         "task_id": "swe-bench:django__django-13837",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-13837_ajpf2dw5"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-13837_vyrflqaw"
       },
       {
         "base_state_verified": true,
@@ -616,7 +616,7 @@
         "repo": "pydata/xarray",
         "setup_status": "ready",
         "task_id": "swe-bench:pydata__xarray-7229",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_pydata__xarray-7229_vzzqde0e"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_pydata__xarray-7229_kwu4u5wm"
       },
       {
         "base_state_verified": true,
@@ -632,7 +632,7 @@
         "repo": "matplotlib/matplotlib",
         "setup_status": "ready",
         "task_id": "swe-bench:matplotlib__matplotlib-24637",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_matplotlib__matplotlib-24637_w7ff2ask"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_matplotlib__matplotlib-24637_wt_mftc9"
       },
       {
         "base_state_verified": true,
@@ -648,7 +648,7 @@
         "repo": "django/django",
         "setup_status": "ready",
         "task_id": "swe-bench:django__django-15037",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-15037_i9x0h5si"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-15037_2atzeq74"
       },
       {
         "base_state_verified": true,
@@ -664,7 +664,7 @@
         "repo": "django/django",
         "setup_status": "ready",
         "task_id": "swe-bench:django__django-12276",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-12276_1strah8h"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-12276_eghv14ar"
       },
       {
         "base_state_verified": true,
@@ -680,7 +680,7 @@
         "repo": "scikit-learn/scikit-learn",
         "setup_status": "ready",
         "task_id": "swe-bench:scikit-learn__scikit-learn-25931",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_scikit-learn__scikit-learn-259_m1is37bi"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_scikit-learn__scikit-learn-259_0gqqlji4"
       },
       {
         "base_state_verified": true,
@@ -696,7 +696,7 @@
         "repo": "django/django",
         "setup_status": "ready",
         "task_id": "swe-bench:django__django-14011",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-14011_h8qmse9u"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-14011_e5vdvkpo"
       },
       {
         "base_state_verified": true,
@@ -712,7 +712,7 @@
         "repo": "django/django",
         "setup_status": "ready",
         "task_id": "swe-bench:django__django-15916",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-15916_rqdygzvw"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-15916_n9p74duk"
       },
       {
         "base_state_verified": true,
@@ -728,7 +728,7 @@
         "repo": "pytest-dev/pytest",
         "setup_status": "ready",
         "task_id": "swe-bench:pytest-dev__pytest-7205",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_pytest-dev__pytest-7205_y6878u84"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_pytest-dev__pytest-7205_isz_84t8"
       },
       {
         "base_state_verified": true,
@@ -744,7 +744,7 @@
         "repo": "django/django",
         "setup_status": "ready",
         "task_id": "swe-bench:django__django-13569",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-13569_qtc3o0if"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-13569_815p4ej6"
       },
       {
         "base_state_verified": true,
@@ -760,7 +760,7 @@
         "repo": "django/django",
         "setup_status": "ready",
         "task_id": "swe-bench:django__django-14580",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-14580_4f3mv4fo"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-14580_ykpae6_l"
       },
       {
         "base_state_verified": true,
@@ -776,7 +776,7 @@
         "repo": "scikit-learn/scikit-learn",
         "setup_status": "ready",
         "task_id": "swe-bench:scikit-learn__scikit-learn-14629",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_scikit-learn__scikit-learn-146_auhnhpye"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_scikit-learn__scikit-learn-146_ejzj9p2y"
       },
       {
         "base_state_verified": true,
@@ -792,7 +792,7 @@
         "repo": "django/django",
         "setup_status": "ready",
         "task_id": "swe-bench:django__django-13297",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-13297_3k15qb5m"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-13297_4jufjm5p"
       },
       {
         "base_state_verified": true,
@@ -808,7 +808,7 @@
         "repo": "django/django",
         "setup_status": "ready",
         "task_id": "swe-bench:django__django-13128",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-13128_2pj983ix"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-13128_5woa8x7f"
       },
       {
         "base_state_verified": true,
@@ -824,7 +824,7 @@
         "repo": "pylint-dev/pylint",
         "setup_status": "ready",
         "task_id": "swe-bench:pylint-dev__pylint-4661",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_pylint-dev__pylint-4661_88bs6cz2"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_pylint-dev__pylint-4661_qnyhsc6c"
       },
       {
         "base_state_verified": true,
@@ -840,7 +840,7 @@
         "repo": "django/django",
         "setup_status": "ready",
         "task_id": "swe-bench:django__django-16950",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-16950_mjax6qke"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-16950_nsa18qff"
       },
       {
         "base_state_verified": true,
@@ -856,7 +856,7 @@
         "repo": "sphinx-doc/sphinx",
         "setup_status": "ready",
         "task_id": "swe-bench:sphinx-doc__sphinx-8475",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_sphinx-doc__sphinx-8475_jtfq29ch"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_sphinx-doc__sphinx-8475_1qdt9_iz"
       },
       {
         "base_state_verified": true,
@@ -872,7 +872,7 @@
         "repo": "django/django",
         "setup_status": "ready",
         "task_id": "swe-bench:django__django-13786",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-13786_78_gc0c_"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-13786_zfvvp0l8"
       },
       {
         "base_state_verified": true,
@@ -888,7 +888,7 @@
         "repo": "django/django",
         "setup_status": "ready",
         "task_id": "swe-bench:django__django-14631",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-14631_fgq47sn3"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-14631_ief9xitx"
       },
       {
         "base_state_verified": true,
@@ -904,7 +904,7 @@
         "repo": "django/django",
         "setup_status": "ready",
         "task_id": "swe-bench:django__django-12325",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-12325_pmx27ud2"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-12325_njbfn6k_"
       },
       {
         "base_state_verified": true,
@@ -920,7 +920,7 @@
         "repo": "scikit-learn/scikit-learn",
         "setup_status": "ready",
         "task_id": "swe-bench:scikit-learn__scikit-learn-13142",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_scikit-learn__scikit-learn-131_f16ue8xs"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_scikit-learn__scikit-learn-131_11zurc_o"
       },
       {
         "base_state_verified": true,
@@ -936,7 +936,7 @@
         "repo": "django/django",
         "setup_status": "ready",
         "task_id": "swe-bench:django__django-11532",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-11532_dc8zesro"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-11532_enp9tl4v"
       },
       {
         "base_state_verified": true,
@@ -952,7 +952,7 @@
         "repo": "sphinx-doc/sphinx",
         "setup_status": "ready",
         "task_id": "swe-bench:sphinx-doc__sphinx-9320",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_sphinx-doc__sphinx-9320_r8virkua"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_sphinx-doc__sphinx-9320_5lk_4zyt"
       },
       {
         "base_state_verified": true,
@@ -968,7 +968,7 @@
         "repo": "sympy/sympy",
         "setup_status": "ready",
         "task_id": "swe-bench:sympy__sympy-20801",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_sympy__sympy-20801_xrxfr5g3"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_sympy__sympy-20801_3oodvcla"
       },
       {
         "base_state_verified": true,
@@ -984,7 +984,7 @@
         "repo": "django/django",
         "setup_status": "ready",
         "task_id": "swe-bench:django__django-11490",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-11490_o4_i39wz"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-11490__r_u75ed"
       },
       {
         "base_state_verified": true,
@@ -1000,7 +1000,7 @@
         "repo": "django/django",
         "setup_status": "ready",
         "task_id": "swe-bench:django__django-16801",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-16801___jz938m"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-16801_3sgp4nhg"
       },
       {
         "base_state_verified": true,
@@ -1016,7 +1016,7 @@
         "repo": "sphinx-doc/sphinx",
         "setup_status": "ready",
         "task_id": "swe-bench:sphinx-doc__sphinx-8056",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_sphinx-doc__sphinx-8056_66y5ak0a"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_sphinx-doc__sphinx-8056_re8_4e4n"
       },
       {
         "base_state_verified": true,
@@ -1032,7 +1032,7 @@
         "repo": "scikit-learn/scikit-learn",
         "setup_status": "ready",
         "task_id": "swe-bench:scikit-learn__scikit-learn-9288",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_scikit-learn__scikit-learn-928_m3eg6j9m"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_scikit-learn__scikit-learn-928_lg3tf0cv"
       },
       {
         "base_state_verified": true,
@@ -1048,7 +1048,7 @@
         "repo": "astropy/astropy",
         "setup_status": "ready",
         "task_id": "swe-bench:astropy__astropy-8872",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_astropy__astropy-8872_arclu9jl"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_astropy__astropy-8872_1yyk44wr"
       },
       {
         "base_state_verified": true,
@@ -1064,7 +1064,7 @@
         "repo": "django/django",
         "setup_status": "ready",
         "task_id": "swe-bench:django__django-15732",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-15732__1xt1nkg"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-15732_rsori8vr"
       },
       {
         "base_state_verified": true,
@@ -1080,7 +1080,7 @@
         "repo": "psf/requests",
         "setup_status": "ready",
         "task_id": "swe-bench:psf__requests-2317",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_psf__requests-2317_2wzdo627"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_psf__requests-2317_ojlr1ygz"
       },
       {
         "base_state_verified": true,
@@ -1096,7 +1096,7 @@
         "repo": "django/django",
         "setup_status": "ready",
         "task_id": "swe-bench:django__django-15851",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-15851_5vawh8so"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-15851_icp89emu"
       },
       {
         "base_state_verified": true,
@@ -1112,7 +1112,7 @@
         "repo": "matplotlib/matplotlib",
         "setup_status": "ready",
         "task_id": "swe-bench:matplotlib__matplotlib-24177",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_matplotlib__matplotlib-24177_aidaqjpf"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_matplotlib__matplotlib-24177_o8jrrppq"
       },
       {
         "base_state_verified": true,
@@ -1128,7 +1128,7 @@
         "repo": "scikit-learn/scikit-learn",
         "setup_status": "ready",
         "task_id": "swe-bench:scikit-learn__scikit-learn-25747",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_scikit-learn__scikit-learn-257_tpyu016u"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_scikit-learn__scikit-learn-257_zc_tlu9w"
       },
       {
         "base_state_verified": true,
@@ -1144,7 +1144,7 @@
         "repo": "django/django",
         "setup_status": "ready",
         "task_id": "swe-bench:django__django-15987",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-15987_ymnpxilw"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-15987_fubplzti"
       },
       {
         "base_state_verified": true,
@@ -1160,7 +1160,7 @@
         "repo": "matplotlib/matplotlib",
         "setup_status": "ready",
         "task_id": "swe-bench:matplotlib__matplotlib-26466",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_matplotlib__matplotlib-26466_zhls4da7"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_matplotlib__matplotlib-26466_0k34d6d0"
       },
       {
         "base_state_verified": true,
@@ -1176,7 +1176,7 @@
         "repo": "django/django",
         "setup_status": "ready",
         "task_id": "swe-bench:django__django-11211",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-11211_8hqnrre8"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-11211_b37h30bk"
       },
       {
         "base_state_verified": true,
@@ -1192,7 +1192,7 @@
         "repo": "sphinx-doc/sphinx",
         "setup_status": "ready",
         "task_id": "swe-bench:sphinx-doc__sphinx-9258",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_sphinx-doc__sphinx-9258_wnlla0wq"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_sphinx-doc__sphinx-9258_ntb4q8fb"
       },
       {
         "base_state_verified": true,
@@ -1208,7 +1208,7 @@
         "repo": "django/django",
         "setup_status": "ready",
         "task_id": "swe-bench:django__django-11885",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-11885_y5unu59u"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-11885_9fyzouqz"
       },
       {
         "base_state_verified": true,
@@ -1224,7 +1224,7 @@
         "repo": "sympy/sympy",
         "setup_status": "ready",
         "task_id": "swe-bench:sympy__sympy-18698",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_sympy__sympy-18698_zofpr9cg"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_sympy__sympy-18698_u13l8k5x"
       },
       {
         "base_state_verified": true,
@@ -1240,7 +1240,7 @@
         "repo": "django/django",
         "setup_status": "ready",
         "task_id": "swe-bench:django__django-13195",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-13195_2jiid2ep"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-13195_bmxh67kr"
       },
       {
         "base_state_verified": true,
@@ -1256,7 +1256,7 @@
         "repo": "sphinx-doc/sphinx",
         "setup_status": "ready",
         "task_id": "swe-bench:sphinx-doc__sphinx-8551",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_sphinx-doc__sphinx-8551_di11xrr0"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_sphinx-doc__sphinx-8551_upz_ggzy"
       },
       {
         "base_state_verified": true,
@@ -1272,7 +1272,7 @@
         "repo": "django/django",
         "setup_status": "ready",
         "task_id": "swe-bench:django__django-11964",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-11964_8b6xna1v"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-11964_2ep7gyms"
       },
       {
         "base_state_verified": true,
@@ -1288,7 +1288,7 @@
         "repo": "django/django",
         "setup_status": "ready",
         "task_id": "swe-bench:django__django-14122",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-14122_z5qd5ij8"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-14122_dr0_qk_i"
       },
       {
         "base_state_verified": true,
@@ -1304,7 +1304,7 @@
         "repo": "sympy/sympy",
         "setup_status": "ready",
         "task_id": "swe-bench:sympy__sympy-14531",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_sympy__sympy-14531_sn9lxua8"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_sympy__sympy-14531_x5bmgvel"
       },
       {
         "base_state_verified": true,
@@ -1320,7 +1320,7 @@
         "repo": "scikit-learn/scikit-learn",
         "setup_status": "ready",
         "task_id": "swe-bench:scikit-learn__scikit-learn-14053",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_scikit-learn__scikit-learn-140_icz_z3h7"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_scikit-learn__scikit-learn-140_vnk0f4wu"
       },
       {
         "base_state_verified": true,
@@ -1336,7 +1336,7 @@
         "repo": "django/django",
         "setup_status": "ready",
         "task_id": "swe-bench:django__django-14534",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-14534_jle3ai38"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-14534__95e1n_8"
       },
       {
         "base_state_verified": true,
@@ -1352,7 +1352,7 @@
         "repo": "scikit-learn/scikit-learn",
         "setup_status": "ready",
         "task_id": "swe-bench:scikit-learn__scikit-learn-11310",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_scikit-learn__scikit-learn-113_adcohiz3"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_scikit-learn__scikit-learn-113_myb9ifln"
       },
       {
         "base_state_verified": true,
@@ -1368,7 +1368,7 @@
         "repo": "django/django",
         "setup_status": "ready",
         "task_id": "swe-bench:django__django-14792",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-14792_df7pp299"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-14792_5aw3xghl"
       },
       {
         "base_state_verified": true,
@@ -1384,7 +1384,7 @@
         "repo": "pytest-dev/pytest",
         "setup_status": "ready",
         "task_id": "swe-bench:pytest-dev__pytest-7432",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_pytest-dev__pytest-7432_52oo04gh"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_pytest-dev__pytest-7432_w9v42il5"
       },
       {
         "base_state_verified": true,
@@ -1400,7 +1400,7 @@
         "repo": "django/django",
         "setup_status": "ready",
         "task_id": "swe-bench:django__django-12419",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-12419_0j66rxgp"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-12419_m_9ynctu"
       },
       {
         "base_state_verified": true,
@@ -1416,7 +1416,7 @@
         "repo": "sympy/sympy",
         "setup_status": "ready",
         "task_id": "swe-bench:sympy__sympy-19346",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_sympy__sympy-19346_4pyrcbe4"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_sympy__sympy-19346_a_nb0rpz"
       },
       {
         "base_state_verified": true,
@@ -1432,7 +1432,7 @@
         "repo": "django/django",
         "setup_status": "ready",
         "task_id": "swe-bench:django__django-13513",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-13513_12zvjpsp"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-13513_el_qt3zp"
       },
       {
         "base_state_verified": true,
@@ -1448,7 +1448,7 @@
         "repo": "scikit-learn/scikit-learn",
         "setup_status": "ready",
         "task_id": "swe-bench:scikit-learn__scikit-learn-12585",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_scikit-learn__scikit-learn-125_8_lusp2j"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_scikit-learn__scikit-learn-125_jazjlw42"
       },
       {
         "base_state_verified": true,
@@ -1464,7 +1464,7 @@
         "repo": "pydata/xarray",
         "setup_status": "ready",
         "task_id": "swe-bench:pydata__xarray-3305",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_pydata__xarray-3305_q050sumr"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_pydata__xarray-3305_csp4pjh1"
       },
       {
         "base_state_verified": true,
@@ -1480,7 +1480,7 @@
         "repo": "scikit-learn/scikit-learn",
         "setup_status": "ready",
         "task_id": "swe-bench:scikit-learn__scikit-learn-13328",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_scikit-learn__scikit-learn-133_ixq8iz2k"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_scikit-learn__scikit-learn-133_5ynu72lt"
       },
       {
         "base_state_verified": true,
@@ -1496,7 +1496,7 @@
         "repo": "pydata/xarray",
         "setup_status": "ready",
         "task_id": "swe-bench:pydata__xarray-6461",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_pydata__xarray-6461_ab21xtr9"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_pydata__xarray-6461_m9sg1vcj"
       },
       {
         "base_state_verified": true,
@@ -1512,7 +1512,7 @@
         "repo": "django/django",
         "setup_status": "ready",
         "task_id": "swe-bench:django__django-13512",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-13512_xchsedq7"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-13512_kdskfx06"
       },
       {
         "base_state_verified": true,
@@ -1528,7 +1528,7 @@
         "repo": "django/django",
         "setup_status": "ready",
         "task_id": "swe-bench:django__django-11400",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-11400_0jw169ey"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-11400_n8031d19"
       },
       {
         "base_state_verified": true,
@@ -1544,7 +1544,7 @@
         "repo": "pydata/xarray",
         "setup_status": "ready",
         "task_id": "swe-bench:pydata__xarray-6599",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_pydata__xarray-6599_avutp6co"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_pydata__xarray-6599_61h9r7pp"
       },
       {
         "base_state_verified": true,
@@ -1560,7 +1560,7 @@
         "repo": "sphinx-doc/sphinx",
         "setup_status": "ready",
         "task_id": "swe-bench:sphinx-doc__sphinx-9698",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_sphinx-doc__sphinx-9698_0pwvi0v0"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_sphinx-doc__sphinx-9698_u5gp5txg"
       },
       {
         "base_state_verified": true,
@@ -1576,7 +1576,7 @@
         "repo": "django/django",
         "setup_status": "ready",
         "task_id": "swe-bench:django__django-12858",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-12858_hdugllqm"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-12858_cyk47w1n"
       },
       {
         "base_state_verified": true,
@@ -1592,7 +1592,7 @@
         "repo": "sympy/sympy",
         "setup_status": "ready",
         "task_id": "swe-bench:sympy__sympy-15976",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_sympy__sympy-15976_7wqypv6s"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_sympy__sympy-15976_0lfwmpv1"
       },
       {
         "base_state_verified": true,
@@ -1608,7 +1608,7 @@
         "repo": "sympy/sympy",
         "setup_status": "ready",
         "task_id": "swe-bench:sympy__sympy-12419",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_sympy__sympy-12419_5cbjxb80"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_sympy__sympy-12419_6ux3e8vz"
       },
       {
         "base_state_verified": true,
@@ -1624,7 +1624,7 @@
         "repo": "scikit-learn/scikit-learn",
         "setup_status": "ready",
         "task_id": "swe-bench:scikit-learn__scikit-learn-13439",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_scikit-learn__scikit-learn-134_slhry51p"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_scikit-learn__scikit-learn-134_kx3ijubr"
       },
       {
         "base_state_verified": true,
@@ -1640,7 +1640,7 @@
         "repo": "sphinx-doc/sphinx",
         "setup_status": "ready",
         "task_id": "swe-bench:sphinx-doc__sphinx-9591",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_sphinx-doc__sphinx-9591_pe_3sip6"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_sphinx-doc__sphinx-9591_4z1na09i"
       },
       {
         "base_state_verified": true,
@@ -1656,7 +1656,7 @@
         "repo": "django/django",
         "setup_status": "ready",
         "task_id": "swe-bench:django__django-12193",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-12193_0a6tgx8d"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-12193_ewdwdaxa"
       },
       {
         "base_state_verified": true,
@@ -1672,7 +1672,7 @@
         "repo": "matplotlib/matplotlib",
         "setup_status": "ready",
         "task_id": "swe-bench:matplotlib__matplotlib-22871",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_matplotlib__matplotlib-22871_tw5agegh"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_matplotlib__matplotlib-22871_dsmi6rle"
       },
       {
         "base_state_verified": true,
@@ -1688,7 +1688,7 @@
         "repo": "pydata/xarray",
         "setup_status": "ready",
         "task_id": "swe-bench:pydata__xarray-4075",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_pydata__xarray-4075_859s834k"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_pydata__xarray-4075_nh95pwpu"
       },
       {
         "base_state_verified": true,
@@ -1704,7 +1704,7 @@
         "repo": "sympy/sympy",
         "setup_status": "ready",
         "task_id": "swe-bench:sympy__sympy-13798",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_sympy__sympy-13798_spenww5w"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_sympy__sympy-13798_abaokjaq"
       },
       {
         "base_state_verified": true,
@@ -1720,7 +1720,7 @@
         "repo": "sympy/sympy",
         "setup_status": "ready",
         "task_id": "swe-bench:sympy__sympy-21612",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_sympy__sympy-21612_y0g3ax0j"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_sympy__sympy-21612_r3h5et6q"
       },
       {
         "base_state_verified": true,
@@ -1736,7 +1736,7 @@
         "repo": "pytest-dev/pytest",
         "setup_status": "ready",
         "task_id": "swe-bench:pytest-dev__pytest-7521",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_pytest-dev__pytest-7521_ukwbw0rb"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_pytest-dev__pytest-7521_lec8b070"
       },
       {
         "base_state_verified": true,
@@ -1752,7 +1752,7 @@
         "repo": "django/django",
         "setup_status": "ready",
         "task_id": "swe-bench:django__django-13023",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-13023_y2v5ygz6"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-13023_kcgdoa2b"
       },
       {
         "base_state_verified": true,
@@ -1768,7 +1768,7 @@
         "repo": "django/django",
         "setup_status": "ready",
         "task_id": "swe-bench:django__django-15368",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-15368_1zqb7edi"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-15368_kgt_d_yw"
       },
       {
         "base_state_verified": true,
@@ -1784,7 +1784,7 @@
         "repo": "matplotlib/matplotlib",
         "setup_status": "ready",
         "task_id": "swe-bench:matplotlib__matplotlib-20859",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_matplotlib__matplotlib-20859_ja50_43b"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_matplotlib__matplotlib-20859_jfybilh0"
       },
       {
         "base_state_verified": true,
@@ -1800,7 +1800,7 @@
         "repo": "sphinx-doc/sphinx",
         "setup_status": "ready",
         "task_id": "swe-bench:sphinx-doc__sphinx-8638",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_sphinx-doc__sphinx-8638_3tj7mj6k"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_sphinx-doc__sphinx-8638_1ehps8co"
       },
       {
         "base_state_verified": true,
@@ -1816,7 +1816,7 @@
         "repo": "pydata/xarray",
         "setup_status": "ready",
         "task_id": "swe-bench:pydata__xarray-7393",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_pydata__xarray-7393_97ik01b0"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_pydata__xarray-7393_0wse9_q5"
       },
       {
         "base_state_verified": true,
@@ -1832,7 +1832,7 @@
         "repo": "django/django",
         "setup_status": "ready",
         "task_id": "swe-bench:django__django-15569",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-15569_0h40y8nw"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-15569_8bkwf6_n"
       },
       {
         "base_state_verified": true,
@@ -1848,7 +1848,7 @@
         "repo": "django/django",
         "setup_status": "ready",
         "task_id": "swe-bench:django__django-13112",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-13112_vgx8drlb"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-13112_c_72vply"
       },
       {
         "base_state_verified": true,
@@ -1864,7 +1864,7 @@
         "repo": "django/django",
         "setup_status": "ready",
         "task_id": "swe-bench:django__django-14017",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-14017_mqvxx6ot"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-14017__4aw3793"
       },
       {
         "base_state_verified": true,
@@ -1880,7 +1880,7 @@
         "repo": "django/django",
         "setup_status": "ready",
         "task_id": "swe-bench:django__django-14315",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-14315_l5nrr3o_"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-14315_1ucaat6m"
       },
       {
         "base_state_verified": true,
@@ -1896,7 +1896,7 @@
         "repo": "django/django",
         "setup_status": "ready",
         "task_id": "swe-bench:django__django-16429",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-16429_0r_65adm"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-16429_6dvqt318"
       },
       {
         "base_state_verified": true,
@@ -1912,7 +1912,7 @@
         "repo": "sympy/sympy",
         "setup_status": "ready",
         "task_id": "swe-bench:sympy__sympy-15345",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_sympy__sympy-15345_dyz58zsj"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_sympy__sympy-15345_o6ptv7wt"
       },
       {
         "base_state_verified": true,
@@ -1928,7 +1928,7 @@
         "repo": "sphinx-doc/sphinx",
         "setup_status": "ready",
         "task_id": "swe-bench:sphinx-doc__sphinx-9367",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_sphinx-doc__sphinx-9367_vgiolmb0"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_sphinx-doc__sphinx-9367_ktdlbyc_"
       },
       {
         "base_state_verified": true,
@@ -1944,7 +1944,7 @@
         "repo": "pytest-dev/pytest",
         "setup_status": "ready",
         "task_id": "swe-bench:pytest-dev__pytest-5809",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_pytest-dev__pytest-5809_76kmzr6d"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_pytest-dev__pytest-5809_xp1t9k0q"
       },
       {
         "base_state_verified": true,
@@ -1960,7 +1960,7 @@
         "repo": "django/django",
         "setup_status": "ready",
         "task_id": "swe-bench:django__django-10999",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-10999_ootb00yk"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-10999_28l7vii3"
       },
       {
         "base_state_verified": true,
@@ -1976,7 +1976,7 @@
         "repo": "django/django",
         "setup_status": "ready",
         "task_id": "swe-bench:django__django-16485",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-16485_3q0wo4uq"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-16485_qowpobwv"
       },
       {
         "base_state_verified": true,
@@ -1992,7 +1992,7 @@
         "repo": "sympy/sympy",
         "setup_status": "ready",
         "task_id": "swe-bench:sympy__sympy-22080",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_sympy__sympy-22080_xqa70kmp"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_sympy__sympy-22080_my9546xp"
       },
       {
         "base_state_verified": true,
@@ -2008,7 +2008,7 @@
         "repo": "django/django",
         "setup_status": "ready",
         "task_id": "swe-bench:django__django-16819",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-16819_ni1v2vi3"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-16819_9zpnhiam"
       },
       {
         "base_state_verified": true,
@@ -2024,7 +2024,7 @@
         "repo": "django/django",
         "setup_status": "ready",
         "task_id": "swe-bench:django__django-16938",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-16938_kfrjlkrt"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-16938_kbx2tsjq"
       },
       {
         "base_state_verified": true,
@@ -2040,7 +2040,7 @@
         "repo": "matplotlib/matplotlib",
         "setup_status": "ready",
         "task_id": "swe-bench:matplotlib__matplotlib-26342",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_matplotlib__matplotlib-26342_x_g2kpp2"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_matplotlib__matplotlib-26342_t3i9ms3h"
       },
       {
         "base_state_verified": true,
@@ -2056,7 +2056,7 @@
         "repo": "django/django",
         "setup_status": "ready",
         "task_id": "swe-bench:django__django-13212",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-13212_ofhabmw9"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-13212_fuvnoh8f"
       },
       {
         "base_state_verified": true,
@@ -2072,7 +2072,7 @@
         "repo": "django/django",
         "setup_status": "ready",
         "task_id": "swe-bench:django__django-11999",
-        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-11999_phobqjd0"
+        "workspace": "/ssd1/iclr/1/.tmp/FlowSteer-swebench-initial-v1/artifacts/swebench_skillflow_v3_initial_v1/worktrees/swe_django__django-11999_gk53xwsk"
       }
     ]
   },

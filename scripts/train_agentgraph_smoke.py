@@ -1172,6 +1172,17 @@ def _swe_coding_runtime_settings(
         raise ConfigurationError(
             "the SkillFlow SWE-bench Tool profile requires its task environment"
         )
+    if tool_profile == SWEBENCH_TOOL_PROFILE_SKILLFLOW_TRAINING:
+        for field_name in (
+            "conda_executable",
+            "conda_envs_dir",
+            "environment_repository_root",
+        ):
+            value = section.get(field_name)
+            if not isinstance(value, str) or not value.strip():
+                raise ConfigurationError(
+                    f"swe_coding_runtime.{field_name} must be non-empty text"
+                )
     task_max_turns = section.get(
         "task_max_turns", section["max_turns_per_agent_call"]
     )
@@ -1204,6 +1215,11 @@ def _swe_coding_runtime_settings(
         "source_key": source_key,
         "repository_store": section["repository_store"].strip(),
         "worktree_root": section["worktree_root"].strip(),
+        "conda_executable": str(section.get("conda_executable", "")).strip(),
+        "conda_envs_dir": str(section.get("conda_envs_dir", "")).strip(),
+        "environment_repository_root": str(
+            section.get("environment_repository_root", "")
+        ).strip(),
         "max_turns": int(section["max_turns_per_agent_call"]),
         "max_tool_calls": int(section["max_tool_calls_per_agent_call"]),
         "tool_profile": str(tool_profile),

@@ -34,6 +34,8 @@ fail-closed 语义停止，没有调用模型、没有生成 patch、没有分�
 - `bash` 新建的非 test 文件也进入最终 workspace diff，不丢失 untracked artifact；
 - `bash` / `run_tests` 严格绑定 SkillFlow `_env_python(repo, version)` 对应的 Conda
   environment；环境缺失时禁止回退到宿主 Python；
+- task environment builder 直接使用 SkillFlow `_env_name` 与 official harness
+  `make_test_spec` scripts，按 48 个唯一 repo/version 保存可恢复 source/log/receipt；
 - progressive Canvas 多 Agent execution 共享 task-global turn/Tool budget；
 - official SkillFlow `evaluate_patch` / SWE-bench harness fail-closed adapter；
 - official harness infrastructure exception 的结构化 classification、phase、retryable、
@@ -45,7 +47,7 @@ fail-closed 语义停止，没有调用模型、没有生成 patch、没有分�
 
 ## 验证结果
 
-定向与兼容性测试：**551 passed，另有 103 个 subtests passed**。覆盖 Dataset、
+定向与兼容性测试：**558 passed，另有 103 个 subtests passed**。覆盖 Dataset、
 worktree、Tool schema/backend、ReAct、CodingExecution、Canvas/runtime、统一 runner、
 evaluation config、official evaluator adapter 和 SWE-bench reporting。
 
@@ -89,6 +91,9 @@ Task execution environment：
 - unavailable：127/128（剩余 47 个唯一 repo/version environment）；
 - strict `bash/run_tests` host fallback：禁用。
 
+Environment builder plan-only：128 tasks / 48 unique repo-version environments，
+48 个 plan 均成功物化为结构化计划；尚未启动剩余 47 个耗时构建。
+
 Official evaluator：
 
 - SkillFlow evaluator source：已定位；
@@ -121,6 +126,8 @@ Wrong Demo，不能归因于 Director、Agent topology 或 patch quality。
 - No-model preflight：`scripts/preflight_swebench_initial_adapter.py`
 - Runtime receipt：
   `reports/swebench_skillflow_v3_initial_v1_preflight.json`
+- Task environment builder：
+  `scripts/prepare_swebench_skillflow_task_environments.py`
 - Formal runner manifest：
   `artifacts/swebench_skillflow_v3_initial_v1/run_manifest.json`
 
