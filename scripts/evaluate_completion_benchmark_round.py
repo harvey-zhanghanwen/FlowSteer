@@ -33,6 +33,7 @@ if str(SCRIPTS_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_ROOT))
 
 import evaluate_hotpotqa_round as hotpot_round
+from scripts.prompts.prompt import ANSWER_GENERATION_PROMPT
 from train_agentgraph_smoke import (
     LiveSmokeBackend,
     _dataset_key,
@@ -1274,11 +1275,28 @@ async def _direct_one(
             "completed_at": _utc_now(),
         }
 
+    direct_problem = _workflow_problem(task, backend.config)
+    if dataset_key == "aime_2026":
+        # SkillFlow/SkillEval does not expose an independent single-model
+        # Direct runner: its formal baseline is a bounded policy episode.  For
+        # the requested Direct comparator, reuse FlowSteer's actual
+        # AnswerGenerate input protocol rather than relabelling that bounded
+        # rollout.  Only the public problem and answer-format metadata enter
+        # the operator prompt; the hidden target remains evaluator-only.
+        answer_format = str(
+            task.metadata.get("answer_format", "integer-000-to-999")
+        )
+        public_input = (
+            f"{task.question}\n\n"
+            f"Public answer format: {answer_format}."
+        )
+        direct_problem = ANSWER_GENERATION_PROMPT.format(input=public_input)
+
     request = AgentRequest(
         request_id=f"{run_id}:direct:single",
         run_id=run_id,
         graph_revision=0,
-        problem=_workflow_problem(task, backend.config),
+        problem=direct_problem,
         agent=AgentNode("direct", model_id, contract),
         model=model,
         provider=provider,
@@ -2174,6 +2192,182 @@ def _telemetry_totals(
     }
 
 
+def _direct_execution_receipts(
+    rows: Sequence[Mapping[str, Any]],
+) -> Mapping[str, Any]:
+    model_ids: Counter[str] = Counter()
+    provider_ids: Counter[str] = Counter()
+    provider_models: Counter[str] = Counter()
+    error_types: Counter[str] = Counter()
+    attempt_count = 0
+    call_count = 0
+    for row in rows:
+        direct = row.get("direct")
+        execution = direct.get("execution") if isinstance(direct, Mapping) else None
+        if not isinstance(execution, Mapping):
+            continue
+        call_count += 1
+        model_id = execution.get("model_id")
+        provider_id = execution.get("provider")
+        if isinstance(model_id, str) and model_id:
+            model_ids[model_id] += 1
+        if isinstance(provider_id, str) and provider_id:
+            provider_ids[provider_id] += 1
+        error_type = execution.get("error_type")
+        if isinstance(error_type, str) and error_type:
+            error_types[error_type] += 1
+        metadata = execution.get("metadata")
+        response = metadata.get("response") if isinstance(metadata, Mapping) else None
+        if isinstance(response, Mapping):
+            response_provider = response.get("provider_id")
+            response_model = response.get("provider_model")
+            if isinstance(response_provider, str) and response_provider:
+                provider_ids[response_provider] += int(
+                    not (isinstance(provider_id, str) and provider_id == response_provider)
+                )
+            if isinstance(response_model, str) and response_model:
+                provider_models[response_model] += 1
+            raw_attempts = response.get("attempt_count", 1)
+            if isinstance(raw_attempts, int) and not isinstance(raw_attempts, bool):
+                attempt_count += raw_attempts
+    return {
+        "call_count": call_count,
+        "provider_attempt_count": attempt_count,
+        "model_id_distribution": dict(sorted(model_ids.items())),
+        "provider_id_distribution": dict(sorted(provider_ids.items())),
+        "provider_model_distribution": dict(sorted(provider_models.items())),
+        "error_type_distribution": dict(sorted(error_types.items())),
+    }
+
+
+def _agentgraph_execution_receipts(
+    trajectories: Sequence[Mapping[str, Any]],
+) -> Mapping[str, Any]:
+    node_models: Counter[str] = Counter()
+    executor_models: Counter[str] = Counter()
+    provider_ids: Counter[str] = Counter()
+    provider_models: Counter[str] = Counter()
+    execution_error_types: Counter[str] = Counter()
+    runtime_failure_types: Counter[str] = Counter()
+    execution_call_count = 0
+    provider_attempt_count = 0
+    director_attempt_count = 0
+    director_latency_ms = 0.0
+    runtime_failed_turn_count = 0
+    runtime_failed_without_structured_failure_record_count = 0
+
+    for trajectory in trajectories:
+        graph = _evaluated_graph(trajectory)
+        nodes = graph.get("nodes") if isinstance(graph, Mapping) else None
+        if isinstance(nodes, Sequence) and not isinstance(nodes, (str, bytes)):
+            for node in nodes:
+                model_id = node.get("model_id") if isinstance(node, Mapping) else None
+                if isinstance(model_id, str) and model_id:
+                    node_models[model_id] += 1
+
+        turns = trajectory.get("turns")
+        if not isinstance(turns, Sequence) or isinstance(turns, (str, bytes)):
+            continue
+        for turn in turns:
+            if not isinstance(turn, Mapping):
+                continue
+            raw_director_attempts = turn.get("director_attempt_count", 0)
+            if isinstance(raw_director_attempts, int) and not isinstance(
+                raw_director_attempts, bool
+            ):
+                director_attempt_count += raw_director_attempts
+            raw_director_latency = turn.get("director_latency_ms", 0.0)
+            if isinstance(raw_director_latency, (int, float)) and not isinstance(
+                raw_director_latency, bool
+            ):
+                director_latency_ms += float(raw_director_latency)
+
+            executions = turn.get("executions")
+            if isinstance(executions, Sequence) and not isinstance(
+                executions, (str, bytes)
+            ):
+                for execution in executions:
+                    if not isinstance(execution, Mapping):
+                        continue
+                    execution_call_count += 1
+                    model_id = execution.get("model_id")
+                    provider_id = execution.get("provider")
+                    if isinstance(model_id, str) and model_id:
+                        executor_models[model_id] += 1
+                    if isinstance(provider_id, str) and provider_id:
+                        provider_ids[provider_id] += 1
+                    error_type = execution.get("error_type")
+                    if isinstance(error_type, str) and error_type:
+                        execution_error_types[error_type] += 1
+                    metadata = execution.get("metadata")
+                    response = (
+                        metadata.get("response")
+                        if isinstance(metadata, Mapping)
+                        else None
+                    )
+                    if isinstance(response, Mapping):
+                        response_provider = response.get("provider_id")
+                        response_model = response.get("provider_model")
+                        if (
+                            isinstance(response_provider, str)
+                            and response_provider
+                            and response_provider != provider_id
+                        ):
+                            provider_ids[response_provider] += 1
+                        if isinstance(response_model, str) and response_model:
+                            provider_models[response_model] += 1
+                        raw_attempts = response.get("attempt_count", 1)
+                        if isinstance(raw_attempts, int) and not isinstance(
+                            raw_attempts, bool
+                        ):
+                            provider_attempt_count += raw_attempts
+
+            runtime = turn.get("runtime_summary")
+            if not isinstance(runtime, Mapping) or runtime.get("execution_status") != "failed":
+                continue
+            runtime_failed_turn_count += 1
+            failure_records = runtime.get("failure_records")
+            if not isinstance(failure_records, Sequence) or isinstance(
+                failure_records, (str, bytes)
+            ) or not failure_records:
+                runtime_failed_without_structured_failure_record_count += 1
+                continue
+            for failure in failure_records:
+                if not isinstance(failure, Mapping):
+                    runtime_failure_types["untyped_runtime_failure"] += 1
+                    continue
+                failure_type = next(
+                    (
+                        failure.get(key)
+                        for key in ("error_type", "failure_type", "public_error_code")
+                        if isinstance(failure.get(key), str) and failure.get(key)
+                    ),
+                    "untyped_runtime_failure",
+                )
+                runtime_failure_types[str(failure_type)] += 1
+
+    return {
+        "evaluated_node_model_distribution": dict(sorted(node_models.items())),
+        "executor_call_count": execution_call_count,
+        "executor_model_distribution": dict(sorted(executor_models.items())),
+        "provider_attempt_count": provider_attempt_count,
+        "provider_id_distribution": dict(sorted(provider_ids.items())),
+        "provider_model_distribution": dict(sorted(provider_models.items())),
+        "execution_error_type_distribution": dict(
+            sorted(execution_error_types.items())
+        ),
+        "director_attempt_count": director_attempt_count,
+        "director_latency_ms": director_latency_ms,
+        "runtime_failed_turn_count": runtime_failed_turn_count,
+        "runtime_failure_type_distribution": dict(
+            sorted(runtime_failure_types.items())
+        ),
+        "runtime_failed_without_structured_failure_record_count": (
+            runtime_failed_without_structured_failure_record_count
+        ),
+    }
+
+
 def _is_reportable_aime_terminal_failure(value: Mapping[str, Any]) -> bool:
     evaluation = value.get("evaluation")
     details = evaluation.get("details") if isinstance(evaluation, Mapping) else None
@@ -2197,6 +2391,8 @@ def _report(
     rows: Sequence[Mapping[str, Any]],
     config: Mapping[str, Any],
     trajectories: Sequence[Mapping[str, Any]] = (),
+    *,
+    collection_failures: Sequence[Mapping[str, Any]] = (),
 ) -> Mapping[str, Any]:
     _, bounded = _evaluation_section(config)
     dataset_key = str(bounded["dataset_key"])
@@ -2298,6 +2494,18 @@ def _report(
         "telemetry_totals": {
             "direct": _telemetry_totals(rows, "direct"),
             "agentgraph": _telemetry_totals(rows, "agentgraph"),
+        },
+        "execution_receipts": {
+            "direct": _direct_execution_receipts(rows),
+            "agentgraph": _agentgraph_execution_receipts(trajectories),
+            "collection_failures": [
+                {
+                    key: failure.get(key)
+                    for key in ("task_id", "condition", "stage", "error", "recorded_at")
+                    if key in failure
+                }
+                for failure in collection_failures
+            ],
         },
         "failure_types": dict(sorted(failure_counts.items())),
         "below_full_score_demo_count": len(below_full),
@@ -2594,13 +2802,47 @@ def _graph_environment_terminal_receipt(
     return False
 
 
+def _existing_trajectory_checkpoint(
+    selected: Sequence[TaskRecord],
+    path: Path,
+    *,
+    condition_id: str,
+) -> dict[str, dict[str, Any]]:
+    """Load only the frozen AgentGraph receipts already admitted by a run.
+
+    This read-only path exists so a corrected Direct comparator can be
+    collected without scheduling a second AgentGraph rollout.  The normal
+    collector already validated evaluator or reportable-terminal-failure
+    admission before writing this ordered checkpoint; this projection retains
+    only exact task and condition identities from the current frozen panel.
+    """
+
+    selected_ids = {task.task_id for task in selected}
+    existing: dict[str, dict[str, Any]] = {}
+    for value in _read_jsonl(path):
+        embedded = value.get("task")
+        task_id = embedded.get("task_id") if isinstance(embedded, Mapping) else None
+        if (
+            isinstance(task_id, str)
+            and task_id in selected_ids
+            and value.get("condition_id") == condition_id
+        ):
+            existing[task_id] = dict(value)
+    return existing
+
+
 async def run_completion_benchmark_round(
     config_path: str | Path,
     *,
     project_root: Optional[str | Path] = None,
     prepare_only: bool = False,
     canary_only: bool = False,
+    direct_only: bool = False,
 ) -> Mapping[str, Any]:
+    if direct_only and (prepare_only or canary_only):
+        raise CompletionBenchmarkRoundError(
+            "direct_only cannot be combined with prepare_only or canary_only"
+        )
     resolved_config = Path(config_path).expanduser().resolve()
     root = (
         Path(project_root).expanduser().resolve()
@@ -2655,6 +2897,7 @@ async def run_completion_benchmark_round(
         },
         "training_enabled": False,
         "optimizer_updates": 0,
+        "direct_only": direct_only,
         "runtime_resource": {
             "configured_rollout_physical": configured_rollout_gpu,
             "effective_rollout_physical": effective_rollout_gpu,
@@ -2779,19 +3022,32 @@ async def run_completion_benchmark_round(
     )
     _atomic_jsonl(paths["failures"], failures)
 
-    manifest["status"] = "agentgraph"
-    _write_json(paths["manifest"], manifest)
-    trajectories = await _collect_graph(
-        backend,
-        active,
-        _compatibility_config(config, bounded),
-        paths["trajectories"],
-        failures,
-        manifest,
-        paths["manifest"],
-        failure_path=paths["failures"],
-    )
-    _atomic_jsonl(paths["failures"], failures)
+    if direct_only:
+        manifest["status"] = "paired_report_from_existing_agentgraph"
+        trajectories = _existing_trajectory_checkpoint(
+            active,
+            paths["trajectories"],
+            condition_id=str(config["experiment"]["condition_id"]),
+        )
+        manifest["agentgraph_progress"] = {
+            "completed": len(trajectories),
+            "reused_without_execution": True,
+        }
+        _write_json(paths["manifest"], manifest)
+    else:
+        manifest["status"] = "agentgraph"
+        _write_json(paths["manifest"], manifest)
+        trajectories = await _collect_graph(
+            backend,
+            active,
+            _compatibility_config(config, bounded),
+            paths["trajectories"],
+            failures,
+            manifest,
+            paths["manifest"],
+            failure_path=paths["failures"],
+        )
+        _atomic_jsonl(paths["failures"], failures)
 
     rows = _paired_rows(active, direct, trajectories, dataset_key)
     _atomic_jsonl(paths["paired"], rows)
@@ -2827,7 +3083,12 @@ async def run_completion_benchmark_round(
             )
         return manifest
 
-    report = _report(rows, config, tuple(trajectories.values()))
+    report = _report(
+        rows,
+        config,
+        tuple(trajectories.values()),
+        collection_failures=failures,
+    )
     _write_json(paths["report_json"], report)
     paths["report_markdown"].parent.mkdir(parents=True, exist_ok=True)
     paths["report_markdown"].write_text(
@@ -2842,7 +3103,10 @@ async def run_completion_benchmark_round(
     manifest.update(
         status=final_status,
         direct_progress={**dict(manifest.get("direct_progress", {})), "completed": len(direct)},
-        agentgraph_progress={"completed": len(trajectories)},
+        agentgraph_progress={
+            **dict(manifest.get("agentgraph_progress", {})),
+            "completed": len(trajectories),
+        },
         metrics={
             "direct": report["direct_local_baseline"],
             "agentgraph": report["agentgraph"],
@@ -2875,6 +3139,14 @@ def build_parser() -> argparse.ArgumentParser:
             "run stable_zero_sample_count frozen tasks through the Stable Zero chain"
         ),
     )
+    parser.add_argument(
+        "--direct-only",
+        action="store_true",
+        help=(
+            "collect/resume Direct only and rebuild paired reports from the "
+            "existing frozen AgentGraph checkpoint"
+        ),
+    )
     return parser
 
 
@@ -2887,6 +3159,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 project_root=PROJECT_ROOT,
                 prepare_only=bool(args.prepare_only),
                 canary_only=bool(args.canary_only),
+                direct_only=bool(args.direct_only),
             )
         )
     except (

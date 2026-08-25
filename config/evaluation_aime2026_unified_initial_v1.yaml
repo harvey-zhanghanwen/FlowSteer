@@ -41,9 +41,9 @@ aime2026_evaluation:
   concurrency: 4
   task_timeout_seconds: 600.0
   direct_model_id: "qwen3.5-9b-local"
-  direct_protocol: "skillev_private_static_integer_submission_v1"
+  direct_protocol: "flowsteer_answer_generate_xml_to_skillev_integer_v1"
   protocol_equivalent_to_direct: true
-  direct_contract: "Solve the problem and submit exactly one decimal integer with no explanation."
+  direct_contract: "Generate the answer with a step-by-step thinking process and one final answer, following the task's XML response format."
   direct_generation_seed: 20260825
 
 # Downstream SkillEval's production AIME 2026 static task has available_tools=().

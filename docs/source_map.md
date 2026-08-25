@@ -145,3 +145,31 @@ verified semantic-lineage purpose and made free AgentGraph relation editing
 unreachable after successful `ADD_AGENT` execution. The guard is now scoped to
 semantic-lineage protocols; no AIME-specific graph operation or mathematical
 workflow was added.
+
+## Qwen3.5-9B Direct comparator source boundary
+
+The checked public SkillFlow source and the downstream SkillEval production
+tree do not provide an independent single-model Direct runner. SkillEval's
+`InitialBaselineInferenceState` still executes
+`RolloutEngine + BoundedAgent + StructuredJsonActionCodec` with explicit
+reasoning/action phases and terminal actions. That is a pre-training bounded
+policy episode, not the requested Qwen3.5-9B Direct comparator, and it is not
+relabelled here.
+
+The fallback therefore directly reuses FlowSteer revision `1c9f2ab`:
+
+- `scripts/operators.py::AnswerGenerate` supplies the single-model,
+  single-call execution boundary;
+- `scripts/prompts/prompt.py::ANSWER_GENERATION_PROMPT` supplies the exact
+  content-level step-by-step and XML response protocol; and
+- `scripts/operator_analysis.py::AnswerGenerateOp` defines the `thought` and
+  `answer` fields.
+
+The project adaptation is limited to formatting the frozen public AIME problem
+and public `answer_format` metadata into that upstream prompt, then submitting
+the model's existing `<answer>` field to the same SkillEval-derived integer
+extractor/canonicalizer used by AgentGraph. The Director prompt, action space,
+AgentGraph search space, Tool catalog, and saved AgentGraph trajectories are
+unchanged. The earlier bare-integer one-call outputs are retained only as a
+pre-source-alignment diagnostic and are not reported as the final Direct
+baseline.

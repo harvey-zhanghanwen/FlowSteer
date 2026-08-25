@@ -1361,10 +1361,64 @@ def test_aime_direct_model_request_contains_problem_but_not_private_target():
 
     assert len(gateway.requests) == 1
     request = gateway.requests[0]
-    assert request.problem.startswith("PUBLIC PROBLEM TEXT\n\n")
-    assert "answer_format=integer-000-to-999" in request.problem
+    assert request.problem.startswith("\nThink step by step and solve the problem.")
+    assert "Your task: PUBLIC PROBLEM TEXT" in request.problem
+    assert "Public answer format: integer-000-to-999." in request.problem
+    assert "<thought>" in request.problem
+    assert "<answer>" in request.problem
     assert sentinel not in request.problem
     assert sentinel not in request.agent.contract
+
+
+def test_direct_only_checkpoint_loader_never_schedules_missing_agentgraph_tasks(
+    tmp_path,
+):
+    selected = (
+        _MODULE.TaskRecord(
+            task_id="aime-2026/01",
+            question="one",
+            ground_truth="1",
+            split="test",
+            metadata={"dataset_key": "aime_2026"},
+        ),
+        _MODULE.TaskRecord(
+            task_id="aime-2026/02",
+            question="two",
+            ground_truth="2",
+            split="test",
+            metadata={"dataset_key": "aime_2026"},
+        ),
+    )
+    checkpoint = tmp_path / "trajectories.jsonl"
+    _MODULE._atomic_jsonl(
+        checkpoint,
+        [
+            {
+                "task": {"task_id": "aime-2026/01"},
+                "condition_id": "frozen-aime",
+                "trajectory_id": "kept",
+            },
+            {
+                "task": {"task_id": "aime-2026/02"},
+                "condition_id": "different-condition",
+                "trajectory_id": "rejected-condition",
+            },
+            {
+                "task": {"task_id": "aime-2026/99"},
+                "condition_id": "frozen-aime",
+                "trajectory_id": "rejected-task",
+            },
+        ],
+    )
+
+    existing = _MODULE._existing_trajectory_checkpoint(
+        selected,
+        checkpoint,
+        condition_id="frozen-aime",
+    )
+
+    assert set(existing) == {"aime-2026/01"}
+    assert existing["aime-2026/01"]["trajectory_id"] == "kept"
 
 
 def test_interactive_direct_condition_records_every_environment_policy_call():

@@ -250,3 +250,31 @@ The AIME bounded evaluation section now also supplies
 execution timeout remains a model/runtime setting; it did not bound a complete
 trajectory. The interrupted pre-correction canary is retained only as failure
 evidence and is not reused as a post-correction result.
+
+## Direct comparator source-alignment correction
+
+The first 30-task Direct collection used the correct local Qwen3.5-9B model,
+fixed tasks, generation seed, extractor, canonicalizer, and evaluator, but its
+contract requested an unexplained bare integer. With the local catalog's
+non-thinking chat template this produced almost no mathematical reasoning
+content. That collection remains useful for diagnosing the protocol mismatch,
+but it is not the final source-aligned Direct baseline.
+
+Source inspection established that SkillFlow/SkillEval has no independent
+single-call Direct implementation: its initial policy also runs through the
+bounded action/terminal runtime. Reusing that code under the name Direct would
+change the comparison condition. The corrected comparator therefore uses
+FlowSteer's existing `AnswerGenerate` single-call protocol and imports
+`ANSWER_GENERATION_PROMPT` directly. Its one `<answer>` field then enters the
+unchanged SkillEval-derived integer evaluator. This adjustment affects only
+the Direct comparator; it does not alter the neutral Director prompt, free
+Agent contracts, topology search space, Canvas actions, AgentGraph execution,
+or terminal semantics.
+
+To preserve the frozen AgentGraph condition, the unified evaluation runner now
+has a bounded `--direct-only` mode. It collects/resumes Direct predictions and
+rebuilds the paired report from the already admitted AgentGraph checkpoint; it
+does not schedule any new Director or AgentGraph call. The report additionally
+aggregates actual node/model/provider/runtime and collection-failure receipts
+from the existing trajectories. No training, Skill, MACE, Bayesian update, or
+Tool was introduced.
