@@ -1,0 +1,159 @@
+{
+  "agentgraph": {
+    "completed": 1,
+    "completed_only_exact_match": 0.0,
+    "completed_only_token_f1": 0.5,
+    "denominator": 1,
+    "evaluator_valid": 1,
+    "strict_exact_match": 0.0,
+    "strict_token_f1": 0.5
+  },
+  "agentgraph_minus_direct": {
+    "exact_match": -1.0,
+    "token_f1": -0.5
+  },
+  "below_full_score_demo_count": 1,
+  "benchmark_slice": null,
+  "comparison_interpretation": "separate_protocol_descriptive_comparison",
+  "completed_at": "2026-08-24T04:38:16.191315+00:00",
+  "dataset": "TriviaQA",
+  "dataset_key": "triviaqa",
+  "direct_local_baseline": {
+    "completed": 1,
+    "completed_only_exact_match": 1.0,
+    "completed_only_token_f1": 1.0,
+    "denominator": 1,
+    "evaluator_valid": 1,
+    "strict_exact_match": 1.0,
+    "strict_token_f1": 1.0
+  },
+  "explicit_finished_count": 1,
+  "failure_types": {
+    "partial_answer_overlap": 1
+  },
+  "graph_search_diagnostics": {
+    "action_counts": {
+      "add_subgraph": 4,
+      "finish": 1
+    },
+    "action_sequence_counts": {
+      "add_subgraph -> add_subgraph -> add_subgraph -> add_subgraph -> finish": 1
+    },
+    "agent_count_distribution": {
+      "4": 1
+    },
+    "atomic_cost_by_agent_count": {
+      "4": {
+        "mean_edit_overhead": 0.0,
+        "mean_minimum_final_construction_actions": 9.0,
+        "mean_observed_turns": 5.0,
+        "mean_turn_overhead": -4.0,
+        "tasks": 1
+      }
+    },
+    "depth_three_plus_count": 1,
+    "effective_dependency_depth_distribution": {
+      "2": 1
+    },
+    "effective_dependency_status_distribution": {
+      "weak": 1
+    },
+    "execution_turn_count": 4,
+    "executor_call_count": 4,
+    "explicit_finish_count": 1,
+    "full_structural_depth_evidence_status_distribution": {
+      "unverified": 1
+    },
+    "max_rounds_termination_count": 0,
+    "max_rounds_values_seen": {},
+    "maximum_prompt_characters": 48667,
+    "maximum_turn_count": 5,
+    "maximum_visible_history": 4,
+    "mean_prompt_characters": 30053.2,
+    "mean_turn_count": 5.0,
+    "parse_failure_count": 0,
+    "rejected_turn_count": 0,
+    "rejected_turn_rate": 0.0,
+    "role_family_distribution": {
+      "evidence_retriever": 1,
+      "format": 1,
+      "reasoner": 1,
+      "verifier": 1
+    },
+    "set_output_before_last_relation_count": 0,
+    "structural_depth_distribution": {
+      "4": 1
+    },
+    "task_count": 1,
+    "tasks_with_execution": 1,
+    "three_plus_agent_count": 1,
+    "topology_family_distribution": {
+      "serial_3_plus": 1
+    },
+    "trajectories": [
+      {
+        "action_sequence": [
+          "add_subgraph",
+          "add_subgraph",
+          "add_subgraph",
+          "add_subgraph",
+          "finish"
+        ],
+        "agent_count": 4,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 4,
+        "executor_call_count": 4,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "unverified",
+        "graph_revision": 8,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 9,
+        "parse_failure_count": 0,
+        "prompt_character_max": 48667,
+        "prompt_character_mean": 30053.2,
+        "rejected_turn_count": 0,
+        "relation_count": 3,
+        "role_families": [
+          "evidence_retriever",
+          "reasoner",
+          "verifier",
+          "format"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 4,
+        "task_id": "triviaqa:tc_3",
+        "termination_reason": "finish",
+        "topology_family": "serial_3_plus",
+        "topology_motifs": [
+          "serial_3_plus"
+        ],
+        "turn_count": 5,
+        "turn_overhead": -4,
+        "visible_history_max": 4
+      }
+    ],
+    "turn_count_distribution": {
+      "5": 1
+    }
+  },
+  "metric_scope": "TriviaQA_official_normalization_exact_match_and_token_F1",
+  "model_catalog_path": "config/model_catalog_multidataset_tool_v7.yaml",
+  "operational_failure_count": 0,
+  "policy_adapter": "theta_jointqa_progressive_step_000000",
+  "policy_version": "qwen35-9b-unified-v2-step-000000",
+  "primary_metric": "exact_match",
+  "project_split": "validation",
+  "protocol_equivalent_to_direct": false,
+  "sample_count": 1,
+  "schema_version": "flowsteer.completion_benchmark.round_report.v1",
+  "skill_evaluation_mode": "memory_off",
+  "skill_injection_performed": false,
+  "skill_store_path": null,
+  "terminal_failure_count": 0,
+  "training_performed": false,
+  "typical_below_full_score_task_ids": [
+    "triviaqa:tc_3"
+  ]
+}

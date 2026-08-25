@@ -54,6 +54,7 @@ class ConfigLoaderTests(unittest.TestCase):
             ("max_bidirectional_block_size", 3),
             ("require_unique_output", False),
             ("require_all_agents_reach_output", False),
+            ("require_format_agent", "false"),
         )
         for field, value in invalid_values:
             with self.subTest(field=field):
@@ -61,6 +62,12 @@ class ConfigLoaderTests(unittest.TestCase):
                 config["agent_graph"][field] = value
                 with self.assertRaises(ConfigurationError):
                     validate_agent_graph_config(config)
+
+        for require_format_agent in (False, True):
+            with self.subTest(require_format_agent=require_format_agent):
+                config = load_yaml("config/training_agent_graph.yaml")
+                config["agent_graph"]["require_format_agent"] = require_format_agent
+                validate_agent_graph_config(config)
 
         config = load_yaml("config/training_agent_graph.yaml")
         config["director"]["execute_on_edit"] = False
@@ -202,7 +209,7 @@ class ConfigLoaderTests(unittest.TestCase):
         )
         self.assertEqual(
             config["experiment"]["tool_version"],
-            "skillflow.qa-retrieval.multihop-semantic-repair.v15",
+            "skillflow.qa-retrieval.multihop-semantic-repair.v16",
         )
         self.assertEqual(config["director"]["action_decoding"], "json_schema")
         self.assertEqual(

@@ -1,5 +1,9 @@
-# Future-run Executor catalog.  v1 remains immutable because the existing
-# multidataset Stable Zero trajectories are receipt-bound to its catalog ID.
+# Successor Executor catalog for unified_architecture_v2 r26+. Earlier catalogs
+# remain immutable because their receipts are bound to them. The exact
+# vectorengine/gpt-4o-mini arm remains excluded after five r24 HTTP 403 receipts;
+# vectorengine/deepseek-v4-flash is additionally excluded after three r25 TC5
+# HTTP 403 permanent_configuration receipts. No other arm is excluded without
+# its own generation receipt.
 providers:
   - provider_id: "local-director"
     kind: "openai-compatible"
@@ -47,42 +51,6 @@ models:
     fast_weight: 1.0
     metadata:
       family: "qwen"
-      profile: "provider=vectorengine;locality=remote;instruction=chat;capabilities=text,structured-action,coding-format"
-      capability_canary: "passed_2026-08-19"
-      canary_source: "artifacts/model_capability_canary/cheap_fast_20260819.json"
-      text_capable: "true"
-      tool_capable: "true"
-      tool_capability_scope: "flowsteer-structured-action"
-      coding_capable: "true"
-      coding_capability_scope: "structured-action-and-unified-diff-format"
-      max_tokens: "4096"
-
-  - model_id: "deepseek-v4-flash"
-    provider_id: "vectorengine"
-    model_name: "deepseek-v4-flash"
-    selection_weight: 1.0
-    cheap_weight: 1.0
-    fast_weight: 1.0
-    metadata:
-      family: "deepseek"
-      profile: "provider=vectorengine;locality=remote;instruction=chat;capabilities=text,structured-action,coding-format"
-      capability_canary: "passed_2026-08-19"
-      canary_source: "artifacts/model_capability_canary/cheap_fast_20260819.json"
-      text_capable: "true"
-      tool_capable: "true"
-      tool_capability_scope: "flowsteer-structured-action"
-      coding_capable: "true"
-      coding_capability_scope: "structured-action-and-unified-diff-format"
-      max_tokens: "4096"
-
-  - model_id: "gpt-4o-mini"
-    provider_id: "vectorengine"
-    model_name: "gpt-4o-mini"
-    selection_weight: 1.0
-    cheap_weight: 1.0
-    fast_weight: 1.0
-    metadata:
-      family: "gpt"
       profile: "provider=vectorengine;locality=remote;instruction=chat;capabilities=text,structured-action,coding-format"
       capability_canary: "passed_2026-08-19"
       canary_source: "artifacts/model_capability_canary/cheap_fast_20260819.json"
@@ -146,3 +114,4 @@ models:
       coding_capable: "true"
       coding_capability_scope: "structured-action-and-unified-diff-format"
       max_tokens: "4096"
+

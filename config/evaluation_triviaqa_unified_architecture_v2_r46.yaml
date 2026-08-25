@@ -1,88 +1,83 @@
-# Current unified-architecture HotpotQA evaluation condition.
-# This is a new condition; persisted legacy selections and narrow Director
-# action profiles remain untouched.
+# Immutable r46 fixed-128 TriviaQA evaluation. It preserves the fixed tasks,
+# Direct baseline, frozen policy/adapter, and neutral Director prompt v3.
+# Runtime v33 keeps strict receipt/proposition grounding and completion-only
+# structural repair. Action-mask v3 now removes model_id from a live modify_agent
+# domain when the frozen catalog has no alternative model, preventing an empty
+# constrained-decoding enum. Director prompt v3 and the catalog are unchanged.
+# Training and Skills remain disabled.
 
 schema_version: "flowsteer.agentgraph.config.v1"
+execution_timeout: 600.0
 experiment:
-  name: "hotpotqa_unified_architecture_v1"
-  phase: "hotpotqa_evaluation"
-  baseline_id: "hotpotqa_unified_architecture_v1"
-  step_id: "stable_zero"
+  name: "triviaqa_unified_architecture_v2_r46"
+  phase: "triviaqa_evaluation"
+  baseline_id: "triviaqa_unified_architecture_v2"
+  step_id: "stable_zero_recovery_r46"
   training_enabled: false
-  seed: 20260815
-  condition_id: "hotpotqa_unified_architecture_v1"
-  sampling_schedule_purpose: "hotpotqa_fixed_development_unified_architecture"
-  catalog_order_namespace: "hotpotqa_unified_architecture_v1"
-  prompt_version: "agentgraph.director.hotpotqa-semantic-recovery.v22"
-  tool_version: "skillflow.qa-retrieval.multihop-semantic-repair.v16"
-  output_dir: "artifacts/unified_architecture_v1/hotpotqa"
+  seed: 20260817
+  condition_id: "triviaqa_unified_architecture_v2_recovery_r46"
+  sampling_schedule_purpose: "triviaqa_fixed_development_unified_architecture_v2_r33"
+  catalog_order_namespace: "unified_architecture_v2"
+  prompt_version: "agentgraph.director.qa-semantic-recovery.v3"
+  tool_version: "skillflow.qa-retrieval.factual-semantic-retry.v33"
+  output_dir: "artifacts/unified_architecture_v2/triviaqa_recovery_r46"
 
 data:
   catalog_path: "config/joint_qa_partitions_v2.yaml"
   registry_path: "config/datasets_runtime_v2.yaml"
-  registry_dataset_key: "hotpotqa"
+  registry_dataset_key: "triviaqa"
   train_path: "data/joint_qa_v2/train.jsonl"
   validation_path: "data/joint_qa_v2/development.jsonl"
   test_path: "data/joint_qa_v2/test.jsonl"
   enforce_split_isolation: true
   task_schema_version: "flowsteer.agentgraph.task.v1"
 
-hotpotqa_evaluation:
-  dataset_key: "hotpotqa"
+triviaqa_evaluation:
+  dataset_key: "triviaqa"
   stage: "development"
-  required_partition: "development"
   split: "validation"
   selection: "sequential"
   sample_count: 128
-  stable_zero_sample_count: 15
+  stable_zero_sample_count: 3
   rollouts_per_task: 1
   concurrency: 2
+  task_timeout_seconds: 3600.0
   direct_model_id: "qwen3.5-9b-local"
-  direct_protocol: "agent_runtime_single_call_skillflow_multihop_prompt_v1"
-  direct_contract: "Chain evidence across the ten supplied passages and return one concise answer inside a single <answer>...</answer> tag."
-  direct_generation_seed: 20260815
-  # Same task IDs, model, prompt protocol, seed and evaluator as the completed
-  # v4 comparator. Reuse avoids a duplicate model call while preserving an
-  # exact per-task receipt in this new condition.
-  direct_reused_from: "artifacts/qa_tool_react_exact_wire_v4_development/hotpotqa/direct_closed_context_predictions.jsonl"
-  direct_context_mode: "closed_context_full_10_passages"
-  agentgraph_protocol: "full_context_plus_model_driven_skillflow_search_read_v1"
+  direct_protocol: "qwen35_single_call_triviaqa_question_only_v1"
+  direct_contract: "Answer the TriviaQA question with the shortest correct span inside a single <answer>...</answer> tag."
+  direct_generation_seed: 20260817
+  direct_context_mode: "question_only"
+  direct_reused_from: "artifacts/qa_tool_react_exact_wire_v3_stable_zero/triviaqa/direct_question_only_predictions.jsonl"
+  legacy_deterministic_prefetch_enabled: false
+  agentgraph_protocol: "question_plus_skillflow_search_read_verified_answer_lineage_v2"
   protocol_equivalent_to_direct: false
 
 qa_tool_runtime:
   enabled: true
-  condition_id: "hotpotqa_unified_architecture_v1"
+  condition_id: "triviaqa_unified_architecture_v2_recovery_r46"
   mode: "model_driven_search_read"
-  passage_source: "provided_context"
-  dataset_scope: ["hotpotqa"]
+  passage_source: "external_corpus"
+  dataset_scope: ["triviaqa"]
   skillflow_source: "/home/test/SKILLEV/skillflow-bayesian-improve-deploy/src"
   index_path: "/ssd1/iclr/SKILLEV/skillev-new-b2-temp/data/datasets/dpr-wikipedia/atlas-retrieval.sqlite3"
-  # search->read->search->read->complete uses five turns.  A rejected
-  # provenance-bound completion may spend one additional search->read pair and
-  # then complete again without leaving the bounded ReAct call.
-  max_turns_per_agent_call: 9
-  max_tool_calls_per_agent_call: 6
+  max_turns_per_agent_call: 20
+  max_tool_calls_per_agent_call: 12
   tool_timeout_seconds: 30.0
-  # This Tool-enabled protocol is reported separately from closed-context
-  # Direct. HotpotQA retrieves ten ranked passage candidates, reads two distinct
-  # passages from that result, and then completes. If the bounded Tool budget
-  # permits only one read, that evidence is preserved and completion remains
-  # possible.
   completion_policy: "required_evidence"
 
 storage:
   schema_version: "flowsteer.completion_benchmark.round.v1"
-  root: "artifacts/unified_architecture_v1/hotpotqa/evidence"
-  selected_tasks_path: "artifacts/unified_architecture_v1/hotpotqa/selected_tasks.jsonl"
-  direct_predictions_path: "artifacts/unified_architecture_v1/hotpotqa/direct_closed_context_predictions.jsonl"
-  trajectories_path: "artifacts/unified_architecture_v1/hotpotqa/agentgraph_trajectories.jsonl"
-  failures_path: "artifacts/unified_architecture_v1/hotpotqa/collection_failures.jsonl"
-  paired_results_path: "artifacts/unified_architecture_v1/hotpotqa/paired_results.jsonl"
-  wrong_demos_path: "artifacts/unified_architecture_v1/hotpotqa/wrong_demos.jsonl"
-  manifest_path: "artifacts/unified_architecture_v1/hotpotqa/run_manifest.json"
-  preflight_receipt_path: "artifacts/unified_architecture_v1/hotpotqa/preflight_receipt.json"
-  report_json_path: "reports/unified_architecture_v1/hotpotqa_report.json"
-  report_markdown_path: "reports/unified_architecture_v1/hotpotqa_report.md"
+  root: "artifacts/unified_architecture_v2/triviaqa_recovery_r46/evidence"
+  selected_tasks_path: "artifacts/unified_architecture_v2/triviaqa_recovery_r46/selected_tasks.jsonl"
+  direct_predictions_path: "artifacts/unified_architecture_v2/triviaqa_recovery_r46/direct_question_only_predictions.jsonl"
+  trajectories_path: "artifacts/unified_architecture_v2/triviaqa_recovery_r46/agentgraph_trajectories.jsonl"
+  failures_path: "artifacts/unified_architecture_v2/triviaqa_recovery_r46/collection_failures.jsonl"
+  paired_results_path: "artifacts/unified_architecture_v2/triviaqa_recovery_r46/paired_results.jsonl"
+  wrong_demos_path: "artifacts/unified_architecture_v2/triviaqa_recovery_r46/wrong_demos.jsonl"
+  manifest_path: "artifacts/unified_architecture_v2/triviaqa_recovery_r46/run_manifest.json"
+  preflight_receipt_path: "artifacts/unified_architecture_v2/triviaqa_recovery_r46/preflight_receipt.json"
+  report_json_path: "reports/unified_architecture_v2/triviaqa_recovery_r46_report.json"
+  report_markdown_path: "reports/unified_architecture_v2/triviaqa_recovery_r46_report.md"
 
 director:
   base_model: "${QWEN35_9B_MODEL_PATH:-/home/test/SKILLEV/skillev-new-b2-temp/model/Qwen3.5-9B-modelscope}"
@@ -90,7 +85,7 @@ director:
   backend: "sglang"
   api_base: "http://127.0.0.1:${FLOWSTEER_SUPERVISOR_PORT:-8015}/v1"
   served_model_name: "supervisor_theta"
-  behavior_policy_version: "qwen35-9b-hotpotqa-unified-v1-step-000000"
+  behavior_policy_version: "qwen35-9b-unified-v2-step-000000"
   behavior_adapter_name: "theta_jointqa_progressive_step_000000"
   behavior_adapter_checkpoint: "artifacts/hotpotqa_multiagent_skill/policy_step_000000/theta"
   updated_policy_version: "unused-evaluation-only"
@@ -99,9 +94,6 @@ director:
   dtype: "bfloat16"
   max_context_tokens: 32768
   max_action_tokens: 1024
-  # The latest FlowSteer Canvas projects the request-scoped admissible action
-  # domain. The native client samples the action discriminator and then its
-  # exact singleton parameters; AgentActionParser remains authoritative.
   action_decoding: "json_schema"
   action_schema_version: "agentgraph.canvas-action-json-schema.v1"
   sampling_schema_version: "agentgraph.model-admissible-action-mask.v3"
@@ -130,12 +122,12 @@ agent_graph:
   require_unique_output: true
   require_all_agents_reach_output: true
   semantic_protocol_by_source:
-    hotpotqa: "hotpotqa_verified_answer_slot_v1"
+    triviaqa: "qa_verified_answer_lineage_v2"
   recovery_policy: "preserve_diagnose_repair_augment"
   required_evidence_tool_id: "qa-retrieval"
   terminal_protocol_by_source:
-    hotpotqa: "exact_single_answer_tag"
-  model_catalog_path: "config/model_catalog_multidataset_tool_v2.yaml"
+    triviaqa: "exact_single_answer_tag"
+  model_catalog_path: "config/model_catalog_multidataset_tool_v7.yaml"
 
 evaluation:
   healthbench_judge_model: ""
@@ -168,7 +160,7 @@ grpo:
 policy_sync:
   enabled: false
   api_base: "http://127.0.0.1:${FLOWSTEER_SUPERVISOR_PORT:-8015}"
-  adapter_name_prefix: "theta_hotpotqa_unified_v1_unused_"
+  adapter_name_prefix: "theta_unified_v2_unused_"
   request_timeout_seconds: 120
   max_retries: 0
   retry_backoff_seconds: 1

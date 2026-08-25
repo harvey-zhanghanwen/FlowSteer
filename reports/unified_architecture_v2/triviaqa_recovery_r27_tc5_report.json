@@ -1,0 +1,56 @@
+{
+  "agentgraph": {
+    "completed": 0,
+    "completed_only_exact_match": null,
+    "completed_only_token_f1": null,
+    "denominator": 1,
+    "evaluator_valid": 0,
+    "strict_exact_match": 0.0,
+    "strict_token_f1": 0.0
+  },
+  "agentgraph_minus_direct": {
+    "exact_match": 0.0,
+    "token_f1": 0.0
+  },
+  "below_full_score_demo_count": 1,
+  "benchmark_slice": null,
+  "comparison_interpretation": "separate_protocol_descriptive_comparison",
+  "completed_at": "2026-08-23T05:58:12.990633+00:00",
+  "dataset": "TriviaQA",
+  "dataset_key": "triviaqa",
+  "direct_local_baseline": {
+    "completed": 1,
+    "completed_only_exact_match": 0.0,
+    "completed_only_token_f1": 0.0,
+    "denominator": 1,
+    "evaluator_valid": 1,
+    "strict_exact_match": 0.0,
+    "strict_token_f1": 0.0
+  },
+  "explicit_finished_count": 0,
+  "failure_types": {
+    "agentgraph_operational_or_evaluator_failure": 1
+  },
+  "graph_search_diagnostics": {
+    "task_count": 0,
+    "trajectories": []
+  },
+  "metric_scope": "TriviaQA_official_normalization_exact_match_and_token_F1",
+  "model_catalog_path": "config/model_catalog_multidataset_tool_v5.yaml",
+  "operational_failure_count": 1,
+  "policy_adapter": "theta_jointqa_progressive_step_000000",
+  "policy_version": "qwen35-9b-unified-v2-step-000000",
+  "primary_metric": "exact_match",
+  "project_split": "validation",
+  "protocol_equivalent_to_direct": false,
+  "sample_count": 1,
+  "schema_version": "flowsteer.completion_benchmark.round_report.v1",
+  "skill_evaluation_mode": "memory_off",
+  "skill_injection_performed": false,
+  "skill_store_path": null,
+  "terminal_failure_count": 0,
+  "training_performed": false,
+  "typical_below_full_score_task_ids": [
+    "triviaqa:tc_5"
+  ]
+}

@@ -1,0 +1,80 @@
+# Successor Executor catalog for unified_architecture_v2 r27+. Earlier
+# catalogs remain immutable because their trajectory receipts are bound to
+# them. The exact vectorengine/qwen3.5-flash arm is excluded after three r26
+# TC5 HTTP 403 permanent-configuration receipts, and glm-4.5-flash is excluded
+# after one r26 TC5 HTTP 403 receipt. The previously excluded gpt-4o-mini and
+# deepseek-v4-flash arms remain absent. No guessed provider alias is added.
+providers:
+  - provider_id: "local-director"
+    kind: "openai-compatible"
+    endpoint: "http://127.0.0.1:8015/v1"
+    max_concurrency: 32
+
+  - provider_id: "vectorengine"
+    kind: "openai-compatible"
+    endpoint: "${VECTOR_ENGINE_BASE_URL:-https://api.vectorengine.ai/v1}"
+    max_concurrency: 32
+    api_key_env: "VECTOR_ENGINE_API_KEY"
+
+# Each retained entry uses an exact model ID already present in the saved
+# compatibility probes. These flags describe message-format compatibility;
+# they do not claim benchmark correctness.
+models:
+  - model_id: "qwen3.5-9b-local"
+    provider_id: "local-director"
+    model_name: "supervisor_theta"
+    selection_weight: 1.0
+    cheap_weight: 1.0
+    fast_weight: 1.0
+    context_window: 32768
+    metadata:
+      family: "qwen"
+      profile: "provider=local-director;locality=local;instruction=chat;context=32768;capabilities=text,structured-action,coding-format"
+      capability_canary: "passed_2026-08-20"
+      canary_source: "artifacts/model_capability_canary/local_qwen35_9b_nonthinking_20260820.json"
+      text_capable: "true"
+      tool_capable: "true"
+      tool_capability_scope: "flowsteer-structured-action"
+      coding_capable: "true"
+      coding_capability_scope: "structured-action-and-unified-diff-format"
+      chat_template_enable_thinking: "false"
+      sampling_backend: "sglang"
+      deployment_locality: "local"
+      supports_top_k: "true"
+      max_tokens: "4096"
+
+  - model_id: "MiniMax-M2.5"
+    provider_id: "vectorengine"
+    model_name: "MiniMax-M2.5"
+    selection_weight: 1.0
+    cheap_weight: 1.0
+    fast_weight: 1.0
+    metadata:
+      family: "minimax"
+      profile: "provider=vectorengine;locality=remote;instruction=chat;capabilities=text,structured-action,coding-format"
+      capability_canary: "passed_2026-08-19"
+      canary_source: "artifacts/model_capability_canary/cheap_fast_20260819.json"
+      text_capable: "true"
+      tool_capable: "true"
+      tool_capability_scope: "flowsteer-structured-action"
+      coding_capable: "true"
+      coding_capability_scope: "structured-action-and-unified-diff-format"
+      max_tokens: "4096"
+
+  - model_id: "MiniMax-M3"
+    provider_id: "vectorengine"
+    model_name: "MiniMax-M3"
+    selection_weight: 1.0
+    cheap_weight: 1.0
+    fast_weight: 1.0
+    metadata:
+      family: "minimax"
+      profile: "provider=vectorengine;locality=remote;instruction=chat;capabilities=text,structured-action,coding-format"
+      capability_canary: "passed_2026-08-19"
+      canary_source: "artifacts/model_capability_canary/cheap_fast_20260819.json"
+      text_capable: "true"
+      tool_capable: "true"
+      tool_capability_scope: "flowsteer-structured-action"
+      coding_capable: "true"
+      coding_capability_scope: "structured-action-and-unified-diff-format"
+      max_tokens: "4096"
