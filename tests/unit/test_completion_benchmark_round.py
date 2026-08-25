@@ -1167,6 +1167,8 @@ def test_webshop_terminal_failure_keeps_runtime_environment_prefix_in_report():
     assert [item["action"] for item in trace] == ["search[desk lamp]"]
     assert diagnostics["environment_turn_count"] == 1
     assert diagnostics["state_advancing_action_count"] == 1
+    assert diagnostics["formal_environment_action_count"] == 0
+    assert diagnostics["saved_prefix_action_count"] == 1
     assert diagnostics["formal_evaluator_skipped_count"] == 1
     assert diagnostics["environment_or_evaluator_failure_count"] == 0
 
@@ -1250,6 +1252,115 @@ def test_webshop_report_separates_formal_episode_from_execute_on_edit_attempts()
     assert diagnostics["rollout_state_advancing_action_count"] == 2
     assert diagnostics["rollout_invalid_action_count"] == 1
     assert diagnostics["rollout_terminal_episode_count"] == 1
+
+
+def test_webshop_rollout_diagnostics_deduplicate_reused_execution_artifact():
+    episode_x = [
+        {
+            "action": "search[blue table]",
+            "state_advanced": True,
+            "terminal": False,
+        },
+        {
+            "action": "click[buy now]",
+            "state_advanced": True,
+            "terminal": True,
+        },
+    ]
+    episode_y = [
+        {
+            "action": "search[desk lamp]",
+            "state_advanced": True,
+            "terminal": False,
+        }
+    ]
+    trajectory = {
+        "turns": [
+            {
+                "executions": [
+                    {
+                        "metadata": {
+                            "response": {
+                                "artifact_id": "artifact-x",
+                                "environment_receipts": episode_x,
+                            }
+                        }
+                    }
+                ],
+                "runtime_summary": {
+                    "output_metadata": {
+                        "actor": {
+                            "artifact_id": "artifact-x",
+                            "environment_receipts": episode_x,
+                        }
+                    }
+                },
+            },
+            {
+                "executions": [],
+                "runtime_summary": {
+                    "output_metadata": {
+                        "actor": {
+                            "artifact_id": "artifact-x",
+                            "environment_receipts": episode_x,
+                        }
+                    }
+                },
+            },
+            {
+                "executions": [
+                    {
+                        "metadata": {
+                            "response": {
+                                "artifact_id": "artifact-y",
+                                "environment_receipts": episode_y,
+                            }
+                        }
+                    }
+                ],
+                "runtime_summary": {
+                    "output_metadata": {
+                        "actor": {
+                            "artifact_id": "artifact-y",
+                            "environment_receipts": episode_y,
+                        }
+                    }
+                },
+            },
+        ]
+    }
+
+    diagnostics = _MODULE._rollout_environment_diagnostics(trajectory)
+
+    assert diagnostics["episode_count"] == 2
+    assert diagnostics["environment_attempt_count"] == 3
+    assert diagnostics["state_advancing_action_count"] == 3
+    assert diagnostics["invalid_action_count"] == 0
+    assert diagnostics["terminal_episode_count"] == 1
+
+
+def test_webshop_direct_trace_done_counts_as_rollout_terminal():
+    direct = {
+        "evaluation": {
+            "valid": True,
+            "details": {
+                "trace": [
+                    {
+                        "step": 0,
+                        "action": "click[buy now]",
+                        "state_advanced": True,
+                        "done": True,
+                    }
+                ]
+            },
+        }
+    }
+
+    diagnostics = _MODULE._rollout_environment_diagnostics(direct)
+
+    assert diagnostics["episode_count"] == 1
+    assert diagnostics["environment_attempt_count"] == 1
+    assert diagnostics["terminal_episode_count"] == 1
 
 
 def test_webshop_native_metric_receipt_fails_closed_when_one_metric_is_missing():

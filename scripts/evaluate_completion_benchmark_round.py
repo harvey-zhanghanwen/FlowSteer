@@ -2213,24 +2213,34 @@ def _execution_environment_receipts(
     if not isinstance(value, Mapping):
         return ()
     episodes: list[tuple[Mapping[str, Any], ...]] = []
+    seen_artifact_ids: set[str] = set()
+
+    def append_from_metadata(metadata: object) -> bool:
+        if not isinstance(metadata, Mapping):
+            return False
+        receipts = metadata.get("environment_receipts")
+        if not isinstance(receipts, Sequence) or isinstance(
+            receipts, (str, bytes)
+        ):
+            return False
+        episode = tuple(dict(item) for item in receipts if isinstance(item, Mapping))
+        if not episode:
+            return False
+        artifact_id = metadata.get("artifact_id")
+        if isinstance(artifact_id, str) and artifact_id.strip():
+            normalized_artifact_id = artifact_id.strip()
+            if normalized_artifact_id in seen_artifact_ids:
+                return True
+            seen_artifact_ids.add(normalized_artifact_id)
+        episodes.append(episode)
+        return True
 
     def append_from_execution(execution: object) -> bool:
         if not isinstance(execution, Mapping):
             return False
         metadata = execution.get("metadata")
         response = metadata.get("response") if isinstance(metadata, Mapping) else None
-        receipts = (
-            response.get("environment_receipts")
-            if isinstance(response, Mapping)
-            else None
-        )
-        if not isinstance(receipts, Sequence) or isinstance(receipts, (str, bytes)):
-            return False
-        episode = tuple(dict(item) for item in receipts if isinstance(item, Mapping))
-        if not episode:
-            return False
-        episodes.append(episode)
-        return True
+        return append_from_metadata(response)
 
     direct_executions = value.get("executions")
     if isinstance(direct_executions, Sequence) and not isinstance(
@@ -2264,18 +2274,7 @@ def _execution_environment_receipts(
             if not isinstance(output_metadata, Mapping):
                 continue
             for metadata in output_metadata.values():
-                if not isinstance(metadata, Mapping):
-                    continue
-                receipts = metadata.get("environment_receipts")
-                if not isinstance(receipts, Sequence) or isinstance(
-                    receipts, (str, bytes)
-                ):
-                    continue
-                episode = tuple(
-                    dict(item) for item in receipts if isinstance(item, Mapping)
-                )
-                if episode:
-                    episodes.append(episode)
+                append_from_metadata(metadata)
     return tuple(episodes)
 
 
@@ -2299,7 +2298,11 @@ def _rollout_environment_diagnostics(
         attempt_count += len(episode)
         terminal_episodes += int(
             any(
-                isinstance(item, Mapping) and item.get("terminal") is True
+                isinstance(item, Mapping)
+                and (
+                    item.get("terminal") is True
+                    or item.get("done") is True
+                )
                 for item in episode
             )
         )
@@ -2487,6 +2490,12 @@ def _environment_arm_diagnostics(
     environment_turns = 0
     state_advancing_actions = 0
     invalid_actions = 0
+    formal_environment_turns = 0
+    formal_state_advancing_actions = 0
+    formal_invalid_actions = 0
+    saved_prefix_turns = 0
+    saved_prefix_state_advancing_actions = 0
+    saved_prefix_invalid_actions = 0
     environment_or_evaluator_failures = 0
     formal_evaluator_skipped = 0
     rollout_episode_count = 0
@@ -2500,7 +2509,8 @@ def _environment_arm_diagnostics(
         evaluation = arm.get("evaluation")
         evaluation = evaluation if isinstance(evaluation, Mapping) else {}
         skipped = _is_reportable_terminal_failure(arm)
-        if evaluation.get("valid") is True:
+        evaluation_valid = evaluation.get("valid") is True
+        if evaluation_valid:
             evaluator_valid += 1
         elif skipped:
             formal_evaluator_skipped += 1
@@ -2527,6 +2537,10 @@ def _environment_arm_diagnostics(
             else ()
         )
         environment_turns += len(trace)
+        if evaluation_valid:
+            formal_environment_turns += len(trace)
+        else:
+            saved_prefix_turns += len(trace)
         for entry in trace:
             if not isinstance(entry, Mapping):
                 continue
@@ -2537,6 +2551,12 @@ def _environment_arm_diagnostics(
             )
             invalid_actions += int(invalid)
             state_advancing_actions += int(not invalid)
+            if evaluation_valid:
+                formal_invalid_actions += int(invalid)
+                formal_state_advancing_actions += int(not invalid)
+            else:
+                saved_prefix_invalid_actions += int(invalid)
+                saved_prefix_state_advancing_actions += int(not invalid)
         rollout = arm.get("rollout_environment_diagnostics")
         if not isinstance(rollout, Mapping):
             rollout = _rollout_environment_diagnostics(arm)
@@ -2559,9 +2579,14 @@ def _environment_arm_diagnostics(
         "environment_turn_count": environment_turns,
         "state_advancing_action_count": state_advancing_actions,
         "invalid_action_count": invalid_actions,
-        "formal_environment_action_count": environment_turns,
-        "formal_state_advancing_action_count": state_advancing_actions,
-        "formal_invalid_action_count": invalid_actions,
+        "formal_environment_action_count": formal_environment_turns,
+        "formal_state_advancing_action_count": formal_state_advancing_actions,
+        "formal_invalid_action_count": formal_invalid_actions,
+        "saved_prefix_action_count": saved_prefix_turns,
+        "saved_prefix_state_advancing_action_count": (
+            saved_prefix_state_advancing_actions
+        ),
+        "saved_prefix_invalid_action_count": saved_prefix_invalid_actions,
         "rollout_environment_episode_count": rollout_episode_count,
         "rollout_environment_attempt_count": rollout_environment_attempts,
         "rollout_state_advancing_action_count": rollout_state_advancing_actions,
@@ -3057,7 +3082,9 @@ def _report_markdown(report: Mapping[str, Any]) -> str:
         direct_environment = environment.get("direct", {})
         graph_environment = environment.get("agentgraph", {})
         execution_receipts = report.get("execution_receipts") or {}
+        direct_receipts = execution_receipts.get("direct", {})
         graph_receipts = execution_receipts.get("agentgraph", {})
+        collection_failures = execution_receipts.get("collection_failures", [])
         return f"""# WebShop Architecture Validation
 
 Fixed {report['project_split']} samples: **{report['sample_count']}**. No training, GRPO, backward pass, optimizer update, LoRA publication, Bayesian update, or Skill publication ran. {skill_sentence}
@@ -3075,10 +3102,10 @@ AgentGraph - Direct: **{100 * float(report['agentgraph_minus_direct']['average_s
 
 ## Formal evaluator episode
 
-| Condition | Formal actions | State-advancing actions | Invalid actions | Terminal episodes | Step-limit episodes | Evaluator skipped (no FINISH) | Timeouts |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| Direct | {direct_environment.get('formal_environment_action_count', 0)} | {direct_environment.get('formal_state_advancing_action_count', 0)} | {direct_environment.get('formal_invalid_action_count', 0)} | {direct_environment.get('terminal_episode_count', 0)} | {direct_environment.get('environment_step_limit_count', 0)} | {direct_environment.get('formal_evaluator_skipped_count', 0)} | {direct_environment.get('environment_timeout_count', 0)} |
-| AgentGraph | {graph_environment.get('formal_environment_action_count', 0)} | {graph_environment.get('formal_state_advancing_action_count', 0)} | {graph_environment.get('formal_invalid_action_count', 0)} | {graph_environment.get('terminal_episode_count', 0)} | {graph_environment.get('environment_step_limit_count', 0)} | {graph_environment.get('formal_evaluator_skipped_count', 0)} | {graph_environment.get('environment_timeout_count', 0)} |
+| Condition | Formal actions | State-advancing actions | Invalid actions | Saved non-formal prefix actions | Terminal episodes | Step-limit episodes | Evaluator skipped (no FINISH) | Timeouts |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Direct | {direct_environment.get('formal_environment_action_count', 0)} | {direct_environment.get('formal_state_advancing_action_count', 0)} | {direct_environment.get('formal_invalid_action_count', 0)} | {direct_environment.get('saved_prefix_action_count', 0)} | {direct_environment.get('terminal_episode_count', 0)} | {direct_environment.get('environment_step_limit_count', 0)} | {direct_environment.get('formal_evaluator_skipped_count', 0)} | {direct_environment.get('environment_timeout_count', 0)} |
+| AgentGraph | {graph_environment.get('formal_environment_action_count', 0)} | {graph_environment.get('formal_state_advancing_action_count', 0)} | {graph_environment.get('formal_invalid_action_count', 0)} | {graph_environment.get('saved_prefix_action_count', 0)} | {graph_environment.get('terminal_episode_count', 0)} | {graph_environment.get('environment_step_limit_count', 0)} | {graph_environment.get('formal_evaluator_skipped_count', 0)} | {graph_environment.get('environment_timeout_count', 0)} |
 
 ## Full rollout environment execution
 
@@ -3096,6 +3123,8 @@ AgentGraph - Direct: **{100 * float(report['agentgraph_minus_direct']['average_s
 - Runtime failed turns: **{graph_receipts.get('runtime_failed_turn_count', 0)}**
 - Runtime failure types: `{graph_receipts.get('runtime_failure_type_distribution', {})}`
 - Executor/provider error types: `{graph_receipts.get('execution_error_type_distribution', {})}`
+- Direct provider error types: `{direct_receipts.get('error_type_distribution', {})}`
+- Collection failures: **{len(collection_failures) if isinstance(collection_failures, list) else 0}**
 
 ## Failure types
 

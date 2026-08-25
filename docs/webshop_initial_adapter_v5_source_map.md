@@ -55,7 +55,10 @@ publication are disabled.
 - `scripts/evaluate_completion_benchmark_round.py`
   - validates either a measured simulator terminal transition or an exact
     fixed-budget truncation receipt during Stable Zero checking, matching
-    SkillFlow's completed/truncated episode semantics.
+    SkillFlow's completed/truncated episode semantics;
+  - keeps the official evaluator episode separate from execute-on-edit
+    diagnostics, deduplicates reused environment artifacts by `artifact_id`,
+    and reports saved non-formal prefixes separately from formal actions.
 
 These adaptations constrain execution capability only. They do not select an
 Agent ID, model, free-text contract, role, Output Agent, edge direction, Agent
