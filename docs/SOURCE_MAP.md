@@ -1310,3 +1310,25 @@ The v62 complete static suite passes 1,011 tests plus 197 subtests, including
 the shared HotpotQA two-hop read and TriviaQA location-containment continuation
 paths. The prepare-only selection check, Stable Zero and fixed-128 scores are
 reported only after their versioned executions complete.
+
+The persisted v62 canary subsequently collected all three frozen tasks with
+zero collection failures and passed Stable Zero `2/3`. `tc_1` and `tc_3`
+explicitly FINISHed with official EM/F1 `1/1`; `tc_5` ended at
+`canvas_action_domain_exhausted`. Its only successful read did not contain the
+requested first-hit-chart relation, and a rejected completion then cited an
+unread public SearchHit. The provenance gate correctly rejected that draft.
+The fixed-128 evaluation was not admitted.
+
+## TriviaQA unified architecture v63 provenance and relation action mask
+
+| Current module/boundary | Classification | Primary source retained | Minimal compatibility adaptation |
+| --- | --- | --- | --- |
+| `qa_tool_adapter.py::{_rejected_completion_unread_passage_id,_state_conditioned_action_domain,_condition_qa_action_response_schema,_tool_action_error}` | Necessary state-conditioned Tool admission adaptation | SkillFlow `SearchHit`, opaque passage IDs, exact `read` StructuredAction and one-Action/one-Observation continuation | When the latest rejected completion fails only because it cites an unread passage ID already published by the latest successful search receipt, expose exactly one `read` action for that opaque ID. The SearchHit remains selection metadata; only the resulting read receipt can become evidence. |
+| `qa_tool_adapter.py::{_relation_surface_rewrite_query_candidates,_relation_surface_replacement_classes}` and search schema/admission | `PROJECT_NECESSARY_ADAPTATION` over SkillFlow constrained generation and public search receipts | SkillFlow constrained next StructuredAction; FlowSteer live state-conditioned action domain | After a read-backed evidence rejection and bounded top-k escalation, enumerate only answer-free, same-class replacements for relation classes not yet transformed. The JSON Schema `enum` and Tool admission use the same predicate. Entity, named scope, ordinal scope, non-relation terms, answer, date, passage and evaluator state are not introduced. A second `alias_expansion` is admitted only when it transforms a still-untransformed required relation class. |
+| `agent_workflow_env.py::_qa_role_contract_responsibility_issue` | Necessary Canvas/Runtime contract compatibility repair | FlowSteer transactional Canvas validation and SkillFlow role-specific execution schemas | Reject an exact canonical responsibility string belonging to another declared role, in addition to the existing bare foreign-role labels. Free-text responsibilities, role choice, Agent count, relation direction and topology remain model-selected. |
+| `evaluation_triviaqa_unified_architecture_v2_fixed128.yaml` v63 condition | Necessary isolated evaluation configuration | Same fixed ordered 128 tasks, Director prompt v6, catalog v7, official evaluator and v57 sampling coordinates | Advance only condition/Tool identity and isolated artifact paths. Training, Skills, MACE, Bayesian state, model pool and topology search space remain unchanged. |
+
+The v63 complete static suite passes 1,013 tests plus 197 subtests. Prepare-only
+reproduces the v62 `selected_tasks.jsonl` byte-for-byte with the same ordered
+128 validation records. Stable Zero and fixed-128 scores are not claimed until
+their corresponding versioned executions complete.

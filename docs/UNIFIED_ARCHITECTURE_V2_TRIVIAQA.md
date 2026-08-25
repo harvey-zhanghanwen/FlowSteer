@@ -1595,6 +1595,43 @@ state are unchanged. The v62 complete static suite passes 1,011 tests plus 197
 subtests; prepare-only and live measurements are not claimed before execution
 under the isolated v62 condition.
 
+The isolated v62 canary later collected all three frozen tasks without a
+collection failure and passed Stable Zero `2/3`. `tc_1` and `tc_3` explicitly
+FINISHed with official EM/F1 `1/1`; `tc_5` ended at
+`canvas_action_domain_exhausted`. Its six successful searches and one read did
+not produce a receipt containing the requested first-hit-chart relation. A
+subsequent completion cited a different public SearchHit without reading it,
+so the provenance gate correctly rejected the draft. No valid lineage fallback
+was available and the fixed-128 run was not started.
+
+### v63 provenance repair and relation-surface action mask
+
+v63 retains SkillFlow's `SearchHit`, opaque `passage_id`, exact `read`
+StructuredAction and one-Action/one-Observation continuation. If a rejected
+completion cites an unread passage ID already published by the latest
+successful search receipt, the next state-conditioned Tool domain contains
+exactly one `read` for that ID. This repairs provenance through the upstream
+Tool operation; it does not promote a snippet to evidence or relax entity,
+relation, ordinal, evidence-span, answer-slot or terminal validation.
+
+When a successful read still fails Evidence Grounding after bounded top-k
+escalation, the search schema now enumerates only controlled, answer-free
+same-class replacements for required relation surfaces not yet transformed.
+The same replacement predicate is used by the JSON Schema action mask and Tool
+admission. A repeated `alias_expansion` is legal only when it advances another
+required relation class. Entity anchors, named and ordinal scope and all
+non-relation terms remain invariant; accepted answers, dates, passage IDs and
+evaluator state are absent from query construction.
+
+The Canvas contract validator also rejects an exact canonical responsibility
+belonging to a different declared role. It does not prescribe a role inventory,
+role order, Agent count, relation direction or topology. Director prompt v6 and
+the shared HotpotQA/TriviaQA topology search space remain unchanged. The v63
+complete static suite passes 1,013 tests plus 197 subtests. Prepare-only
+reproduces the v62 selected-task file byte-for-byte with the same ordered 128
+validation records. Stable Zero and fixed-128 results remain pending their
+versioned executions.
+
 ## Historical comparison condition
 
 The frozen v6.2 TriviaQA development run on the same ordered 128 tasks reported
