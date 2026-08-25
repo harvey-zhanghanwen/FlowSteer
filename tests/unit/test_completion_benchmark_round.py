@@ -792,6 +792,84 @@ def test_environment_stable_zero_uses_terminal_receipt_not_free_text_answer():
     assert failed["checks"][0]["environment_terminal_receipt_valid"] is False
 
 
+def test_environment_stable_zero_accepts_exact_fixed_budget_truncation():
+    task = _MODULE.TaskRecord(
+        task_id="webshop:00500",
+        question="buy the requested item",
+        ground_truth="environment_terminal_success",
+        split="validation",
+        metadata={"dataset_key": "webshop"},
+    )
+    evaluator_version = _MODULE.evaluator_version_for(task)
+    direct = {
+        task.task_id: {
+            "evaluation": {
+                "valid": True,
+                "evaluator_version": evaluator_version,
+            }
+        }
+    }
+    metadata = {
+        "environment_terminal": False,
+        "environment_truncated": True,
+        "environment_turns_used": 2,
+        "environment_max_turns": 2,
+        "evaluator_environment_trace": [
+            {"action": "search[item]", "done": False, "state_advanced": True},
+            {"action": "click[item]", "done": False, "state_advanced": True},
+        ],
+    }
+    trajectory = {
+        "explicit_finish": True,
+        "final_answer": "",
+        "evaluation": {
+            "valid": True,
+            "evaluator_version": evaluator_version,
+        },
+        "turns": [
+            {
+                "receipt_verified": True,
+                "director_attempt_count": 1,
+                "director_generation_seed": 1,
+                "director_latency_ms": 1.0,
+                "action": {"action_type": "finish"},
+                "graph_snapshot": {"output_agent_id": "actor"},
+                "executions": [
+                    {
+                        "agent_id": "actor",
+                        "execution_id": "execution-1",
+                        "metadata": {
+                            "request": {
+                                "agent": {"agent_id": "actor"},
+                                "model": {"model_id": "m"},
+                                "phase": "single",
+                                "upstream": [],
+                                "own_draft": None,
+                                "peer_draft": None,
+                                "rendered_messages": [],
+                            }
+                        },
+                    }
+                ],
+                "runtime_summary": {"output_metadata": {"actor": metadata}},
+            }
+        ],
+    }
+
+    passed = _MODULE._completion_stable_zero_check(
+        (task,), direct, {task.task_id: trajectory}, dataset_key="webshop"
+    )
+    assert passed["passed"] is True
+    assert passed["checks"][0]["environment_terminal_receipt_valid"] is True
+
+    metadata["environment_turns_used"] = 1
+    malformed = _MODULE._completion_stable_zero_check(
+        (task,), direct, {task.task_id: trajectory}, dataset_key="webshop"
+    )
+    assert malformed["passed"] is False
+    assert malformed["checks"][0]["environment_terminal_receipt_valid"] is False
+
+
 def test_reports_aime_accuracy_and_healthbench_raw_score():
     aime_rows = [
         {

@@ -225,6 +225,8 @@ class UnifiedMetadataGateway:
                     },
                 ),
                 "environment_terminal": True,
+                "environment_truncated": False,
+                "environment_max_turns": 10,
                 "environment_turns_used": 1,
                 "environment_steps": 1,
                 "evaluator_environment_trace": (
@@ -2195,6 +2197,8 @@ def test_collector_materializes_exact_finish_trajectory_and_evidence(tmp_path):
     )
     assert response_receipt["environment_receipts"][0]["state_advanced"] is True
     assert response_receipt["environment_terminal"] is True
+    assert response_receipt["environment_truncated"] is False
+    assert response_receipt["environment_max_turns"] == 10
     assert response_receipt["environment_turns_used"] == 1
     assert response_receipt["environment_steps"] == 1
     assert response_receipt["evaluator_environment_trace"][0]["reward"] == 1.0
@@ -2218,6 +2222,8 @@ def test_collector_materializes_exact_finish_trajectory_and_evidence(tmp_path):
     assert output_metadata["continuation_source_agent_id"] == "failed_reasoner"
     assert output_metadata["continued_action_history_count"] == 1
     assert output_metadata["continued_tool_receipt_count"] == 1
+    assert output_metadata["environment_truncated"] is False
+    assert output_metadata["environment_max_turns"] == 10
     assert output_metadata["evaluator_environment_trace"] == response_receipt[
         "evaluator_environment_trace"
     ]

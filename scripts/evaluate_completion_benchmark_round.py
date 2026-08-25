@@ -3303,7 +3303,13 @@ def _completion_stable_zero_check(
 def _graph_environment_terminal_receipt(
     trajectory: Optional[Mapping[str, Any]],
 ) -> bool:
-    """Validate the persisted terminal Action--Observation edge."""
+    """Validate a persisted terminal or fixed-budget truncation receipt.
+
+    SkillFlow treats both a simulator terminal transition and exhaustion of the
+    configured episode-step budget as completed bounded WebShop/ALFWorld
+    rollouts.  The latter remains a valid zero-reward evaluator input even
+    though the underlying simulator did not emit ``done=True``.
+    """
 
     if not isinstance(trajectory, Mapping):
         return False
@@ -3323,14 +3329,31 @@ def _graph_environment_terminal_receipt(
             if not isinstance(metadata, Mapping):
                 continue
             trace = metadata.get("evaluator_environment_trace")
-            if (
+            terminal = (
                 metadata.get("environment_terminal") is True
                 and isinstance(trace, list)
                 and bool(trace)
                 and isinstance(trace[-1], Mapping)
                 and trace[-1].get("done") is True
                 and trace[-1].get("state_advanced") is True
-            ):
+            )
+            if terminal:
+                return True
+            turns_used = metadata.get("environment_turns_used")
+            max_turns = metadata.get("environment_max_turns")
+            truncated = (
+                metadata.get("environment_terminal") is False
+                and metadata.get("environment_truncated") is True
+                and isinstance(turns_used, int)
+                and not isinstance(turns_used, bool)
+                and isinstance(max_turns, int)
+                and not isinstance(max_turns, bool)
+                and max_turns > 0
+                and turns_used == max_turns
+                and isinstance(trace, list)
+                and len(trace) == max_turns
+            )
+            if truncated:
                 return True
     return False
 

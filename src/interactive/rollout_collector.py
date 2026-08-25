@@ -2891,6 +2891,8 @@ _UNIFIED_EXECUTION_METADATA_FIELDS: Tuple[str, ...] = (
     "environment_reset_receipt",
     "environment_receipts",
     "environment_terminal",
+    "environment_truncated",
+    "environment_max_turns",
     "environment_turns_used",
     "environment_steps",
     "evaluator_environment_trace",
