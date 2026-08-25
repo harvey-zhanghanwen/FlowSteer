@@ -1,12 +1,14 @@
-"""AIME 2026 integer-answer boundary used by the dataset adapter.
+"""AIME 2026 target-blind extraction and integer Accuracy boundary.
 
-The integer canonicalization is a thin port of downstream SkillEval's
-``PrivateStaticTarget.score`` branch for ``StaticScoringRule.INTEGER``.  The
-public SkillFlow repository does not contain this AIME-2026-specific scorer.
-The only project-specific layer here maps FlowSteer's existing single
-``<answer>...</answer>`` terminal boundary to the private scorer's
-``{"answer": str}`` submission.  It never solves, repairs, or looks up an
-answer.
+The trusted-target comparison remains the thin port of downstream SkillEval's
+``PrivateStaticTarget.score`` branch for ``StaticScoringRule.INTEGER``.  A free
+AgentGraph returns text instead of SkillEval's already-structured
+``{"answer": str}`` action, so the project-specific boundary below performs a
+small deterministic projection first.  Its admitted markers are the explicit
+integer, ``\\boxed{...}``, and ``Final Answer: ...`` forms used by SkillFlow's
+math parsing path.  It deliberately omits SkillFlow training reward's broad
+"last number" fallback: extraction never solves, repairs, looks up, or compares
+against the trusted target when choosing a candidate.
 """
 
 from __future__ import annotations
@@ -18,13 +20,20 @@ from typing import Sequence
 
 AIME2026_DATASET_KEY = "aime_2026"
 AIME2026_TASK_FAMILY = "aime-2026/integer-answer"
-AIME2026_EVALUATOR_VERSION = "skillev.private-static.integer.v1"
+AIME2026_EVALUATOR_VERSION = "skillev.integer.target-blind-extraction.v2"
 AIME2026_ANSWER_FORMAT = "integer-000-to-999"
 
 _ANSWER_TAG = re.compile(
     r"<answer>\s*(.*?)\s*</answer>",
     flags=re.IGNORECASE | re.DOTALL,
 )
+_THINKING_END = "</think>"
+_BOXED_INTEGER = re.compile(r"\\boxed\s*\{\s*([+]?\d+)\s*\}")
+_FINAL_INTEGER = re.compile(
+    r"(?im)^\s*(?:final\s+answer|answer)\s*[:=]\s*"
+    r"\$?\s*([+]?\d+)\s*\$?\s*[.!]?\s*$"
+)
+_BARE_INTEGER = re.compile(r"[+]?\d+")
 
 
 @dataclass(frozen=True)
@@ -88,6 +97,51 @@ def canonical_aime_integer(value: object) -> str:
     return str(integer)
 
 
+def extract_aime2026_candidate(
+    prediction: str,
+) -> tuple[str | None, bool, str | None]:
+    """Extract one unambiguous public AIME candidate without using the target.
+
+    The optional FlowSteer terminal envelope is removed first.  An explicit
+    marker is admitted only when every marker present names the same integer;
+    contradictory markers fail closed.  Without a marker, the entire visible
+    response must be one integer.  This preserves SkillFlow's public math
+    answer forms without importing its reward-only last-number heuristic.
+    """
+
+    submitted, structured, boundary_failure = extract_aime2026_submission(
+        prediction
+    )
+    if boundary_failure is not None:
+        return None, structured, boundary_failure
+    visible = submitted
+    if _THINKING_END in visible:
+        visible = visible.rsplit(_THINKING_END, 1)[1]
+    visible = visible.strip()
+    if not visible:
+        return None, structured, "empty_answer"
+
+    marked = [
+        *(_BOXED_INTEGER.findall(visible)),
+        *(_FINAL_INTEGER.findall(visible)),
+    ]
+    if marked:
+        try:
+            candidates = {canonical_aime_integer(value) for value in marked}
+        except ValueError:
+            return None, structured, "aime_integer_out_of_range"
+        if len(candidates) != 1:
+            return None, structured, "conflicting_explicit_candidates"
+        return next(iter(candidates)), structured, None
+
+    if _BARE_INTEGER.fullmatch(visible) is None:
+        return None, structured, "aime_integer_not_found"
+    try:
+        return canonical_aime_integer(visible), structured, None
+    except ValueError:
+        return None, structured, "aime_integer_out_of_range"
+
+
 def score_aime2026_integer(
     prediction: str,
     accepted_answers: Sequence[str],
@@ -103,19 +157,11 @@ def score_aime2026_integer(
     if not accepted_answers:
         raise ValueError("AIME evaluator requires at least one accepted answer")
     expected = {canonical_aime_integer(answer) for answer in accepted_answers}
-    submitted, structured, boundary_failure = extract_aime2026_submission(prediction)
-    predicted: str | None = None
-    parsing_failure_reason = boundary_failure
-    if boundary_failure is not None:
-        accuracy = 0.0
-    else:
-        try:
-            predicted = str(int(submitted.strip()))
-        except ValueError:
-            accuracy = 0.0
-            parsing_failure_reason = "integer_conversion_failed"
-        else:
-            accuracy = float(predicted in expected)
+    submitted, _, _ = extract_aime2026_submission(prediction)
+    predicted, structured, parsing_failure_reason = extract_aime2026_candidate(
+        prediction
+    )
+    accuracy = float(predicted in expected) if predicted is not None else 0.0
     return AIME2026IntegerScore(
         accuracy=accuracy,
         raw_prediction=prediction,
@@ -134,6 +180,7 @@ __all__ = [
     "AIME2026_TASK_FAMILY",
     "AIME2026IntegerScore",
     "canonical_aime_integer",
+    "extract_aime2026_candidate",
     "extract_aime2026_submission",
     "score_aime2026_integer",
 ]

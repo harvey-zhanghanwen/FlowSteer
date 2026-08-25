@@ -178,12 +178,9 @@ class StaticEvaluatorTests(unittest.IsolatedAsyncioTestCase):
         free_form = await evaluate_task(
             task("AIME 2026", ground_truth="56"), "Thus \\boxed{56}."
         )
-        self.assertEqual(0.0, free_form.reward)
-        self.assertFalse(free_form.details["parsing_succeeded"])
-        self.assertEqual(
-            "integer_conversion_failed",
-            free_form.details["parsing_failure_reason"],
-        )
+        self.assertEqual(1.0, free_form.reward)
+        self.assertTrue(free_form.details["parsing_succeeded"])
+        self.assertEqual("56", free_form.details["canonical_prediction"])
 
     async def test_aime_direct_and_agentgraph_share_one_evaluator_contract(self) -> None:
         benchmark_task = task("AIME 2026", ground_truth="56")

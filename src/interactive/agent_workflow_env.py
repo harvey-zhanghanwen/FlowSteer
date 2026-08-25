@@ -7,7 +7,7 @@ import hashlib
 import json
 import re
 import unicodedata
-from typing import Collection, Mapping, Optional, Sequence, Tuple, Union
+from typing import Callable, Collection, Mapping, Optional, Sequence, Tuple, Union
 
 from .agent_action_parser import (
     AgentAction,
@@ -266,6 +266,7 @@ class AgentWorkflowHistoryEntry:
     action: Optional[AgentAction]
     revision: int
     feedback: str
+    feedback_code: Optional[str] = None
     execution_reused: bool = False
 
     def to_dict(self) -> dict[str, object]:
@@ -276,6 +277,7 @@ class AgentWorkflowHistoryEntry:
             "action": None if self.action is None else self.action.to_dict(),
             "revision": self.revision,
             "feedback": self.feedback,
+            "feedback_code": self.feedback_code,
             "execution_reused": self.execution_reused,
         }
 
@@ -311,6 +313,7 @@ class AgentWorkflowStepResult:
     revision: int
     feedback: str
     snapshot: AgentWorkflowSnapshot
+    feedback_code: Optional[str] = None
     validation_issues: Tuple[GraphValidationIssue, ...] = ()
     execution: Optional[AgentRuntimeResult] = None
     execution_reused: bool = False
@@ -373,6 +376,9 @@ class AgentWorkflowEnv:
         semantic_protocol: str = "none",
         recovery_policy: str = "default",
         required_evidence_tool_id: Optional[str] = None,
+        artifact_candidate_extractor: Optional[
+            Callable[[str], tuple[Optional[str], bool, Optional[str]]]
+        ] = None,
     ) -> None:
         if runtime is None and gateway is None:
             raise AgentWorkflowStateError("gateway or runtime is required")
@@ -450,6 +456,12 @@ class AgentWorkflowEnv:
                 f"runtime={runtime.semantic_protocol!r}, "
                 f"environment={semantic_protocol!r}"
             )
+        if artifact_candidate_extractor is not None and not callable(
+            artifact_candidate_extractor
+        ):
+            raise AgentWorkflowStateError(
+                "artifact_candidate_extractor must be callable or None"
+            )
         if allowed_actions is None:
             resolved_allowed_actions = tuple(item.value for item in AgentActionType)
         else:
@@ -490,6 +502,7 @@ class AgentWorkflowEnv:
             if required_evidence_tool_id is None
             else required_evidence_tool_id.strip()
         )
+        self.artifact_candidate_extractor = artifact_candidate_extractor
         self.allowed_action_types = resolved_allowed_actions
         self._allowed_action_type_set = frozenset(resolved_allowed_actions)
         self.parser = AgentActionParser()
@@ -565,6 +578,12 @@ class AgentWorkflowEnv:
     @property
     def unresolved_dirty_agent_ids(self) -> Tuple[str, ...]:
         return tuple(sorted(self._unresolved_dirty_agents))
+
+    @property
+    def available_model_ids(self) -> Tuple[str, ...]:
+        """Return the frozen catalog minus trajectory-scoped failures."""
+
+        return self._available_model_ids()
 
     @property
     def last_valid_evidence_lineage(
@@ -3741,6 +3760,7 @@ class AgentWorkflowEnv:
             semantic_protocol=self.semantic_protocol,
             recovery_policy=self.recovery_policy,
             required_evidence_tool_id=self.required_evidence_tool_id,
+            artifact_candidate_extractor=self.artifact_candidate_extractor,
         )
         result._turn_count = state.turn_count
         result._finished = state.finished
@@ -3765,6 +3785,13 @@ class AgentWorkflowEnv:
             return self._reject(None, "action must be AgentAction or JSON text")
 
         self._turn_count += 1
+        if self._is_repeated_rejected_action(action):
+            return self._reject_after_count(
+                action,
+                "action rejected: identical action was already rejected at the "
+                "unchanged graph revision",
+                feedback_code="repeated_rejected_action",
+            )
         if action.action_type.value not in self._allowed_action_type_set:
             return self._reject_after_count(
                 action,
@@ -3823,6 +3850,14 @@ class AgentWorkflowEnv:
                 )
             execution = cached_execution
             execution_reused = execution is not None
+            if execution is None and self.execute_on_edit:
+                return self._reject_after_count(
+                    action,
+                    "cannot finish: current graph revision has no fresh Output "
+                    "artifact; repair the responsible graph input or Agent before "
+                    "submitting FINISH",
+                    feedback_code="stale_output_artifact",
+                )
             if execution is None:
                 try:
                     execution = await self.runtime.execute(
@@ -4293,32 +4328,93 @@ class AgentWorkflowEnv:
             if call.request.agent.id == execution.output_agent_id
         ]
         output_request = output_calls[-1].request if output_calls else None
-        output_inbox = []
+        provenance_items: list[Mapping[str, object]] = []
         if output_request is not None:
-            for message in output_request.upstream[:4]:
-                content = " ".join(message.content.split())
-                if len(content) > 160:
-                    content = content[:157] + "..."
-                output_inbox.append(
-                    {
-                        "source_agent_id": message.source_agent_id,
-                        "target_agent_id": message.target_agent_id,
-                        "message_type": message.message_type,
-                        "artifact_type": message.artifact_type,
-                        "graph_revision": message.graph_revision,
-                        "environment_revision": message.environment_revision,
-                        "request_or_dependency": message.request_or_dependency,
-                        "tool_receipt_count": len(message.tool_receipts),
-                        "tool_ids": sorted(
-                            {
-                                str(receipt.get("tool_id"))
-                                for receipt in message.tool_receipts
-                                if receipt.get("tool_id") is not None
-                            }
-                        ),
-                        "content_preview": content,
-                    }
-                )
+            provenance_items = [
+                message.to_dict() for message in output_request.upstream
+            ]
+        elif execution.output_agent_id is not None:
+            raw_provenance = execution.output_metadata.get(
+                execution.output_agent_id,
+                {},
+            ).get("input_artifact_provenance", ())
+            if isinstance(raw_provenance, (list, tuple)):
+                provenance_items = [
+                    item for item in raw_provenance if isinstance(item, Mapping)
+                ]
+
+        output_inbox = []
+        candidate_observations = []
+        for item in provenance_items:
+            source_agent_id = item.get("source_agent_id")
+            target_agent_id = item.get("target_agent_id")
+            artifact_id = item.get("artifact_id", item.get("artifact_version"))
+            raw_output = item.get(
+                "raw_output",
+                item.get("artifact_body", item.get("artifact", item.get("content"))),
+            )
+            if not isinstance(raw_output, str):
+                continue
+            content_preview = " ".join(raw_output.split())
+            if len(content_preview) > 160:
+                content_preview = content_preview[:157] + "..."
+            raw_tool_receipts = item.get("tool_receipts", ())
+            tool_receipts = (
+                [
+                    receipt
+                    for receipt in raw_tool_receipts
+                    if isinstance(receipt, Mapping)
+                ]
+                if isinstance(raw_tool_receipts, (list, tuple))
+                else []
+            )
+            output_inbox.append(
+                {
+                    "source_agent": source_agent_id,
+                    "source_agent_id": source_agent_id,
+                    "target_agent_id": target_agent_id,
+                    "artifact_id": artifact_id,
+                    "raw_output": raw_output,
+                    "message_type": item.get("message_type"),
+                    "artifact_type": item.get("artifact_type"),
+                    "graph_revision": item.get("graph_revision"),
+                    "environment_revision": item.get("environment_revision"),
+                    "request_or_dependency": item.get(
+                        "request_or_dependency",
+                        item.get("dependency"),
+                    ),
+                    "provenance_status": "unverified_work_product",
+                    "tool_receipt_count": len(tool_receipts),
+                    "tool_ids": sorted(
+                        {
+                            str(receipt.get("tool_id"))
+                            for receipt in tool_receipts
+                            if receipt.get("tool_id") is not None
+                        }
+                    ),
+                    "content_preview": content_preview,
+                }
+            )
+            if self.artifact_candidate_extractor is not None:
+                try:
+                    candidate, _, _ = self.artifact_candidate_extractor(raw_output)
+                except (TypeError, ValueError):
+                    candidate = None
+                if candidate is not None:
+                    candidate_observations.append(
+                        {
+                            "source_agent": source_agent_id,
+                            "artifact_id": artifact_id,
+                            "candidate": candidate,
+                        }
+                    )
+        candidate_conflict = len(
+            {
+                str(item["candidate"])
+                for item in candidate_observations
+                if item.get("candidate") is not None
+            }
+        ) > 1
         calls_by_agent = {
             call.request.agent.id: call for call in execution.calls
         }
@@ -4354,6 +4450,15 @@ class AgentWorkflowEnv:
                         if call is None
                         else [item.source_agent_id for item in call.request.upstream]
                     ),
+                    "artifact_id": execution.output_metadata.get(
+                        agent_id,
+                        {},
+                    ).get(
+                        "artifact_id",
+                        execution.output_metadata.get(agent_id, {}).get(
+                            "artifact_version"
+                        ),
+                    ),
                     "artifact_preview": preview,
                 }
             )
@@ -4370,6 +4475,8 @@ class AgentWorkflowEnv:
                 "deferred_agent_ids": list(execution.deferred_agent_ids),
                 "topology": self._graph.topology_statistics(),
                 "output_inbox": output_inbox,
+                "candidate_conflict": candidate_conflict,
+                "candidate_observations": candidate_observations,
                 "agent_artifacts": agent_artifacts,
                 **(
                     {"recovery_state": self.recovery_state()}
@@ -10169,12 +10276,11 @@ class AgentWorkflowEnv:
         elif action.action_type is AgentActionType.SET_OUTPUT:
             if action.agent_id is None:
                 raise GraphMutationError("set_output action is incomplete")
-            previous = graph.output_agent_id
             graph.set_output(action.agent_id)
-            seeds = {action.agent_id}
-            if previous is not None:
-                seeds.add(previous)
-            return graph.dirty_closure(seeds)
+            # FlowSteer FINISH consumes the last execution result.  SET_OUTPUT
+            # therefore changes only the pointer to an already-materialized
+            # artifact; it is not an Agent input and must not trigger sampling.
+            return set()
         else:
             raise GraphMutationError(f"unsupported graph edit: {action.action_type.value}")
 
@@ -10193,17 +10299,23 @@ class AgentWorkflowEnv:
         feedback: str,
         issues: Tuple[GraphValidationIssue, ...] = (),
         *,
+        feedback_code: Optional[str] = None,
         execution: Optional[AgentRuntimeResult] = None,
         execution_reused: bool = False,
         partial_execution: Optional[AgentRuntimeResult] = None,
         execution_failure_records: Tuple[AgentFailureRecord, ...] = (),
     ) -> AgentWorkflowStepResult:
+        resolved_feedback_code = feedback_code or self._typed_feedback_code(
+            feedback,
+            issues,
+        )
         self._last_feedback = feedback
         self._record_history(
             accepted=False,
             done=self._finished,
             action=action,
             feedback=feedback,
+            feedback_code=resolved_feedback_code,
             execution_reused=execution_reused,
         )
         return AgentWorkflowStepResult(
@@ -10213,6 +10325,7 @@ class AgentWorkflowEnv:
             revision=self._graph.revision,
             feedback=feedback,
             snapshot=self.snapshot(),
+            feedback_code=resolved_feedback_code,
             validation_issues=issues,
             execution=execution,
             execution_reused=execution_reused,
@@ -10227,6 +10340,7 @@ class AgentWorkflowEnv:
         done: bool,
         action: Optional[AgentAction],
         feedback: str,
+        feedback_code: Optional[str] = None,
         execution_reused: bool = False,
     ) -> None:
         self._history.append(
@@ -10237,9 +10351,60 @@ class AgentWorkflowEnv:
                 action=action,
                 revision=self._graph.revision,
                 feedback=feedback,
+                feedback_code=feedback_code,
                 execution_reused=execution_reused,
             )
         )
+
+    def _is_repeated_rejected_action(self, action: AgentAction) -> bool:
+        serialized = action.to_dict()
+        return any(
+            not entry.accepted
+            and entry.revision == self._graph.revision
+            and entry.action is not None
+            and entry.action.to_dict() == serialized
+            for entry in self._history
+        )
+
+    @staticmethod
+    def _typed_feedback_code(
+        feedback: str,
+        issues: Tuple[GraphValidationIssue, ...],
+    ) -> str:
+        issue_codes = {issue.code for issue in issues}
+        issue_projection = {
+            "self_relation": "self_loop",
+            "unknown_relation_endpoint": "unknown_agent",
+            "unknown_output_agent": "unknown_agent",
+            "unknown_model_id": "invalid_model",
+            "bidirectional_block_too_large": "bidirectional_block_too_large",
+        }
+        for source_code, target_code in issue_projection.items():
+            if source_code in issue_codes:
+                return target_code
+        if issue_codes:
+            return sorted(issue_codes)[0]
+
+        normalized = " ".join(feedback.casefold().split())
+        if "self relations are not allowed" in normalized:
+            return "self_loop"
+        if "unknown agent_id" in normalized or "does not exist" in normalized:
+            return "unknown_agent"
+        if "unknown model" in normalized or "model_id is unavailable" in normalized:
+            return "invalid_model"
+        if "bidirectional block" in normalized:
+            return "bidirectional_block_too_large"
+        if "action made no graph change" in normalized:
+            return "no_graph_change"
+        if normalized.startswith("invalid action:"):
+            return "invalid_action"
+        if "outside the configured canvas action set" in normalized:
+            return "action_not_allowed"
+        if normalized.startswith("cannot finish:"):
+            return "terminal_rejected"
+        if "execution_error=" in normalized or "execution failed" in normalized:
+            return "runtime_failure"
+        return "action_rejected"
 
     def _validate_agent_limit(self, graph: AgentGraph) -> None:
         if self.max_agents is not None and len(graph.nodes) > self.max_agents:

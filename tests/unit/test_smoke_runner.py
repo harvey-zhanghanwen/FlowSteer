@@ -18,6 +18,7 @@ import yaml
 from src.interactive.agent_graph import AgentGraph, AgentNode
 from src.interactive.agent_runtime import AgentResponse, AgentRuntime
 from src.interactive.agent_workflow_env import AgentWorkflowEnv
+from src.interactive.aime2026_adapter import AIME2026_EVALUATOR_VERSION
 from src.interactive.computation_tools import (
     AIME_CALCULATOR_TOOL_ID,
     AIME_PYTHON_EXEC_TOOL_ID,
@@ -2607,9 +2608,7 @@ class SelectionTests(unittest.TestCase):
         }
         self.assertEqual("hotpotqa.official.answer.v1", versions["hotpotqa"])
         self.assertEqual("triviaqa.official.answer.v1", versions["triviaqa"])
-        self.assertEqual(
-            "skillev.private-static.integer.v1", versions["aime_2026"]
-        )
+        self.assertEqual(AIME2026_EVALUATOR_VERSION, versions["aime_2026"])
         self.assertEqual(versions["webshop"], versions["alfworld"])
         self.assertEqual(6, len(set(versions.values())))
 

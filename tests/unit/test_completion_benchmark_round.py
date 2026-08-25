@@ -8,7 +8,10 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from src.interactive.config_loader import load_model_registry, load_yaml
-from src.interactive.task_evaluator import EvaluationOutcome
+from src.interactive.task_evaluator import (
+    AIME2026_EVALUATOR_VERSION,
+    EvaluationOutcome,
+)
 
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -153,6 +156,29 @@ def test_official_aime_initial_config_keeps_learning_tools_and_priors_disabled()
     ]
 
 
+def test_aime_runtime_v2_config_preserves_the_evaluation_only_search_space():
+    config = load_yaml(_ROOT / "config" / "evaluation_aime2026_runtime_v2.yaml")
+
+    _MODULE.validate_completion_benchmark_config(config)
+
+    assert config["experiment"]["training_enabled"] is False
+    assert config["experiment"]["prompt_version"] == (
+        "agentgraph.director.minimal-neutral-scalar.v2"
+    )
+    assert config["aime2026_evaluation"]["sample_count"] == 30
+    assert config["aime_tool_runtime"]["enabled"] is False
+    assert config["director"]["lora"]["enabled"] is False
+    assert config["grpo"]["enabled"] is False
+    assert config["exploration"]["enabled"] is False
+    assert config["skills"]["enabled"] is False
+    assert config["skills"]["initial_library"] == []
+    assert config["agent_graph"]["contract_type"] == "free_text"
+    assert config["agent_graph"]["require_format_agent"] is False
+    assert config["agent_graph"]["terminal_protocol_by_source"] == {
+        "aime_2026": "none"
+    }
+
+
 def test_aime_without_explicit_finish_never_calls_formal_evaluator():
     task = _MODULE.TaskRecord(
         task_id="aime-2026/01",
@@ -186,7 +212,7 @@ def test_aime_terminal_failure_is_reportable_without_evaluator_retry_or_double_c
         split="test",
         metadata={"dataset_key": "aime_2026"},
     )
-    versions = {"evaluator": "skillev.private-static.integer.v1"}
+    versions = {"evaluator": AIME2026_EVALUATOR_VERSION}
     trajectory = {
         "trajectory_id": "trajectory:aime-terminal-failure",
         "task": task.to_dict(),
@@ -205,7 +231,7 @@ def test_aime_terminal_failure_is_reportable_without_evaluator_retry_or_double_c
                 "terminal_failure": True,
                 "formal_evaluator_called": False,
             },
-            "evaluator_version": "skillev.private-static.integer.v1",
+            "evaluator_version": AIME2026_EVALUATOR_VERSION,
         },
     }
 
@@ -1351,7 +1377,7 @@ def test_aime_direct_model_request_contains_problem_but_not_private_target():
             reward=0.0,
             metrics={"accuracy": 0.0},
             reason="evaluated",
-            evaluator_version="skillev.private-static.integer.v1",
+            evaluator_version=AIME2026_EVALUATOR_VERSION,
         )
 
     execution = SimpleNamespace(

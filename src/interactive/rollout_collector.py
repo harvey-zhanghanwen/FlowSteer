@@ -2862,8 +2862,19 @@ _PROVIDER_RESPONSE_METADATA_FIELDS: Tuple[str, ...] = (
 
 _UNIFIED_EXECUTION_METADATA_FIELDS: Tuple[str, ...] = (
     "artifact_version",
+    "artifact_id",
+    "agent_id",
+    "graph_revision",
+    "model",
+    "model_name",
+    "provider_id",
+    "contract",
+    "tool_config",
+    "raw_output",
+    "upstream_dependencies",
     "input_artifact_versions",
     "input_artifact_provenance",
+    "retry_receipts",
     "execution_mode",
     "react_turns_used",
     "new_react_turns_used",
@@ -3145,6 +3156,7 @@ def _runtime_summary(runtime: Optional[AgentRuntimeResult]) -> Mapping[str, Any]
         "executed_agent_ids": list(runtime.executed_agent_ids),
         "reused_agent_ids": list(runtime.reused_agent_ids),
         "deferred_agent_ids": list(runtime.deferred_agent_ids),
+        "agent_statuses": dict(runtime.agent_statuses),
         "output_metadata": output_metadata,
     }
 

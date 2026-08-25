@@ -22,13 +22,22 @@ PREPARE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(PREPARE)
 
 
-def test_integer_scorer_matches_skillev_private_static_rule() -> None:
+def test_integer_scorer_uses_target_blind_explicit_math_forms() -> None:
     assert score_aime2026_integer("42", ["42"]).accuracy == 1.0
     assert score_aime2026_integer("042", ["42"]).accuracy == 1.0
     assert score_aime2026_integer("+42", ["42"]).accuracy == 1.0
     assert score_aime2026_integer("42.0", ["42"]).accuracy == 0.0
     assert score_aime2026_integer("The answer is 42", ["42"]).accuracy == 0.0
     assert score_aime2026_integer("100%", ["1"]).accuracy == 0.0
+    assert score_aime2026_integer(r"\boxed{42}", ["42"]).accuracy == 1.0
+    assert score_aime2026_integer("Final Answer: 42", ["42"]).accuracy == 1.0
+    assert (
+        score_aime2026_integer(
+            "\\boxed{41}\nFinal Answer: 42",
+            ["42"],
+        ).parsing_failure_reason
+        == "conflicting_explicit_candidates"
+    )
 
 
 def test_single_terminal_boundary_maps_to_private_integer_submission() -> None:
@@ -53,7 +62,7 @@ def test_single_terminal_boundary_maps_to_private_integer_submission() -> None:
         ("<answer>42</answer><answer>", "malformed_answer_boundary"),
         ("</answer><answer>42</answer>", "malformed_answer_boundary"),
         ("<answer>42", "malformed_answer_boundary"),
-        ("Thus 42", "integer_conversion_failed"),
+        ("Thus 42", "aime_integer_not_found"),
     ],
 )
 def test_prediction_parser_fails_closed_without_selecting_an_answer(

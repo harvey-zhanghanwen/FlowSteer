@@ -299,3 +299,51 @@ passed, but the complete 30-task run did not satisfy full-panel Stable Zero.
 These results are retained as the initial untrained architecture condition.
 No loose parsing, historical-candidate recovery, answer lookup, workflow
 template, training update, or Skill was added in response to the score.
+
+## Runtime/artifact/output protocol v2
+
+The 30-task Wrong Demo receipts exposed four execution-boundary confounders
+that preceded mathematical reasoning quality: Output-pointer edits resampled a
+fresh Agent, FINISH could sample on a cache miss, free-text boxed/final-answer
+forms failed before integer comparison, and repeated invalid Canvas actions
+were visible only as untyped text.
+
+The following minimal unified-core changes were accepted:
+
+1. `SET_OUTPUT` changes the Output pointer and reuses immutable fresh artifacts.
+   Generic non-semantic Agent prompts are Output-pointer invariant; a declared
+   Format contract is likewise materialized from its role/inputs before Output
+   selection rather than being created by the pointer edit.
+2. In execute-on-edit conditions, `FINISH` never invokes a model. It consumes
+   the current revision's fresh Output artifact or returns
+   `stale_output_artifact`.
+3. Output metadata explicitly persists artifact identity, producing Agent,
+   graph revision, model/provider, free-text contract, tool configuration,
+   exact upstream artifact provenance, and raw output. Relation edits continue
+   to invalidate only their affected target/downstream closure.
+4. Fan-in feedback retains every source and reports
+   `candidate_conflict=true` only when a target-blind task extractor obtains
+   different public candidates. It does not rank or resolve them.
+5. AIME terminal extraction now accepts a bare integer, `\\boxed{integer}`, or
+   an explicit `Final Answer: integer`/`Answer: integer` marker. Conflicting
+   explicit candidates, malformed boundaries, missing candidates, and values
+   outside `0..999` fail closed. No LLM, expected answer, symbolic solver, or
+   last-number heuristic participates.
+6. The existing same-request transient provider retry is unchanged in policy,
+   but all failed and successful attempt receipts are now saved. The Runtime
+   never changes provider/model during a retry.
+7. Partial Runtime results now publish per-node `SUCCESS`, `FAILURE`, and
+   `BLOCKED_BY_UPSTREAM` state while retaining every already successful
+   artifact.
+8. Rejections carry typed feedback codes. An identical rejected action at an
+   unchanged graph revision is blocked as `repeated_rejected_action`.
+   Scalar Director observation v2 exposes only live IDs, model IDs, relations,
+   remaining rounds, feedback, and legal actions; it contains no mathematical
+   workflow recommendation.
+
+The directed regression suite covers Output-pointer and FINISH reuse,
+relation-scoped invalidation, fan-in provenance/conflict, AIME extraction and
+fail-closed parsing, same-model provider retry, partial failure state,
+repeated-action rejection, and evaluator-target isolation. No training,
+optimizer, LoRA, MACE, Bayesian, Skill, retrieval, or answer lookup path was
+enabled.

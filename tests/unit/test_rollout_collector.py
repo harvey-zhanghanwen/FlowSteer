@@ -2651,7 +2651,7 @@ def test_collector_does_not_duplicate_reused_progressive_execution():
 
     trajectory = asyncio.run(collector.collect(_task(), 0, evaluator))
 
-    assert len(trajectory.turns[1].executions) == 1
+    assert len(trajectory.turns[1].executions) == 0
     assert trajectory.turns[1].execution_reused is False
     assert trajectory.turns[2].executions == ()
     assert trajectory.turns[2].execution_reused is True

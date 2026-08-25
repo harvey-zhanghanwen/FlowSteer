@@ -24,6 +24,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from src.interactive.agent_graph import AgentGraph, AgentNode, AgentRelation
 from src.interactive.agent_runtime import AgentRuntime
 from src.interactive.agent_workflow_env import AgentWorkflowEnv
+from src.interactive.aime2026_adapter import extract_aime2026_candidate
 from src.interactive.config_loader import (
     ConfigurationError,
     load_model_registry,
@@ -3318,6 +3319,11 @@ class LiveSmokeBackend:
                 semantic_protocol=semantic_protocol,
                 recovery_policy=recovery_policy,
                 required_evidence_tool_id=required_evidence_tool_id,
+                artifact_candidate_extractor=(
+                    extract_aime2026_candidate
+                    if _dataset_key(task) == "aime_2026"
+                    else None
+                ),
                 allowed_actions=(
                     tuple(str(value) for value in graph_config["actions"])
                     if graph_config.get("actions") is not None

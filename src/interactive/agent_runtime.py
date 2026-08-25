@@ -32,6 +32,14 @@ class CommunicationCondition(str, Enum):
     UPSTREAM_MASKED = "upstream_masked"
 
 
+class AgentExecutionStatus(str, Enum):
+    """Per-node materialization state persisted with each Runtime result."""
+
+    SUCCESS = "SUCCESS"
+    FAILURE = "FAILURE"
+    BLOCKED_BY_UPSTREAM = "BLOCKED_BY_UPSTREAM"
+
+
 def _communication_condition(
     value: Union[CommunicationCondition, str],
 ) -> CommunicationCondition:
@@ -121,6 +129,12 @@ class UpstreamMessage:
         return self.content
 
     @property
+    def artifact_id(self) -> Optional[str]:
+        """Canonical alias for the legacy persisted ``artifact_version``."""
+
+        return self.artifact_version
+
+    @property
     def dependency(self) -> Optional[str]:
         return self.request_or_dependency
 
@@ -132,10 +146,12 @@ class UpstreamMessage:
             "artifact_type": self.artifact_type,
             "artifact": self.content,
             "artifact_body": self.content,
+            "raw_output": self.content,
             "content": self.content,
             "graph_revision": self.graph_revision,
             "environment_revision": self.environment_revision,
             "artifact_version": self.artifact_version,
+            "artifact_id": self.artifact_version,
             "request_or_dependency": self.request_or_dependency,
             "dependency": self.request_or_dependency,
             "tool_receipts": [dict(item) for item in self.tool_receipts],
@@ -180,8 +196,6 @@ class AgentRequest:
             raise TypeError("is_format_agent must be bool")
         if type(self.is_format_predecessor) is not bool:
             raise TypeError("is_format_predecessor must be bool")
-        if self.is_format_agent and not self.is_output_agent:
-            raise ValueError("Format Agent must be the Output Agent")
         if self.is_format_agent and self.is_format_predecessor:
             raise ValueError("Format Agent cannot be its own predecessor")
         if self.semantic_protocol not in {
@@ -305,6 +319,10 @@ class AgentRuntimeResult:
         default_factory=dict,
         compare=False,
     )
+    agent_statuses: Mapping[str, str] = field(
+        default_factory=dict,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "outputs", MappingProxyType(dict(self.outputs)))
@@ -322,6 +340,22 @@ class AgentRuntimeResult:
                     for agent_id, metadata in self.output_metadata.items()
                 }
             ),
+        )
+        normalized_statuses = dict(self.agent_statuses)
+        allowed_statuses = {item.value for item in AgentExecutionStatus}
+        if any(
+            not isinstance(agent_id, str)
+            or status not in allowed_statuses
+            for agent_id, status in normalized_statuses.items()
+        ):
+            raise ValueError(
+                "agent_statuses must map Agent IDs to SUCCESS, FAILURE, or "
+                "BLOCKED_BY_UPSTREAM"
+            )
+        object.__setattr__(
+            self,
+            "agent_statuses",
+            MappingProxyType(normalized_statuses),
         )
 
 
@@ -385,6 +419,7 @@ def _public_failure_metadata(exc: BaseException) -> Mapping[str, object]:
         "react_trace",
         "tool_receipts",
         "model_calls",
+        "retry_receipts",
         "environment_reset_receipt",
         "environment_receipts",
         "evaluator_environment_trace",
@@ -780,6 +815,21 @@ class AgentRuntime:
                             - failed_component_ids
                         )
                     )
+                    blocked_status_ids = set(blocked_agent_ids) | set(
+                        deferred_agent_ids
+                    )
+                    partial_statuses = {
+                        agent_id: (
+                            AgentExecutionStatus.SUCCESS.value
+                            if agent_id in outputs
+                            else (
+                                AgentExecutionStatus.BLOCKED_BY_UPSTREAM.value
+                                if agent_id in blocked_status_ids
+                                else AgentExecutionStatus.FAILURE.value
+                            )
+                        )
+                        for agent_id in nodes
+                    }
                     partial_result = AgentRuntimeResult(
                         run_id=resolved_run_id,
                         graph_revision=snapshot.revision,
@@ -795,6 +845,7 @@ class AgentRuntime:
                         deferred_agent_ids=deferred_agent_ids,
                         communication_condition=resolved_condition,
                         output_metadata=output_metadata,
+                        agent_statuses=partial_statuses,
                     )
                     pending_agent_ids = tuple(
                         sorted(set(nodes) - set(partial_result.outputs))
@@ -873,6 +924,14 @@ class AgentRuntime:
             deferred_agent_ids=deferred_agent_ids,
             communication_condition=resolved_condition,
             output_metadata=output_metadata,
+            agent_statuses={
+                agent_id: (
+                    AgentExecutionStatus.SUCCESS.value
+                    if agent_id in outputs
+                    else AgentExecutionStatus.BLOCKED_BY_UPSTREAM.value
+                )
+                for agent_id in nodes
+            },
         )
 
     def _semantic_input_deferred_components(
@@ -922,9 +981,7 @@ class AgentRuntime:
                 elif role == "verifier" and not has_routed_upstream:
                     seeds.add(plan.component_for[agent_id])
                 elif role == "format" and (
-                    not format_output_agent
-                    or agent_id != output_agent_id
-                    or not has_routed_upstream
+                    not format_output_agent or not has_routed_upstream
                 ):
                     seeds.add(plan.component_for[agent_id])
             deferred = set(seeds)
@@ -938,7 +995,23 @@ class AgentRuntime:
             return deferred
 
         if self.semantic_protocol != "hotpotqa_verified_answer_slot_v1":
-            return set()
+            if not format_output_agent:
+                return set()
+            seeds = {
+                plan.component_for[agent_id]
+                for agent_id, node in nodes.items()
+                if (node.role_family or "").casefold() == "format"
+                and not graph.directed_predecessors(agent_id)
+            }
+            deferred = set(seeds)
+            frontier = list(seeds)
+            while frontier:
+                component = frontier.pop()
+                for successor in plan.successors[component]:
+                    if successor not in deferred:
+                        deferred.add(successor)
+                        frontier.append(successor)
+            return deferred
         seeds: Set[Tuple[str, ...]] = set()
         output_agent_id = graph.output_agent_id
         for agent_id, node in nodes.items():
@@ -956,7 +1029,6 @@ class AgentRuntime:
             elif role == "format":
                 if (
                     not format_output_agent
-                    or agent_id != output_agent_id
                     or len(predecessors) != 1
                     or (
                         nodes[predecessors[0]].role_family or ""
@@ -1701,6 +1773,11 @@ class AgentRuntime:
                 # Keep the canonical routed message intact. Diagnostic masking is
                 # applied only when the provider prompt is rendered so receipts
                 # retain both the true upstream and what the model actually saw.
+                source_metadata = output_metadata.get(source_id, {})
+                raw_artifact_id = source_metadata.get(
+                    "artifact_id",
+                    source_metadata.get("artifact_version"),
+                )
                 messages.append(
                     UpstreamMessage(
                         source_id,
@@ -1713,28 +1790,15 @@ class AgentRuntime:
                             nodes[source_id], "artifact_type", "text"
                         ),
                         environment_revision=_environment_revision_from_metadata(
-                            output_metadata.get(source_id, {})
+                            source_metadata
                         ),
                         tool_receipts=_tool_receipts_from_metadata(
-                            output_metadata.get(source_id, {})
+                            source_metadata
                         ),
                         artifact_version=(
-                            str(
-                                output_metadata.get(source_id, {}).get(
-                                    "artifact_version"
-                                )
-                            )
-                            if isinstance(
-                                output_metadata.get(source_id, {}).get(
-                                    "artifact_version"
-                                ),
-                                str,
-                            )
-                            and str(
-                                output_metadata.get(source_id, {}).get(
-                                    "artifact_version"
-                                )
-                            ).strip()
+                            raw_artifact_id.strip()
+                            if isinstance(raw_artifact_id, str)
+                            and raw_artifact_id.strip()
                             else None
                         ),
                     )
@@ -1856,7 +1920,8 @@ class AgentRuntime:
             phase=phase,
             is_output_agent=agent.id == output_agent_id,
             is_format_agent=(
-                format_output_agent and agent.id == output_agent_id
+                format_output_agent
+                and (agent.role_family or "").casefold() == "format"
             ),
             is_format_predecessor=is_format_predecessor,
             communication_condition=communication_condition,
@@ -1877,7 +1942,27 @@ class AgentRuntime:
         """Bind one artifact to the exact public inputs consumed to produce it."""
 
         metadata = dict(response.metadata)
+        # Keep the existing request identity as the immutable artifact identity
+        # so old trajectories remain readable.  A provider retry is another
+        # receipt for this same logical request, never a new semantic artifact.
         metadata["artifact_version"] = request.request_id
+        metadata["artifact_id"] = request.request_id
+        metadata["agent_id"] = request.agent.id
+        metadata["graph_revision"] = request.graph_revision
+        metadata["model"] = request.model.model_id
+        metadata["model_id"] = request.model.model_id
+        metadata["model_name"] = request.model.model_name
+        metadata["provider_id"] = request.provider.provider_id
+        metadata["contract"] = request.agent.contract
+        metadata["tool_config"] = {
+            "execution_mode": getattr(
+                request.agent.execution_mode,
+                "value",
+                request.agent.execution_mode,
+            ),
+            "allowed_tools": list(request.agent.allowed_tools),
+        }
+        metadata["raw_output"] = response.text
         inputs = list(request.upstream)
         if request.peer_draft is not None:
             inputs.append(request.peer_draft)
@@ -1900,6 +1985,16 @@ class AgentRuntime:
             input_artifact_provenance.append(message.to_dict())
         metadata["input_artifact_versions"] = input_artifact_versions
         metadata["input_artifact_provenance"] = input_artifact_provenance
+        metadata["upstream_dependencies"] = tuple(
+            MappingProxyType(
+                {
+                    "source_agent": message.source_agent_id,
+                    "artifact_id": message.artifact_id,
+                    "raw_output": message.content,
+                }
+            )
+            for message in inputs
+        )
         if self.semantic_protocol in {
             "hotpotqa_verified_answer_slot_v1",
             "qa_verified_answer_lineage_v2",
@@ -2085,6 +2180,7 @@ __all__ = [
     "AgentFailureRecord",
     "AgentGateway",
     "AgentExecutionAdapter",
+    "AgentExecutionStatus",
     "AgentRequest",
     "AgentResponse",
     "AgentRuntime",

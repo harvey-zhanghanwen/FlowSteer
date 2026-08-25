@@ -61,7 +61,10 @@ Use only action types listed in admissible_action_types, model_id values from mo
 Each accepted edit is executed once, and its Canvas validation and execution feedback appear in the next observation. Inspect that state before choosing the next action. Use finish only when finish_admissibility is present and admissible. Do not assume a fixed workflow topology or an unlisted Skill."""
 
 DIRECTOR_PROMPT_VERSION = "agentgraph.director.minimal-neutral.v10"
-SCALAR_DIRECTOR_PROMPT_VERSION = "agentgraph.director.minimal-neutral-scalar.v1"
+SCALAR_DIRECTOR_PROMPT_VERSION = "agentgraph.director.minimal-neutral-scalar.v2"
+LEGACY_SCALAR_DIRECTOR_PROMPT_VERSION_V1 = (
+    "agentgraph.director.minimal-neutral-scalar.v1"
+)
 LEGACY_DIRECTOR_PROMPT_VERSION_V9 = "agentgraph.director.minimal-neutral.v9"
 LEGACY_DIRECTOR_PROMPT_VERSION_V8 = "agentgraph.director.minimal-neutral.v8"
 HOTPOTQA_DIRECTOR_PROMPT_VERSION = (
@@ -493,6 +496,7 @@ def director_system_prompt_for_version(prompt_version: str) -> str:
     by_version = {
         DIRECTOR_PROMPT_VERSION: DIRECTOR_SYSTEM_PROMPT,
         SCALAR_DIRECTOR_PROMPT_VERSION: SCALAR_DIRECTOR_SYSTEM_PROMPT,
+        LEGACY_SCALAR_DIRECTOR_PROMPT_VERSION_V1: SCALAR_DIRECTOR_SYSTEM_PROMPT,
         LEGACY_DIRECTOR_PROMPT_VERSION_V9: LEGACY_DIRECTOR_SYSTEM_PROMPT_V9,
         LEGACY_DIRECTOR_PROMPT_VERSION_V8: LEGACY_DIRECTOR_SYSTEM_PROMPT_V8,
         # These are the two historical v8 experiment labels still present in
@@ -3219,10 +3223,33 @@ class AgentGraphOrchestrator:
                 "required_tool_id": env.required_tool_id,
             },
         }
+        if self.prompt_version == SCALAR_DIRECTOR_PROMPT_VERSION:
+            # FlowSteer exposes the current Canvas identifiers and bounded
+            # horizon to the editor.  The v2 scalar observation adds only
+            # live legality state; it does not prescribe a topology or role.
+            payload.update(
+                {
+                    "current_agent_ids": sorted(
+                        node.id for node in env.graph.nodes
+                    ),
+                    "available_model_ids": list(env.available_model_ids),
+                    "current_relations": [
+                        relation.to_dict() for relation in env.graph.relations
+                    ],
+                    "remaining_rounds": max(
+                        self.max_rounds - env.turn_count,
+                        0,
+                    ),
+                }
+            )
         if verified_qa_semantic_protocol(self.semantic_protocol):
             payload["action_target_domains"] = (
                 env.model_admissible_action_targets()
             )
+        if (
+            self.prompt_version == SCALAR_DIRECTOR_PROMPT_VERSION
+            or verified_qa_semantic_protocol(self.semantic_protocol)
+        ):
             recent_rejections: list[dict[str, Any]] = []
             for entry in reversed(env.history):
                 if entry.accepted:
@@ -3242,6 +3269,7 @@ class AgentGraphOrchestrator:
                 recent_rejections.append(
                     {
                         "revision": entry.revision,
+                        "feedback_code": entry.feedback_code,
                         "action": action_value.get("action"),
                         "target": target,
                         "reason": reason[:360],

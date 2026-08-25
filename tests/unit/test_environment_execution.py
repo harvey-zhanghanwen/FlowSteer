@@ -493,8 +493,9 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(second.accepted)
         self.assertFalse(second.done)
-        self.assertTrue(second.execution_reused)
-        self.assertIs(second.execution, first.execution)
+        self.assertFalse(second.execution_reused)
+        self.assertIsNone(second.execution)
+        self.assertEqual("repeated_rejected_action", second.feedback_code)
         self.assertEqual(["look"], session.actions)
         self.assertEqual(1, len(gateway.requests))
 

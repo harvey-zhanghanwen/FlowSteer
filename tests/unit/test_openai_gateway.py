@@ -4,7 +4,8 @@ from dataclasses import replace
 import json
 import os
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
+from urllib.error import HTTPError
 
 from src.interactive.agent_graph import AgentNode
 from src.interactive.agent_runtime import (
@@ -190,20 +191,18 @@ class MessageTests(unittest.TestCase):
         self.assertIn("source_agent: source", text)
         self.assertIn("target_agent: agent", text)
         self.assertIn("request_or_dependency: verify carefully", text)
-        self.assertIn(
-            "Preserve the output form and level of detail",
-            messages[0]["content"],
-        )
+        self.assertIn("unverified work product", messages[0]["content"])
+        self.assertIn("does not change this execution contract", messages[0]["content"])
         self.assertNotIn("<answer>", messages[0]["content"])
-        self.assertIn("exactly one listed executable action", messages[0]["content"])
 
-    def test_intermediate_contract_forbids_task_level_answer_tag(self) -> None:
+    def test_generic_contract_is_output_pointer_invariant(self) -> None:
         messages = build_agent_messages(request(is_output_agent=False))
         system = messages[0]["content"]
-        self.assertIn("intermediate AgentGraph node", system)
-        self.assertIn("do not use <answer> tags", system)
-        self.assertIn("original relation, qualifiers, comparison criterion", system)
-        self.assertIn("independently reconstruct that evidence", system)
+        output_system = build_agent_messages(request(is_output_agent=True))[0][
+            "content"
+        ]
+        self.assertEqual(system, output_system)
+        self.assertIn("unverified work product", system)
         self.assertNotIn("direct semantic predecessor", system)
         self.assertNotIn("unique Output Agent", system)
 
@@ -670,6 +669,51 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
                 "max_tokens": 512,
                 "seed": 17,
             },
+        )
+        self.assertEqual(1, len(response.metadata["retry_receipts"]))
+        self.assertEqual(
+            "completed",
+            response.metadata["retry_receipts"][0]["status"],
+        )
+
+    async def test_retry_reuses_exact_provider_model_and_persists_attempts(self) -> None:
+        gateway = OpenAICompatibleGateway(max_retries=1)
+        payloads = []
+
+        def fake_post(url, api_key, payload):
+            payloads.append(dict(payload))
+            if len(payloads) == 1:
+                raise HTTPError(url, 429, "rate limited", {}, None)
+            return {
+                "id": "req-after-retry",
+                "model": "remote-model-id",
+                "choices": [
+                    {"message": {"content": "answer"}, "finish_reason": "stop"}
+                ],
+                "usage": {},
+            }
+
+        gateway._post_json = fake_post  # type: ignore[method-assign]
+        with patch(
+            "src.interactive.openai_gateway.asyncio.sleep",
+            new=AsyncMock(),
+        ):
+            response = await gateway.generate(request())
+
+        self.assertEqual(2, len(payloads))
+        self.assertEqual(payloads[0], payloads[1])
+        self.assertEqual(
+            ["remote-model-id", "remote-model-id"],
+            [payload["model"] for payload in payloads],
+        )
+        receipts = response.metadata["retry_receipts"]
+        self.assertEqual(
+            ["retryable_failure", "completed"],
+            [item["status"] for item in receipts],
+        )
+        self.assertEqual(
+            ["model", "model"],
+            [item["model_id"] for item in receipts],
         )
 
     async def test_missing_credential_names_variable_without_printing_key(self) -> None:

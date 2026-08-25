@@ -776,8 +776,8 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.final_graph["output_agent_id"], "solver")
         self.assertEqual(client.seeds, [1, 2, 3])
 
-        # Each completed Agent configuration executes immediately.  Changing
-        # the node to the Output role re-executes that dirty node.
+        # Each completed Agent configuration executes immediately. SET_OUTPUT
+        # only rebinds the pointer to the immutable fresh artifact.
         self.assertIsNotNone(result.turns[0].canvas_result.execution)
         self.assertIsNotNone(result.turns[1].canvas_result.execution)
         self.assertIn("execution_result=", result.turns[0].canvas_result.feedback)
@@ -787,7 +787,7 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('"final_answer"', result.turns[1].canvas_result.feedback)
         self.assertIn("output_inbox", result.turns[1].canvas_result.feedback)
         # Finish reuses the successful result for the unchanged graph revision.
-        self.assertEqual(len(gateway.requests), 2)
+        self.assertEqual(len(gateway.requests), 1)
 
         initial_messages = transcript_messages(client.prompts[0])
         continued_messages = transcript_messages(client.prompts[1])
@@ -1723,6 +1723,10 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         assert messages is not None
         observation = json.loads(messages[-1]["content"].rpartition("\n\n")[2])
         self.assertEqual(["add_agent"], observation["admissible_action_types"])
+        self.assertEqual([], observation["current_agent_ids"])
+        self.assertEqual([], observation["current_relations"])
+        self.assertEqual(["other", "qwen"], sorted(observation["available_model_ids"]))
+        self.assertEqual(1, observation["remaining_rounds"])
         self.assertNotIn("plan", SCALAR_DIRECTOR_SYSTEM_PROMPT.casefold())
         self.assertNotIn("solver", SCALAR_DIRECTOR_SYSTEM_PROMPT.casefold())
         self.assertNotIn("verify", SCALAR_DIRECTOR_SYSTEM_PROMPT.casefold())

@@ -41,6 +41,7 @@ from src.interactive.agent_workflow_env import (
     _QA_LOCATION_REASONER_RECOVERY_CONTRACT,
     _evidence_span_matches_read,
 )
+from src.interactive.aime2026_adapter import extract_aime2026_candidate
 from src.interactive.director import director_validate_live_action_target_domains
 from src.interactive.model_registry import (
     ModelRegistry,
@@ -1496,7 +1497,7 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_exact_answer_terminal_protocol_rejects_malformed_finish(self) -> None:
         registry = make_registry()
-        gateway = _SequenceGateway(["draft", "Paris", "<answer>Paris</answer>"])
+        gateway = _SequenceGateway(["Paris", "<answer>Paris</answer>"])
         env = AgentWorkflowEnv(
             registry,
             gateway,
@@ -1516,7 +1517,7 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(env.finished)
         self.assertIn("terminal answer must be exactly one", rejected.feedback)
         self.assertIn("answer_tag_count=0", rejected.feedback)
-        self.assertEqual(2, len(gateway.requests))
+        self.assertEqual(1, len(gateway.requests))
 
         await env.step(
             '{"action":"modify_agent","agent_id":"a","contract":"answer with exact wrapper"}'
@@ -1524,7 +1525,7 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         finished = await env.step('{"action":"finish"}')
         self.assertTrue(finished.accepted)
         self.assertEqual("<answer>Paris</answer>", finished.final_answer)
-        self.assertEqual(3, len(gateway.requests))
+        self.assertEqual(2, len(gateway.requests))
 
     async def test_exact_answer_protocol_rejects_multiple_and_nested_wrappers(self) -> None:
         for answer, tag_count in (
@@ -1534,7 +1535,7 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         ):
             with self.subTest(answer=answer):
                 registry = make_registry()
-                gateway = _SequenceGateway(["draft", answer])
+                gateway = _SequenceGateway([answer])
                 env = AgentWorkflowEnv(
                     registry,
                     gateway,
@@ -1559,7 +1560,7 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_revision_preserving_edit_is_rejected_without_reexecution(self) -> None:
         registry = make_registry()
-        gateway = _SequenceGateway(["draft", "not wrapped"])
+        gateway = _SequenceGateway(["not wrapped"])
         env = AgentWorkflowEnv(
             registry,
             gateway,
@@ -1573,12 +1574,12 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         )
         selected = await env.step('{"action":"set_output","agent_id":"a"}')
         self.assertTrue(selected.accepted)
-        self.assertEqual(2, len(gateway.requests))
+        self.assertEqual(1, len(gateway.requests))
 
         repeated = await env.step('{"action":"set_output","agent_id":"a"}')
         self.assertFalse(repeated.accepted)
         self.assertIn("action made no graph change", repeated.feedback)
-        self.assertEqual(2, len(gateway.requests))
+        self.assertEqual(1, len(gateway.requests))
 
         finish = await env.step('{"action":"finish"}')
         self.assertFalse(finish.accepted)
@@ -1650,6 +1651,28 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(retried.done)
         self.assertEqual("answer:a", retried.final_answer)
         self.assertEqual(2, len(gateway.requests))
+
+    async def test_finish_does_not_sample_when_output_artifact_is_missing(self) -> None:
+        registry = make_registry()
+        gateway = _FailAgentGateway("a")
+        env = AgentWorkflowEnv(
+            registry,
+            gateway,
+            problem="question",
+            execute_on_edit=True,
+        )
+        await env.step(
+            '{"action":"add_agent","agent_id":"a","model_id":"balanced",'
+            '"contract":"answer"}'
+        )
+        await env.step('{"action":"set_output","agent_id":"a"}')
+        request_count = len(gateway.requests)
+
+        rejected = await env.step('{"action":"finish"}')
+
+        self.assertFalse(rejected.accepted)
+        self.assertEqual("stale_output_artifact", rejected.feedback_code)
+        self.assertEqual(request_count, len(gateway.requests))
 
     async def test_failed_dirty_closure_survives_an_unrelated_edit(self) -> None:
         registry = make_registry()
@@ -1795,6 +1818,7 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         await env.step(
             '{"action":"add_agent","agent_id":"a","model_id":"balanced","contract":"answer"}'
         )
+        artifact_id = env._progressive_output_metadata["a"]["artifact_id"]
         progressive = await env.step('{"action":"set_output","agent_id":"a"}')
 
         finished = await env.step('{"action":"finish"}')
@@ -1802,7 +1826,80 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(finished.accepted)
         self.assertIs(progressive.execution, finished.execution)
         self.assertTrue(finished.execution_reused)
-        self.assertEqual(2, len(gateway.requests))
+        self.assertEqual(1, len(gateway.requests))
+        self.assertEqual((), progressive.execution.calls)
+        self.assertEqual(
+            artifact_id,
+            progressive.execution.output_metadata["a"]["artifact_id"],
+        )
+
+    async def test_repeated_rejected_action_has_typed_feedback(self) -> None:
+        registry = make_registry()
+        gateway = _ImmediateGateway()
+        env = AgentWorkflowEnv(
+            registry,
+            gateway,
+            problem="question",
+            execute_on_edit=True,
+        )
+        await env.step(
+            '{"action":"add_agent","agent_id":"a","model_id":"balanced",'
+            '"contract":"answer"}'
+        )
+        await env.step('{"action":"set_output","agent_id":"a"}')
+        first = await env.step('{"action":"set_output","agent_id":"a"}')
+        repeated = await env.step('{"action":"set_output","agent_id":"a"}')
+
+        self.assertEqual("no_graph_change", first.feedback_code)
+        self.assertEqual("repeated_rejected_action", repeated.feedback_code)
+        self.assertEqual(1, len(gateway.requests))
+
+    async def test_aime_fanin_feedback_preserves_provenance_and_conflict(self) -> None:
+        registry = make_registry()
+
+        class CandidateGateway(_ImmediateGateway):
+            async def generate(self, request: AgentRequest) -> str:
+                self.requests.append(request)
+                return {
+                    "left": r"\boxed{41}",
+                    "right": "Final Answer: 42",
+                    "merge": "Final Answer: 42",
+                }[request.agent.id]
+
+        gateway = CandidateGateway()
+        env = AgentWorkflowEnv(
+            registry,
+            gateway,
+            problem="public problem only",
+            execute_on_edit=True,
+            artifact_candidate_extractor=extract_aime2026_candidate,
+        )
+        result = await env.step(
+            '{"action":"add_subgraph","agents":['
+            '{"agent_id":"left","model_id":"cheap","contract":"work left"},'
+            '{"agent_id":"right","model_id":"fast","contract":"work right"},'
+            '{"agent_id":"merge","model_id":"balanced","contract":"consume both"}'
+            '],"relations":['
+            '{"source_id":"left","target_id":"merge",'
+            '"source_to_target":true,"target_to_source":false},'
+            '{"source_id":"right","target_id":"merge",'
+            '"source_to_target":true,"target_to_source":false}'
+            '],"output_agent_id":"merge"}'
+        )
+
+        self.assertTrue(result.accepted)
+        self.assertIn('"candidate_conflict":true', result.feedback)
+        self.assertIn('"source_agent":"left"', result.feedback)
+        self.assertIn('"source_agent":"right"', result.feedback)
+        self.assertIn('"raw_output":"\\\\boxed{41}"', result.feedback)
+        merge_request = next(
+            request for request in gateway.requests if request.agent.id == "merge"
+        )
+        self.assertTrue(all(item.artifact_id for item in merge_request.upstream))
+        self.assertEqual(
+            ["left", "right"],
+            [item.source_agent_id for item in merge_request.upstream],
+        )
 
     async def test_finish_requires_the_configured_environment_actor(self) -> None:
         registry = make_registry()
@@ -1875,7 +1972,7 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(repeated.execution_reused)
         self.assertFalse(repeated.snapshot.history[-1].execution_reused)
         self.assertIn("action made no graph change", repeated.feedback)
-        self.assertEqual(2, len(gateway.requests))
+        self.assertEqual(1, len(gateway.requests))
 
     async def test_each_edit_executes_only_dirty_topological_blocks(self) -> None:
         registry = make_registry()
@@ -2035,7 +2132,7 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(premature.accepted)
         self.assertIn("exactly one upstream semantic-answer artifact", premature.feedback)
         self.assertIsNone(env.graph.output_agent_id)
-        await env.step(
+        routed = await env.step(
             '{"action":"set_relation","source_id":"solver","target_id":"formatter",'
             '"source_to_target":true,"target_to_source":false}'
         )
@@ -2044,9 +2141,10 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         )
         finished = await env.step('{"action":"finish"}')
 
-        format_request = selected.execution.calls[-1].request
-        self.assertTrue(format_request.is_output_agent)
+        format_request = routed.execution.calls[-1].request
+        self.assertFalse(format_request.is_output_agent)
         self.assertTrue(format_request.is_format_agent)
+        self.assertEqual((), selected.execution.calls)
         self.assertEqual(["solver"], [item.source_agent_id for item in format_request.upstream])
         self.assertIsNone(env.format_agent_issue())
         self.assertTrue(finished.accepted)

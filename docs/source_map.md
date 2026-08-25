@@ -175,3 +175,32 @@ AgentGraph search space, Tool catalog, and saved AgentGraph trajectories are
 unchanged. The earlier bare-integer one-call outputs are retained only as a
 pre-source-alignment diagnostic and are not reported as the final Direct
 baseline.
+
+## AIME runtime/artifact protocol v2 source map
+
+The v2 repair changes the unified execution boundary, not the AIME search
+space. Agent declarations remain `agent_id + model_id + free-text contract`,
+relations keep the existing two-bit encoding, and the Director still chooses
+the graph, Output pointer, and explicit `FINISH` action.
+
+| v2 boundary | Upstream source | Reuse / adaptation |
+|---|---|---|
+| `SET_OUTPUT` and `FINISH` reuse | FlowSteer `src/interactive/workflow_env.py::_step_internal` reuses the last execution result at FINISH; `workflow_builder.py::create_aflow_executor_wrapper` caches a node by its actual input identity | **FlowSteer reused / project thin adaptation:** Output selection is pointer-only. A fresh node artifact is not resampled; FINISH consumes the current revision's Output artifact and rejects a missing/stale artifact. |
+| Artifact identity and invalidation | Existing unified `AgentRuntime._response_output_metadata`, `UpstreamMessage`, `AgentGraph.dirty_closure`, and FlowSteer progressive execution cache | **Existing core reused:** `artifact_version=request_id` remains backward compatible and is also exposed as `artifact_id`. The receipt now explicitly projects agent, revision, model, contract, tool configuration, upstream dependencies, and raw output. Model/contract/tool edits and actual upstream relation/input changes retain the existing downstream dirty-closure behavior. |
+| Fan-in provenance | Existing one-envelope-per-edge `UpstreamMessage` routing | **Existing core reused / project thin adaptation:** every source keeps `source_agent`, `artifact_id`, and `raw_output`; the model is told that each item is an unverified work product. A task adapter may deterministically extract public candidates and report only whether distinct candidates conflict. |
+| Provider retry | SkillFlow `src/executor/openai_request_policy.py::OpenAIRequestPolicy.create_chat_completion` retries transient connection/timeout, 408/409/429, and server failures without changing the request; the project already used the same-request retry boundary in `OpenAICompatibleGateway.generate` | **SkillFlow strategy reused / receipt adaptation:** the existing finite retry/backoff policy is retained, model/provider/payload stay fixed, and every attempt is now persisted in `retry_receipts`. |
+| Partial failure state | Existing quotient-DAG scheduler preserves completed sibling blocks before fail-fast cancellation and records blocked descendants | **Existing core reused / project thin adaptation:** the same partial outputs are retained and an explicit per-node `SUCCESS`, `FAILURE`, or `BLOCKED_BY_UPSTREAM` projection is added. |
+| Canvas rejection feedback | Existing `GraphValidationIssue` codes plus SkillFlow's repeated Action/Tool-call observation precedent | **Existing core reused / project thin adaptation:** typed `feedback_code` accompanies the legacy feedback string; an identical rejected action at an unchanged revision is reported as `repeated_rejected_action`. Scalar Director observation v2 exposes current Agent IDs, available model IDs, current relations, remaining rounds, and recent typed rejections without suggesting an edit. |
+| AIME free-text answer extraction | SkillFlow's math-reward parser recognizes explicit `\\boxed{...}` and final-answer markers; downstream SkillEval's private AIME scorer canonicalizes a structured integer with `str(int(...))` | **Necessary protocol adaptation:** AgentGraph emits free text rather than an already-structured terminal action. The v2 target-blind extractor admits only a whole bare integer or one consistent set of explicit boxed/final-answer integer markers, then applies the private integer/range normalization. It omits the reward parser's broad last-number and symbolic-equivalence fallbacks. |
+
+The formal evaluator target remains isolated. Candidate extraction accepts only
+prediction text, so neither fan-in conflict detection nor terminal parsing can
+select a candidate by comparing it with the expected answer. A missing,
+ambiguous, malformed, or out-of-range candidate is a parsing failure.
+
+The v2 evaluation condition is
+`config/evaluation_aime2026_runtime_v2.yaml`. It uses the same 30 tasks, base
+weights, generation seed, and catalog presentation as v1, while assigning a
+new scalar observation protocol version and separate artifact/report paths.
+Tools, training, GRPO, MACE, Bayesian inference, and Skill functionality remain
+disabled.

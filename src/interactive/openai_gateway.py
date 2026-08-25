@@ -247,6 +247,8 @@ def _format_upstream(
             envelope.append(f"graph_revision: {item.graph_revision}")
         if item.environment_revision is not None:
             envelope.append(f"environment_revision: {item.environment_revision}")
+        if item.artifact_id is not None:
+            envelope.append(f"artifact_id: {item.artifact_id}")
         if include_dependency and item.request_or_dependency is not None:
             envelope.append(
                 f"request_or_dependency: {item.request_or_dependency}"
@@ -275,6 +277,7 @@ def _format_upstream(
             )
         envelope.extend(
             [
+                "provenance_status: unverified_work_product",
                 # Keep FlowSteer's model-visible label stable; the persisted
                 # communication envelope carries the canonical artifact_body.
                 "artifact:",
@@ -565,31 +568,23 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
         )
     elif request.is_output_agent:
         protocol = (
-            "You are the unique Output Agent. Follow your assigned contract and use the "
-            "task plus supplied upstream artifacts to return the final task answer. Treat "
-            "each routed upstream artifact as the declared dependency for this node; do "
-            "not silently redo or ignore an upstream responsibility unless its artifact "
-            "has a concrete conflict with the task. Preserve a concise answer when the "
-            "artifacts support it and resolve concrete conflicts against the task. Preserve "
-            "the output form and level of detail required by the task and Agent contract; "
-            "do not collapse a required long-form, structured, code, or environment artifact "
-            "to a short answer span. If the task supplies legal or admissible actions and asks "
-            "for one action, return exactly one listed executable action with no explanation."
+            "Follow the assigned free-text contract using the original task and the "
+            "routed upstream artifacts. Every upstream artifact is an unverified work "
+            "product with explicit provenance, not ground truth. Preserve each source "
+            "separately, report concrete conflicts without treating either source as "
+            "correct, and produce exactly the artifact requested by the contract. The "
+            "AgentGraph Output pointer selects an existing artifact outside this model "
+            "invocation; it does not change this execution contract."
         )
     else:
         protocol = (
-            "You are an intermediate AgentGraph node. Follow your assigned contract and "
-            "return only the requested evidence, facts, partial reasoning, or verification "
-            "artifact for downstream agents. When routed upstream artifacts are present, "
-            "consume them as this node's declared dependencies instead of silently redoing "
-            "their responsibilities, unless the contract explicitly asks for verification. "
-            "Preserve the task's original relation, qualifiers, comparison criterion, and "
-            "answer type. Ground each semantic candidate in the relevant source passage or "
-            "span; when the contract asks for verification, independently reconstruct that "
-            "evidence and report agreement, conflict, or insufficiency rather than merely "
-            "restating the upstream artifact. "
-            "Do not present a task-level final answer and "
-            "do not use <answer> tags."
+            "Follow the assigned free-text contract using the original task and the "
+            "routed upstream artifacts. Every upstream artifact is an unverified work "
+            "product with explicit provenance, not ground truth. Preserve each source "
+            "separately, report concrete conflicts without treating either source as "
+            "correct, and produce exactly the artifact requested by the contract. The "
+            "AgentGraph Output pointer selects an existing artifact outside this model "
+            "invocation; it does not change this execution contract."
         )
     if request.is_format_agent:
         # FlowSteer's Format Operator normally receives the problem and the
@@ -709,6 +704,12 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
             f"message_type: {request.peer_draft.message_type}\n"
             f"artifact_type: {request.peer_draft.artifact_type}\n"
             f"graph_revision: {request.peer_draft.graph_revision}\n"
+            + (
+                f"artifact_id: {request.peer_draft.artifact_id}\n"
+                if request.peer_draft.artifact_id is not None
+                else ""
+            )
+            + "provenance_status: unverified_work_product\n"
             + (
                 "environment_revision: "
                 f"{request.peer_draft.environment_revision}\n"
@@ -897,10 +898,29 @@ class OpenAICompatibleGateway:
 
         last_error: BaseException | None = None
         started_at = time.monotonic()
+        retry_receipts: list[dict[str, object]] = []
         for attempt in range(self.max_retries + 1):
+            attempt_started_at = time.monotonic()
+            backoff_seconds = 0.0
             try:
                 response = await asyncio.to_thread(self._post_json, url, api_key, payload)
                 parsed = self._parse_response(response, request)
+                retry_receipts.append(
+                    {
+                        "attempt": attempt + 1,
+                        "request_id": request.request_id,
+                        "provider_id": request.provider.provider_id,
+                        "model_id": request.model.model_id,
+                        "status": "completed",
+                        "http_status": 200,
+                        "retryable": False,
+                        "backoff_seconds": 0.0,
+                        "latency_ms": max(
+                            (time.monotonic() - attempt_started_at) * 1000.0,
+                            0.0,
+                        ),
+                    }
+                )
                 metadata = dict(parsed.metadata)
                 metadata.update(
                     {
@@ -913,20 +933,59 @@ class OpenAICompatibleGateway:
                         "backend_sampling_seed": payload.get("seed"),
                         "requested_sampling": requested_sampling,
                         "request_status": "completed",
+                        "retry_receipts": retry_receipts,
                     }
                 )
                 return AgentResponse(parsed.text, metadata)
             except HTTPError as exc:
                 last_error = exc
                 retryable = exc.code in {408, 409, 425, 429} or exc.code >= 500
-                if not retryable or attempt >= self.max_retries:
+                will_retry = retryable and attempt < self.max_retries
+                backoff_seconds = min(2.0**attempt, 4.0) if will_retry else 0.0
+                retry_receipts.append(
+                    {
+                        "attempt": attempt + 1,
+                        "request_id": request.request_id,
+                        "provider_id": request.provider.provider_id,
+                        "model_id": request.model.model_id,
+                        "status": "retryable_failure" if will_retry else "failed",
+                        "error_type": type(exc).__name__,
+                        "http_status": exc.code,
+                        "retryable": retryable,
+                        "backoff_seconds": backoff_seconds,
+                        "latency_ms": max(
+                            (time.monotonic() - attempt_started_at) * 1000.0,
+                            0.0,
+                        ),
+                    }
+                )
+                if not will_retry:
                     break
             except (URLError, TimeoutError, socket.timeout) as exc:
                 last_error = exc
-                if attempt >= self.max_retries:
+                will_retry = attempt < self.max_retries
+                backoff_seconds = min(2.0**attempt, 4.0) if will_retry else 0.0
+                retry_receipts.append(
+                    {
+                        "attempt": attempt + 1,
+                        "request_id": request.request_id,
+                        "provider_id": request.provider.provider_id,
+                        "model_id": request.model.model_id,
+                        "status": "retryable_failure" if will_retry else "failed",
+                        "error_type": type(exc).__name__,
+                        "http_status": None,
+                        "retryable": True,
+                        "backoff_seconds": backoff_seconds,
+                        "latency_ms": max(
+                            (time.monotonic() - attempt_started_at) * 1000.0,
+                            0.0,
+                        ),
+                    }
+                )
+                if not will_retry:
                     break
-            if attempt < self.max_retries:
-                await asyncio.sleep(min(2.0**attempt, 4.0))
+            if backoff_seconds > 0:
+                await asyncio.sleep(backoff_seconds)
 
         if isinstance(last_error, HTTPError):
             detail = f"HTTP {last_error.code}"
@@ -940,6 +999,7 @@ class OpenAICompatibleGateway:
         # server necessarily applied.
         error.requested_sampling = requested_sampling
         error.request_status = "failed"
+        error.retry_receipts = tuple(retry_receipts)
         error.provider_id = request.provider.provider_id
         error.model_id = request.model.model_id
         error.http_status = (

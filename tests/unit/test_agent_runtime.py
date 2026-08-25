@@ -690,6 +690,9 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(("a", "c"), raised.exception.pending_agent_ids)
         self.assertEqual("a", raised.exception.failure_records[0].agent_id)
         self.assertNotIn("c", [item.agent.id for item in gateway.requests])
+        self.assertEqual("SUCCESS", partial.agent_statuses["b"])
+        self.assertEqual("FAILURE", partial.agent_statuses["a"])
+        self.assertEqual("BLOCKED_BY_UPSTREAM", partial.agent_statuses["c"])
 
     async def test_react_failure_keeps_public_action_observation_receipts(self) -> None:
         catalog = registry()
