@@ -162,6 +162,8 @@ The fallback therefore directly reuses FlowSteer revision `1c9f2ab`:
   single-call execution boundary;
 - `scripts/prompts/prompt.py::ANSWER_GENERATION_PROMPT` supplies the exact
   content-level step-by-step and XML response protocol; and
+- `scripts/formatter.py::XmlFormatter.from_model(...).prepare_prompt(...)`
+  appends FlowSteer's actual Pydantic-derived XML field contract; and
 - `scripts/operator_analysis.py::AnswerGenerateOp` defines the `thought` and
   `answer` fields.
 

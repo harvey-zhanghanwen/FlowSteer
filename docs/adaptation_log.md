@@ -265,11 +265,12 @@ single-call Direct implementation: its initial policy also runs through the
 bounded action/terminal runtime. Reusing that code under the name Direct would
 change the comparison condition. The corrected comparator therefore uses
 FlowSteer's existing `AnswerGenerate` single-call protocol and imports
-`ANSWER_GENERATION_PROMPT` directly. Its one `<answer>` field then enters the
-unchanged SkillEval-derived integer evaluator. This adjustment affects only
-the Direct comparator; it does not alter the neutral Director prompt, free
-Agent contracts, topology search space, Canvas actions, AgentGraph execution,
-or terminal semantics.
+`ANSWER_GENERATION_PROMPT`, `AnswerGenerateOp`, and the
+`XmlFormatter.prepare_prompt` boundary directly. Its one `<answer>` field then
+enters the unchanged SkillEval-derived integer evaluator. This adjustment
+affects only the Direct comparator; it does not alter the neutral Director
+prompt, free Agent contracts, topology search space, Canvas actions,
+AgentGraph execution, or terminal semantics.
 
 To preserve the frozen AgentGraph condition, the unified evaluation runner now
 has a bounded `--direct-only` mode. It collects/resumes Direct predictions and

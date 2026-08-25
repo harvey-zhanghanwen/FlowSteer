@@ -1366,6 +1366,8 @@ def test_aime_direct_model_request_contains_problem_but_not_private_target():
     assert "Public answer format: integer-000-to-999." in request.problem
     assert "<thought>" in request.problem
     assert "<answer>" in request.problem
+    assert "# Response format (must be strictly followed)" in request.problem
+    assert "<answer>The final answer to the question</answer>" in request.problem
     assert sentinel not in request.problem
     assert sentinel not in request.agent.contract
 

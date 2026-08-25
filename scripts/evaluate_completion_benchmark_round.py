@@ -34,6 +34,8 @@ if str(SCRIPTS_ROOT) not in sys.path:
 
 import evaluate_hotpotqa_round as hotpot_round
 from scripts.prompts.prompt import ANSWER_GENERATION_PROMPT
+from scripts.formatter import XmlFormatter
+from scripts.operator_analysis import AnswerGenerateOp
 from train_agentgraph_smoke import (
     LiveSmokeBackend,
     _dataset_key,
@@ -1290,7 +1292,9 @@ async def _direct_one(
             f"{task.question}\n\n"
             f"Public answer format: {answer_format}."
         )
-        direct_problem = ANSWER_GENERATION_PROMPT.format(input=public_input)
+        direct_problem = XmlFormatter.from_model(AnswerGenerateOp).prepare_prompt(
+            ANSWER_GENERATION_PROMPT.format(input=public_input)
+        )
 
     request = AgentRequest(
         request_id=f"{run_id}:direct:single",
