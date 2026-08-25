@@ -130,6 +130,7 @@ def test_official_aime_initial_config_keeps_learning_tools_and_priors_disabled()
     _MODULE.validate_completion_benchmark_config(config)
 
     assert config["experiment"]["training_enabled"] is False
+    assert config["execution_timeout"] == 600.0
     assert config["director"]["lora"]["enabled"] is False
     assert config["aime_tool_runtime"]["enabled"] is False
     assert config["grpo"]["enabled"] is False

@@ -5,6 +5,7 @@
 # workflow.
 
 schema_version: "flowsteer.agentgraph.config.v1"
+execution_timeout: 600.0
 experiment:
   name: "aime2026_unified_initial_v1"
   phase: "aime2026_evaluation"
