@@ -3272,7 +3272,8 @@ def _completion_stable_zero_check(
             )
         elif environment_dataset:
             environment_terminal_receipt_valid = _graph_environment_terminal_receipt(
-                graph_value
+                graph_value,
+                dataset_key=dataset_key,
             )
         check = {
             **dict(base_check),
@@ -3302,6 +3303,8 @@ def _completion_stable_zero_check(
 
 def _graph_environment_terminal_receipt(
     trajectory: Optional[Mapping[str, Any]],
+    *,
+    dataset_key: str,
 ) -> bool:
     """Validate a persisted terminal or fixed-budget truncation receipt.
 
@@ -3314,48 +3317,79 @@ def _graph_environment_terminal_receipt(
     if not isinstance(trajectory, Mapping):
         return False
     turns = trajectory.get("turns")
-    if not isinstance(turns, list):
+    if not isinstance(turns, list) or not turns:
         return False
-    for turn in reversed(turns):
-        if not isinstance(turn, Mapping):
-            continue
-        runtime_summary = turn.get("runtime_summary")
-        if not isinstance(runtime_summary, Mapping):
-            continue
-        output_metadata = runtime_summary.get("output_metadata")
-        if not isinstance(output_metadata, Mapping):
-            continue
-        for metadata in output_metadata.values():
-            if not isinstance(metadata, Mapping):
-                continue
-            trace = metadata.get("evaluator_environment_trace")
-            terminal = (
-                metadata.get("environment_terminal") is True
-                and isinstance(trace, list)
-                and bool(trace)
-                and isinstance(trace[-1], Mapping)
-                and trace[-1].get("done") is True
-                and trace[-1].get("state_advanced") is True
-            )
-            if terminal:
-                return True
-            turns_used = metadata.get("environment_turns_used")
-            max_turns = metadata.get("environment_max_turns")
-            truncated = (
-                metadata.get("environment_terminal") is False
-                and metadata.get("environment_truncated") is True
-                and isinstance(turns_used, int)
-                and not isinstance(turns_used, bool)
-                and isinstance(max_turns, int)
-                and not isinstance(max_turns, bool)
-                and max_turns > 0
-                and turns_used == max_turns
-                and isinstance(trace, list)
-                and len(trace) == max_turns
-            )
-            if truncated:
-                return True
-    return False
+    final_turn = turns[-1]
+    if not isinstance(final_turn, Mapping):
+        return False
+    action = final_turn.get("action")
+    if not isinstance(action, Mapping):
+        return False
+    action_name = action.get("action", action.get("action_type"))
+    if not isinstance(action_name, str) or action_name.strip().lower() != "finish":
+        return False
+    runtime_summary = final_turn.get("runtime_summary")
+    if not isinstance(runtime_summary, Mapping):
+        return False
+    output_metadata = runtime_summary.get("output_metadata")
+    if not isinstance(output_metadata, Mapping):
+        return False
+    candidates = [
+        metadata
+        for metadata in output_metadata.values()
+        if isinstance(metadata, Mapping)
+        and "evaluator_environment_trace" in metadata
+    ]
+    if len(candidates) != 1:
+        return False
+    metadata = candidates[0]
+    task_family = metadata.get("task_family")
+    if (
+        not isinstance(task_family, str)
+        or task_family.strip().lower() != dataset_key.strip().lower()
+    ):
+        return False
+    trace = metadata.get("evaluator_environment_trace")
+    if (
+        not isinstance(trace, list)
+        or not trace
+        or any(not isinstance(entry, Mapping) for entry in trace)
+    ):
+        return False
+    if any(
+        not isinstance(entry.get("step"), int)
+        or isinstance(entry.get("step"), bool)
+        or entry.get("step") != index
+        for index, entry in enumerate(trace)
+    ):
+        return False
+    turns_used = metadata.get("environment_turns_used")
+    max_turns = metadata.get("environment_max_turns")
+    if (
+        not isinstance(turns_used, int)
+        or isinstance(turns_used, bool)
+        or not isinstance(max_turns, int)
+        or isinstance(max_turns, bool)
+        or max_turns <= 0
+        or turns_used != len(trace)
+        or turns_used > max_turns
+    ):
+        return False
+    terminal = metadata.get("environment_terminal")
+    truncated = metadata.get("environment_truncated")
+    if terminal is True:
+        return bool(
+            truncated is False
+            and all(entry.get("done") is False for entry in trace[:-1])
+            and trace[-1].get("done") is True
+            and trace[-1].get("state_advanced") is True
+        )
+    return bool(
+        terminal is False
+        and truncated is True
+        and turns_used == max_turns
+        and all(entry.get("done") is False for entry in trace)
+    )
 
 
 def _existing_trajectory_checkpoint(

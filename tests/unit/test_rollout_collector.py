@@ -224,17 +224,17 @@ class UnifiedMetadataGateway:
                         "state_advanced": True,
                     },
                 ),
-                "environment_terminal": True,
-                "environment_truncated": False,
-                "environment_max_turns": 10,
+                "environment_terminal": False,
+                "environment_truncated": True,
+                "environment_max_turns": 1,
                 "environment_turns_used": 1,
                 "environment_steps": 1,
                 "evaluator_environment_trace": (
                     {
                         "step": 0,
                         "action": "search[query]",
-                        "reward": 1.0,
-                        "done": True,
+                        "reward": 0.0,
+                        "done": False,
                     },
                 ),
                 "opaque_runtime_object": object(),
@@ -2196,12 +2196,12 @@ def test_collector_materializes_exact_finish_trajectory_and_evidence(tmp_path):
         "initial observation"
     )
     assert response_receipt["environment_receipts"][0]["state_advanced"] is True
-    assert response_receipt["environment_terminal"] is True
-    assert response_receipt["environment_truncated"] is False
-    assert response_receipt["environment_max_turns"] == 10
+    assert response_receipt["environment_terminal"] is False
+    assert response_receipt["environment_truncated"] is True
+    assert response_receipt["environment_max_turns"] == 1
     assert response_receipt["environment_turns_used"] == 1
     assert response_receipt["environment_steps"] == 1
-    assert response_receipt["evaluator_environment_trace"][0]["reward"] == 1.0
+    assert response_receipt["evaluator_environment_trace"][0]["reward"] == 0.0
     assert response_receipt["provider_id"] == "vector"
     assert response_receipt["model_id"] == "cheap-model"
     assert response_receipt["prompt_tokens"] == 12
@@ -2222,8 +2222,8 @@ def test_collector_materializes_exact_finish_trajectory_and_evidence(tmp_path):
     assert output_metadata["continuation_source_agent_id"] == "failed_reasoner"
     assert output_metadata["continued_action_history_count"] == 1
     assert output_metadata["continued_tool_receipt_count"] == 1
-    assert output_metadata["environment_truncated"] is False
-    assert output_metadata["environment_max_turns"] == 10
+    assert output_metadata["environment_truncated"] is True
+    assert output_metadata["environment_max_turns"] == 1
     assert output_metadata["evaluator_environment_trace"] == response_receipt[
         "evaluator_environment_trace"
     ]

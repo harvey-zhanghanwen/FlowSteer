@@ -754,9 +754,14 @@ def test_environment_stable_zero_uses_terminal_receipt_not_free_text_answer():
                 "runtime_summary": {
                     "output_metadata": {
                         "actor": {
+                            "task_family": "webshop",
                             "environment_terminal": True,
+                            "environment_truncated": False,
+                            "environment_turns_used": 1,
+                            "environment_max_turns": 10,
                             "evaluator_environment_trace": [
                                 {
+                                    "step": 0,
                                     "action": "click[buy now]",
                                     "done": True,
                                     "state_advanced": True,
@@ -810,13 +815,24 @@ def test_environment_stable_zero_accepts_exact_fixed_budget_truncation():
         }
     }
     metadata = {
+        "task_family": "webshop",
         "environment_terminal": False,
         "environment_truncated": True,
         "environment_turns_used": 2,
         "environment_max_turns": 2,
         "evaluator_environment_trace": [
-            {"action": "search[item]", "done": False, "state_advanced": True},
-            {"action": "click[item]", "done": False, "state_advanced": True},
+            {
+                "step": 0,
+                "action": "search[item]",
+                "done": False,
+                "state_advanced": True,
+            },
+            {
+                "step": 1,
+                "action": "click[item]",
+                "done": False,
+                "state_advanced": True,
+            },
         ],
     }
     trajectory = {
@@ -868,6 +884,103 @@ def test_environment_stable_zero_accepts_exact_fixed_budget_truncation():
     )
     assert malformed["passed"] is False
     assert malformed["checks"][0]["environment_terminal_receipt_valid"] is False
+
+    metadata["environment_turns_used"] = 2
+    metadata["task_family"] = "alfworld"
+    wrong_family = _MODULE._completion_stable_zero_check(
+        (task,), direct, {task.task_id: trajectory}, dataset_key="webshop"
+    )
+    assert wrong_family["passed"] is False
+
+    metadata["task_family"] = "webshop"
+    metadata["evaluator_environment_trace"][1]["done"] = True
+    contradictory = _MODULE._completion_stable_zero_check(
+        (task,), direct, {task.task_id: trajectory}, dataset_key="webshop"
+    )
+    assert contradictory["passed"] is False
+
+
+def test_environment_stable_zero_rejects_stale_pre_finish_receipt():
+    task = _MODULE.TaskRecord(
+        task_id="webshop:00500",
+        question="buy the requested item",
+        ground_truth="environment_terminal_success",
+        split="validation",
+        metadata={"dataset_key": "webshop"},
+    )
+    evaluator_version = _MODULE.evaluator_version_for(task)
+    direct = {
+        task.task_id: {
+            "evaluation": {
+                "valid": True,
+                "evaluator_version": evaluator_version,
+            }
+        }
+    }
+    trajectory = {
+        "explicit_finish": True,
+        "final_answer": "",
+        "evaluation": {
+            "valid": True,
+            "evaluator_version": evaluator_version,
+        },
+        "turns": [
+            {
+                "receipt_verified": True,
+                "action": {"action": "modify_agent"},
+                "runtime_summary": {
+                    "output_metadata": {
+                        "actor": {
+                            "task_family": "webshop",
+                            "environment_terminal": True,
+                            "environment_truncated": False,
+                            "environment_turns_used": 1,
+                            "environment_max_turns": 10,
+                            "evaluator_environment_trace": [
+                                {
+                                    "step": 0,
+                                    "done": True,
+                                    "state_advanced": True,
+                                }
+                            ],
+                        }
+                    }
+                },
+            },
+            {
+                "receipt_verified": True,
+                "director_attempt_count": 1,
+                "director_generation_seed": 1,
+                "director_latency_ms": 1.0,
+                "action": {"action": "finish"},
+                "graph_snapshot": {"output_agent_id": "actor"},
+                "executions": [
+                    {
+                        "agent_id": "actor",
+                        "execution_id": "execution-2",
+                        "metadata": {
+                            "request": {
+                                "agent": {"agent_id": "actor"},
+                                "model": {"model_id": "m"},
+                                "phase": "single",
+                                "upstream": [],
+                                "own_draft": None,
+                                "peer_draft": None,
+                                "rendered_messages": [],
+                            }
+                        },
+                    }
+                ],
+                "runtime_summary": {"output_metadata": {"actor": {}}},
+            },
+        ],
+    }
+
+    result = _MODULE._completion_stable_zero_check(
+        (task,), direct, {task.task_id: trajectory}, dataset_key="webshop"
+    )
+    assert result["passed"] is False
+    assert result["checks"][0]["environment_terminal_receipt_valid"] is False
 
 
 def test_reports_aime_accuracy_and_healthbench_raw_score():
