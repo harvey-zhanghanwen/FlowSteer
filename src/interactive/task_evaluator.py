@@ -1063,7 +1063,10 @@ async def _evaluate_environment(
     max_environment_steps: int,
     ragen_adapter_path: Path,
     replay_trace: Sequence[Mapping[str, Any]] = (),
+    replay_is_complete: bool = False,
 ) -> EvaluationOutcome:
+    if type(replay_is_complete) is not bool:
+        raise TypeError("replay_is_complete must be bool")
     if isinstance(replay_trace, (str, bytes)) or not isinstance(
         replay_trace, Sequence
     ):
@@ -1071,7 +1074,7 @@ async def _evaluate_environment(
             "environment_replay_trace_invalid",
             evaluator_version=RAGEN_EVALUATOR_VERSION,
         )
-    if run_graph is None and not replay_trace:
+    if run_graph is None and not replay_trace and not replay_is_complete:
         return _invalid(
             "environment_graph_callback_unavailable",
             evaluator_version=RAGEN_EVALUATOR_VERSION,
@@ -1441,14 +1444,20 @@ async def _evaluate_environment(
     if trace:
         lock_details["replayed_environment_steps"] = len(trace)
 
-    if not terminal and len(trace) < max_environment_steps and run_graph is None:
+    if (
+        not terminal
+        and len(trace) < max_environment_steps
+        and run_graph is None
+        and not replay_is_complete
+    ):
         return _invalid(
             "environment_graph_callback_unavailable",
             evaluator_version=RAGEN_EVALUATOR_VERSION,
             details={"trace": trace, **lock_details},
         )
 
-    for step_index in range(len(trace), max_environment_steps):
+    replay_stop = len(trace) if replay_is_complete else max_environment_steps
+    for step_index in range(len(trace), replay_stop):
         if terminal:
             break
         available_actions = getattr(adapter, "available_actions", ()) or ()
@@ -1624,12 +1633,21 @@ async def _evaluate_environment(
             "steps": float(len(trace)),
             "terminal": float(terminal),
         },
-        reason="evaluated" if terminal else "environment_step_limit",
+        reason=(
+            "evaluated"
+            if terminal
+            else (
+                "environment_rollout_closed_before_terminal"
+                if replay_is_complete
+                else "environment_step_limit"
+            )
+        ),
         details={
             "env_type": env_type,
             "terminal_observation": observation,
             "terminal_info": _detail_value(terminal_info),
             "trace": trace,
+            "replay_is_complete": replay_is_complete,
             **lock_details,
         },
         evaluator_version=RAGEN_EVALUATOR_VERSION,
@@ -1693,6 +1711,7 @@ async def evaluate_task(
     max_environment_steps: int = 50,
     ragen_adapter_path: str | Path = DEFAULT_RAGEN_ADAPTER_PATH,
     environment_replay_trace: Sequence[Mapping[str, Any]] = (),
+    environment_replay_is_complete: bool = False,
 ) -> EvaluationOutcome:
     """Evaluate one final answer without manufacturing unavailable rewards.
 
@@ -1702,7 +1721,9 @@ async def evaluate_task(
     invalid unless a real harness callback explicitly reports ``resolved``.
     ``environment_replay_trace`` may contain a prior WebShop/ALFWorld evaluator
     prefix: the environment is reset and each recorded transition is checked
-    exactly before ``run_graph`` is called for the first missing step.
+    exactly before ``run_graph`` is called for the first missing step.  When
+    ``environment_replay_is_complete`` is true, that trace is the complete
+    rollout ledger and evaluation must not request another policy action.
     """
 
     if max_environment_steps <= 0:
@@ -1727,6 +1748,7 @@ async def evaluate_task(
             max_environment_steps=max_environment_steps,
             ragen_adapter_path=Path(ragen_adapter_path),
             replay_trace=environment_replay_trace,
+            replay_is_complete=environment_replay_is_complete,
         )
     if dataset == "swe_bench":
         return await _evaluate_swebench(record, str(prediction), swe_harness=swe_harness)

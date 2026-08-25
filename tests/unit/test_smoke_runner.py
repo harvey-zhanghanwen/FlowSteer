@@ -1742,12 +1742,21 @@ class EnvironmentRuntimeWiringTests(unittest.TestCase):
             workflow_problem(task, self._config()),
         )
 
-    def test_partial_nonterminal_trace_cannot_fall_back_to_old_runtime(self) -> None:
-        task = self._task()
-        backend = self._backend(self._config())
+    def test_partial_nonterminal_trace_is_evaluated_as_complete_rollout(self) -> None:
+        task = self._task("alfworld")
+        backend = self._backend(
+            self._config(source="alfworld", runtime_budget=3, evaluator_budget=3)
+        )
         backend.judge = None
         backend.judge_model = ""
         backend.swe_harness = None
+        outcome = _MODULE.EvaluationOutcome(
+            valid=True,
+            reward=0.0,
+            metrics={"success": 0.0, "steps": 1.0},
+            reason="environment_rollout_closed_before_terminal",
+            evaluator_version=_MODULE.RAGEN_EVALUATOR_VERSION,
+        )
         partial = (
             {
                 "step": 0,
@@ -1761,24 +1770,66 @@ class EnvironmentRuntimeWiringTests(unittest.TestCase):
                 "state_advanced": True,
             },
         )
+        captured: dict = {}
 
-        with (
-            patch.object(
-                _MODULE,
-                "evaluate_task",
-                side_effect=AssertionError("partial trace must not reach evaluator"),
-            ),
-            self.assertRaisesRegex(ConfigurationError, "terminal state or exhaust"),
-        ):
-            asyncio.run(
+        async def fake_evaluate_task(*args, **kwargs):  # type: ignore[no-untyped-def]
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+            return outcome
+
+        with patch.object(_MODULE, "evaluate_task", side_effect=fake_evaluate_task):
+            result = asyncio.run(
                 backend.evaluate_final_graph(
                     task,
-                    "next",
+                    None,
                     {"nodes": [], "relations": [], "revision": 0},
                     rollout_index=0,
                     environment_replay_trace=partial,
                 )
             )
+
+        self.assertIs(outcome, result)
+        self.assertEqual(partial, captured["kwargs"]["environment_replay_trace"])
+        self.assertTrue(captured["kwargs"]["environment_replay_is_complete"])
+        self.assertEqual("", captured["args"][1])
+
+    def test_alfworld_empty_trace_is_evaluated_as_complete_zero_action_rollout(
+        self,
+    ) -> None:
+        task = self._task("alfworld")
+        backend = self._backend(
+            self._config(source="alfworld", runtime_budget=3, evaluator_budget=3)
+        )
+        backend.judge = None
+        backend.judge_model = ""
+        backend.swe_harness = None
+        outcome = _MODULE.EvaluationOutcome(
+            valid=True,
+            reward=0.0,
+            metrics={"success": 0.0, "steps": 0.0},
+            reason="environment_rollout_closed_before_terminal",
+            evaluator_version=_MODULE.RAGEN_EVALUATOR_VERSION,
+        )
+        captured: dict = {}
+
+        async def fake_evaluate_task(*args, **kwargs):  # type: ignore[no-untyped-def]
+            captured["kwargs"] = kwargs
+            return outcome
+
+        with patch.object(_MODULE, "evaluate_task", side_effect=fake_evaluate_task):
+            result = asyncio.run(
+                backend.evaluate_final_graph(
+                    task,
+                    None,
+                    {"nodes": [], "relations": [], "revision": 0},
+                    rollout_index=0,
+                    environment_replay_trace=(),
+                )
+            )
+
+        self.assertIs(outcome, result)
+        self.assertEqual((), captured["kwargs"]["environment_replay_trace"])
+        self.assertTrue(captured["kwargs"]["environment_replay_is_complete"])
 
     def setUp(self) -> None:
         import tempfile

@@ -2088,9 +2088,157 @@ def _alfworld_trace(value: Optional[Mapping[str, Any]]) -> tuple[Mapping[str, An
     evaluation = value.get("evaluation") if isinstance(value, Mapping) else None
     details = evaluation.get("details") if isinstance(evaluation, Mapping) else None
     trace = details.get("trace") if isinstance(details, Mapping) else None
-    if not isinstance(trace, Sequence) or isinstance(trace, (str, bytes)):
-        return ()
-    return tuple(item for item in trace if isinstance(item, Mapping))
+    if isinstance(trace, Sequence) and not isinstance(trace, (str, bytes)):
+        return tuple(item for item in trace if isinstance(item, Mapping))
+
+    # Pre-fix terminal-failure receipts kept the authoritative environment
+    # ledger on each executor response but returned before copying it into the
+    # evaluator details.  Select the longest, latest task-scoped ledger.  This
+    # is a deterministic receipt projection; it never calls a model or invents
+    # an environment transition.
+    candidates: list[tuple[int, int, tuple[Mapping[str, Any], ...]]] = []
+    turns = value.get("turns") if isinstance(value, Mapping) else None
+    if isinstance(turns, Sequence) and not isinstance(turns, (str, bytes)):
+        order = 0
+        for turn in turns:
+            executions = turn.get("executions") if isinstance(turn, Mapping) else None
+            if not isinstance(executions, Sequence) or isinstance(
+                executions, (str, bytes)
+            ):
+                continue
+            for execution in executions:
+                order += 1
+                metadata = (
+                    execution.get("metadata")
+                    if isinstance(execution, Mapping)
+                    else None
+                )
+                response = (
+                    metadata.get("response")
+                    if isinstance(metadata, Mapping)
+                    else None
+                )
+                raw_trace = (
+                    response.get("evaluator_environment_trace")
+                    if isinstance(response, Mapping)
+                    else None
+                )
+                if not isinstance(raw_trace, Sequence) or isinstance(
+                    raw_trace, (str, bytes)
+                ):
+                    continue
+                ledger = tuple(
+                    item for item in raw_trace if isinstance(item, Mapping)
+                )
+                candidates.append((len(ledger), order, ledger))
+    return max(candidates, default=(0, 0, ()), key=lambda item: item[:2])[2]
+
+
+def _alfworld_action_budget(value: Mapping[str, Any]) -> Optional[int]:
+    """Read the pinned SkillFlow policy-turn budget from the task receipt."""
+
+    task = value.get("task")
+    metadata = task.get("metadata") if isinstance(task, Mapping) else None
+    skillflow = metadata.get("skillflow") if isinstance(metadata, Mapping) else None
+    extra = skillflow.get("extra") if isinstance(skillflow, Mapping) else None
+    env_config = (
+        skillflow.get("env_config") if isinstance(skillflow, Mapping) else None
+    )
+    for source, key in (
+        (extra, "action_policy_budget"),
+        (env_config, "max_steps"),
+    ):
+        raw = source.get(key) if isinstance(source, Mapping) else None
+        if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0:
+            return raw
+    return None
+
+
+def _alfworld_first_runtime_failure(
+    value: Mapping[str, Any],
+) -> Optional[Mapping[str, Any]]:
+    """Return the first typed Canvas/runtime failure receipt, if any."""
+
+    turns = value.get("turns")
+    if not isinstance(turns, Sequence) or isinstance(turns, (str, bytes)):
+        return None
+    for turn in turns:
+        if not isinstance(turn, Mapping):
+            continue
+        round_index = turn.get("round_index")
+        action = turn.get("action")
+        action_name = action.get("action") if isinstance(action, Mapping) else None
+        runtime = turn.get("runtime_summary")
+        failures = (
+            runtime.get("failure_records") if isinstance(runtime, Mapping) else None
+        )
+        if isinstance(failures, Sequence) and not isinstance(
+            failures, (str, bytes)
+        ):
+            for failure in failures:
+                if not isinstance(failure, Mapping):
+                    continue
+                error_type = next(
+                    (
+                        failure.get(key)
+                        for key in (
+                            "error_type",
+                            "failure_type",
+                            "public_error_code",
+                        )
+                        if isinstance(failure.get(key), str)
+                        and failure.get(key)
+                    ),
+                    "agent_runtime_failure",
+                )
+                lowered = str(error_type).lower()
+                message = str(failure.get("message", ""))
+                lowered_message = message.lower()
+                layer = (
+                    "provider"
+                    if "provider" in lowered
+                    else "tool_interface"
+                    if (
+                        "must allow exactly its request-scoped environment tool"
+                        in lowered_message
+                        or "stateful tool" in lowered_message
+                        or "tool capability" in lowered_message
+                    )
+                    else "environment"
+                    if (
+                        "environment" in lowered
+                        and any(
+                            marker in lowered_message
+                            for marker in (
+                                "reset failed",
+                                "step failed",
+                                "unavailable",
+                            )
+                        )
+                    )
+                    else "agent_runtime"
+                )
+                return {
+                    "diagnosis_scope": "first_observable_failure",
+                    "failure_layer": layer,
+                    "first_error_turn": round_index,
+                    "first_error_action": action_name,
+                    "first_error_agent_id": failure.get("agent_id"),
+                    "error": error_type,
+                }
+        feedback = turn.get("canvas_feedback")
+        if isinstance(feedback, str) and feedback.startswith("edit rejected:"):
+            return {
+                "diagnosis_scope": "first_observable_failure",
+                "failure_layer": "director_canvas",
+                "first_error_turn": round_index,
+                "first_error_action": action_name,
+                "first_error_agent_id": (
+                    action.get("agent_id") if isinstance(action, Mapping) else None
+                ),
+                "error": "canvas_edit_rejected",
+            }
+    return None
 
 
 def _alfworld_episode_statistics(
@@ -2122,6 +2270,10 @@ def _alfworld_episode_statistics(
     parse_errors = sum(item.get("parse_error") is True for item in trace)
     evaluation = value.get("evaluation") if isinstance(value, Mapping) else None
     metrics = evaluation.get("metrics") if isinstance(evaluation, Mapping) else None
+    final_info = trace[-1].get("info") if trace else None
+    trace_score = (
+        final_info.get("score") if isinstance(final_info, Mapping) else None
+    )
     return {
         "environment_turn_count": len(trace),
         "environment_action_count": len(actions),
@@ -2133,7 +2285,11 @@ def _alfworld_episode_statistics(
             trace and isinstance(trace[-1], Mapping) and trace[-1].get("done") is True
         ),
         "episode_score": (
-            metrics.get("episode_score") if isinstance(metrics, Mapping) else None
+            metrics.get("episode_score")
+            if isinstance(metrics, Mapping)
+            and isinstance(metrics.get("episode_score"), (int, float))
+            and not isinstance(metrics.get("episode_score"), bool)
+            else trace_score
         ),
     }
 
@@ -2153,6 +2309,9 @@ def _alfworld_wrong_demo_diagnosis(
     evaluation = graph_value.get("evaluation")
     reason = evaluation.get("reason") if isinstance(evaluation, Mapping) else None
     details = evaluation.get("details") if isinstance(evaluation, Mapping) else None
+    runtime_failure = _alfworld_first_runtime_failure(graph_value)
+    if runtime_failure is not None:
+        return runtime_failure
     trace = _alfworld_trace(graph_value)
     for entry in trace:
         step = entry.get("step")
@@ -2189,13 +2348,6 @@ def _alfworld_wrong_demo_diagnosis(
                 "error": "environment_action_had_no_effect",
                 "action": entry.get("action"),
             }
-    if graph_value.get("explicit_finish") is not True:
-        return {
-            "diagnosis_scope": "first_observable_failure",
-            "failure_layer": "director",
-            "first_error_turn": None,
-            "error": "missing_explicit_finish",
-        }
     if isinstance(evaluation, Mapping) and evaluation.get("valid") is not True:
         return {
             "diagnosis_scope": "first_observable_failure",
@@ -2208,11 +2360,17 @@ def _alfworld_wrong_demo_diagnosis(
         details.get("terminal_info") if isinstance(details, Mapping) else None
     )
     if not terminal:
+        budget = _alfworld_action_budget(graph_value)
+        exhausted = budget is not None and len(trace) >= budget
         return {
             "diagnosis_scope": "first_observable_failure",
-            "failure_layer": "agent_policy",
+            "failure_layer": "agent_policy" if exhausted else "director",
             "first_error_turn": len(trace),
-            "error": "action_budget_exhausted_before_environment_terminal",
+            "error": (
+                "action_budget_exhausted_before_environment_terminal"
+                if exhausted
+                else "director_max_rounds_before_environment_terminal"
+            ),
         }
     if isinstance(terminal_info, Mapping) and terminal_info.get("won") is False:
         return {
@@ -2220,6 +2378,13 @@ def _alfworld_wrong_demo_diagnosis(
             "failure_layer": "agent_policy",
             "first_error_turn": len(trace) - 1,
             "error": "environment_terminal_without_goal_satisfaction",
+        }
+    if graph_value.get("explicit_finish") is not True:
+        return {
+            "diagnosis_scope": "first_observable_failure",
+            "failure_layer": "director",
+            "first_error_turn": None,
+            "error": "missing_explicit_finish_after_environment_terminal",
         }
     return {
         "diagnosis_scope": "first_observable_failure",
@@ -2698,6 +2863,37 @@ def _report(
         for row in below_full
         if isinstance(row.get("wrong_demo_diagnosis"), Mapping)
     ]
+    rows_by_task_id = {
+        str(row.get("task_id")): row
+        for row in rows
+        if isinstance(row.get("task_id"), str)
+    }
+
+    def _collection_failure_recovered(failure: Mapping[str, Any]) -> bool:
+        task_id = failure.get("task_id")
+        condition = failure.get("condition")
+        if not isinstance(task_id, str) or condition not in {"direct", "agentgraph"}:
+            return False
+        row = rows_by_task_id.get(task_id)
+        current = row.get(condition) if isinstance(row, Mapping) else None
+        if not isinstance(current, Mapping) or current.get("available") is not True:
+            return False
+        if current.get("valid") is True:
+            return True
+        return bool(
+            condition == "agentgraph"
+            and dataset_key == "aime_2026"
+            and _is_reportable_aime_terminal_failure(current)
+        )
+
+    recovered_collection_failure_attempt_count = sum(
+        _collection_failure_recovered(failure) for failure in collection_failures
+    )
+    unresolved_collection_failure_keys = {
+        (str(failure.get("task_id")), str(failure.get("condition")))
+        for failure in collection_failures
+        if not _collection_failure_recovered(failure)
+    }
     return {
         "schema_version": "flowsteer.completion_benchmark.round_report.v1",
         "dataset_key": dataset_key,
@@ -2800,6 +2996,17 @@ def _report(
                 for failure in collection_failures
             ],
         },
+        "collection_failure_attempt_count": len(collection_failures),
+        "recovered_collection_failure_attempt_count": (
+            recovered_collection_failure_attempt_count
+        ),
+        "unresolved_collection_failure_task_count": len(
+            unresolved_collection_failure_keys
+        ),
+        "unresolved_collection_failure_tasks": [
+            {"task_id": task_id, "condition": condition}
+            for task_id, condition in sorted(unresolved_collection_failure_keys)
+        ],
         "failure_types": dict(sorted(failure_counts.items())),
         "below_full_score_demo_count": len(below_full),
         "typical_below_full_score_task_ids": [
@@ -2891,9 +3098,6 @@ def _report_markdown(report: Mapping[str, Any]) -> str:
         graph_receipts = report.get("execution_receipts", {}).get(
             "agentgraph", {}
         )
-        collection_failures = report.get("execution_receipts", {}).get(
-            "collection_failures", ()
-        )
         wrong_demos = report.get(
             "alfworld_wrong_demo_first_observable_failures", ()
         )
@@ -2948,7 +3152,7 @@ AgentGraph termination: explicit FINISH **{report.get('explicit_finished_count',
 - Direct execution error distribution: `{json.dumps(direct_error_distribution, ensure_ascii=False, sort_keys=True)}`
 - AgentGraph execution error distribution: `{json.dumps(graph_execution_error_distribution, ensure_ascii=False, sort_keys=True)}`
 - AgentGraph runtime failed turns: **{graph_receipts.get('runtime_failed_turn_count', 0)}**; structured runtime failure distribution: `{json.dumps(graph_runtime_failure_distribution, ensure_ascii=False, sort_keys=True)}`
-- Collection failures: **{len(collection_failures)}**
+- Historical collection failure attempts: **{report.get('collection_failure_attempt_count', 0)}**; recovered attempts: **{report.get('recovered_collection_failure_attempt_count', 0)}**; unresolved task-condition pairs: **{report.get('unresolved_collection_failure_task_count', 0)}**
 
 ## Wrong Demo: first observable failure
 
@@ -3226,15 +3430,17 @@ async def _rescore_static_trajectory_checkpoint(
     selected: Sequence[TaskRecord],
     trajectories: Mapping[str, Mapping[str, Any]],
 ) -> dict[str, dict[str, Any]]:
-    """Re-evaluate persisted explicit terminal outputs without model calls.
+    """Re-evaluate persisted terminal outputs and environment ledgers.
 
     This mirrors the existing Direct rescore boundary above.  It is used only
     by ``--direct-only`` when an evaluator/output-parser version changes while
-    the frozen AgentGraph execution receipt remains unchanged.
+    the frozen AgentGraph execution receipt remains unchanged.  ALFWorld may
+    also require a no-model native replay when a historical max-rounds receipt
+    omitted its environment ledger from ``evaluation.details``.
     """
 
     rescored: dict[str, dict[str, Any]] = {}
-    for task in selected:
+    for rollout_index, task in enumerate(selected):
         candidate = trajectories.get(task.task_id)
         if not isinstance(candidate, Mapping):
             continue
@@ -3293,7 +3499,46 @@ async def _rescore_static_trajectory_checkpoint(
         evaluation = candidate.get("evaluation")
         final_answer = candidate.get("final_answer")
         target_version = evaluator_version_for(task)
-        if (
+        evaluation_details = (
+            evaluation.get("details") if isinstance(evaluation, Mapping) else None
+        )
+        alfworld_replay_missing = (
+            _dataset_key(task) == "alfworld"
+            and (
+                not isinstance(evaluation_details, Mapping)
+                or not isinstance(evaluation_details.get("trace"), list)
+            )
+        )
+        if alfworld_replay_missing:
+            terminal_graph = _evaluated_graph(updated) or _terminal_canvas_graph(
+                updated
+            )
+            if not isinstance(terminal_graph, Mapping):
+                raise CompletionBenchmarkRoundError(
+                    f"ALFWorld trajectory {task.task_id!r} has no terminal graph"
+                )
+            replay_trace = _alfworld_trace(updated)
+            updated["evaluation"] = asdict(
+                await backend.evaluate_final_graph(
+                    task,
+                    final_answer if isinstance(final_answer, str) else None,
+                    terminal_graph,
+                    rollout_index=rollout_index,
+                    environment_replay_trace=replay_trace,
+                )
+            )
+            updated["evaluation_rescore_receipt"] = {
+                "mode": "offline_native_environment_replay",
+                "source_evaluator_version": (
+                    evaluation.get("evaluator_version")
+                    if isinstance(evaluation, Mapping)
+                    else None
+                ),
+                "target_evaluator_version": target_version,
+                "replayed_environment_turns": len(replay_trace),
+                "model_calls": 0,
+            }
+        elif (
             candidate.get("explicit_finish") is True
             and isinstance(final_answer, str)
             and (

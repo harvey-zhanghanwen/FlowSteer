@@ -294,10 +294,10 @@ adapter.
 | --- | --- | --- | --- |
 | `config/datasets_alfworld_protocol_v10.yaml` and `scripts/prepare_alfworld_protocol_v10.py::_default_task_provider/_record/prepare` | SkillFlow `protocol_v10.yaml`, `protocol_v10_sources.yaml`, and deployed `RAGENAdapter`/`ALFWorldEnv` inventory | Necessary adaptation | Materialize one independent train preflight task plus the complete pinned `valid_seen` and `valid_unseen` inventories into the existing `TaskRecord`/JSONL contract without changing instruction, official split, game identity, seed, 20-turn policy budget, or 50-step simulator cap. `prepare_alfworld_dataset.py` is reused only for existing identity/record helpers; it is not the protocol-v10 entry point. |
 | `src/interactive/environment_execution.py::build_environment_execution_resources/EnvironmentExecutionAdapter.execute/EnvironmentToolBackend.invoke` | SkillFlow `ALFWorldEnvironment`, `_embodied.EmbodiedTextEnvironment._command_from_action`, bounded ReAct execution, and deployed `RAGENAdapter` | Necessary adaptation | Register the exact public resource `alfworld` and sole action `act(command)`; map each accepted command through the thinnest native-command bridge; bind all Canvas executions in one rollout to one task-scoped session; run the remaining bounded ReAct policy turns inside one ReAct Agent execution; retain the Director-authored free-text Agent contract; serialize mutations; and save every transition receipt. |
-| `src/interactive/task_evaluator.py` | SkillFlow official outcome view and `PrivateALFWorldTerminalEvaluator` | Direct semantic reuse through a project receipt adapter | Lock exact task/game/seed/budget, use only terminal `won`, return binary episode success, and keep infrastructure/evaluator failure separate from task failure. |
+| `src/interactive/task_evaluator.py` | SkillFlow official outcome view and `PrivateALFWorldTerminalEvaluator` | Direct semantic reuse through a project receipt adapter | Lock exact task/game/seed/budget, replay only a frozen complete action trace, use only terminal `won`, return binary episode success, and keep infrastructure/evaluator failure separate from task failure. A complete nonterminal trace remains evaluator-valid with zero success; replay never requests a new model action. |
 | `src/interactive/agent_workflow_env.py::AgentWorkflowEnv.step` | FlowSteer `InteractiveWorkflowBuilder.run_loop/run_loop_async` plus progressive Canvas and execution feedback | Existing core, unchanged by dataset adapter | Apply accepted graph edits, execute the complete currently executable graph through `AgentRuntime.execute` (reusing unaffected progressive artifacts), return feedback, and admit only legal `FINISH`; do not add an ALFWorld role or topology requirement. |
 | `src/interactive/agent_graph.py` and `agent_runtime.py` | Design document free AgentGraph plus FlowSteer execution boundary | Existing core, unchanged by dataset adapter | Preserve free contracts, model selection, directed/independent relations, bounded reciprocal execution, unique Output Agent, and complete Agent communication receipts. |
-| `scripts/evaluate_completion_benchmark_round.py` | Existing project evaluation collector plus FlowSteer bounded execution | Necessary evaluation wiring | Freeze paired tasks and conditions, run Direct and AgentGraph independently, checkpoint exact receipts, aggregate native SR, and materialize Wrong Demos from the first observable failure layer. |
+| `scripts/evaluate_completion_benchmark_round.py` | Existing project evaluation collector plus FlowSteer bounded execution | Necessary evaluation wiring | Freeze paired tasks and conditions, run Direct and AgentGraph independently, checkpoint exact receipts, rescore historical complete traces without model calls, aggregate native SR, distinguish historical/recovered/unresolved collection failures, and materialize Wrong Demos from the first observable failure layer. |
 
 The existing interactive FINISH capability check may require an Agent that can
 invoke the configured environment Tool. `run_task` binds that requirement to
@@ -405,3 +405,28 @@ actual receipts:
     trajectory evidence; and
 11. no fixed role, Agent count, topology, or ALFWorld workflow has been added to
     the unified orchestration core.
+
+## 13. Completed validation record
+
+The train-split Stable Zero canary completed the full chain with native
+`won=true`, score `1`, four accepted actions, zero invalid/repeated actions,
+and explicit `FINISH` in both Direct and AgentGraph conditions.
+
+The full official paired evaluations are complete:
+
+| Official split | Direct | AgentGraph | AgentGraph minus Direct | Evaluator valid | Operational failures |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `valid_seen` | 43/140 (30.71%) | 46/140 (32.86%) | +2.14 percentage points | 140/140 in both conditions | 0 |
+| `valid_unseen` | 28/134 (20.90%) | 38/134 (28.36%) | +7.46 percentage points | 134/134 in both conditions | 0 |
+
+AgentGraph explicit `FINISH` / `max_rounds` counts are 46/94 on
+`valid_seen` and 38/96 on `valid_unseen`. Three historical SGLang connection
+failure attempts on `valid_unseen` were recovered through exact checkpoint
+resume; all three receipts remain append-only while unresolved failures are
+zero.
+
+The receipt-backed reports are:
+
+- `reports/alfworld_initial_adapter_v1/valid_seen_report.json` and `.md`;
+- `reports/alfworld_initial_adapter_v1/valid_unseen_report.json` and `.md`; and
+- `reports/alfworld_initial_adapter_v1/ALFWORLD_INITIAL_ADAPTER_V1_REPORT_ZH.md`.

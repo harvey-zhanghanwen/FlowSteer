@@ -955,6 +955,135 @@ class EnvironmentEvaluatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, outcome.details["replayed_environment_steps"])
         self.assertFalse(callback_called)
 
+    async def test_alfworld_complete_partial_replay_closes_without_new_action(
+        self,
+    ) -> None:
+        target = "/games/game-partial.tw-pddl"
+        stepped_actions: list[str] = []
+
+        class AlfredEnvConfig:
+            config_file = ""
+
+        class Inventory:
+            def __init__(self, config, mode):
+                self.game_files = [target]
+
+        class Adapter:
+            def __init__(self):
+                self._env = None
+                self.available_actions = ["look"]
+
+            def reset(self, env_type, env_config, question="", extra=None):
+                self._env = SimpleNamespace(current_game_file=target)
+                return "Room"
+
+            def step(self, action):
+                stepped_actions.append(action)
+                return "Hall", 0.0, False, {"score": 0}
+
+        module = SimpleNamespace(
+            AlfredEnvConfig=AlfredEnvConfig,
+            ALFWorldEnv=Inventory,
+            RAGENAdapter=Adapter,
+        )
+        record = task(
+            "ALFWorld",
+            question="look",
+            environment={
+                "env_type": "alfworld",
+                "env_config": {"game_file": target},
+            },
+        )
+        replay_trace = [
+            {
+                "step": 0,
+                "observation": "Room",
+                "legal_actions": ["look"],
+                "action": "look",
+                "raw_graph_output": "look",
+                "next_observation": "Hall",
+                "reward": 0.0,
+                "done": False,
+                "info": {"score": 0},
+                "state_advanced": True,
+            }
+        ]
+        with patch(
+            "src.interactive.task_evaluator._load_ragen_module",
+            return_value=module,
+        ):
+            outcome = await evaluate_task(
+                record,
+                "",
+                run_graph=None,
+                max_environment_steps=20,
+                environment_replay_trace=replay_trace,
+                environment_replay_is_complete=True,
+            )
+
+        self.assertTrue(outcome.valid)
+        self.assertEqual(0.0, outcome.reward)
+        self.assertEqual(0.0, outcome.metrics["success"])
+        self.assertEqual(
+            "environment_rollout_closed_before_terminal", outcome.reason
+        )
+        self.assertEqual(["look"], stepped_actions)
+        self.assertEqual(1, len(outcome.details["trace"]))
+        self.assertTrue(outcome.details["replay_is_complete"])
+
+    async def test_alfworld_complete_empty_replay_is_valid_zero(self) -> None:
+        target = "/games/game-empty.tw-pddl"
+
+        class AlfredEnvConfig:
+            config_file = ""
+
+        class Inventory:
+            def __init__(self, config, mode):
+                self.game_files = [target]
+
+        class Adapter:
+            def __init__(self):
+                self._env = None
+                self.available_actions = ["look"]
+
+            def reset(self, env_type, env_config, question="", extra=None):
+                self._env = SimpleNamespace(current_game_file=target)
+                return "Room"
+
+        module = SimpleNamespace(
+            AlfredEnvConfig=AlfredEnvConfig,
+            ALFWorldEnv=Inventory,
+            RAGENAdapter=Adapter,
+        )
+        record = task(
+            "ALFWorld",
+            question="look",
+            environment={
+                "env_type": "alfworld",
+                "env_config": {"game_file": target},
+            },
+        )
+        with patch(
+            "src.interactive.task_evaluator._load_ragen_module",
+            return_value=module,
+        ):
+            outcome = await evaluate_task(
+                record,
+                "",
+                run_graph=None,
+                max_environment_steps=20,
+                environment_replay_trace=(),
+                environment_replay_is_complete=True,
+            )
+
+        self.assertTrue(outcome.valid)
+        self.assertEqual(0.0, outcome.reward)
+        self.assertEqual(0.0, outcome.metrics["steps"])
+        self.assertEqual([], outcome.details["trace"])
+        self.assertEqual(
+            "environment_rollout_closed_before_terminal", outcome.reason
+        )
+
     async def test_webshop_protocol_mismatch_is_invalid_before_callback(self) -> None:
         callback_called = False
 

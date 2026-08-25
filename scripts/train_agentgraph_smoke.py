@@ -2947,7 +2947,7 @@ class LiveSmokeBackend:
                 },
                 evaluator_version=AIME2026_EVALUATOR_VERSION,
             )
-        if source_key in {"webshop", "alfworld"} and final_answer is None:
+        if source_key == "webshop" and final_answer is None:
             # A natural Director budget exhaustion is already a real
             # terminal failure in the MD/SkillFlow boundary.  Do not start
             # a fresh interactive environment after the workflow itself
@@ -2963,23 +2963,13 @@ class LiveSmokeBackend:
         environment_settings = _environment_runtime_settings(self.config, task)
         if environment_settings is not None:
             budget = int(environment_settings["max_turns"])
-            if not environment_replay_trace:
+            if not environment_replay_trace and source_key != "alfworld":
                 raise ConfigurationError(
                     "the explicit environment runtime produced no replay trace"
                 )
             if len(environment_replay_trace) > budget:
                 raise ConfigurationError(
                     "environment replay trace exceeds the authoritative evaluator budget"
-                )
-            final_entry = environment_replay_trace[-1]
-            terminal = (
-                isinstance(final_entry, Mapping)
-                and final_entry.get("done") is True
-            )
-            if not terminal and len(environment_replay_trace) != budget:
-                raise ConfigurationError(
-                    "environment replay must reach terminal state or exhaust the "
-                    "authoritative evaluator budget"
                 )
 
         environment_graph = _graph_from_mapping(final_graph)
@@ -3028,6 +3018,7 @@ class LiveSmokeBackend:
                 )
             ),
             environment_replay_trace=environment_replay_trace,
+            environment_replay_is_complete=(source_key == "alfworld"),
             **evaluator_kwargs,
         )
 

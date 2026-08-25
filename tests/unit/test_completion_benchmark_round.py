@@ -11,6 +11,7 @@ from src.interactive.config_loader import load_model_registry, load_yaml
 from src.interactive.task_evaluator import (
     AIME2026_EVALUATOR_VERSION,
     EvaluationOutcome,
+    RAGEN_EVALUATOR_VERSION,
 )
 
 
@@ -961,8 +962,240 @@ def test_alfworld_report_summarizes_native_outcomes_receipts_and_wrong_demo():
     assert "explicit FINISH **1/2**; max_rounds **1**" in markdown
     assert "Agent count distribution: `{" in markdown
     assert "AgentGraph runtime failed turns: **1**" in markdown
-    assert "Collection failures: **1**" in markdown
+    assert report["collection_failure_attempt_count"] == 1
+    assert report["recovered_collection_failure_attempt_count"] == 0
+    assert report["unresolved_collection_failure_task_count"] == 1
+    assert "Historical collection failure attempts: **1**" in markdown
+    assert "recovered attempts: **0**" in markdown
+    assert "unresolved task-condition pairs: **1**" in markdown
     assert "| alfworld:valid_seen:00001 | agent_action_grounding | 1 |" in markdown
+
+
+def test_report_marks_historical_collection_failure_as_recovered():
+    config = _evaluation_config("alfworld")
+    row = {
+        "task_id": "alfworld:valid_seen:00000",
+        "failure_type": "equal_success",
+        "wrong_demo_diagnosis": None,
+        "direct": {
+            "available": True,
+            "valid": True,
+            "success": 0.0,
+            "evaluation": {"valid": True, "details": {}},
+            "telemetry": {},
+            "environment": {},
+        },
+        "agentgraph": {
+            "available": True,
+            "valid": True,
+            "success": 0.0,
+            "evaluation": {"valid": True, "details": {}},
+            "telemetry": {},
+            "explicit_finish": True,
+            "termination_reason": "finish",
+            "graph_diagnostic": {
+                "agent_count": 1,
+                "relation_count": 0,
+                "topology_family": "single",
+            },
+            "environment": {},
+        },
+    }
+    report = _MODULE._report(
+        [row],
+        config,
+        collection_failures=[
+            {
+                "task_id": "alfworld:valid_seen:00000",
+                "condition": "agentgraph",
+                "stage": "collect",
+                "error": "provider unavailable",
+            }
+        ],
+    )
+
+    assert report["operational_failure_count"] == 0
+    assert report["collection_failure_attempt_count"] == 1
+    assert report["recovered_collection_failure_attempt_count"] == 1
+    assert report["unresolved_collection_failure_task_count"] == 0
+    assert report["unresolved_collection_failure_tasks"] == []
+
+
+def test_alfworld_statistics_fall_back_to_persisted_executor_ledger():
+    trace = [
+        {
+            "step": 0,
+            "action": "go to table 1",
+            "done": False,
+            "info": {"action_is_valid": True, "score": 0},
+        },
+        {
+            "step": 1,
+            "action": "go to table 1",
+            "done": False,
+            "info": {"action_is_valid": True, "score": 0},
+        },
+    ]
+    value = {
+        "evaluation": {"valid": True, "details": {}, "metrics": {"success": 0}},
+        "turns": [
+            {
+                "executions": [
+                    {
+                        "metadata": {
+                            "response": {"evaluator_environment_trace": trace}
+                        }
+                    }
+                ]
+            }
+        ],
+    }
+
+    statistics = _MODULE._alfworld_episode_statistics(value)
+
+    assert statistics["environment_turn_count"] == 2
+    assert statistics["environment_action_count"] == 2
+    assert statistics["repeated_action_count"] == 1
+    assert statistics["episode_score"] == 0
+
+
+def test_alfworld_wrong_demo_prefers_first_typed_runtime_failure():
+    diagnosis = _MODULE._alfworld_wrong_demo_diagnosis(
+        {
+            "evaluation": {"valid": True, "details": {}, "metrics": {"success": 0}},
+            "explicit_finish": False,
+            "termination_reason": "max_rounds",
+            "turns": [
+                {
+                    "round_index": 0,
+                    "action": {"action": "add_agent", "agent_id": "actor"},
+                    "runtime_summary": {
+                        "execution_status": "failed",
+                        "failure_records": [
+                            {
+                                "agent_id": "actor",
+                                "error_type": "EnvironmentExecutionError",
+                                "message": (
+                                    "environment Agent must allow exactly its "
+                                    "request-scoped environment tool"
+                                ),
+                            }
+                        ],
+                    },
+                }
+            ],
+        }
+    )
+
+    assert diagnosis["failure_layer"] == "tool_interface"
+    assert diagnosis["first_error_turn"] == 0
+    assert diagnosis["first_error_agent_id"] == "actor"
+
+
+def test_alfworld_static_rescore_replays_max_rounds_without_model_calls():
+    task = _MODULE.TaskRecord(
+        task_id="alfworld:valid_seen:00000",
+        question="put an apple on table.",
+        ground_truth="environment_success",
+        split="test",
+        metadata={
+            "dataset_key": "alfworld",
+            "skillflow": {
+                "extra": {"action_policy_budget": 20},
+                "env_config": {"max_steps": 20},
+            },
+        },
+    )
+    trace = [
+        {
+            "step": 0,
+            "observation": "Room",
+            "legal_actions": ["look"],
+            "action": "look",
+            "next_observation": "Room",
+            "reward": 0.0,
+            "done": False,
+            "info": {"score": 0},
+            "state_advanced": True,
+        }
+    ]
+    graph = {
+        "revision": 1,
+        "nodes": [],
+        "relations": [],
+        "output_agent_id": None,
+    }
+    trajectories = {
+        task.task_id: {
+            "task": task.to_dict(),
+            "explicit_finish": False,
+            "final_answer": None,
+            "evaluation": {
+                "valid": True,
+                "evaluator_version": RAGEN_EVALUATOR_VERSION,
+                "details": {},
+                "metrics": {"success": 0.0},
+            },
+            "turns": [
+                {
+                    "graph_snapshot": graph,
+                    "executions": [
+                        {
+                            "metadata": {
+                                "response": {
+                                    "evaluator_environment_trace": trace
+                                }
+                            }
+                        }
+                    ],
+                }
+            ],
+        }
+    }
+    calls = []
+
+    class Backend:
+        async def evaluate_final_graph(
+            self,
+            evaluated_task,
+            final_answer,
+            final_graph,
+            *,
+            rollout_index,
+            environment_replay_trace,
+        ):
+            calls.append(
+                (
+                    evaluated_task.task_id,
+                    final_answer,
+                    final_graph,
+                    rollout_index,
+                    environment_replay_trace,
+                )
+            )
+            return EvaluationOutcome(
+                valid=True,
+                reward=0.0,
+                metrics={"success": 0.0, "steps": 1.0},
+                reason="environment_rollout_closed_before_terminal",
+                details={"trace": list(environment_replay_trace)},
+                evaluator_version=RAGEN_EVALUATOR_VERSION,
+            )
+
+    rescored = asyncio.run(
+        _MODULE._rescore_static_trajectory_checkpoint(
+            Backend(), (task,), trajectories
+        )
+    )
+
+    assert calls == [(task.task_id, None, graph, 0, tuple(trace))]
+    assert rescored[task.task_id]["evaluation_rescore_receipt"] == {
+        "mode": "offline_native_environment_replay",
+        "source_evaluator_version": RAGEN_EVALUATOR_VERSION,
+        "target_evaluator_version": RAGEN_EVALUATOR_VERSION,
+        "replayed_environment_turns": 1,
+        "model_calls": 0,
+    }
 
 
 def test_aime_wrong_demo_uses_first_runtime_failure_receipt():
