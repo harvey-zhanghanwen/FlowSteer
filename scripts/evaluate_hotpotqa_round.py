@@ -397,6 +397,47 @@ def _trajectory_resume_matches(
     )
 
 
+def _reportable_terminal_failure_matches(
+    value: Mapping[str, Any],
+    *,
+    task: TaskRecord,
+    condition_id: str,
+    versions: Mapping[str, str],
+) -> bool:
+    """Admit one frozen AIME terminal failure to reporting, not evaluation.
+
+    A trajectory that naturally exhausts the Director budget without a legal
+    ``FINISH`` is a completed execution receipt under the project terminal
+    semantics.  It must remain evaluator-invalid and must not enter terminal
+    evaluator retry, but dropping it would erase the real failure from paired
+    analysis and cause the frozen workflow to be sampled again.
+    """
+
+    evaluation = value.get("evaluation")
+    details = evaluation.get("details") if isinstance(evaluation, Mapping) else None
+    return bool(
+        _dataset_key(task) == "aime_2026"
+        and _trajectory_identity_matches(
+            value,
+            task=task,
+            condition_id=condition_id,
+            versions=versions,
+        )
+        and value.get("explicit_finish") is False
+        and value.get("termination_reason")
+        in {"max_rounds", "canvas_action_domain_exhausted"}
+        and value.get("final_answer") in (None, "")
+        and isinstance(evaluation, Mapping)
+        and evaluation.get("valid") is False
+        and evaluation.get("reward") is None
+        and evaluation.get("reason")
+        == "not_evaluated_without_explicit_finish"
+        and evaluation.get("evaluator_version") == versions.get("evaluator")
+        and isinstance(details, Mapping)
+        and details.get("formal_evaluator_called") is False
+    )
+
+
 def _trajectory_identity_matches(
     value: Mapping[str, Any],
     *,
@@ -786,6 +827,7 @@ async def _collect_graph(
     # be retried, never the Director/Canvas/Agent construction.
     candidates = [*_read_jsonl(path), *backend.evidence_store.trajectories.payloads()]
     valid_candidates: dict[str, tuple[int, dict[str, Any]]] = {}
+    terminal_failure_candidates: dict[str, tuple[int, dict[str, Any]]] = {}
     invalid_candidates: dict[str, list[tuple[int, dict[str, Any]]]] = {}
     for order, value in enumerate(candidates):
         embedded = value.get("task")
@@ -805,12 +847,21 @@ async def _collect_graph(
             versions=versions[task_id].to_dict(),
         ):
             valid_candidates[task_id] = (order, dict(value))
+        elif _reportable_terminal_failure_matches(
+            value,
+            task=selected_task,
+            condition_id=condition_id,
+            versions=versions[task_id].to_dict(),
+        ):
+            terminal_failure_candidates[task_id] = (order, dict(value))
         else:
             invalid_candidates.setdefault(task_id, []).append((order, dict(value)))
 
     by_task = {
         task_id: value for task_id, (_, value) in valid_candidates.items()
     }
+    for task_id, (_, value) in terminal_failure_candidates.items():
+        by_task.setdefault(task_id, value)
     retry_sources: dict[str, tuple[dict[str, Any], int]] = {}
     for task_id, values in invalid_candidates.items():
         if task_id in by_task:
@@ -833,6 +884,15 @@ async def _collect_graph(
     _persist_ordered(path, selected, by_task)
     manifest["agentgraph_progress"] = {
         "completed": len(by_task),
+        "reportable_terminal_failures": sum(
+            _reportable_terminal_failure_matches(
+                value,
+                task=selected_by_id[task_id],
+                condition_id=condition_id,
+                versions=versions[task_id].to_dict(),
+            )
+            for task_id, value in by_task.items()
+        ),
         "pending_evaluator_retries": len(pending_retry_task_ids),
         "failed_attempts": sum(
             item.get("condition") == "agentgraph" for item in failures
@@ -906,6 +966,11 @@ async def _collect_graph(
                 task=task,
                 condition_id=condition_id,
                 versions=versions[task.task_id].to_dict(),
+            ) or _reportable_terminal_failure_matches(
+                payload,
+                task=task,
+                condition_id=condition_id,
+                versions=versions[task.task_id].to_dict(),
             ):
                 by_task[task.task_id] = payload
                 pending_retry_task_ids.discard(task.task_id)
@@ -934,6 +999,15 @@ async def _collect_graph(
                 )
         manifest["agentgraph_progress"] = {
             "completed": len(by_task),
+            "reportable_terminal_failures": sum(
+                _reportable_terminal_failure_matches(
+                    value,
+                    task=selected_by_id[task_id],
+                    condition_id=condition_id,
+                    versions=versions[task_id].to_dict(),
+                )
+                for task_id, value in by_task.items()
+            ),
             "pending_evaluator_retries": sum(
                 task.task_id not in by_task
                 and task.task_id in pending_retry_task_ids

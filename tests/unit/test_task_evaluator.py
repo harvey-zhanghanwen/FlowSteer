@@ -164,19 +164,39 @@ class StaticEvaluatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1.0, normalized.metrics["exact_match"])
         self.assertAlmostEqual(2.0 / 3.0, repeated.metrics["token_f1"])
 
-    async def test_aime_uses_skillflow_protocol10_integer_submission(self) -> None:
+    async def test_aime_uses_skillev_private_integer_submission(self) -> None:
         outcome = await evaluate_task(
             task("AIME 2026", ground_truth="56"), "<answer>056</answer>"
         )
         self.assertTrue(outcome.valid)
         self.assertEqual(1.0, outcome.reward)
         self.assertEqual(1.0, outcome.metrics["accuracy"])
-        self.assertEqual(1.0, outcome.metrics["exact_match"])
+        self.assertNotIn("exact_match", outcome.metrics)
+        self.assertTrue(outcome.details["parsing_succeeded"])
+        self.assertEqual("56", outcome.details["canonical_prediction"])
 
         free_form = await evaluate_task(
             task("AIME 2026", ground_truth="56"), "Thus \\boxed{56}."
         )
         self.assertEqual(0.0, free_form.reward)
+        self.assertFalse(free_form.details["parsing_succeeded"])
+        self.assertEqual(
+            "integer_conversion_failed",
+            free_form.details["parsing_failure_reason"],
+        )
+
+    async def test_aime_direct_and_agentgraph_share_one_evaluator_contract(self) -> None:
+        benchmark_task = task("AIME 2026", ground_truth="56")
+        direct = await evaluate_task(benchmark_task, "<answer>056</answer>")
+        agentgraph = await evaluate_task(benchmark_task, "<answer>056</answer>")
+
+        self.assertEqual(direct.evaluator_version, agentgraph.evaluator_version)
+        self.assertEqual(direct.metrics, agentgraph.metrics)
+        self.assertEqual(
+            direct.details["canonical_prediction"],
+            agentgraph.details["canonical_prediction"],
+        )
+        self.assertEqual("56", direct.details["canonical_prediction"])
 
     async def test_explicit_answer_boundary_is_scored_and_raw_output_is_retained(self) -> None:
         raw = "A long explanation with distractor 999. <answer>red fox</answer>"

@@ -54,7 +54,14 @@ Use only action types listed in admissible_action_types, model_id values from mo
 
 A directed relation routes the source artifact to the target. A bidirectional relation performs one bounded two-Agent exchange. Each accepted edit is executed once, and its Canvas validation and execution feedback appear in the next observation. Inspect that state before choosing the next action. Use finish only when finish_admissibility is present and admissible. Do not assume a fixed workflow topology or an unlisted Skill."""
 
+SCALAR_DIRECTOR_SYSTEM_PROMPT = """You are the Flow-Director. Incrementally edit the executable AgentGraph from the latest Canvas observation. Return exactly one valid JSON action each turn and no other text.
+
+Use only action types listed in admissible_action_types, model_id values from model_catalog, and exact tool_id values from tool_catalog. add_agent adds one Agent with a free-text contract. A directed relation routes the source artifact to the target. A bidirectional relation performs one bounded two-Agent exchange.
+
+Each accepted edit is executed once, and its Canvas validation and execution feedback appear in the next observation. Inspect that state before choosing the next action. Use finish only when finish_admissibility is present and admissible. Do not assume a fixed workflow topology or an unlisted Skill."""
+
 DIRECTOR_PROMPT_VERSION = "agentgraph.director.minimal-neutral.v10"
+SCALAR_DIRECTOR_PROMPT_VERSION = "agentgraph.director.minimal-neutral-scalar.v1"
 LEGACY_DIRECTOR_PROMPT_VERSION_V9 = "agentgraph.director.minimal-neutral.v9"
 LEGACY_DIRECTOR_PROMPT_VERSION_V8 = "agentgraph.director.minimal-neutral.v8"
 HOTPOTQA_DIRECTOR_PROMPT_VERSION = (
@@ -485,6 +492,7 @@ def director_system_prompt_for_version(prompt_version: str) -> str:
     normalized = prompt_version.strip()
     by_version = {
         DIRECTOR_PROMPT_VERSION: DIRECTOR_SYSTEM_PROMPT,
+        SCALAR_DIRECTOR_PROMPT_VERSION: SCALAR_DIRECTOR_SYSTEM_PROMPT,
         LEGACY_DIRECTOR_PROMPT_VERSION_V9: LEGACY_DIRECTOR_SYSTEM_PROMPT_V9,
         LEGACY_DIRECTOR_PROMPT_VERSION_V8: LEGACY_DIRECTOR_SYSTEM_PROMPT_V8,
         # These are the two historical v8 experiment labels still present in
@@ -548,6 +556,7 @@ def director_system_prompt_for_version(prompt_version: str) -> str:
 _SUPPORTED_DIRECTOR_SYSTEM_PROMPTS = frozenset(
     {
         DIRECTOR_SYSTEM_PROMPT,
+        SCALAR_DIRECTOR_SYSTEM_PROMPT,
         HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V11,
         HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V13,
         HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V14,
@@ -3193,7 +3202,11 @@ class AgentGraphOrchestrator:
             ),
             "admissible_action_types": list(
                 env.model_admissible_action_types()
-                if verified_qa_semantic_protocol(self.semantic_protocol)
+                if (
+                    verified_qa_semantic_protocol(self.semantic_protocol)
+                    or self.sampling_action_profile
+                    == DIRECTOR_MODEL_ADMISSIBLE_ACTION_MASK_PROFILE
+                )
                 else env.allowed_action_types
             ),
             # These are existing admission constraints enforced by

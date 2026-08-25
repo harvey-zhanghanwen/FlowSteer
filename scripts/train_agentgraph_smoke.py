@@ -438,6 +438,16 @@ def _workflow_problem(
     """
 
     source_key = _dataset_key(task)
+    if source_key == "aime_2026":
+        answer_format = str(
+            task.metadata.get("answer_format", "integer-000-to-999")
+        )
+        return (
+            f"{task.question}\n\n"
+            "Public task metadata: benchmark_id=aime-2026; "
+            f"answer_format={answer_format}. Submit exactly one decimal integer "
+            "and no explanation."
+        )
     if source_key not in {"webshop", "alfworld"}:
         return task.question
     section = config.get(f"{source_key}_evaluation")
@@ -2913,6 +2923,22 @@ class LiveSmokeBackend:
         """
 
         source_key = _dataset_key(task)
+        if source_key == "aime_2026" and final_answer is None:
+            # The formal AIME adapter is reachable only after a legal FINISH.
+            # Preserve max-round trajectories for diagnosis, but do not turn
+            # an empty submission into an evaluated zero or recover a prior
+            # progressive candidate.
+            return EvaluationOutcome(
+                valid=False,
+                reward=None,
+                metrics={},
+                reason="not_evaluated_without_explicit_finish",
+                details={
+                    "terminal_failure": True,
+                    "formal_evaluator_called": False,
+                },
+                evaluator_version=AIME2026_EVALUATOR_VERSION,
+            )
         if source_key in {"webshop", "alfworld"} and final_answer is None:
             # A natural Director budget exhaustion is already a real
             # terminal failure in the MD/SkillFlow boundary.  Do not start

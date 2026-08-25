@@ -1,11 +1,12 @@
-"""AIME 2026 integer-answer boundary used by the dataset-specific adapter.
+"""AIME 2026 integer-answer boundary used by the dataset adapter.
 
-This is a thin local port of SkillFlow Protocol 10's
+The integer canonicalization is a thin port of downstream SkillEval's
 ``PrivateStaticTarget.score`` branch for ``StaticScoringRule.INTEGER``.  The
-only project adaptation is recognition of FlowSteer's existing
-``<answer>...</answer>`` terminal boundary before the submitted value reaches
-the scorer.  Free-form explanations, decimal values, percentages, and
-symbolic-equivalence heuristics are intentionally not accepted.
+public SkillFlow repository does not contain this AIME-2026-specific scorer.
+The only project-specific layer here maps FlowSteer's existing single
+``<answer>...</answer>`` terminal boundary to the private scorer's
+``{"answer": str}`` submission.  It never solves, repairs, or looks up an
+answer.
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ from typing import Sequence
 
 AIME2026_DATASET_KEY = "aime_2026"
 AIME2026_TASK_FAMILY = "aime-2026/integer-answer"
-AIME2026_EVALUATOR_VERSION = "skillflow.protocol-v10.static.integer.v1"
+AIME2026_EVALUATOR_VERSION = "skillev.private-static.integer.v1"
 AIME2026_ANSWER_FORMAT = "integer-000-to-999"
 
 _ANSWER_TAG = re.compile(
@@ -34,6 +35,38 @@ class AIME2026IntegerScore:
     raw_prediction: str
     scored_prediction: str
     structured_answer_extracted: bool
+    parsing_succeeded: bool
+    parsing_failure_reason: str | None
+    canonical_prediction: str | None
+
+
+def extract_aime2026_submission(prediction: str) -> tuple[str, bool, str | None]:
+    """Map one terminal output to a target-blind integer submission string.
+
+    A single complete answer boundary is permitted and its contents are
+    submitted.  With no boundary, the complete response is submitted exactly
+    as SkillEval's private static task expects.  Multiple or malformed
+    boundaries fail closed instead of selecting a convenient candidate.
+    """
+
+    if not isinstance(prediction, str):
+        raise TypeError("AIME prediction must be text")
+    tagged = _ANSWER_TAG.findall(prediction)
+    if len(tagged) > 1:
+        return "", False, "multiple_answer_boundaries"
+    if len(tagged) == 1:
+        remainder = _ANSWER_TAG.sub("", prediction, count=1).casefold()
+        if (
+            "<answer" in remainder
+            or "</answer" in remainder
+            or "<answer" in tagged[0].casefold()
+            or "</answer" in tagged[0].casefold()
+        ):
+            return "", False, "malformed_answer_boundary"
+        return tagged[0].strip(), True, None
+    if "<answer" in prediction.casefold() or "</answer" in prediction.casefold():
+        return "", False, "malformed_answer_boundary"
+    return prediction.strip(), False, None
 
 
 def canonical_aime_integer(value: object) -> str:
@@ -59,33 +92,38 @@ def score_aime2026_integer(
     prediction: str,
     accepted_answers: Sequence[str],
 ) -> AIME2026IntegerScore:
-    """Score a submitted answer exactly as SkillFlow's ``INTEGER`` rule.
+    """Score a submitted answer exactly as SkillEval's ``INTEGER`` rule.
 
-    SkillFlow applies ``str(int(prediction.strip()))`` and compares it with the
-    equivalently canonicalized trusted answers.  FlowSteer's Format operator
-    can wrap the submission in ``<answer>``; when present, the last complete
-    boundary is the submitted value.  Without that boundary the whole output
-    is scored, preserving the fail-closed official behavior.
+    SkillEval applies ``str(int(prediction.strip()))`` and compares it with the
+    equivalently canonicalized trusted answers.  FlowSteer's terminal protocol
+    can wrap the submission in one ``<answer>`` boundary.  Without that
+    boundary the whole output is scored, preserving the fail-closed behavior.
     """
 
-    if not isinstance(prediction, str):
-        raise TypeError("AIME prediction must be text")
     if not accepted_answers:
         raise ValueError("AIME evaluator requires at least one accepted answer")
     expected = {canonical_aime_integer(answer) for answer in accepted_answers}
-    tagged = _ANSWER_TAG.findall(prediction)
-    submitted = tagged[-1].strip() if tagged else prediction
-    try:
-        predicted = str(int(submitted.strip()))
-    except ValueError:
+    submitted, structured, boundary_failure = extract_aime2026_submission(prediction)
+    predicted: str | None = None
+    parsing_failure_reason = boundary_failure
+    if boundary_failure is not None:
         accuracy = 0.0
     else:
-        accuracy = float(predicted in expected)
+        try:
+            predicted = str(int(submitted.strip()))
+        except ValueError:
+            accuracy = 0.0
+            parsing_failure_reason = "integer_conversion_failed"
+        else:
+            accuracy = float(predicted in expected)
     return AIME2026IntegerScore(
         accuracy=accuracy,
         raw_prediction=prediction,
         scored_prediction=submitted,
-        structured_answer_extracted=bool(tagged),
+        structured_answer_extracted=structured,
+        parsing_succeeded=parsing_failure_reason is None,
+        parsing_failure_reason=parsing_failure_reason,
+        canonical_prediction=predicted,
     )
 
 
@@ -96,5 +134,6 @@ __all__ = [
     "AIME2026_TASK_FAMILY",
     "AIME2026IntegerScore",
     "canonical_aime_integer",
+    "extract_aime2026_submission",
     "score_aime2026_integer",
 ]

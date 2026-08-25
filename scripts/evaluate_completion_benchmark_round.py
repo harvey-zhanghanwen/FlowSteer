@@ -37,6 +37,7 @@ from train_agentgraph_smoke import (
     LiveSmokeBackend,
     _dataset_key,
     _safe_error,
+    _workflow_problem,
     _write_json,
     evaluator_version_for,
 )
@@ -99,8 +100,8 @@ _BENCHMARKS: Mapping[str, Mapping[str, Any]] = {
         "label": "AIME 2026",
         "section_names": ("aime2026_evaluation", "aime_2026_evaluation"),
         "phase_names": ("aime2026_evaluation", "aime_2026_evaluation"),
-        "primary_metric": "exact_match",
-        "metric_names": ("exact_match",),
+        "primary_metric": "accuracy",
+        "metric_names": ("accuracy",),
     },
     "healthbench_professional": {
         "label": "HealthBench Professional",
@@ -369,14 +370,22 @@ def validate_completion_benchmark_config(config: Mapping[str, Any]) -> None:
         raise ConfigurationError(
             "data.registry_dataset_key must match the evaluation dataset_key"
         )
-    for name in (
-        "behavior_policy_version",
-        "behavior_adapter_name",
-        "behavior_adapter_checkpoint",
-        "expected_server_weight_version",
-    ):
+    for name in ("behavior_policy_version", "expected_server_weight_version"):
         if not str(director.get(name, "")).strip():
             raise ConfigurationError(f"director.{name} must be non-empty")
+    behavior_adapter = director.get("behavior_adapter_name")
+    behavior_checkpoint = director.get("behavior_adapter_checkpoint")
+    adapter_configured = bool(
+        isinstance(behavior_adapter, str) and behavior_adapter.strip()
+    )
+    checkpoint_configured = bool(
+        isinstance(behavior_checkpoint, str) and behavior_checkpoint.strip()
+    )
+    if adapter_configured != checkpoint_configured:
+        raise ConfigurationError(
+            "director.behavior_adapter_name and "
+            "director.behavior_adapter_checkpoint must be supplied together"
+        )
 
 
 def _runtime_dataset_registry_coordinates(
@@ -1269,7 +1278,7 @@ async def _direct_one(
         request_id=f"{run_id}:direct:single",
         run_id=run_id,
         graph_revision=0,
-        problem=task.question,
+        problem=_workflow_problem(task, backend.config),
         agent=AgentNode("direct", model_id, contract),
         model=model,
         provider=provider,
@@ -1619,7 +1628,11 @@ def _failure_type(
 ) -> str:
     if direct_value is None or not direct_valid:
         return "direct_operational_or_evaluator_failure"
-    if graph_value is None or not graph_valid:
+    if graph_value is None:
+        return "agentgraph_operational_or_evaluator_failure"
+    if dataset_key == "aime_2026" and graph_value.get("explicit_finish") is not True:
+        return "agentgraph_terminal_failure"
+    if not graph_valid:
         return "agentgraph_operational_or_evaluator_failure"
     if dataset_key == "triviaqa" and graph_score < 1.0:
         evaluation = graph_value.get("evaluation")
@@ -1746,11 +1759,22 @@ def _failure_type(
     if graph_value.get("explicit_finish") is not True:
         return "agentgraph_terminal_failure"
     if dataset_key == "aime_2026":
+        evaluation = graph_value.get("evaluation")
+        details = (
+            evaluation.get("details", {})
+            if isinstance(evaluation, Mapping)
+            else {}
+        )
+        if (
+            isinstance(details, Mapping)
+            and details.get("parsing_succeeded") is False
+        ):
+            return "output_parsing_failure"
         if graph_score == 1.0 and direct_score == 0.0:
-            return "agentgraph_exact_match_gain"
+            return "agentgraph_accuracy_gain"
         if graph_score == 0.0 and direct_score == 1.0:
-            return "agentgraph_exact_match_regression"
-        return "both_exact" if graph_score == 1.0 else "both_incorrect"
+            return "agentgraph_accuracy_regression"
+        return "both_correct" if graph_score == 1.0 else "both_incorrect"
     metric_name = str(_BENCHMARKS[dataset_key]["primary_metric"])
     if graph_score > direct_score:
         return f"agentgraph_higher_{metric_name}"
@@ -1815,6 +1839,200 @@ def _evaluated_graph_diagnostic_view(
     projected = dict(graph_value)
     projected["turns"] = projected_turns
     return projected
+
+
+def _first_action_agent_id(action: Mapping[str, Any]) -> Optional[str]:
+    agent_id = action.get("agent_id")
+    if isinstance(agent_id, str) and agent_id:
+        return agent_id
+    agents = action.get("agents")
+    if isinstance(agents, Sequence) and not isinstance(agents, (str, bytes)):
+        for agent in agents:
+            if isinstance(agent, Mapping):
+                value = agent.get("agent_id")
+                if isinstance(value, str) and value:
+                    return value
+    return None
+
+
+def _aime_wrong_demo_diagnosis(
+    graph_value: Optional[Mapping[str, Any]],
+) -> Mapping[str, Any]:
+    """Locate the first observable AIME failure in the saved trajectory.
+
+    This is an offline receipt diagnosis.  It does not expose the target to a
+    model and does not infer an unobserved reasoning error from the answer.
+    """
+
+    if graph_value is None:
+        return {
+            "diagnosis_scope": "first_observable_failure",
+            "failure_layer": "runtime",
+            "first_error_turn": None,
+            "first_error_action": None,
+            "first_error_agent_id": None,
+            "error": "trajectory_missing",
+            "subsequent_error_propagation": "no trajectory was persisted",
+            "terminal_result": "collection_failed",
+        }
+    turns = graph_value.get("turns", ())
+    if not isinstance(turns, Sequence) or isinstance(turns, (str, bytes)):
+        turns = ()
+    first: Optional[dict[str, Any]] = None
+    for turn in turns:
+        if not isinstance(turn, Mapping):
+            continue
+        action = turn.get("action")
+        action = action if isinstance(action, Mapping) else {}
+        action_name = action.get("action")
+        action_name = action_name if isinstance(action_name, str) else None
+        feedback = str(turn.get("canvas_feedback", ""))
+        folded = feedback.casefold()
+        round_index = turn.get("round_index")
+        runtime_summary = turn.get("runtime_summary")
+        runtime_summary = (
+            runtime_summary if isinstance(runtime_summary, Mapping) else {}
+        )
+        failure_records = runtime_summary.get("failure_records", ())
+        failure_records = (
+            failure_records
+            if isinstance(failure_records, Sequence)
+            and not isinstance(failure_records, (str, bytes))
+            else ()
+        )
+        first_failure_record = next(
+            (value for value in failure_records if isinstance(value, Mapping)),
+            None,
+        )
+        if not action_name:
+            first = {
+                "failure_layer": "director",
+                "first_error_turn": round_index,
+                "first_error_action": None,
+                "first_error_agent_id": None,
+                "error": "invalid_or_unparsed_director_action",
+            }
+        elif (
+            "rejected" in folded
+            or folded.startswith("[invalid]")
+            or "invalid action:" in folded
+            or "cannot finish:" in folded
+            or "parse_error" in folded
+            or "schema_invalid" in folded
+        ):
+            first = {
+                "failure_layer": (
+                    "director"
+                    if "parse" in folded or "schema" in folded
+                    else "graph"
+                ),
+                "first_error_turn": round_index,
+                "first_error_action": action_name,
+                "first_error_agent_id": _first_action_agent_id(action),
+                "error": "canvas_action_rejected",
+            }
+        elif (
+            runtime_summary.get("execution_status") == "failed"
+            or first_failure_record is not None
+        ):
+            error_type = (
+                first_failure_record.get("error_type")
+                if isinstance(first_failure_record, Mapping)
+                else None
+            )
+            folded_error_type = str(error_type or "").casefold()
+            first = {
+                "failure_layer": (
+                    "tool" if "tool" in folded_error_type else "runtime"
+                ),
+                "first_error_turn": round_index,
+                "first_error_action": action_name,
+                "first_error_agent_id": (
+                    first_failure_record.get("agent_id")
+                    if isinstance(first_failure_record, Mapping)
+                    else _first_action_agent_id(action)
+                ),
+                "error": error_type or "agent_or_provider_execution_failure",
+            }
+        elif any(
+            marker in folded
+            for marker in (
+                "execution_error=",
+                "agentruntimeerror",
+                "gateway failed",
+                "provider request failed",
+                "tool execution failure",
+            )
+        ):
+            first = {
+                "failure_layer": "tool" if "tool" in folded else "runtime",
+                "first_error_turn": round_index,
+                "first_error_action": action_name,
+                "first_error_agent_id": _first_action_agent_id(action),
+                "error": "agent_or_provider_execution_failure",
+            }
+        if first is not None:
+            break
+
+    evaluation = graph_value.get("evaluation")
+    details = evaluation.get("details", {}) if isinstance(evaluation, Mapping) else {}
+    if first is None and graph_value.get("explicit_finish") is not True:
+        first = {
+            "failure_layer": "director",
+            # This is a terminal-boundary failure after the final sampled
+            # turn, not an invented Director turn.
+            "first_error_turn": None,
+            "first_error_action": "finish_absent",
+            "first_error_agent_id": None,
+            "error": "missing_explicit_finish",
+            "failure_boundary": "terminal_boundary_after_last_turn",
+            "last_observed_turn_index": (
+                turns[-1].get("round_index")
+                if turns and isinstance(turns[-1], Mapping)
+                else None
+            ),
+        }
+    if (
+        first is None
+        and isinstance(details, Mapping)
+        and details.get("parsing_succeeded") is False
+    ):
+        final_graph = _evaluated_graph(graph_value) or {}
+        first = {
+            "failure_layer": "output_extraction",
+            "first_error_turn": len(turns) - 1 if turns else None,
+            "first_error_action": "finish",
+            "first_error_agent_id": final_graph.get("output_agent_id"),
+            "error": details.get("parsing_failure_reason") or "output_parsing_failure",
+        }
+    if first is None:
+        final_graph = _evaluated_graph(graph_value) or {}
+        first = {
+            "failure_layer": "agent",
+            "first_error_turn": None,
+            "first_error_action": None,
+            "first_error_agent_id": final_graph.get("output_agent_id"),
+            "error": "incorrect_terminal_integer_without_observable_runtime_failure",
+        }
+    first_turn = first.get("first_error_turn")
+    later_turns = (
+        max(0, len(turns) - int(first_turn) - 1)
+        if isinstance(first_turn, int)
+        else None
+    )
+    return {
+        "diagnosis_scope": "first_observable_failure",
+        **first,
+        "subsequent_error_propagation": {
+            "interpretation": "subsequent_receipt_span_not_proven_causality",
+            "later_turn_count": later_turns,
+            "final_answer": graph_value.get("final_answer"),
+            "evaluator_reason": (
+                evaluation.get("reason") if isinstance(evaluation, Mapping) else None
+            ),
+        },
+        "terminal_result": graph_value.get("termination_reason"),
+    }
 
 
 def _paired_rows(
@@ -1901,6 +2119,11 @@ def _paired_rows(
                     graph_score=graph_score,
                     dataset_key=dataset_key,
                 ),
+                "wrong_demo_diagnosis": (
+                    _aime_wrong_demo_diagnosis(graph_value)
+                    if dataset_key == "aime_2026" and graph_score < 1.0
+                    else None
+                ),
             }
         )
     return rows
@@ -1931,13 +2154,43 @@ def _aggregate(
         )
         result[f"strict_{metric_name}"] = strict
         result[f"completed_only_{metric_name}"] = completed_only
-    # Official AIME accuracy is the dataset average of per-problem exact match.
     if dataset_key == "aime_2026":
-        result["strict_accuracy"] = result["strict_exact_match"]
-        result["completed_only_accuracy"] = result[
-            "completed_only_exact_match"
-        ]
+        result["correct"] = sum(
+            float(value.get("accuracy", 0.0)) == 1.0 for value in values
+        )
     return result
+
+
+def _telemetry_totals(
+    rows: Sequence[Mapping[str, Any]], condition: str
+) -> Mapping[str, float | int]:
+    fields = ("api_attempts", "input_tokens", "output_tokens", "latency_ms")
+    return {
+        field: sum(
+            float(row[condition].get("telemetry", {}).get(field, 0.0))
+            for row in rows
+        )
+        for field in fields
+    }
+
+
+def _is_reportable_aime_terminal_failure(value: Mapping[str, Any]) -> bool:
+    evaluation = value.get("evaluation")
+    details = evaluation.get("details") if isinstance(evaluation, Mapping) else None
+    return bool(
+        value.get("available") is True
+        and value.get("valid") is False
+        and value.get("explicit_finish") is False
+        and value.get("termination_reason")
+        in {"max_rounds", "canvas_action_domain_exhausted"}
+        and isinstance(evaluation, Mapping)
+        and evaluation.get("valid") is False
+        and evaluation.get("reward") is None
+        and evaluation.get("reason")
+        == "not_evaluated_without_explicit_finish"
+        and isinstance(details, Mapping)
+        and details.get("formal_evaluator_called") is False
+    )
 
 
 def _report(
@@ -1959,6 +2212,29 @@ def _report(
         for row in rows
         if float(row["agentgraph"].get(metric_name, 0.0)) < 1.0
     ]
+    graph_diagnostics = [
+        row["agentgraph"].get("graph_diagnostic")
+        for row in rows
+        if isinstance(row["agentgraph"].get("graph_diagnostic"), Mapping)
+    ]
+    agent_count_distribution = Counter(
+        int(value.get("agent_count", 0)) for value in graph_diagnostics
+    )
+    topology_distribution = Counter(
+        str(value.get("topology_family", "unknown")) for value in graph_diagnostics
+    )
+    relation_count_distribution = Counter(
+        int(value.get("relation_count", 0)) for value in graph_diagnostics
+    )
+    parsing_failure_count = sum(
+        isinstance(row["agentgraph"].get("evaluation"), Mapping)
+        and isinstance(row["agentgraph"]["evaluation"].get("details"), Mapping)
+        and row["agentgraph"]["evaluation"]["details"].get(
+            "parsing_succeeded"
+        )
+        is False
+        for row in rows
+    )
     return {
         "schema_version": "flowsteer.completion_benchmark.round_report.v1",
         "dataset_key": dataset_key,
@@ -1986,7 +2262,7 @@ def _report(
             if dataset_key == "hotpotqa"
             else "TriviaQA_official_normalization_exact_match_and_token_F1"
             if dataset_key == "triviaqa"
-            else "SkillFlow_exact_answer_extraction_and_exact_match"
+            else "SkillEval_canonicalized_integer_exact_accuracy"
             if dataset_key == "aime_2026"
             else "OpenAI_simple_evals_HealthBench_rubric_raw_score"
             if dataset_key == "healthbench_professional"
@@ -2011,6 +2287,18 @@ def _report(
         "graph_search_diagnostics": aggregate_trajectory_diagnostics(
             _evaluated_graph_diagnostic_view(value) for value in trajectories
         ),
+        "agent_count_distribution": {
+            str(key): value for key, value in sorted(agent_count_distribution.items())
+        },
+        "relation_count_distribution": {
+            str(key): value
+            for key, value in sorted(relation_count_distribution.items())
+        },
+        "topology_distribution": dict(sorted(topology_distribution.items())),
+        "telemetry_totals": {
+            "direct": _telemetry_totals(rows, "direct"),
+            "agentgraph": _telemetry_totals(rows, "agentgraph"),
+        },
         "failure_types": dict(sorted(failure_counts.items())),
         "below_full_score_demo_count": len(below_full),
         "typical_below_full_score_task_ids": [
@@ -2024,11 +2312,22 @@ def _report(
             and row["agentgraph"].get("explicit_finish") is not True
             for row in rows
         ),
+        "max_rounds_count": sum(
+            row["agentgraph"].get("termination_reason") == "max_rounds"
+            for row in rows
+        ),
+        "parsing_failure_count": parsing_failure_count,
         "operational_failure_count": sum(
             row["direct"].get("available") is not True
             or row["direct"].get("valid") is not True
             or row["agentgraph"].get("available") is not True
-            or row["agentgraph"].get("valid") is not True
+            or (
+                row["agentgraph"].get("valid") is not True
+                and not (
+                    dataset_key == "aime_2026"
+                    and _is_reportable_aime_terminal_failure(row["agentgraph"])
+                )
+            )
             for row in rows
         ),
         "policy_version": str(config["director"]["behavior_policy_version"]),
@@ -2401,13 +2700,30 @@ async def run_completion_benchmark_round(
                 selected,
             )
         director = _mapping(config["director"], "director")
-        adapter_preflight = await asyncio.to_thread(
-            backend.publisher.ensure_loaded_adapter,
-            checkpoint_path=str(
-                _resolve(root, str(director["behavior_adapter_checkpoint"]))
-            ),
-            adapter_name=str(director["behavior_adapter_name"]),
-        )
+        behavior_adapter = director.get("behavior_adapter_name")
+        behavior_checkpoint = director.get("behavior_adapter_checkpoint")
+        if (
+            isinstance(behavior_adapter, str)
+            and behavior_adapter.strip()
+            and isinstance(behavior_checkpoint, str)
+            and behavior_checkpoint.strip()
+        ):
+            adapter_preflight = await asyncio.to_thread(
+                backend.publisher.ensure_loaded_adapter,
+                checkpoint_path=str(_resolve(root, behavior_checkpoint)),
+                adapter_name=behavior_adapter,
+            )
+        else:
+            adapter_preflight = {
+                "status": "base_model_ready",
+                "success": True,
+                "mode": "base_model",
+                "adapter_name": None,
+                "checkpoint_path": None,
+                "loaded_now": False,
+                "training_performed": False,
+                "policy_published": False,
+            }
         sglang_server_runtime = await asyncio.to_thread(
             backend.publisher.server_runtime_receipt
         )

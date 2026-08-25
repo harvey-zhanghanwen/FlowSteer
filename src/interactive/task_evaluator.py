@@ -575,7 +575,7 @@ def _evaluate_static(
 def _evaluate_aime2026(
     record: TaskRecord | Mapping[str, Any], prediction: str
 ) -> EvaluationOutcome:
-    """Apply SkillFlow Protocol 10's strict INTEGER submission scorer."""
+    """Apply downstream SkillEval's strict INTEGER Accuracy scorer."""
 
     answers = _accepted_answers(record)
     if not answers:
@@ -594,14 +594,17 @@ def _evaluate_aime2026(
     return EvaluationOutcome(
         valid=True,
         reward=result.accuracy,
-        metrics={"accuracy": result.accuracy, "exact_match": result.accuracy},
+        metrics={"accuracy": result.accuracy},
         reason="evaluated",
         details={
             "accepted_answer_count": len(answers),
             "raw_prediction": result.raw_prediction,
             "scored_prediction": result.scored_prediction,
             "structured_answer_extracted": result.structured_answer_extracted,
-            "metric_scope": "official_integer_submission",
+            "canonical_prediction": result.canonical_prediction,
+            "parsing_succeeded": result.parsing_succeeded,
+            "parsing_failure_reason": result.parsing_failure_reason,
+            "metric_scope": "canonicalized_integer_exact_accuracy",
         },
         evaluator_version=AIME2026_EVALUATOR_VERSION,
     )

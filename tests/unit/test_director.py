@@ -47,6 +47,8 @@ from src.interactive.director import (
     QA_DIRECTOR_SYSTEM_PROMPT_V5,
     QA_DIRECTOR_SYSTEM_PROMPT_V6,
     QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+    SCALAR_DIRECTOR_PROMPT_VERSION,
+    SCALAR_DIRECTOR_SYSTEM_PROMPT,
     LEGACY_QA_DIRECTOR_PROMPT_VERSION_V4,
     LEGACY_QA_DIRECTOR_PROMPT_VERSION_V5,
     LEGACY_QA_DIRECTOR_PROMPT_VERSION_V2,
@@ -1666,6 +1668,64 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
                 for item in client.schema_requests
             ],
         )
+
+    async def test_scalar_neutral_prompt_and_live_domain_start_with_add_agent(
+        self,
+    ) -> None:
+        model_registry = registry()
+        client = ScriptedDirector(
+            [
+                '{"action":"add_agent","agent_id":"agent_1",'
+                '"model_id":"qwen","contract":"Complete the task."}'
+            ]
+        )
+        env = AgentWorkflowEnv(
+            model_registry,
+            gateway=FakeGateway(),
+            execute_on_edit=True,
+            allowed_actions=(
+                "add_agent",
+                "modify_agent",
+                "delete_agent",
+                "set_relation",
+                "set_output",
+                "finish",
+            ),
+        )
+        orchestrator = AgentGraphOrchestrator(
+            model_registry,
+            client,
+            max_rounds=1,
+            system_prompt=director_system_prompt_for_version(
+                SCALAR_DIRECTOR_PROMPT_VERSION
+            ),
+            prompt_version=SCALAR_DIRECTOR_PROMPT_VERSION,
+            sampling_action_profile=DIRECTOR_MODEL_ADMISSIBLE_ACTION_MASK_PROFILE,
+            sampling_action_schema_version=(
+                DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION
+            ),
+        )
+
+        await orchestrator.run(env, "task")
+
+        self.assertEqual(
+            SCALAR_DIRECTOR_SYSTEM_PROMPT,
+            director_system_prompt_for_version(SCALAR_DIRECTOR_PROMPT_VERSION),
+        )
+        self.assertEqual(
+            ("add_agent",),
+            director_actions_from_admissible_schema_branch(
+                client.schema_requests[0]["action_schema_branch"]
+            ),
+        )
+        messages = decode_director_transcript(client.prompts[0])
+        self.assertIsNotNone(messages)
+        assert messages is not None
+        observation = json.loads(messages[-1]["content"].rpartition("\n\n")[2])
+        self.assertEqual(["add_agent"], observation["admissible_action_types"])
+        self.assertNotIn("plan", SCALAR_DIRECTOR_SYSTEM_PROMPT.casefold())
+        self.assertNotIn("solver", SCALAR_DIRECTOR_SYSTEM_PROMPT.casefold())
+        self.assertNotIn("verify", SCALAR_DIRECTOR_SYSTEM_PROMPT.casefold())
 
     def test_model_admissible_schema_branch_round_trip_is_exact(self) -> None:
         actions = (

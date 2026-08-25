@@ -1,9 +1,9 @@
-# AIME-specific population boundary for architecture development and Stable
-# Zero evaluation.  This follows SkillFlow Protocol 10's year boundary: AIME
-# through 2024 for training, AIME 2025 for development, and all 30 official AIME 2026
-# tasks for final evaluation.  The available year-labelled training source
-# begins in 2000, so this catalog materializes a 512-task 2000--2024 subset.
-# No training is enabled by this catalog.
+# AIME-family compatibility materialization plus the official AIME 2026
+# final-evaluation population. The initial AIME 2026 runtime selects only the
+# complete 30-row MathArena population through the dedicated runtime registry.
+# Historical AIME and FlowSteer's AIME 2025 file remain disjoint compatibility
+# splits for existing project loaders; they are not used in this evaluation,
+# and no training is enabled by this catalog.
 
 schema_version: "flowsteer.agentgraph.aime2026.dataset.v1"
 task_schema_version: "flowsteer.agentgraph.task.v1"
@@ -15,8 +15,8 @@ sources:
   historical_path: "${FLOWSTEER_AIME_HISTORY_PATH:-/ssd1/iclr/2/datasets/aime_2000_2025/aime_2000_2025.jsonl}"
   # FlowSteer's 30-problem AIME 2025 evaluation source.
   development_path: "${FLOWSTEER_AIME2025_PATH:-/ssd1/iclr/owner/skillflow-iclr/resources/datasets/FlowSteer-Dataset/eval/aime2025.jsonl}"
-  # MathArena/EnvCommons official 30-problem AIME 2026 release.
-  final_path: "${FLOWSTEER_DATASETS_ROOT:-/home/test/datasets}/AIME_2026/data/train-*.parquet"
+  # MathArena AIME 2026 complete 30-problem release used by SkillEval.
+  final_path: "${FLOWSTEER_DATASETS_ROOT:-/home/test/datasets}/AIME_2026/data/train-00000-of-00001.parquet"
 
 split_policy:
   training_maximum_year: 2024

@@ -114,14 +114,17 @@ def _compat_record(
     env_type: str | None = None,
     env_config: Mapping[str, Any] | None = None,
     code_files: Mapping[str, str] | None = None,
+    preserve_question_text: bool = False,
 ) -> dict[str, Any]:
     """Build the shared design-note, FlowSteer, and SkillFlow record."""
 
     if split not in SPLITS:
         raise ValueError(f"invalid project split: {split}")
-    question = str(question).strip()
-    if not question:
+    question = str(question)
+    if not question.strip():
         raise ValueError(f"empty question for {task_id}")
+    if not preserve_question_text:
+        question = question.strip()
     metadata: Dict[str, Any] = {
         "dataset_key": dataset_key,
         "source": source,

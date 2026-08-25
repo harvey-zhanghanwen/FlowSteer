@@ -1,0 +1,21 @@
+# Runtime binding for the official AIME 2026 final-evaluation population.
+# The aligned files and manifest are produced from the official-only catalog;
+# this registry is intentionally separate from the historical/development AIME
+# family materialization used by older architecture conditions.
+
+schema_version: "flowsteer.agentgraph.runtime-datasets.v2"
+task_schema_version: "flowsteer.agentgraph.task.v1"
+
+datasets:
+  aime_2026:
+    protocol_label: "skillev_aime2026_official_static_integer_v1"
+    preparation_catalog_path: "config/datasets_aime2026_official_v1.yaml"
+    preparation_catalog_schema_version: "flowsteer.agentgraph.aime2026.dataset.v1"
+    manifest:
+      path: "data/aime2026_official_v1/manifest.json"
+      schema_version: "flowsteer.agentgraph.aime2026.dataset.v1"
+      provenance_field: "catalog"
+    paths:
+      train: "data/aime2026_official_v1/train.jsonl"
+      validation: "data/aime2026_official_v1/validation.jsonl"
+      test: "data/aime2026_official_v1/test.jsonl"

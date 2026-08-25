@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
-"""Prepare the AIME development/final-evaluation view for AgentGraph.
+"""Prepare the official AIME 2026 evaluation view for AgentGraph.
 
 The record shape and atomic split writer are reused from
-``prepare_agentgraph_datasets.py``.  The population boundary follows
-SkillFlow Protocol 10 and FlowSteer's checked-in AIME 2025 evaluation source:
+``prepare_agentgraph_datasets.py``. The default catalog follows downstream
+SkillEval's fixed MathArena AIME 2026 source and writes only its official
+evaluation population. The legacy AIME-family catalog remains supported for
+existing project conditions and may additionally materialize:
 
 * the local year-labelled AIME 2000--2024 subset supplies 512 training tasks;
 * AIME 2025 is development/validation, optionally followed by a disjoint
   historical development supplement requested by the dataset catalog; and
-* all 30 official AIME 2026 problems are final-evaluation-only.
+* all 30 MathArena AIME 2026 problems are final-evaluation-only and retain the
+  exact downstream SkillEval row schema and source order.
 
 This command only aligns data.  It does not start a model, an API request,
 training, backward, an optimizer update, or Skill publication.
@@ -23,7 +26,7 @@ import json
 from pathlib import Path
 import re
 import sys
-from typing import Any, Iterator, Mapping, Sequence
+from typing import Any, Iterator, Mapping, Sequence, cast
 
 import yaml
 
@@ -36,7 +39,6 @@ from scripts.prepare_agentgraph_datasets import (  # noqa: E402
     TASK_SCHEMA_VERSION,
     SplitWriters,
     _compat_record,
-    _iter_parquet_rows,
     _path,
 )
 from src.interactive.aime2026_adapter import (  # noqa: E402
@@ -49,6 +51,34 @@ from src.interactive.aime2026_adapter import (  # noqa: E402
 
 
 AIME2026_CATALOG_SCHEMA_VERSION = "flowsteer.agentgraph.aime2026.dataset.v1"
+
+
+def _read_official_parquet_rows(path: Path) -> tuple[dict[str, object], ...]:
+    """Thin port of SkillEval ``PyArrowParquetRowReader.read_rows``.
+
+    The source must be one explicitly named absolute shard. ``to_pylist``
+    preserves Arrow row order and scalar values; benchmark validation remains
+    in ``_final_records``.
+    """
+
+    if not isinstance(path, Path) or not path.is_absolute():
+        raise ValueError("official AIME Parquet source must be an absolute Path")
+    if not path.is_file():
+        raise FileNotFoundError(path)
+
+    import pyarrow.parquet as parquet
+
+    table = parquet.read_table(path)
+    raw_rows = table.to_pylist()
+    if type(raw_rows) is not list or not raw_rows:
+        raise ValueError("official AIME Parquet source must contain records")
+    if any(
+        type(row) is not dict
+        or any(type(field_name) is not str for field_name in row)
+        for row in raw_rows
+    ):
+        raise TypeError("official AIME rows must be exact string-keyed objects")
+    return tuple(cast(dict[str, object], row) for row in raw_rows)
 
 
 def _read_jsonl(path: Path) -> Iterator[dict[str, Any]]:
@@ -91,6 +121,12 @@ def _record(
     evaluation_role: str,
     problem_index: int,
     part: str | None,
+    source_name: str = "AIME",
+    source_split: str | None = None,
+    source_format: str | None = None,
+    benchmark_id: str | None = None,
+    dataset_revision: str | None = None,
+    preserve_question_text: bool = False,
 ) -> dict[str, Any]:
     canonical = canonical_aime_integer(answer)
     extra: dict[str, Any] = {
@@ -103,9 +139,17 @@ def _record(
     }
     if part is not None:
         extra["part"] = part
+    if source_split is not None:
+        extra["source_split"] = source_split
+    if source_format is not None:
+        extra["source_format"] = source_format
+    if benchmark_id is not None:
+        extra["benchmark_id"] = benchmark_id
+    if dataset_revision is not None:
+        extra["dataset_revision"] = dataset_revision
     result = _compat_record(
         dataset_key=AIME2026_DATASET_KEY,
-        source="AIME 2026",
+        source=source_name,
         task_id=task_id,
         question=question,
         ground_truth=canonical,
@@ -114,6 +158,7 @@ def _record(
         metric="accuracy",
         extra=extra,
         evaluator_payload={"accepted_answers": [canonical]},
+        preserve_question_text=preserve_question_text,
     )
     metadata = dict(result["metadata"])
     metadata.update(
@@ -124,6 +169,15 @@ def _record(
             "evaluation_role": evaluation_role,
             "answer_format": AIME2026_ANSWER_FORMAT,
             "evaluator_version": AIME2026_EVALUATOR_VERSION,
+            "problem_index": problem_index,
+            **({"source_split": source_split} if source_split is not None else {}),
+            **({"source_format": source_format} if source_format is not None else {}),
+            **({"benchmark_id": benchmark_id} if benchmark_id is not None else {}),
+            **(
+                {"dataset_revision": dataset_revision}
+                if dataset_revision is not None
+                else {}
+            ),
         }
     )
     result["metadata"] = metadata
@@ -242,17 +296,40 @@ def _development_records(path: Path) -> list[dict[str, Any]]:
     return records
 
 
-def _final_records(path_pattern: Path) -> list[dict[str, Any]]:
-    rows = sorted(_iter_parquet_rows(path_pattern), key=lambda row: int(row["problem_idx"]))
+def _final_records(
+    source_path: Path,
+    *,
+    dataset_revision: str = "d2de22f3c656b4f56cf8981212186377d1e23bc3",
+) -> list[dict[str, Any]]:
+    required_fields = {"answer", "problem", "problem_idx"}
+    raw_rows = list(_read_official_parquet_rows(source_path))
+    for row_index, row in enumerate(raw_rows):
+        if set(row) != required_fields:
+            raise ValueError(
+                "official AIME 2026 row "
+                f"{row_index} fields differ from {sorted(required_fields)}"
+            )
+        if isinstance(row["problem_idx"], bool) or not isinstance(
+            row["problem_idx"], int
+        ):
+            raise ValueError("official AIME 2026 problem_idx must be int64")
+        if isinstance(row["answer"], bool) or not isinstance(row["answer"], int):
+            raise ValueError("official AIME 2026 answer must be int64")
+        if not isinstance(row["problem"], str) or not row["problem"].strip():
+            raise ValueError("official AIME 2026 problem must be non-empty text")
+    rows = raw_rows
+    indices = [row["problem_idx"] for row in rows]
+    if len(indices) != len(set(indices)):
+        raise ValueError("official AIME 2026 problem_idx values must be unique")
     records: list[dict[str, Any]] = []
     for row in rows:
-        index = int(row["problem_idx"])
+        index = row["problem_idx"]
         if not 1 <= index <= 30:
             raise ValueError("official AIME 2026 problem_idx must lie in [1, 30]")
         records.append(
             _record(
-                task_id=f"aime-2026:{index:02d}",
-                question=str(row.get("problem", "")).strip(),
+                task_id=f"aime-2026/{index:02d}",
+                question=row["problem"],
                 answer=row.get("answer"),
                 split="test",
                 benchmark_year=2026,
@@ -260,6 +337,12 @@ def _final_records(path_pattern: Path) -> list[dict[str, Any]]:
                 evaluation_role="final-evaluation",
                 problem_index=index,
                 part=None,
+                source_name="MathArena/aime_2026",
+                source_split="train",
+                source_format="matharena-aime-2026-parquet@1",
+                benchmark_id="aime-2026",
+                dataset_revision=dataset_revision,
+                preserve_question_text=True,
             )
         )
     return records
@@ -297,35 +380,50 @@ def prepare(catalog_path: Path) -> Path:
 
     sources = catalog["sources"]
     split_policy = catalog["split_policy"]
-    historical = _historical_records(
-        _path(str(sources["historical_path"])),
-        maximum_year=int(split_policy["training_maximum_year"]),
-    )
-    train_count = int(split_policy["train_count"])
-    development_historical_count = int(
-        split_policy.get("development_historical_count", 0)
-    )
-    if development_historical_count < 0:
-        raise ValueError("development_historical_count must be non-negative")
-    if len(historical) < development_historical_count + train_count:
-        raise ValueError(
-            "historical AIME provides "
-            f"{len(historical)} tasks, expected at least "
-            f"{development_historical_count + train_count} for disjoint "
-            "development and training"
+    mode = str(split_policy.get("mode", "family_compatibility"))
+    if mode == "official_evaluation_only":
+        train: list[dict[str, Any]] = []
+        development: list[dict[str, Any]] = []
+        historical_development: list[dict[str, Any]] = []
+        dataset_revision = str(sources["dataset_revision"])
+        final = _final_records(
+            _path(str(sources["final_path"])),
+            dataset_revision=dataset_revision,
         )
-    historical_development = [
-        _historical_development_record(item)
-        for item in historical[:development_historical_count]
-    ]
-    train = historical[
-        development_historical_count : development_historical_count + train_count
-    ]
-    development = _development_records(
-        _path(str(sources["development_path"]))
-    ) + historical_development
-    final = _final_records(_path(str(sources["final_path"])))
-    expected_development = int(split_policy["development_count"])
+        expected_development = 0
+    elif mode == "family_compatibility":
+        historical = _historical_records(
+            _path(str(sources["historical_path"])),
+            maximum_year=int(split_policy["training_maximum_year"]),
+        )
+        train_count = int(split_policy["train_count"])
+        development_historical_count = int(
+            split_policy.get("development_historical_count", 0)
+        )
+        if development_historical_count < 0:
+            raise ValueError("development_historical_count must be non-negative")
+        if len(historical) < development_historical_count + train_count:
+            raise ValueError(
+                "historical AIME provides "
+                f"{len(historical)} tasks, expected at least "
+                f"{development_historical_count + train_count} for disjoint "
+                "development and training"
+            )
+        historical_development = [
+            _historical_development_record(item)
+            for item in historical[:development_historical_count]
+        ]
+        train = historical[
+            development_historical_count : development_historical_count + train_count
+        ]
+        development = _development_records(
+            _path(str(sources["development_path"]))
+        ) + historical_development
+        final = _final_records(_path(str(sources["final_path"])))
+        expected_development = int(split_policy["development_count"])
+        dataset_revision = None
+    else:
+        raise ValueError(f"unsupported AIME dataset mode: {mode!r}")
     expected_final = int(split_policy["final_count"])
     if len(development) != expected_development:
         raise ValueError(
@@ -354,14 +452,28 @@ def prepare(catalog_path: Path) -> Path:
         "training_started": False,
         "evaluator_version": AIME2026_EVALUATOR_VERSION,
         "task_family": AIME2026_TASK_FAMILY,
+        "dataset_mode": mode,
+        "dataset_source": (
+            "MathArena/aime_2026" if mode == "official_evaluation_only" else None
+        ),
+        "dataset_revision": dataset_revision,
+        "source_split": "train" if mode == "official_evaluation_only" else None,
         "split_policy": {
             "train": (
-                "historical AIME 2000--2024 after the held-out historical "
-                f"development prefix, next {len(train)} in source order"
+                "empty: official AIME 2026 is evaluation-only"
+                if mode == "official_evaluation_only"
+                else (
+                    "historical AIME 2000--2024 after the held-out historical "
+                    f"development prefix, next {len(train)} in source order"
+                )
             ),
             "validation": (
-                "complete AIME 2025 development population plus "
-                f"{len(historical_development)} held-out historical tasks"
+                "empty: official AIME 2026 is evaluation-only"
+                if mode == "official_evaluation_only"
+                else (
+                    "complete AIME 2025 development population plus "
+                    f"{len(historical_development)} held-out historical tasks"
+                )
             ),
             "test": "complete official AIME 2026 final-evaluation population",
         },
@@ -384,7 +496,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--catalog",
-        default="config/datasets_aime2026.yaml",
+        default="config/datasets_aime2026_official_v1.yaml",
         help="AIME 2026 dataset catalog path",
     )
     return parser.parse_args()

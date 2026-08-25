@@ -1,0 +1,19 @@
+# Exact downstream SkillEval AIME 2026 production population. This catalog is
+# evaluation-only and intentionally materializes no historical train or
+# development records.
+
+schema_version: "flowsteer.agentgraph.aime2026.dataset.v1"
+task_schema_version: "flowsteer.agentgraph.task.v1"
+aligned_dir: "data/aime2026_official_v1"
+
+sources:
+  dataset_id: "MathArena/aime_2026"
+  dataset_revision: "d2de22f3c656b4f56cf8981212186377d1e23bc3"
+  source_split: "train"
+  final_path: "${FLOWSTEER_DATASETS_ROOT:-/home/test/datasets}/AIME_2026/data/train-00000-of-00001.parquet"
+
+split_policy:
+  mode: "official_evaluation_only"
+  final_count: 30
+  final_evaluation_only: true
+  training_enabled: false

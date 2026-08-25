@@ -1041,7 +1041,16 @@ class AgentWorkflowEnv:
         admitted: list[str] = []
         for action_type in self.allowed_action_types:
             if (
-                action_type == AgentActionType.ADD_SUBGRAPH.value
+                action_type
+                in {
+                    AgentActionType.ADD_AGENT.value,
+                    AgentActionType.ADD_SUBGRAPH.value,
+                }
+                and (
+                    action_type == AgentActionType.ADD_SUBGRAPH.value
+                    or AgentActionType.ADD_SUBGRAPH.value
+                    not in self._allowed_action_type_set
+                )
                 and can_add
                 and (
                     not self._uses_semantic_lineage_protocol()

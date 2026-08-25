@@ -106,6 +106,141 @@ def test_supported_configs_are_evaluation_only():
             raise AssertionError("an optimizer-enabled evaluation config was accepted")
 
 
+def test_evaluation_config_allows_base_director_without_lora_adapter():
+    config = _evaluation_config("aime_2026")
+    config["director"]["behavior_adapter_name"] = None
+    config["director"]["behavior_adapter_checkpoint"] = None
+
+    _MODULE.validate_completion_benchmark_config(config)
+
+    config["director"]["behavior_adapter_name"] = "unexpected-adapter"
+    try:
+        _MODULE.validate_completion_benchmark_config(config)
+    except Exception as exc:
+        assert "must be supplied together" in str(exc)
+    else:  # pragma: no cover - fail-closed guard
+        raise AssertionError("a partial adapter route was accepted")
+
+
+def test_official_aime_initial_config_keeps_learning_tools_and_priors_disabled():
+    config = load_yaml(
+        _ROOT / "config" / "evaluation_aime2026_unified_initial_v1.yaml"
+    )
+
+    _MODULE.validate_completion_benchmark_config(config)
+
+    assert config["experiment"]["training_enabled"] is False
+    assert config["director"]["lora"]["enabled"] is False
+    assert config["aime_tool_runtime"]["enabled"] is False
+    assert config["grpo"]["enabled"] is False
+    assert config["grpo"]["max_optimizer_updates"] == 0
+    assert config["exploration"]["enabled"] is False
+    assert config["skills"]["enabled"] is False
+    assert config["skills"]["initial_library"] == []
+    assert config["agent_graph"]["contract_type"] == "free_text"
+    assert config["agent_graph"]["require_format_agent"] is False
+    assert config["agent_graph"]["terminal_protocol_by_source"] == {
+        "aime_2026": "none"
+    }
+    assert config["agent_graph"]["actions"] == [
+        "add_agent",
+        "modify_agent",
+        "delete_agent",
+        "set_relation",
+        "set_output",
+        "finish",
+    ]
+
+
+def test_aime_without_explicit_finish_never_calls_formal_evaluator():
+    task = _MODULE.TaskRecord(
+        task_id="aime-2026/01",
+        question="problem",
+        ground_truth="42",
+        split="test",
+        metadata={"dataset_key": "aime_2026"},
+    )
+
+    outcome = asyncio.run(
+        _MODULE.LiveSmokeBackend.evaluate_final_graph(
+            SimpleNamespace(),
+            task,
+            None,
+            {"nodes": [], "relations": [], "revision": 0},
+            rollout_index=0,
+        )
+    )
+
+    assert outcome.valid is False
+    assert outcome.reward is None
+    assert outcome.reason == "not_evaluated_without_explicit_finish"
+    assert outcome.details["formal_evaluator_called"] is False
+
+
+def test_aime_terminal_failure_is_reportable_without_evaluator_retry_or_double_count():
+    task = _MODULE.TaskRecord(
+        task_id="aime-2026/01",
+        question="problem",
+        ground_truth="42",
+        split="test",
+        metadata={"dataset_key": "aime_2026"},
+    )
+    versions = {"evaluator": "skillev.private-static.integer.v1"}
+    trajectory = {
+        "trajectory_id": "trajectory:aime-terminal-failure",
+        "task": task.to_dict(),
+        "condition_id": "aime-condition",
+        "versions": versions,
+        "turns": [],
+        "final_answer": None,
+        "explicit_finish": False,
+        "termination_reason": "max_rounds",
+        "evaluation": {
+            "valid": False,
+            "reward": None,
+            "metrics": {},
+            "reason": "not_evaluated_without_explicit_finish",
+            "details": {
+                "terminal_failure": True,
+                "formal_evaluator_called": False,
+            },
+            "evaluator_version": "skillev.private-static.integer.v1",
+        },
+    }
+
+    assert _MODULE.hotpot_round._reportable_terminal_failure_matches(
+        trajectory,
+        task=task,
+        condition_id="aime-condition",
+        versions=versions,
+    )
+
+    row = {
+        "task_id": task.task_id,
+        "failure_type": "agentgraph_terminal_failure",
+        "direct": {
+            "available": True,
+            "valid": True,
+            "accuracy": 0.0,
+            "telemetry": {},
+        },
+        "agentgraph": {
+            "available": True,
+            "valid": False,
+            "accuracy": 0.0,
+            "explicit_finish": False,
+            "termination_reason": "max_rounds",
+            "evaluation": trajectory["evaluation"],
+            "telemetry": {},
+            "graph_diagnostic": None,
+        },
+    }
+    report = _MODULE._report([row], _evaluation_config("aime_2026"))
+    assert report["terminal_failure_count"] == 1
+    assert report["max_rounds_count"] == 1
+    assert report["operational_failure_count"] == 0
+
+
 def test_graph_task_timeout_must_be_positive_when_configured():
     config = _evaluation_config("alfworld")
     config["alfworld_evaluation"]["task_timeout_seconds"] = 300
@@ -159,8 +294,8 @@ def test_aime_selection_filters_the_official_2026_slice(tmp_path):
 
     records = (
         task("aime-historical:one", "historical_aime_1983_2025", "1"),
-        task("aime-2026:01", "official_aime_2026", "2"),
-        task("aime-2026:02", "official_aime_2026", "3"),
+        task("aime-2026/01", "official_aime_2026", "2"),
+        task("aime-2026/02", "official_aime_2026", "3"),
     )
     _MODULE._atomic_jsonl(
         source,
@@ -172,10 +307,10 @@ def test_aime_selection_filters_the_official_2026_slice(tmp_path):
 
     frozen = _MODULE._select_tasks(config, tmp_path, selected)
 
-    assert [item.task_id for item in frozen] == ["aime-2026:01", "aime-2026:02"]
+    assert [item.task_id for item in frozen] == ["aime-2026/01", "aime-2026/02"]
     assert [item.task_id for item in _MODULE.iter_task_records(selected)] == [
-        "aime-2026:01",
-        "aime-2026:02",
+        "aime-2026/01",
+        "aime-2026/02",
     ]
 
 
@@ -358,7 +493,7 @@ def test_swebench_evaluator_preflight_does_not_call_selected_task_harness():
 
 def test_stable_zero_requires_dataset_evaluator_receipts():
     task = _MODULE.TaskRecord(
-        task_id="aime-2026:01",
+        task_id="aime-2026/01",
         question="question",
         ground_truth="7",
         split="test",
@@ -509,32 +644,32 @@ def test_environment_stable_zero_uses_terminal_receipt_not_free_text_answer():
     assert failed["checks"][0]["environment_terminal_receipt_valid"] is False
 
 
-def test_reports_aime_exact_match_and_healthbench_raw_score():
+def test_reports_aime_accuracy_and_healthbench_raw_score():
     aime_rows = [
         {
-            "direct": {"available": True, "valid": True, "exact_match": 0.0},
+            "direct": {"available": True, "valid": True, "accuracy": 0.0},
             "agentgraph": {
                 "available": True,
                 "valid": True,
-                "exact_match": 1.0,
+                "accuracy": 1.0,
                 "explicit_finish": True,
             },
         },
         {
-            "direct": {"available": True, "valid": True, "exact_match": 1.0},
+            "direct": {"available": True, "valid": True, "accuracy": 1.0},
             "agentgraph": {
                 "available": False,
                 "valid": False,
-                "exact_match": 0.0,
+                "accuracy": 0.0,
                 "explicit_finish": False,
             },
         },
     ]
     aime = _MODULE._aggregate(aime_rows, "agentgraph", "aime_2026")
     assert aime["denominator"] == 2
-    assert aime["strict_exact_match"] == 0.5
-    assert aime["completed_only_exact_match"] == 1.0
     assert aime["strict_accuracy"] == 0.5
+    assert aime["completed_only_accuracy"] == 1.0
+    assert aime["correct"] == 1
 
     health_rows = [
         {
@@ -579,6 +714,55 @@ def test_reports_aime_exact_match_and_healthbench_raw_score():
         "webshop",
     )
     assert environment["strict_success"] == 1.0
+
+
+def test_aime_wrong_demo_uses_first_runtime_failure_receipt():
+    diagnosis = _MODULE._aime_wrong_demo_diagnosis(
+        {
+            "turns": [
+                {
+                    "round_index": 0,
+                    "action": {
+                        "action": "set_relation",
+                        "source_id": "a",
+                        "target_id": "b",
+                    },
+                    "canvas_feedback": "accepted set_relation",
+                    "runtime_summary": {
+                        "execution_status": "failed",
+                        "failure_records": [
+                            {
+                                "agent_id": "b",
+                                "error_type": "ProviderRequestError",
+                                "phase": "single",
+                            }
+                        ],
+                    },
+                },
+                {
+                    "round_index": 1,
+                    "action": {"action": "modify_agent", "agent_id": "b"},
+                    "canvas_feedback": "accepted modify_agent",
+                    "runtime_summary": {},
+                },
+            ],
+            "evaluation": {"reason": "not_evaluated_without_explicit_finish"},
+            "explicit_finish": False,
+            "termination_reason": "max_rounds",
+            "final_answer": None,
+        }
+    )
+
+    assert diagnosis["diagnosis_scope"] == "first_observable_failure"
+    assert diagnosis["failure_layer"] == "runtime"
+    assert diagnosis["first_error_turn"] == 0
+    assert diagnosis["first_error_action"] == "set_relation"
+    assert diagnosis["first_error_agent_id"] == "b"
+    assert diagnosis["subsequent_error_propagation"]["later_turn_count"] == 1
+    assert (
+        diagnosis["subsequent_error_propagation"]["interpretation"]
+        == "subsequent_receipt_span_not_proven_causality"
+    )
 
 
 def test_qa_reports_native_exact_match_and_token_f1_together():
@@ -1103,6 +1287,83 @@ def test_paired_row_uses_the_evaluated_lineage_graph_for_fallback():
     assert row["agentgraph"]["final_graph"] == evaluated_graph
     assert row["agentgraph"]["terminal_canvas_graph"] == terminal_graph
     assert row["agentgraph"]["graph_diagnostic"]["graph_revision"] == 1
+
+
+def test_aime_direct_model_request_contains_problem_but_not_private_target():
+    registry = load_model_registry(
+        _ROOT / "config" / "model_catalog_hotpotqa_deep_v6.yaml"
+    )
+    sentinel = "PRIVATE_TARGET_SENTINEL_7391"
+
+    class Gateway:
+        def __init__(self):
+            self.requests = []
+
+        async def generate(self, request):
+            self.requests.append(request)
+            return SimpleNamespace(text="<answer>7</answer>")
+
+    gateway = Gateway()
+    backend = SimpleNamespace(
+        registry=registry,
+        runtime=SimpleNamespace(gateway=gateway),
+        config={},
+    )
+    task = _MODULE.TaskRecord(
+        task_id="aime-2026/01",
+        question="PUBLIC PROBLEM TEXT",
+        ground_truth=sentinel,
+        split="test",
+        metadata={
+            "dataset_key": "aime_2026",
+            "evaluator_payload": {"accepted_answers": [sentinel]},
+        },
+    )
+
+    async def fake_evaluate(_backend, evaluated_task, prediction, *, run_graph=None):
+        assert evaluated_task.ground_truth == sentinel
+        assert prediction == "<answer>7</answer>"
+        assert run_graph is None
+        return EvaluationOutcome(
+            valid=True,
+            reward=0.0,
+            metrics={"accuracy": 0.0},
+            reason="evaluated",
+            evaluator_version="skillev.private-static.integer.v1",
+        )
+
+    execution = SimpleNamespace(
+        metadata={"response": {"generation_seed": 17}},
+        to_dict=lambda: {
+            "input": {"problem": "PUBLIC PROBLEM TEXT"},
+            "output": "<answer>7</answer>",
+            "metadata": {"response": {"generation_seed": 17}},
+        },
+    )
+    with patch.object(
+        _MODULE,
+        "execution_record_from_call",
+        return_value=execution,
+    ), patch.object(_MODULE, "_evaluate_prediction", new=fake_evaluate):
+        asyncio.run(
+            _MODULE._direct_one(
+                backend,
+                task,
+                0,
+                model_id="qwen3.5-9b-local",
+                protocol="skillev_private_static_integer_submission_v1",
+                contract="Return one integer.",
+                seed=17,
+                run_label="aime-private-boundary-test",
+            )
+        )
+
+    assert len(gateway.requests) == 1
+    request = gateway.requests[0]
+    assert request.problem.startswith("PUBLIC PROBLEM TEXT\n\n")
+    assert "answer_format=integer-000-to-999" in request.problem
+    assert sentinel not in request.problem
+    assert sentinel not in request.agent.contract
 
 
 def test_interactive_direct_condition_records_every_environment_policy_call():
