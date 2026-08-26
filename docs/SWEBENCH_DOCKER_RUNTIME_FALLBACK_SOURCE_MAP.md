@@ -42,15 +42,44 @@ implementation over the same bind-mounted bytes.  Its timeout helper is a
 minimal extension of SkillFlow `training/swe_bench_eval.py::_exec_run_with_tolerant_decode`
 that also records Docker's `ExitCode`.
 
+The Docker Tool backend explicitly runs the same Python-environment prologue
+used by the official SWE-bench `eval_script` before every `bash` or
+`run_tests` command:
+
+```text
+source /opt/miniconda3/bin/activate
+conda activate testbed
+```
+
+This is required because non-interactive `docker exec ... bash -c` does not
+read `/root/.bashrc`.
+
+The task Docker daemon has only one mapped UID/GID and cannot unpack the
+official xarray image layer containing `/etc/gshadow` group 42.  For the two
+allowlisted instances, the official OCI layers were expanded in manifest
+order, their archive ownership was normalized to container `root:root`, and
+the resulting root filesystem was imported under the original local instance
+image tag.  File content, file mode, layer order, `/opt/miniconda3/envs/testbed`,
+`/testbed`, image environment, working directory, and command remain those of
+the corresponding official OCI manifest.  The local image receipt records
+both the Docker image ID and the source OCI index/manifest digest.
+
 The unified Director, Canvas, AgentGraph, `CodingExecutionAdapter`, topology
 search space, FINISH behavior, and `OfficialSWEbenchHarness` evaluator are not
 changed.  No role or relation is introduced.
 
-## Not validated in this branch
+## Live validation
 
-- No Docker daemon, image pull, model/API call, smoke rollout, or official
-  evaluation was run while developing this fallback.
-- Runtime wiring must use an explicit instance allowlist containing only the
-  two IDs above before a live canary.
-- The official per-instance images must be locally available or pullable by
-  the existing official `build_container` path at live runtime.
+- The explicit runtime allowlist contains only `pydata__xarray-7229` and
+  `pydata__xarray-7393`.
+- Both task workspaces were created through
+  `prepare_swebench_docker_workspace_for_task`, reset to their public
+  `base_commit`, and cleaned through the official container lifecycle.
+- In both workspaces, the Docker Tool backend imported xarray from
+  `/testbed/xarray` and completed
+  `xarray/tests/test_computation.py::test_where` with `1 passed`.
+- The official SWE-bench harness evaluated a deliberately non-solution patch
+  for each instance.  Both evaluations produced valid official reports with
+  `resolved=false` and `proxy_metric_used=false`, as expected for that patch.
+- No model/API call, training step, or proxy evaluator was used for these
+  environment checks.

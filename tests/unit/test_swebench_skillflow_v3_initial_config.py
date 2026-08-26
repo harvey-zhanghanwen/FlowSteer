@@ -39,6 +39,9 @@ _STABLE_ZERO_SHARED_WORKSPACE_CONFIG_PATH = (
 _STABLE_ZERO_DOCKER_FALLBACK_CONFIG_PATH = (
     _ROOT / "config" / "evaluation_swebench_skillflow_v3_stable_zero_v16.yaml"
 )
+_STABLE_ZERO_DOCKER_ACTIVATION_CONFIG_PATH = (
+    _ROOT / "config" / "evaluation_swebench_skillflow_v3_stable_zero_v17.yaml"
+)
 
 
 def _config() -> dict[str, object]:
@@ -406,6 +409,33 @@ def test_v16_limits_official_docker_fallback_to_two_xarray_instances() -> None:
     assert runtime["official_docker_workspace_root"].endswith(
         "/docker_workspaces"
     )
+    assert config["swebench_evaluation"]["sample_count"] == 128
+    assert config["grpo"]["enabled"] is False
+    assert config["skills"]["enabled"] is False
+
+
+def test_v17_keeps_v16_protocol_and_versions_testbed_activation() -> None:
+    previous = dict(load_yaml(_STABLE_ZERO_DOCKER_FALLBACK_CONFIG_PATH))
+    config = dict(load_yaml(_STABLE_ZERO_DOCKER_ACTIVATION_CONFIG_PATH))
+
+    validate_completion_benchmark_config(config)
+
+    assert config["experiment"]["condition_id"] == (
+        "swebench_skillflow_v3_stable_zero_v17"
+    )
+    assert config["experiment"]["tool_version"] == (
+        previous["experiment"]["tool_version"]
+        .removesuffix("flowsteer.official-docker-testbed-fallback.v1")
+        + "flowsteer.official-docker-testbed-fallback.v2"
+        + "+flowsteer.swebench-testbed-conda-activation.v1"
+    )
+    assert config["experiment"]["catalog_order_namespace"] == previous[
+        "experiment"
+    ]["catalog_order_namespace"]
+    assert config["swebench_evaluation"] == previous["swebench_evaluation"]
+    assert config["swe_coding_runtime"][
+        "official_docker_fallback_instance_ids"
+    ] == ["pydata__xarray-7229", "pydata__xarray-7393"]
     assert config["swebench_evaluation"]["sample_count"] == 128
     assert config["grpo"]["enabled"] is False
     assert config["skills"]["enabled"] is False

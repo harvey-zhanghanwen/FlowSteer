@@ -147,6 +147,9 @@ class PreparedSWEbenchDockerWorkspace:
     close_logger: Callable[[Any], None] = field(repr=False)
     logger: Any = field(repr=False)
     log_path: Path
+    local_instance_image_id: str = ""
+    official_oci_index_digest: str = ""
+    official_oci_manifest_digest: str = ""
     _closed: bool = False
 
     @property
@@ -164,6 +167,9 @@ class PreparedSWEbenchDockerWorkspace:
             "observed_pinned_commit": self.pinned_commit,
             "instance_image_key": self.instance_image_key,
             "environment_image_key": self.environment_image_key,
+            "local_instance_image_id": self.local_instance_image_id,
+            "official_oci_index_digest": self.official_oci_index_digest,
+            "official_oci_manifest_digest": self.official_oci_manifest_digest,
             "container_name": self.container_name,
             "runtime_log_path": str(self.log_path),
             "workspace": SWEBENCH_DOCKER_WORKDIR,
@@ -234,9 +240,20 @@ class DockerRepositoryToolBackend(RepositoryToolBackend):
         }
 
     def _run_in_testbed(self, command: str, timeout: float) -> DockerExecResult:
+        # DIRECT_REUSE: the official SWE-bench Python eval script activates
+        # ``testbed`` before executing repository commands.  ``docker exec
+        # /bin/bash -c`` is non-interactive and therefore does not read the
+        # image's ``/root/.bashrc``; activate explicitly so Agent Tool calls
+        # use the same Python environment as the official evaluator.
+        activation = (
+            'tool_command="$1"; shift; '
+            "source /opt/miniconda3/bin/activate && "
+            "conda activate testbed && "
+            'exec /bin/bash -c "$tool_command"'
+        )
         return self._exec_runner(
             self._workspace.container,
-            ("/bin/bash", "-c", command),
+            ("/bin/bash", "-c", activation, "swebench-tool", command),
             timeout_seconds=timeout,
         )
 
@@ -361,15 +378,28 @@ def prepare_swebench_docker_workspace_for_task(
     try:
         client = docker_client_factory()
         try:
-            client.images.get(test_spec.instance_image_key)
+            local_image = client.images.get(test_spec.instance_image_key)
         except ImageNotFound:
             # NECESSARY_ADAPTATION: the official remote image is an OCI image
             # index.  This task-scoped rootless daemon requires the official
             # platform to be explicit so the local tag is materialized.
-            client.images.pull(
+            local_image = client.images.pull(
                 test_spec.instance_image_key,
                 platform=test_spec.platform,
             )
+        image_attributes = getattr(local_image, "attrs", {})
+        image_config = (
+            image_attributes.get("Config", {})
+            if isinstance(image_attributes, Mapping)
+            else {}
+        )
+        image_labels = (
+            image_config.get("Labels", {})
+            if isinstance(image_config, Mapping)
+            else {}
+        )
+        if not isinstance(image_labels, Mapping):
+            image_labels = {}
         transient = build(test_spec, client, run_id + "-seed", logger, False, False)
         transient.start()
         repo_root = _extract_testbed(transient, task_directory)
@@ -420,6 +450,13 @@ def prepare_swebench_docker_workspace_for_task(
             close_logger=close_logger,
             logger=logger,
             log_path=log_path,
+            local_instance_image_id=str(getattr(local_image, "id", "")),
+            official_oci_index_digest=str(
+                image_labels.get("swebench.official.index_digest", "")
+            ),
+            official_oci_manifest_digest=str(
+                image_labels.get("swebench.official.manifest_digest", "")
+            ),
         )
     except BaseException:
         try:

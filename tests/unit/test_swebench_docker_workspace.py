@@ -77,6 +77,9 @@ def _workspace(tmp_path: Path) -> PreparedSWEbenchDockerWorkspace:
         close_logger=lambda _logger: None,
         logger=object(),
         log_path=root / "runtime.log",
+        local_instance_image_id="sha256:local-image",
+        official_oci_index_digest="sha256:official-index",
+        official_oci_manifest_digest="sha256:official-manifest",
     )
 
 
@@ -126,15 +129,44 @@ def test_docker_backend_reuses_repository_tools_and_runs_commands_in_testbed(
     )
     assert bash.value["ok"] is True
     assert tests.value["passed"] is True
+    activation = (
+        'tool_command="$1"; shift; '
+        "source /opt/miniconda3/bin/activate && "
+        "conda activate testbed && "
+        'exec /bin/bash -c "$tool_command"'
+    )
     assert calls == [
-        (("/bin/bash", "-c", "git status --short"), 30.0),
-        (("/bin/bash", "-c", "pytest -q"), 12.0),
+        (
+            (
+                "/bin/bash",
+                "-c",
+                activation,
+                "swebench-tool",
+                "git status --short",
+            ),
+            30.0,
+        ),
+        (
+            (
+                "/bin/bash",
+                "-c",
+                activation,
+                "swebench-tool",
+                "pytest -q",
+            ),
+            12.0,
+        ),
     ]
     assert workspace.receipt["workspace"] == SWEBENCH_DOCKER_WORKDIR
     assert workspace.receipt["instance_image_key"].endswith(
         "pydata_1776_xarray-7229:latest"
     )
     assert workspace.receipt["environment_image_key"].startswith("sweb.env.py")
+    assert workspace.receipt["local_instance_image_id"] == "sha256:local-image"
+    assert workspace.receipt["official_oci_index_digest"] == "sha256:official-index"
+    assert workspace.receipt["official_oci_manifest_digest"] == (
+        "sha256:official-manifest"
+    )
 
 
 def test_training_registration_accepts_the_task_environment_backend(
