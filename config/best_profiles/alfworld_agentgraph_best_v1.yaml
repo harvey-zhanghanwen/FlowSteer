@@ -1,0 +1,75 @@
+schema_version: "flowsteer.agentgraph.best-profile.v1"
+profile_id: "alfworld_agentgraph_best_v1"
+dataset_key: "alfworld"
+
+selection:
+  candidate: "agentgraph"
+  metric: "native_environment_terminal_success_rate"
+  scope: "per_official_split"
+  require_full_official_split: true
+  require_complete: true
+  require_evaluator_valid_for_all_tasks: true
+  require_same_protocol_within_split: true
+  excluded_conditions:
+    - "direct"
+    - "canary_or_small_sample"
+    - "prepare_only"
+    - "incomplete_or_evaluator_invalid"
+    - "different_official_split"
+    - "non_native_or_leaky_evaluator"
+
+source:
+  source_code_revision: "eab43ab2b5245248310676c832ff19fde3ca5b6d"
+  dataset_protocol: "skillflow.protocol.v10"
+  evaluator_version: "skillflow.ragen_adapter.v2"
+  director_prompt_version: "agentgraph.director.minimal-neutral.v10"
+  tool_runtime_version: "skillflow.ragen-alfworld.rollout-session.v1"
+  behavior_policy_version: "qwen35-9b-base-alfworld-initial-v1"
+  model_catalog_path: "config/model_catalog_alfworld_paired_qwen35_v1.yaml"
+  training_performed: false
+  skill_injection_performed: false
+
+profiles:
+  valid_seen:
+    eligible_complete_agentgraph_condition_count: 1
+    selected_condition_id: "alfworld_valid_seen_unified_architecture_v1"
+    executable_config_path: "config/evaluation_alfworld_valid_seen_unified_architecture_v1.yaml"
+    official_split: "valid_seen"
+    sample_count: 140
+    evaluator_valid: 140
+    success_count: 46
+    success_rate: 0.32857142857142857
+    direct_success_count: 43
+    direct_success_rate: 0.30714285714285716
+    agentgraph_minus_direct: 0.021428571428571408
+    completion_status: "completed_with_terminal_failures"
+    selected_tasks_path: "artifacts/alfworld_initial_adapter_v1/valid_seen/selected_tasks.jsonl"
+    run_manifest_path: "artifacts/alfworld_initial_adapter_v1/valid_seen/run_manifest.json"
+    report_json_path: "reports/alfworld_initial_adapter_v1/valid_seen_report.json"
+    report_markdown_path: "reports/alfworld_initial_adapter_v1/valid_seen_report.md"
+
+  valid_unseen:
+    eligible_complete_agentgraph_condition_count: 1
+    selected_condition_id: "alfworld_valid_unseen_unified_architecture_v1"
+    executable_config_path: "config/evaluation_alfworld_valid_unseen_unified_architecture_v1.yaml"
+    official_split: "valid_unseen"
+    sample_count: 134
+    evaluator_valid: 134
+    success_count: 40
+    success_rate: 0.29850746268656714
+    direct_success_count: 28
+    direct_success_rate: 0.208955223880597
+    agentgraph_minus_direct: 0.08955223880597013
+    completion_status: "completed_with_terminal_failures"
+    selected_tasks_path: "artifacts/alfworld_initial_adapter_v1/valid_unseen/selected_tasks.jsonl"
+    run_manifest_path: "artifacts/alfworld_initial_adapter_v1/valid_unseen/run_manifest.json"
+    report_json_path: "reports/alfworld_initial_adapter_v1/valid_unseen_report.json"
+    report_markdown_path: "reports/alfworld_initial_adapter_v1/valid_unseen_report.md"
+
+next_run:
+  canonical_profile_pointer: true
+  runner_auto_selects_profile: false
+  requires_explicit_config_argument: true
+  config_by_official_split:
+    valid_seen: "config/evaluation_alfworld_valid_seen_unified_architecture_v1.yaml"
+    valid_unseen: "config/evaluation_alfworld_valid_unseen_unified_architecture_v1.yaml"
