@@ -1300,7 +1300,7 @@ class RepositoryToolBackend:
 
 
 def create_swebench_repository_registration(
-    repo_root: Path | str,
+    repo_root: Path | str | None,
     *,
     tool_id: str = SWEBENCH_REPOSITORY_TOOL_ID,
     dataset_scope: tuple[str, ...] = ("swe_bench",),
@@ -1313,28 +1313,38 @@ def create_swebench_repository_registration(
     repository_state_receipt: Mapping[str, object] | None = None,
     task_issue: str = "",
     edit_generator: Callable[..., Any] | None = None,
+    backend_override: Any | None = None,
 ) -> ToolRegistration:
     """Create one registry entry for a prepared SWE-bench repository."""
 
     if action_profile not in SWEBENCH_TOOL_PROFILES:
         raise ValueError("unsupported SWE-bench repository Tool profile")
     if action_profile == SWEBENCH_TOOL_PROFILE_SKILLFLOW_TRAINING:
-        if require_task_environment is not True or not tuple(task_command_prefix):
+        if require_task_environment is not True or (
+            backend_override is None and not tuple(task_command_prefix)
+        ):
             raise ValueError(
                 "SkillFlow SWE-bench training Tool profile requires a "
                 "task-specific command environment"
             )
 
-    backend = RepositoryToolBackend(
-        repo_root,
-        max_test_timeout_seconds=timeout_seconds,
-        task_command_prefix=task_command_prefix,
-        task_environment_receipt=task_environment_receipt,
-        require_task_environment=require_task_environment,
-        repository_state_receipt=repository_state_receipt,
-        task_issue=task_issue,
-        edit_generator=edit_generator,
-    )
+    if backend_override is None:
+        if repo_root is None:
+            raise ValueError("repository root is required without a backend override")
+        backend = RepositoryToolBackend(
+            repo_root,
+            max_test_timeout_seconds=timeout_seconds,
+            task_command_prefix=task_command_prefix,
+            task_environment_receipt=task_environment_receipt,
+            require_task_environment=require_task_environment,
+            repository_state_receipt=repository_state_receipt,
+            task_issue=task_issue,
+            edit_generator=edit_generator,
+        )
+    else:
+        if not callable(getattr(backend_override, "invoke", None)):
+            raise TypeError("backend override must implement invoke")
+        backend = backend_override
     compatibility_action_schemas = {
         "apply_patch": {
             "type": "object",

@@ -3544,6 +3544,14 @@ async def run_completion_benchmark_round(
             swe_runtime = _mapping(
                 config.get("swe_coding_runtime"), "swe_coding_runtime"
             )
+            raw_fallback_ids = swe_runtime.get(
+                "official_docker_fallback_instance_ids", []
+            )
+            fallback_ids = {
+                str(value).strip()
+                for value in raw_fallback_ids
+                if isinstance(value, str) and value.strip()
+            }
             worktree_root = _resolve(root, str(swe_runtime["worktree_root"]))
             worktree_root.mkdir(parents=True, exist_ok=True)
             repository_population = await asyncio.to_thread(
@@ -3562,11 +3570,57 @@ async def run_completion_benchmark_round(
             )
             preflight["repository_population"] = repository_population
             preflight_harness = _swebench_harness_from_config(config, root)
+            host_environment_tasks = [
+                task
+                for task in active
+                if SWEbenchRepositoryIdentity.from_task_record(task).instance_id
+                not in fallback_ids
+            ]
+            docker_environment_tasks = [
+                task
+                for task in active
+                if SWEbenchRepositoryIdentity.from_task_record(task).instance_id
+                in fallback_ids
+            ]
             try:
-                task_environment_population = await asyncio.to_thread(
-                    preflight_harness.preflight_task_environments,
-                    active,
+                host_population = (
+                    await asyncio.to_thread(
+                        preflight_harness.preflight_task_environments,
+                        host_environment_tasks,
+                    )
+                    if host_environment_tasks
+                    else {"ready": 0, "rows": []}
                 )
+                docker_rows = [
+                    {
+                        "status": "ready",
+                        "source": "official SWE-bench per-instance Docker image",
+                        "instance_id": SWEbenchRepositoryIdentity.from_task_record(
+                            task
+                        ).instance_id,
+                        "repo": SWEbenchRepositoryIdentity.from_task_record(task).repo,
+                        "base_commit": SWEbenchRepositoryIdentity.from_task_record(
+                            task
+                        ).base_commit,
+                        "task_environment_ready": True,
+                        "workspace": "/testbed",
+                        "workspace_isolation": "task_scoped_persistent_container",
+                    }
+                    for task in docker_environment_tasks
+                ]
+                host_rows = list(host_population.get("rows", []))
+                ready = int(host_population.get("ready", 0)) + len(docker_rows)
+                task_environment_population = {
+                    "source": "SkillFlow Conda or official per-instance Docker image",
+                    "total": len(active),
+                    "ready": ready,
+                    "unavailable": len(active) - ready,
+                    "all_ready": ready == len(active),
+                    "official_docker_fallback_instance_ids": sorted(
+                        row["instance_id"] for row in docker_rows
+                    ),
+                    "rows": [*host_rows, *docker_rows],
+                }
             except Exception as exc:
                 task_environment_population = {
                     "all_ready": False,

@@ -124,7 +124,14 @@ from src.interactive.smoke_trainer import (
     SmokeTrainerConfig,
     trajectory_to_grpo,
 )
-from src.interactive.swe_worktree import prepare_swebench_worktree_for_task
+from src.interactive.swe_worktree import (
+    SWEbenchRepositoryIdentity,
+    prepare_swebench_worktree_for_task,
+)
+from src.interactive.swebench_docker_workspace import (
+    DockerRepositoryToolBackend,
+    prepare_swebench_docker_workspace_for_task,
+)
 from src.interactive.task_dataset import iter_task_records
 from src.interactive.task_evaluator import (
     AIME2026_EVALUATOR_VERSION,
@@ -1195,6 +1202,38 @@ def _swe_coding_runtime_settings(
                     "the SkillFlow SWE-bench Tool profile requires non-empty "
                     f"director.{field_name} for its Agent-local MExec editor"
                 )
+    raw_docker_fallback_ids = section.get(
+        "official_docker_fallback_instance_ids", []
+    )
+    if (
+        not isinstance(raw_docker_fallback_ids, list)
+        or any(
+            not isinstance(value, str) or not value.strip()
+            for value in raw_docker_fallback_ids
+        )
+        or len({value.strip() for value in raw_docker_fallback_ids})
+        != len(raw_docker_fallback_ids)
+    ):
+        raise ConfigurationError(
+            "swe_coding_runtime.official_docker_fallback_instance_ids must "
+            "contain unique non-empty instance IDs"
+        )
+    docker_fallback_ids = tuple(value.strip() for value in raw_docker_fallback_ids)
+    docker_workspace_root = str(
+        section.get("official_docker_workspace_root", "")
+    ).strip()
+    if docker_fallback_ids:
+        if (
+            tool_profile != SWEBENCH_TOOL_PROFILE_SKILLFLOW_TRAINING
+            or require_task_environment is not True
+        ):
+            raise ConfigurationError(
+                "official Docker fallback requires the SkillFlow training Tool profile"
+            )
+        if not docker_workspace_root:
+            raise ConfigurationError(
+                "swe_coding_runtime.official_docker_workspace_root is required"
+            )
     task_max_turns = section.get(
         "task_max_turns", section["max_turns_per_agent_call"]
     )
@@ -1244,6 +1283,8 @@ def _swe_coding_runtime_settings(
         ),
         "setup_timeout_seconds": float(section["setup_timeout_seconds"]),
         "cleanup_timeout_seconds": float(section["cleanup_timeout_seconds"]),
+        "official_docker_fallback_instance_ids": docker_fallback_ids,
+        "official_docker_workspace_root": docker_workspace_root,
         "edit_executor_api_base": (
             str(_mapping(config.get("director"), "director")["api_base"]).strip()
             if tool_profile == SWEBENCH_TOOL_PROFILE_SKILLFLOW_TRAINING
@@ -2205,23 +2246,49 @@ class LiveSmokeBackend:
 
         if swe_coding_settings is not None:
             source_key = str(swe_coding_settings["source_key"])
-            prepared = prepare_swebench_worktree_for_task(
-                task,
-                repository_store=_resolve(
-                    self.project_root,
-                    str(swe_coding_settings["repository_store"]),
-                ),
-                worktree_root=_resolve(
-                    self.project_root,
-                    str(swe_coding_settings["worktree_root"]),
-                ),
-                setup_timeout_seconds=float(
-                    swe_coding_settings["setup_timeout_seconds"]
-                ),
-                cleanup_timeout_seconds=float(
-                    swe_coding_settings["cleanup_timeout_seconds"]
-                ),
+            identity = SWEbenchRepositoryIdentity.from_task_record(task)
+            docker_fallback = identity.instance_id in set(
+                swe_coding_settings["official_docker_fallback_instance_ids"]
             )
+            if docker_fallback:
+                if self.swe_harness is None:
+                    raise ConfigurationError(
+                        "official Docker fallback requires the SWE-bench harness"
+                    )
+                docker_workspace_root = _resolve(
+                    self.project_root,
+                    str(swe_coding_settings["official_docker_workspace_root"]),
+                )
+                docker_workspace_root.mkdir(parents=True, exist_ok=True)
+                prepared = prepare_swebench_docker_workspace_for_task(
+                    task,
+                    harness=self.swe_harness,
+                    workspace_root=docker_workspace_root,
+                    setup_timeout_seconds=float(
+                        swe_coding_settings["setup_timeout_seconds"]
+                    ),
+                    cleanup_timeout_seconds=float(
+                        swe_coding_settings["cleanup_timeout_seconds"]
+                    ),
+                )
+            else:
+                prepared = prepare_swebench_worktree_for_task(
+                    task,
+                    repository_store=_resolve(
+                        self.project_root,
+                        str(swe_coding_settings["repository_store"]),
+                    ),
+                    worktree_root=_resolve(
+                        self.project_root,
+                        str(swe_coding_settings["worktree_root"]),
+                    ),
+                    setup_timeout_seconds=float(
+                        swe_coding_settings["setup_timeout_seconds"]
+                    ),
+                    cleanup_timeout_seconds=float(
+                        swe_coding_settings["cleanup_timeout_seconds"]
+                    ),
+                )
             try:
                 compatibility_runtime = (
                     swe_coding_settings["tool_profile"]
@@ -2236,6 +2303,10 @@ class LiveSmokeBackend:
                 workspace_diff = None
                 repository_runtime_receipt = None
                 if compatibility_runtime:
+                    if docker_fallback:
+                        raise ConfigurationError(
+                            "official Docker fallback does not support the legacy Tool profile"
+                        )
                     # Preserve frozen legacy conditions and their monkeypatch
                     # seam exactly; new SWE-bench v1 conditions use the
                     # explicit SkillFlow profile below.
@@ -2248,7 +2319,10 @@ class LiveSmokeBackend:
                     )
                 else:
                     task_environment = None
-                    if swe_coding_settings["require_task_environment"]:
+                    if (
+                        swe_coding_settings["require_task_environment"]
+                        and not docker_fallback
+                    ):
                         environment_resolver = getattr(
                             self.swe_harness,
                             "task_environment",
@@ -2260,17 +2334,22 @@ class LiveSmokeBackend:
                                 "environment resolver"
                             )
                         task_environment = environment_resolver(task)
-                    repository_state = {
-                        "instance_id": prepared.identity.instance_id,
-                        "repo": prepared.identity.repo,
-                        "expected_base_commit": prepared.identity.base_commit,
-                        "observed_pinned_commit": prepared.pinned_commit,
-                        "workspace": str(prepared.repo_root),
-                        "workspace_isolation": "task_scoped_detached_worktree",
-                        "base_state_verified": (
-                            prepared.pinned_commit == prepared.identity.base_commit
-                        ),
-                    }
+                    repository_state = (
+                        dict(prepared.receipt)
+                        if docker_fallback
+                        else {
+                            "instance_id": prepared.identity.instance_id,
+                            "repo": prepared.identity.repo,
+                            "expected_base_commit": prepared.identity.base_commit,
+                            "observed_pinned_commit": prepared.pinned_commit,
+                            "workspace": str(prepared.repo_root),
+                            "workspace_isolation": "task_scoped_detached_worktree",
+                            "base_state_verified": (
+                                prepared.pinned_commit
+                                == prepared.identity.base_commit
+                            ),
+                        }
+                    )
                     edit_generator = None
                     if (
                         swe_coding_settings["tool_profile"]
@@ -2296,8 +2375,20 @@ class LiveSmokeBackend:
                                 ),
                             )
                         )
+                    docker_backend = (
+                        DockerRepositoryToolBackend(
+                            prepared,
+                            timeout_seconds=float(
+                                swe_coding_settings["max_test_timeout_seconds"]
+                            ),
+                            task_issue=task.question,
+                            edit_generator=edit_generator,
+                        )
+                        if docker_fallback
+                        else None
+                    )
                     registration = create_swebench_repository_registration(
-                        prepared.repo_root,
+                        None if docker_fallback else prepared.repo_root,
                         dataset_scope=(source_key,),
                         timeout_seconds=float(
                             swe_coding_settings["max_test_timeout_seconds"]
@@ -2311,7 +2402,9 @@ class LiveSmokeBackend:
                             else ()
                         ),
                         task_environment_receipt=(
-                            task_environment.receipt()
+                            dict(prepared.receipt)
+                            if docker_fallback
+                            else task_environment.receipt()
                             if task_environment is not None
                             else None
                         ),
@@ -2321,6 +2414,7 @@ class LiveSmokeBackend:
                         repository_state_receipt=repository_state,
                         task_issue=task.question,
                         edit_generator=edit_generator,
+                        backend_override=docker_backend,
                     )
                     tool_registry = ToolRegistry((registration,))
                     materializer = getattr(

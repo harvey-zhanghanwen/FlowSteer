@@ -36,6 +36,9 @@ _STABLE_ZERO_DIRECT_REUSE_CONFIG_PATH = (
 _STABLE_ZERO_SHARED_WORKSPACE_CONFIG_PATH = (
     _ROOT / "config" / "evaluation_swebench_skillflow_v3_stable_zero_v15.yaml"
 )
+_STABLE_ZERO_DOCKER_FALLBACK_CONFIG_PATH = (
+    _ROOT / "config" / "evaluation_swebench_skillflow_v3_stable_zero_v16.yaml"
+)
 
 
 def _config() -> dict[str, object]:
@@ -375,5 +378,31 @@ def test_v15_freezes_shared_workspace_empty_patch_and_finish_feedback() -> None:
     assert config["evaluation"]["swebench_dataset_path"] == previous[
         "evaluation"
     ]["swebench_dataset_path"]
+    assert config["grpo"]["enabled"] is False
+    assert config["skills"]["enabled"] is False
+
+
+def test_v16_limits_official_docker_fallback_to_two_xarray_instances() -> None:
+    previous = dict(load_yaml(_STABLE_ZERO_SHARED_WORKSPACE_CONFIG_PATH))
+    config = dict(load_yaml(_STABLE_ZERO_DOCKER_FALLBACK_CONFIG_PATH))
+
+    validate_completion_benchmark_config(config)
+
+    assert config["experiment"]["condition_id"] == (
+        "swebench_skillflow_v3_stable_zero_v16"
+    )
+    assert config["experiment"]["tool_version"] == (
+        previous["experiment"]["tool_version"]
+        + "+flowsteer.official-docker-testbed-fallback.v1"
+    )
+    runtime = config["swe_coding_runtime"]
+    assert runtime["official_docker_fallback_instance_ids"] == [
+        "pydata__xarray-7229",
+        "pydata__xarray-7393",
+    ]
+    assert runtime["official_docker_workspace_root"].endswith(
+        "/docker_workspaces"
+    )
+    assert config["swebench_evaluation"]["sample_count"] == 128
     assert config["grpo"]["enabled"] is False
     assert config["skills"]["enabled"] is False
