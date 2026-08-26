@@ -1,0 +1,99 @@
+# Versioned evidence pointer for the highest fully completed, protocol-eligible
+# WebShop AgentGraph condition currently present in this repository. This file
+# does not change the evaluated condition or duplicate its executable config.
+
+schema_version: "flowsteer.agentgraph.best-profile-pointer.v1"
+dataset_key: "webshop"
+dataset_name: "WebShop"
+
+selection_scope:
+  benchmark_slice: "native_validation"
+  split: "validation"
+  sample_count: 128
+  task_id_first: "webshop:00500"
+  task_id_last: "webshop:00627"
+  primary_metric: "average_score"
+  auxiliary_metric: "success_rate"
+  aggregation: "strict_full_denominator"
+  evaluator_protocol: "WebShop_official_environment_Average_Score_and_Success_Rate"
+  evaluator_version: "skillflow.ragen_adapter.v2"
+  require_complete_agentgraph_population: true
+  require_same_task_population: true
+  require_same_evaluator_protocol: true
+  exclude_evaluator_leakage: true
+
+selection:
+  eligible_condition_count: 1
+  selected_condition_id: "webshop_initial_adapter_v5"
+  selection_reason: "only_eligible_completed_same_protocol_condition"
+  evaluated_source_commit: "b6f9df30d0937a416f36b150122101c5a3c7d0c7"
+  final_evaluation_report_commit: "a9e602552d97d9e439ddce7dd2d8bdff4c316c71"
+  executable_config_path: "config/evaluation_webshop_initial_adapter_v5.yaml"
+  current_profile_pointer_path: "config/webshop_best_profile.yaml"
+  dataset_registry_path: "config/datasets_runtime_webshop_initial_v1.yaml"
+  model_catalog_path: "config/model_catalog_multidataset_tool_v2.yaml"
+  run_manifest_path: "artifacts/webshop_initial_adapter_v5/development/run_manifest.json"
+  paired_results_path: "artifacts/webshop_initial_adapter_v5/development/paired_results.jsonl"
+  trajectory_path: "artifacts/webshop_initial_adapter_v5/development/agentgraph_trajectories.jsonl"
+  evaluation_report_path: "reports/webshop_initial_adapter_v5/development_report.json"
+  evaluation_report_zh_path: "reports/webshop_initial_adapter_v5/initial_adapter_report_zh.md"
+  completion_status: "completed"
+
+architecture_profile:
+  director_model: "qwen3.5-9b-local"
+  policy_version: "qwen35-9b-base-webshop-initial-adapter-v5"
+  policy_adapter: null
+  director_prompt_version: "agentgraph.director.minimal-neutral-scalar.v2"
+  action_schema_version: "agentgraph.canvas-action-json-schema.v1"
+  action_mask_version: "agentgraph.model-admissible-action-mask.v2"
+  canvas_execution: "incremental_execute_on_edit"
+  max_agents: 8
+  max_rounds: 20
+  relation_encoding: "two_bit"
+  require_unique_output: true
+  recovery_policy: "preserve_diagnose_repair_augment"
+  tool_version: "skillflow.ragen-webshop.native-action.public-observation.v3"
+  skill_condition: "none"
+  training_condition: "none"
+
+verified_metrics:
+  agentgraph:
+    denominator: 128
+    completed: 128
+    evaluator_valid: 128
+    explicit_finish: 128
+    terminal_failure: 0
+    strict_average_score: 0.5033723958333332
+    strict_success_count: 18
+    strict_success_rate: 0.140625
+  direct:
+    denominator: 128
+    completed: 128
+    evaluator_valid: 128
+    strict_average_score: 0.3386588541666666
+    strict_success_count: 19
+    strict_success_rate: 0.1484375
+  agentgraph_minus_direct:
+    strict_average_score: 0.16471354166666657
+    strict_success_rate: -0.0078125
+
+next_run:
+  selected: true
+  executable_config_path: "config/evaluation_webshop_initial_adapter_v5.yaml"
+  runner_requires_explicit_config_argument: true
+  automatic_global_default_resolver: false
+  evaluation_only: true
+  full_evaluation_rerun_authorized: false
+
+excluded_conditions:
+  - condition: "webshop_ragen_environment_native_action_v4_stable_zero"
+    reason: "evaluator-private terminal reward entered Agent rendered input in 26 of 128 trajectories"
+  - condition: "webshop_round_04/evaluation"
+    reason: "different task population and split; AgentGraph population was incomplete"
+  - condition: "webshop_initial_adapter_v1"
+    reason: "incomplete AgentGraph population"
+  - condition: "webshop_initial_adapter_v2_v3_v4"
+    reason: "two-sample canary or failed Stable Zero only"
+  - condition: "webshop_native_validation_unified_architecture_v1"
+    reason: "prepared-only; no completed evaluator-valid result"
+
