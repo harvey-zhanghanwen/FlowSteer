@@ -109,6 +109,40 @@ Official evaluator：
 official Docker harness 权限是另一个独立 blocker。这些都不是某一道 SWE-bench task 的
 Wrong Demo，不能归因于 Director、Agent topology 或 patch quality。
 
+## 当前 Wrong Demo failure taxonomy
+
+当前 task-level Wrong Demo 分母为 **0**。以下类别数量均明确为 0；由于分母为 0，占比为
+**N/A**，不是 0%。127 个 task environment 缺口和 Docker socket 权限只属于
+run-level blocker，不计入下表，也不生成虚构 demo。
+
+| Primary observable category | Count | Share | Representative demo |
+|---|---:|---:|---|
+| collection / receipt failure | 0 | N/A | None |
+| model provider failure | 0 | N/A | None |
+| task-scoped repository environment failure | 0 | N/A | None |
+| Director / Canvas orchestration failure | 0 | N/A | None |
+| Agent communication / artifact routing failure | 0 | N/A | None |
+| repository Tool protocol / execution failure | 0 | N/A | None |
+| local test validation failure / timeout | 0 | N/A | None |
+| FINISH / round or Tool budget failure | 0 | N/A | None |
+| workspace patch publication / application failure | 0 | N/A | None |
+| official FAIL_TO_PASS target-test failure | 0 | N/A | None |
+| official PASS_TO_PASS regression | 0 | N/A | None |
+| official unresolved without F2P/P2P detail | 0 | N/A | None |
+| official evaluator / harness runtime failure | 0 | N/A | None |
+| unclassified structured receipt failure | 0 | N/A | None |
+
+后续正式 evaluation 的 JSON 报告会在
+`swebench_offline_receipts.wrong_demo_failure_taxonomy` 保存逐类 count/share 与每个非零类别
+1 个（可配置为最多 3 个）完整 receipt-backed demo。报告始终区分
+`first_observable_failure` 与 causal failure；无因果证据时后者保持 `null`。SWE-bench
+不使用 answer-string canonicalization 或 LLM judge，gold patch 与 official test contract
+保持 evaluator-only redacted。
+
+当前 adapter 只持久化 SkillFlow 的 `resolved/unresolved` harness detail，尚无结构化 F2P/P2P
+breakdown；因此后续真实 unresolved 在该字段补齐前只能归
+`official_test_failure_unclassified`，不能凭日志猜成 target-test failure 或 regression。
+
 ## 本轮未运行
 
 - Stable Zero model canary；
@@ -126,6 +160,8 @@ Wrong Demo，不能归因于 Director、Agent topology 或 patch quality。
 - No-model preflight：`scripts/preflight_swebench_initial_adapter.py`
 - Runtime receipt：
   `reports/swebench_skillflow_v3_initial_v1_preflight.json`
+- Machine-readable Wrong Demo taxonomy（当前分母 0）：
+  `reports/swebench_skillflow_v3_initial_v1_wrong_demo_taxonomy.json`
 - Task environment builder：
   `scripts/prepare_swebench_skillflow_task_environments.py`
 - Formal runner manifest：

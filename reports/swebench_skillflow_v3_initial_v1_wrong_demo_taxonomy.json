@@ -1,0 +1,49 @@
+{
+  "schema_version": "flowsteer.swebench.failure-taxonomy.v2",
+  "condition_id": "swebench_skillflow_v3_initial_v1",
+  "run_status": "failed_runtime_preflight",
+  "classification_scope": "task_level_agentgraph_wrong_attempts",
+  "counting_rule": "one mutually exclusive primary observable category per wrong task",
+  "denominator": 0,
+  "denominator_status": "no_evaluated_wrong_demo",
+  "share_unit": "fraction_of_wrong_tasks",
+  "causal_attribution_policy": "first observable receipt is reported; causal failure and causal propagation remain null without explicit causal or intervention evidence",
+  "run_preflight_blockers_included": false,
+  "categories": [
+    {"code": "collection_receipt_failure", "count": 0, "share": null, "share_status": "not_applicable_no_evaluated_wrong_demo", "representative_demo_ids": []},
+    {"code": "provider_failure", "count": 0, "share": null, "share_status": "not_applicable_no_evaluated_wrong_demo", "representative_demo_ids": []},
+    {"code": "repository_environment_failure", "count": 0, "share": null, "share_status": "not_applicable_no_evaluated_wrong_demo", "representative_demo_ids": []},
+    {"code": "orchestration_failure", "count": 0, "share": null, "share_status": "not_applicable_no_evaluated_wrong_demo", "representative_demo_ids": []},
+    {"code": "agent_communication_failure", "count": 0, "share": null, "share_status": "not_applicable_no_evaluated_wrong_demo", "representative_demo_ids": []},
+    {"code": "repository_tool_failure", "count": 0, "share": null, "share_status": "not_applicable_no_evaluated_wrong_demo", "representative_demo_ids": []},
+    {"code": "local_validation_failure", "count": 0, "share": null, "share_status": "not_applicable_no_evaluated_wrong_demo", "representative_demo_ids": []},
+    {"code": "terminal_budget_failure", "count": 0, "share": null, "share_status": "not_applicable_no_evaluated_wrong_demo", "representative_demo_ids": []},
+    {"code": "patch_publication_application_failure", "count": 0, "share": null, "share_status": "not_applicable_no_evaluated_wrong_demo", "representative_demo_ids": []},
+    {"code": "official_target_test_failure", "count": 0, "share": null, "share_status": "not_applicable_no_evaluated_wrong_demo", "representative_demo_ids": [], "availability": "requires_structured_official_F2P_receipt"},
+    {"code": "official_regression_failure", "count": 0, "share": null, "share_status": "not_applicable_no_evaluated_wrong_demo", "representative_demo_ids": [], "availability": "requires_structured_official_P2P_receipt"},
+    {"code": "official_test_failure_unclassified", "count": 0, "share": null, "share_status": "not_applicable_no_evaluated_wrong_demo", "representative_demo_ids": []},
+    {"code": "evaluator_runtime_failure", "count": 0, "share": null, "share_status": "not_applicable_no_evaluated_wrong_demo", "representative_demo_ids": []},
+    {"code": "unclassified_receipt_failure", "count": 0, "share": null, "share_status": "not_applicable_no_evaluated_wrong_demo", "representative_demo_ids": []}
+  ],
+  "representative_demos": [],
+  "run_blockers": [
+    {
+      "scope": "run_preflight",
+      "type": "task_environment_population",
+      "ready": 1,
+      "unavailable": 127,
+      "task_failure_demo": false
+    },
+    {
+      "scope": "run_preflight",
+      "type": "official_docker_harness_access",
+      "status": "blocked",
+      "task_failure_demo": false
+    }
+  ],
+  "model_calls": 0,
+  "official_evaluator_calls": 0,
+  "official_labels": 0,
+  "source_manifest": "artifacts/swebench_skillflow_v3_initial_v1/run_manifest.json",
+  "source_preflight_report": "reports/swebench_skillflow_v3_initial_v1_preflight.json"
+}

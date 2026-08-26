@@ -2759,6 +2759,59 @@ def _report_markdown(report: Mapping[str, Any]) -> str:
             if isinstance(receipts, Mapping)
             else 0
         )
+        taxonomy = (
+            receipts.get("wrong_demo_failure_taxonomy", {})
+            if isinstance(receipts, Mapping)
+            else {}
+        )
+        taxonomy_categories = (
+            taxonomy.get("categories", [])
+            if isinstance(taxonomy, Mapping)
+            else []
+        )
+        taxonomy_rows = []
+        for category in taxonomy_categories:
+            if not isinstance(category, Mapping):
+                continue
+            share = category.get("share")
+            share_text = (
+                f"{100 * float(share):.2f}%"
+                if isinstance(share, (int, float))
+                and not isinstance(share, bool)
+                else "N/A"
+            )
+            demo_ids = category.get("representative_demo_ids", [])
+            demo_text = (
+                ", ".join(f"`{value}`" for value in demo_ids)
+                if isinstance(demo_ids, Sequence)
+                and not isinstance(demo_ids, (str, bytes))
+                and demo_ids
+                else "None"
+            )
+            taxonomy_rows.append(
+                f"| `{category.get('code')}` | {category.get('count', 0)} | "
+                f"{share_text} | {demo_text} |"
+            )
+        taxonomy_table = "\n".join(taxonomy_rows) or (
+            "| None | 0 | N/A | None |"
+        )
+        taxonomy_denominator = (
+            taxonomy.get("denominator", 0)
+            if isinstance(taxonomy, Mapping)
+            else 0
+        )
+        taxonomy_note = (
+            "No evaluated AgentGraph Wrong Demo exists; all task-level counts are "
+            "zero and shares are N/A. Run-level preflight blockers are excluded."
+            if taxonomy_denominator == 0
+            else (
+                "Each wrong task contributes to exactly one primary observable "
+                "category. Full Director/Canvas/Agent/communication/ReAct/Tool/"
+                "terminal/evaluator receipts for every listed representative demo "
+                "are stored in report JSON at `swebench_offline_receipts."
+                "wrong_demo_failure_taxonomy.representative_demos`."
+            )
+        )
         direct_official = direct.get("official_resolved_rate")
         graph_official = graph.get("official_resolved_rate")
         direct_rate = (
@@ -2796,6 +2849,16 @@ AgentGraph explicit FINISH: **{report['explicit_finished_count']}/{report['sampl
 Repository Tool action groups (`search/view/edit/test/command`): Direct **{direct_tools}**; AgentGraph **{graph_tools}**. First-observable Wrong Demo diagnoses: **{wrong_demo_count}**.
 
 Agent count distribution: **{report['agent_count_distribution']}**. Natural topology distribution: **{report['topology_distribution']}**.
+
+## Receipt-based Wrong Demo failure taxonomy
+
+Wrong-task denominator: **{taxonomy_denominator}**. {taxonomy_note}
+
+| Primary observable category | Count | Share of wrong tasks | Representative demo |
+|---|---:|---:|---|
+{taxonomy_table}
+
+`first_observable_failure` is never renamed as root cause. Without explicit causal or intervention evidence, `first_causal_failure` and causal propagation remain null. SWE-bench uses patch application and official tests; answer-string canonicalization and LLM judging are not part of this evaluator.
 
 ## Failure types
 

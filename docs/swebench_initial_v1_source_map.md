@@ -222,6 +222,32 @@ Tool/action、budget exhaustion、local test、provider/executor、patch apply�
 official test failure；不解析模型输出中的 `PASSED` 字符串。Wrong Demo 记录最早可观察
 failure layer，并明确 `causal_attribution=false`。
 
+Task-level Wrong Demo 进一步使用 SWE-bench evaluation pipeline、SkillFlow repository
+Tool boundary 与 FlowSteer Director/Canvas/runtime boundary 对齐的互斥 primary taxonomy：
+collection/receipt、provider、task-scoped repository environment、orchestration、Agent
+communication/artifact routing、repository Tool、terminal/budget、workspace patch
+protocol/execution、local test validation、workspace patch publication/application、official
+target-test、official regression、official unresolved
+without F2P/P2P detail、evaluator runtime 与 unclassified structured receipt。每个错误 task
+只计入一个 outcome-oriented primary observable category；有效 official terminal receipt
+优先于中间 debugging observation，但不据此声称中间失败已经恢复或导致终局。该分类不是
+root-cause inference。
+
+报告按 `task_id` 连接 paired row 与完整 trajectory，代表性 demo 保存 Director
+input/output/action、Canvas edit/snapshot、Agent request/output、实际 `upstream[]` artifact、
+ReAct Action--Observation、Tool receipt、runtime、terminal 和 official evaluator receipt。
+`first_observable_failure` 与 causal attribution 严格分开：没有显式 causal receipt 或受控
+intervention evidence 时，`first_causal_failure` 与 causal propagation 均为 `null`。SWE-bench
+没有 QA answer-string canonicalization；gold patch、test patch、FAIL_TO_PASS 与 PASS_TO_PASS
+仍为 evaluator-only redacted fields，不进入公开 Wrong Demo。run-level environment/Docker
+preflight blocker 不计入 task-level taxonomy。
+
+当前 SkillFlow `evaluate_patch` 返回的 `details` 是 `resolved/unresolved` 字符串，adapter
+尚未持久化 official report 的结构化 F2P/P2P breakdown。因此当前真实 unresolved 只能进入
+`official_test_failure_unclassified`；target-test 与 regression 两类保持显式 0，不能从日志
+或模型文本推断。若上游未来直接提供结构化 `tests_status`，公开报告只保留 success/failure
+count，test IDs 继续 redacted。
+
 SkillFlow official harness 的 infrastructure exception 若带 `diagnostic`，只透传
 classification、phase、retryable、test/report presence、container exit/OOM 等结构化
 字段；不解析自由文本，也不把 infrastructure failure 转成 `Resolved=false`。
@@ -312,3 +338,14 @@ reports/swebench_skillflow_v3_initial_v1_report.{json,md}
 ```
 
 任何没有 official evaluator receipt 的任务均不得进入 Resolved/Failed 分母。
+
+严格同口径的 best-profile 选择状态记录在：
+
+```text
+config/swebench_best_profile_v1.yaml
+reports/swebench_best_profile_v1_status.md
+```
+
+当前没有 official-evaluator-valid 候选，pointer 保持
+`no_evaluator_valid_candidate` / `activation_allowed=false`，不会把 preflight 条件重命名为
+best，也不会修改必填 `--config` 的文档化 next-run 入口。

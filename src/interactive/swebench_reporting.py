@@ -23,6 +23,124 @@ SWEBENCH_TOOL_ACTION_GROUPS: Mapping[str, tuple[str, ...]] = {
     "command": ("bash",),
 }
 
+# These categories follow the persisted boundaries that exist in the reused
+# SkillFlow SWE-bench repository/evaluator path and the FlowSteer
+# Director/Canvas/runtime path.  They are task-attempt categories, not run
+# preflight categories: missing global environments or Docker access must be
+# reported separately as run blockers until a task execution has started.
+SWEBENCH_FAILURE_TAXONOMY: tuple[Mapping[str, str], ...] = (
+    {
+        "code": "collection_receipt_failure",
+        "label": "collection / receipt failure",
+    },
+    {
+        "code": "provider_failure",
+        "label": "model provider failure",
+    },
+    {
+        "code": "repository_environment_failure",
+        "label": "task-scoped repository environment failure",
+    },
+    {
+        "code": "orchestration_failure",
+        "label": "Director / Canvas orchestration failure",
+    },
+    {
+        "code": "agent_communication_failure",
+        "label": "Agent communication / artifact routing failure",
+    },
+    {
+        "code": "repository_tool_failure",
+        "label": "repository Tool protocol / execution failure",
+    },
+    {
+        "code": "local_validation_failure",
+        "label": "local test validation failure / timeout",
+    },
+    {
+        "code": "terminal_budget_failure",
+        "label": "FINISH / round or Tool budget failure",
+    },
+    {
+        "code": "patch_publication_application_failure",
+        "label": "workspace patch publication / application failure",
+    },
+    {
+        "code": "official_target_test_failure",
+        "label": "official FAIL_TO_PASS target-test failure",
+    },
+    {
+        "code": "official_regression_failure",
+        "label": "official PASS_TO_PASS regression",
+    },
+    {
+        "code": "official_test_failure_unclassified",
+        "label": "official unresolved test outcome without F2P/P2P detail",
+    },
+    {
+        "code": "evaluator_runtime_failure",
+        "label": "official evaluator / harness runtime failure",
+    },
+    {
+        "code": "unclassified_receipt_failure",
+        "label": "unclassified structured receipt failure",
+    },
+)
+
+_TAXONOMY_CODES = frozenset(
+    str(category["code"]) for category in SWEBENCH_FAILURE_TAXONOMY
+)
+
+_COMMUNICATION_FAILURE_CODES = frozenset(
+    {
+        "artifact_routing_failed",
+        "blocked_by_upstream",
+        "communication_contract_violation",
+        "dependency_artifact_missing",
+        "missing_upstream_artifact",
+        "upstream_artifact_missing",
+    }
+)
+
+_EVALUATOR_ONLY_REPORT_FIELDS = frozenset(
+    {
+        "evaluator_payload",
+        "fail_to_pass",
+        "gold_patch",
+        "ground_truth",
+        "pass_to_pass",
+        "test_patch",
+    }
+)
+
+_SAFE_HARNESS_DETAIL_STATUSES = frozenset(
+    {
+        "empty_patch",
+        "env_not_ready",
+        "image_build_failed",
+        "image_missing_or_pull_failed",
+        "patch_apply_failed",
+        "resolved",
+        "test_patch_apply_failed",
+        "test_timeout",
+        "unresolved",
+        "worktree_create_failed",
+    }
+)
+
+_TASK_EXECUTION_COLLECTION_STAGES = frozenset(
+    {
+        "agent_execution",
+        "agentgraph_collection",
+        "director_canvas_runtime_or_evaluator",
+        "generation_or_evaluator",
+        "model_request",
+        "official_evaluator",
+        "provider_request",
+        "task_execution",
+    }
+)
+
 _INVALID_TOOL_ACTION_CODES = frozenset(
     {
         "duplicate_tool_request",
@@ -163,6 +281,52 @@ def _normalized_token(value: object) -> str:
     if not isinstance(value, str):
         return ""
     return value.strip().casefold().replace("-", "_").replace(" ", "_")
+
+
+def _public_receipt_value(value: object) -> object:
+    """Project a persisted receipt without evaluator-only target material."""
+
+    if isinstance(value, Mapping):
+        projected: dict[str, Any] = {}
+        for raw_key, nested in value.items():
+            key = str(raw_key)
+            normalized_key = _normalized_token(key)
+            if normalized_key in _EVALUATOR_ONLY_REPORT_FIELDS:
+                projected[key] = None
+                projected[f"{key}_role"] = "evaluator_only_redacted"
+                continue
+            if normalized_key == "harness_details":
+                if isinstance(nested, Mapping):
+                    projected[key] = _public_receipt_value(nested)
+                elif _normalized_token(nested) in _SAFE_HARNESS_DETAIL_STATUSES:
+                    projected[key] = nested
+                else:
+                    projected[key] = None
+                    projected[f"{key}_role"] = "evaluator_only_redacted"
+                continue
+            if normalized_key == "tests_status" and isinstance(nested, Mapping):
+                summary: dict[str, Any] = {}
+                for suite_name in ("FAIL_TO_PASS", "PASS_TO_PASS"):
+                    suite = _mapping(nested.get(suite_name))
+                    success = suite.get("success") if suite is not None else None
+                    summary[suite_name] = {
+                        "success_count": (
+                            len(success)
+                            if isinstance(success, Sequence)
+                            and not isinstance(success, (str, bytes))
+                            else None
+                        ),
+                        "failure_count": _structured_test_failure_count(suite),
+                        "test_ids": None,
+                        "test_ids_role": "evaluator_only_redacted",
+                    }
+                projected["tests_status_summary"] = summary
+                continue
+            projected[key] = _public_receipt_value(nested)
+        return projected
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        return [_public_receipt_value(item) for item in value]
+    return value
 
 
 def _structured_failure_phase(value: Mapping[str, Any]) -> str:
@@ -795,6 +959,632 @@ def diagnose_swebench_wrong_demo(
     return _evaluation_diagnosis(task_id, evaluation)
 
 
+def _evaluation_for_wrong_demo(
+    row: Mapping[str, Any],
+    trajectory: Optional[Mapping[str, Any]],
+) -> Optional[Mapping[str, Any]]:
+    graph = _mapping(row.get("agentgraph")) or {}
+    evaluation = _mapping(graph.get("evaluation"))
+    if evaluation is None and trajectory is not None:
+        evaluation = _mapping(trajectory.get("evaluation"))
+    return evaluation
+
+
+def _structured_test_failure_count(value: object) -> Optional[int]:
+    status = _mapping(value)
+    if status is None:
+        return None
+    for field_name in ("failure", "failures", "failed"):
+        failures = status.get(field_name)
+        if isinstance(failures, Sequence) and not isinstance(
+            failures, (str, bytes)
+        ):
+            return len(failures)
+        if isinstance(failures, int) and not isinstance(failures, bool):
+            return max(0, failures)
+    return None
+
+
+def _official_test_failure_assignment(
+    evaluation: Optional[Mapping[str, Any]],
+) -> tuple[str, str]:
+    """Use structured official test status when it was actually persisted.
+
+    SWE-bench's report distinguishes FAIL_TO_PASS target tests from
+    PASS_TO_PASS regression tests.  The current reused SkillFlow wrapper often
+    persists only ``harness_details='unresolved'``; that lossy receipt must stay
+    explicitly unclassified rather than being guessed from model prose or log
+    text.
+    """
+
+    details = _mapping(evaluation.get("details")) if evaluation is not None else None
+    details = details or {}
+    status = _mapping(details.get("tests_status"))
+    if status is None:
+        harness = _mapping(details.get("harness_details"))
+        status = _mapping(harness.get("tests_status")) if harness is not None else None
+    if status is None:
+        return (
+            "official_test_failure_unclassified",
+            "official_unresolved_without_structured_f2p_p2p_status",
+        )
+    f2p_failed = _structured_test_failure_count(status.get("FAIL_TO_PASS"))
+    p2p_failed = _structured_test_failure_count(status.get("PASS_TO_PASS"))
+    if isinstance(p2p_failed, int) and p2p_failed > 0:
+        return (
+            "official_regression_failure",
+            (
+                "target_and_regression_tests_failed"
+                if isinstance(f2p_failed, int) and f2p_failed > 0
+                else "pass_to_pass_regression"
+            ),
+        )
+    if isinstance(f2p_failed, int) and f2p_failed > 0:
+        return "official_target_test_failure", "fail_to_pass_target_not_fixed"
+    return (
+        "official_test_failure_unclassified",
+        "official_unresolved_without_failed_test_breakdown",
+    )
+
+
+def _diagnosis_category(diagnosis: Mapping[str, Any]) -> tuple[str, str]:
+    layer = _normalized_token(diagnosis.get("failure_layer"))
+    failure_type = _normalized_token(diagnosis.get("failure_type"))
+    action = _normalized_token(diagnosis.get("action"))
+    if failure_type in _COMMUNICATION_FAILURE_CODES or layer in {
+        "agent_communication",
+        "artifact_routing",
+    }:
+        return "agent_communication_failure", failure_type or layer
+    if layer in {"collection_runtime"}:
+        return "collection_receipt_failure", failure_type or layer
+    if layer in {"provider_execution"}:
+        return "provider_failure", failure_type or layer
+    if layer in {
+        "official_harness_environment",
+        "repository_environment",
+    }:
+        return "repository_environment_failure", failure_type or layer
+    if layer in {
+        "canvas_action_validation",
+        "director_action_parsing",
+        "graph_scheduler",
+        "orchestration",
+    }:
+        return "orchestration_failure", failure_type or layer
+    if failure_type in {
+        "canvas_action_domain_exhausted",
+        "explicit_finish_missing",
+        "max_rounds",
+        "max_rounds_exhausted",
+        "tool_call_budget_exhausted",
+    } or layer in {"finish", "terminal_budget"}:
+        return "terminal_budget_failure", failure_type or layer
+    if failure_type in {"local_test_failed", "local_test_timeout"}:
+        return "local_validation_failure", failure_type
+    if layer in {"structured_tool_action", "tool_dispatch", "tool_result"}:
+        if failure_type.endswith("budget_exhausted"):
+            return "terminal_budget_failure", failure_type
+        return "repository_tool_failure", failure_type or action or layer
+    if layer in {"official_harness_patch_apply", "workspace_patch"}:
+        return "patch_publication_application_failure", failure_type or layer
+    if layer == "official_harness_test":
+        return (
+            "official_test_failure_unclassified",
+            failure_type or "official_unresolved_without_structured_f2p_p2p_status",
+        )
+    if layer in {"official_harness_evaluator"}:
+        return "evaluator_runtime_failure", failure_type or layer
+    if layer in {"executor_runtime"}:
+        return "collection_receipt_failure", failure_type or layer
+    return "unclassified_receipt_failure", failure_type or layer or "unknown"
+
+
+def _wrong_demo_taxonomy_assignment(
+    row: Mapping[str, Any],
+    trajectory: Optional[Mapping[str, Any]],
+    diagnosis: Mapping[str, Any],
+) -> Mapping[str, str]:
+    """Assign one mutually exclusive primary observable category.
+
+    This is an outcome-oriented taxonomy: a valid official terminal receipt
+    takes precedence over intermediate observations, without claiming that an
+    intermediate failure recovered or caused the terminal outcome.  Terminal
+    non-completion takes precedence when the evaluator was not admissible.
+    When neither exists, the first saved failure receipt is used.  None of
+    these rules is presented as root-cause proof.
+    """
+
+    graph = _mapping(row.get("agentgraph")) or {}
+    termination_reason = _normalized_token(
+        (
+            trajectory.get("termination_reason")
+            if trajectory is not None
+            else graph.get("termination_reason")
+        )
+    )
+    diagnosis_layer = _normalized_token(diagnosis.get("failure_layer"))
+    if diagnosis_layer in {"finish", "workspace_patch"}:
+        category, subtype = _diagnosis_category(diagnosis)
+        basis = "terminal_completion_receipt"
+    elif termination_reason in {
+        "canvas_action_domain_exhausted",
+        "max_rounds",
+        "max_rounds_exhausted",
+        "tool_call_budget_exhausted",
+    }:
+        category, subtype = "terminal_budget_failure", termination_reason
+        basis = "terminal_completion_receipt"
+    else:
+        category = ""
+        subtype = ""
+        basis = ""
+    evaluation = _evaluation_for_wrong_demo(row, trajectory)
+    classified = classify_swebench_evaluation(evaluation)
+    outcome = str(classified["outcome"])
+    if category:
+        pass
+    elif outcome == "patch_apply_failure" or outcome == "workspace_patch_failure":
+        category, subtype = (
+            "patch_publication_application_failure",
+            outcome,
+        )
+        basis = "official_terminal_evaluator_receipt"
+    elif outcome in {"test_failure", "official_harness_unresolved"}:
+        category, subtype = _official_test_failure_assignment(evaluation)
+        basis = "official_terminal_evaluator_receipt"
+    elif outcome == "environment_failure":
+        category, subtype = "repository_environment_failure", outcome
+        basis = "task_scoped_evaluator_receipt"
+    elif outcome in {"evaluator_failure", "evaluation_result_invalid"}:
+        category, subtype = "evaluator_runtime_failure", outcome
+        basis = "official_evaluator_receipt"
+    elif outcome == "provider_failure":
+        category, subtype = "provider_failure", outcome
+        basis = "structured_provider_receipt"
+    else:
+        category, subtype = _diagnosis_category(diagnosis)
+        basis = "first_observable_failure_receipt"
+    if category not in _TAXONOMY_CODES:
+        category = "unclassified_receipt_failure"
+    return {
+        "category": category,
+        "subtype": subtype,
+        "assignment_basis": basis,
+        "causal_attribution": "not_established",
+    }
+
+
+def _agent_execution_report(execution: Mapping[str, Any]) -> Mapping[str, Any]:
+    metadata = _mapping(execution.get("metadata"))
+    request = _mapping(metadata.get("request")) if metadata is not None else None
+    response = _mapping(metadata.get("response")) if metadata is not None else None
+    if response is None and metadata is not None and any(
+        field_name in metadata
+        for field_name in ("model_calls", "react_trace", "tool_receipts")
+    ):
+        response = metadata
+    agent = _mapping(request.get("agent")) if request is not None else None
+
+    def receipt_sequence(field_name: str) -> Optional[list[object]]:
+        if response is None or field_name not in response:
+            return None
+        return list(_sequence(response.get(field_name)))
+
+    return {
+        "execution_id": execution.get("execution_id"),
+        "agent_id": execution.get("agent_id"),
+        "model_id": execution.get("model_id"),
+        "provider": execution.get("provider"),
+        "contract": agent.get("contract") if agent is not None else None,
+        "agent_input": (
+            _public_receipt_value(dict(request)) if request is not None else None
+        ),
+        "agent_output": execution.get("output"),
+        "agent_communication": (
+            {
+                "phase": request.get("phase"),
+                "upstream": _public_receipt_value(request.get("upstream")),
+                "own_draft": _public_receipt_value(request.get("own_draft")),
+                "peer_draft": _public_receipt_value(request.get("peer_draft")),
+            }
+            if request is not None
+            else None
+        ),
+        "react_tool_execution": (
+            {
+                "model_calls": _public_receipt_value(
+                    receipt_sequence("model_calls")
+                ),
+                "action_observation_trace": _public_receipt_value(
+                    receipt_sequence("react_trace")
+                ),
+                "tool_receipts": _public_receipt_value(
+                    receipt_sequence("tool_receipts")
+                ),
+                "continued_action_history_count": response.get(
+                    "continued_action_history_count"
+                ),
+                "continued_tool_receipt_count": response.get(
+                    "continued_tool_receipt_count"
+                ),
+            }
+            if response is not None
+            else None
+        ),
+        "execution_receipt": {
+            "error_type": execution.get("error_type"),
+            "latency_ms": execution.get("latency_ms"),
+            "input_tokens": execution.get("input_tokens"),
+            "output_tokens": execution.get("output_tokens"),
+            "model_fingerprint": execution.get("model_fingerprint"),
+        },
+    }
+
+
+def _director_canvas_turn_report(turn: Mapping[str, Any]) -> Mapping[str, Any]:
+    executions = (
+        _sequence(turn.get("executions"))
+        if "executions" in turn
+        else None
+    )
+    return {
+        "round_index": turn.get("round_index"),
+        "director": {
+            "input_prompt": _public_receipt_value(turn.get("prompt")),
+            "raw_output": _public_receipt_value(turn.get("policy_response")),
+            "parsed_action": _public_receipt_value(turn.get("action")),
+            "policy_version": turn.get("policy_version"),
+            "policy_adapter": turn.get("policy_adapter"),
+            "request_id": turn.get("director_request_id"),
+            "attempt_count": turn.get("director_attempt_count"),
+            "latency_ms": turn.get("director_latency_ms"),
+        },
+        "canvas_edit": {
+            "action": _public_receipt_value(turn.get("action")),
+            "feedback": _public_receipt_value(turn.get("canvas_feedback")),
+            "graph_revision": turn.get("graph_revision"),
+            "previous_graph_snapshot_id": turn.get("previous_graph_snapshot_id"),
+            "graph_snapshot_id": turn.get("graph_snapshot_id"),
+            "graph_snapshot": _public_receipt_value(turn.get("graph_snapshot")),
+        },
+        "agent_executions": (
+            [_agent_execution_report(execution) for execution in executions]
+            if executions is not None
+            else None
+        ),
+        "runtime_receipt": (
+            _public_receipt_value(turn.get("runtime_summary"))
+            if "runtime_summary" in turn
+            else None
+        ),
+    }
+
+
+def _observed_post_failure_receipts(
+    trajectory: Optional[Mapping[str, Any]],
+    diagnosis: Mapping[str, Any],
+    evaluation: Optional[Mapping[str, Any]],
+) -> Mapping[str, Any]:
+    turns = _sequence(trajectory.get("turns")) if trajectory is not None else ()
+    first_turn = diagnosis.get("turn_index")
+    later_turn_count: Optional[int]
+    later_turns: Optional[list[Mapping[str, Any]]]
+    if isinstance(first_turn, int) and not isinstance(first_turn, bool):
+        later_turns = [
+            turn
+            for turn in turns
+            if isinstance(turn.get("round_index"), int)
+            and turn.get("round_index") > first_turn
+        ]
+        later_turn_count = len(later_turns)
+    elif trajectory is not None:
+        later_turns = []
+        later_turn_count = 0
+    else:
+        later_turns = None
+        later_turn_count = None
+    return {
+        "interpretation": (
+            "receipts observed after the first failure; temporal order is not "
+            "proof of causal propagation"
+        ),
+        "later_turn_count": later_turn_count,
+        "subsequent_turn_receipts": (
+            [_director_canvas_turn_report(turn) for turn in later_turns]
+            if later_turns is not None
+            else None
+        ),
+        "terminal_receipt": (
+            {
+                "explicit_finish": trajectory.get("explicit_finish"),
+                "termination_reason": trajectory.get("termination_reason"),
+                "terminal_failure": trajectory.get("terminal_failure"),
+                "final_patch_present": bool(
+                    isinstance(trajectory.get("final_answer"), str)
+                    and trajectory.get("final_answer", "").strip()
+                ),
+            }
+            if trajectory is not None
+            else None
+        ),
+        "evaluator_receipt": _public_receipt_value(evaluation),
+    }
+
+
+def _representative_wrong_demo(
+    row: Mapping[str, Any],
+    trajectory: Optional[Mapping[str, Any]],
+    diagnosis: Mapping[str, Any],
+    assignment: Mapping[str, str],
+    collection_failures: Sequence[Mapping[str, Any]],
+) -> Mapping[str, Any]:
+    task_id = row.get("task_id")
+    graph = _mapping(row.get("agentgraph")) or {}
+    repository_state = _mapping(row.get("repository_state")) or {}
+    evaluation = _evaluation_for_wrong_demo(row, trajectory)
+    matching_collection = [
+        _public_receipt_value(dict(failure))
+        for failure in collection_failures
+        if failure.get("task_id") == task_id
+        and _collection_failure_arm(failure) == "agentgraph"
+    ]
+    terminal_receipt = (
+        {
+            "final_patch": trajectory.get("final_answer"),
+            "explicit_finish": trajectory.get("explicit_finish"),
+            "termination_reason": trajectory.get("termination_reason"),
+            "terminal_failure": trajectory.get("terminal_failure"),
+            "valid_lineage_fallback_used": trajectory.get(
+                "valid_lineage_fallback_used"
+            ),
+            "valid_lineage_fallback_receipt": _public_receipt_value(
+                trajectory.get("valid_lineage_fallback_receipt")
+            ),
+        }
+        if trajectory is not None
+        else None
+    )
+    return {
+        "schema_version": "flowsteer.swebench.wrong-demo.v2",
+        "demo_id": f"{task_id}:{assignment['category']}",
+        "task_id": task_id,
+        "sample_id": repository_state.get("instance_id", task_id),
+        "arm": "agentgraph",
+        "input": {
+            "question": row.get("question"),
+            "repository_state": dict(repository_state),
+        },
+        "reference_target": {
+            "metric": "official_swebench_harness_resolved",
+            "expected_resolved": True,
+            "gold_patch": None,
+            "fail_to_pass": None,
+            "pass_to_pass": None,
+            "redaction_role": "evaluator_only_redacted",
+        },
+        "system_result": {
+            "final_patch": graph.get("final_answer"),
+            "metric_name": row.get("primary_metric", "resolved"),
+            "metric_value": graph.get("resolved"),
+            "evaluator_valid": graph.get("valid"),
+            "explicit_finish": graph.get("explicit_finish"),
+            "termination_reason": graph.get("termination_reason"),
+        },
+        "execution_chain": {
+            "trajectory_id": (
+                trajectory.get("trajectory_id")
+                if trajectory is not None
+                else graph.get("trajectory_id")
+            ),
+            "director_canvas_turns": (
+                [
+                    _director_canvas_turn_report(turn)
+                    for turn in _sequence(trajectory.get("turns"))
+                ]
+                if trajectory is not None
+                and "turns" in trajectory
+                else None
+            ),
+            "output_agent_inbox": _public_receipt_value(
+                graph.get("output_agent_inbox")
+            ),
+            "terminal_receipt": terminal_receipt,
+            "evaluator_receipt": _public_receipt_value(evaluation),
+        },
+        "failure_analysis": {
+            "primary_observable_category": assignment["category"],
+            "subtype": assignment["subtype"],
+            "assignment_basis": assignment["assignment_basis"],
+            "first_observable_failure": dict(diagnosis),
+            "first_causal_failure": None,
+            "causality_status": "not_established",
+            "causal_error_propagation": None,
+            "subsequent_observed_receipts": _observed_post_failure_receipts(
+                trajectory,
+                diagnosis,
+                evaluation,
+            ),
+        },
+        "source_receipts": {
+            "join_key": task_id,
+            "trajectory_present": trajectory is not None,
+            "collection_failures": matching_collection,
+        },
+    }
+
+
+def _agentgraph_collection_failures_for_task(
+    task_id: str,
+    collection_failures: Sequence[Mapping[str, Any]],
+) -> tuple[Mapping[str, Any], ...]:
+    return tuple(
+        failure
+        for failure in collection_failures
+        if failure.get("task_id") == task_id
+        and _collection_failure_arm(failure) == "agentgraph"
+    )
+
+
+def _task_attempt_started(
+    row: Mapping[str, Any],
+    trajectory: Optional[Mapping[str, Any]],
+    collection_failures: Sequence[Mapping[str, Any]],
+) -> bool:
+    """Exclude run-level preflight placeholders from task failure counts."""
+
+    if trajectory is not None:
+        return True
+    graph = _mapping(row.get("agentgraph")) or {}
+    if graph.get("available") is True or graph.get("trajectory_id") is not None:
+        return True
+    task_id = row.get("task_id")
+    if not isinstance(task_id, str) or not task_id:
+        return False
+    for failure in _agentgraph_collection_failures_for_task(
+        task_id,
+        collection_failures,
+    ):
+        if failure.get("execution_started") is True:
+            return True
+        if _normalized_token(failure.get("stage")) in _TASK_EXECUTION_COLLECTION_STAGES:
+            return True
+    return False
+
+
+def build_swebench_wrong_demo_taxonomy(
+    paired_rows: Sequence[Mapping[str, Any]],
+    trajectories: Mapping[str, Mapping[str, Any]]
+    | Sequence[Mapping[str, Any]] = (),
+    collection_failures: Sequence[Mapping[str, Any]] = (),
+    *,
+    representative_demo_limit: int = 1,
+) -> Mapping[str, Any]:
+    """Build a receipt-only SWE-bench failure taxonomy and reproducible demos.
+
+    Counts use one mutually exclusive primary observable category per failed
+    AgentGraph task.  Shares use the number of evaluated/collected wrong tasks
+    as denominator.  With no wrong task, every count is explicitly zero while
+    every share is ``None``/N/A; run preflight blockers remain outside this
+    task-level schema.
+    """
+
+    if not isinstance(representative_demo_limit, int) or isinstance(
+        representative_demo_limit, bool
+    ) or not 1 <= representative_demo_limit <= 3:
+        raise ValueError("representative_demo_limit must be an integer in [1, 3]")
+    candidate_rows = tuple(
+        row
+        for row in paired_rows
+        if isinstance(row, Mapping) and _row_is_agentgraph_wrong(row)
+    )
+    trajectory_by_task = _trajectory_index(trajectories)
+    failures = tuple(
+        failure for failure in collection_failures if isinstance(failure, Mapping)
+    )
+    assignments: list[
+        tuple[
+            Mapping[str, Any],
+            Optional[Mapping[str, Any]],
+            Mapping[str, Any],
+            Mapping[str, str],
+        ]
+    ] = []
+    seen_task_ids: set[str] = set()
+    for row in candidate_rows:
+        task_id = row.get("task_id")
+        if not isinstance(task_id, str) or not task_id:
+            raise ValueError("every SWE-bench paired row must have a non-empty task_id")
+        if task_id in seen_task_ids:
+            raise ValueError(f"duplicate SWE-bench paired task_id: {task_id}")
+        seen_task_ids.add(task_id)
+        trajectory = (
+            trajectory_by_task.get(task_id)
+        )
+        if not _task_attempt_started(row, trajectory, failures):
+            continue
+        diagnosis = diagnose_swebench_wrong_demo(
+            row,
+            trajectory=trajectory,
+            collection_failures=failures,
+        )
+        assignment = _wrong_demo_taxonomy_assignment(row, trajectory, diagnosis)
+        assignments.append((row, trajectory, diagnosis, assignment))
+
+    denominator = len(assignments)
+    counts = Counter(
+        assignment["category"] for _, _, _, assignment in assignments
+    )
+    categories: list[dict[str, Any]] = []
+    all_demos: list[Mapping[str, Any]] = []
+    for definition in SWEBENCH_FAILURE_TAXONOMY:
+        code = str(definition["code"])
+        selected = [
+            value for value in assignments if value[3]["category"] == code
+        ]
+        demos = [
+            _representative_wrong_demo(
+                row,
+                trajectory,
+                diagnosis,
+                assignment,
+                failures,
+            )
+            for row, trajectory, diagnosis, assignment in selected[
+                :representative_demo_limit
+            ]
+        ]
+        all_demos.extend(demos)
+        count = int(counts[code])
+        categories.append(
+            {
+                **dict(definition),
+                "count": count,
+                "share": count / denominator if denominator else None,
+                "share_status": (
+                    "computed_over_wrong_task_denominator"
+                    if denominator
+                    else "not_applicable_no_evaluated_wrong_demo"
+                ),
+                "task_ids": [
+                    row.get("task_id") for row, _, _, _ in selected
+                ],
+                "representative_demo_ids": [demo["demo_id"] for demo in demos],
+            }
+        )
+    return {
+        "schema_version": "flowsteer.swebench.failure-taxonomy.v2",
+        "classification_scope": "task_level_agentgraph_wrong_attempts",
+        "counting_rule": (
+            "one mutually exclusive primary observable category per wrong task; "
+            "official terminal receipts override recoverable intermediate observations"
+        ),
+        "denominator": denominator,
+        "denominator_status": (
+            "available" if denominator else "no_evaluated_wrong_demo"
+        ),
+        "share_unit": "fraction_of_wrong_tasks",
+        "causal_attribution_policy": (
+            "first observable receipt is reported; causal failure and causal "
+            "propagation remain null without explicit causal or intervention evidence"
+        ),
+        "run_preflight_blockers_included": False,
+        "categories": categories,
+        "representative_demos": all_demos,
+        "not_applicable": {
+            "answer_string_canonicalization": (
+                "SWE-bench is scored by patch application and official tests, not "
+                "answer-string canonicalization"
+            ),
+            "external_information_retrieval": (
+                "the initial adapter exposes repository search/view Tools; no external "
+                "retrieval service is part of this protocol"
+            ),
+            "llm_judge": "not used by the official Resolved evaluator",
+        },
+    }
+
+
 def aggregate_swebench_receipts(
     paired_rows: Sequence[Mapping[str, Any]],
     trajectories: Mapping[str, Mapping[str, Any]]
@@ -838,27 +1628,43 @@ def aggregate_swebench_receipts(
             _structured_failure_phase(failure)
         ] += 1
 
-    diagnoses = [
-        diagnose_swebench_wrong_demo(
-            row,
-            trajectory=(
-                trajectory_by_task.get(row.get("task_id"))
-                if isinstance(row.get("task_id"), str)
-                else None
-            ),
-            collection_failures=failures,
+    diagnoses: list[Mapping[str, Any]] = []
+    seen_wrong_task_ids: set[str] = set()
+    for row in rows:
+        if not _row_is_agentgraph_wrong(row):
+            continue
+        task_id = row.get("task_id")
+        if not isinstance(task_id, str) or not task_id:
+            raise ValueError("every SWE-bench paired row must have a non-empty task_id")
+        if task_id in seen_wrong_task_ids:
+            raise ValueError(f"duplicate SWE-bench paired task_id: {task_id}")
+        seen_wrong_task_ids.add(task_id)
+        trajectory = trajectory_by_task.get(task_id)
+        if not _task_attempt_started(row, trajectory, failures):
+            continue
+        diagnoses.append(
+            diagnose_swebench_wrong_demo(
+                row,
+                trajectory=trajectory,
+                collection_failures=failures,
+            )
         )
-        for row in rows
-        if _row_is_agentgraph_wrong(row)
-    ]
+    failure_taxonomy = build_swebench_wrong_demo_taxonomy(
+        rows,
+        trajectories,
+        failures,
+    )
     return {
-        "schema_version": "flowsteer.swebench.offline-reporting.v1",
+        "schema_version": "flowsteer.swebench.offline-reporting.v2",
         "receipt_policy": {
             "source": "persisted_structured_receipts_only",
             "resolution_metric": "official_swebench_harness_resolved",
             "llm_judge_used": False,
             "passed_string_parsing_used": False,
             "wrong_demo_diagnosis": "first_observable_failure_not_causal_attribution",
+            "failure_taxonomy": (
+                "mutually_exclusive_primary_observable_category_not_root_cause"
+            ),
         },
         "tool_action_groups": {
             name: list(actions)
@@ -870,12 +1676,15 @@ def aggregate_swebench_receipts(
         },
         "wrong_demo_count": len(diagnoses),
         "wrong_demo_diagnoses": diagnoses,
+        "wrong_demo_failure_taxonomy": failure_taxonomy,
     }
 
 
 __all__ = [
+    "SWEBENCH_FAILURE_TAXONOMY",
     "SWEBENCH_TOOL_ACTION_GROUPS",
     "aggregate_swebench_receipts",
+    "build_swebench_wrong_demo_taxonomy",
     "classify_swebench_evaluation",
     "diagnose_swebench_wrong_demo",
 ]

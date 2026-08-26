@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import json
+
 from src.interactive.swebench_reporting import (
+    SWEBENCH_FAILURE_TAXONOMY,
     aggregate_swebench_receipts,
+    build_swebench_wrong_demo_taxonomy,
     classify_swebench_evaluation,
     diagnose_swebench_wrong_demo,
 )
@@ -394,3 +398,389 @@ def test_wrong_demo_terminal_and_official_harness_layers_are_distinct():
     )
     assert missing["failure_layer"] == "repository_environment"
     assert missing["causal_attribution"] is False
+
+
+def test_failure_taxonomy_reports_explicit_zero_and_na_share_without_wrong_tasks():
+    taxonomy = build_swebench_wrong_demo_taxonomy([], [])
+
+    assert taxonomy["denominator"] == 0
+    assert taxonomy["denominator_status"] == "no_evaluated_wrong_demo"
+    assert taxonomy["run_preflight_blockers_included"] is False
+    assert taxonomy["representative_demos"] == []
+    assert [category["code"] for category in taxonomy["categories"]] == [
+        category["code"] for category in SWEBENCH_FAILURE_TAXONOMY
+    ]
+    assert all(category["count"] == 0 for category in taxonomy["categories"])
+    assert all(category["share"] is None for category in taxonomy["categories"])
+    assert all(
+        category["share_status"]
+        == "not_applicable_no_evaluated_wrong_demo"
+        for category in taxonomy["categories"]
+    )
+
+
+def test_failure_taxonomy_uses_terminal_official_outcome_without_inferring_recovery():
+    row = _row("swe:recovered-debug", direct_status="resolved", graph_status="unresolved")
+    trajectory = _trajectory(
+        "swe:recovered-debug",
+        [
+            _accepted_turn(
+                [
+                    _execution(
+                        trace=[
+                            {
+                                "turn": 1,
+                                "structured_action": {
+                                    "kind": "tool",
+                                    "name": "run_tests",
+                                },
+                                "observation": {
+                                    "observation_status": "success",
+                                    "result": {
+                                        "ok": True,
+                                        "passed": False,
+                                        "timed_out": False,
+                                    },
+                                },
+                            }
+                        ]
+                    )
+                ]
+            )
+        ],
+    )
+
+    taxonomy = build_swebench_wrong_demo_taxonomy([row], [trajectory])
+    counts = {category["code"]: category["count"] for category in taxonomy["categories"]}
+
+    assert taxonomy["denominator"] == 1
+    assert sum(counts.values()) == 1
+    assert counts["repository_tool_failure"] == 0
+    assert counts["official_test_failure_unclassified"] == 1
+    demo = taxonomy["representative_demos"][0]
+    assert demo["failure_analysis"]["first_observable_failure"]["failure_type"] == (
+        "local_test_failed"
+    )
+    assert demo["failure_analysis"]["first_causal_failure"] is None
+    assert demo["failure_analysis"]["causality_status"] == "not_established"
+
+
+def test_failure_taxonomy_excludes_preflight_placeholder_rows():
+    row = _row("swe:preflight", direct_status="resolved", graph_status="unresolved")
+    row["agentgraph"].update(
+        available=False,
+        valid=False,
+        evaluation=None,
+        trajectory_id=None,
+    )
+    taxonomy = build_swebench_wrong_demo_taxonomy(
+        [row],
+        [],
+        [
+            {
+                "task_id": "swe:preflight",
+                "condition": "swebench_agentgraph",
+                "stage": "repository_setup",
+                "execution_started": False,
+            }
+        ],
+    )
+
+    assert taxonomy["denominator"] == 0
+    assert taxonomy["representative_demos"] == []
+    assert all(category["count"] == 0 for category in taxonomy["categories"])
+    report = aggregate_swebench_receipts(
+        [row],
+        [],
+        [
+            {
+                "task_id": "swe:preflight",
+                "condition": "swebench_agentgraph",
+                "stage": "repository_setup",
+                "execution_started": False,
+            }
+        ],
+    )
+    assert report["wrong_demo_count"] == 0
+    assert report["wrong_demo_diagnoses"] == []
+
+
+def test_failure_taxonomy_prioritizes_max_rounds_over_not_called_evaluator():
+    row = _row("swe:max-rounds", direct_status="resolved", graph_status="unresolved")
+    not_called = {
+        "valid": False,
+        "metrics": {},
+        "reason": "not_evaluated_without_explicit_finish",
+        "details": {},
+    }
+    row["agentgraph"].update(
+        valid=False,
+        evaluation=not_called,
+        explicit_finish=False,
+        termination_reason="max_rounds",
+    )
+    trajectory = {
+        **_trajectory("swe:max-rounds", [_accepted_turn()], finish=False),
+        "termination_reason": "max_rounds",
+        "evaluation": not_called,
+    }
+
+    taxonomy = build_swebench_wrong_demo_taxonomy([row], [trajectory])
+    counts = {category["code"]: category["count"] for category in taxonomy["categories"]}
+
+    assert counts["terminal_budget_failure"] == 1
+    assert counts["evaluator_runtime_failure"] == 0
+
+
+def test_failure_taxonomy_treats_failed_local_test_as_validation_not_tool_backend():
+    row = _row("swe:local-test", direct_status="resolved", graph_status="unresolved")
+    row["agentgraph"]["evaluation"] = None
+    trajectory = _trajectory(
+        "swe:local-test",
+        [
+            _accepted_turn(
+                [
+                    _execution(
+                        trace=[
+                            {
+                                "turn": 1,
+                                "structured_action": {
+                                    "kind": "tool",
+                                    "name": "run_tests",
+                                },
+                                "observation": {
+                                    "observation_status": "success",
+                                    "result": {
+                                        "ok": True,
+                                        "passed": False,
+                                        "timed_out": False,
+                                    },
+                                },
+                            }
+                        ]
+                    )
+                ]
+            )
+        ],
+    )
+    trajectory.pop("evaluation")
+
+    taxonomy = build_swebench_wrong_demo_taxonomy([row], [trajectory])
+    counts = {category["code"]: category["count"] for category in taxonomy["categories"]}
+
+    assert counts["local_validation_failure"] == 1
+    assert counts["repository_tool_failure"] == 0
+
+
+def test_failure_taxonomy_rejects_duplicate_task_rows():
+    row = _row("swe:duplicate", direct_status="resolved", graph_status="unresolved")
+    trajectory = _trajectory("swe:duplicate", [_accepted_turn()])
+
+    try:
+        build_swebench_wrong_demo_taxonomy([row, row], [trajectory])
+    except ValueError as exc:
+        assert "duplicate SWE-bench paired task_id" in str(exc)
+    else:
+        raise AssertionError("duplicate task IDs must fail closed")
+
+
+def test_failure_taxonomy_distinguishes_target_test_failure_and_regression():
+    target_row = _row("swe:target", direct_status="resolved", graph_status="unresolved")
+    target_evaluation = _evaluation("unresolved")
+    target_evaluation["details"]["tests_status"] = {
+        "FAIL_TO_PASS": {"success": [], "failure": ["SECRET_F2P_ID"]},
+        "PASS_TO_PASS": {"success": ["SECRET_P2P_ID"], "failure": []},
+    }
+    target_row["agentgraph"]["evaluation"] = target_evaluation
+    target_trajectory = {
+        **_trajectory("swe:target", [_accepted_turn()]),
+        "evaluation": target_evaluation,
+    }
+
+    regression_row = _row(
+        "swe:regression", direct_status="resolved", graph_status="unresolved"
+    )
+    regression_evaluation = _evaluation("unresolved")
+    regression_evaluation["details"]["tests_status"] = {
+        "FAIL_TO_PASS": {"success": ["SECRET_F2P_ID"], "failure": []},
+        "PASS_TO_PASS": {"success": [], "failure": ["SECRET_P2P_ID"]},
+    }
+    regression_row["agentgraph"]["evaluation"] = regression_evaluation
+    regression_trajectory = {
+        **_trajectory("swe:regression", [_accepted_turn()]),
+        "evaluation": regression_evaluation,
+    }
+
+    taxonomy = build_swebench_wrong_demo_taxonomy(
+        [target_row, regression_row],
+        [target_trajectory, regression_trajectory],
+    )
+    counts = {category["code"]: category["count"] for category in taxonomy["categories"]}
+
+    assert taxonomy["denominator"] == 2
+    assert counts["official_target_test_failure"] == 1
+    assert counts["official_regression_failure"] == 1
+    assert sum(counts.values()) == 2
+    serialized = json.dumps(taxonomy)
+    assert "SECRET_F2P_ID" not in serialized
+    assert "SECRET_P2P_ID" not in serialized
+
+
+def test_representative_demo_contains_full_receipt_chain_and_redacts_gold_target():
+    row = _row("swe:demo", direct_status="resolved", graph_status="unresolved")
+    row.update(
+        question="Fix the public issue",
+        ground_truth="GOLD_PATCH_SENTINEL",
+        repository_state={
+            "instance_id": "owner__repo-1",
+            "repo": "owner/repo",
+            "base_commit": "base",
+        },
+    )
+    row["agentgraph"]["output_agent_inbox"] = {
+        "evaluator_payload": {"test_patch": "SECRET_OUTPUT_INBOX"}
+    }
+    secret_evaluation = _evaluation("unresolved")
+    secret_evaluation["details"]["harness_details"] = "SECRET_TEST_CONTRACT"
+    row["agentgraph"]["evaluation"] = secret_evaluation
+    execution = _execution(
+        receipts=[_receipt("search_code", {"ok": True})],
+        trace=[
+            {
+                "turn": 1,
+                "structured_action": {"kind": "tool", "name": "search_code"},
+                "observation": {
+                    "observation_status": "success",
+                    "result": {"ok": True},
+                },
+            }
+        ],
+        agent_id="agent_search",
+    )
+    execution.update(
+        execution_id="execution-1",
+        model_id="qwen3.5-9b-local",
+        provider="local",
+        output="candidate patch",
+    )
+    execution["metadata"]["request"] = {
+        "agent": {
+            "id": "agent_search",
+            "model_id": "qwen3.5-9b-local",
+            "contract": "Inspect the repository and propose a patch.",
+        },
+        "problem": "Fix the public issue",
+        "phase": "single",
+        "rendered_messages": [{"role": "user", "content": "Fix the public issue"}],
+        "upstream": [],
+        "evaluator_payload": {"gold_patch": "GOLD_PATCH_SENTINEL"},
+    }
+    execution["metadata"]["response"]["model_calls"] = [
+        {"request_status": "success", "evaluator_payload": "SECRET_MODEL_CALL"}
+    ]
+    execution["metadata"]["response"]["react_trace"][0][
+        "evaluator_payload"
+    ] = "SECRET_REACT_TRACE"
+    execution["metadata"]["response"]["tool_receipts"][0][
+        "evaluator_payload"
+    ] = "SECRET_TOOL_RECEIPT"
+    turn = _accepted_turn([execution])
+    turn.update(
+        prompt="Director input",
+        policy_response='{"action":"add_subgraph"}',
+        policy_version="policy-v1",
+        director_request_id="director-1",
+        graph_revision=1,
+        graph_snapshot={
+            "nodes": [
+                {
+                    "id": "agent_search",
+                    "model_id": "qwen3.5-9b-local",
+                    "contract": "Inspect the repository and propose a patch.",
+                }
+            ],
+            "relations": [],
+            "output_agent_id": "agent_search",
+            "revision": 1,
+            "evaluator_payload": "SECRET_GRAPH_SNAPSHOT",
+        },
+        runtime_summary={"evaluator_payload": "SECRET_RUNTIME"},
+    )
+    trajectory = {
+        **_trajectory("swe:demo", [turn]),
+        "trajectory_id": "trajectory-1",
+        "evaluation": secret_evaluation,
+        "task": {
+            "task_id": "swe:demo",
+            "ground_truth": "GOLD_PATCH_SENTINEL",
+            "metadata": {"evaluator_payload": {"test_patch": "SECRET_TEST"}},
+        },
+    }
+
+    taxonomy = build_swebench_wrong_demo_taxonomy([row], [trajectory])
+    demo = taxonomy["representative_demos"][0]
+
+    assert demo["task_id"] == "swe:demo"
+    assert demo["sample_id"] == "owner__repo-1"
+    assert demo["input"]["question"] == "Fix the public issue"
+    assert demo["reference_target"] == {
+        "metric": "official_swebench_harness_resolved",
+        "expected_resolved": True,
+        "gold_patch": None,
+        "fail_to_pass": None,
+        "pass_to_pass": None,
+        "redaction_role": "evaluator_only_redacted",
+    }
+    chain_turn = demo["execution_chain"]["director_canvas_turns"][0]
+    assert chain_turn["director"]["parsed_action"] == {"action": "add_subgraph"}
+    assert chain_turn["canvas_edit"]["feedback"] == "accepted add_subgraph"
+    agent = chain_turn["agent_executions"][0]
+    assert agent["agent_input"]["problem"] == "Fix the public issue"
+    assert agent["agent_input"]["evaluator_payload"] is None
+    assert agent["agent_input"]["evaluator_payload_role"] == (
+        "evaluator_only_redacted"
+    )
+    assert agent["agent_output"] == "candidate patch"
+    assert agent["react_tool_execution"]["tool_receipts"][0]["request"][
+        "action"
+    ] == "search_code"
+    assert demo["execution_chain"]["terminal_receipt"] is not None
+    assert demo["execution_chain"]["evaluator_receipt"] is not None
+    serialized = json.dumps(taxonomy)
+    assert "GOLD_PATCH_SENTINEL" not in serialized
+    assert "SECRET_TEST" not in serialized
+    assert "SECRET_MODEL_CALL" not in serialized
+    assert "SECRET_REACT_TRACE" not in serialized
+    assert "SECRET_TOOL_RECEIPT" not in serialized
+    assert "SECRET_GRAPH_SNAPSHOT" not in serialized
+    assert "SECRET_RUNTIME" not in serialized
+    assert "SECRET_OUTPUT_INBOX" not in serialized
+    assert "SECRET_TEST_CONTRACT" not in serialized
+
+
+def test_representative_demo_keeps_missing_chain_receipts_null():
+    row = _row("swe:missing", direct_status="resolved", graph_status="unresolved")
+    row["agentgraph"].update(
+        available=False,
+        valid=False,
+        evaluation=None,
+        trajectory_id=None,
+    )
+    failures = [
+        {
+            "task_id": "swe:missing",
+            "condition": "swebench_agentgraph",
+            "stage": "provider_request",
+            "execution_started": True,
+            "failure_phase": "provider",
+        }
+    ]
+
+    taxonomy = build_swebench_wrong_demo_taxonomy([row], [], failures)
+    demo = taxonomy["representative_demos"][0]
+
+    assert demo["execution_chain"]["director_canvas_turns"] is None
+    assert demo["execution_chain"]["terminal_receipt"] is None
+    assert demo["failure_analysis"]["subsequent_observed_receipts"][
+        "subsequent_turn_receipts"
+    ] is None

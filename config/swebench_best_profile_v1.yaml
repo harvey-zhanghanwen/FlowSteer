@@ -1,0 +1,76 @@
+schema_version: "flowsteer.swebench.best-profile-pointer.v1"
+dataset_key: "swe_bench"
+selection_scope:
+  benchmark_source: "SWE-bench Verified"
+  project_split: "test"
+  sample_count: 128
+  primary_metric: "official_resolved_rate"
+  require_complete_official_evaluator_coverage: true
+  require_agentgraph_condition: true
+  exclude_direct: true
+  exclude_canary_or_small_sample: true
+  exclude_prepared_or_incomplete: true
+  exclude_proxy_or_llm_judge: true
+  exclude_evaluator_leakage: true
+
+selection:
+  status: "no_evaluator_valid_candidate"
+  eligible_condition_count: 0
+  selected_condition_id: null
+  selected_config_path: null
+  selected_manifest_path: null
+  selected_report_path: null
+  selected_source_version: null
+  agentgraph_resolved: null
+  agentgraph_resolved_rate: null
+  direct_resolved: null
+  direct_resolved_rate: null
+  agentgraph_minus_direct: null
+  metric_status: "not_reportable"
+  activation_allowed: false
+  reason: "No SWE-bench AgentGraph condition has complete official evaluator-valid coverage on the fixed 128-task Verified test protocol."
+
+current_candidate:
+  condition_id: "swebench_skillflow_v3_initial_v1"
+  config_path: "config/evaluation_swebench_skillflow_v3_initial_v1.yaml"
+  manifest_path: "artifacts/swebench_skillflow_v3_initial_v1/run_manifest.json"
+  preflight_report_path: "reports/swebench_skillflow_v3_initial_v1_preflight.json"
+  source_branch: "feature/swebench-initial-adaptation-v1-20260825"
+  source_revision: "08c4252cba32e63f3d33260a56964b0745e3f916"
+  dataset_protocol: "SkillFlow v3 code_generation IID128 joined to SWE-bench Verified at evaluator boundary"
+  director_prompt_version: "agentgraph.director.minimal-neutral.v10"
+  agentgraph_protocol: "free agent_id + model_id + free-text contract; unified Canvas actions"
+  repository_tool_version: "skillflow.training.repository-tools.v1+flowsteer.workspace-diff.v1"
+  evaluator_protocol: "SkillFlow evaluate_patch -> official SWE-bench Docker harness"
+  split: "test"
+  sample_count: 128
+  run_status: "failed_runtime_preflight"
+  official_evaluator_valid: 0
+  agentgraph_resolved_rate: null
+  direct_resolved_rate: null
+  eligible_as_best: false
+
+default_and_next_run:
+  runner_default_config: null
+  documented_next_run_config: "config/evaluation_swebench_skillflow_v3_initial_v1.yaml"
+  changed_by_this_pointer: false
+  points_to_selected_best: false
+  status: "unchanged_no_verified_best"
+  policy: "Do not activate or rename a profile as best until a complete official evaluator-valid result satisfies selection_scope."
+
+run_blockers:
+  task_environment_population:
+    ready: 1
+    unavailable: 127
+  official_docker_harness_access: "blocked"
+
+evidence:
+  current_preflight_markdown: "reports/swebench_skillflow_v3_initial_v1_preflight.md"
+  current_preflight_json: "reports/swebench_skillflow_v3_initial_v1_preflight.json"
+  current_manifest: "artifacts/swebench_skillflow_v3_initial_v1/run_manifest.json"
+  historical_status_report: "/ssd1/iclr/1/FlowSteer/reports/multidataset_stablezero/SWEBENCH_ARCH_REPORT.md"
+  historical_regular_dev_manifest: "/ssd1/iclr/1/FlowSteer/artifacts/eval128_current/swebench_regular_dev/run_manifest.json"
+
+training_performed: false
+full_evaluation_rerun_performed: false
+official_harness_rerun_performed: false
