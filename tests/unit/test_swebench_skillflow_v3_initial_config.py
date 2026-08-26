@@ -395,6 +395,9 @@ def test_v16_limits_official_docker_fallback_to_two_xarray_instances() -> None:
         previous["experiment"]["tool_version"]
         + "+flowsteer.official-docker-testbed-fallback.v1"
     )
+    assert config["experiment"]["catalog_order_namespace"] == previous[
+        "experiment"
+    ]["catalog_order_namespace"]
     runtime = config["swe_coding_runtime"]
     assert runtime["official_docker_fallback_instance_ids"] == [
         "pydata__xarray-7229",

@@ -16,7 +16,6 @@ called from this module.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-import logging
 from pathlib import Path
 import shutil
 import subprocess
@@ -139,11 +138,15 @@ class PreparedSWEbenchDockerWorkspace:
     repo_root: Path
     workspace_root: Path
     pinned_commit: str
-    image_key: str
+    instance_image_key: str
+    environment_image_key: str
+    container_name: str
     container: Any = field(repr=False)
     client: Any = field(repr=False)
     cleanup_container: Callable[[Any, Any, Any], None] = field(repr=False)
+    close_logger: Callable[[Any], None] = field(repr=False)
     logger: Any = field(repr=False)
+    log_path: Path
     _closed: bool = False
 
     @property
@@ -159,8 +162,12 @@ class PreparedSWEbenchDockerWorkspace:
             "repo": self.identity.repo,
             "base_commit": self.identity.base_commit,
             "observed_pinned_commit": self.pinned_commit,
-            "environment_image_id": self.image_key,
+            "instance_image_key": self.instance_image_key,
+            "environment_image_key": self.environment_image_key,
+            "container_name": self.container_name,
+            "runtime_log_path": str(self.log_path),
             "workspace": SWEBENCH_DOCKER_WORKDIR,
+            "task_workspace_path": str(self.repo_root),
             "workspace_isolation": "task_scoped_persistent_container",
             "base_state_verified": self.pinned_commit == self.identity.base_commit,
             "task_environment_ready": True,
@@ -175,17 +182,22 @@ class PreparedSWEbenchDockerWorkspace:
             try:
                 self.client.close()
             finally:
-                resolved_root = self.workspace_root.resolve()
-                resolved_repository = self.repo_root.resolve()
-                owned_path = (
-                    resolved_repository
-                    if resolved_repository.parent == resolved_root
-                    else resolved_repository.parent
-                )
-                if owned_path.parent != resolved_root:
-                    raise RuntimeError("Docker workspace path is outside its task root")
-                shutil.rmtree(owned_path)
-                self._closed = True
+                try:
+                    self.close_logger(self.logger)
+                finally:
+                    resolved_root = self.workspace_root.resolve()
+                    resolved_repository = self.repo_root.resolve()
+                    owned_path = (
+                        resolved_repository
+                        if resolved_repository.parent == resolved_root
+                        else resolved_repository.parent
+                    )
+                    if owned_path.parent != resolved_root:
+                        raise RuntimeError(
+                            "Docker workspace path is outside its task root"
+                        )
+                    shutil.rmtree(owned_path)
+                    self._closed = True
 
     close = cleanup
 
@@ -257,10 +269,18 @@ class DockerRepositoryToolBackend(RepositoryToolBackend):
         test_cmd = arguments.get("test_cmd")
         if not isinstance(test_cmd, str) or not test_cmd.strip():
             return _error("run_tests", "test_cmd must be non-empty text")
+        raw_timeout = arguments.get(
+            "timeout_seconds", self.max_test_timeout_seconds
+        )
         try:
-            completed = self._run_in_testbed(
-                test_cmd.strip(), self.max_test_timeout_seconds
-            )
+            timeout = float(raw_timeout)
+        except (TypeError, ValueError):
+            return _error("run_tests", "timeout_seconds must be numeric")
+        if timeout <= 0:
+            return _error("run_tests", "timeout_seconds must be positive")
+        timeout = min(timeout, self.max_test_timeout_seconds)
+        try:
+            completed = self._run_in_testbed(test_cmd.strip(), timeout)
         except Exception as exc:
             return _error("run_tests", f"Docker exec failed: {exc}")
         return ToolResult(
@@ -269,7 +289,7 @@ class DockerRepositoryToolBackend(RepositoryToolBackend):
                 "ok": not completed.timed_out,
                 "passed": completed.returncode == 0 and not completed.timed_out,
                 "timed_out": completed.timed_out,
-                "timeout_seconds": self.max_test_timeout_seconds,
+                "timeout_seconds": timeout,
                 "returncode": completed.returncode,
                 "stdout": completed.output[-2000:],
                 "stderr": "",
@@ -307,7 +327,12 @@ def prepare_swebench_docker_workspace_for_task(
     if str(harness_path) not in sys.path:
         sys.path.insert(0, str(harness_path))
     from swebench.harness.constants import DOCKER_USER
-    from swebench.harness.docker_build import build_container
+    from docker.errors import ImageNotFound
+    from swebench.harness.docker_build import (
+        build_container,
+        close_logger,
+        setup_logger,
+    )
     from swebench.harness.docker_utils import cleanup_container
     from swebench.harness.test_spec.test_spec import make_test_spec
 
@@ -321,14 +346,30 @@ def prepare_swebench_docker_workspace_for_task(
     cleanup = cleanup_container_fn or cleanup_container
     test_spec = make_test_spec(row, namespace=harness.docker_namespace)
     run_id = "flowsteer-workspace-" + uuid.uuid4().hex[:12]
-    logger = logging.getLogger(f"flowsteer.swebench.{identity.instance_id}")
-    client = docker_client_factory()
-    transient = None
     task_directory = Path(
         tempfile.mkdtemp(prefix="swe_docker_", dir=str(root))
     ).resolve()
+    log_path = (
+        root
+        / "docker_logs"
+        / f"{identity.instance_id}-{run_id}.log"
+    ).resolve()
+    logger = setup_logger(identity.instance_id, log_path)
+    client = None
+    transient = None
     persistent = None
     try:
+        client = docker_client_factory()
+        try:
+            client.images.get(test_spec.instance_image_key)
+        except ImageNotFound:
+            # NECESSARY_ADAPTATION: the official remote image is an OCI image
+            # index.  This task-scoped rootless daemon requires the official
+            # platform to be explicit so the local tag is materialized.
+            client.images.pull(
+                test_spec.instance_image_key,
+                platform=test_spec.platform,
+            )
         transient = build(test_spec, client, run_id + "-seed", logger, False, False)
         transient.start()
         repo_root = _extract_testbed(transient, task_directory)
@@ -370,19 +411,27 @@ def prepare_swebench_docker_workspace_for_task(
             repo_root=repo_root,
             workspace_root=root,
             pinned_commit=pinned_commit,
-            image_key=str(test_spec.instance_image_key),
+            instance_image_key=str(test_spec.instance_image_key),
+            environment_image_key=str(test_spec.env_image_key),
+            container_name=str(persistent.name),
             container=persistent,
             client=client,
             cleanup_container=cleanup,
+            close_logger=close_logger,
             logger=logger,
+            log_path=log_path,
         )
     except BaseException:
-        if persistent is not None:
-            cleanup(client, persistent, logger)
-        if transient is not None:
-            cleanup(client, transient, logger)
-        client.close()
-        shutil.rmtree(task_directory, ignore_errors=True)
+        try:
+            if client is not None and persistent is not None:
+                cleanup(client, persistent, logger)
+            if client is not None and transient is not None:
+                cleanup(client, transient, logger)
+            if client is not None:
+                client.close()
+        finally:
+            close_logger(logger)
+            shutil.rmtree(task_directory, ignore_errors=True)
         raise
 
 

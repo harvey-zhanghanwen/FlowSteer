@@ -70,6 +70,9 @@ from src.interactive.scientific_sampling import (
     stable_hash,
 )
 from src.interactive.swebench_adapter import OfficialSWEbenchHarness
+from src.interactive.swebench_docker_workspace import (
+    prepare_swebench_docker_workspace_for_task,
+)
 from src.interactive.swe_worktree import (
     SWEbenchRepositoryIdentity,
     preflight_swebench_worktree_population,
@@ -3591,25 +3594,50 @@ async def run_completion_benchmark_round(
                     if host_environment_tasks
                     else {"ready": 0, "rows": []}
                 )
-                docker_rows = [
-                    {
-                        "status": "ready",
-                        "source": "official SWE-bench per-instance Docker image",
-                        "instance_id": SWEbenchRepositoryIdentity.from_task_record(
-                            task
-                        ).instance_id,
-                        "repo": SWEbenchRepositoryIdentity.from_task_record(task).repo,
-                        "base_commit": SWEbenchRepositoryIdentity.from_task_record(
-                            task
-                        ).base_commit,
-                        "task_environment_ready": True,
-                        "workspace": "/testbed",
-                        "workspace_isolation": "task_scoped_persistent_container",
-                    }
-                    for task in docker_environment_tasks
-                ]
+                docker_workspace_root = _resolve(
+                    root,
+                    str(swe_runtime.get("official_docker_workspace_root", "")),
+                )
+                docker_workspace_root.mkdir(parents=True, exist_ok=True)
+                docker_rows: list[dict[str, Any]] = []
+                for task in docker_environment_tasks:
+                    identity = SWEbenchRepositoryIdentity.from_task_record(task)
+                    prepared_docker = None
+                    try:
+                        prepared_docker = await asyncio.to_thread(
+                            prepare_swebench_docker_workspace_for_task,
+                            task,
+                            harness=preflight_harness,
+                            workspace_root=docker_workspace_root,
+                            setup_timeout_seconds=float(
+                                swe_runtime["setup_timeout_seconds"]
+                            ),
+                            cleanup_timeout_seconds=float(
+                                swe_runtime["cleanup_timeout_seconds"]
+                            ),
+                        )
+                        docker_rows.append(
+                            {"status": "ready", **dict(prepared_docker.receipt)}
+                        )
+                    except Exception as exc:
+                        docker_rows.append(
+                            {
+                                "status": "unavailable",
+                                "instance_id": identity.instance_id,
+                                "repo": identity.repo,
+                                "base_commit": identity.base_commit,
+                                "task_environment_ready": False,
+                                "error_type": type(exc).__name__,
+                                "error": _safe_error(exc),
+                            }
+                        )
+                    finally:
+                        if prepared_docker is not None:
+                            await asyncio.to_thread(prepared_docker.cleanup)
                 host_rows = list(host_population.get("rows", []))
-                ready = int(host_population.get("ready", 0)) + len(docker_rows)
+                ready = int(host_population.get("ready", 0)) + sum(
+                    row.get("status") == "ready" for row in docker_rows
+                )
                 task_environment_population = {
                     "source": "SkillFlow Conda or official per-instance Docker image",
                     "total": len(active),

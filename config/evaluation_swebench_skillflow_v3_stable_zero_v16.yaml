@@ -12,7 +12,9 @@ experiment:
   seed: 20260825
   condition_id: "swebench_skillflow_v3_stable_zero_v16"
   sampling_schedule_purpose: "swebench_skillflow_v3_iid128_stable_zero_v15"
-  catalog_order_namespace: "swebench_skillflow_v3_stable_zero_v16"
+  # Preserve the v15 model-catalog order; this condition changes only the
+  # repository runtime for the two explicitly listed xarray instances.
+  catalog_order_namespace: "swebench_skillflow_v3_stable_zero_v15"
   prompt_version: "agentgraph.director.minimal-neutral.v10"
   tool_version: "skillflow.training.repository-tools.v1+skillflow.code-generation-guidance.v1+skillflow.force-terminate.v1+skillflow.scientific-sampling@1+flowsteer.coding-exact-action-schema.v1+flowsteer.structured-action-flat.v1+flowsteer.workspace-diff.v1+flowsteer.repository-cwd-contract.v1+skillflow.mexec-edit-file.v1+skillflow.force-terminate-empty-patch-official-evaluation.v1+skillflow.swe-memory-context-compaction.v1+flowsteer.runtime-output-admission.v1+flowsteer.free-agent-runtime-profile-declaration.v1+flowsteer.direct-evaluator-checkpoint-resume.v1+flowsteer.generic-add-receipt-root-binding.v1+flowsteer.serialized-shared-repository-workspace.v1+flowsteer.empty-patch-communication-envelope.v1+flowsteer.swebench-finish-admissibility-feedback.v1+flowsteer.official-docker-testbed-fallback.v1"
   output_dir: "artifacts/swebench_skillflow_v3_stable_zero_v16"
@@ -73,7 +75,7 @@ swe_coding_runtime:
   task_max_turns: 28
   task_max_tool_calls: 28
   max_test_timeout_seconds: 60.0
-  setup_timeout_seconds: 30.0
+  setup_timeout_seconds: 900.0
   cleanup_timeout_seconds: 10.0
   # Only the two tasks sharing the xarray 2022.09 Conda timeout use Docker.
   official_docker_fallback_instance_ids:

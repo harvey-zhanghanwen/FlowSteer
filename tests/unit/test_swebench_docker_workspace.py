@@ -66,11 +66,17 @@ def _workspace(tmp_path: Path) -> PreparedSWEbenchDockerWorkspace:
         repo_root=repo_root,
         workspace_root=root,
         pinned_commit=commit,
-        image_key="swebench/sweb.eval.x86_64.pydata__xarray-7229:latest",
+        instance_image_key=(
+            "swebench/sweb.eval.x86_64.pydata_1776_xarray-7229:latest"
+        ),
+        environment_image_key="sweb.env.py.x86_64.example:latest",
+        container_name="sweb.eval.pydata_xarray-7229.flowsteer-test",
         container=object(),
         client=_FakeClient(),
         cleanup_container=lambda _client, _container, _logger: None,
+        close_logger=lambda _logger: None,
         logger=object(),
+        log_path=root / "runtime.log",
     )
 
 
@@ -112,14 +118,23 @@ def test_docker_backend_reuses_repository_tools_and_runs_commands_in_testbed(
     assert "+    return 'new'" in diff.value["diff"]
 
     bash = backend.invoke(ToolRequest("bash", {"command": "git status --short"}))
-    tests = backend.invoke(ToolRequest("run_tests", {"test_cmd": "pytest -q"}))
+    tests = backend.invoke(
+        ToolRequest(
+            "run_tests",
+            {"test_cmd": "pytest -q", "timeout_seconds": 12},
+        )
+    )
     assert bash.value["ok"] is True
     assert tests.value["passed"] is True
     assert calls == [
         (("/bin/bash", "-c", "git status --short"), 30.0),
-        (("/bin/bash", "-c", "pytest -q"), 30.0),
+        (("/bin/bash", "-c", "pytest -q"), 12.0),
     ]
     assert workspace.receipt["workspace"] == SWEBENCH_DOCKER_WORKDIR
+    assert workspace.receipt["instance_image_key"].endswith(
+        "pydata_1776_xarray-7229:latest"
+    )
+    assert workspace.receipt["environment_image_key"].startswith("sweb.env.py")
 
 
 def test_training_registration_accepts_the_task_environment_backend(
@@ -160,4 +175,3 @@ def test_workspace_cleanup_stops_container_closes_client_and_removes_task_tree(
     assert client.closed is True
     assert not repo_root.exists()
     workspace.cleanup()
-

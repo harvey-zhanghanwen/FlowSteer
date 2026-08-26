@@ -15,7 +15,7 @@ SkillFlow Conda environment plus detached-worktree runtime.
   (`_ApptainerSWEWorkspaceBackend`) and
   `swebench_official_worker.py` (`_copy_testbed`, base reset, workspace command
   execution).
-- Official SWE-bench image/container lifecycle:
+- Official SWE-bench instance-image preparation and transient-container lifecycle:
   `/ssd1/iclr/.private/skillflow-resources/SWE-bench-harness-d83/swebench/harness/test_spec/test_spec.py::make_test_spec`,
   `docker_build.py::build_container`, and
   `docker_utils.py::cleanup_container`.
@@ -29,6 +29,14 @@ SkillFlow Conda environment plus detached-worktree runtime.
 `/testbed` source tree into a task-owned directory, resets it to the public
 `base_commit`, bind-mounts that exact tree back at `/testbed` in one persistent
 container, and redirects only `bash`/`run_tests` process execution to Docker.
+The persistent bind-mounted container is created with the same image, user,
+platform and capability arguments used by the official `build_container`; this
+is the minimum adaptation required because the official helper has no volume
+mount parameter.  Before calling `build_container`, the adapter resolves the
+official OCI image index for `test_spec.platform`; the task-scoped rootless
+Docker daemon otherwise finishes the pull without materializing an inspectable
+local instance-image tag.  The official `setup_logger`/`close_logger` pair is
+used so upstream `BuildImageError` retains its expected `log_file` receipt.
 Search, view, edit and diff remain the existing `RepositoryToolBackend`
 implementation over the same bind-mounted bytes.  Its timeout helper is a
 minimal extension of SkillFlow `training/swe_bench_eval.py::_exec_run_with_tolerant_decode`
