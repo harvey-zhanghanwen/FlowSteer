@@ -15,6 +15,18 @@ _ROOT = Path(__file__).resolve().parents[2]
 _CONFIG_PATH = (
     _ROOT / "config" / "evaluation_swebench_skillflow_v3_initial_v1.yaml"
 )
+_STABLE_ZERO_CONFIG_PATH = (
+    _ROOT / "config" / "evaluation_swebench_skillflow_v3_stable_zero_v8.yaml"
+)
+_STABLE_ZERO_CWD_CONFIG_PATH = (
+    _ROOT / "config" / "evaluation_swebench_skillflow_v3_stable_zero_v9.yaml"
+)
+_STABLE_ZERO_MEXEC_CONFIG_PATH = (
+    _ROOT / "config" / "evaluation_swebench_skillflow_v3_stable_zero_v11.yaml"
+)
+_STABLE_ZERO_OUTPUT_ADMISSION_CONFIG_PATH = (
+    _ROOT / "config" / "evaluation_swebench_skillflow_v3_stable_zero_v12.yaml"
+)
 
 
 def _config() -> dict[str, object]:
@@ -89,3 +101,109 @@ def test_strict_profile_requires_task_specific_environment() -> None:
 
     with pytest.raises(ConfigurationError, match="require_task_environment"):
         validate_completion_benchmark_config(config)
+
+
+@pytest.mark.parametrize(
+    "config_path", (_STABLE_ZERO_CONFIG_PATH, _STABLE_ZERO_CWD_CONFIG_PATH)
+)
+def test_v8_v9_reuse_skillflow_code_generation_episode_without_training(
+    config_path: Path,
+) -> None:
+    config = dict(load_yaml(config_path))
+
+    validate_completion_benchmark_config(config)
+
+    runtime = config["swe_coding_runtime"]
+    assert runtime["max_turns_per_agent_call"] == 28
+    assert runtime["max_tool_calls_per_agent_call"] == 28
+    assert runtime["task_max_turns"] == 28
+    assert runtime["task_max_tool_calls"] == 28
+    assert config["swebench_evaluation"]["concurrency"] == 2
+    assert config["director"]["sampling_schema_version"] == (
+        "agentgraph.model-admissible-action-mask.v2"
+    )
+    assert config["agent_graph"]["contract_type"] == "free_text"
+    assert config["agent_graph"]["require_format_agent"] is False
+    assert config["grpo"]["enabled"] is False
+    assert config["skills"]["enabled"] is False
+
+
+def test_v11_freezes_mexec_force_termination_and_swe_memory_condition() -> None:
+    config = dict(load_yaml(_STABLE_ZERO_MEXEC_CONFIG_PATH))
+
+    validate_completion_benchmark_config(config)
+
+    experiment = config["experiment"]
+    bounded = config["swebench_evaluation"]
+    runtime = config["swe_coding_runtime"]
+    tool_version = experiment["tool_version"]
+    assert experiment["condition_id"] == (
+        "swebench_skillflow_v3_stable_zero_v11"
+    )
+    assert experiment["seed"] == 20260825
+    assert bounded["split"] == "test"
+    assert bounded["sample_count"] == 128
+    assert bounded["stable_zero_sample_count"] == 2
+    assert bounded["concurrency"] == 2
+    assert bounded["direct_generation_seed"] == 20260825
+    assert bounded["official_metric"] == "resolved_rate"
+    assert runtime["max_turns_per_agent_call"] == 28
+    assert runtime["max_tool_calls_per_agent_call"] == 28
+    assert runtime["task_max_turns"] == 28
+    assert runtime["task_max_tool_calls"] == 28
+    assert config["agent_graph"]["model_catalog_path"] == (
+        "config/model_catalog_multidataset_tool_v2.yaml"
+    )
+    assert config["evaluation"]["swebench_harness_enabled"] is True
+    assert "skillflow.mexec-edit-file.v1" in tool_version
+    assert (
+        "skillflow.force-terminate-empty-patch-official-evaluation.v1"
+        in tool_version
+    )
+    assert "skillflow.swe-memory-context-compaction.v1" in tool_version
+    assert "including an empty patch" in bounded["direct_completion_condition"]
+    assert config["grpo"]["enabled"] is False
+    assert config["skills"]["enabled"] is False
+
+
+def test_v12_changes_only_runtime_output_admission_condition() -> None:
+    previous = dict(load_yaml(_STABLE_ZERO_MEXEC_CONFIG_PATH))
+    config = dict(load_yaml(_STABLE_ZERO_OUTPUT_ADMISSION_CONFIG_PATH))
+
+    validate_completion_benchmark_config(config)
+
+    experiment = config["experiment"]
+    bounded = config["swebench_evaluation"]
+    runtime = config["swe_coding_runtime"]
+    assert experiment["condition_id"] == (
+        "swebench_skillflow_v3_stable_zero_v12"
+    )
+    assert experiment["prompt_version"] == previous["experiment"][
+        "prompt_version"
+    ]
+    assert experiment["tool_version"] == (
+        previous["experiment"]["tool_version"]
+        + "+flowsteer.runtime-output-admission.v1"
+    )
+    assert experiment["seed"] == previous["experiment"]["seed"] == 20260825
+    assert bounded == previous["swebench_evaluation"]
+    assert bounded["sample_count"] == 128
+    assert bounded["concurrency"] == 2
+    assert runtime["max_turns_per_agent_call"] == 28
+    assert runtime["max_tool_calls_per_agent_call"] == 28
+    assert runtime["task_max_turns"] == 28
+    assert runtime["task_max_tool_calls"] == 28
+    assert config["agent_graph"]["model_catalog_path"] == previous[
+        "agent_graph"
+    ]["model_catalog_path"]
+    assert config["evaluation"]["swebench_evaluator_path"] == previous[
+        "evaluation"
+    ]["swebench_evaluator_path"]
+    assert config["evaluation"]["swebench_harness_path"] == previous[
+        "evaluation"
+    ]["swebench_harness_path"]
+    assert config["evaluation"]["swebench_dataset_path"] == previous[
+        "evaluation"
+    ]["swebench_dataset_path"]
+    assert config["grpo"]["enabled"] is False
+    assert config["skills"]["enabled"] is False

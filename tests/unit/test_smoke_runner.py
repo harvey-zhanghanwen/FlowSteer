@@ -1895,6 +1895,27 @@ class SWEbenchCodingRuntimeWiringTests(unittest.IsolatedAsyncioTestCase):
             }
         return config
 
+    @classmethod
+    def _skillflow_config(cls) -> dict:
+        config = cls._config()
+        config["director"] = {
+            "api_base": "http://127.0.0.1:8015/v1",
+            "served_model_name": "supervisor_theta",
+        }
+        config["swe_coding_runtime"].update(
+            {
+                "tool_profile": "skillflow_training_v1",
+                "completion_policy": "workspace_diff",
+                "require_task_environment": True,
+                "conda_executable": "/fixture/conda",
+                "conda_envs_dir": "/fixture/envs",
+                "environment_repository_root": "/fixture/SkillFlow",
+                "task_max_turns": 28,
+                "task_max_tool_calls": 28,
+            }
+        )
+        return config
+
     def _task(self, *, instance_id: str = "owner__repo-1") -> TaskRecord:
         return TaskRecord(
             task_id=f"swe-bench:{instance_id}",
@@ -2150,6 +2171,76 @@ class SWEbenchCodingRuntimeWiringTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ConfigurationError, "multiple task-scoped"):
             backend._runtime_for_task(task)
 
+    def test_skillflow_runtime_derives_mexec_endpoint_from_director(self) -> None:
+        config = self._skillflow_config()
+
+        settings = swe_coding_runtime_settings(config, self._task())
+
+        assert settings is not None
+        self.assertEqual(
+            "http://127.0.0.1:8015/v1",
+            settings["edit_executor_api_base"],
+        )
+        self.assertEqual(
+            "supervisor_theta",
+            settings["edit_executor_model_name"],
+        )
+
+        for field_name in ("api_base", "served_model_name"):
+            invalid = copy.deepcopy(config)
+            invalid["director"][field_name] = ""
+            with self.subTest(field_name=field_name), self.assertRaisesRegex(
+                ConfigurationError,
+                f"director.{field_name}",
+            ):
+                swe_coding_runtime_settings(invalid, self._task())
+
+    def test_skillflow_runtime_wires_agent_local_mexec_editor(self) -> None:
+        task = self._task()
+        backend = self._backend(self._skillflow_config())
+        task_environment = SimpleNamespace(
+            command_prefix=("/fixture/conda", "run", "-n", "fixture"),
+            receipt=lambda: {
+                "source": "skillflow.task_env",
+                "environment_name": "fixture",
+            },
+        )
+        backend.swe_harness = SimpleNamespace(
+            task_environment=lambda record: task_environment
+        )
+        mexec_transport = object()
+        edit_generator = object()
+
+        with patch.object(
+            _MODULE,
+            "SkillFlowMExec",
+            return_value=mexec_transport,
+        ) as mexec, patch.object(
+            _MODULE,
+            "SkillFlowExactEditGenerator",
+            return_value=edit_generator,
+        ) as generator:
+            runtime, shared_registry, close = backend._runtime_for_task(task)
+
+        try:
+            mexec.assert_called_once_with(
+                api_base="http://127.0.0.1:8015/v1",
+                model_name="supervisor_theta",
+            )
+            generator.assert_called_once_with(mexec_transport)
+            repository_backend = shared_registry._backend(
+                SWEBENCH_REPOSITORY_TOOL_ID
+            )
+            self.assertEqual(task.question, repository_backend._task_issue)
+            self.assertIs(edit_generator, repository_backend._edit_generator)
+            self.assertIs(shared_registry, runtime.tool_registry)
+            self.assertIs(
+                shared_registry,
+                runtime.execution_adapters["coding"]._tool_registry,
+            )
+        finally:
+            close()
+
     async def test_official_resolved_boundary_receives_only_workspace_diff(self) -> None:
         task = self._task()
         backend = self._backend(self._config(enabled=False))
@@ -2182,6 +2273,11 @@ class SWEbenchCodingRuntimeWiringTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1.0, outcome.metrics["resolved"])
         self.assertEqual([(task.task_id, patch_text)], calls)
         self.assertFalse(outcome.details["proxy_metric_used"])
+        self.assertEqual(
+            patch_text,
+            outcome.details["terminal_artifact"]["repository_patch"],
+        )
+        self.assertTrue(outcome.details["terminal_artifact"]["non_empty"])
 
     async def test_swebench_evaluation_without_workspace_diff_fails_closed(
         self,

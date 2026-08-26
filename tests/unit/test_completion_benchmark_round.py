@@ -603,6 +603,90 @@ def test_stable_zero_requires_dataset_evaluator_receipts():
     assert result["checks"][0]["direct_evaluator_valid"] is False
 
 
+def test_swebench_stable_zero_accepts_official_empty_patch_receipts():
+    task = _MODULE.TaskRecord(
+        task_id="swe-bench:owner__repo-1",
+        question="Fix the repository issue.",
+        ground_truth="official_harness_only",
+        split="test",
+        metadata={"dataset_key": "swe_bench"},
+    )
+    evaluator_version = _MODULE.evaluator_version_for(task)
+    direct = {
+        task.task_id: {
+            "final_answer": "",
+            "evaluation": {
+                "valid": True,
+                "evaluator_version": evaluator_version,
+                "details": {
+                    "resolved": False,
+                    "proxy_metric_used": False,
+                    "harness_details": "empty_patch",
+                },
+            },
+        }
+    }
+    trajectory = {
+        "explicit_finish": True,
+        "final_answer": "",
+        "evaluation": {
+            "valid": True,
+            "evaluator_version": evaluator_version,
+            "details": {
+                "resolved": False,
+                "proxy_metric_used": False,
+                "harness_details": "empty_patch",
+                "terminal_artifact": {
+                    "kind": "repository_patch",
+                    "repository_patch": "",
+                    "non_empty": False,
+                },
+            },
+        },
+        "turns": [
+            {
+                "receipt_verified": True,
+                "director_attempt_count": 1,
+                "director_generation_seed": 1,
+                "director_latency_ms": 1.0,
+                "action": {"action_type": "finish"},
+                "graph_snapshot": {"output_agent_id": "agent_1"},
+                "executions": [
+                    {
+                        "agent_id": "agent_1",
+                        "execution_id": "execution-1",
+                        "metadata": {
+                            "request": {
+                                "agent": {"agent_id": "agent_1"},
+                                "model": {"model_id": "m"},
+                                "phase": "single",
+                                "upstream": [],
+                                "own_draft": None,
+                                "peer_draft": None,
+                                "rendered_messages": [],
+                            }
+                        },
+                    }
+                ],
+            }
+        ],
+    }
+
+    result = _MODULE._completion_stable_zero_check(
+        (task,),
+        direct,
+        {task.task_id: trajectory},
+        dataset_key="swe_bench",
+    )
+
+    assert result["passed"] is True
+    assert result["checks"][0]["official_harness_receipts_valid"] is True
+    assert (
+        result["checks"][0]["non_empty_patch_official_harness_exercised"]
+        is False
+    )
+
+
 def test_environment_stable_zero_uses_terminal_receipt_not_free_text_answer():
     task = _MODULE.TaskRecord(
         task_id="webshop:00500",

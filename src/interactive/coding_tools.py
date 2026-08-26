@@ -30,7 +30,7 @@ import re
 import subprocess
 import tempfile
 import threading
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from .tool_runtime import (
     ToolCapability,
@@ -80,6 +80,8 @@ class RepositoryToolBackend:
         task_environment_receipt: Mapping[str, object] | None = None,
         require_task_environment: bool = False,
         repository_state_receipt: Mapping[str, object] | None = None,
+        task_issue: str = "",
+        edit_generator: Callable[..., Any] | None = None,
     ) -> None:
         root = Path(repo_root).expanduser().resolve()
         if not root.is_dir():
@@ -103,6 +105,9 @@ class RepositoryToolBackend:
         self._task_environment_receipt = dict(task_environment_receipt or {})
         self._require_task_environment = require_task_environment
         self._repository_state_receipt = dict(repository_state_receipt or {})
+        self._task_issue = str(task_issue)
+        self._edit_generator = edit_generator
+        self._source_evidence: list[dict[str, object]] = []
         # ``None`` records that a path did not exist before the first edit.
         # This lets the workspace diff represent SkillFlow ``create`` actions.
         self._original_contents: dict[str, str | None] = {}
@@ -137,6 +142,7 @@ class RepositoryToolBackend:
             "bash": self._bash,
             "list_files": self._list_files,
             "search_code": self._search_code,
+            "edit_file": self._edit_file,
             "str_replace_editor": self._str_replace_editor,
             "view_file": self._view_file,
             "exact_edit": self._exact_edit,
@@ -215,6 +221,30 @@ class RepositoryToolBackend:
             paths.append(path)
         return sorted(paths, key=lambda item: item.relative_to(self.repo_root).as_posix())
 
+    def _remember_source_evidence(
+        self,
+        action: str,
+        arguments: Mapping[str, object],
+        result: Mapping[str, object],
+    ) -> None:
+        """Keep SkillFlow's task-local public search/view memory.
+
+        DIRECT_REUSE: ``GenericTaskEnvironment`` builds MExec edit context
+        only from prior public ``search_code``/``view_file`` observations.
+        This backend is task-scoped and serialized by ``CodingExecutionAdapter``,
+        so one bounded ledger preserves the same observation order without
+        exposing hidden reasoning or adding an AgentGraph edge.
+        """
+
+        self._source_evidence.append(
+            {
+                "action": action,
+                "arguments": dict(arguments),
+                "result": dict(result),
+            }
+        )
+        del self._source_evidence[:-24]
+
     def _list_files(self, arguments: Mapping[str, object]) -> ToolResult:
         raw_pattern = arguments.get("file_pattern", "")
         if not isinstance(raw_pattern, str):
@@ -264,16 +294,16 @@ class RepositoryToolBackend:
                     break
             if len(matches) >= self.max_search_matches:
                 break
-        return ToolResult(
-            {
-                "action": "search_code",
-                "ok": True,
-                "query": query,
-                "file_pattern": file_pattern,
-                "matches": matches,
-                "match_count": len(matches),
-            }
-        )
+        value = {
+            "action": "search_code",
+            "ok": True,
+            "query": query,
+            "file_pattern": file_pattern,
+            "matches": matches,
+            "match_count": len(matches),
+        }
+        self._remember_source_evidence("search_code", arguments, value)
+        return ToolResult(value)
 
     @staticmethod
     def _generate_filemap(content: str, path: str) -> str | None:
@@ -349,16 +379,16 @@ class RepositoryToolBackend:
         if not has_explicit_range and total > 500 and path.suffix == ".py":
             filemap = self._generate_filemap(content, relative)
             if filemap:
-                return ToolResult(
-                    {
-                        "action": "view_file",
-                        "ok": True,
-                        "path": relative,
-                        "kind": "filemap",
-                        "total_lines": total,
-                        "filemap": filemap,
-                    }
-                )
+                value = {
+                    "action": "view_file",
+                    "ok": True,
+                    "path": relative,
+                    "kind": "filemap",
+                    "total_lines": total,
+                    "filemap": filemap,
+                }
+                self._remember_source_evidence("view_file", arguments, value)
+                return ToolResult(value)
         try:
             start_line = int(arguments.get("start_line", 1))
             end_line = int(arguments.get("end_line", max(total, 1)))
@@ -372,18 +402,291 @@ class RepositoryToolBackend:
             for index in range(start_line, end_line + 1)
             if index <= total
         ]
-        return ToolResult(
-            {
-                "action": "view_file",
-                "ok": True,
-                "path": relative,
-                "kind": "file",
-                "start_line": start_line,
-                "end_line": end_line if total else 0,
-                "total_lines": total,
-                "lines": selected,
-            }
+        value = {
+            "action": "view_file",
+            "ok": True,
+            "path": relative,
+            "kind": "file",
+            "start_line": start_line,
+            "end_line": end_line if total else 0,
+            "total_lines": total,
+            "lines": selected,
+        }
+        self._remember_source_evidence("view_file", arguments, value)
+        return ToolResult(value)
+
+    @staticmethod
+    def _literal_replacement_from_instruction(
+        instruction: str,
+        file_content: str,
+    ) -> tuple[str, str] | None:
+        """DIRECT_REUSE of SkillFlow's deterministic edit_file fast path."""
+
+        text = " ".join(instruction.strip().split())
+        if not text:
+            return None
+        quote = r"['\"`]"
+        candidates: list[tuple[str, str]] = []
+        patterns = (
+            rf"\b(?:replace|change)\s+(?:the\s+text\s+)?(?P<q1>{quote})"
+            rf"(?P<old>.+?)(?P=q1)\s+(?:with|to)\s+(?P<q2>{quote})"
+            rf"(?P<new>.+?)(?P=q2)",
+            rf"\bfrom\s+(?P<q1>{quote})(?P<old>.+?)(?P=q1)\s+to\s+"
+            rf"(?P<q2>{quote})(?P<new>.+?)(?P=q2)",
         )
+        for pattern in patterns:
+            for match in re.finditer(pattern, text, flags=re.IGNORECASE):
+                candidates.append((match.group("old"), match.group("new")))
+        seen: set[tuple[str, str]] = set()
+        for old, new in candidates:
+            pair = (old.strip(), new.strip())
+            if not pair[0] or pair[0] == pair[1] or pair in seen:
+                continue
+            seen.add(pair)
+            if file_content.count(pair[0]) == 1:
+                return pair
+            for line in file_content.splitlines(keepends=True):
+                if pair[0] in line and file_content.count(line) == 1:
+                    return line, line.replace(pair[0], pair[1], 1)
+        return None
+
+    def _edit_target_excerpt(
+        self,
+        *,
+        relative: str,
+        instruction: str,
+        file_content: str,
+    ) -> str:
+        """Select SkillFlow's bounded target-file context for MExec."""
+
+        lines = file_content.splitlines()
+        if len(lines) <= 180:
+            return file_content
+        for evidence in reversed(self._source_evidence):
+            if evidence.get("action") != "view_file":
+                continue
+            result = evidence.get("result")
+            if not isinstance(result, Mapping) or result.get("path") != relative:
+                continue
+            start = int(result.get("start_line") or 1)
+            end = int(result.get("end_line") or start)
+            start = max(1, start - 60)
+            end = min(len(lines), end + 90)
+            return (
+                f"[Excerpt from {relative}, original lines {start}-{end} of "
+                f"{len(lines)}; line numbers are NOT part of the file]\n"
+                + "\n".join(lines[start - 1 : end])
+            )
+        identifiers = sorted(
+            set(re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", instruction)),
+            key=len,
+            reverse=True,
+        )
+        for identifier in identifiers:
+            match = re.search(
+                rf"(?m)^.*\b{re.escape(identifier)}\b.*$", file_content
+            )
+            if match is None:
+                continue
+            center = file_content[: match.start()].count("\n") + 1
+            start = max(1, center - 60)
+            end = min(len(lines), center + 90)
+            return (
+                f"[Excerpt from {relative}, original lines {start}-{end} of "
+                f"{len(lines)}; line numbers are NOT part of the file]\n"
+                + "\n".join(lines[start - 1 : end])
+            )
+        return file_content
+
+    def _recent_edit_context(self, target_relative: str) -> str:
+        """Render only prior public source observations, as SkillFlow does."""
+
+        snippets: list[str] = []
+        for evidence in reversed(self._source_evidence):
+            action = evidence.get("action")
+            arguments = evidence.get("arguments")
+            result = evidence.get("result")
+            if not isinstance(arguments, Mapping) or not isinstance(result, Mapping):
+                continue
+            if action == "view_file":
+                viewed = str(result.get("path") or "")
+                if viewed == target_relative:
+                    continue
+                lines = result.get("lines")
+                if isinstance(lines, Sequence) and not isinstance(lines, (str, bytes)):
+                    text = "\n".join(
+                        str(item.get("text", ""))
+                        for item in lines
+                        if isinstance(item, Mapping)
+                    )
+                else:
+                    text = str(result.get("filemap") or "")
+                snippets.append(f"[view_file {viewed}]\n{text[:1200]}")
+            elif action == "search_code":
+                query = str(arguments.get("query") or "")[:90]
+                matches = result.get("matches")
+                text = "\n".join(
+                    f"{item.get('path')}:{item.get('line')}: {item.get('text')}"
+                    for item in (matches or ())
+                    if isinstance(item, Mapping)
+                )
+                snippets.append(f"[search_code query={query!r}]\n{text[:900]}")
+            if sum(len(item) for item in snippets) >= 3500:
+                break
+        return "\n\n".join(reversed(snippets))[:3500]
+
+    @staticmethod
+    def _effective_old_content(candidate: str, file_content: str) -> str:
+        """Reuse SkillFlow's exact/whitespace/high-confidence anchor lookup."""
+
+        if candidate in file_content:
+            return candidate
+
+        def normalize(value: str) -> str:
+            return "\n".join(" ".join(line.split()) for line in value.split("\n"))
+
+        normalized = normalize(candidate)
+        candidate_lines = candidate.split("\n")
+        file_lines = file_content.split("\n")
+        best = (0.0, "")
+        second = 0.0
+        for window_size in sorted(
+            {len(candidate_lines), max(1, len(candidate_lines) - 1), len(candidate_lines) + 1}
+        ):
+            if window_size > len(file_lines):
+                continue
+            for index in range(len(file_lines) - window_size + 1):
+                window = "\n".join(file_lines[index : index + window_size])
+                if normalize(window) == normalized:
+                    return window
+                ratio = difflib.SequenceMatcher(
+                    None, normalized.strip(), normalize(window).strip()
+                ).ratio()
+                if ratio > best[0]:
+                    second = best[0]
+                    best = (ratio, window)
+                elif ratio > second:
+                    second = ratio
+        if best[0] >= 0.94 and best[0] - second >= 0.03:
+            return best[1]
+        return ""
+
+    def _edit_file(self, arguments: Mapping[str, object]) -> ToolResult:
+        """SkillFlow ``edit_file(path, instruction)`` with MExec behind it."""
+
+        try:
+            path, relative = self._resolve_repo_path(arguments.get("path", ""))
+        except ValueError as exc:
+            return _error("edit_file", str(exc))
+        instruction = arguments.get("instruction", "")
+        if not isinstance(instruction, str) or not instruction.strip():
+            return _error("edit_file", "instruction must be non-empty text")
+        relative_parts = Path(relative).parts
+        if (
+            "tests" in relative_parts[:-1]
+            or (relative_parts and relative_parts[-1].startswith("test_"))
+        ):
+            return _error("edit_file", "cannot edit test files")
+        if not path.is_file():
+            return _error("edit_file", f"file not found: {relative}")
+        try:
+            original = path.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            return _error("edit_file", f"cannot read {relative}: {exc}")
+
+        literal = self._literal_replacement_from_instruction(instruction, original)
+        attempts = 0
+        last_error = ""
+        requested_instruction = instruction.strip()
+        while attempts < 2:
+            attempts += 1
+            if literal is not None and attempts == 1:
+                old_content, new_content = literal
+                generator_used = False
+            else:
+                if self._edit_generator is None:
+                    return _error("edit_file", "SkillFlow MExec editor is unavailable")
+                try:
+                    generated = self._edit_generator(
+                        issue=self._task_issue,
+                        path=relative,
+                        target_excerpt=self._edit_target_excerpt(
+                            relative=relative,
+                            instruction=requested_instruction,
+                            file_content=original,
+                        ),
+                        instruction=requested_instruction,
+                        recent_context=self._recent_edit_context(relative),
+                    )
+                    old_content = generated.old_content
+                    new_content = generated.new_content
+                    generator_used = True
+                except Exception as exc:
+                    last_error = f"{type(exc).__name__}: {exc}"
+                    requested_instruction = (
+                        instruction.strip()
+                        + " Return one smaller exact replacement grounded in the viewed source."
+                    )
+                    literal = None
+                    continue
+            if not old_content:
+                last_error = "editor returned empty old_content"
+                requested_instruction = (
+                    instruction.strip()
+                    + " Use a short unique source anchor copied from the target file."
+                )
+                literal = None
+                continue
+            effective_old = self._effective_old_content(old_content, original)
+            if not effective_old:
+                last_error = "old_content was not found unambiguously"
+                requested_instruction = (
+                    instruction.strip()
+                    + " The prior old_content was not found; use a shorter exact source anchor."
+                )
+                literal = None
+                continue
+            updated = original.replace(effective_old, new_content, 1)
+            if updated == original:
+                last_error = "replacement makes no source change"
+                literal = None
+                continue
+            if path.suffix == ".py":
+                try:
+                    ast.parse(updated, filename=relative)
+                except SyntaxError as exc:
+                    last_error = f"syntax error at line {exc.lineno}: {exc.msg}"
+                    requested_instruction = (
+                        instruction.strip()
+                        + f" The prior edit had {last_error}; preserve valid Python syntax."
+                    )
+                    literal = None
+                    continue
+            self._remember_original(relative, original)
+            self._edit_history[relative] = original
+            try:
+                path.write_text(updated, encoding="utf-8")
+            except OSError as exc:
+                return _error("edit_file", f"cannot write {relative}: {exc}")
+            changed_line = original[: original.find(effective_old)].count("\n") + 1
+            updated_lines = updated.splitlines()
+            start = max(1, changed_line - 3)
+            end = min(len(updated_lines), changed_line + new_content.count("\n") + 4)
+            diff_nonempty = bool(self._workspace_diff().strip())
+            return ToolResult(
+                {
+                    "action": "edit_file",
+                    "ok": True,
+                    "changed": True,
+                    "path": relative,
+                    "instruction": instruction,
+                    "updated_snippet": "\n".join(updated_lines[start - 1 : end]),
+                    "workspace_diff_nonempty": diff_nonempty,
+                    "mexec_used": generator_used,
+                    "edit_attempts": attempts,
+                }
+            )
+        return _error("edit_file", f"edit generation failed: {last_error}")
 
     def _remember_original(self, relative: str, content: str | None) -> None:
         if relative not in self._original_contents:
@@ -670,7 +973,7 @@ class RepositoryToolBackend:
             return ToolResult(
                 {
                     "action": "bash",
-                    "ok": True,
+                    "ok": False,
                     "command": command,
                     "timed_out": True,
                     "timeout_seconds": self.max_test_timeout_seconds,
@@ -687,7 +990,7 @@ class RepositoryToolBackend:
         return ToolResult(
             {
                 "action": "bash",
-                "ok": True,
+                "ok": completed.returncode == 0,
                 "command": command,
                 "timed_out": False,
                 "returncode": completed.returncode,
@@ -971,7 +1274,7 @@ class RepositoryToolBackend:
             return ToolResult(
                 {
                     "action": "run_tests",
-                    "ok": True,
+                    "ok": False,
                     "passed": False,
                     "timed_out": True,
                     "timeout_seconds": timeout,
@@ -1008,6 +1311,8 @@ def create_swebench_repository_registration(
     task_environment_receipt: Mapping[str, object] | None = None,
     require_task_environment: bool = False,
     repository_state_receipt: Mapping[str, object] | None = None,
+    task_issue: str = "",
+    edit_generator: Callable[..., Any] | None = None,
 ) -> ToolRegistration:
     """Create one registry entry for a prepared SWE-bench repository."""
 
@@ -1027,6 +1332,8 @@ def create_swebench_repository_registration(
         task_environment_receipt=task_environment_receipt,
         require_task_environment=require_task_environment,
         repository_state_receipt=repository_state_receipt,
+        task_issue=task_issue,
+        edit_generator=edit_generator,
     )
     compatibility_action_schemas = {
         "apply_patch": {
@@ -1127,46 +1434,138 @@ def create_swebench_repository_registration(
             },
         },
     }
-    # NECESSARY_ADAPTATION: deployed SkillFlow's code_generation mask exposes
-    # list/search/view/edit_file, but edit_file is inseparable from its private
-    # M_exec episode object and natural-language edit generator.  Reuse the
-    # same deployed source's deterministic str_replace_editor instead of
-    # inventing another editor.  bash and run_tests are existing deployed
-    # handler/schema pairs and are explicitly enabled for repository command
+    # DIRECT_REUSE: deployed SkillFlow's code_generation mask exposes
+    # list/search/view/edit_file.  The model-visible edit contract stays
+    # ``edit_file(path, instruction)``; the private M_exec generator is wired
+    # behind RepositoryToolBackend by the SWE-bench task runtime.  bash and
+    # run_tests are the deployed handler/schema pairs used for focused command
     # and test execution in this evaluation adapter.
     # Patch publication remains the upstream internal workspace-diff
     # materialization, not a model-visible ``diff`` action.
     skillflow_training_action_schemas = {
-        "bash": compatibility_action_schemas["bash"],
+        "bash": {
+            **compatibility_action_schemas["bash"],
+            "description": (
+                "Execute a bash command from the repository root. Do not cd to "
+                "/testbed, /workspace, an environment directory, or another absolute "
+                "path. Prefer list_files/search_code/view_file for source inspection; "
+                "use bash only for a focused repository command. Output is bounded."
+            ),
+            "properties": {
+                **compatibility_action_schemas["bash"]["properties"],
+                "command": {
+                    **compatibility_action_schemas["bash"]["properties"][
+                        "command"
+                    ],
+                    "description": (
+                        "Command executed with the repository root as cwd; use plain "
+                        "shell text rather than HTML entities."
+                    ),
+                },
+            },
+        },
         "list_files": {
             "type": "object",
+            "description": (
+                "List source files in the repository. Use this first to "
+                "discover concrete paths before searching or editing."
+            ),
             "additionalProperties": False,
             "properties": {},
         },
-        "search_code": compatibility_action_schemas["search_code"],
-        "view_file": compatibility_action_schemas["view_file"],
-        "str_replace_editor": {
-            **compatibility_action_schemas["str_replace_editor"],
+        "search_code": {
+            **compatibility_action_schemas["search_code"],
+            "description": (
+                "Search repository source using a regular expression. Use "
+                "concise symbols or error strings; after no match, simplify "
+                "the query or inspect a concrete file."
+            ),
             "properties": {
-                **compatibility_action_schemas["str_replace_editor"]["properties"],
-                "command": {
-                    "type": "string",
-                    "enum": [
-                        "view",
-                        "create",
-                        "str_replace",
-                        "insert",
-                        "undo_edit",
+                **compatibility_action_schemas["search_code"]["properties"],
+                "query": {
+                    **compatibility_action_schemas["search_code"]["properties"][
+                        "query"
                     ],
+                    "description": (
+                        "Concise source-code regex, symbol, or error string."
+                    ),
+                },
+                "file_pattern": {
+                    **compatibility_action_schemas["search_code"]["properties"][
+                        "file_pattern"
+                    ],
+                    "description": (
+                        "Optional basename, directory, or glob path filter."
+                    ),
+                },
+            },
+        },
+        "view_file": {
+            **compatibility_action_schemas["view_file"],
+            "description": (
+                "View line-numbered source from a concrete repository path "
+                "returned by list_files or search_code."
+            ),
+            "properties": {
+                **compatibility_action_schemas["view_file"]["properties"],
+                "path": {
+                    **compatibility_action_schemas["view_file"]["properties"][
+                        "path"
+                    ],
+                    "description": "Concrete repository-relative file path.",
+                },
+                "start_line": {
+                    **compatibility_action_schemas["view_file"]["properties"][
+                        "start_line"
+                    ],
+                    "description": "Optional 1-based start line.",
+                },
+                "end_line": {
+                    **compatibility_action_schemas["view_file"]["properties"][
+                        "end_line"
+                    ],
+                    "description": "Optional inclusive end line.",
+                },
+            },
+        },
+        "edit_file": {
+            "type": "object",
+            "description": (
+                "Edit one existing repository source file from a natural-language "
+                "instruction after inspecting the relevant source."
+            ),
+            "additionalProperties": False,
+            "required": ["path", "instruction"],
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Concrete repository-relative source file path.",
+                },
+                "instruction": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": (
+                        "A precise semantic change grounded in the issue and viewed "
+                        "source; name the symbol or unique source anchor."
+                    ),
                 },
             },
         },
         "run_tests": {
             "type": "object",
+            "description": (
+                "Run a focused test command in the task repository environment "
+                "and observe stdout, stderr, exit status, and timeout."
+            ),
             "additionalProperties": False,
             "required": ["test_cmd"],
             "properties": {
-                "test_cmd": {"type": "string", "minLength": 1},
+                "test_cmd": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Focused repository test command to execute.",
+                },
             },
         },
     }

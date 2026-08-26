@@ -96,6 +96,36 @@ class ConcurrentCompleteGateway:
 
 
 class CodingExecutionTests(unittest.IsolatedAsyncioTestCase):
+    def test_skillflow_swe_memory_bounds_model_visible_observations(self) -> None:
+        observations = [
+            {
+                "observation_status": "success",
+                "executed_action": {
+                    "kind": "tool",
+                    "name": "bash",
+                    "resource_id": SWEBENCH_REPOSITORY_TOOL_ID,
+                    "skill_id": None,
+                    "arguments": {"command": f"python check_{index}.py"},
+                },
+                "result": {
+                    "action": "bash",
+                    "ok": True,
+                    "returncode": 0,
+                    "stdout": "x" * 9000,
+                },
+            }
+            for index in range(20)
+        ]
+
+        visible = CodingExecutionAdapter._model_visible_observations(observations)
+
+        self.assertEqual(2, len(visible))
+        self.assertEqual(6, len(visible[0]["SWE_MEMORY"]))
+        self.assertEqual(13, visible[0]["omitted_prior_observations"])
+        rendered = json.dumps(visible, ensure_ascii=False)
+        self.assertLess(len(rendered), 10000)
+        self.assertIn("OBSERVATION_TRUNCATED", rendered)
+
     async def test_empty_tool_declaration_inherits_task_repository_resource(
         self,
     ) -> None:
@@ -199,12 +229,16 @@ class CodingExecutionTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(1, gateway.calls)
             self.assertEqual(1, gateway.max_active)
             self.assertEqual(
-                1,
+                2,
                 sum(isinstance(value, AgentResponse) for value in results),
             )
             self.assertEqual(
                 1,
-                sum(isinstance(value, ReactExecutionError) for value in results),
+                sum(
+                    value.metadata.get("termination_reason")
+                    == "task_global_turn_budget"
+                    for value in results
+                ),
             )
 
     async def test_skillflow_profile_submits_materialized_workspace_diff(self) -> None:
@@ -225,12 +259,12 @@ class CodingExecutionTests(unittest.IsolatedAsyncioTestCase):
             gateway = SequenceGateway(
                 [
                     tool(
-                        "str_replace_editor",
+                        "edit_file",
                         {
-                            "command": "str_replace",
                             "path": "bug.py",
-                            "old_str": "return a - b",
-                            "new_str": "return a + b",
+                            "instruction": (
+                                "Replace `return a - b` with `return a + b`."
+                            ),
                         },
                     ),
                     complete("model prose is not the submitted patch"),
@@ -255,7 +289,7 @@ class CodingExecutionTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertIn("+    return a + b", response.text)
             self.assertEqual(
-                ["str_replace_editor"],
+                ["edit_file"],
                 [
                     receipt["request"]["action"]
                     for receipt in response.metadata["tool_receipts"]
@@ -294,12 +328,12 @@ class CodingExecutionTests(unittest.IsolatedAsyncioTestCase):
             gateway = SequenceGateway(
                 [
                     tool(
-                        "str_replace_editor",
+                        "edit_file",
                         {
-                            "command": "str_replace",
                             "path": "bug.py",
-                            "old_str": "return a - b",
-                            "new_str": "return a + b",
+                            "instruction": (
+                                "Replace `return a - b` with `return a + b`."
+                            ),
                         },
                     ),
                     tool("view_file", {"path": "bug.py"}),
@@ -337,6 +371,43 @@ class CodingExecutionTests(unittest.IsolatedAsyncioTestCase):
                 response.metadata["task_global_budget"],
             )
 
+    async def test_skillflow_force_terminate_submits_empty_workspace_diff(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "bug.py").write_text("VALUE = 1\n", encoding="utf-8")
+            registration = create_swebench_repository_registration(
+                root,
+                action_profile=SWEBENCH_TOOL_PROFILE_SKILLFLOW_TRAINING,
+                task_command_prefix=("/usr/bin/env",),
+                task_environment_receipt={"task_environment_ready": True},
+                require_task_environment=True,
+            )
+            gateway = SequenceGateway([tool("list_files", {})])
+            adapter = CodingExecutionAdapter(
+                gateway=gateway,
+                tool_registry=ToolRegistry((registration,)),
+                max_turns=1,
+                max_tool_calls=1,
+                completion_policy=CodingExecutionAdapter.WORKSPACE_DIFF_COMPLETION,
+                workspace_diff=registration.backend.materialize_workspace_diff,
+                task_max_turns=1,
+                task_max_tool_calls=1,
+            )
+
+            first = await adapter.execute(coding_request())
+            second = await adapter.execute(coding_request())
+
+            self.assertEqual("", first.text)
+            self.assertFalse(first.metadata["workspace_diff_submitted"])
+            self.assertEqual("max_turns", first.metadata["termination_reason"])
+            self.assertEqual("", second.text)
+            self.assertFalse(second.metadata["workspace_diff_submitted"])
+            self.assertEqual(
+                "task_global_turn_budget",
+                second.metadata["termination_reason"],
+            )
+            self.assertEqual(1, len(gateway.requests))
+
     async def test_skillflow_repository_actions_use_five_field_sampling_schema(
         self,
     ) -> None:
@@ -356,12 +427,12 @@ class CodingExecutionTests(unittest.IsolatedAsyncioTestCase):
             gateway = SequenceGateway(
                 [
                     tool(
-                        "str_replace_editor",
+                        "edit_file",
                         {
-                            "command": "str_replace",
                             "path": "bug.py",
-                            "old_str": "return a - b",
-                            "new_str": "return a + b",
+                            "instruction": (
+                                "Replace `return a - b` with `return a + b`."
+                            ),
                         },
                     ),
                     complete("done"),
@@ -381,22 +452,72 @@ class CodingExecutionTests(unittest.IsolatedAsyncioTestCase):
             schema = json.loads(
                 gateway.requests[0].model.metadata["response_json_schema"]
             )
+            first_branches = schema["oneOf"]
+            first_names = {
+                branch["properties"]["name"]["const"]
+                for branch in first_branches
+            }
+            self.assertIn("edit_file", first_names)
+            self.assertNotIn("complete", first_names)
+            editor_branch = next(
+                branch
+                for branch in first_branches
+                if branch["properties"]["name"]["const"]
+                == "edit_file"
+            )
             self.assertEqual(
+                SWEBENCH_REPOSITORY_TOOL_ID,
+                editor_branch["properties"]["resource_id"]["const"],
+            )
+            self.assertFalse(
+                editor_branch["properties"]["arguments"][
+                    "additionalProperties"
+                ]
+            )
+            completion_schema = json.loads(
+                gateway.requests[1].model.metadata["response_json_schema"]
+            )
+            self.assertIn(
+                "complete",
                 {
-                    "arguments",
-                    "kind",
-                    "name",
-                    "resource_id",
-                    "skill_id",
+                    branch["properties"]["name"]["const"]
+                    for branch in completion_schema["oneOf"]
                 },
-                set(schema["required"]),
             )
-            self.assertIn("str_replace_editor", schema["properties"]["name"]["enum"])
-            self.assertIn("complete", schema["properties"]["name"]["enum"])
-            self.assertEqual(
-                [SWEBENCH_REPOSITORY_TOOL_ID, None],
-                schema["properties"]["resource_id"]["enum"],
+
+    async def test_skillflow_code_generation_guidance_is_model_visible(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "bug.py").write_text("VALUE = 1\n", encoding="utf-8")
+            registration = create_swebench_repository_registration(
+                root,
+                action_profile=SWEBENCH_TOOL_PROFILE_SKILLFLOW_TRAINING,
+                task_command_prefix=("/usr/bin/env",),
+                task_environment_receipt={"task_environment_ready": True},
+                require_task_environment=True,
             )
+            gateway = SequenceGateway(
+                [tool("list_files", {}), complete("done")]
+            )
+            adapter = CodingExecutionAdapter(
+                gateway=gateway,
+                tool_registry=ToolRegistry((registration,)),
+                max_turns=2,
+                max_tool_calls=1,
+                completion_policy=CodingExecutionAdapter.WORKSPACE_DIFF_COMPLETION,
+                workspace_diff=lambda: "diff --git a/bug.py b/bug.py\n",
+            )
+
+            await adapter.execute(coding_request())
+
+            prompt = gateway.requests[0].agent.contract
+            self.assertIn("SkillFlow code-generation episode guidance", prompt)
+            self.assertIn("workspace diff is the submitted artifact", prompt)
+            self.assertIn("repository root is already the current working directory", prompt)
+            self.assertIn("use edit_file", prompt)
+            self.assertIn("Use this first", prompt)
 
     async def test_task_global_turn_budget_survives_new_agent_call(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -416,12 +537,12 @@ class CodingExecutionTests(unittest.IsolatedAsyncioTestCase):
             gateway = SequenceGateway(
                 [
                     tool(
-                        "str_replace_editor",
+                        "edit_file",
                         {
-                            "command": "str_replace",
                             "path": "bug.py",
-                            "old_str": "return a - b",
-                            "new_str": "return a + b",
+                            "instruction": (
+                                "Replace `return a - b` with `return a + b`."
+                            ),
                         },
                     ),
                     complete("done"),
@@ -458,11 +579,12 @@ class CodingExecutionTests(unittest.IsolatedAsyncioTestCase):
                 provider=second.provider,
                 phase=second.phase,
             )
-            with self.assertRaisesRegex(
-                ReactExecutionError,
-                "task-global turn budget is exhausted",
-            ):
-                await adapter.execute(second)
+            response = await adapter.execute(second)
+            self.assertIn("+    return a + b", response.text)
+            self.assertEqual(
+                "task_global_turn_budget",
+                response.metadata["termination_reason"],
+            )
 
     async def test_edit_test_diff_then_complete_patch(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

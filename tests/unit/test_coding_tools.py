@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 
 from src.interactive.coding_tools import (
@@ -182,6 +183,77 @@ class RepositoryToolBackendTests(unittest.TestCase):
         self.assertIn("syntax error", result["error"].lower())
         self.assertEqual(original, (self.root / "pkg" / "maths.py").read_text())
 
+    def test_skillflow_edit_file_literal_instruction_emits_patch(self) -> None:
+        result = self.invoke(
+            "edit_file",
+            path="pkg/maths.py",
+            instruction="Replace `return left - right` with `return left + right`.",
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["mexec_used"])
+        self.assertTrue(result["workspace_diff_nonempty"])
+        self.assertIn("return left + right", (self.root / "pkg" / "maths.py").read_text())
+
+    def test_skillflow_edit_file_uses_private_mexec_generator(self) -> None:
+        calls: list[dict[str, object]] = []
+
+        def generate(**kwargs: object) -> SimpleNamespace:
+            calls.append(dict(kwargs))
+            return SimpleNamespace(
+                old_content="return left - right",
+                new_content="return left + right",
+            )
+
+        backend = RepositoryToolBackend(
+            self.root,
+            task_issue="add returns subtraction instead of addition",
+            edit_generator=generate,
+        )
+        backend.invoke(
+            ToolRequest("view_file", {"path": "pkg/maths.py"})
+        )
+        result = backend.invoke(
+            ToolRequest(
+                "edit_file",
+                {
+                    "path": "pkg/maths.py",
+                    "instruction": "Correct add so it returns the sum.",
+                },
+            )
+        ).value
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["mexec_used"])
+        self.assertEqual("pkg/maths.py", calls[0]["path"])
+        self.assertIn("subtraction", str(calls[0]["issue"]))
+        self.assertIn("def add", str(calls[0]["target_excerpt"]))
+
+    def test_skillflow_edit_file_rejects_tests_and_invalid_python(self) -> None:
+        test_result = self.invoke(
+            "edit_file",
+            path="tests/test_maths.py",
+            instruction="Replace `5` with `-1`.",
+        )
+        self.assertFalse(test_result["ok"])
+
+        def invalid(**_: object) -> SimpleNamespace:
+            return SimpleNamespace(
+                old_content="return left - right",
+                new_content="return (",
+            )
+
+        backend = RepositoryToolBackend(self.root, edit_generator=invalid)
+        original = (self.root / "pkg" / "maths.py").read_text()
+        result = backend.invoke(
+            ToolRequest(
+                "edit_file",
+                {"path": "pkg/maths.py", "instruction": "Correct add."},
+            )
+        ).value
+        self.assertFalse(result["ok"])
+        self.assertEqual(original, (self.root / "pkg" / "maths.py").read_text())
+
     def test_skillflow_str_replace_editor_create_insert_and_undo_diff(self) -> None:
         replaced = self.invoke(
             "str_replace_editor",
@@ -236,6 +308,24 @@ class RepositoryToolBackendTests(unittest.TestCase):
         self.assertFalse(result["timed_out"])
         self.assertEqual(0, result["returncode"])
         self.assertIn("bash-ok", result["output"])
+
+    def test_skillflow_bash_nonzero_and_timeout_are_not_ok(self) -> None:
+        failed = self.invoke("bash", command="exit 3")
+        self.assertFalse(failed["ok"])
+        self.assertEqual(3, failed["returncode"])
+
+        backend = RepositoryToolBackend(
+            self.root,
+            max_test_timeout_seconds=0.01,
+        )
+        timed_out = backend.invoke(
+            ToolRequest(
+                "bash",
+                {"command": f'{sys.executable} -c "import time; time.sleep(1)"'},
+            )
+        ).value
+        self.assertFalse(timed_out["ok"])
+        self.assertTrue(timed_out["timed_out"])
 
     def test_official_codex_apply_patch_updates_workspace_and_diff(self) -> None:
         patch = (
@@ -356,10 +446,10 @@ class RepositoryToolRegistryTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 (
                     "bash",
+                    "edit_file",
                     "list_files",
                     "run_tests",
                     "search_code",
-                    "str_replace_editor",
                     "view_file",
                 ),
                 capability.action_names,
@@ -371,13 +461,27 @@ class RepositoryToolRegistryTests(unittest.IsolatedAsyncioTestCase):
                 ["command"], capability.action_schemas["bash"]["required"]
             )
             self.assertIn(
-                "create",
-                capability.action_schemas["str_replace_editor"]["properties"][
-                    "command"
-                ]["enum"],
+                "repository root as cwd",
+                capability.action_schemas["bash"]["properties"]["command"][
+                    "description"
+                ],
+            )
+            self.assertEqual(
+                ["path", "instruction"],
+                capability.action_schemas["edit_file"]["required"],
             )
             self.assertNotIn("diff", capability.action_schemas)
             self.assertNotIn("apply_patch", capability.action_schemas)
+            self.assertIn(
+                "Use this first",
+                capability.action_schemas["list_files"]["description"],
+            )
+            self.assertEqual(
+                "Concrete repository-relative source file path.",
+                capability.action_schemas["edit_file"]["properties"][
+                    "path"
+                ]["description"],
+            )
 
     async def test_skillflow_training_profile_requires_task_environment(
         self,

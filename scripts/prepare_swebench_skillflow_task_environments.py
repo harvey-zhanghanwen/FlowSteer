@@ -25,6 +25,7 @@ import re
 import shlex
 import subprocess
 import sys
+import threading
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 
@@ -49,6 +50,7 @@ DEFAULT_RECEIPT = Path(
     "task_environment_preparation_receipt.json"
 )
 RECEIPT_SCHEMA = "flowsteer.swebench.skillflow-task-environments.v1"
+_CONDA_SETUP_LOCK = threading.Lock()
 
 
 @dataclass(frozen=True, slots=True)
@@ -197,9 +199,9 @@ def render_official_scripts(
         "conda create -c conda-forge -n ",
         "conda create --override-channels -c conda-forge -n ",
     )
-    setup = setup.replace(
-        "conda env create ",
-        "conda env create --override-channels -c conda-forge ",
+    setup = _adapt_conda_setup_commands(
+        setup,
+        environment_python=envs_dir / plan.environment_name / "bin/python",
     )
     quoted_source = shlex.quote(str(source_path.expanduser().resolve()))
     install = install.replace("/testbed", quoted_source)
@@ -214,14 +216,100 @@ def render_official_scripts(
     )
     install = install.replace(clone_prefix, resume_clone, 1)
     install = install.replace("git remote remove origin", "git remote remove origin || true")
+    setup = _protect_conda_activation_from_checkout_shadowing(setup)
+    install = _protect_conda_activation_from_checkout_shadowing(install)
     exports = (
         f"export CONDA_EXE={shlex.quote(str(conda_executable.expanduser().resolve()))}\n"
         f"export CONDA_ENVS_DIR={shlex.quote(str(envs_dir.expanduser().resolve()))}\n"
         f"export CONDA_ENVS_PATH={shlex.quote(str(envs_dir.expanduser().resolve()))}\n"
+        # Conda 26 checks the configured ``default_channels`` before solving
+        # an environment file, even when that file contains ``nodefaults``.
+        # Override both channel settings so the relocated official scripts use
+        # conda-forge without requiring repo.anaconda.com Terms of Service.
+        "export CONDA_CHANNELS=conda-forge\n"
+        "export CONDA_DEFAULT_CHANNELS=conda-forge\n"
         f"export SWE_BENCH_ENV_SOURCE_ROOT={shlex.quote(str(source_path.parent.resolve()))}\n"
         "export CUDA_VISIBLE_DEVICES=\n"
     )
     return exports + setup, exports + install
+
+
+def _protect_conda_activation_from_checkout_shadowing(script: str) -> str:
+    """Keep a checkout such as ``requests/`` off Conda's Python import path."""
+
+    rendered: list[str] = []
+    for line in script.splitlines(keepends=True):
+        stripped = line.lstrip()
+        if stripped.startswith("conda activate "):
+            indentation = line[: len(line) - len(stripped)]
+            line = indentation + "PYTHONSAFEPATH=1 " + stripped
+        rendered.append(line)
+    return "".join(rendered)
+
+
+def _adapt_conda_setup_commands(script: str, *, environment_python: Path) -> str:
+    """Adapt official Conda commands without changing their dependency set.
+
+    The installed Conda accepts channel flags for ``conda create`` but not for
+    ``conda env create/update``.  Environment-file commands instead receive
+    the documented ``nodefaults`` channel in ``environment.yml``.  Creation
+    commands are also made restartable when an earlier phase already created
+    the target prefix.
+    """
+
+    python = shlex.quote(str(environment_python.expanduser().resolve()))
+    channel_prelude = (
+        "if grep -Eq '^[[:space:]]*channels:[[:space:]]*$' environment.yml; then\n"
+        "  sed -i -E 's/^([[:space:]]*-[[:space:]]*)defaults([[:space:]]*)$/"
+        "\\1conda-forge\\2/' environment.yml\n"
+        "  if ! grep -Eq '^[[:space:]]*-[[:space:]]*nodefaults([[:space:]]*)$' "
+        "environment.yml; then\n"
+        "    sed -i '/^[[:space:]]*channels:[[:space:]]*$/a\\  - nodefaults' "
+        "environment.yml\n"
+        "  fi\n"
+        "else\n"
+        "  sed -i '1ichannels:\\n  - conda-forge\\n  - nodefaults' environment.yml\n"
+        "fi\n"
+    )
+    rendered: list[str] = []
+    channel_prelude_emitted = False
+    for line in script.splitlines(keepends=True):
+        stripped = line.lstrip()
+        indentation = line[: len(line) - len(stripped)]
+        command = stripped.rstrip("\r\n")
+        newline = line[len(line.rstrip("\r\n")) :]
+        if re.match(r"^conda env (?:create|update)\b", command):
+            if not channel_prelude_emitted:
+                rendered.append(
+                    indentation
+                    + channel_prelude.replace("\n", "\n" + indentation)
+                )
+                channel_prelude_emitted = True
+            if command.startswith("conda env create "):
+                update = command.replace("conda env create ", "conda env update ", 1)
+                rendered.extend(
+                    (
+                        f"{indentation}if [ -x {python} ]; then\n",
+                        f"{indentation}  {update}\n",
+                        f"{indentation}else\n",
+                        f"{indentation}  {command}\n",
+                        f"{indentation}fi{newline}",
+                    )
+                )
+            else:
+                rendered.append(line)
+            continue
+        if re.match(r"^conda create\b", command):
+            rendered.extend(
+                (
+                    f"{indentation}if [ ! -x {python} ]; then\n",
+                    f"{indentation}  {command}\n",
+                    f"{indentation}fi{newline}",
+                )
+            )
+            continue
+        rendered.append(line)
+    return "".join(rendered)
 
 
 def _read_json(path: Path) -> Mapping[str, Any] | None:
@@ -268,7 +356,6 @@ def prepare_environment(
     source_path = source_root / plan.environment_name
     python_path = envs_dir / plan.environment_name / "bin/python"
     env_state = state_root / plan.environment_name
-    execution_home = env_state / "home"
     execution_workdir = env_state / "work"
     receipt_path = env_state / "receipt.json"
     previous = _read_json(receipt_path)
@@ -286,7 +373,6 @@ def prepare_environment(
         "source_path": str(source_path.resolve()),
         "python_path": str(python_path.resolve()),
         "receipt_path": str(receipt_path.resolve()),
-        "host_home": str(execution_home.resolve()),
         "host_working_directory": str(execution_workdir.resolve()),
         "source": "SkillFlow _env_name + official SWE-bench make_test_spec scripts",
     }
@@ -300,7 +386,6 @@ def prepare_environment(
         }
 
     env_state.mkdir(parents=True, exist_ok=True)
-    execution_home.mkdir(parents=True, exist_ok=True)
     execution_workdir.mkdir(parents=True, exist_ok=True)
     source_root.mkdir(parents=True, exist_ok=True)
     envs_dir.mkdir(parents=True, exist_ok=True)
@@ -310,10 +395,19 @@ def prepare_environment(
         envs_dir=envs_dir,
         source_path=source_path,
     )
-    isolated_host_prefix = (
-        f"export HOME={shlex.quote(str(execution_home.resolve()))}\n"
-        f"cd {shlex.quote(str(execution_workdir.resolve()))}\n"
+    requirements_path = shlex.quote(
+        str((execution_workdir / "requirements.txt").resolve())
     )
+    for shared_path in (
+        "$HOME/requirements.txt",
+        "${HOME}/requirements.txt",
+        "~/requirements.txt",
+    ):
+        setup = setup.replace(shared_path, requirements_path)
+    setup = setup.replace(
+        f"rm {requirements_path}", f"rm -f {requirements_path}"
+    )
+    isolated_host_prefix = f"cd {shlex.quote(str(execution_workdir.resolve()))}\n"
     setup = isolated_host_prefix + setup
     install = isolated_host_prefix + install
     setup_path = env_state / "setup_env.sh"
@@ -329,11 +423,19 @@ def prepare_environment(
         "started_at": _utc_now(),
     }
     receipt_path.write_text(json.dumps(row, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    phase = "initialization"
     try:
         for phase, script_path in (("setup_env", setup_path), ("install_repo", install_path)):
             if phase == "setup_env" and phase in completed_phases and python_path.is_file():
                 continue
-            result = runner(script_path, timeout_seconds=timeout_seconds)
+            if phase == "setup_env":
+                # Conda uses one shared package cache.  Serializing setup_env
+                # prevents concurrent .partial-file writes and LockError while
+                # repository installation may still overlap on --jobs 2.
+                with _CONDA_SETUP_LOCK:
+                    result = runner(script_path, timeout_seconds=timeout_seconds)
+            else:
+                result = runner(script_path, timeout_seconds=timeout_seconds)
             (env_state / f"{phase}.stdout.log").write_text(result.stdout or "", encoding="utf-8")
             (env_state / f"{phase}.stderr.log").write_text(result.stderr or "", encoding="utf-8")
             if result.returncode != 0:
@@ -354,6 +456,7 @@ def prepare_environment(
                 "ready": False,
                 "error_type": type(exc).__name__,
                 "error": str(exc),
+                "failed_phase": phase,
                 "finished_at": _utc_now(),
             }
         )

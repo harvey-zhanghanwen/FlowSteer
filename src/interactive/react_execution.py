@@ -1009,6 +1009,27 @@ class ToolReactExecutionAdapter:
                         "error_type": receipt.error_type,
                     }
                 )
+            elif (
+                isinstance(result.value, Mapping)
+                and result.value.get("ok") is False
+            ):
+                # DIRECT_REUSE: SkillFlow returns failed repository commands
+                # and editor operations as public failure observations while
+                # retaining their execution receipts.  A dispatched ToolResult
+                # is not automatically semantic success: ``ok=false`` must
+                # drive the next repair Action instead of reinforcing the
+                # failed request.
+                observation = MappingProxyType(
+                    {
+                        "observation_status": "tool_error",
+                        "public_error_code": "tool_result_not_ok",
+                        "tool_id": action.resource_id,
+                        "executed_action": action.to_value(),
+                        "tool_version": receipt.tool_version,
+                        "result": result.value,
+                        "completed": result.completed,
+                    }
+                )
             else:
                 observation = MappingProxyType(
                     {

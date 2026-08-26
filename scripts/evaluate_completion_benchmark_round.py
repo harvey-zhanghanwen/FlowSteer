@@ -1229,10 +1229,6 @@ async def _direct_one(
                 task.question,
                 run_id=run_id,
             )
-            if not runtime_result.final_answer:
-                raise CompletionBenchmarkRoundError(
-                    "SWE-bench Direct Coding Agent produced no workspace diff"
-                )
             calls = tuple(runtime_result.calls)
             if len(calls) != 1:
                 raise CompletionBenchmarkRoundError(
@@ -1484,6 +1480,17 @@ async def _collect_direct(
     for candidate in direct_candidates:
         task = selected_by_id.get(candidate.get("task_id"))
         evaluation = candidate.get("evaluation")
+        existing_answer = candidate.get("final_answer")
+        retry_swebench_evaluator = bool(
+            task is not None
+            and _dataset_key(task) == "swe_bench"
+            and isinstance(existing_answer, str)
+            and existing_answer.strip()
+            and (
+                not isinstance(evaluation, Mapping)
+                or evaluation.get("valid") is not True
+            )
+        )
         if (
             task is not None
             and _dataset_key(task) not in _INTERACTIVE_BENCHMARKS
@@ -1494,6 +1501,7 @@ async def _collect_direct(
             and (
                 not isinstance(evaluation, Mapping)
                 or evaluation.get("evaluator_version") != evaluator_version_for(task)
+                or retry_swebench_evaluator
             )
         ):
             updated = dict(candidate)
@@ -1501,7 +1509,11 @@ async def _collect_direct(
                 await _evaluate_prediction(backend, task, str(candidate["final_answer"]))
             )
             updated["rescore_receipt"] = {
-                "mode": "offline_existing_prediction",
+                "mode": (
+                    "official_evaluator_only_existing_patch"
+                    if retry_swebench_evaluator
+                    else "offline_existing_prediction"
+                ),
                 "source_evaluator_version": (
                     evaluation.get("evaluator_version")
                     if isinstance(evaluation, Mapping)
@@ -3205,7 +3217,12 @@ def _completion_stable_zero_check(
         tasks,
         direct,
         trajectories,
-        require_non_empty_final_answer=not environment_dataset,
+        # SkillFlow's official SWE-bench evaluator accepts an empty workspace
+        # diff as an authoritative unresolved submission.  Empty text remains
+        # invalid for answer/environment benchmarks.
+        require_non_empty_final_answer=(
+            not environment_dataset and dataset_key != "swe_bench"
+        ),
     )
     checks: list[dict[str, Any]] = []
     for task, base_check in zip(tasks, base["checks"], strict=True):
@@ -3226,6 +3243,7 @@ def _completion_stable_zero_check(
         )
         judge_receipts_valid = True
         official_harness_receipts_valid = True
+        non_empty_patch_official_harness_exercised = True
         environment_terminal_receipt_valid = True
         if dataset_key == "healthbench_professional":
             judge_receipts_valid = all(
@@ -3236,11 +3254,44 @@ def _completion_stable_zero_check(
                 for value in (direct_evaluation, graph_evaluation)
             )
         elif dataset_key == "swe_bench":
+            direct_patch = (
+                direct_value.get("final_answer")
+                if isinstance(direct_value, Mapping)
+                else None
+            )
+            graph_terminal_artifact = (
+                graph_evaluation.get("details", {}).get("terminal_artifact")
+                if isinstance(graph_evaluation.get("details"), Mapping)
+                else None
+            )
+            direct_details = direct_evaluation.get("details", {})
+            graph_details = graph_evaluation.get("details", {})
             official_harness_receipts_valid = all(
                 isinstance(value.get("details"), Mapping)
                 and isinstance(value["details"].get("resolved"), bool)
                 and value["details"].get("proxy_metric_used") is False
+                and value["details"].get("harness_details")
+                in {"empty_patch", "resolved", "unresolved"}
                 for value in (direct_evaluation, graph_evaluation)
+            ) and bool(
+                isinstance(direct_patch, str)
+                and isinstance(graph_terminal_artifact, Mapping)
+                and graph_terminal_artifact.get("kind")
+                == "repository_patch"
+                and isinstance(
+                    graph_terminal_artifact.get("repository_patch"),
+                    str,
+                )
+            )
+            non_empty_patch_official_harness_exercised = bool(
+                isinstance(direct_patch, str)
+                and direct_patch.strip()
+                and direct_details.get("harness_details")
+                in {"resolved", "unresolved"}
+                and isinstance(graph_terminal_artifact, Mapping)
+                and graph_terminal_artifact.get("non_empty") is True
+                and graph_details.get("harness_details")
+                in {"resolved", "unresolved"}
             )
         elif environment_dataset:
             environment_terminal_receipt_valid = _graph_environment_terminal_receipt(
@@ -3252,6 +3303,9 @@ def _completion_stable_zero_check(
             "agentgraph_evaluator_valid": graph_evaluator_valid,
             "judge_receipts_valid": judge_receipts_valid,
             "official_harness_receipts_valid": official_harness_receipts_valid,
+            "non_empty_patch_official_harness_exercised": (
+                non_empty_patch_official_harness_exercised
+            ),
             "environment_terminal_receipt_valid": environment_terminal_receipt_valid,
         }
         check["passed"] = bool(

@@ -718,6 +718,110 @@ def test_interactive_retry_without_persisted_trace_fails_closed(tmp_path):
     assert retry["evaluation"]["reason"] == "environment_replay_trace_unavailable"
     assert retry["evaluation_retry_receipt"]["environment_replay_steps"] is None
 
+
+def test_swebench_retry_reuses_only_persisted_authoritative_patch():
+    task = _MODULE.TaskRecord(
+        task_id="swe_bench:retry",
+        question="repository issue",
+        ground_truth=None,
+        split="test",
+        metadata={"dataset_key": "swe_bench"},
+    )
+    versions = _graph_versions(_MODULE, task)
+    invalid = _graph_trajectory(
+        task,
+        versions,
+        trajectory_id="trajectory-swe-invalid",
+        valid=False,
+    )
+    patch = "diff --git a/bug.py b/bug.py\n-old\n+new\n"
+    invalid["evaluation"]["details"]["terminal_artifact"] = {
+        "kind": "repository_patch",
+        "source": "CodingExecutionAdapter.materialize_workspace_diff",
+        "repository_patch": patch,
+        "non_empty": True,
+    }
+
+    class Backend:
+        def __init__(self):
+            self.patch = None
+            self.evidence_store = type(
+                "Evidence",
+                (),
+                {
+                    "append_trajectory": staticmethod(lambda payload: None),
+                },
+            )()
+
+        async def evaluate_final_graph(self, task, *args, **kwargs):
+            self.patch = kwargs.get("repository_patch")
+            return EvaluationOutcome(
+                valid=True,
+                reward=0.0,
+                metrics={"resolved": 0.0},
+                reason="evaluated",
+                evaluator_version=versions.evaluator,
+            )
+
+    backend = Backend()
+    retry = asyncio.run(
+        _MODULE._retry_terminal_evaluator(
+            backend,
+            task,
+            invalid,
+            versions=versions.to_dict(),
+            attempt=1,
+        )
+    )
+
+    assert backend.patch == patch
+    assert retry["evaluation"]["valid"] is True
+    assert retry["evaluation_retry_receipt"]["repository_patch_reused"] is True
+
+
+def test_swebench_retry_never_uses_output_prose_as_patch():
+    task = _MODULE.TaskRecord(
+        task_id="swe_bench:missing-patch",
+        question="repository issue",
+        ground_truth=None,
+        split="test",
+        metadata={"dataset_key": "swe_bench"},
+    )
+    versions = _graph_versions(_MODULE, task)
+    invalid = _graph_trajectory(
+        task,
+        versions,
+        trajectory_id="trajectory-swe-missing",
+        valid=False,
+    )
+    invalid["final_answer"] = "Output Agent prose that is not a patch"
+
+    class Backend:
+        evidence_store = type(
+            "Evidence",
+            (),
+            {"append_trajectory": staticmethod(lambda payload: None)},
+        )()
+
+        async def evaluate_final_graph(self, *args, **kwargs):
+            raise AssertionError("missing patch must fail before evaluator")
+
+    retry = asyncio.run(
+        _MODULE._retry_terminal_evaluator(
+            Backend(),
+            task,
+            invalid,
+            versions=versions.to_dict(),
+            attempt=1,
+        )
+    )
+
+    assert retry["evaluation"]["valid"] is False
+    assert retry["evaluation"]["reason"] == (
+        "terminal_repository_patch_unavailable"
+    )
+    assert retry["evaluation_retry_receipt"]["repository_patch_reused"] is False
+
 def test_strict_aggregate_keeps_failed_task_in_denominator():
     rows = [
         {

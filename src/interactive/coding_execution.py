@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
+import json
 from typing import Callable, Mapping, Optional
 
 from .agent_runtime import AgentGateway, AgentRequest, AgentResponse
@@ -37,7 +38,12 @@ def _receipt_value(receipt: dict[str, object]) -> Optional[dict[str, object]]:
 
 def _changed_edit(receipt: dict[str, object]) -> bool:
     action = _receipt_action(receipt)
-    if action not in {"apply_patch", "exact_edit", "str_replace_editor"}:
+    if action not in {
+        "apply_patch",
+        "edit_file",
+        "exact_edit",
+        "str_replace_editor",
+    }:
         return False
     value = _receipt_value(receipt)
     if action == "str_replace_editor" and value is not None:
@@ -229,12 +235,26 @@ class CodingExecutionAdapter(ToolReactExecutionAdapter):
                 )
         remaining_turns = self._task_max_turns - self._task_turns_used
         remaining_tools = self._task_max_tool_calls - self._task_tool_calls_used
-        if remaining_turns <= 0:
-            raise ReactExecutionError(
-                "coding task-global turn budget is exhausted",
+        if remaining_turns <= 0 or remaining_tools <= 0:
+            # DIRECT_REUSE: SkillFlow force-terminates a code-generation
+            # episode at either global bound and submits the exact current
+            # workspace diff, including the empty string.  Do not resample a
+            # coding Agent after the task-scoped repository budget is spent.
+            response = self._force_terminated_response(
+                request=request,
+                current_model_calls=(),
+                current_receipts=tuple(request.prior_tool_receipts),
                 react_trace=tuple(request.action_history),
-                tool_receipts=tuple(request.prior_tool_receipts),
-                tool_plan_exhausted=True,
+                new_turns=0,
+                termination_reason=(
+                    "task_global_turn_budget"
+                    if remaining_turns <= 0
+                    else "task_global_tool_budget"
+                ),
+            )
+            return self._attach_task_runtime_metadata(
+                response,
+                task_scoped_tool_binding=task_scoped_tool_binding,
             )
 
         original_turn_limit = self._max_turns
@@ -299,51 +319,29 @@ class CodingExecutionAdapter(ToolReactExecutionAdapter):
             # termination semantic here instead of discarding a legal patch
             # merely because the model did not emit a separate completion
             # action on its final bounded turn.
-            workspace_diff = self._materialized_workspace_diff()
-            if workspace_diff is not None:
-                react_trace = tuple(getattr(error, "react_trace", ()))
-                last_turn = (
-                    react_trace[-1].get("turn")
-                    if react_trace and isinstance(react_trace[-1], Mapping)
-                    else None
-                )
-                response = AgentResponse(
-                    workspace_diff,
-                    {
-                        "execution_mode": "coding",
-                        "react_turns_used": (
-                            last_turn
-                            if isinstance(last_turn, int)
-                            else len(request.action_history) + new_turns
-                        ),
-                        "new_react_turns_used": new_turns,
-                        "continued_action_history_count": len(
-                            request.action_history
-                        ),
-                        "continued_tool_receipt_count": prior_receipt_count,
-                        "continuation_source_agent_id": (
-                            request.continuation_source_agent_id
-                        ),
-                        "tool_calls": total_receipts,
-                        "tool_receipts": tuple(
-                            dict(item) for item in current_receipts
-                        ),
-                        "react_trace": react_trace,
-                        "model_calls": tuple(
-                            dict(item) for item in current_model_calls
-                        ),
-                        "truncated": True,
-                        "termination_reason": "max_turns",
-                        "workspace_diff_submitted": True,
-                        "termination_source": (
-                            "SkillFlow training.environment._force_terminate"
-                        ),
-                    },
-                )
-                error = None
+            response = self._force_terminated_response(
+                request=request,
+                current_model_calls=tuple(current_model_calls),
+                current_receipts=tuple(current_receipts),
+                react_trace=tuple(getattr(error, "react_trace", ())),
+                new_turns=new_turns,
+                termination_reason="max_turns",
+            )
+            error = None
         if error is not None:
             raise error
         assert response is not None
+        return self._attach_task_runtime_metadata(
+            response,
+            task_scoped_tool_binding=task_scoped_tool_binding,
+        )
+
+    def _attach_task_runtime_metadata(
+        self,
+        response: AgentResponse,
+        *,
+        task_scoped_tool_binding: tuple[str, ...],
+    ) -> AgentResponse:
         metadata = dict(response.metadata)
         metadata["task_global_budget"] = self.task_budget_receipt
         metadata["task_scoped_tool_binding"] = {
@@ -357,6 +355,63 @@ class CodingExecutionAdapter(ToolReactExecutionAdapter):
             )
         return AgentResponse(response.text, metadata)
 
+    def _force_terminated_response(
+        self,
+        *,
+        request: AgentRequest,
+        current_model_calls: tuple[object, ...],
+        current_receipts: tuple[object, ...],
+        react_trace: tuple[object, ...],
+        new_turns: int,
+        termination_reason: str,
+    ) -> AgentResponse:
+        """Return SkillFlow's exact bounded-episode repository artifact."""
+
+        workspace_diff = self.materialize_workspace_diff()
+        last_turn = (
+            react_trace[-1].get("turn")
+            if react_trace and isinstance(react_trace[-1], Mapping)
+            else None
+        )
+        return AgentResponse(
+            workspace_diff,
+            {
+                "execution_mode": "coding",
+                "react_turns_used": (
+                    last_turn
+                    if isinstance(last_turn, int)
+                    else len(request.action_history) + new_turns
+                ),
+                "new_react_turns_used": new_turns,
+                "continued_action_history_count": len(request.action_history),
+                "continued_tool_receipt_count": len(
+                    request.prior_tool_receipts
+                ),
+                "continuation_source_agent_id": (
+                    request.continuation_source_agent_id
+                ),
+                "tool_calls": len(current_receipts),
+                "tool_receipts": tuple(
+                    dict(item) for item in current_receipts
+                    if isinstance(item, Mapping)
+                ),
+                "react_trace": tuple(
+                    dict(item) for item in react_trace
+                    if isinstance(item, Mapping)
+                ),
+                "model_calls": tuple(
+                    dict(item) for item in current_model_calls
+                    if isinstance(item, Mapping)
+                ),
+                "truncated": True,
+                "termination_reason": termination_reason,
+                "workspace_diff_submitted": bool(workspace_diff.strip()),
+                "termination_source": (
+                    "SkillFlow training.environment._force_terminate"
+                ),
+            },
+        )
+
     def _materialized_workspace_diff(self) -> Optional[str]:
         if self._workspace_diff is None:
             return None
@@ -369,19 +424,260 @@ class CodingExecutionAdapter(ToolReactExecutionAdapter):
         patch = self._materialized_workspace_diff()
         return patch if patch is not None else ""
 
+    def _state_conditioned_action_domain(
+        self,
+        request: AgentRequest,
+        observations: list[Mapping[str, object]],
+    ) -> tuple[Optional[frozenset[tuple[str, str]]], bool]:
+        """Expose completion only after SkillFlow has a submit-ready diff.
+
+        DIRECT_REUSE: SkillFlow's ``code_generation`` episode has repository
+        actions during the episode and submits ``_generate_workspace_diff`` at
+        termination.  A prose-only completion before the workspace changes is
+        therefore not a legal code-generation action.  Repository actions stay
+        fully open; this is only the measured completion admission boundary.
+        """
+
+        if self._completion_policy == self.WORKSPACE_DIFF_COMPLETION:
+            del request, observations
+            return None, self._materialized_workspace_diff() is not None
+        return super()._state_conditioned_action_domain(request, observations)
+
+    @staticmethod
+    def _shorten_one_line(value: object, limit: int) -> str:
+        text = " ".join(str(value or "").split())
+        return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+    @classmethod
+    def _skillflow_observation_summary(
+        cls,
+        observation: Mapping[str, object],
+    ) -> dict[str, object]:
+        """Port SkillFlow's bounded SWE_MEMORY Tool-result summaries.
+
+        DIRECT_REUSE: ``training/environment.py::_swe_memory_summary`` keeps
+        at most six recent repository observations and summarizes search,
+        view, edit, command, and test results.  SkillFlow stores observations
+        as text; this runtime stores the same public receipt as a mapping, so
+        this is the minimal representation adapter for that upstream policy.
+        """
+
+        action = observation.get("executed_action")
+        action_value = action if isinstance(action, Mapping) else {}
+        arguments = action_value.get("arguments")
+        arguments_value = arguments if isinstance(arguments, Mapping) else {}
+        name = str(action_value.get("name") or "")
+        result = observation.get("result")
+        result_value = result if isinstance(result, Mapping) else {}
+        summary: dict[str, object] = {
+            "action": name,
+            "observation_status": observation.get("observation_status"),
+        }
+        if observation.get("public_error_code") is not None:
+            summary["public_error_code"] = observation.get("public_error_code")
+        if name == "search_code":
+            summary["query"] = cls._shorten_one_line(
+                arguments_value.get("query"), 90
+            )
+            matches = result_value.get("matches")
+            if isinstance(matches, list):
+                summary["matches"] = [
+                    {
+                        "path": item.get("path"),
+                        "line": item.get("line"),
+                        "text": cls._shorten_one_line(item.get("text"), 100),
+                    }
+                    for item in matches[:3]
+                    if isinstance(item, Mapping)
+                ]
+            summary["match_count"] = result_value.get("match_count")
+        elif name == "view_file":
+            summary.update(
+                path=result_value.get("path") or arguments_value.get("path"),
+                start_line=result_value.get("start_line"),
+                end_line=result_value.get("end_line"),
+            )
+            lines = result_value.get("lines")
+            if isinstance(lines, list):
+                selected = lines if len(lines) <= 6 else lines[:3] + lines[-3:]
+                summary["lines"] = [
+                    {
+                        "line": item.get("line"),
+                        "text": cls._shorten_one_line(item.get("text"), 110),
+                    }
+                    for item in selected
+                    if isinstance(item, Mapping)
+                ]
+        elif name == "edit_file":
+            summary.update(
+                path=result_value.get("path") or arguments_value.get("path"),
+                instruction=cls._shorten_one_line(
+                    arguments_value.get("instruction"), 140
+                ),
+                ok=result_value.get("ok"),
+                changed=result_value.get("changed"),
+                workspace_diff_nonempty=result_value.get(
+                    "workspace_diff_nonempty"
+                ),
+            )
+        elif name in {"bash", "run_tests"}:
+            command = arguments_value.get("command")
+            if command is None:
+                command = arguments_value.get("test_cmd")
+            summary.update(
+                command=cls._shorten_one_line(command, 180),
+                ok=result_value.get("ok"),
+                returncode=result_value.get("returncode"),
+                passed=result_value.get("passed"),
+                timed_out=result_value.get("timed_out"),
+                output=cls._shorten_one_line(
+                    result_value.get("output")
+                    or result_value.get("stdout")
+                    or result_value.get("stderr"),
+                    240,
+                ),
+            )
+        elif name == "list_files":
+            files = result_value.get("files")
+            if isinstance(files, list):
+                summary["files"] = [str(item) for item in files[:20]]
+                summary["file_count"] = len(files)
+        else:
+            summary["result"] = cls._shorten_one_line(
+                json.dumps(result_value, ensure_ascii=False, sort_keys=True),
+                280,
+            )
+        return summary
+
+    @classmethod
+    def _model_visible_observations(
+        cls,
+        observations: list[Mapping[str, object]],
+    ) -> list[dict[str, object]]:
+        """Expose SkillFlow's bounded current observation plus SWE_MEMORY."""
+
+        canonical = ToolReactExecutionAdapter._model_visible_observations(
+            observations
+        )
+        if not canonical:
+            return []
+        prior = [
+            cls._skillflow_observation_summary(item)
+            for item in canonical[:-1]
+        ]
+        compressed: list[dict[str, object]] = []
+        for item in prior:
+            if compressed and {
+                key: value
+                for key, value in compressed[-1].items()
+                if key != "repeated"
+            } == item:
+                compressed[-1]["repeated"] = int(
+                    compressed[-1].get("repeated", 1)
+                ) + 1
+            else:
+                compressed.append(dict(item))
+        memory = compressed[-6:]
+        current = dict(canonical[-1])
+        current_summary = cls._skillflow_observation_summary(current)
+        result = current.get("result")
+        result_value = result if isinstance(result, Mapping) else {}
+        action_name = str(current_summary.get("action") or "")
+        if action_name == "view_file":
+            lines = result_value.get("lines")
+            if isinstance(lines, list):
+                current_summary["current_lines"] = [
+                    {
+                        "line": item.get("line"),
+                        "text": str(item.get("text", "")),
+                    }
+                    for item in lines[:60]
+                    if isinstance(item, Mapping)
+                ]
+        elif action_name == "search_code":
+            matches = result_value.get("matches")
+            if isinstance(matches, list):
+                current_summary["current_matches"] = [
+                    dict(item) for item in matches[:20] if isinstance(item, Mapping)
+                ]
+        elif action_name == "edit_file":
+            current_summary["updated_snippet"] = str(
+                result_value.get("updated_snippet") or ""
+            )[:2000]
+        elif action_name in {"bash", "run_tests"}:
+            output = str(
+                result_value.get("output")
+                or result_value.get("stdout")
+                or result_value.get("stderr")
+                or ""
+            )
+            if len(output) > 6000:
+                output = (
+                    output[:4000]
+                    + "\n[OBSERVATION_TRUNCATED]\n"
+                    + output[-1800:]
+                )
+            current_summary["current_output"] = output
+        visible: list[dict[str, object]] = []
+        if memory:
+            visible.append(
+                {
+                    "SWE_MEMORY": memory,
+                    "omitted_prior_observations": max(
+                        0, len(compressed) - len(memory)
+                    ),
+                }
+            )
+        visible.append({"current_observation": current_summary})
+        return visible
+
+    def _contract(
+        self,
+        request: AgentRequest,
+        observations: list[Mapping[str, object]],
+    ) -> str:
+        """Append SkillFlow's code-generation episode guidance.
+
+        DIRECT_REUSE: the behavioral rules come from
+        ``training/task_prompts.py::CODE_GENERATION``.  The one necessary
+        adaptation binds SkillFlow's private ``M_exec`` natural-language
+        editor to this task-scoped ToolRegistry.  It does not prescribe an
+        AgentGraph role or topology.
+        """
+
+        return (
+            super()._contract(request, observations)
+            + "\n\nSkillFlow code-generation episode guidance: Fix the bug in "
+            "the real repository using the provided source tools. The evaluator "
+            "submits the workspace diff at the end. Never edit test files. Make "
+            "minimal changes. The repository root is already the current working "
+            "directory: every path passed to a source tool must be repository-relative; "
+            "never use /testbed, /workspace, environment paths, or cd to an absolute "
+            "path. Do not repeat an identical search, view, edit, or command after "
+            "either success or failure. Keep track of the current "
+            "best source candidate, the evidence observed for it, and remaining "
+            "uncertainty. When the source location and expected behavior are clear, "
+            "use edit_file with a repository-relative path and a precise natural-"
+            "language instruction grounded in the viewed source. Tool strings are "
+            "plain source/shell text, "
+            "not HTML entities. Inspect real source files; do not use "
+            "synthetic reproductions or example datasets as evidence. A non-empty "
+            "workspace diff is the submitted artifact, not explanatory prose."
+        )
+
     def _state_conditioned_response_schema(
         self,
         request: AgentRequest,
         observations: list[Mapping[str, object]],
     ) -> Optional[dict[str, object]]:
-        """Require SkillFlow's five-field wire shape for repository actions.
+        """Bind every SkillFlow repository action to its exact argument schema.
 
-        SkillFlow's native provider emits a complete Tool call envelope even
-        when several repository actions are available.  The local SGLang text
-        boundary needs the equivalent flat compatibility schema: it constrains
-        only the five top-level StructuredAction fields, while the existing
-        ToolRegistry and strict parser remain authoritative for the selected
-        action's argument schema and resource/name pairing.
+        DIRECT_REUSE: SkillFlow publishes each repository action as one native
+        function schema.  The local text-generation boundary represents that
+        same function choice as mutually exclusive five-field
+        ``StructuredAction`` branches.  This prevents parameters for one Tool
+        from being nested into or mixed with another Tool's arguments while
+        leaving the action choice to the Agent.
         """
 
         exact = super()._state_conditioned_response_schema(
@@ -406,41 +702,58 @@ class CodingExecutionAdapter(ToolReactExecutionAdapter):
             action_pairs = set(admitted_tool_actions)
         if not action_pairs and not completion_admitted:
             return None
-        action_names = sorted({name for _, name in action_pairs})
-        resource_ids = sorted({tool_id for tool_id, _ in action_pairs})
-        if completion_admitted:
-            action_names.append("complete")
-        return {
-            "type": "object",
-            "required": [
-                "arguments",
-                "kind",
-                "name",
-                "resource_id",
-                "skill_id",
-            ],
-            "properties": {
-                "arguments": {
+        branches: list[dict[str, object]] = []
+        for resource_id, action_name in sorted(action_pairs):
+            capability = self._tool_registry.require_capability(resource_id)
+            argument_schema = capability.action_schemas.get(action_name)
+            if not isinstance(argument_schema, Mapping):  # pragma: no cover
+                continue
+            branches.append(
+                {
                     "type": "object",
-                    "additionalProperties": True,
-                },
-                "kind": {
-                    "enum": [
-                        *(["tool"] if action_pairs else []),
-                        *(["complete"] if completion_admitted else []),
-                    ]
-                },
-                "name": {"enum": action_names},
-                "resource_id": {
-                    "enum": [
-                        *resource_ids,
-                        *([None] if completion_admitted else []),
-                    ]
-                },
-                "skill_id": {"const": None},
-            },
-            "additionalProperties": False,
-        }
+                    "required": [
+                        "arguments",
+                        "kind",
+                        "name",
+                        "resource_id",
+                        "skill_id",
+                    ],
+                    "properties": {
+                        "arguments": dict(argument_schema),
+                        "kind": {"const": "tool"},
+                        "name": {"const": action_name},
+                        "resource_id": {"const": resource_id},
+                        "skill_id": {"const": None},
+                    },
+                    "additionalProperties": False,
+                }
+            )
+        if completion_admitted:
+            branches.append(
+                {
+                    "type": "object",
+                    "required": [
+                        "arguments",
+                        "kind",
+                        "name",
+                        "resource_id",
+                        "skill_id",
+                    ],
+                    "properties": {
+                        "arguments": dict(
+                            self._completion_arguments_schema(request)
+                        ),
+                        "kind": {"const": "complete"},
+                        "name": {"const": "complete"},
+                        "resource_id": {"const": None},
+                        "skill_id": {"const": None},
+                    },
+                    "additionalProperties": False,
+                }
+            )
+        if len(branches) == 1:
+            return branches[0]
+        return {"oneOf": branches}
 
     def _completion_error(
         self,

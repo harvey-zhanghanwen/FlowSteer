@@ -109,6 +109,10 @@ from src.interactive.scientific_sampling import (
     scientific_sampling_schedule_hash,
     stable_hash,
 )
+from src.interactive.skillflow_mexec import (
+    SkillFlowExactEditGenerator,
+    SkillFlowMExec,
+)
 from src.interactive.skills import (
     SkillEvidencePipeline,
     SkillQuery,
@@ -1183,6 +1187,14 @@ def _swe_coding_runtime_settings(
                 raise ConfigurationError(
                     f"swe_coding_runtime.{field_name} must be non-empty text"
                 )
+        director = _mapping(config.get("director"), "director")
+        for field_name in ("api_base", "served_model_name"):
+            value = director.get(field_name)
+            if not isinstance(value, str) or not value.strip():
+                raise ConfigurationError(
+                    "the SkillFlow SWE-bench Tool profile requires non-empty "
+                    f"director.{field_name} for its Agent-local MExec editor"
+                )
     task_max_turns = section.get(
         "task_max_turns", section["max_turns_per_agent_call"]
     )
@@ -1232,6 +1244,20 @@ def _swe_coding_runtime_settings(
         ),
         "setup_timeout_seconds": float(section["setup_timeout_seconds"]),
         "cleanup_timeout_seconds": float(section["cleanup_timeout_seconds"]),
+        "edit_executor_api_base": (
+            str(_mapping(config.get("director"), "director")["api_base"]).strip()
+            if tool_profile == SWEBENCH_TOOL_PROFILE_SKILLFLOW_TRAINING
+            else ""
+        ),
+        "edit_executor_model_name": (
+            str(
+                _mapping(config.get("director"), "director")[
+                    "served_model_name"
+                ]
+            ).strip()
+            if tool_profile == SWEBENCH_TOOL_PROFILE_SKILLFLOW_TRAINING
+            else ""
+        ),
     }
 
 
@@ -2245,6 +2271,31 @@ class LiveSmokeBackend:
                             prepared.pinned_commit == prepared.identity.base_commit
                         ),
                     }
+                    edit_generator = None
+                    if (
+                        swe_coding_settings["tool_profile"]
+                        == SWEBENCH_TOOL_PROFILE_SKILLFLOW_TRAINING
+                    ):
+                        # DIRECT_REUSE: SkillFlow's Agent-visible
+                        # ``edit_file(path, instruction)`` delegates semantic
+                        # exact-edit generation to its local MExec transport.
+                        # This private Tool executor is not an AgentGraph node
+                        # or a Director action and therefore does not constrain
+                        # the free AgentGraph search space.
+                        edit_generator = SkillFlowExactEditGenerator(
+                            SkillFlowMExec(
+                                api_base=str(
+                                    swe_coding_settings[
+                                        "edit_executor_api_base"
+                                    ]
+                                ),
+                                model_name=str(
+                                    swe_coding_settings[
+                                        "edit_executor_model_name"
+                                    ]
+                                ),
+                            )
+                        )
                     registration = create_swebench_repository_registration(
                         prepared.repo_root,
                         dataset_scope=(source_key,),
@@ -2268,6 +2319,8 @@ class LiveSmokeBackend:
                             swe_coding_settings["require_task_environment"]
                         ),
                         repository_state_receipt=repository_state,
+                        task_issue=task.question,
+                        edit_generator=edit_generator,
                     )
                     tool_registry = ToolRegistry((registration,))
                     materializer = getattr(
@@ -3175,7 +3228,7 @@ class LiveSmokeBackend:
             # text remains a routed graph artifact and must never substitute
             # for the detached worktree's authoritative git diff.
             evaluator_prediction = repository_patch
-        return await evaluate_task(
+        outcome = await evaluate_task(
             task,
             evaluator_prediction,
             judge=self.judge,
@@ -3195,6 +3248,27 @@ class LiveSmokeBackend:
             ),
             environment_replay_trace=environment_replay_trace,
             **evaluator_kwargs,
+        )
+        if source_key != "swe_bench":
+            return outcome
+        assert repository_patch is not None
+        # NECESSARY_ADAPTATION: SkillFlow evaluates the live workspace diff,
+        # while FlowSteer's evaluator-only resume happens after that detached
+        # worktree is cleaned up. Persist the exact terminal artifact with the
+        # evaluator receipt so an infrastructure failure can retry only the
+        # official harness without resampling Director or Agent actions. The
+        # Output Agent prose is never a patch fallback.
+        return replace(
+            outcome,
+            details={
+                **dict(outcome.details),
+                "terminal_artifact": {
+                    "kind": "repository_patch",
+                    "source": "CodingExecutionAdapter.materialize_workspace_diff",
+                    "repository_patch": repository_patch,
+                    "non_empty": bool(repository_patch.strip()),
+                },
+            },
         )
 
     async def collect(

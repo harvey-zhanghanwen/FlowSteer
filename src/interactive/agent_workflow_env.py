@@ -1884,6 +1884,24 @@ class AgentWorkflowEnv:
         for node in self._graph.nodes:
             if node.id == self._graph.output_agent_id:
                 continue
+            if (
+                self.execute_on_edit
+                and self.recovery_policy == _PRESERVE_REPAIR_RECOVERY_POLICY
+                and not self._uses_semantic_lineage_protocol()
+            ):
+                # A progressively executed Canvas may expose SET_OUTPUT only
+                # for an Agent whose current revision produced a Runtime
+                # artifact.  Runtime stores a force-terminated SWE-bench empty
+                # repository patch as the valid empty string, so membership —
+                # not truthiness — is the required check here.
+                if node.id not in self._progressive_outputs:
+                    continue
+                if (
+                    node.id in self._failed_agent_ids
+                    or node.id in self._unresolved_dirty_agents
+                    or node.model_id in self._unavailable_model_ids
+                ):
+                    continue
             if self._uses_semantic_lineage_protocol():
                 role_family = (node.role_family or "").casefold()
                 admitted_output_roles = (
@@ -9113,6 +9131,21 @@ class AgentWorkflowEnv:
     ) -> Optional[str]:
         """Protect a verified semantic lineage while recovery remains active."""
 
+        if (
+            self.execute_on_edit
+            and self.recovery_policy == _PRESERVE_REPAIR_RECOVERY_POLICY
+            and not self._uses_semantic_lineage_protocol()
+            and not self._uses_format_agent_protocol()
+            and action.action_type is AgentActionType.SET_OUTPUT
+            and action.agent_id not in self._model_admissible_output_agent_ids()
+        ):
+            return (
+                "set_output requires a current Runtime artifact from an Agent "
+                "that is not FAILURE, BLOCKED_BY_UPSTREAM, unresolved after "
+                "the latest Canvas edit, or backed by an unavailable model; "
+                "admissible_output_agent_ids="
+                f"{list(self._model_admissible_output_agent_ids())!r}"
+            )
         if (
             not self._uses_semantic_lineage_protocol()
             or self.recovery_policy != _PRESERVE_REPAIR_RECOVERY_POLICY

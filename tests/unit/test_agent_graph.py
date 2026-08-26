@@ -1155,6 +1155,45 @@ class _HotpotSemanticGateway(_ImmediateGateway):
 
 
 class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
+    async def test_execute_on_edit_output_targets_require_current_runtime_artifact(
+        self,
+    ) -> None:
+        graph = AgentGraph([AgentNode("worker", "balanced", "resolve task")])
+        env = AgentWorkflowEnv(
+            make_registry(),
+            _ImmediateGateway(),
+            graph=graph,
+            problem="question",
+            execute_on_edit=True,
+            recovery_policy="preserve_diagnose_repair_augment",
+        )
+
+        self.assertEqual((), env._model_admissible_output_agent_ids())
+        rejected_without_artifact = await env.step(
+            '{"action":"set_output","agent_id":"worker"}'
+        )
+        self.assertFalse(rejected_without_artifact.accepted)
+        self.assertIn("current Runtime artifact", rejected_without_artifact.feedback)
+
+        # SWE-bench force termination submits the exact repository diff.  An
+        # empty patch is still a current Runtime artifact and must remain
+        # eligible for official evaluation as unresolved.
+        env._progressive_outputs["worker"] = ""
+        self.assertEqual(
+            ("worker",), env._model_admissible_output_agent_ids()
+        )
+
+        env._failed_agent_ids.add("worker")
+        self.assertEqual((), env._model_admissible_output_agent_ids())
+        env._failed_agent_ids.clear()
+
+        env._unresolved_dirty_agents.add("worker")
+        self.assertEqual((), env._model_admissible_output_agent_ids())
+        env._unresolved_dirty_agents.clear()
+
+        env._unavailable_model_ids.add("balanced")
+        self.assertEqual((), env._model_admissible_output_agent_ids())
+
     async def test_execution_contract_is_rejected_before_canvas_commit(self) -> None:
         registry = make_registry()
         gateway = _ImmediateGateway()

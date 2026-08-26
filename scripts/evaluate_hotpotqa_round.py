@@ -524,6 +524,20 @@ async def _retry_terminal_evaluator(
     )
     replay_trace = _environment_replay_trace(source)
     final_graph = _final_graph(source)
+    repository_patch: Optional[str] = None
+    if _dataset_key(task) == "swe_bench":
+        terminal_artifact = (
+            source_details.get("terminal_artifact")
+            if isinstance(source_details, Mapping)
+            else None
+        )
+        candidate_patch = (
+            terminal_artifact.get("repository_patch")
+            if isinstance(terminal_artifact, Mapping)
+            else None
+        )
+        if isinstance(candidate_patch, str) and candidate_patch.strip():
+            repository_patch = candidate_patch
     started_at = _utc_now()
     if _dataset_key(task) in {"webshop", "alfworld"} and replay_trace_missing:
         evaluation = EvaluationReceipt(
@@ -551,6 +565,19 @@ async def _retry_terminal_evaluator(
                 ),
             },
         )
+    elif _dataset_key(task) == "swe_bench" and repository_patch is None:
+        evaluation = EvaluationReceipt(
+            evaluator_version=expected_evaluator,
+            valid=False,
+            reward=None,
+            reason="terminal_repository_patch_unavailable",
+            details={
+                "error": (
+                    "frozen SWE-bench rollout has no non-empty authoritative "
+                    "workspace diff"
+                ),
+            },
+        )
     elif final_graph is None and source_record.final_answer is not None:
         evaluation = EvaluationReceipt(
             evaluator_version=expected_evaluator,
@@ -561,12 +588,16 @@ async def _retry_terminal_evaluator(
         )
     else:
         try:
+            evaluator_kwargs: dict[str, Any] = {}
+            if _dataset_key(task) == "swe_bench":
+                evaluator_kwargs["repository_patch"] = repository_patch
             outcome = await backend.evaluate_final_graph(
                 task,
                 source_record.final_answer,
                 final_graph or {},
                 rollout_index=0,
                 environment_replay_trace=replay_trace,
+                **evaluator_kwargs,
             )
             evaluation = EvaluationReceipt.from_dict(asdict(outcome))
         except Exception as exc:
@@ -616,6 +647,7 @@ async def _retry_terminal_evaluator(
             if replay_trace is None or replay_trace_missing
             else len(replay_trace)
         ),
+        "repository_patch_reused": repository_patch is not None,
         "started_at": started_at,
         "completed_at": completed_at,
     }
