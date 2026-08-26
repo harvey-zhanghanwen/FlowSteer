@@ -1,0 +1,91 @@
+# Versioned evidence pointer for the highest fully completed, directly
+# comparable HealthBench Professional AgentGraph condition currently present
+# in this repository. This file does not change the evaluated condition.
+
+schema_version: "flowsteer.agentgraph.best-profile-pointer.v1"
+dataset_key: "healthbench_professional"
+dataset_name: "HealthBench Professional"
+
+selection_scope:
+  benchmark_slice: "public_test"
+  split: "test"
+  sample_count: 525
+  primary_metric: "overall_score_length_adjusted"
+  aggregation: "strict_full_denominator"
+  evaluator_protocol: "healthbench_professional_public_test_reference_evaluator_v1"
+  evaluator_version: "openai-simple-evals-healthbench-professional-652c89d@1"
+  require_complete_agentgraph_population: true
+  require_same_task_population: true
+  require_same_evaluator_protocol: true
+
+selection:
+  eligible_condition_count: 1
+  selected_condition_id: "healthbench_professional_official_v1"
+  selection_reason: "only_eligible_completed_same_protocol_condition"
+  evaluated_source_commit: "3f1625642a5fd5fb284b37e158e943f13422f7ef"
+  final_evaluation_report_commit: "2151f9ef830eedc0563f995d0b5bb2f99a49b19c"
+  executable_config_path: "config/evaluation_healthbench_professional_official_v1.yaml"
+  current_profile_pointer_path: "config/healthbench_professional_best_profile.yaml"
+  dataset_catalog_path: "config/datasets_healthbench_professional_official_v1.yaml"
+  dataset_registry_path: "config/datasets_runtime_healthbench_professional_official_v1.yaml"
+  model_catalog_path: "config/model_catalog_healthbench_professional_qwen35_v1.yaml"
+  grader_catalog_path: "config/model_catalog_healthbench_professional_grader_v1.yaml"
+  run_manifest_path: "artifacts/healthbench_professional_official_v1/evaluation/run_manifest.json"
+  evaluation_report_path: "reports/healthbench_professional_official_v1/evaluation_report.json"
+  evaluation_report_zh_path: "reports/healthbench_professional_official_v1/evaluation_report_zh.md"
+  completion_status: "completed_with_terminal_failures"
+
+architecture_profile:
+  director_model: "qwen3.5-9b-local"
+  policy_version: "qwen35-9b-base-healthbench-professional-official-v1"
+  policy_adapter: null
+  director_prompt_version: "agentgraph.director.minimal-neutral-scalar.v1"
+  action_schema_version: "agentgraph.canvas-action-json-schema.v1"
+  action_mask_version: "agentgraph.model-admissible-action-mask.v2"
+  canvas_execution: "incremental_execute_on_edit"
+  max_agents: 8
+  max_rounds: 20
+  relation_encoding: "two_bit"
+  require_unique_output: true
+  recovery_policy: "preserve_diagnose_repair_augment"
+  tool_condition: "none"
+  skill_condition: "none"
+  training_condition: "none"
+
+verified_metrics:
+  agentgraph:
+    denominator: 525
+    completed: 525
+    evaluator_valid: 503
+    explicit_finish: 503
+    terminal_failure: 22
+    strict_overall_score_length_adjusted: 0.20239464574643176
+    strict_overall_score: 0.22645146174643163
+    valid_only_overall_score: 0.23635589943713042
+    valid_only_overall_score_length_adjusted: 0.21124689665383037
+  direct:
+    denominator: 525
+    evaluator_valid: 525
+    strict_overall_score_length_adjusted: 0.19172803126027108
+    strict_overall_score: 0.1897214952602711
+  agentgraph_minus_direct:
+    strict_overall_score_length_adjusted: 0.010666614486160686
+    strict_overall_score: 0.03672996648616053
+
+next_run:
+  selected: true
+  executable_config_path: "config/evaluation_healthbench_professional_official_v1.yaml"
+  runner_requires_explicit_config_argument: true
+  automatic_global_default_resolver: false
+  evaluation_only: true
+  full_evaluation_rerun_authorized: false
+
+excluded_conditions:
+  - condition: "healthbench_professional_round_01/evaluation"
+    reason: "validation split with 128 samples and legacy raw-score protocol"
+  - condition: "healthbench_professional_medrag_tool_stable_zero_v2/development"
+    reason: "development validation split with 128 samples, 124 evaluator-valid, and a different Tool protocol"
+  - condition: "healthbench_professional_medrag_tool_stable_zero/canary"
+    reason: "two-sample canary"
+  - condition: "unified_architecture_v1/healthbench_professional_internal"
+    reason: "prepared-only; no evaluator-valid formal result"

@@ -608,3 +608,31 @@ terminal receipts, and rubric-level evaluator receipts are written only to
 `artifacts/healthbench_professional_official_v1/evaluation/evaluator_private/`.
 That private diagnostic output is excluded from Git and must not enter a model
 prompt or training input.
+
+### 11. Versioned best-profile selection
+
+The same-split, same-denominator, same-evaluator comparison found one eligible
+completed HealthBench Professional AgentGraph condition:
+`healthbench_professional_official_v1`. The 128-case validation runs, the
+two-case canary, prepared-only artifacts, and the separate MedRAG Tool
+protocol were excluded rather than compared as though they were public-test
+results.
+
+`config/healthbench_professional_best_profile_v1.yaml` now records the exact
+executable configuration, evaluated source commit, protocol/evaluator
+versions, manifest/report evidence, architecture settings, formal metrics,
+Direct comparator, and excluded conditions. Its `next_run` entry selects
+`config/evaluation_healthbench_professional_official_v1.yaml`. The repository
+current pointer `config/healthbench_professional_best_profile.yaml` selects the
+same versioned descriptor and executable configuration. The repository has no
+automatic global default resolver, so the runner still requires that config
+path explicitly; neither pointer renames or fabricates a new evaluated
+condition.
+
+The selected strict full-denominator Professional length-adjusted score is
+20.2395% on 525 public-test tasks, versus 19.1728% for matched Direct, a
++1.0667 percentage-point difference. Strict raw scores are 22.6451% and
+18.9721%, respectively. The condition has 503 evaluator-valid `FINISH`
+trajectories and 22 reportable `max_rounds` terminal failures. No rollout,
+grader call, training, Tool, Skill, policy, model weight, or orchestration-core
+change was made during profile selection.
