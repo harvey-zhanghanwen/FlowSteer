@@ -820,6 +820,7 @@ def test_alfworld_report_summarizes_native_outcomes_receipts_and_wrong_demo():
             "task_id": "alfworld:valid_seen:00000",
             "failure_type": "equal_success",
             "wrong_demo_diagnosis": None,
+            "agentgraph_failure_taxonomy": None,
             "direct": {
                 "available": True,
                 "valid": True,
@@ -858,6 +859,15 @@ def test_alfworld_report_summarizes_native_outcomes_receipts_and_wrong_demo():
                 "failure_layer": "agent_action_grounding",
                 "first_error_turn": 1,
                 "error": "action_not_admissible_at_observed_state",
+            },
+            "agentgraph_failure_taxonomy": {
+                "taxonomy_version": "alfworld.receipt_causal.v1",
+                "attribution_scope": "mutually_exclusive_primary_cause",
+                "primary_failure_class": "object_grounding_affordance",
+                "first_causal_step": 1,
+                "first_causal_action": "take potato 1 from fridge 1",
+                "evidence": "target apple was substituted with potato",
+                "subsequent_error_propagation": "wrong object lineage",
             },
             "direct": {
                 "available": True,
@@ -958,6 +968,18 @@ def test_alfworld_report_summarizes_native_outcomes_receipts_and_wrong_demo():
     assert report["alfworld_wrong_demo_first_observable_failures"][0][
         "diagnosis_scope"
     ] == "first_observable_failure"
+    taxonomy = report["alfworld_receipt_causal_failure_taxonomy"]
+    assert taxonomy["denominator"] == 1
+    assert next(
+        value
+        for value in taxonomy["categories"]
+        if value["key"] == "object_grounding_affordance"
+    )["count"] == 1
+    assert next(
+        value
+        for value in taxonomy["categories"]
+        if value["key"] == "agent_communication"
+    )["count"] == 0
     assert "| Direct | 1 | 2 | 1 | 50.00% | 100.00% |" in markdown
     assert "explicit FINISH **1/2**; max_rounds **1**" in markdown
     assert "Agent count distribution: `{" in markdown
@@ -969,6 +991,8 @@ def test_alfworld_report_summarizes_native_outcomes_receipts_and_wrong_demo():
     assert "recovered attempts: **0**" in markdown
     assert "unresolved task-condition pairs: **1**" in markdown
     assert "| alfworld:valid_seen:00001 | agent_action_grounding | 1 |" in markdown
+    assert "| Object grounding/affordance | 1 | 100.00% |" in markdown
+    assert "| Agent communication | 0 | 0.00% | None |" in markdown
 
 
 def test_report_marks_historical_collection_failure_as_recovered():
@@ -1059,6 +1083,140 @@ def test_alfworld_statistics_fall_back_to_persisted_executor_ledger():
     assert statistics["episode_score"] == 0
 
 
+def test_alfworld_empty_evaluator_trace_does_not_shadow_executor_ledger():
+    trace = [
+        {
+            "step": 0,
+            "action": "go to table 1",
+            "done": False,
+            "info": {"action_is_valid": True, "score": 0},
+        }
+    ]
+    value = {
+        "evaluation": {
+            "valid": True,
+            "details": {"trace": [], "replay_is_complete": True},
+            "metrics": {"success": 0},
+        },
+        "turns": [
+            {
+                "executions": [
+                    {
+                        "metadata": {
+                            "response": {"evaluator_environment_trace": trace}
+                        }
+                    }
+                ]
+            }
+        ],
+    }
+
+    assert _MODULE._alfworld_trace(value) == tuple(trace)
+    assert _MODULE._alfworld_episode_statistics(value)[
+        "environment_turn_count"
+    ] == 1
+
+
+def test_alfworld_receipt_causal_taxonomy_separates_native_failure_classes():
+    def trajectory(trace):
+        return {
+            "task": {
+                "metadata": {
+                    "skillflow": {
+                        "extra": {
+                            "task_directory": (
+                                "pick_cool_then_place_in_recep-Apple-None-"
+                                "Microwave-1"
+                            )
+                        }
+                    }
+                }
+            },
+            "evaluation": {
+                "valid": True,
+                "metrics": {"success": 0.0},
+                "details": {"trace": trace},
+            },
+            "termination_reason": "max_rounds",
+        }
+
+    exploration = _MODULE._alfworld_primary_failure_taxonomy(
+        trajectory(
+            [
+                {
+                    "step": 0,
+                    "action": "go to fridge 1",
+                    "info": {"action_is_valid": True},
+                }
+            ]
+        )
+    )
+    grounding = _MODULE._alfworld_primary_failure_taxonomy(
+        trajectory(
+            [
+                {
+                    "step": 0,
+                    "action": "take potato 1 from fridge 1",
+                    "info": {"action_is_valid": True},
+                }
+            ]
+        )
+    )
+    sequencing = _MODULE._alfworld_primary_failure_taxonomy(
+        trajectory(
+            [
+                {
+                    "step": 0,
+                    "action": "take apple 1 from table 1",
+                    "info": {"action_is_valid": True},
+                }
+            ]
+        )
+    )
+    parser = _MODULE._alfworld_primary_failure_taxonomy(
+        trajectory(
+            [
+                {
+                    "step": 0,
+                    "action": "<INVALID>",
+                    "raw_graph_output": "<action>take apple 1 from table 1</action>",
+                    "legal_actions": ["take apple 1 from table 1"],
+                    "parse_error": True,
+                }
+            ]
+        )
+    )
+    free_text_tool_profile = _MODULE._alfworld_primary_failure_taxonomy(
+        {
+            **trajectory([]),
+            "turns": [
+                {
+                    "round_index": 0,
+                    "graph_snapshot": {
+                        "nodes": [
+                            {
+                                "contract": (
+                                    "execution_mode: react, "
+                                    "allowed_tools: [alfworld]"
+                                ),
+                                "execution_mode": "reasoning",
+                                "allowed_tools": [],
+                            }
+                        ]
+                    },
+                    "canvas_feedback": "accepted add_agent",
+                }
+            ],
+        }
+    )
+
+    assert exploration["primary_failure_class"] == "environment_exploration_search"
+    assert grounding["primary_failure_class"] == "object_grounding_affordance"
+    assert sequencing["primary_failure_class"] == "subgoal_sequencing_action_policy"
+    assert parser["primary_failure_class"] == "native_action_parser"
+    assert free_text_tool_profile["primary_failure_class"] == "tool_execution_profile"
+
+
 def test_alfworld_wrong_demo_prefers_first_typed_runtime_failure():
     diagnosis = _MODULE._alfworld_wrong_demo_diagnosis(
         {
@@ -1133,7 +1291,10 @@ def test_alfworld_static_rescore_replays_max_rounds_without_model_calls():
             "evaluation": {
                 "valid": True,
                 "evaluator_version": RAGEN_EVALUATOR_VERSION,
-                "details": {},
+                # Historical terminal-failure checkpoints may contain an
+                # explicitly empty top-level trace even though the executor
+                # persisted a longer authoritative environment ledger.
+                "details": {"trace": []},
                 "metrics": {"success": 0.0},
             },
             "turns": [

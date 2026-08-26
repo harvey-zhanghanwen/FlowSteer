@@ -297,7 +297,7 @@ adapter.
 | `src/interactive/task_evaluator.py` | SkillFlow official outcome view and `PrivateALFWorldTerminalEvaluator` | Direct semantic reuse through a project receipt adapter | Lock exact task/game/seed/budget, replay only a frozen complete action trace, use only terminal `won`, return binary episode success, and keep infrastructure/evaluator failure separate from task failure. A complete nonterminal trace remains evaluator-valid with zero success; replay never requests a new model action. |
 | `src/interactive/agent_workflow_env.py::AgentWorkflowEnv.step` | FlowSteer `InteractiveWorkflowBuilder.run_loop/run_loop_async` plus progressive Canvas and execution feedback | Existing core, unchanged by dataset adapter | Apply accepted graph edits, execute the complete currently executable graph through `AgentRuntime.execute` (reusing unaffected progressive artifacts), return feedback, and admit only legal `FINISH`; do not add an ALFWorld role or topology requirement. |
 | `src/interactive/agent_graph.py` and `agent_runtime.py` | Design document free AgentGraph plus FlowSteer execution boundary | Existing core, unchanged by dataset adapter | Preserve free contracts, model selection, directed/independent relations, bounded reciprocal execution, unique Output Agent, and complete Agent communication receipts. |
-| `scripts/evaluate_completion_benchmark_round.py` | Existing project evaluation collector plus FlowSteer bounded execution | Necessary evaluation wiring | Freeze paired tasks and conditions, run Direct and AgentGraph independently, checkpoint exact receipts, rescore historical complete traces without model calls, aggregate native SR, distinguish historical/recovered/unresolved collection failures, and materialize Wrong Demos from the first observable failure layer. |
+| `scripts/evaluate_completion_benchmark_round.py` | Existing project evaluation collector plus FlowSteer bounded execution | Necessary evaluation wiring | Freeze paired tasks and conditions, run Direct and AgentGraph independently, checkpoint exact receipts, select the longest task-scoped environment ledger across evaluator and executor receipt locations, rescore historical complete traces without model calls, aggregate native SR, distinguish historical/recovered/unresolved collection failures, retain the first observable typed failure, and assign a separate mutually exclusive receipt-causal primary failure class. |
 
 The existing interactive FINISH capability check may require an Agent that can
 invoke the configured environment Tool. `run_task` binds that requirement to
@@ -346,7 +346,10 @@ must not modify the unified orchestration core.
 - serial native state mutation across multiple Agents;
 - typed transition, failure, model-call, Tool-call, and evaluator receipts;
 - a shared evaluation harness for paired Direct and AgentGraph conditions; and
-- Wrong Demo classification using the first observed failure layer.
+- Wrong Demo reporting with both the first observable typed failure and a
+  mutually exclusive receipt-causal primary failure taxonomy; early errors
+  repaired before a complete native episode are not relabelled as terminal
+  root causes.
 
 ### Not enabled in ALFWorld Initial Adapter v1
 
@@ -401,8 +404,10 @@ actual receipts:
    evaluator conditions;
 9. `valid_seen` and `valid_unseen` are reported separately with
    `success / valid / total / SR` and operational failures;
-10. every Wrong Demo identifies the first observable failure layer from stored
-    trajectory evidence; and
+10. every Wrong Demo preserves the first observable typed failure and also
+    identifies one primary causal failure from the complete stored environment
+    ledger, with `max_rounds` reported separately as a terminal manifestation;
+    and
 11. no fixed role, Agent count, topology, or ALFWorld workflow has been added to
     the unified orchestration core.
 
@@ -417,10 +422,13 @@ The full official paired evaluations are complete:
 | Official split | Direct | AgentGraph | AgentGraph minus Direct | Evaluator valid | Operational failures |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | `valid_seen` | 43/140 (30.71%) | 46/140 (32.86%) | +2.14 percentage points | 140/140 in both conditions | 0 |
-| `valid_unseen` | 28/134 (20.90%) | 38/134 (28.36%) | +7.46 percentage points | 134/134 in both conditions | 0 |
+| `valid_unseen` | 28/134 (20.90%) | 40/134 (29.85%) | +8.96 percentage points | 134/134 in both conditions | 0 |
 
 AgentGraph explicit `FINISH` / `max_rounds` counts are 46/94 on
-`valid_seen` and 38/96 on `valid_unseen`. Three historical SGLang connection
+`valid_seen` and 38/96 on `valid_unseen`. Two `valid_unseen` episodes reached
+native `won=true` without a Director `FINISH`; deterministic replay of their
+complete executor-side ledgers therefore corrects the native SR without any
+model call. Three historical SGLang connection
 failure attempts on `valid_unseen` were recovered through exact checkpoint
 resume; all three receipts remain append-only while unresolved failures are
 zero.

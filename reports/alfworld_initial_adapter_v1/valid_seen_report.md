@@ -54,7 +54,30 @@ AgentGraph termination: explicit FINISH **46/140**; max_rounds **94**; terminal 
 - AgentGraph runtime failed turns: **530**; structured runtime failure distribution: `{"CancelledError": 32, "EnvironmentExecutionError": 565}`
 - Historical collection failure attempts: **0**; recovered attempts: **0**; unresolved task-condition pairs: **0**
 
-## Wrong Demo: first observable failure
+## Receipt-causal primary failure taxonomy
+
+Denominator: **94 unsuccessful AgentGraph episodes**. Each episode receives one mutually exclusive primary cause. Early typed errors that were repaired before a complete native episode remain in the trajectory but are not relabeled as the terminal root cause.
+
+| Primary failure class | Count | Share | Representative task IDs |
+|---|---:|---:|---|
+| Environment exploration/search | 37 | 39.36% | `alfworld:valid_seen:00003`, `alfworld:valid_seen:00014`, `alfworld:valid_seen:00028` |
+| Object grounding/affordance | 32 | 34.04% | `alfworld:valid_seen:00007`, `alfworld:valid_seen:00008`, `alfworld:valid_seen:00009` |
+| Subgoal sequencing/action policy | 23 | 24.47% | `alfworld:valid_seen:00010`, `alfworld:valid_seen:00012`, `alfworld:valid_seen:00021` |
+| Native action parser | 0 | 0.00% | None |
+| Tool/execution-profile | 1 | 1.06% | `alfworld:valid_seen:00026` |
+| Director/Canvas construction | 1 | 1.06% | `alfworld:valid_seen:00093` |
+| Agent communication | 0 | 0.00% | None |
+| Agent runtime | 0 | 0.00% | None |
+| Environment runtime | 0 | 0.00% | None |
+| Terminal control | 0 | 0.00% | None |
+| Evaluator | 0 | 0.00% | None |
+| Provider/collection | 0 | 0.00% | None |
+
+`max_rounds` is reported as a cross-cutting terminal manifestation, not automatically as the root cause: **94** unsuccessful episodes; missing explicit FINISH: **94**.
+
+Retrieval/database and final-answer formatting/canonicalization are not applicable to the native ALFWorld reward protocol. Environment observations and admissible actions come from the stateful Tool, and success comes only from the native terminal evaluator.
+
+## Wrong Demo: first observable typed failure (diagnostic, not necessarily root cause)
 
 | Task | Failure layer | First error turn | Error |
 |---|---|---:|---|

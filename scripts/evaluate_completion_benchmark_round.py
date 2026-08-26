@@ -2088,15 +2088,19 @@ def _alfworld_trace(value: Optional[Mapping[str, Any]]) -> tuple[Mapping[str, An
     evaluation = value.get("evaluation") if isinstance(value, Mapping) else None
     details = evaluation.get("details") if isinstance(evaluation, Mapping) else None
     trace = details.get("trace") if isinstance(details, Mapping) else None
+    candidates: list[tuple[int, int, tuple[Mapping[str, Any], ...]]] = []
     if isinstance(trace, Sequence) and not isinstance(trace, (str, bytes)):
-        return tuple(item for item in trace if isinstance(item, Mapping))
+        evaluator_ledger = tuple(
+            item for item in trace if isinstance(item, Mapping)
+        )
+        candidates.append((len(evaluator_ledger), 0, evaluator_ledger))
 
     # Pre-fix terminal-failure receipts kept the authoritative environment
     # ledger on each executor response but returned before copying it into the
-    # evaluator details.  Select the longest, latest task-scoped ledger.  This
-    # is a deterministic receipt projection; it never calls a model or invents
-    # an environment transition.
-    candidates: list[tuple[int, int, tuple[Mapping[str, Any], ...]]] = []
+    # evaluator details.  An empty evaluator ledger must therefore not shadow
+    # a longer task-scoped executor ledger.  Select the longest, latest frozen
+    # ledger across both receipt locations.  This is a deterministic receipt
+    # projection; it never calls a model or invents an environment transition.
     turns = value.get("turns") if isinstance(value, Mapping) else None
     if isinstance(turns, Sequence) and not isinstance(turns, (str, bytes)):
         order = 0
@@ -2394,6 +2398,366 @@ def _alfworld_wrong_demo_diagnosis(
     }
 
 
+_ALFWORLD_PRIMARY_FAILURE_CLASSES: tuple[tuple[str, str], ...] = (
+    ("environment_exploration_search", "Environment exploration/search"),
+    ("object_grounding_affordance", "Object grounding/affordance"),
+    ("subgoal_sequencing_action_policy", "Subgoal sequencing/action policy"),
+    ("native_action_parser", "Native action parser"),
+    ("tool_execution_profile", "Tool/execution-profile"),
+    ("director_canvas_construction", "Director/Canvas construction"),
+    ("agent_communication", "Agent communication"),
+    ("agent_runtime", "Agent runtime"),
+    ("environment_runtime", "Environment runtime"),
+    ("terminal_control", "Terminal control"),
+    ("evaluator", "Evaluator"),
+    ("provider_collection", "Provider/collection"),
+)
+
+
+def _alfworld_normalize_object_class(value: Any) -> str:
+    return "".join(character for character in str(value).lower() if character.isalnum())
+
+
+def _alfworld_target_object_class(value: Mapping[str, Any]) -> Optional[str]:
+    task = value.get("task")
+    metadata = task.get("metadata") if isinstance(task, Mapping) else None
+    skillflow = metadata.get("skillflow") if isinstance(metadata, Mapping) else None
+    extra = skillflow.get("extra") if isinstance(skillflow, Mapping) else None
+    task_directory = extra.get("task_directory") if isinstance(extra, Mapping) else None
+    if not isinstance(task_directory, str):
+        return None
+    fields = task_directory.split("-")
+    if len(fields) < 2 or not fields[1]:
+        return None
+    normalized = _alfworld_normalize_object_class(fields[1])
+    return normalized or None
+
+
+def _alfworld_proposed_action(entry: Mapping[str, Any]) -> Optional[str]:
+    action = entry.get("action")
+    if isinstance(action, str) and action and action != "<INVALID>":
+        return action.strip()
+    raw = entry.get("raw_graph_output")
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    candidate = raw.strip()
+    if candidate.startswith("<action>") and candidate.endswith("</action>"):
+        candidate = candidate[len("<action>") : -len("</action>")].strip()
+    if candidate.startswith("{"):
+        try:
+            decoded = json.loads(candidate)
+        except json.JSONDecodeError:
+            decoded = None
+        if isinstance(decoded, Mapping) and isinstance(decoded.get("action"), str):
+            candidate = str(decoded["action"]).strip()
+    return candidate or None
+
+
+def _alfworld_action_object_class(action: Optional[str]) -> Optional[str]:
+    if not isinstance(action, str):
+        return None
+    fields = action.lower().split()
+    if len(fields) < 2 or fields[0] not in {
+        "take",
+        "move",
+        "put",
+        "heat",
+        "cool",
+        "clean",
+        "examine",
+    }:
+        return None
+    normalized = _alfworld_normalize_object_class(fields[1])
+    return normalized or None
+
+
+def _alfworld_true_parser_failure(
+    entry: Mapping[str, Any], proposed_action: Optional[str]
+) -> bool:
+    """Separate parser defects from policy proposals outside the action domain."""
+
+    if entry.get("parse_error") is not True or not isinstance(proposed_action, str):
+        return False
+    legal_actions = entry.get("legal_actions")
+    return bool(
+        isinstance(legal_actions, Sequence)
+        and not isinstance(legal_actions, (str, bytes))
+        and proposed_action in legal_actions
+    )
+
+
+def _alfworld_first_no_progress_step(trace: Sequence[Mapping[str, Any]]) -> Optional[int]:
+    actions = [_alfworld_proposed_action(entry) for entry in trace]
+    for index, action in enumerate(actions):
+        if action is None:
+            continue
+        if index >= 1 and action == actions[index - 1]:
+            return index
+        if index >= 3 and action == actions[index - 2] and actions[index - 1] == actions[index - 3]:
+            return index - 2
+    return None
+
+
+def _alfworld_primary_failure_taxonomy(
+    graph_value: Optional[Mapping[str, Any]],
+) -> Mapping[str, Any]:
+    """Assign one receipt-backed primary cause to an unsuccessful episode.
+
+    The attribution follows ALFWorld's native task progression: environment
+    exploration, object grounding, then subgoal/action sequencing.  Typed
+    runtime, Canvas, evaluator, and provider failures take precedence only when
+    no native environment ledger establishes a later decisive task-level cause.
+    Early errors that were repaired before a complete episode are retained in
+    the trajectory but are not misreported as the primary cause.
+    """
+
+    if graph_value is None:
+        return {
+            "taxonomy_version": "alfworld.receipt_causal.v1",
+            "attribution_scope": "mutually_exclusive_primary_cause",
+            "primary_failure_class": "provider_collection",
+            "first_causal_step": None,
+            "evidence": "AgentGraph trajectory is missing from the frozen checkpoint.",
+            "subsequent_error_propagation": "No environment episode was available for evaluation.",
+        }
+
+    evaluation = graph_value.get("evaluation")
+    metrics = evaluation.get("metrics") if isinstance(evaluation, Mapping) else None
+    trace = _alfworld_trace(graph_value)
+    target_object_class = _alfworld_target_object_class(graph_value)
+    final_info = trace[-1].get("info") if trace else None
+    native_won = bool(
+        isinstance(final_info, Mapping)
+        and (
+            final_info.get("won") is True
+            or (
+                isinstance(final_info.get("score"), (int, float))
+                and not isinstance(final_info.get("score"), bool)
+                and float(final_info["score"]) >= 1.0
+            )
+        )
+    )
+    recorded_success = bool(
+        isinstance(metrics, Mapping)
+        and isinstance(metrics.get("success"), (int, float))
+        and not isinstance(metrics.get("success"), bool)
+        and float(metrics["success"]) >= 1.0
+    )
+    if native_won and not recorded_success:
+        return {
+            "taxonomy_version": "alfworld.receipt_causal.v1",
+            "attribution_scope": "mutually_exclusive_primary_cause",
+            "primary_failure_class": "evaluator",
+            "target_object_class": target_object_class,
+            "first_causal_step": trace[-1].get("step"),
+            "first_causal_action": trace[-1].get("action"),
+            "evidence": "Native environment receipt records won=true/score>=1 but the evaluator records success=0.",
+            "subsequent_error_propagation": "A successful environment terminal state was reported as an unsuccessful paired result.",
+        }
+    if isinstance(evaluation, Mapping) and evaluation.get("valid") is not True:
+        reason = str(evaluation.get("reason") or "invalid_environment_evaluation")
+        lowered = reason.lower()
+        failure_class = (
+            "environment_runtime"
+            if any(marker in lowered for marker in ("environment", "reset", "game_file"))
+            else "evaluator"
+        )
+        return {
+            "taxonomy_version": "alfworld.receipt_causal.v1",
+            "attribution_scope": "mutually_exclusive_primary_cause",
+            "primary_failure_class": failure_class,
+            "target_object_class": target_object_class,
+            "first_causal_step": None,
+            "evidence": reason,
+            "subsequent_error_propagation": "The native success evaluator could not produce a valid episode result.",
+        }
+
+    if not trace:
+        runtime_failure = _alfworld_first_runtime_failure(graph_value)
+        runtime_layer = (
+            runtime_failure.get("failure_layer")
+            if isinstance(runtime_failure, Mapping)
+            else None
+        )
+        runtime_error = (
+            runtime_failure.get("error")
+            if isinstance(runtime_failure, Mapping)
+            else None
+        )
+        turns = graph_value.get("turns")
+        free_text_tool_profile = False
+        if isinstance(turns, Sequence) and not isinstance(turns, (str, bytes)):
+            for turn in turns:
+                snapshot = (
+                    turn.get("graph_snapshot") if isinstance(turn, Mapping) else None
+                )
+                nodes = snapshot.get("nodes") if isinstance(snapshot, Mapping) else None
+                if not isinstance(nodes, Sequence) or isinstance(nodes, (str, bytes)):
+                    continue
+                if any(
+                    isinstance(node, Mapping)
+                    and isinstance(node.get("contract"), str)
+                    and any(
+                        marker in str(node["contract"]).lower()
+                        for marker in ("allowed_tools", "alfworld")
+                    )
+                    and node.get("execution_mode") != "react"
+                    and node.get("allowed_tools") != ["alfworld"]
+                    for node in nodes
+                ):
+                    free_text_tool_profile = True
+                    break
+        if runtime_layer == "provider":
+            failure_class = "provider_collection"
+        elif runtime_layer == "environment":
+            failure_class = "environment_runtime"
+        elif runtime_layer == "tool_interface" or free_text_tool_profile:
+            failure_class = "tool_execution_profile"
+        else:
+            canvas_rejection = next(
+                (
+                    turn
+                    for turn in turns
+                    if isinstance(turn, Mapping)
+                    and isinstance(turn.get("canvas_feedback"), str)
+                    and str(turn["canvas_feedback"]).startswith("edit rejected:")
+                ),
+                None,
+            ) if isinstance(turns, Sequence) and not isinstance(turns, (str, bytes)) else None
+            failure_class = (
+                "director_canvas_construction"
+                if canvas_rejection is not None
+                else "agent_communication"
+                if isinstance(runtime_error, str)
+                and any(
+                    marker in runtime_error.lower()
+                    for marker in ("upstream", "artifact", "communication")
+                )
+                else "agent_runtime"
+                if runtime_failure is not None
+                else "tool_execution_profile"
+            )
+        return {
+            "taxonomy_version": "alfworld.receipt_causal.v1",
+            "attribution_scope": "mutually_exclusive_primary_cause",
+            "primary_failure_class": failure_class,
+            "target_object_class": target_object_class,
+            "first_causal_step": (
+                runtime_failure.get("first_error_turn")
+                if isinstance(runtime_failure, Mapping)
+                else None
+            ),
+            "first_causal_action": (
+                runtime_failure.get("first_error_action")
+                if isinstance(runtime_failure, Mapping)
+                else None
+            ),
+            "evidence": runtime_error or "No Agent acquired a valid request-scoped ALFWorld execution profile.",
+            "subsequent_error_propagation": "No native environment transition was produced before Director max_rounds.",
+        }
+
+    target_progress: list[tuple[int, str]] = []
+    target_attempts: list[tuple[int, str]] = []
+    substituted_objects: list[tuple[int, str, str]] = []
+    parser_failures: list[tuple[int, str]] = []
+    parse_errors: list[tuple[int, str]] = []
+    for index, entry in enumerate(trace):
+        proposed_action = _alfworld_proposed_action(entry)
+        if not isinstance(proposed_action, str):
+            continue
+        step = entry.get("step") if isinstance(entry.get("step"), int) else index
+        object_class = _alfworld_action_object_class(proposed_action)
+        action_verb = proposed_action.lower().split()[0]
+        if _alfworld_true_parser_failure(entry, proposed_action):
+            parser_failures.append((step, proposed_action))
+            continue
+        if entry.get("parse_error") is True:
+            parse_errors.append((step, proposed_action))
+        if object_class is None:
+            continue
+        if target_object_class is not None and object_class == target_object_class:
+            target_attempts.append((step, proposed_action))
+            info = entry.get("info")
+            if (
+                entry.get("parse_error") is not True
+                and not (
+                    isinstance(info, Mapping)
+                    and (
+                        info.get("action_is_valid") is False
+                        or info.get("action_is_effective") is False
+                    )
+                )
+            ):
+                target_progress.append((step, proposed_action))
+        elif target_object_class is not None and action_verb != "examine":
+            substituted_objects.append((step, proposed_action, object_class))
+
+    if parser_failures:
+        step, action = parser_failures[0]
+        failure_class = "native_action_parser"
+        evidence = f"Parser rejected an action that exactly matched the native legal_actions list: {action!r}."
+        propagation = "The admissible environment action was not executed and task progress stopped."
+        first_step = step
+        first_action = action
+    elif not target_progress and (target_attempts or substituted_objects):
+        failure_class = "object_grounding_affordance"
+        if substituted_objects:
+            first_step, first_action, observed_class = substituted_objects[0]
+            evidence = (
+                f"Target object class={target_object_class!r}, but the first decisive manipulation used "
+                f"object class={observed_class!r}: {first_action!r}."
+            )
+        else:
+            first_step, first_action = target_attempts[0]
+            evidence = (
+                f"The policy attempted target object class={target_object_class!r} only through an action "
+                f"outside the current admissible action domain: {first_action!r}."
+            )
+        propagation = "Subsequent actions followed an ungrounded or substituted object lineage and the native goal remained unsatisfied."
+    elif target_progress:
+        failure_class = "subgoal_sequencing_action_policy"
+        later_parse_error = next(
+            (item for item in parse_errors if item[0] >= target_progress[0][0]),
+            None,
+        )
+        if later_parse_error is not None:
+            first_step, first_action = later_parse_error
+            evidence = (
+                f"The target object was grounded, but a later proposed subgoal action was outside the current "
+                f"admissible action domain: {first_action!r}."
+            )
+        else:
+            first_step, first_action = target_progress[-1]
+            evidence = (
+                "The target object was manipulated successfully, but the required transformation, count, "
+                "state precondition, placement, or inspection sequence did not reach won=true."
+            )
+        propagation = "The episode consumed its policy budget before completing the remaining native task subgoals."
+    else:
+        failure_class = "environment_exploration_search"
+        no_progress_step = _alfworld_first_no_progress_step(trace)
+        first_step = no_progress_step if no_progress_step is not None else len(trace) - 1
+        first_action = _alfworld_proposed_action(trace[first_step])
+        evidence = (
+            f"No successful manipulation of target object class={target_object_class!r} was recorded in "
+            f"{len(trace)} environment policy turns."
+        )
+        propagation = "Exploration/search or no-progress repetition exhausted the action budget before object grounding."
+
+    return {
+        "taxonomy_version": "alfworld.receipt_causal.v1",
+        "attribution_scope": "mutually_exclusive_primary_cause",
+        "primary_failure_class": failure_class,
+        "target_object_class": target_object_class,
+        "first_causal_step": first_step,
+        "first_causal_action": first_action,
+        "evidence": evidence,
+        "subsequent_error_propagation": propagation,
+        "environment_turn_count": len(trace),
+        "action_parse_error_turn_count": len(parse_errors),
+    }
+
+
 def _paired_rows(
     selected: Sequence[TaskRecord],
     direct: Mapping[str, Mapping[str, Any]],
@@ -2492,6 +2856,11 @@ def _paired_rows(
                     _aime_wrong_demo_diagnosis(graph_value)
                     if dataset_key == "aime_2026" and graph_score < 1.0
                     else _alfworld_wrong_demo_diagnosis(graph_value)
+                    if dataset_key == "alfworld" and graph_score < 1.0
+                    else None
+                ),
+                "agentgraph_failure_taxonomy": (
+                    _alfworld_primary_failure_taxonomy(graph_value)
                     if dataset_key == "alfworld" and graph_score < 1.0
                     else None
                 ),
@@ -2863,6 +3232,39 @@ def _report(
         for row in below_full
         if isinstance(row.get("wrong_demo_diagnosis"), Mapping)
     ]
+    alfworld_failure_taxonomy_records = [
+        {
+            "task_id": row.get("task_id"),
+            **dict(row["agentgraph_failure_taxonomy"]),
+        }
+        for row in below_full
+        if isinstance(row.get("agentgraph_failure_taxonomy"), Mapping)
+    ]
+    alfworld_failure_taxonomy_counts = Counter(
+        str(value.get("primary_failure_class"))
+        for value in alfworld_failure_taxonomy_records
+    )
+    alfworld_failure_taxonomy_denominator = len(alfworld_failure_taxonomy_records)
+    alfworld_failure_taxonomy_categories = [
+        {
+            "key": key,
+            "label": label,
+            "count": int(alfworld_failure_taxonomy_counts.get(key, 0)),
+            "share_of_unsuccessful_agentgraph_episodes": (
+                float(alfworld_failure_taxonomy_counts.get(key, 0))
+                / alfworld_failure_taxonomy_denominator
+                if alfworld_failure_taxonomy_denominator
+                else 0.0
+            ),
+            "representative_task_ids": [
+                str(value["task_id"])
+                for value in alfworld_failure_taxonomy_records
+                if value.get("primary_failure_class") == key
+                and isinstance(value.get("task_id"), str)
+            ][:3],
+        }
+        for key, label in _ALFWORLD_PRIMARY_FAILURE_CLASSES
+    ]
     rows_by_task_id = {
         str(row.get("task_id")): row
         for row in rows
@@ -2980,6 +3382,37 @@ def _report(
                         ).items()
                     )
                 ),
+                "alfworld_receipt_causal_failure_taxonomy": {
+                    "taxonomy_version": "alfworld.receipt_causal.v1",
+                    "attribution_scope": (
+                        "mutually_exclusive_primary_cause_over_unsuccessful_agentgraph_episodes"
+                    ),
+                    "denominator": alfworld_failure_taxonomy_denominator,
+                    "categories": alfworld_failure_taxonomy_categories,
+                    "records": alfworld_failure_taxonomy_records,
+                    "cross_cutting_terminal_manifestations": {
+                        "max_rounds_count": sum(
+                            row["agentgraph"].get("termination_reason")
+                            == "max_rounds"
+                            for row in below_full
+                        ),
+                        "missing_explicit_finish_count": sum(
+                            row["agentgraph"].get("explicit_finish") is not True
+                            for row in below_full
+                        ),
+                    },
+                    "not_applicable": {
+                        "retrieval_or_database": (
+                            "ALFWorld observations and admissible actions come from the native environment Tool."
+                        ),
+                        "final_answer_formatting_or_canonicalization": (
+                            "Reward is the native environment terminal success; no Formatter or text-answer canonicalizer is used."
+                        ),
+                        "llm_judge_validation": (
+                            "The evaluator is the official environment success signal, not an LLM judge."
+                        ),
+                    },
+                },
             }
             if dataset_key == "alfworld"
             else {}
@@ -3120,6 +3553,41 @@ def _report_markdown(report: Mapping[str, Any]) -> str:
         graph_runtime_failure_distribution = graph_receipts.get(
             "runtime_failure_type_distribution", {}
         )
+        causal_taxonomy = report.get(
+            "alfworld_receipt_causal_failure_taxonomy", {}
+        )
+        causal_categories = (
+            causal_taxonomy.get("categories", ())
+            if isinstance(causal_taxonomy, Mapping)
+            else ()
+        )
+        causal_rows = "\n".join(
+            "| {label} | {count} | {share:.2f}% | {task_ids} |".format(
+                label=value.get("label"),
+                count=value.get("count", 0),
+                share=100
+                * float(value.get("share_of_unsuccessful_agentgraph_episodes", 0.0)),
+                task_ids=(
+                    ", ".join(
+                        f"`{task_id}`"
+                        for task_id in value.get("representative_task_ids", ())
+                    )
+                    or "None"
+                ),
+            )
+            for value in causal_categories
+            if isinstance(value, Mapping)
+        ) or "| None | 0 | 0.00% | None |"
+        causal_denominator = (
+            causal_taxonomy.get("denominator", 0)
+            if isinstance(causal_taxonomy, Mapping)
+            else 0
+        )
+        terminal_manifestations = (
+            causal_taxonomy.get("cross_cutting_terminal_manifestations", {})
+            if isinstance(causal_taxonomy, Mapping)
+            else {}
+        )
         alfworld_section = f"""
 
 ## ALFWorld native outcome
@@ -3154,7 +3622,19 @@ AgentGraph termination: explicit FINISH **{report.get('explicit_finished_count',
 - AgentGraph runtime failed turns: **{graph_receipts.get('runtime_failed_turn_count', 0)}**; structured runtime failure distribution: `{json.dumps(graph_runtime_failure_distribution, ensure_ascii=False, sort_keys=True)}`
 - Historical collection failure attempts: **{report.get('collection_failure_attempt_count', 0)}**; recovered attempts: **{report.get('recovered_collection_failure_attempt_count', 0)}**; unresolved task-condition pairs: **{report.get('unresolved_collection_failure_task_count', 0)}**
 
-## Wrong Demo: first observable failure
+## Receipt-causal primary failure taxonomy
+
+Denominator: **{causal_denominator} unsuccessful AgentGraph episodes**. Each episode receives one mutually exclusive primary cause. Early typed errors that were repaired before a complete native episode remain in the trajectory but are not relabeled as the terminal root cause.
+
+| Primary failure class | Count | Share | Representative task IDs |
+|---|---:|---:|---|
+{causal_rows}
+
+`max_rounds` is reported as a cross-cutting terminal manifestation, not automatically as the root cause: **{terminal_manifestations.get('max_rounds_count', 0)}** unsuccessful episodes; missing explicit FINISH: **{terminal_manifestations.get('missing_explicit_finish_count', 0)}**.
+
+Retrieval/database and final-answer formatting/canonicalization are not applicable to the native ALFWorld reward protocol. Environment observations and admissible actions come from the stateful Tool, and success comes only from the native terminal evaluator.
+
+## Wrong Demo: first observable typed failure (diagnostic, not necessarily root cause)
 
 | Task | Failure layer | First error turn | Error |
 |---|---|---:|---|
@@ -3502,11 +3982,24 @@ async def _rescore_static_trajectory_checkpoint(
         evaluation_details = (
             evaluation.get("details") if isinstance(evaluation, Mapping) else None
         )
+        evaluator_trace = (
+            evaluation_details.get("trace")
+            if isinstance(evaluation_details, Mapping)
+            else None
+        )
+        evaluator_trace_length = (
+            sum(isinstance(item, Mapping) for item in evaluator_trace)
+            if isinstance(evaluator_trace, list)
+            else -1
+        )
+        persisted_replay_trace = (
+            _alfworld_trace(updated) if _dataset_key(task) == "alfworld" else ()
+        )
         alfworld_replay_missing = (
             _dataset_key(task) == "alfworld"
             and (
-                not isinstance(evaluation_details, Mapping)
-                or not isinstance(evaluation_details.get("trace"), list)
+                not isinstance(evaluator_trace, list)
+                or len(persisted_replay_trace) > evaluator_trace_length
             )
         )
         if alfworld_replay_missing:
@@ -3517,7 +4010,7 @@ async def _rescore_static_trajectory_checkpoint(
                 raise CompletionBenchmarkRoundError(
                     f"ALFWorld trajectory {task.task_id!r} has no terminal graph"
                 )
-            replay_trace = _alfworld_trace(updated)
+            replay_trace = persisted_replay_trace
             updated["evaluation"] = asdict(
                 await backend.evaluate_final_graph(
                     task,

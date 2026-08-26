@@ -2,234 +2,182 @@
 
 ## 1. Architecture Completion Report
 
-ALFWorld Initial Adapter v1 已完成。该版本只在统一架构外接入 Dataset /
+ALFWorld Initial Adapter v1 已完成。本版本只在统一架构外接入 Dataset /
 Environment Adapter、`alfworld.act(command)` Tool、task-scoped environment
-runtime、native evaluator 和 paired evaluation；没有修改统一 AgentGraph 的
-Agent 定义、Canvas action space 或固定任何具身任务 workflow。
+runtime、native evaluator 和 paired evaluation；没有修改统一 AgentGraph 的 Agent
+定义、Canvas action space，也没有固定具身任务 workflow。
 
-端到端链路已经由真实 environment receipt 验证：
+已由真实 receipt 验证的端到端链路为：
 
 ```text
 ALFWorld task
   -> Qwen3.5-9B Flow-Director
-  -> progressive Canvas editing
+  -> progressive Canvas edit
   -> current AgentGraph execution
   -> Agent communication artifact
-  -> alfworld.act(command)
+  -> ReAct Agent -> alfworld.act(command)
   -> shared task-scoped world state
-  -> native observation / admissible_commands
+  -> native observation / admissible actions
   -> official terminal won / episode score
   -> evaluator receipt / trajectory
   -> FINISH or max_rounds
 ```
 
-完成并验证的模块：
+完成并验证：
 
-- protocol-v10 Dataset Adapter：独立 train preflight、完整 `valid_seen=140`、
-  完整 `valid_unseen=134`；
-- SkillFlow ALFWorld Tool schema：`resource_id="alfworld"`、`act`、
-  `arguments={"command": native_command}`；
-- 每条 rollout 一个独立 session，Canvas 多次执行共享一个串行 world state；
-- SkillFlow 20-turn ReAct policy budget 与官方 TextWorld 50-step hard limit；
-- 原生 terminal `won` Success Rate evaluator 和 `episode_score`；
+- SkillFlow protocol-v10 task loader 与 train preflight；
+- 完整 official `valid_seen=140`、`valid_unseen=134`；
+- 每条 rollout 独立 session，多个 Canvas execution 串行共享同一 world state；
+- SkillFlow 20-turn ReAct policy budget 与 TextWorld 50-step simulator cap；
+- `alfworld` / `act(command)` public Tool schema；
+- native terminal `won` Success Rate 与 episode score；
 - Direct / AgentGraph 同 task、environment、action budget、model/tool condition、
   evaluator 的 paired evaluation；
-- 完整 environment transition、Tool receipt、Agent communication、Canvas
-  feedback、trajectory 和 Wrong Demo；
-- `max_rounds` trajectory 的 complete native replay：不再丢失已执行 action、
-  observation、score 或 terminal state。
+- Canvas、Agent I/O、Agent communication、Tool Action--Observation、terminal、
+  evaluator 和 Wrong Demo receipts；
+- max-rounds trajectory 的完整 native ledger 选择与 0-model-call deterministic
+  replay。
 
-保留但未启用的接口：GRPO、LoRA、backward、optimizer update、MACE、Bayesian
-posterior、Skill retrieval/injection/evolution。本轮全部为零更新。
+预留但未启用：GRPO、LoRA、backward、optimizer update、MACE、Bayesian
+posterior、Skill retrieval/injection/evolution。本轮 optimizer update 为 0。
 
-已知限制：当前 model-admissible action mask 尚未把
-`execution_mode=react + allowed_tools=[alfworld]`、唯一 stateful Tool owner、
-Tool owner 不得进入 reciprocal block 编码成联合参数约束；这些合法性约束目前
-由 runtime feedback 执行。因此 Director 在大量 episode 中先生成非法 execution
-profile，再消耗 Canvas turn 修复，最终造成较多 `max_rounds`。
-
-Stable Zero 结论：独立 train-split canary 已完整通过。Direct 与 AgentGraph
-均成功完成 `put a handtowel in garbagecan.`，环境结果均为 `won=true`、
-`episode_score=1`、4 个原生 action、0 invalid、0 repeated，并保存了显式
-`FINISH` 和完整 trajectory。因此初版 adapter 达到受限 Stable Zero；正式分数
-仍以完整官方 split 为准。
+Stable Zero：train-split canary 中 Direct 与 AgentGraph 均以 4 个 native action
+完成 `put a handtowel in garbagecan.`，`won=true`、score=1、显式 `FINISH`，因此
+adapter 达到受限 Stable Zero。正式能力以完整 official split 分数为准。
 
 ## 2. 实现来源与兼容边界
 
-实现优先级为项目 MD、SkillFlow 实际 ALFWorld 源码、官方 ALFWorld、FlowSteer。
-完整逐项映射见
-[source map](/ssd1/iclr/1/.tmp/FlowSteer-alfworld-initial-v1/docs/ALFWORLD_INITIAL_ADAPTER_V1_SOURCE_MAP.md)。
+优先级为项目 MD、SkillFlow 实际源码、官方 ALFWorld、FlowSteer。逐项 source map：
+[ALFWORLD_INITIAL_ADAPTER_V1_SOURCE_MAP.md](/ssd1/iclr/1/.tmp/FlowSteer-alfworld-initial-v1/docs/ALFWORLD_INITIAL_ADAPTER_V1_SOURCE_MAP.md)。
 
-| 本地边界 | 上游来源 | 状态 |
+| 本地边界 | 来源 | 状态 |
 |---|---|---|
-| Dataset / split / pinned game identity | SkillFlow protocol v10 与官方 ALFWorld inventory | 必要薄适配 |
-| reset、step、observation、admissible actions、state transition、terminal `won` | SkillFlow official bridge / RAGEN adapter / `AlfredTWEnv` | 直接复用语义 |
-| `alfworld.act(command)` | SkillFlow public embodied Tool contract | 直接复用接口 |
-| progressive Canvas、execute-on-edit、feedback、trajectory、`FINISH` | FlowSteer | 直接复用 |
-| free-text Agent contract、Director 自主 Agent/model/relation/Output Agent/topology | 项目 MD 与统一 AgentGraph | 现有 core，不变 |
-| task-scoped session 与统一 runtime/evaluator receipt 转换 | 本项目 | 必要薄适配 |
+| task/split/pinned game identity | SkillFlow protocol v10 + ALFWorld inventory | 必要薄适配 |
+| reset/step/observation/admissible actions/state/terminal `won` | SkillFlow official bridge + `AlfredTWEnv` | 直接复用语义 |
+| `alfworld.act(command)` | SkillFlow embodied Tool contract | 直接复用接口 |
+| progressive Canvas/execute-on-edit/feedback/trajectory/`FINISH` | FlowSteer | 直接复用 |
+| free-text Agent contract、自主 Agent/model/relation/Output/topology | 项目 MD + 统一 AgentGraph | core 不变 |
+| task-scoped session、evaluator receipt、report adapter | 本项目 | 必要薄适配 |
 
-没有预设 `Navigator`、`Manipulator`、`Planner`、`Verifier`，没有要求固定 chain、
-parallel 或 reciprocal topology。ReAct 只作为单个 Agent 的 execution mode。
+没有预设 `Navigator`、`Manipulator`、`Planner`、`Verifier`，没有强制 chain、
+parallel 或 reciprocal topology。ReAct 是 Agent execution mode，不是 Agent role。
 
-## 3. 正式 evaluation 结果
+## 3. 完整 official evaluation
 
-Primary metric 为官方 environment terminal Success Rate。所有分母均为完整官方
-split，所有 episode 均 evaluator-valid；Agent 自述和 LLM judge 不参与 reward。
+Primary metric 是 native environment terminal Success Rate。所有任务均
+evaluator-valid；Agent 自述、文本答案和 LLM judge 不参与 reward。
 
-| Official split | Condition | Success / Total | SR | Episode score（sum / mean） | Evaluator valid |
+| Official split | Condition | Success / Total | SR | Direct 对照 | AgentGraph - Direct |
 |---|---|---:|---:|---:|---:|
-| `valid_seen` | Qwen3.5-9B Direct | 43 / 140 | 30.71% | 43 / 0.3071 | 140 / 140 |
-| `valid_seen` | AgentGraph | 46 / 140 | 32.86% | 46 / 0.3286 | 140 / 140 |
-| `valid_unseen` | Qwen3.5-9B Direct | 28 / 134 | 20.90% | 28 / 0.2090 | 134 / 134 |
-| `valid_unseen` | AgentGraph | 38 / 134 | 28.36% | 38 / 0.2836 | 134 / 134 |
+| `valid_seen` | `alfworld_valid_seen_unified_architecture_v1` | 46 / 140 | **32.86%** | 43 / 140 = 30.71% | **+2.14 pp** |
+| `valid_unseen` | `alfworld_valid_unseen_unified_architecture_v1` | 40 / 134 | **29.85%** | 28 / 134 = 20.90% | **+8.96 pp** |
 
-- `valid_seen`：AgentGraph 相对 Direct 为 **+2.14 percentage points**。
-- `valid_unseen`：AgentGraph 相对 Direct 为 **+7.46 percentage points**。
-- `valid_seen` AgentGraph：`FINISH=46`、`max_rounds=94`、episode-level
-  operational/evaluator failure `=0`。
-- `valid_unseen` AgentGraph：`FINISH=38`、`max_rounds=96`、episode-level
-  operational/evaluator failure `=0`。
-- `valid_unseen` 曾有 3 次 SGLang connection failure；三条均已在相同冻结条件下
-  checkpoint-resume 成功，当前 unresolved failure 为 0，历史 attempt receipt 保留。
+完成状态：
 
-逐 split 机器可读报告：
+- `valid_seen`：AgentGraph `140/140 completed`、`140/140 evaluator-valid`，
+  native terminal success 46，Director `FINISH=46`、`max_rounds=94`；
+- `valid_unseen`：AgentGraph `134/134 completed`、`134/134 evaluator-valid`，
+  native terminal success 40，Director `FINISH=38`、`max_rounds=96`；
+- unseen 有 2 个 episode 已由 environment 证明 `won=true`，但 Director 未发出
+  `FINISH`。最长 task-scoped executor ledger 的 deterministic replay 将其从旧的
+  38/134 修正为 40/134；该过程模型调用数为 0；
+- unseen 历史 3 次 provider connection failure 已在相同冻结条件下恢复，当前
+  unresolved provider/collection failure 为 0。
+
+正式证据：
 
 - [valid_seen JSON](/ssd1/iclr/1/.tmp/FlowSteer-alfworld-initial-v1/reports/alfworld_initial_adapter_v1/valid_seen_report.json)
 - [valid_seen Markdown](/ssd1/iclr/1/.tmp/FlowSteer-alfworld-initial-v1/reports/alfworld_initial_adapter_v1/valid_seen_report.md)
 - [valid_unseen JSON](/ssd1/iclr/1/.tmp/FlowSteer-alfworld-initial-v1/reports/alfworld_initial_adapter_v1/valid_unseen_report.json)
 - [valid_unseen Markdown](/ssd1/iclr/1/.tmp/FlowSteer-alfworld-initial-v1/reports/alfworld_initial_adapter_v1/valid_unseen_report.md)
 
-## 4. Environment telemetry
+## 4. Environment telemetry 与自然 topology
 
-| Split / Condition | Policy turns | Native actions | Parse errors | Invalid | No effect | Immediate repeats | Terminal episodes |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| seen Direct | 2,331 | 2,250 | 81 | 0 | 0 | 134 | 43 |
-| seen AgentGraph | 2,259 | 2,176 | 83 | 0 | 0 | 114 | 46 |
-| unseen Direct | 2,354 | 2,227 | 127 | 0 | 0 | 204 | 28 |
-| unseen AgentGraph | 339 | 333 | 6 | 0 | 0 | 9 | 38 |
+| Split / Condition | Policy turns | Native actions | Parse-error turns | Immediate repeats | Native terminal episodes |
+|---|---:|---:|---:|---:|---:|
+| seen Direct | 2,331 | 2,250 | 81 | 134 | 43 |
+| seen AgentGraph | 2,259 | 2,176 | 83 | 114 | 46 |
+| unseen Direct | 2,354 | 2,227 | 127 | 204 | 28 |
+| unseen AgentGraph | 2,212 | 2,059 | 153 | 178 | 40 |
 
-`invalid=0` 表示未把不可执行命令提交给 environment；不可解析输出单独计入
-`parse errors`。`repeated` 只统计相邻完全相同 action，不包含 `A -> B -> A -> B`
-oscillation。
+所有 condition 的 environment `invalid_action_count=0`、
+`no_effect_action_count=0`：不在当前 admissible-action domain 的 candidate 被记录为
+policy-turn parse error，没有伪装成成功 Tool transition。
 
-首个可观察 failure layer：
-
-- seen：`tool_interface=87`、`director_canvas=7`；
-- unseen：`tool_interface=86`、`director_canvas=10`。
-
-这些是 trajectory 内可恢复或终局前的失败层，不等同于 episode-level provider /
-environment operational failure。
-
-## 5. 自然 AgentGraph topology
-
-`valid_seen` 的最终/evaluated topology：
+最终/evaluated topology：
 
 ```text
-empty 6, single 58, serial_2 31, serial_3_plus 5,
-parallel 18, fan_in 13, mixed 6, reciprocal 3
+valid_seen:
+  empty 6, single 58, serial_2 31, serial_3_plus 5,
+  parallel 18, fan_in 13, mixed 6, reciprocal 3
+
+valid_unseen:
+  empty 1, single 45, serial_2 39, serial_3_plus 4,
+  parallel 25, fan_in 13, fan_out 2, mixed 4, reciprocal 1
 ```
 
-`valid_unseen`：
+Director 真实生成了 chain、parallel、fan-in、fan-out、mixed、reciprocal graph；
+adapter 没有把 search space 固定为链式结构。当前结果不能证明复杂 topology
+本身有效或无效，因为许多 episode 的决定性错误发生在 environment exploration、
+object grounding 或 subgoal sequencing。
 
-```text
-empty 1, single 45, serial_2 39, serial_3_plus 4,
-parallel 25, fan_in 13, fan_out 2, mixed 4, reciprocal 1
-```
+## 5. Receipt-causal failure taxonomy
 
-Director 确实生成了 chain、parallel、fan-in、fan-out、mixed 和 reciprocal graph，
-说明 adapter 没有把 search space 固定为链式结构。但在本初版中，复杂 topology
-episode 多数先违反 stateful Tool ownership / execution-mode legality，因此不能从
-当前结果推断复杂 topology 本身无效，也不应根据测试集失败硬编码固定 workflow。
+每个 native failure episode 只分配一个 primary cause；`max_rounds` 单独作为
+terminal manifestation。完整数量、占比、零计数类别和逐类全链路 demo 见：
 
-## 6. 代表性 Wrong Demo
+[ALFWORLD_FAILURE_TAXONOMY_REPORT_ZH.md](/ssd1/iclr/1/.tmp/FlowSteer-alfworld-initial-v1/reports/alfworld_initial_adapter_v1/ALFWORLD_FAILURE_TAXONOMY_REPORT_ZH.md)。
 
-### 6.1 `valid_seen:00026` — Tool capability 未绑定
+| Primary failure class | valid_seen（n=94） | valid_unseen（n=94） |
+|---|---:|---:|
+| Environment exploration/search | 37（39.36%） | 35（37.23%） |
+| Object grounding/affordance | 32（34.04%） | 40（42.55%） |
+| Subgoal sequencing/action policy | 23（24.47%） | 18（19.15%） |
+| Tool/execution-profile | 1（1.06%） | 1（1.06%） |
+| Director/Canvas construction | 1（1.06%） | 0 |
+| Native parser / communication / runtime / evaluator / provider | 0 | 0 |
 
-Task：`heat some tomato and put it in fridge.`
+Agent communication primary failure 为 0，不表示 graph communication 已被充分
+利用：部分任务没有 relation；部分 artifact transport 正常但缺少 environment
+evidence；部分 Output pointer 没有接到 stateful Tool artifact。这些属于次生结构
+问题，不能在 receipt 无依据时虚构为“消息丢失”。
 
-Director 添加 React Agent，但没有设置结构化 `allowed_tools=["alfworld"]`。
-runtime 首轮明确返回：
+## 6. 当前最高已验证 AgentGraph profile
 
-```text
-environment Agent must allow exactly its request-scoped environment tool
-```
+严格排除 Direct、canary、小样本、prepared-only、未完成、train-heldout、不同 split
+和无效 evaluator 后，每个 official split 只有一个合格的完整 AgentGraph 条件，
+因此上述两个 `unified_architecture_v1` 条件分别是各自 split 的当前最高已验证
+profile。两个 official split 不互相比较，也不合并为一个官方 SR。
 
-后续 Director 把 `allowed_tools=[:alfworld]` 写入 free-text contract，而不是 Agent
-的结构化 Tool capability。最终虽形成 3-Agent `serial_3_plus`，environment action
-仍为 0，`score=0`，终止于 `max_rounds`。首个 failure layer 为
-`tool_interface`。
+版本边界：
 
-### 6.2 `valid_seen:00007` — object grounding 错误
+- Dataset protocol：`skillflow.protocol.v10`；
+- Evaluator：`skillflow.ragen_adapter.v2`；
+- Director prompt：`agentgraph.director.minimal-neutral.v10`；
+- Tool/runtime：`skillflow.ragen-alfworld.rollout-session.v1`；
+- policy：`qwen35-9b-base-alfworld-initial-v1`；
+- model catalog：`config/model_catalog_alfworld_paired_qwen35_v1.yaml`。
 
-Task：`put a cool apple in microwave.`
+版本化 best-profile pointer：
+[alfworld_agentgraph_best_v1.yaml](/ssd1/iclr/1/.tmp/FlowSteer-alfworld-initial-v1/config/best_profiles/alfworld_agentgraph_best_v1.yaml)。
+它按 `official_split` 指向现有可执行配置及其 manifest/report，不复制 condition、
+不改名冒充新实验。当前 runner 仍要求显式传入 `--config`，因此该文件是 canonical
+next-run pointer，不是 runner 自动消费的 hidden default。
 
-Tool owner 修复后，environment 正常执行。关键 transition：
+## 7. 结论与已知边界
 
-```text
-open fridge 1
--> fridge contains bowl 2, bowl 1, egg 1, potato 1
+ALFWorld 初版适配已完成：只新增 task/environment adapter，没有改变统一
+orchestration core；Stable Zero 与两个完整 official split 均有 native receipt。
 
-take potato 1 from fridge 1
--> cool potato 1 with fridge 1
--> move potato 1 to microwave 1
-```
+当前主要能力瓶颈是：
 
-任务目标为 apple，但 action policy 在检索未完成时改为处理 potato。20 个 action
-均合法，仍因 entity grounding 错误得到 `score=0`。后续 Canvas 编辑又删除已执行
-节点，terminal graph 为 `empty`。
+1. environment exploration/search 与 no-progress recovery；
+2. object grounding 与 state-dependent affordance selection；
+3. transformation、state precondition、count、placement、inspection 的 subgoal
+   sequencing；
+4. typed `execution_mode`、唯一 stateful Tool owner、`allowed_tools` 与 reciprocal
+   block 之间的联合 Canvas action legality 尚未进入结构化 action mask。
 
-### 6.3 `valid_seen:00009` — model catalog 与目标实体错误
-
-Task：`clean some tomato and put it in countertop.`
-
-Director turn 0 使用 catalog 外的 `model_id="via-hotswap"`，Canvas 以
-`unknown_model_id` 拒绝。后续 environment action 又转向 `fork 2`：
-
-```text
-take fork 2 from sinkbasin 1
--> clean fork 2 with sinkbasin 1
--> sinkbasin / countertop oscillation
-```
-
-目标 tomato 未完成，最终 `20 actions / score 0 / max_rounds`。首个 failure layer
-为 `director_canvas`。
-
-### 6.4 `valid_unseen:00000` — stateful Tool owner 缺失
-
-Task：`cool some lettuce and put it in countertop.`
-
-React Agent 没有结构化 `alfworld` Tool ownership，turn 0 即收到 request-scoped
-Tool 错误。最终为 3-Agent `parallel`、0 relation、0 environment action、
-`score=0 / max_rounds`。
-
-### 6.5 `valid_unseen:00038` — 无效 Canvas 修复
-
-Task：`clean some knife and put it in countertop.`
-
-Director 对 Agent 重复设置相同 model，Canvas 返回 `action made no graph change`；
-随后又给 reasoning Agent 添加 `alfworld` Tool，runtime 拒绝该 execution profile。
-最终两个节点同时成为 stateful Tool owner，违反单一 owner 约束，environment action
-仍为 0。
-
-### 6.6 `valid_unseen:00128` — pseudo-action 与多 Tool owner
-
-Task：`clean some pan and put it in countertop.`
-
-reasoning Agent 先输出非原生 pseudo-action `move_to(pan)`；新增 React Agent 又缺少
-Tool 绑定。Director 一度修复一个 owner，随后再次增加第二个 `alfworld` owner。
-最终为 3-Agent `mixed`，environment ledger 仍为 0 action、`score=0 / max_rounds`。
-
-## 7. 结论与下一步边界
-
-本轮目标已经完成：ALFWorld 只新增 task/environment adapter，没有改变统一
-orchestration core；Stable Zero、完整 official `valid_seen`、完整 official
-`valid_unseen` 和 Wrong Demo 报告均有真实 receipt。
-
-当前最明确的架构瓶颈不是 evaluator 或 Agent communication 丢失，而是 Director
-Canvas action 的联合参数合法性：React execution mode、唯一 stateful Tool owner、
-结构化 Tool capability 和 reciprocal relation 之间尚未进入 action mask 的联合
-约束。object grounding、搜索 oscillation 和 no-progress recovery 则属于后续 policy /
-Skill 学习问题。本轮按要求不根据 evaluation error 固定 ALFWorld workflow，也不
-启动训练或 Skill evolution。
-
+本轮没有根据 evaluation error 固定 ALFWorld workflow，没有训练，没有 Skill
+注入或 evolution，也没有将 `max_rounds`、Agent 自述或无效 evaluator 伪装成 task
+reward。
