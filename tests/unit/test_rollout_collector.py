@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 import time
 
@@ -92,6 +93,68 @@ class FakeGateway:
                 "temperature": 0.0,
                 "top_p": 1.0,
                 "max_tokens": 64,
+            },
+        )
+
+
+class UnifiedMetadataGateway:
+    async def generate(self, request):
+        return AgentResponse(
+            "final answer",
+            {
+                "provider_request_id": request.request_id + ":provider",
+                "provider_model": request.model.model_name,
+                "finish_reason": "stop",
+                "provider_id": request.provider.provider_id,
+                "model_id": request.model.model_id,
+                "attempt_count": True,
+                "generation_seed": 17,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "max_tokens": 64,
+                "execution_mode": "react",
+                "react_turns_used": 2,
+                "tool_calls": 1,
+                "tool_receipts": (
+                    {
+                        "tool_id": "qa-retrieval.search",
+                        "tool_version": "retrieval-v1",
+                        "latency_ms": 1.25,
+                    },
+                ),
+                "react_trace": (
+                    {"turn": 1, "observation_status": "success"},
+                    {"turn": 2, "observation_status": "completed"},
+                ),
+                "model_calls": (
+                    {
+                        "turn": 1,
+                        "request_id": request.request_id + ":react:1",
+                        "metadata": {
+                            "provider_request_id": "provider-react-1",
+                            "finish_reason": "stop",
+                            "prompt_tokens": 5,
+                            "completion_tokens": 1,
+                            "total_tokens": 6,
+                            "latency_ms": 1.25,
+                            "attempt_count": 1,
+                        },
+                    },
+                    {
+                        "turn": 2,
+                        "request_id": request.request_id + ":react:2",
+                        "metadata": {
+                            "provider_request_id": "provider-react-2",
+                            "finish_reason": "stop",
+                            "prompt_tokens": 7,
+                            "completion_tokens": 2,
+                            "total_tokens": 9,
+                            "latency_ms": 2.75,
+                            "attempt_count": 2,
+                        },
+                    },
+                ),
+                "opaque_runtime_object": object(),
             },
         )
 
@@ -251,7 +314,7 @@ def test_collector_materializes_exact_finish_trajectory_and_evidence(tmp_path):
         expected_server_weight_version="default",
     )
     orchestrator = AgentGraphOrchestrator(registry, client, max_rounds=3, seed=7)
-    environment = AgentWorkflowEnv(registry, gateway=FakeGateway())
+    environment = AgentWorkflowEnv(registry, gateway=UnifiedMetadataGateway())
     evidence = EvidenceStore(tmp_path)
     collector = AgentGraphRolloutCollector(
         orchestrator,
@@ -304,8 +367,32 @@ def test_collector_materializes_exact_finish_trajectory_and_evidence(tmp_path):
         ["solver"]
     ]
     request_receipt = trajectory.turns[-1].executions[0].metadata["request"]
+    assert request_receipt["is_output_agent"] is True
+    assert request_receipt["communication_condition"] == "normal"
     assert request_receipt["rendered_messages"][0]["role"] == "system"
     assert request_receipt["rendered_messages"][1]["role"] == "user"
+    response_receipt = trajectory.turns[-1].executions[0].metadata["response"]
+    assert response_receipt["execution_mode"] == "react"
+    assert response_receipt["react_turns_used"] == 2
+    assert response_receipt["tool_calls"] == 1
+    assert response_receipt["tool_receipts"][0]["tool_id"] == "qa-retrieval.search"
+    assert response_receipt["react_trace"][1]["observation_status"] == "completed"
+    assert response_receipt["model_calls"][0]["request_id"].endswith(":react:1")
+    assert response_receipt["prompt_tokens"] == 12
+    assert response_receipt["completion_tokens"] == 3
+    assert response_receipt["total_tokens"] == 15
+    assert response_receipt["latency_ms"] == 4.0
+    assert response_receipt["attempt_count"] == 3
+    execution = trajectory.turns[-1].executions[0]
+    assert execution.input_tokens == 12
+    assert execution.output_tokens == 3
+    assert execution.latency_ms == 4.0
+    assert "opaque_runtime_object" not in response_receipt
+    output_metadata = trajectory.turns[-1].runtime_summary["output_metadata"]["solver"]
+    assert output_metadata["tool_receipts"] == response_receipt["tool_receipts"]
+    assert output_metadata["attempt_count"] == 3
+    assert "opaque_runtime_object" not in output_metadata
+    json.dumps(trajectory.to_dict())
     assert len(evidence.snapshots) == 3
     assert len(evidence.trajectories) == 1
 

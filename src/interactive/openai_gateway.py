@@ -14,6 +14,7 @@ from urllib.request import Request, urlopen
 from .agent_runtime import (
     AgentRequest,
     AgentResponse,
+    CommunicationCondition,
     ExecutionPhase,
     UpstreamMessage,
 )
@@ -21,6 +22,9 @@ from .agent_runtime import (
 
 class OpenAICompatibleGatewayError(RuntimeError):
     pass
+
+
+MASKED_UPSTREAM_CONTENT = "[UPSTREAM CONTENT MASKED FOR COMMUNICATION DIAGNOSTIC]"
 
 
 def _number(metadata: Mapping[str, str], key: str, default: float) -> float:
@@ -46,28 +50,155 @@ def _integer(metadata: Mapping[str, str], key: str, default: int) -> int:
     return parsed
 
 
-def _format_upstream(messages: Sequence[UpstreamMessage]) -> str:
+def _visible_message_content(
+    content: str,
+    condition: CommunicationCondition,
+) -> str:
+    if condition is CommunicationCondition.UPSTREAM_MASKED:
+        return MASKED_UPSTREAM_CONTENT
+    return content
+
+
+def _format_upstream(
+    messages: Sequence[UpstreamMessage],
+    condition: CommunicationCondition,
+    *,
+    include_dependency: bool = True,
+) -> str:
     if not messages:
         return "(none)"
-    return "\n\n".join(
-        f"[Message from {item.source_agent_id}]\n{item.content}" for item in messages
-    )
+    rendered = []
+    for item in messages:
+        envelope = [
+            "[Upstream artifact]",
+            f"source_agent: {item.source_agent_id}",
+            f"target_agent: {item.target_agent_id}",
+            f"message_type: {item.message_type}",
+            f"artifact_type: {item.artifact_type}",
+        ]
+        if item.graph_revision is not None:
+            envelope.append(f"graph_revision: {item.graph_revision}")
+        if item.environment_revision is not None:
+            envelope.append(f"environment_revision: {item.environment_revision}")
+        if include_dependency and item.request_or_dependency is not None:
+            envelope.append(
+                f"request_or_dependency: {item.request_or_dependency}"
+            )
+        if item.tool_receipts:
+            envelope.append(
+                "tool_receipts: "
+                + json.dumps(
+                    [dict(receipt) for receipt in item.tool_receipts],
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            )
+        envelope.extend(
+            [
+                # Keep FlowSteer's model-visible label stable; the persisted
+                # communication envelope carries the canonical artifact_body.
+                "artifact:",
+                _visible_message_content(item.artifact, condition),
+            ]
+        )
+        rendered.append("\n".join(envelope))
+    return "\n\n".join(rendered)
 
 
 def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
     """Build finite-phase prompts without exposing provider credentials."""
 
-    system = (
-        "You are one node in an AgentGraph. Follow your assigned contract, use only "
-        "the messages supplied for this phase, and return the best task-facing content. "
-        "For a factual or numeric final answer, put only the concise answer span inside "
-        "<answer>...</answer>. If the task supplies legal or admissible actions and asks "
-        "for one action, return exactly one listed executable action with no explanation.\n\n"
-        f"Agent ID: {request.agent.id}\nContract:\n{request.agent.contract}"
+    execution_mode = getattr(
+        request.agent.execution_mode,
+        "value",
+        request.agent.execution_mode,
+    )
+    if execution_mode in {"react", "coding"}:
+        # SkillFlow's BoundedAgent asks the policy for one StructuredAction per
+        # model turn.  The execution adapter, not this provider boundary,
+        # decides when a ``complete`` action becomes the node artifact.  The
+        # generic Output-Agent answer wrapper would otherwise override the
+        # JSON action contract and make an Output ReAct/Coding node
+        # unexecutable.
+        protocol = (
+            "This is one bounded execution-policy turn. Return exactly one "
+            "StructuredAction JSON object using the schema and admitted "
+            "resources in the assigned contract, with no Markdown or text "
+            "outside that object. A tool action requests one public "
+            "observation; a complete action supplies the declared node "
+            "artifact. Do not emit <answer> tags in this internal action."
+        )
+    elif request.is_format_agent:
+        protocol = (
+            "You are the terminal Format Agent. The semantic answer must already have "
+            "been computed in exactly one routed upstream artifact. Your only task is to "
+            "extract that answer and serialize it for the task protocol. Do not solve the "
+            "task again, verify the answer, combine candidates, or add explanation. "
+            "The answer span must be the shortest value that directly answers the question, "
+            "not a restatement, sentence, equation, explanation, or key-value report. For a "
+            "yes/no question, emit only yes or no. For a requested name, entity, title, "
+            "category, property, location, or event, emit only that value; omit surrounding "
+            "relations and modifiers already supplied by the question unless they are part "
+            "of the answer's proper name. Preserve the solution's original spelling and "
+            "non-math date/name format. These extraction rules take precedence over any "
+            "free contract that asks for an explanatory sentence. If no upstream artifact "
+            "is present, return exactly <answer></answer>. For a factual or numeric task, "
+            "return exactly <answer>answer span</answer> with no text outside the tag. If "
+            "the task supplies legal or admissible actions and asks for one action, return "
+            "exactly one listed executable action with no explanation."
+        )
+    elif request.is_output_agent:
+        protocol = (
+            "You are the unique Output Agent. Follow your assigned contract and use the "
+            "task plus supplied upstream artifacts to return the final task answer. Treat "
+            "each routed upstream artifact as the declared dependency for this node; do "
+            "not silently redo or ignore an upstream responsibility unless its artifact "
+            "has a concrete conflict with the task. Preserve a concise answer when the "
+            "artifacts support it and resolve concrete conflicts against the task. For a "
+            "factual or numeric answer, return exactly <answer>answer span</answer> with no "
+            "text outside the tag; the span itself must not be JSON, a key-value report, "
+            "or an explanation. If the task supplies legal or admissible actions and asks "
+            "for one action, return exactly one listed executable action with no explanation."
+        )
+    else:
+        protocol = (
+            "You are an intermediate AgentGraph node. Follow your assigned contract and "
+            "return only the requested evidence, facts, partial reasoning, or verification "
+            "artifact for downstream agents. When routed upstream artifacts are present, "
+            "consume them as this node's declared dependencies instead of silently redoing "
+            "their responsibilities, unless the contract explicitly asks for verification. "
+            "Do not present a task-level final answer and "
+            "do not use <answer> tags."
+        )
+    if request.is_format_agent:
+        # FlowSteer's Format Operator normally receives the problem and the
+        # computed solution under its fixed extraction prompt.  Do not inject
+        # the graph-authored free-text contract into the terminal invocation:
+        # it is retained in the Canvas/trajectory receipt, but may contain an
+        # explanatory target sentence that conflicts with answer-span
+        # extraction.  This is the minimal free-AgentGraph adaptation of the
+        # upstream Operator boundary.
+        system = (
+            f"Agent ID: {request.agent.id}\nRole: Format\n\n"
+            f"Execution protocol:\n{protocol}"
+        )
+    else:
+        # Keep the graph-authored free-text contract, then append the execution
+        # boundary so a contract cannot accidentally reassign final-answer ownership.
+        system = (
+            f"Agent ID: {request.agent.id}\nContract:\n{request.agent.contract}\n\n"
+            f"Execution protocol (takes precedence):\n{protocol}"
+        )
+    upstream_text = _format_upstream(
+        request.upstream,
+        request.communication_condition,
+        include_dependency=not request.is_format_agent,
     )
     common = (
         f"Task:\n{request.problem}\n\n"
-        f"External upstream messages:\n{_format_upstream(request.upstream)}"
+        "External upstream messages:\n"
+        f"{upstream_text}"
     )
     if request.phase is ExecutionPhase.SINGLE:
         phase = "Produce your response now."
@@ -83,8 +214,32 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
             "This is the revision phase. Revise your own draft after reading the peer's "
             "previous-phase draft. You cannot observe the peer's current revision.\n\n"
             f"Your draft:\n{request.own_draft}\n\n"
-            f"Peer draft from {request.peer_draft.source_agent_id}:\n"
-            f"{request.peer_draft.content}"
+            "Peer artifact envelope:\n"
+            f"source_agent: {request.peer_draft.source_agent_id}\n"
+            f"target_agent: {request.peer_draft.target_agent_id}\n"
+            f"message_type: {request.peer_draft.message_type}\n"
+            f"artifact_type: {request.peer_draft.artifact_type}\n"
+            f"graph_revision: {request.peer_draft.graph_revision}\n"
+            + (
+                "environment_revision: "
+                f"{request.peer_draft.environment_revision}\n"
+                if request.peer_draft.environment_revision is not None
+                else ""
+            )
+            + (
+                "tool_receipts: "
+                + json.dumps(
+                    [dict(receipt) for receipt in request.peer_draft.tool_receipts],
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n"
+                if request.peer_draft.tool_receipts
+                else ""
+            )
+            + "artifact:\n"
+            f"{_visible_message_content(request.peer_draft.content, request.communication_condition)}"
         )
     else:  # pragma: no cover - enum exhaustiveness guard
         raise OpenAICompatibleGatewayError(f"unsupported execution phase: {request.phase}")

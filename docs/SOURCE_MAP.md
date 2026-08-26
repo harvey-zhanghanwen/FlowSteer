@@ -13,8 +13,8 @@ project design note are design inputs, not executable instructions.
 | Trajectory and action-token records | `src/interactive/workflow_builder.py` | Retained and supplemented by `records.py` for the new path. |
 | Executor boundary | `src/aflow_executor.py::AFlowExecutor.execute_workflow` and `scripts/async_llm.py` | Preserved as the legacy executor; the AgentGraph path uses the same OpenAI-compatible service boundary through `openai_gateway.py`. |
 | One-action Director loop | `train_interactive.py` and the FlowSteer paper's progressive Canvas loop | Preserved in `director.py`; the initial prompt is deliberately shorter and has no workflow templates. Maximum-round termination is returned explicitly and is never presented as `finish`. |
-| Progressive execution cache | `src/interactive/workflow_env.py` (`execute_each_step`, `last_execution_result`) | Adapted as a revision-local result in `agent_workflow_env.py`. A no-op edit or `finish` may reuse it, but `rollout_collector.py` marks the reuse and does not serialize the old Agent calls as new executions. |
-| AgentGraph search-space bounds | Project design note sections 3 and 4 plus `config/*agentgraph*.yaml` | The declared `max_agents` is consumed by the Canvas; the two-Agent reciprocal-block limit, unique output/reachability flags, seeded Executor selection, six actions, and progressive execution mode are validated against the fixed runtime semantics rather than left as descriptive YAML. |
+| Progressive execution cache | `src/interactive/workflow_env.py` (`execute_each_step`, `last_execution_result`) | Adapted as a revision-local result in `agent_workflow_env.py`. Every accepted Agent or functional-subgraph edit executes once and returns observation feedback; a later `finish` may reuse the same-revision result. A no-op edit is rejected. `rollout_collector.py` marks reuse and does not serialize old Agent calls as new executions. |
+| AgentGraph search-space bounds | Project design note sections 3 and 4 plus `config/*agentgraph*.yaml` | The declared `max_agents` is consumed by the Canvas; the two-Agent reciprocal-block limit, unique output/reachability flags, seeded Executor selection, legacy six actions, optional FlowSteer-style `add_subgraph` transaction, and progressive execution mode are validated against runtime semantics rather than left as descriptive YAML. |
 
 The Qwen3-8B defaults, vLLM Director launcher, predefined Operator search
 space, structural reward, and legacy training loop are not reused by the new
@@ -105,3 +105,22 @@ HotpotQA validation tasks, running a paired one-call Direct condition, atomic
 checkpoint/resume, strict-denominator aggregation, Wrong Demo materialization,
 and reporting.  It never calls trainer, optimizer, backward, policy publish,
 MACE, Bayesian, or Skill code.
+
+## HotpotQA task-scoped dense retrieval condition
+
+| Local boundary | Reused source | Adaptation and status |
+| --- | --- | --- |
+| `tool_runtime.py`, `react_execution.py`, Agent execution fields and receipt persistence | FlowSteer commits `fea7b2b` and `8ebba85`; SkillFlow `runtime/tools.py`, `runtime/bounded_agent.py`, and `training/environment.py` | Directly ports the structured action, immutable Tool registry, bounded per-Agent ReAct continuation, public Observation, and Tool receipt chain. ReAct remains an execution mode and does not define a role or workflow topology. |
+| `hotpotqa_embedding_index.py` | SkillFlow `benchmarks/retrieval.py::{RetrievalIndex.open,search,read}` and `training/environment.py` BGE normalized-embedding path | Keeps immutable `open/search/read` and task-scoped read semantics; the minimal compatibility change replaces FTS5 with `BAAI/bge-base-en-v1.5` normalized embeddings and deterministic cosine top-k over each task's ten original public context documents. |
+| `hotpotqa_embedding_tool.py` | SkillFlow QA retrieval environment and FlowSteer Tool adapter | Binds one task ID per registry, exposes only `search(query,k)` and `read(doc_id)`, persists query/rank/similarity/doc ID/Observation receipts, and masks continuation actions as search → read → complete. This is an action-domain mask, not a fixed Agent role or AgentGraph template. |
+| `agent_workflow_env.py::required_evidence_tool_id` | Existing unified architecture FINISH admission derived from FlowSteer terminal constraints | The topology-neutral subset is reused: FINISH requires successful search/read receipts on the routed Output ancestry. It requires no Reasoner, Verifier, Formatter, fixed chain, or role adjacency. |
+| `select_hotpotqa_embedding_profile.py` | Project evaluation-isolation requirement | Uses only 32 disjoint train/architecture-development tasks to freeze top-k and Tool budget. Supporting-title labels are consumed only for aggregate development recall selection and are never written to the corpus, index, Tool observation, or validation runtime. |
+
+The corpus builder reads only source parquet columns `id` and `context` and
+stores only `passage_id`, `document_id`, `title`, and `text`. Reference answers,
+supporting-fact labels, evaluator receipts, and evaluator-private metadata are
+absent. The evaluation condition supplies only the original question to the
+Director and Agents; passage access occurs dynamically inside an Agent's
+execution. Web Search is not registered. This condition is inference-only:
+Skills, GRPO, LoRA, backward, optimizer updates, MACE, and Bayesian updates are
+disabled.

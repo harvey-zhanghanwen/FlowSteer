@@ -77,9 +77,19 @@ def _resolve(root: Path, value: str) -> Path:
 
 
 def _git_state(root: Path) -> Mapping[str, Optional[str]]:
+    git_args: list[str] = []
+    git_file = root / ".git"
+    if git_file.is_file():
+        first_line = git_file.read_text(encoding="utf-8").splitlines()[0]
+        if first_line.startswith("gitdir: "):
+            git_args = [
+                f"--git-dir={first_line[len('gitdir: '):].strip()}",
+                f"--work-tree={root}",
+            ]
+
     def read(*args: str) -> Optional[str]:
         result = subprocess.run(
-            ["git", *args],
+            ["git", *git_args, *args],
             cwd=root,
             check=False,
             capture_output=True,
@@ -139,6 +149,39 @@ def validate_hotpot_config(config: Mapping[str, Any]) -> None:
         if not str(director.get(name, "")).strip():
             raise ConfigurationError(f"director.{name} must be non-empty")
 
+    raw_retrieval = config.get("qa_embedding_retrieval")
+    if raw_retrieval is not None:
+        retrieval = _mapping(raw_retrieval, "qa_embedding_retrieval")
+        retrieval_checks = {
+            "enabled": retrieval.get("enabled") is True,
+            "condition_id": retrieval.get("condition_id") == experiment.get("condition_id"),
+            "mode": retrieval.get("mode") == "model_driven_search_read",
+            "dataset_scope": retrieval.get("dataset_scope") == ["hotpotqa"],
+            "question_scope": retrieval.get("question_scope") == "question_only",
+            "normalize_embeddings": retrieval.get("normalize_embeddings") is True,
+            "similarity": retrieval.get("similarity") == "cosine",
+            "web_search_enabled": retrieval.get("web_search_enabled") is False,
+        }
+        failed_retrieval = [
+            name for name, valid in retrieval_checks.items() if not valid
+        ]
+        if failed_retrieval:
+            raise ConfigurationError(
+                "HotpotQA embedding retrieval condition is invalid: "
+                + ", ".join(failed_retrieval)
+            )
+        for name in (
+            "search_top_k",
+            "max_turns_per_agent_call",
+            "max_tool_calls_per_agent_call",
+            "development_sample_count",
+        ):
+            value = retrieval.get(name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ConfigurationError(
+                    f"qa_embedding_retrieval.{name} must be a positive integer"
+                )
+
 
 def _paths(config: Mapping[str, Any], root: Path) -> dict[str, Path]:
     storage = _mapping(config["storage"], "storage")
@@ -154,7 +197,26 @@ def _paths(config: Mapping[str, Any], root: Path) -> dict[str, Path]:
         "report_json": "report_json_path",
         "report_markdown": "report_markdown_path",
     }
-    return {name: _resolve(root, str(storage[field])) for name, field in names.items()}
+    paths = {name: _resolve(root, str(storage[field])) for name, field in names.items()}
+    if storage.get("error_demos_path") is not None:
+        paths["error_demos"] = _resolve(root, str(storage["error_demos_path"]))
+    optional_names = {
+        "retrieval_profile_selection": "retrieval_profile_selection_path",
+        "retrieval_index_manifest": "retrieval_index_manifest_path",
+        "retrieval_index_smoke": "retrieval_index_smoke_path",
+        "retrieval_index_rebuild_smoke": "retrieval_index_rebuild_smoke_path",
+    }
+    for name, field in optional_names.items():
+        if storage.get(field) is not None:
+            paths[name] = _resolve(root, str(storage[field]))
+    return paths
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, Mapping):
+        raise HotpotRoundError(f"{path}: expected one JSON object")
+    return dict(value)
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -342,6 +404,52 @@ async def _collect_direct(
     protocol = str(bounded["direct_protocol"])
     seed = int(experiment["seed"])
     concurrency = int(bounded["concurrency"])
+    source_value = bounded.get("direct_source_path")
+    if source_value is not None:
+        source_path = _resolve(PROJECT_ROOT, str(source_value))
+        source_by_task = _by_task(_read_jsonl(source_path))
+        rescored: dict[str, dict[str, Any]] = {}
+        for task in selected:
+            source = source_by_task.get(task.task_id)
+            if source is None:
+                raise HotpotRoundError(
+                    f"saved Direct source is missing frozen task {task.task_id}"
+                )
+            answer = source.get("final_answer")
+            if not isinstance(answer, str):
+                raise HotpotRoundError(
+                    f"saved Direct source has no text answer for {task.task_id}"
+                )
+            evaluation = await evaluate_task(task, answer)
+            if not evaluation.valid:
+                raise HotpotRoundError(
+                    f"saved Direct answer is evaluator-invalid for {task.task_id}"
+                )
+            rescored[task.task_id] = {
+                "schema_version": "flowsteer.hotpotqa.direct_rescore.v1",
+                "task_id": task.task_id,
+                "task": task.to_dict(),
+                "condition": "direct_local_qwen35_9b_official_rescore",
+                "protocol": protocol,
+                "model_id": source.get("model_id", model_id),
+                "provider_id": source.get("provider_id"),
+                "provider_model": source.get("provider_model"),
+                "generation_seed": source.get("generation_seed", seed),
+                "final_answer": answer,
+                "evaluation": asdict(evaluation),
+                "execution": source.get("execution"),
+                "source_prediction_path": str(source_path),
+                "model_call_reused": True,
+                "completed_at": _utc_now(),
+            }
+        _persist_ordered(path, selected, rescored)
+        manifest["direct_progress"] = {
+            "completed": len(rescored),
+            "model_calls": 0,
+            "saved_predictions_rescored": len(rescored),
+        }
+        _write_json(manifest_path, manifest)
+        return rescored
     by_task = {
         task_id: value
         for task_id, value in _by_task(_read_jsonl(path)).items()
@@ -628,6 +736,65 @@ def _graph_telemetry(trajectory: Optional[Mapping[str, Any]]) -> Mapping[str, An
     }
 
 
+def _tool_receipts(trajectory: Optional[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    if trajectory is None:
+        return []
+    turns = trajectory.get("turns")
+    if not isinstance(turns, list):
+        return []
+    receipts: list[dict[str, Any]] = []
+    for turn in turns:
+        if not isinstance(turn, Mapping):
+            continue
+        executions = turn.get("executions", ())
+        if not isinstance(executions, list):
+            continue
+        for execution in executions:
+            if not isinstance(execution, Mapping):
+                continue
+            metadata = execution.get("metadata")
+            response = metadata.get("response") if isinstance(metadata, Mapping) else None
+            raw = response.get("tool_receipts", ()) if isinstance(response, Mapping) else ()
+            if not isinstance(raw, list):
+                continue
+            receipts.extend(dict(item) for item in raw if isinstance(item, Mapping))
+    return receipts
+
+
+def _tool_statistics(
+    trajectories: Mapping[str, Mapping[str, Any]],
+) -> Mapping[str, Any]:
+    by_task = {task_id: _tool_receipts(value) for task_id, value in trajectories.items()}
+    receipts = [receipt for values in by_task.values() for receipt in values]
+    actions = [
+        str(receipt.get("request", {}).get("action", ""))
+        for receipt in receipts
+        if isinstance(receipt.get("request"), Mapping)
+    ]
+    rewritten = 0
+    for values in by_task.values():
+        queries = []
+        for receipt in values:
+            request = receipt.get("request")
+            if not isinstance(request, Mapping) or request.get("action") != "search":
+                continue
+            arguments = request.get("arguments")
+            query = arguments.get("query") if isinstance(arguments, Mapping) else None
+            if isinstance(query, str) and query not in queries:
+                queries.append(query)
+        rewritten += len(queries) > 1
+    return {
+        "tool_invoked_tasks": sum(bool(values) for values in by_task.values()),
+        "tool_calls": len(receipts),
+        "successful_calls": sum(receipt.get("error_type") is None for receipt in receipts),
+        "failed_calls": sum(receipt.get("error_type") is not None for receipt in receipts),
+        "search_calls": actions.count("search"),
+        "read_calls": actions.count("read"),
+        "query_rewrite_tasks": rewritten,
+        "latency_ms": sum(float(receipt.get("latency_ms") or 0.0) for receipt in receipts),
+    }
+
+
 def _failure_type(
     direct: Optional[Mapping[str, Any]],
     trajectory: Optional[Mapping[str, Any]],
@@ -769,6 +936,42 @@ def _aggregate(rows: Sequence[Mapping[str, Any]], condition: str) -> Mapping[str
     }
 
 
+async def _official_rescore_saved_agentgraph(
+    selected: Sequence[TaskRecord],
+    source_path: Path,
+) -> Mapping[str, Any]:
+    """Rescore saved Round-01 text without making any model or Tool call."""
+
+    source_by_task = _by_task(_read_jsonl(source_path))
+    exact_match = 0.0
+    token_f1 = 0.0
+    valid = 0
+    for task in selected:
+        source = source_by_task.get(task.task_id)
+        if source is None:
+            continue
+        answer = source.get("final_answer")
+        if not isinstance(answer, str):
+            answer = ""
+        evaluation = await evaluate_task(task, answer)
+        if not evaluation.valid:
+            continue
+        valid += 1
+        exact_match += float(evaluation.metrics.get("exact_match", 0.0))
+        token_f1 += float(evaluation.metrics.get("token_f1", 0.0))
+    denominator = len(selected)
+    return {
+        "source_path": str(source_path),
+        "denominator": denominator,
+        "completed": sum(task.task_id in source_by_task for task in selected),
+        "evaluator_valid": valid,
+        "strict_exact_match": exact_match / denominator if denominator else 0.0,
+        "strict_token_f1": token_f1 / denominator if denominator else 0.0,
+        "evaluator_version": "hotpotqa.official.answer.v1",
+        "model_calls": 0,
+    }
+
+
 def _report(rows: Sequence[Mapping[str, Any]], config: Mapping[str, Any]) -> Mapping[str, Any]:
     direct = _aggregate(rows, "direct")
     graph = _aggregate(rows, "agentgraph")
@@ -779,7 +982,11 @@ def _report(rows: Sequence[Mapping[str, Any]], config: Mapping[str, Any]) -> Map
         "dataset": "HotpotQA",
         "project_split": "validation",
         "native_source_split": "train",
-        "input_context": "full_10_passages",
+        "input_context": (
+            "question_only_dynamic_embedding_search_read"
+            if config.get("qa_embedding_retrieval") is not None
+            else "full_10_passages"
+        ),
         "sample_count": len(rows),
         "direct_local_baseline": direct,
         "agentgraph": graph,
@@ -798,6 +1005,9 @@ def _report(rows: Sequence[Mapping[str, Any]], config: Mapping[str, Any]) -> Map
         },
         "failure_types": dict(sorted(failure_counts.items())),
         "wrong_demo_count": len(wrong),
+        "terminal_failures": sum(
+            row["agentgraph"].get("explicit_finish") is not True for row in rows
+        ),
         "typical_wrong_demo_task_ids": [row["task_id"] for row in wrong[:10]],
         "policy_version": config["director"]["behavior_policy_version"],
         "policy_adapter": config["director"]["behavior_adapter_name"],
@@ -818,9 +1028,29 @@ def _report_markdown(report: Mapping[str, Any]) -> str:
     delta = report["agentgraph_minus_direct"]
     failures = report["failure_types"]
     failure_lines = "\n".join(f"- `{name}`: {count}" for name, count in failures.items())
+    tool = report.get("tool_usage") if isinstance(report.get("tool_usage"), Mapping) else {}
+    baseline = (
+        report.get("round01_agentgraph_official_rescore")
+        if isinstance(report.get("round01_agentgraph_official_rescore"), Mapping)
+        else None
+    )
+    baseline_line = ""
+    if baseline is not None:
+        baseline_line = (
+            "\nRound-01 saved AgentGraph outputs rescored with the same official "
+            f"answer evaluator: **{100 * baseline['strict_exact_match']:.2f} EM**, "
+            f"**{100 * baseline['strict_token_f1']:.2f} F1**.\n"
+        )
+    input_description = (
+        "The Director and Agent Runtime receive only the original question; "
+        "public passages are obtained dynamically through the task-scoped "
+        "embedding search/read Tool."
+        if report.get("input_context") == "question_only_dynamic_embedding_search_read"
+        else "The model input uses all ten supplied passages."
+    )
     return f"""# HotpotQA Architecture Validation — Round 01
 
-Fixed project-held-out samples: **{report['sample_count']}**. The model input uses all ten supplied passages. No training, backward pass, optimizer step, policy update, MACE, Bayesian, or Skill loop ran.
+Fixed project-held-out samples: **{report['sample_count']}**. {input_description} No training, backward pass, optimizer step, policy update, MACE, Bayesian, or Skill loop ran.
 
 | Condition | Completed | Valid | Strict EM | Strict F1 |
 |---|---:|---:|---:|---:|
@@ -828,6 +1058,15 @@ Fixed project-held-out samples: **{report['sample_count']}**. The model input us
 | AgentGraph | {graph['completed']} | {graph['evaluator_valid']} | {100 * graph['strict_exact_match']:.2f} | {100 * graph['strict_token_f1']:.2f} |
 
 AgentGraph − Direct: **{100 * delta['exact_match']:+.2f} EM**, **{100 * delta['token_f1']:+.2f} F1**.
+{baseline_line}
+Terminal failures: **{report.get('terminal_failures', 0)}**.
+
+## Dynamic retrieval Tool
+
+- Tool-invoked tasks: **{tool.get('tool_invoked_tasks', 0)}**
+- Calls: **{tool.get('tool_calls', 0)}** (`search`={tool.get('search_calls', 0)}, `read`={tool.get('read_calls', 0)})
+- Successful / failed calls: **{tool.get('successful_calls', 0)} / {tool.get('failed_calls', 0)}**
+- Tasks with query rewriting: **{tool.get('query_rewrite_tasks', 0)}**
 
 ## Failure types
 
@@ -843,6 +1082,8 @@ def _stable_zero_check(
     tasks: Sequence[TaskRecord],
     direct: Mapping[str, Mapping[str, Any]],
     trajectories: Mapping[str, Mapping[str, Any]],
+    *,
+    require_dynamic_retrieval: bool = False,
 ) -> Mapping[str, Any]:
     checks: list[dict[str, Any]] = []
     for task in tasks:
@@ -857,6 +1098,12 @@ def _stable_zero_check(
             and turn.get("director_latency_ms") is not None
             for turn in turns
         )
+        tool_receipts = _tool_receipts(trajectory)
+        retrieval_receipt = any(
+            receipt.get("tool_id") == "qa-retrieval"
+            and receipt.get("error_type") is None
+            for receipt in tool_receipts
+        )
         passed = bool(
             direct_value
             and trajectory
@@ -865,6 +1112,7 @@ def _stable_zero_check(
             and trajectory.get("evaluation", {}).get("valid") is True
             and _output_inbox(trajectory) is not None
             and full_turn_receipts
+            and (not require_dynamic_retrieval or retrieval_receipt)
         )
         checks.append(
             {
@@ -875,12 +1123,17 @@ def _stable_zero_check(
                 "explicit_finish": trajectory.get("explicit_finish") if trajectory else False,
                 "output_inbox_saved": _output_inbox(trajectory) is not None,
                 "full_turn_receipts": full_turn_receipts,
+                "dynamic_retrieval_receipt": retrieval_receipt,
             }
         )
     passed = any(check["passed"] for check in checks)
     return {
         "passed": passed,
-        "criterion": "at_least_one_real_fixed_task_completed_the_full_chain",
+        "criterion": (
+            "at_least_one_real_fixed_task_completed_full_chain_with_dynamic_retrieval"
+            if require_dynamic_retrieval
+            else "at_least_one_real_fixed_task_completed_the_full_chain"
+        ),
         "checks": checks,
     }
 
@@ -912,7 +1165,11 @@ async def run_hotpot_round(
         "selected_task_ids": [task.task_id for task in selected],
         "sample_count": len(selected),
         "fixed_split": "validation",
-        "input_context": "full_10_passages",
+        "input_context": (
+            "question_only_dynamic_embedding_search_read"
+            if config.get("qa_embedding_retrieval") is not None
+            else "full_10_passages"
+        ),
         "training_enabled": False,
         "optimizer_updates": 0,
         "artifacts": {name: str(path) for name, path in paths.items()},
@@ -985,7 +1242,31 @@ async def run_hotpot_round(
     _atomic_jsonl(paths["paired"], rows)
     wrong = [row for row in rows if float(row["agentgraph"]["exact_match"]) < 1.0]
     _atomic_jsonl(paths["wrong"], wrong)
-    stable_zero = _stable_zero_check(active, direct, trajectories)
+    if "error_demos" in paths:
+        demos = []
+        for row in wrong[:3]:
+            task_id = str(row["task_id"])
+            demos.append(
+                {
+                    "schema_version": "flowsteer.hotpotqa.error_demo.v1",
+                    "task_id": task_id,
+                    "question": row["question"],
+                    "ground_truth": row["ground_truth"],
+                    "final_answer": row["agentgraph"]["final_answer"],
+                    "exact_match": row["agentgraph"]["exact_match"],
+                    "token_f1": row["agentgraph"]["token_f1"],
+                    "failure_type": row["failure_type"],
+                    "director_canvas_agent_tool_evaluator_trajectory": trajectories.get(task_id),
+                    "direct_comparison": row["direct"],
+                }
+            )
+        _atomic_jsonl(paths["error_demos"], demos)
+    stable_zero = _stable_zero_check(
+        active,
+        direct,
+        trajectories,
+        require_dynamic_retrieval=config.get("qa_embedding_retrieval") is not None,
+    )
     manifest["stable_zero"] = stable_zero
     if not stable_zero["passed"]:
         manifest.update(status="failed_stable_zero", completed_at=_utc_now())
@@ -1001,7 +1282,62 @@ async def run_hotpot_round(
         _write_json(paths["manifest"], manifest)
         return manifest
 
-    report = _report(rows, config)
+    report = {
+        **dict(_report(rows, config)),
+        "tool_usage": _tool_statistics(trajectories),
+        "retrieval_profile": (
+            dict(config["qa_embedding_retrieval"])
+            if isinstance(config.get("qa_embedding_retrieval"), Mapping)
+            else None
+        ),
+    }
+    if config.get("qa_embedding_retrieval") is not None:
+        required_retrieval_artifacts = {
+            name: paths[name]
+            for name in (
+                "retrieval_profile_selection",
+                "retrieval_index_manifest",
+                "retrieval_index_smoke",
+                "retrieval_index_rebuild_smoke",
+            )
+        }
+        missing = [str(path) for path in required_retrieval_artifacts.values() if not path.is_file()]
+        if missing:
+            raise HotpotRoundError(
+                "required retrieval evidence artifact is missing: " + ", ".join(missing)
+            )
+        report = {
+            **dict(report),
+            "retrieval_evidence": {
+                name: {
+                    "path": str(path),
+                    "value": _read_json(path),
+                }
+                for name, path in required_retrieval_artifacts.items()
+            },
+        }
+    baseline_source = _mapping(
+        config["hotpotqa_evaluation"], "hotpotqa_evaluation"
+    ).get("agentgraph_baseline_source_path")
+    if baseline_source is not None:
+        official_baseline = await _official_rescore_saved_agentgraph(
+            active,
+            _resolve(root, str(baseline_source)),
+        )
+        report = {
+            **dict(report),
+            "round01_agentgraph_official_rescore": official_baseline,
+            "agentgraph_minus_round01_official_rescore": {
+                "exact_match": (
+                    report["agentgraph"]["strict_exact_match"]
+                    - official_baseline["strict_exact_match"]
+                ),
+                "token_f1": (
+                    report["agentgraph"]["strict_token_f1"]
+                    - official_baseline["strict_token_f1"]
+                ),
+            },
+        }
     _write_json(paths["report_json"], report)
     paths["report_markdown"].parent.mkdir(parents=True, exist_ok=True)
     paths["report_markdown"].write_text(_report_markdown(report), encoding="utf-8")
@@ -1014,6 +1350,8 @@ async def run_hotpot_round(
             "agentgraph": report["agentgraph"],
             "delta": report["agentgraph_minus_direct"],
         },
+        tool_usage=report["tool_usage"],
+        terminal_failures=report["terminal_failures"],
         failure_type_counts=report["failure_types"],
         git_end=_git_state(root),
         completed_at=_utc_now(),

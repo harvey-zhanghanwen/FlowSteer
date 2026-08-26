@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 import hashlib
 import json
-from typing import Collection, Dict, Iterable, List, Optional, Sequence, Set, Tuple, Union
+from collections import deque
+from typing import Collection, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 from .model_registry import ModelRegistry
 
@@ -14,17 +16,77 @@ class GraphMutationError(ValueError):
     """Raised when an atomic graph mutation cannot be applied."""
 
 
+DEPENDENCY_EVIDENCE_STATUSES = frozenset({"unverified", "weak", "verified"})
+
+
+class AgentExecutionMode(str, Enum):
+    """Agent execution semantics; this is not a fixed workflow role."""
+
+    REASONING = "reasoning"
+    REACT = "react"
+    CODING = "coding"
+
+
+@dataclass(frozen=True, slots=True)
+class DependencyEdgeEvidence:
+    """Explicit evidence grade for one directed communication edge.
+
+    The graph never promotes an edge from an answer change or a structural
+    mask alone.  ``weak`` is appropriate for a matching runtime delivery
+    receipt.  ``verified`` must be supplied only by a caller holding an
+    independently validated paired-intervention receipt.  This keeps the
+    read-only diagnostic separate from runtime, reward, and policy behavior.
+    """
+
+    source_id: str
+    target_id: str
+    status: str
+    evidence_id: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.source_id, str) or not self.source_id.strip():
+            raise ValueError("dependency evidence source_id must be non-empty")
+        if not isinstance(self.target_id, str) or not self.target_id.strip():
+            raise ValueError("dependency evidence target_id must be non-empty")
+        source_id = self.source_id.strip()
+        target_id = self.target_id.strip()
+        if source_id == target_id:
+            raise ValueError("dependency evidence cannot describe a self edge")
+        if (
+            not isinstance(self.status, str)
+            or self.status not in DEPENDENCY_EVIDENCE_STATUSES
+        ):
+            raise ValueError(
+                "dependency evidence status must be unverified, weak, or verified"
+            )
+        if self.evidence_id is not None and (
+            not isinstance(self.evidence_id, str) or not self.evidence_id.strip()
+        ):
+            raise ValueError("dependency evidence_id must be non-empty when supplied")
+        object.__setattr__(self, "source_id", source_id)
+        object.__setattr__(self, "target_id", target_id)
+        if self.evidence_id is not None:
+            object.__setattr__(self, "evidence_id", self.evidence_id.strip())
+
+
 @dataclass(frozen=True, slots=True, init=False)
 class AgentNode:
     """A free Agent role bound to a stable model ID.
 
     ``prompt`` is accepted as an initialization alias for ``contract`` and is
     exposed as a read-only property for callers that use prompt terminology.
+    ``role_family`` is optional free-text analysis metadata and has no graph
+    execution or topology semantics.
     """
 
     id: str
     model_id: str
     contract: str
+    role_family: Optional[str]
+    allowed_tools: Tuple[str, ...]
+    execution_mode: AgentExecutionMode
+    artifact_type: str
+    completion_condition: Optional[str]
 
     def __init__(
         self,
@@ -33,6 +95,11 @@ class AgentNode:
         contract: Optional[str] = None,
         *,
         prompt: Optional[str] = None,
+        role_family: Optional[str] = None,
+        allowed_tools: Collection[str] = (),
+        execution_mode: Union[AgentExecutionMode, str] = AgentExecutionMode.REASONING,
+        artifact_type: str = "text",
+        completion_condition: Optional[str] = None,
     ) -> None:
         if not isinstance(id, str) or not isinstance(model_id, str):
             raise TypeError("AgentNode id and model_id must be strings")
@@ -43,16 +110,74 @@ class AgentNode:
             raise ValueError("AgentNode requires contract or prompt")
         if not isinstance(resolved_contract, str):
             raise TypeError("AgentNode contract must be a string")
+        if role_family is not None:
+            if not isinstance(role_family, str):
+                raise TypeError("AgentNode role_family must be a string when supplied")
+            role_family = role_family.strip()
+            if not role_family:
+                raise ValueError("AgentNode role_family must be non-empty when supplied")
+        if isinstance(allowed_tools, (str, bytes)) or not isinstance(
+            allowed_tools, Collection
+        ):
+            raise TypeError("AgentNode allowed_tools must be a collection of strings")
+        normalized_tools: List[str] = []
+        for tool_id in allowed_tools:
+            if not isinstance(tool_id, str) or not tool_id.strip():
+                raise ValueError(
+                    "AgentNode allowed_tools must contain non-empty strings"
+                )
+            normalized_tools.append(tool_id.strip())
+        if len(set(normalized_tools)) != len(normalized_tools):
+            raise ValueError("AgentNode allowed_tools must be unique")
+        if isinstance(execution_mode, str):
+            try:
+                execution_mode = AgentExecutionMode(execution_mode.strip())
+            except ValueError as exc:
+                raise ValueError(
+                    "AgentNode execution_mode must be reasoning, react, or coding"
+                ) from exc
+        if not isinstance(execution_mode, AgentExecutionMode):
+            raise TypeError(
+                "AgentNode execution_mode must be an AgentExecutionMode or string"
+            )
+        if not isinstance(artifact_type, str) or not artifact_type.strip():
+            raise ValueError("AgentNode artifact_type must be a non-empty string")
+        if completion_condition is not None:
+            if not isinstance(completion_condition, str):
+                raise TypeError(
+                    "AgentNode completion_condition must be a string when supplied"
+                )
+            completion_condition = completion_condition.strip()
+            if not completion_condition:
+                raise ValueError(
+                    "AgentNode completion_condition must be non-empty when supplied"
+                )
         object.__setattr__(self, "id", id.strip())
         object.__setattr__(self, "model_id", model_id.strip())
         object.__setattr__(self, "contract", resolved_contract.strip())
+        object.__setattr__(self, "role_family", role_family)
+        object.__setattr__(self, "allowed_tools", tuple(normalized_tools))
+        object.__setattr__(self, "execution_mode", execution_mode)
+        object.__setattr__(self, "artifact_type", artifact_type.strip())
+        object.__setattr__(self, "completion_condition", completion_condition)
 
     @property
     def prompt(self) -> str:
         return self.contract
 
-    def to_dict(self) -> Dict[str, str]:
-        return {"id": self.id, "model_id": self.model_id, "contract": self.contract}
+    def to_dict(self) -> Dict[str, object]:
+        result: Dict[str, object] = {
+            "id": self.id,
+            "model_id": self.model_id,
+            "contract": self.contract,
+            "allowed_tools": list(self.allowed_tools),
+            "execution_mode": self.execution_mode.value,
+            "artifact_type": self.artifact_type,
+            "completion_condition": self.completion_condition,
+        }
+        if self.role_family is not None:
+            result["role_family"] = self.role_family
+        return result
 
 
 @dataclass(frozen=True, slots=True)
@@ -471,6 +596,11 @@ class AgentGraph:
             raise GraphMutationError(f"agent_id is not unique: {agent_id}")
         return matches[0]
 
+    def has_node(self, agent_id: str) -> bool:
+        """Return whether the current Canvas contains ``agent_id``."""
+
+        return any(node.id == agent_id for node in self._nodes)
+
     def add_agent(self, node: AgentNode) -> None:
         if any(existing.id == node.id for existing in self._nodes):
             raise GraphMutationError(f"duplicate agent_id: {node.id}")
@@ -484,6 +614,11 @@ class AgentGraph:
         model_id: Optional[str] = None,
         contract: Optional[str] = None,
         prompt: Optional[str] = None,
+        role_family: Optional[str] = None,
+        allowed_tools: Optional[Collection[str]] = None,
+        execution_mode: Optional[Union[AgentExecutionMode, str]] = None,
+        artifact_type: Optional[str] = None,
+        completion_condition: Optional[str] = None,
     ) -> None:
         current = self.get_node(agent_id)
         if contract is not None and prompt is not None and contract != prompt:
@@ -493,6 +628,21 @@ class AgentGraph:
             id=current.id,
             model_id=current.model_id if model_id is None else model_id,
             contract=current.contract if resolved_contract is None else resolved_contract,
+            role_family=current.role_family if role_family is None else role_family,
+            allowed_tools=(
+                current.allowed_tools if allowed_tools is None else allowed_tools
+            ),
+            execution_mode=(
+                current.execution_mode if execution_mode is None else execution_mode
+            ),
+            artifact_type=(
+                current.artifact_type if artifact_type is None else artifact_type
+            ),
+            completion_condition=(
+                current.completion_condition
+                if completion_condition is None
+                else completion_condition
+            ),
         )
         if replacement == current:
             return
@@ -561,8 +711,371 @@ class AgentGraph:
     ) -> GraphValidationResult:
         return AgentGraphValidator(model_catalog).validate(self, require_complete=require_complete)
 
+    def _quotient_structure(
+        self,
+    ) -> Tuple[
+        GraphValidationResult,
+        Dict[str, Tuple[str, ...]],
+        Dict[Tuple[str, ...], Set[Tuple[str, ...]]],
+        Dict[Tuple[str, ...], Set[Tuple[str, ...]]],
+    ]:
+        """Build the reciprocal-contracted graph used by validation and diagnostics."""
+
+        validation = self.validate(require_complete=False)
+        component_for = {
+            agent_id: component
+            for component in validation.components
+            for agent_id in component
+        }
+        predecessors: Dict[Tuple[str, ...], Set[Tuple[str, ...]]] = {
+            component: set() for component in validation.components
+        }
+        successors: Dict[Tuple[str, ...], Set[Tuple[str, ...]]] = {
+            component: set() for component in validation.components
+        }
+        for relation in self._relations:
+            for source_id, target_id in relation.directed_edges():
+                if source_id not in component_for or target_id not in component_for:
+                    continue
+                source_component = component_for[source_id]
+                target_component = component_for[target_id]
+                if source_component == target_component:
+                    continue
+                successors[source_component].add(target_component)
+                predecessors[target_component].add(source_component)
+        return validation, component_for, predecessors, successors
+
+    def dirty_closure(self, seeds: Iterable[str]) -> Set[str]:
+        """Return changed Agents, reciprocal peers, and directed descendants.
+
+        This is the free-AgentGraph adaptation of SelfPlayGraphFlowSteer's
+        ``MultiAgentGraph.dirty_closure``.  A reciprocal component is one
+        bounded execution block, while a directed successor consumes the
+        changed artifact and must therefore be recomputed.
+        """
+
+        validation = self.validate(require_complete=False)
+        validation.raise_if_invalid()
+        component_for = {
+            agent_id: component
+            for component in validation.components
+            for agent_id in component
+        }
+        successors: Dict[str, Set[str]] = {node.id: set() for node in self._nodes}
+        for relation in self._relations:
+            for source_id, target_id in relation.directed_edges():
+                if source_id not in successors or target_id not in successors:
+                    continue
+                if component_for[source_id] != component_for[target_id]:
+                    successors[source_id].add(target_id)
+
+        dirty: Set[str] = set()
+        queue = deque(
+            agent_id for agent_id in seeds if agent_id in component_for
+        )
+        while queue:
+            agent_id = queue.popleft()
+            for peer_id in component_for[agent_id]:
+                if peer_id not in dirty:
+                    dirty.add(peer_id)
+                    queue.append(peer_id)
+            for target_id in successors[agent_id]:
+                if target_id not in dirty:
+                    dirty.add(target_id)
+                    queue.append(target_id)
+        return dirty
+
+    def directed_predecessors(self, agent_id: str) -> Tuple[str, ...]:
+        """Return external Agents whose artifacts are routed into ``agent_id``."""
+
+        self.get_node(agent_id)
+        return tuple(
+            sorted(
+                source_id
+                for relation in self._relations
+                for source_id, target_id in relation.directed_edges()
+                if target_id == agent_id
+            )
+        )
+
+    def topology_statistics(self) -> Dict[str, object]:
+        """Return read-only DAG shape facts for Canvas feedback and analysis.
+
+        This is the AgentGraph analogue of FlowSteer's
+        ``WorkflowGraph.get_statistics``.  It reports only observed structure;
+        no shape is rewarded or required.
+        """
+
+        validation, component_for, component_predecessors, component_successors = (
+            self._quotient_structure()
+        )
+        agent_in_degree = {node.id: 0 for node in self._nodes}
+        agent_out_degree = {node.id: 0 for node in self._nodes}
+        for relation in self._relations:
+            for source_id, target_id in relation.directed_edges():
+                if source_id not in component_for or target_id not in component_for:
+                    continue
+                agent_out_degree[source_id] += 1
+                agent_in_degree[target_id] += 1
+        depth_by_component: Dict[Tuple[str, ...], int] = {}
+        width_by_depth: Dict[int, int] = {}
+        for component in validation.topological_blocks:
+            predecessors = component_predecessors[component]
+            depth = (
+                1
+                if not predecessors
+                else 1 + max(depth_by_component[item] for item in predecessors)
+            )
+            depth_by_component[component] = depth
+            width_by_depth[depth] = width_by_depth.get(depth, 0) + 1
+
+        roots = sorted(
+            agent_id for agent_id, degree in agent_in_degree.items() if degree == 0
+        )
+        sinks = sorted(
+            agent_id for agent_id, degree in agent_out_degree.items() if degree == 0
+        )
+        quotient_edge_count = sum(len(targets) for targets in component_successors.values())
+        component_count = len(validation.components)
+        reciprocal_pair_count = sum(
+            relation.bits.is_bidirectional for relation in self._relations
+        )
+        structural_depth = max(depth_by_component.values(), default=0)
+        fan_in = any(len(items) > 1 for items in component_predecessors.values())
+        fan_out = any(len(items) > 1 for items in component_successors.values())
+        simple_serial = (
+            component_count > 1
+            and quotient_edge_count == component_count - 1
+            and all(len(items) <= 1 for items in component_predecessors.values())
+            and all(len(items) <= 1 for items in component_successors.values())
+        )
+
+        motifs: List[str] = []
+        if simple_serial:
+            motifs.append("serial_2" if structural_depth == 2 else "serial_3_plus")
+        elif max(width_by_depth.values(), default=0) > 1:
+            motifs.append("parallel")
+        if fan_in:
+            motifs.append("fan_in")
+        if fan_out:
+            motifs.append("fan_out")
+        if reciprocal_pair_count:
+            motifs.append("reciprocal")
+
+        if not self._nodes:
+            topology_family = "empty"
+        elif len(self._nodes) == 1:
+            topology_family = "single"
+        elif reciprocal_pair_count and component_count == 1:
+            topology_family = "reciprocal"
+        elif simple_serial:
+            topology_family = motifs[0]
+        elif fan_in and fan_out:
+            topology_family = "mixed"
+        elif fan_in:
+            topology_family = "fan_in"
+        elif fan_out:
+            topology_family = "fan_out"
+        elif "parallel" in motifs:
+            topology_family = "parallel"
+        else:
+            topology_family = "mixed"
+
+        return {
+            "agent_count": len(self._nodes),
+            "relation_count": len(self._relations),
+            "directed_edge_count": sum(agent_out_degree.values()),
+            "quotient_directed_edge_count": quotient_edge_count,
+            "reciprocal_pair_count": reciprocal_pair_count,
+            "component_count": component_count,
+            # ``max_depth`` remains for receipt compatibility.  The explicit
+            # name documents that finite reciprocal blocks count as one node.
+            "max_depth": structural_depth,
+            "structural_depth": structural_depth,
+            "max_width": max(width_by_depth.values(), default=0),
+            "topology_family": topology_family,
+            "topology_motifs": motifs,
+            "root_agent_ids": roots,
+            "sink_agent_ids": sinks,
+            "root_component_count": sum(
+                not items for items in component_predecessors.values()
+            ),
+            "sink_component_count": sum(
+                not items for items in component_successors.values()
+            ),
+            "fan_in_agent_ids": sorted(
+                agent_id for agent_id, degree in agent_in_degree.items() if degree > 1
+            ),
+            "fan_out_agent_ids": sorted(
+                agent_id for agent_id, degree in agent_out_degree.items() if degree > 1
+            ),
+            "output_agent_id": self._output_agent_id,
+        }
+
+    def construction_progress(self) -> Dict[str, object]:
+        """Return a neutral lower bound for finishing through atomic edits.
+
+        The count preserves every current node and relation.  It may choose a
+        quotient sink as Output and connect other quotient sinks to it, then
+        uses the existing explicit FINISH action.  It is state feedback only:
+        no topology, role, Agent count, or edit is recommended.
+        """
+
+        validation, component_for, _, successors = self._quotient_structure()
+        if not self._nodes:
+            add_agent_actions = 1
+            relation_actions = 0
+            output_actions = 1
+        else:
+            add_agent_actions = 0
+            sink_count = sum(not targets for targets in successors.values())
+            relation_actions = max(sink_count - 1, 0)
+            output_component = component_for.get(self._output_agent_id or "")
+            output_actions = int(
+                output_component is None or bool(successors.get(output_component))
+            )
+        finish_actions = 1
+        minimum = (
+            add_agent_actions + relation_actions + output_actions + finish_actions
+        )
+        return {
+            "atomic_edits_applied": self._revision,
+            "structurally_finishable_now": self.validate(
+                require_complete=True
+            ).valid,
+            "minimum_remaining_actions": minimum,
+            "minimum_remaining_breakdown": {
+                "add_agent": add_agent_actions,
+                "set_relation": relation_actions,
+                "set_output": output_actions,
+                "finish": finish_actions,
+            },
+            "partial_graph_valid": validation.valid,
+        }
+
+    def effective_dependency_statistics(
+        self,
+        evidence: Iterable[DependencyEdgeEvidence] = (),
+    ) -> Dict[str, object]:
+        """Conservatively aggregate explicit dependency evidence over the DAG.
+
+        Structural edges default to ``unverified``.  This method never reads
+        answer text or infers causality from a masked-output difference; only
+        evidence grades explicitly supplied by the diagnostic caller can
+        increase the reported effective depth.
+        """
+
+        validation, component_for, predecessors, _ = self._quotient_structure()
+        rank = {"unverified": 0, "weak": 1, "verified": 2}
+        directed_edges = {
+            edge
+            for relation in self._relations
+            for edge in relation.directed_edges()
+        }
+        edge_status = {edge: "unverified" for edge in directed_edges}
+        evidence_ids: Dict[Tuple[str, str], List[str]] = {
+            edge: [] for edge in directed_edges
+        }
+        for item in evidence:
+            if not isinstance(item, DependencyEdgeEvidence):
+                raise TypeError("dependency evidence items must be DependencyEdgeEvidence")
+            edge = (item.source_id, item.target_id)
+            if edge not in directed_edges:
+                raise ValueError(f"dependency evidence references absent edge: {edge!r}")
+            if rank[item.status] > rank[edge_status[edge]]:
+                edge_status[edge] = item.status
+            if item.evidence_id is not None:
+                evidence_ids[edge].append(item.evidence_id)
+
+        component_edge_status: Dict[
+            Tuple[Tuple[str, ...], Tuple[str, ...]], str
+        ] = {}
+        for edge, status in edge_status.items():
+            source_component = component_for[edge[0]]
+            target_component = component_for[edge[1]]
+            if source_component == target_component:
+                continue
+            key = (source_component, target_component)
+            previous = component_edge_status.get(key, "unverified")
+            if rank[status] > rank[previous]:
+                component_edge_status[key] = status
+
+        def longest_depth(minimum_rank: int) -> int:
+            depth: Dict[Tuple[str, ...], int] = {}
+            for component in validation.topological_blocks:
+                supported = [
+                    predecessor
+                    for predecessor in predecessors[component]
+                    if rank[
+                        component_edge_status.get(
+                            (predecessor, component), "unverified"
+                        )
+                    ]
+                    >= minimum_rank
+                ]
+                depth[component] = 1 + max(
+                    (depth[item] for item in supported), default=0
+                )
+            return max(depth.values(), default=0)
+
+        structural_depth = int(self.topology_statistics()["structural_depth"])
+        verified_depth = longest_depth(rank["verified"])
+        weak_or_verified_depth = longest_depth(rank["weak"])
+        if not component_edge_status:
+            status = "not_applicable" if structural_depth <= 1 else "unverified"
+        elif verified_depth == weak_or_verified_depth and verified_depth > 1:
+            status = "verified"
+        elif weak_or_verified_depth > 1:
+            status = "weak"
+        else:
+            status = "unverified"
+
+        if structural_depth <= 1:
+            full_depth_status = "not_applicable"
+        elif verified_depth >= structural_depth:
+            full_depth_status = "verified"
+        elif weak_or_verified_depth >= structural_depth:
+            full_depth_status = "weak"
+        else:
+            full_depth_status = "unverified"
+
+        status_counts = {name: 0 for name in sorted(DEPENDENCY_EVIDENCE_STATUSES)}
+        for value in edge_status.values():
+            status_counts[value] += 1
+        return {
+            "structural_depth": structural_depth,
+            "effective_dependency_depth": weak_or_verified_depth,
+            "verified_dependency_depth": verified_depth,
+            "evidence_status": status,
+            "full_structural_depth_evidence_status": full_depth_status,
+            "directed_edge_status_counts": status_counts,
+            "directed_edge_evidence": [
+                {
+                    "source_id": source_id,
+                    "target_id": target_id,
+                    "status": edge_status[(source_id, target_id)],
+                    "evidence_ids": sorted(evidence_ids[(source_id, target_id)]),
+                }
+                for source_id, target_id in sorted(directed_edges)
+            ],
+        }
+
     def snapshot(self) -> AgentGraphSnapshot:
-        nodes = tuple(sorted(self._nodes, key=lambda node: (node.id, node.model_id, node.contract)))
+        nodes = tuple(
+            sorted(
+                self._nodes,
+                key=lambda node: (
+                    node.id,
+                    node.model_id,
+                    node.contract,
+                    node.role_family or "",
+                    node.execution_mode.value,
+                    node.allowed_tools,
+                    node.artifact_type,
+                    node.completion_condition or "",
+                ),
+            )
+        )
         relations = tuple(
             sorted(
                 (relation.canonical() for relation in self._relations),
@@ -592,6 +1105,7 @@ __all__ = [
     "AgentGraphSnapshot",
     "AgentGraphValidationError",
     "AgentGraphValidator",
+    "AgentExecutionMode",
     "AgentNode",
     "AgentRelation",
     "GraphMutationError",

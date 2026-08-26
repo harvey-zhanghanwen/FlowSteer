@@ -4,9 +4,19 @@ import pytest
 
 from src.interactive.task_dataset import (
     TASK_SCHEMA_VERSION,
+    qa_question_scope,
     iter_task_records,
     task_record_from_mapping,
 )
+
+
+def test_qa_question_scope_removes_only_prefetched_hotpot_passages() -> None:
+    rendered = (
+        "Based on the following passages, answer the question.\n\n"
+        "[[A] public passage]\n\nQuestion: Which city is named?"
+    )
+    assert qa_question_scope(rendered) == "Which city is named?"
+    assert qa_question_scope("Who wrote it?") == "Who wrote it?"
 
 
 def _item(split="train"):

@@ -15,19 +15,21 @@ from urllib.request import Request, urlopen
 
 from .agent_workflow_env import AgentWorkflowEnv, AgentWorkflowStepResult
 from .model_registry import ModelRegistry
+from .tool_runtime import ToolRegistry
 
 
-DIRECTOR_SYSTEM_PROMPT = """You are the Flow-Director. Build an executable AgentGraph for the task, one edit at a time. Follow the latest Canvas feedback and return exactly one JSON object each turn.
+DIRECTOR_SYSTEM_PROMPT = """You are the Flow-Director. Incrementally build an executable AgentGraph. Follow the latest Canvas observation and return exactly one JSON object each turn.
 
 Actions:
-{"action":"add_agent","agent_id":"...","model_id":"...","contract":"..."}
-{"action":"modify_agent","agent_id":"...","model_id":"...","contract":"..."}
+{"action":"add_subgraph","agents":[{"agent_id":"...","model_id":"...","contract":"...","role_family":"...","allowed_tools":[],"execution_mode":"reasoning|react|coding","artifact_type":"text","completion_condition":"..."}],"relations":[{"source_id":"...","target_id":"...","source_to_target":true,"target_to_source":false}],"output_agent_id":"..."}
+{"action":"add_agent","agent_id":"...","model_id":"...","contract":"...","role_family":"...","allowed_tools":[],"execution_mode":"reasoning|react|coding","artifact_type":"text","completion_condition":"..."}
+{"action":"modify_agent","agent_id":"...","model_id":"...","contract":"...","role_family":"...","allowed_tools":[],"execution_mode":"reasoning|react|coding","artifact_type":"...","completion_condition":"..."}
 {"action":"delete_agent","agent_id":"..."}
 {"action":"set_relation","source_id":"...","target_id":"...","source_to_target":true,"target_to_source":false}
 {"action":"set_output","agent_id":"..."}
 {"action":"finish"}
 
-Use a model_id from the supplied catalog and describe each Agent's job in ordinary free text. Finish only after the Canvas accepts a complete graph."""
+An add_subgraph action adds one functional subgraph of one to three Agents and is executed once after the whole action is accepted. relations may be an empty array; output_agent_id is optional. Use model_id and allowed_tools values only from the supplied catalogs. execution_mode is execution semantics, not a fixed role; use reasoning unless a listed tool requires react or coding. A directed relation routes the source artifact to the target; a bidirectional relation is one bounded two-Agent exchange. Describe each Agent's objective, required inputs, output artifact, and completion condition in concise ordinary text. role_family is optional metadata, not a fixed Operator type. Inspect execution feedback and Canvas issues before selecting the next action. Do not assume a fixed workflow topology or an unlisted Skill."""
 
 
 class DirectorError(RuntimeError):
@@ -209,6 +211,7 @@ class AgentGraphOrchestrator:
         max_rounds: int = 20,
         seed: int = 42,
         history_window: int = 4,
+        tool_registry: Optional[ToolRegistry] = None,
     ) -> None:
         if max_rounds < 1:
             raise ValueError("max_rounds must be positive")
@@ -219,6 +222,21 @@ class AgentGraphOrchestrator:
         self.max_rounds = max_rounds
         self.seed = seed
         self.history_window = history_window
+        self.tool_registry = tool_registry
+
+    def _tool_catalog(self, env: AgentWorkflowEnv) -> list[dict[str, object]]:
+        if self.tool_registry is None:
+            return []
+        if env.runtime.tool_registry is not self.tool_registry:
+            raise DirectorError(
+                "Director and AgentRuntime must share the same ToolRegistry"
+            )
+        dataset_id = env.runtime.dataset_id
+        return [
+            capability.to_value()
+            for capability in self.tool_registry.capabilities
+            if dataset_id is None or capability.supports_dataset(dataset_id)
+        ]
 
     def build_prompt(
         self,
@@ -272,6 +290,9 @@ class AgentGraphOrchestrator:
         }
         if env.max_agents is not None:
             payload["max_agents"] = env.max_agents
+        tool_catalog = self._tool_catalog(env)
+        if tool_catalog:
+            payload["tool_catalog"] = tool_catalog
         if skills:
             payload["available_skills"] = list(skills)
         return (

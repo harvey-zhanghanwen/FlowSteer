@@ -116,7 +116,7 @@ def validate_agent_graph_config(value: Mapping[str, Any]) -> None:
         raise ConfigurationError("director.history_window must be a positive integer")
 
     graph = value["agent_graph"]
-    expected_actions = [
+    legacy_actions = [
         "add_agent",
         "modify_agent",
         "delete_agent",
@@ -124,8 +124,14 @@ def validate_agent_graph_config(value: Mapping[str, Any]) -> None:
         "set_output",
         "finish",
     ]
-    if graph.get("actions") != expected_actions:
-        raise ConfigurationError("AgentGraph search space must contain the six atomic actions")
+    progressive_actions = ["add_subgraph", *legacy_actions]
+    actions = graph.get("actions")
+    if actions != legacy_actions and actions != progressive_actions:
+        # Historical six-action configs remain replayable while a versioned
+        # condition may enable FlowSteer's functional-subgraph transaction.
+        raise ConfigurationError(
+            "AgentGraph search space must contain the supported atomic actions"
+        )
     if graph.get("contract_type") != "free_text" or graph.get("relation_encoding") != "two_bit":
         raise ConfigurationError("AgentGraph requires free-text contracts and two-bit relations")
     max_agents = graph.get("max_agents")

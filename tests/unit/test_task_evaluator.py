@@ -47,9 +47,16 @@ class StaticEvaluatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1.0, hotpot.reward)
         self.assertEqual(1.0, hotpot.metrics["exact_match"])
         self.assertEqual(1.0, hotpot.metrics["token_f1"])
+        self.assertEqual("hotpotqa.official.answer.v1", hotpot.evaluator_version)
         self.assertGreater(trivia.reward or 0.0, 0.6)
         self.assertEqual(0.0, trivia.metrics["exact_match"])
         self.assertEqual("skillflow.training.reward.v1", trivia.evaluator_version)
+
+    async def test_hotpot_yes_no_special_answer_mismatch_has_zero_f1(self) -> None:
+        outcome = await evaluate_task(task("HotpotQA", ground_truth="yes"), "no")
+        self.assertTrue(outcome.valid)
+        self.assertEqual(0.0, outcome.metrics["exact_match"])
+        self.assertEqual(0.0, outcome.metrics["token_f1"])
 
     async def test_aime_uses_skillflow_exact_answer_extraction(self) -> None:
         outcome = await evaluate_task(task("AIME 2026", ground_truth="56"), "Thus \\boxed{56}.")

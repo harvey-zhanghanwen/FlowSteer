@@ -32,6 +32,11 @@ from src.interactive.config_loader import (
 )
 from src.interactive.director import AgentGraphOrchestrator
 from src.interactive.grpo_objective import same_condition_advantages
+from src.interactive.hotpotqa_embedding_index import HotpotQAEmbeddingIndex
+from src.interactive.hotpotqa_embedding_tool import (
+    HotpotQAEmbeddingReactExecutionAdapter,
+    build_hotpotqa_embedding_tool_registry,
+)
 from src.interactive.openai_gateway import OpenAICompatibleGateway
 from src.interactive.persistence import EvidenceStore
 from src.interactive.policy_sync import (
@@ -50,10 +55,11 @@ from src.interactive.smoke_trainer import (
     SmokeTrainerConfig,
     trajectory_to_grpo,
 )
-from src.interactive.task_dataset import iter_task_records
+from src.interactive.task_dataset import hotpotqa_question_scope, iter_task_records
 from src.interactive.task_evaluator import (
     EvaluationOutcome,
     HEALTHBENCH_EVALUATOR_VERSION,
+    HOTPOTQA_ANSWER_EVALUATOR_VERSION,
     RAGEN_EVALUATOR_VERSION,
     SKILLFLOW_REWARD_VERSION,
     SWEBENCH_EVALUATOR_VERSION,
@@ -241,7 +247,9 @@ def select_smoke_tasks(
 
 def evaluator_version_for(task: TaskRecord) -> str:
     source = _dataset_key(task)
-    if source in {"hotpotqa", "triviaqa", "aime_2026"}:
+    if source == "hotpotqa":
+        return HOTPOTQA_ANSWER_EVALUATOR_VERSION
+    if source in {"triviaqa", "aime_2026"}:
         return SKILLFLOW_REWARD_VERSION
     if source == "healthbench_professional":
         return HEALTHBENCH_EVALUATOR_VERSION
@@ -388,6 +396,8 @@ class LiveSmokeBackend:
         publisher: SGLangPolicyPublisher,
         judge: Optional[JudgeCallback],
         judge_model: str,
+        project_root: Path,
+        hotpotqa_embedding_index: Optional[HotpotQAEmbeddingIndex] = None,
     ) -> None:
         self.config = config
         self.registry = registry
@@ -399,6 +409,8 @@ class LiveSmokeBackend:
         self.publisher = publisher
         self.judge = judge
         self.judge_model = judge_model
+        self.project_root = project_root
+        self.hotpotqa_embedding_index = hotpotqa_embedding_index
 
     @property
     def model_catalog_version(self) -> str:
@@ -466,6 +478,29 @@ class LiveSmokeBackend:
 
         gateway = OpenAICompatibleGateway(default_seed=int(experiment["seed"]))
         runtime = AgentRuntime(registry, gateway)
+        hotpotqa_embedding_index: Optional[HotpotQAEmbeddingIndex] = None
+        raw_embedding_retrieval = config.get("qa_embedding_retrieval")
+        if raw_embedding_retrieval is not None:
+            retrieval = _mapping(
+                raw_embedding_retrieval,
+                "qa_embedding_retrieval",
+            )
+            index_dir = _resolve(root, str(retrieval["index_dir"]))
+            hotpotqa_embedding_index = HotpotQAEmbeddingIndex.open(
+                index_dir,
+                embedding_model_path=str(retrieval["embedding_model"]),
+                embedding_device=str(retrieval["embedding_device"]),
+            )
+            manifest = hotpotqa_embedding_index.manifest
+            if (
+                manifest.embedding_model != str(retrieval["embedding_model_id"])
+                or manifest.frozen_top_k != int(retrieval["search_top_k"])
+                or manifest.normalized is not True
+                or manifest.similarity != str(retrieval["similarity"])
+            ):
+                raise ConfigurationError(
+                    "HotpotQA embedding index manifest differs from the frozen config"
+                )
         evidence_store = EvidenceStore(_resolve(root, str(storage["root"])))
 
         trainer: Optional[Qwen35OnePassSmokeTrainer] = None
@@ -538,6 +573,8 @@ class LiveSmokeBackend:
             publisher=publisher,
             judge=judge,
             judge_model=judge_model,
+            project_root=root,
+            hotpotqa_embedding_index=hotpotqa_embedding_index,
         )
 
     @staticmethod
@@ -586,18 +623,65 @@ class LiveSmokeBackend:
         director = _mapping(self.config["director"], "director")
         graph_config = _mapping(self.config["agent_graph"], "agent_graph")
         experiment = _mapping(self.config["experiment"], "experiment")
+        runtime_task = task
+        task_runtime = self.runtime
+        task_tool_registry = None
+        raw_embedding_retrieval = self.config.get("qa_embedding_retrieval")
+        if raw_embedding_retrieval is not None:
+            retrieval = _mapping(
+                raw_embedding_retrieval,
+                "qa_embedding_retrieval",
+            )
+            if _dataset_key(task) != "hotpotqa":
+                raise ConfigurationError(
+                    "HotpotQA embedding retrieval cannot serve another dataset"
+                )
+            if self.hotpotqa_embedding_index is None:
+                raise ConfigurationError("HotpotQA embedding index was not opened")
+            task_tool_registry = build_hotpotqa_embedding_tool_registry(
+                self.hotpotqa_embedding_index,
+                task_id=task.task_id,
+                frozen_top_k=int(retrieval["search_top_k"]),
+                timeout_seconds=float(retrieval["tool_timeout_seconds"]),
+            )
+            react_adapter = HotpotQAEmbeddingReactExecutionAdapter(
+                gateway=self.runtime.gateway,
+                tool_registry=task_tool_registry,
+                max_turns=int(retrieval["max_turns_per_agent_call"]),
+                max_tool_calls=int(retrieval["max_tool_calls_per_agent_call"]),
+            )
+            task_runtime = AgentRuntime(
+                self.registry,
+                self.runtime.gateway,
+                execution_adapters={"react": react_adapter},
+                tool_registry=task_tool_registry,
+                dataset_id="hotpotqa",
+            )
+            runtime_task = TaskRecord(
+                task_id=task.task_id,
+                question=hotpotqa_question_scope(task.question),
+                ground_truth=task.ground_truth,
+                split=task.split,
+                metadata=task.metadata,
+            )
         orchestrator = AgentGraphOrchestrator(
             self.registry,
             self.director_client,
             max_rounds=int(director["max_rounds"]),
             seed=int(experiment["seed"]) + rollout_index,
             history_window=int(director["history_window"]),
+            tool_registry=task_tool_registry,
         )
         environment = AgentWorkflowEnv(
             self.registry,
-            runtime=self.runtime,
+            runtime=task_runtime,
             execute_on_edit=bool(director["execute_on_edit"]),
             max_agents=int(graph_config["max_agents"]),
+            required_evidence_tool_id=(
+                str(graph_config["required_evidence_tool_id"])
+                if task_tool_registry is not None
+                else None
+            ),
         )
         collector = AgentGraphRolloutCollector(
             orchestrator,
@@ -636,7 +720,7 @@ class LiveSmokeBackend:
             async def run_graph(observation: str) -> str:
                 nonlocal environment_step
                 environment_step += 1
-                result = await self.runtime.execute(
+                result = await task_runtime.execute(
                     environment_graph,
                     observation,
                     run_id=(
@@ -652,7 +736,7 @@ class LiveSmokeBackend:
             if not isinstance(configured_steps, Mapping):
                 configured_steps = {}
             return await evaluate_task(
-                evaluated_task,
+                task,
                 final_answer or "",
                 judge=self.judge,
                 judge_model=self.judge_model,
@@ -667,7 +751,7 @@ class LiveSmokeBackend:
                 ),
             )
 
-        return await collector.collect(task, rollout_index, evaluator_callback)
+        return await collector.collect(runtime_task, rollout_index, evaluator_callback)
 
     def train(
         self,

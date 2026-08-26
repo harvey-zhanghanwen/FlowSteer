@@ -39,6 +39,7 @@ DEFAULT_RAGEN_ADAPTER_PATH = Path(
 )
 
 SKILLFLOW_REWARD_VERSION = "skillflow.training.reward.v1"
+HOTPOTQA_ANSWER_EVALUATOR_VERSION = "hotpotqa.official.answer.v1"
 HEALTHBENCH_EVALUATOR_VERSION = "openai.simple-evals.healthbench.v1"
 RAGEN_EVALUATOR_VERSION = "skillflow.ragen_adapter.v1"
 SWEBENCH_EVALUATOR_VERSION = "swebench.harness.v1"
@@ -94,6 +95,40 @@ def _token_f1(prediction: str, gold: str) -> float:
 
 def _token_f1_multi(prediction: str, candidates: Sequence[str]) -> float:
     return max(_token_f1(prediction, candidate) for candidate in candidates)
+
+
+# HotpotQA's answer-only scorer follows the benchmark's official evaluation
+# script: lowercase, strip punctuation/articles/extra whitespace, then compute
+# normalized exact match and token F1 with the yes/no/noanswer special case.
+def _normalize_hotpotqa_answer(text: str) -> str:
+    lowered = text.lower()
+    without_punctuation = "".join(
+        character for character in lowered if character not in string.punctuation
+    )
+    without_articles = re.sub(r"\b(a|an|the)\b", " ", without_punctuation)
+    return " ".join(without_articles.split())
+
+
+def _hotpotqa_answer_f1(prediction: str, gold: str) -> float:
+    normalized_prediction = _normalize_hotpotqa_answer(prediction)
+    normalized_gold = _normalize_hotpotqa_answer(gold)
+    special_answers = {"yes", "no", "noanswer"}
+    if (
+        normalized_prediction in special_answers
+        or normalized_gold in special_answers
+    ) and normalized_prediction != normalized_gold:
+        return 0.0
+    prediction_tokens = normalized_prediction.split()
+    gold_tokens = normalized_gold.split()
+    if not prediction_tokens or not gold_tokens:
+        return float(prediction_tokens == gold_tokens)
+    common = Counter(prediction_tokens) & Counter(gold_tokens)
+    overlap = sum(common.values())
+    if overlap == 0:
+        return 0.0
+    precision = overlap / len(prediction_tokens)
+    recall = overlap / len(gold_tokens)
+    return 2.0 * precision * recall / (precision + recall)
 
 
 def _extract_math_answer(text: str) -> str:
@@ -384,10 +419,15 @@ def _evaluate_static(
     record: TaskRecord | Mapping[str, Any], prediction: str, dataset: str
 ) -> EvaluationOutcome:
     answers = _accepted_answers(record)
+    evaluator_version = (
+        HOTPOTQA_ANSWER_EVALUATOR_VERSION
+        if dataset == "hotpotqa"
+        else SKILLFLOW_REWARD_VERSION
+    )
     if not answers:
         return _invalid(
             "missing_ground_truth",
-            evaluator_version=SKILLFLOW_REWARD_VERSION,
+            evaluator_version=evaluator_version,
         )
     # Both upstream implementations make ``<answer>...</answer>`` an explicit
     # final-answer boundary (FlowSteer's Format operator and SkillFlow's base
@@ -398,7 +438,20 @@ def _evaluate_static(
         r"<answer>\s*(.*?)\s*</answer>", prediction, re.IGNORECASE | re.DOTALL
     )
     scored_prediction = tagged_answers[-1].strip() if tagged_answers else prediction
-    if dataset in {"hotpotqa", "triviaqa"}:
+    if dataset == "hotpotqa":
+        token_f1 = max(
+            _hotpotqa_answer_f1(scored_prediction, answer) for answer in answers
+        )
+        exact_match = max(
+            float(
+                _normalize_hotpotqa_answer(scored_prediction)
+                == _normalize_hotpotqa_answer(answer)
+            )
+            for answer in answers
+        )
+        score = token_f1
+        metrics = {"exact_match": exact_match, "token_f1": token_f1}
+    elif dataset == "triviaqa":
         # SkillFlow's terminal reward remains token F1.  FlowSteer's QA
         # evaluator reports normalized EM alongside it; preserve both on the
         # exact same extracted answer span for local baseline comparisons.
@@ -423,7 +476,7 @@ def _evaluate_static(
             "scored_prediction": scored_prediction,
             "structured_answer_extracted": bool(tagged_answers),
         },
-        evaluator_version=SKILLFLOW_REWARD_VERSION,
+        evaluator_version=evaluator_version,
     )
 
 

@@ -6,7 +6,7 @@ import asyncio
 from dataclasses import dataclass, field
 from enum import Enum
 from types import MappingProxyType
-from typing import Awaitable, Dict, List, Mapping, Optional, Protocol, Set, Tuple, Union
+from typing import Awaitable, Collection, Dict, List, Mapping, Optional, Protocol, Set, Tuple, Union
 import uuid
 
 from .agent_graph import (
@@ -16,6 +16,7 @@ from .agent_graph import (
     AgentRelation,
 )
 from .model_registry import ModelRegistry, ModelSpec, ProviderSpec
+from .tool_runtime import ToolRegistry
 
 
 class ExecutionPhase(str, Enum):
@@ -24,11 +25,119 @@ class ExecutionPhase(str, Enum):
     REVISION = "revision"
 
 
+class CommunicationCondition(str, Enum):
+    """Execution-only communication condition, never a task reward signal."""
+
+    NORMAL = "normal"
+    UPSTREAM_MASKED = "upstream_masked"
+
+
+def _communication_condition(
+    value: Union[CommunicationCondition, str],
+) -> CommunicationCondition:
+    if isinstance(value, CommunicationCondition):
+        return value
+    if not isinstance(value, str):
+        raise TypeError("communication_condition must be a string or CommunicationCondition")
+    try:
+        return CommunicationCondition(value.strip())
+    except ValueError as exc:
+        raise ValueError(
+            "communication_condition must be normal or upstream_masked"
+        ) from exc
+
+
 @dataclass(frozen=True, slots=True)
 class UpstreamMessage:
+    """Typed public communication envelope between AgentGraph nodes.
+
+    ``content``/``message_type`` are retained for trajectory compatibility.
+    ``artifact_type`` and the remaining receipt fields implement the project's
+    minimal typed-envelope extension required because FlowSteer's text-only
+    messages cannot represent tool, environment, or coding observations.
+    """
+
     source_agent_id: str
     target_agent_id: str
     content: str
+    message_type: str = "artifact"
+    graph_revision: Optional[int] = None
+    request_or_dependency: Optional[str] = None
+    artifact_type: str = "text"
+    environment_revision: Optional[int] = None
+    tool_receipts: Tuple[Mapping[str, object], ...] = ()
+
+    def __post_init__(self) -> None:
+        for value, name in (
+            (self.source_agent_id, "source_agent_id"),
+            (self.target_agent_id, "target_agent_id"),
+            (self.content, "content"),
+            (self.message_type, "message_type"),
+            (self.artifact_type, "artifact_type"),
+        ):
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{name} must be a non-empty string")
+        if self.graph_revision is not None and (
+            isinstance(self.graph_revision, bool)
+            or not isinstance(self.graph_revision, int)
+            or self.graph_revision < 0
+        ):
+            raise ValueError("graph_revision must be non-negative when supplied")
+        if self.request_or_dependency is not None and (
+            not isinstance(self.request_or_dependency, str)
+            or not self.request_or_dependency.strip()
+        ):
+            raise ValueError(
+                "request_or_dependency must be non-empty when supplied"
+            )
+        if self.environment_revision is not None and (
+            isinstance(self.environment_revision, bool)
+            or not isinstance(self.environment_revision, int)
+            or self.environment_revision < 0
+        ):
+            raise ValueError("environment_revision must be non-negative when supplied")
+        if not isinstance(self.tool_receipts, tuple) or any(
+            not isinstance(item, Mapping) for item in self.tool_receipts
+        ):
+            raise TypeError("tool_receipts must be a tuple of mappings")
+        object.__setattr__(
+            self,
+            "tool_receipts",
+            tuple(MappingProxyType(dict(item)) for item in self.tool_receipts),
+        )
+
+    @property
+    def artifact(self) -> str:
+        return self.content
+
+    @property
+    def artifact_body(self) -> str:
+        return self.content
+
+    @property
+    def dependency(self) -> Optional[str]:
+        return self.request_or_dependency
+
+    def to_dict(self) -> Dict[str, object]:
+        return {
+            "source_agent_id": self.source_agent_id,
+            "target_agent_id": self.target_agent_id,
+            "message_type": self.message_type,
+            "artifact_type": self.artifact_type,
+            "artifact": self.content,
+            "artifact_body": self.content,
+            "content": self.content,
+            "graph_revision": self.graph_revision,
+            "environment_revision": self.environment_revision,
+            "request_or_dependency": self.request_or_dependency,
+            "dependency": self.request_or_dependency,
+            "tool_receipts": [dict(item) for item in self.tool_receipts],
+        }
+
+
+# Public terminology from the project design; the legacy name remains the
+# canonical class so persisted trajectories and downstream imports stay valid.
+CommunicationEnvelope = UpstreamMessage
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,9 +150,25 @@ class AgentRequest:
     model: ModelSpec
     provider: ProviderSpec
     phase: ExecutionPhase
+    is_output_agent: bool = False
+    is_format_agent: bool = False
+    communication_condition: CommunicationCondition = CommunicationCondition.NORMAL
     upstream: Tuple[UpstreamMessage, ...] = ()
     own_draft: Optional[str] = None
     peer_draft: Optional[UpstreamMessage] = None
+
+    def __post_init__(self) -> None:
+        if type(self.is_output_agent) is not bool:
+            raise TypeError("is_output_agent must be bool")
+        if type(self.is_format_agent) is not bool:
+            raise TypeError("is_format_agent must be bool")
+        if self.is_format_agent and not self.is_output_agent:
+            raise ValueError("Format Agent must be the Output Agent")
+        object.__setattr__(
+            self,
+            "communication_condition",
+            _communication_condition(self.communication_condition),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +192,45 @@ class AgentGateway(Protocol):
         ...
 
 
+class AgentExecutionAdapter(Protocol):
+    """Unified execution boundary for reasoning, ReAct, and coding nodes."""
+
+    async def execute(self, request: AgentRequest) -> GatewayResponse:
+        ...
+
+
+@dataclass(frozen=True, slots=True)
+class ReasoningExecutionAdapter:
+    """Thin adapter retaining the existing provider-gateway execution path."""
+
+    gateway: AgentGateway
+
+    async def execute(self, request: AgentRequest) -> GatewayResponse:
+        return await self.gateway.generate(request)
+
+
+def _tool_receipts_from_metadata(
+    metadata: Mapping[str, object],
+) -> Tuple[Mapping[str, object], ...]:
+    """Return only concrete serialized receipts emitted by an adapter."""
+
+    raw = metadata.get("tool_receipts", ())
+    if not isinstance(raw, (list, tuple)):
+        return ()
+    return tuple(
+        MappingProxyType(dict(item)) for item in raw if isinstance(item, Mapping)
+    )
+
+
+def _environment_revision_from_metadata(
+    metadata: Mapping[str, object],
+) -> Optional[int]:
+    raw = metadata.get("environment_revision")
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+        return None
+    return raw
+
+
 @dataclass(frozen=True, slots=True)
 class AgentCallRecord:
     request: AgentRequest
@@ -77,14 +241,36 @@ class AgentCallRecord:
 class AgentRuntimeResult:
     run_id: str
     graph_revision: int
-    output_agent_id: str
-    final_answer: str
+    output_agent_id: Optional[str]
+    final_answer: Optional[str]
     outputs: Mapping[str, str]
     calls: Tuple[AgentCallRecord, ...]
     block_completion_order: Tuple[Tuple[str, ...], ...]
+    executed_agent_ids: Tuple[str, ...] = ()
+    reused_agent_ids: Tuple[str, ...] = ()
+    communication_condition: CommunicationCondition = CommunicationCondition.NORMAL
+    output_metadata: Mapping[str, Mapping[str, object]] = field(
+        default_factory=dict,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "outputs", MappingProxyType(dict(self.outputs)))
+        object.__setattr__(
+            self,
+            "communication_condition",
+            _communication_condition(self.communication_condition),
+        )
+        object.__setattr__(
+            self,
+            "output_metadata",
+            MappingProxyType(
+                {
+                    agent_id: MappingProxyType(dict(metadata))
+                    for agent_id, metadata in self.output_metadata.items()
+                }
+            ),
+        )
 
 
 class AgentRuntimeError(RuntimeError):
@@ -131,6 +317,9 @@ class AgentRuntime:
         *,
         max_concurrency: Optional[int] = None,
         timeout_seconds: Optional[float] = None,
+        execution_adapters: Optional[Mapping[str, AgentExecutionAdapter]] = None,
+        tool_registry: Optional[ToolRegistry] = None,
+        dataset_id: Optional[str] = None,
     ) -> None:
         if max_concurrency is not None and (
             type(max_concurrency) is not int or max_concurrency <= 0
@@ -138,8 +327,28 @@ class AgentRuntime:
             raise ValueError("max_concurrency must be a positive integer")
         if timeout_seconds is not None and timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
+        if dataset_id is not None and (
+            not isinstance(dataset_id, str) or not dataset_id.strip()
+        ):
+            raise ValueError("dataset_id must be non-empty when supplied")
         self.model_registry = model_registry
         self.gateway = gateway
+        adapters: Dict[str, AgentExecutionAdapter] = {
+            "reasoning": ReasoningExecutionAdapter(gateway)
+        }
+        for mode, adapter in dict(execution_adapters or {}).items():
+            if mode not in {"reasoning", "react", "coding"}:
+                raise ValueError(
+                    "execution adapter mode must be reasoning, react, or coding"
+                )
+            if not hasattr(adapter, "execute"):
+                raise TypeError("execution adapters must implement execute")
+            adapters[mode] = adapter
+        self.execution_adapters: Mapping[str, AgentExecutionAdapter] = (
+            MappingProxyType(adapters)
+        )
+        self.tool_registry = tool_registry
+        self.dataset_id = None if dataset_id is None else dataset_id.strip()
         self.timeout_seconds = timeout_seconds
         self._global_semaphore = (
             asyncio.Semaphore(max_concurrency) if max_concurrency is not None else None
@@ -158,44 +367,122 @@ class AgentRuntime:
         problem: str,
         *,
         run_id: Optional[str] = None,
+        require_complete: bool = True,
+        prior_outputs: Optional[Mapping[str, str]] = None,
+        prior_output_metadata: Optional[
+            Mapping[str, Mapping[str, object]]
+        ] = None,
+        dirty_agents: Optional[Collection[str]] = None,
+        format_output_agent: bool = False,
+        communication_condition: Union[
+            CommunicationCondition, str
+        ] = CommunicationCondition.NORMAL,
     ) -> AgentRuntimeResult:
         if not isinstance(problem, str) or not problem.strip():
             raise ValueError("problem must be a non-empty string")
+        if type(format_output_agent) is not bool:
+            raise TypeError("format_output_agent must be bool")
         snapshot = graph.snapshot()
         execution_graph = AgentGraph.from_snapshot(snapshot)
-        validation = execution_graph.validate(self.model_registry, require_complete=True)
+        validation = execution_graph.validate(
+            self.model_registry,
+            require_complete=require_complete,
+        )
         validation.raise_if_invalid()
-        if execution_graph.output_agent_id is None:  # narrowed by validation
+        if require_complete and execution_graph.output_agent_id is None:
             raise AgentGraphValidationError(validation)
 
         resolved_run_id = run_id or uuid.uuid4().hex
         if not isinstance(resolved_run_id, str) or not resolved_run_id.strip():
             raise ValueError("run_id must be a non-empty string")
         resolved_run_id = resolved_run_id.strip()
+        resolved_condition = _communication_condition(communication_condition)
         plan = self._build_plan(execution_graph, validation.components)
         nodes = {node.id: node for node in execution_graph.nodes}
+        self._validate_execution_contracts(tuple(nodes.values()))
+        self._validate_stateful_resource_ownership(nodes, plan)
+        if format_output_agent and execution_graph.output_agent_id is not None:
+            format_node = nodes[execution_graph.output_agent_id]
+            if (format_node.role_family or "").casefold() != "format":
+                raise AgentRuntimeError(
+                    "format_output_agent requires the Output Agent to carry "
+                    "role_family='format'"
+                )
+            format_mode = getattr(
+                format_node.execution_mode,
+                "value",
+                format_node.execution_mode,
+            )
+            if format_mode != "reasoning" or format_node.allowed_tools:
+                raise AgentRuntimeError(
+                    "Format Agent must use reasoning execution without tools"
+                )
         outputs: Dict[str, str] = {}
+        output_metadata: Dict[str, Mapping[str, object]] = {}
+        for agent_id, output in dict(prior_outputs or {}).items():
+            if agent_id in nodes:
+                if not isinstance(output, str):
+                    raise TypeError("prior_outputs values must be strings")
+                outputs[agent_id] = output
+        for agent_id, metadata in dict(prior_output_metadata or {}).items():
+            if agent_id in outputs:
+                if not isinstance(metadata, Mapping):
+                    raise TypeError(
+                        "prior_output_metadata values must be mappings"
+                    )
+                output_metadata[agent_id] = MappingProxyType(dict(metadata))
+        if dirty_agents is None:
+            dirty = set(nodes)
+        else:
+            if any(not isinstance(agent_id, str) for agent_id in dirty_agents):
+                raise TypeError("dirty_agents must contain strings")
+            dirty = execution_graph.dirty_closure(dirty_agents)
+        dirty.update(agent_id for agent_id in nodes if agent_id not in outputs)
+        dirty_components = {
+            plan.component_for[agent_id]
+            for agent_id in dirty
+            if agent_id in plan.component_for
+        }
         calls: List[AgentCallRecord] = []
         completion_order: List[Tuple[str, ...]] = []
+        executed_agents: Set[str] = set()
+        reused_agents: Set[str] = set()
         indegree = dict(plan.indegree)
         ready = sorted(component for component, degree in indegree.items() if degree == 0)
-        active: Dict["asyncio.Task[Dict[str, str]]", Tuple[str, ...]] = {}
+        active: Dict[
+            "asyncio.Task[Tuple[Dict[str, str], bool]]",
+            Tuple[str, ...],
+        ] = {}
+
+        async def execute_or_reuse(
+            component: Tuple[str, ...],
+        ) -> Tuple[Dict[str, str], bool]:
+            if component not in dirty_components and all(
+                agent_id in outputs for agent_id in component
+            ):
+                return ({agent_id: outputs[agent_id] for agent_id in component}, True)
+            return (
+                await self._execute_block(
+                    component,
+                    nodes,
+                    plan,
+                    outputs,
+                    problem.strip(),
+                    resolved_run_id,
+                    snapshot.revision,
+                    calls,
+                    output_metadata,
+                    output_agent_id=execution_graph.output_agent_id,
+                    format_output_agent=format_output_agent,
+                    communication_condition=resolved_condition,
+                ),
+                False,
+            )
 
         def start_ready() -> None:
             while ready:
                 component = ready.pop(0)
-                task = asyncio.create_task(
-                    self._execute_block(
-                        component,
-                        nodes,
-                        plan,
-                        outputs,
-                        problem.strip(),
-                        resolved_run_id,
-                        snapshot.revision,
-                        calls,
-                    )
-                )
+                task = asyncio.create_task(execute_or_reuse(component))
                 active[task] = component
 
         start_ready()
@@ -204,12 +491,15 @@ class AgentRuntime:
                 done, _ = await asyncio.wait(
                     tuple(active), return_when=asyncio.FIRST_COMPLETED
                 )
-                completed: List[Tuple[Tuple[str, ...], Dict[str, str]]] = []
+                completed: List[
+                    Tuple[Tuple[str, ...], Dict[str, str], bool]
+                ] = []
                 failure: Optional[BaseException] = None
                 for task in sorted(done, key=lambda item: active[item]):
                     component = active.pop(task)
                     try:
-                        completed.append((component, task.result()))
+                        block_outputs, reused = task.result()
+                        completed.append((component, block_outputs, reused))
                     except BaseException as exc:
                         failure = exc
                         break
@@ -221,11 +511,15 @@ class AgentRuntime:
                         raise failure
                     raise AgentRuntimeError(f"AgentGraph block execution failed: {failure}") from failure
 
-                for component, block_outputs in completed:
+                for component, block_outputs, reused in completed:
                     outputs.update(block_outputs)
                     completion_order.append(component)
+                    if reused:
+                        reused_agents.update(component)
+                    else:
+                        executed_agents.update(component)
                 newly_ready: Set[Tuple[str, ...]] = set()
-                for component, _ in completed:
+                for component, _, _ in completed:
                     for successor in plan.successors[component]:
                         indegree[successor] -= 1
                         if indegree[successor] == 0:
@@ -238,15 +532,110 @@ class AgentRuntime:
             raise
 
         output_id = execution_graph.output_agent_id
+        final_answer = outputs.get(output_id) if output_id is not None else None
+        if require_complete and final_answer is None:
+            raise AgentRuntimeError("complete AgentGraph produced no Output Agent artifact")
         return AgentRuntimeResult(
             run_id=resolved_run_id,
             graph_revision=snapshot.revision,
             output_agent_id=output_id,
-            final_answer=outputs[output_id],
+            final_answer=final_answer,
             outputs=outputs,
             calls=tuple(sorted(calls, key=lambda record: record.request.request_id)),
             block_completion_order=tuple(completion_order),
+            executed_agent_ids=tuple(sorted(executed_agents)),
+            reused_agent_ids=tuple(sorted(reused_agents)),
+            communication_condition=resolved_condition,
+            output_metadata=output_metadata,
         )
+
+    def _validate_execution_contracts(
+        self,
+        nodes: Tuple[AgentNode, ...],
+    ) -> None:
+        """Validate Director-selected execution semantics before scheduling."""
+
+        for node in nodes:
+            mode_value = getattr(node.execution_mode, "value", node.execution_mode)
+            if mode_value not in self.execution_adapters:
+                raise AgentRuntimeError(
+                    f"agent {node.id!r} requires unregistered execution adapter "
+                    f"{mode_value!r}"
+                )
+            if not node.allowed_tools:
+                continue
+            if mode_value == "reasoning":
+                raise AgentRuntimeError(
+                    f"reasoning agent {node.id!r} cannot declare allowed_tools"
+                )
+            if self.tool_registry is None:
+                raise AgentRuntimeError(
+                    f"agent {node.id!r} declares tools but no ToolRegistry is configured"
+                )
+            for tool_id in node.allowed_tools:
+                if tool_id not in self.tool_registry.resource_ids:
+                    raise AgentRuntimeError(
+                        f"agent {node.id!r} references unknown tool {tool_id!r}"
+                    )
+                try:
+                    capability = self.tool_registry.require_capability(tool_id)
+                except KeyError as exc:
+                    raise AgentRuntimeError(
+                        f"agent {node.id!r} tool {tool_id!r} has no capability metadata"
+                    ) from exc
+                if not capability.availability:
+                    raise AgentRuntimeError(
+                        f"agent {node.id!r} tool {tool_id!r} is unavailable"
+                    )
+                if self.dataset_id is not None and not capability.supports_dataset(
+                    self.dataset_id
+                ):
+                    raise AgentRuntimeError(
+                        f"agent {node.id!r} tool {tool_id!r} is outside dataset scope "
+                        f"{self.dataset_id!r}"
+                    )
+
+    def _validate_stateful_resource_ownership(
+        self,
+        nodes: Mapping[str, AgentNode],
+        plan: _ExecutionPlan,
+    ) -> None:
+        """Preserve single-episode/single-worktree semantics in a graph run.
+
+        SkillFlow binds one environment episode to one bounded Agent and one
+        SWE repository worktree to one coding episode.  FlowSteer's
+        reciprocal block executes both members concurrently and then executes
+        both again for revision, so a stateful resource cannot legally be
+        owned by that block or by multiple graph nodes.  Stateless retrieval
+        and process-isolated computation remain unrestricted.
+        """
+
+        if self.tool_registry is None:
+            return
+        exclusive_side_effects = {
+            "environment_state_transition",
+            "repository_read_write_and_test_process",
+        }
+        owners: Dict[str, List[str]] = {}
+        for node in nodes.values():
+            for tool_id in node.allowed_tools:
+                capability = self.tool_registry.require_capability(tool_id)
+                if capability.side_effect in exclusive_side_effects:
+                    owners.setdefault(tool_id, []).append(node.id)
+
+        for tool_id, agent_ids in sorted(owners.items()):
+            if len(agent_ids) != 1:
+                raise AgentRuntimeError(
+                    f"stateful tool {tool_id!r} requires one graph Agent owner; "
+                    f"found {len(agent_ids)}"
+                )
+            owner_id = agent_ids[0]
+            component = plan.component_for[owner_id]
+            if len(component) != 1:
+                raise AgentRuntimeError(
+                    f"stateful tool {tool_id!r} cannot execute inside a "
+                    "reciprocal Agent block"
+                )
 
     def _build_plan(
         self,
@@ -290,25 +679,55 @@ class AgentRuntime:
         run_id: str,
         graph_revision: int,
         calls: List[AgentCallRecord],
+        output_metadata: Dict[str, Mapping[str, object]],
+        *,
+        output_agent_id: Optional[str],
+        format_output_agent: bool,
+        communication_condition: CommunicationCondition,
     ) -> Dict[str, str]:
         if len(component) == 1:
             agent_id = component[0]
             request = self._request(
                 agent=nodes[agent_id],
                 phase=ExecutionPhase.SINGLE,
-                upstream=self._upstream(agent_id, plan, outputs),
+                upstream=self._upstream(
+                    agent_id,
+                    plan,
+                    outputs,
+                    nodes=nodes,
+                    graph_revision=graph_revision,
+                    output_metadata=output_metadata,
+                ),
                 problem=problem,
                 run_id=run_id,
                 graph_revision=graph_revision,
+                output_agent_id=output_agent_id,
+                format_output_agent=format_output_agent,
+                communication_condition=communication_condition,
             )
             response = await self._invoke(request, calls)
+            output_metadata[agent_id] = response.metadata
             return {agent_id: response.text}
 
         if len(component) != 2:
             raise AgentRuntimeError(f"unsupported reciprocal block size: {len(component)}")
         left_id, right_id = component
-        left_upstream = self._upstream(left_id, plan, outputs)
-        right_upstream = self._upstream(right_id, plan, outputs)
+        left_upstream = self._upstream(
+            left_id,
+            plan,
+            outputs,
+            nodes=nodes,
+            graph_revision=graph_revision,
+            output_metadata=output_metadata,
+        )
+        right_upstream = self._upstream(
+            right_id,
+            plan,
+            outputs,
+            nodes=nodes,
+            graph_revision=graph_revision,
+            output_metadata=output_metadata,
+        )
         left_draft_request = self._request(
             agent=nodes[left_id],
             phase=ExecutionPhase.DRAFT,
@@ -316,6 +735,9 @@ class AgentRuntime:
             problem=problem,
             run_id=run_id,
             graph_revision=graph_revision,
+            output_agent_id=output_agent_id,
+            format_output_agent=format_output_agent,
+            communication_condition=communication_condition,
         )
         right_draft_request = self._request(
             agent=nodes[right_id],
@@ -324,6 +746,9 @@ class AgentRuntime:
             problem=problem,
             run_id=run_id,
             graph_revision=graph_revision,
+            output_agent_id=output_agent_id,
+            format_output_agent=format_output_agent,
+            communication_condition=communication_condition,
         )
         left_draft, right_draft = await _gather_pair(
             self._invoke(left_draft_request, calls),
@@ -335,25 +760,57 @@ class AgentRuntime:
             phase=ExecutionPhase.REVISION,
             upstream=left_upstream,
             own_draft=left_draft.text,
-            peer_draft=UpstreamMessage(right_id, left_id, right_draft.text),
+            peer_draft=UpstreamMessage(
+                right_id,
+                left_id,
+                right_draft.text,
+                message_type="candidate",
+                graph_revision=graph_revision,
+                request_or_dependency=nodes[left_id].contract,
+                artifact_type=getattr(nodes[right_id], "artifact_type", "text"),
+                environment_revision=_environment_revision_from_metadata(
+                    right_draft.metadata
+                ),
+                tool_receipts=_tool_receipts_from_metadata(right_draft.metadata),
+            ),
             problem=problem,
             run_id=run_id,
             graph_revision=graph_revision,
+            output_agent_id=output_agent_id,
+            format_output_agent=format_output_agent,
+            communication_condition=communication_condition,
         )
         right_revision_request = self._request(
             agent=nodes[right_id],
             phase=ExecutionPhase.REVISION,
             upstream=right_upstream,
             own_draft=right_draft.text,
-            peer_draft=UpstreamMessage(left_id, right_id, left_draft.text),
+            peer_draft=UpstreamMessage(
+                left_id,
+                right_id,
+                left_draft.text,
+                message_type="candidate",
+                graph_revision=graph_revision,
+                request_or_dependency=nodes[right_id].contract,
+                artifact_type=getattr(nodes[left_id], "artifact_type", "text"),
+                environment_revision=_environment_revision_from_metadata(
+                    left_draft.metadata
+                ),
+                tool_receipts=_tool_receipts_from_metadata(left_draft.metadata),
+            ),
             problem=problem,
             run_id=run_id,
             graph_revision=graph_revision,
+            output_agent_id=output_agent_id,
+            format_output_agent=format_output_agent,
+            communication_condition=communication_condition,
         )
         left_revision, right_revision = await _gather_pair(
             self._invoke(left_revision_request, calls),
             self._invoke(right_revision_request, calls),
         )
+        output_metadata[left_id] = left_revision.metadata
+        output_metadata[right_id] = right_revision.metadata
         return {left_id: left_revision.text, right_id: right_revision.text}
 
     def _upstream(
@@ -361,6 +818,10 @@ class AgentRuntime:
         target_agent_id: str,
         plan: _ExecutionPlan,
         outputs: Mapping[str, str],
+        *,
+        nodes: Mapping[str, AgentNode],
+        graph_revision: int,
+        output_metadata: Mapping[str, Mapping[str, object]],
     ) -> Tuple[UpstreamMessage, ...]:
         target_component = plan.component_for[target_agent_id]
         messages = []
@@ -374,7 +835,28 @@ class AgentRuntime:
                     raise AgentRuntimeError(
                         f"upstream output {source_id!r} was not ready for {target_agent_id!r}"
                     )
-                messages.append(UpstreamMessage(source_id, target_id, outputs[source_id]))
+                # Keep the canonical routed message intact. Diagnostic masking is
+                # applied only when the provider prompt is rendered so receipts
+                # retain both the true upstream and what the model actually saw.
+                messages.append(
+                    UpstreamMessage(
+                        source_id,
+                        target_id,
+                        outputs[source_id],
+                        message_type="artifact",
+                        graph_revision=graph_revision,
+                        request_or_dependency=nodes[target_id].contract,
+                        artifact_type=getattr(
+                            nodes[source_id], "artifact_type", "text"
+                        ),
+                        environment_revision=_environment_revision_from_metadata(
+                            output_metadata.get(source_id, {})
+                        ),
+                        tool_receipts=_tool_receipts_from_metadata(
+                            output_metadata.get(source_id, {})
+                        ),
+                    )
+                )
         return tuple(
             sorted(messages, key=lambda item: (item.source_agent_id, item.target_agent_id))
         )
@@ -390,6 +872,9 @@ class AgentRuntime:
         graph_revision: int,
         own_draft: Optional[str] = None,
         peer_draft: Optional[UpstreamMessage] = None,
+        output_agent_id: Optional[str],
+        format_output_agent: bool,
+        communication_condition: CommunicationCondition,
     ) -> AgentRequest:
         model = self.model_registry.require_model(agent.model_id)
         provider = self.model_registry.provider_for(agent.model_id)
@@ -403,6 +888,11 @@ class AgentRuntime:
             model=model,
             provider=provider,
             phase=phase,
+            is_output_agent=agent.id == output_agent_id,
+            is_format_agent=(
+                format_output_agent and agent.id == output_agent_id
+            ),
+            communication_condition=communication_condition,
             upstream=upstream,
             own_draft=own_draft,
             peer_draft=peer_draft,
@@ -414,11 +904,21 @@ class AgentRuntime:
         calls: List[AgentCallRecord],
     ) -> AgentResponse:
         async def call_gateway() -> GatewayResponse:
+            mode_value = getattr(
+                request.agent.execution_mode,
+                "value",
+                request.agent.execution_mode,
+            )
+            adapter = self.execution_adapters.get(mode_value)
+            if adapter is None:
+                raise AgentRuntimeError(
+                    f"no execution adapter registered for {mode_value!r}"
+                )
             provider_semaphore = self._provider_semaphores.get(request.provider.provider_id)
             if provider_semaphore is None:
-                return await self.gateway.generate(request)
+                return await adapter.execute(request)
             async with provider_semaphore:
-                return await self.gateway.generate(request)
+                return await adapter.execute(request)
 
         try:
             if self._global_semaphore is None:
@@ -450,12 +950,16 @@ class AgentRuntime:
 __all__ = [
     "AgentCallRecord",
     "AgentGateway",
+    "AgentExecutionAdapter",
     "AgentRequest",
     "AgentResponse",
     "AgentRuntime",
     "AgentRuntimeError",
     "AgentRuntimeResult",
+    "CommunicationCondition",
+    "CommunicationEnvelope",
     "ExecutionPhase",
     "GatewayResponse",
+    "ReasoningExecutionAdapter",
     "UpstreamMessage",
 ]

@@ -18,6 +18,31 @@ TASK_SCHEMA_VERSION = "flowsteer.agentgraph.task.v1"
 REQUIRED_FIELDS = frozenset(
     {"schema_version", "task_id", "question", "ground_truth", "split", "metadata"}
 )
+_HOTPOTQA_QUESTION_MARKER = "\n\nQuestion:"
+
+
+def qa_question_scope(rendered_question: str) -> str:
+    """Return the model-visible QA question without prefetched passages.
+
+    This is the question-only boundary used by FlowSteer's task-scoped QA
+    Tool runtime.  It consults no task metadata, accepted answer, supporting
+    fact, or evaluator field.
+    """
+
+    if not isinstance(rendered_question, str) or not rendered_question.strip():
+        raise ValueError("QA question must be non-empty")
+    if _HOTPOTQA_QUESTION_MARKER not in rendered_question:
+        return rendered_question.strip()
+    scope = rendered_question.rsplit(_HOTPOTQA_QUESTION_MARKER, 1)[1].strip()
+    if not scope:
+        raise ValueError("rendered QA input has an empty Question field")
+    return scope
+
+
+def hotpotqa_question_scope(rendered_question: str) -> str:
+    """Backward-compatible HotpotQA wrapper for :func:`qa_question_scope`."""
+
+    return qa_question_scope(rendered_question)
 
 
 def build_hotpotqa_question(question: str, passages: List[str]) -> str:
@@ -149,7 +174,9 @@ def load_task_records(
 __all__ = [
     "TASK_SCHEMA_VERSION",
     "build_hotpotqa_question",
+    "hotpotqa_question_scope",
     "iter_task_records",
     "load_task_records",
+    "qa_question_scope",
     "task_record_from_mapping",
 ]
