@@ -1430,14 +1430,16 @@ def director_live_add_subgraph_agent_declarations_json_schema_text(
     ):
         raise ValueError("add_subgraph live Agent-count domain is invalid")
     required_fields = domain.get("required_agent_fields")
+    generic_free_agent = domain.get("semantic_protocol") == "none"
     required_minimum = {
         "agent_id",
         "model_id",
         "contract",
-        "role_family",
         "allowed_tools",
         "execution_mode",
     }
+    if not generic_free_agent:
+        required_minimum.add("role_family")
     if (
         not isinstance(required_fields, (list, tuple))
         or any(
@@ -1467,6 +1469,62 @@ def director_live_add_subgraph_agent_declarations_json_schema_text(
         for key in ("relation_endpoint_sources", "output_agent_id_sources")
     ):
         raise ValueError("add_subgraph endpoint scope is incomplete")
+    if generic_free_agent:
+        if selected_agent_roles is not None:
+            raise ValueError(
+                "generic add_subgraph does not use Agent role selection"
+            )
+        profiles = _live_execution_profiles(
+            domain.get("registered_execution_profiles"),
+            label="add_subgraph.registered_execution_profiles",
+        )
+        new_agent_ids = _live_new_agent_ids(existing_agent_ids, max_agents)
+        positional_agent_schemas: list[Mapping[str, Any]] = []
+        for agent_id in new_agent_ids:
+            profile_branches: list[Mapping[str, Any]] = []
+            for execution_mode, allowed_tools in profiles:
+                properties = json.loads(
+                    json.dumps(_AGENT_SPEC_JSON_SCHEMA["properties"])
+                )
+                properties["agent_id"] = {"const": agent_id}
+                properties["model_id"] = {"enum": list(model_ids)}
+                properties["execution_mode"] = {"const": execution_mode}
+                properties["allowed_tools"] = {
+                    "const": list(allowed_tools)
+                }
+                profile_branches.append(
+                    {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": list(required_fields),
+                        "properties": properties,
+                    }
+                )
+            positional_agent_schemas.append({"oneOf": profile_branches})
+        agent_count_branches = [
+            {
+                "type": "array",
+                "minItems": count,
+                "maxItems": count,
+                "prefixItems": positional_agent_schemas[:count],
+                "items": False,
+            }
+            for count in range(min_agents, max_agents + 1)
+        ]
+        return json.dumps(
+            {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["action", "agents"],
+                "properties": {
+                    "action": {"const": "add_subgraph"},
+                    "agents": {"oneOf": agent_count_branches},
+                },
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
     role_constraints = domain.get("role_constraints")
     if not isinstance(role_constraints, Mapping) or not role_constraints:
         raise ValueError("add_subgraph role constraints are missing")
@@ -1604,12 +1662,19 @@ def director_live_add_subgraph_role_selection_json_schema_text(
     the Director write each free contract.
     """
 
+    domain = action_target_domains.get("add_subgraph")
+    if (
+        not isinstance(domain, Mapping)
+        or domain.get("semantic_protocol") == "none"
+    ):
+        raise ValueError(
+            "generic add_subgraph does not use Agent role selection"
+        )
     declaration_schema = json.loads(
         director_live_add_subgraph_agent_declarations_json_schema_text(
             action_target_domains
         )
     )
-    domain = action_target_domains["add_subgraph"]
     min_agents = domain["min_new_agents"]
     max_agents = domain["max_new_agents"]
     existing_agent_ids = domain["existing_agent_ids"]
@@ -1765,16 +1830,104 @@ def _live_add_subgraph_agents(
         domain["existing_agent_ids"],
         max_agents,
     )
-    role_constraints = domain["role_constraints"]
-    admitted_new_roles = _live_admitted_new_role_families(
-        domain,
-        role_constraints,
-    )
     model_ids = set(domain["model_ids"])
     required_fields = set(domain["required_agent_fields"])
     known_fields = set(_AGENT_SPEC_JSON_SCHEMA["properties"])
     normalized: list[dict[str, Any]] = []
     new_ids: set[str] = set()
+    if domain.get("semantic_protocol") == "none":
+        execution_profiles = set(
+            _live_execution_profiles(
+                domain.get("registered_execution_profiles"),
+                label="add_subgraph.registered_execution_profiles",
+            )
+        )
+        for position, raw_agent in enumerate(agents):
+            if not isinstance(raw_agent, Mapping):
+                raise ValueError(
+                    "add_subgraph Agent declaration must be an object"
+                )
+            agent = dict(raw_agent)
+            if not required_fields.issubset(agent) or not set(agent).issubset(
+                known_fields
+            ):
+                raise ValueError(
+                    "add_subgraph Agent declaration fields are invalid"
+                )
+            agent_id = agent.get("agent_id")
+            model_id = agent.get("model_id")
+            contract = agent.get("contract")
+            execution_mode = agent.get("execution_mode")
+            allowed_tools = agent.get("allowed_tools")
+            if (
+                not isinstance(agent_id, str)
+                or not agent_id
+                or agent_id != agent_id.strip()
+                or agent_id != expected_new_ids[position]
+                or agent_id in existing_ids
+                or agent_id in new_ids
+            ):
+                raise ValueError(
+                    "add_subgraph new Agent IDs must match the unique neutral "
+                    "IDs assigned by the current Canvas"
+                )
+            if (
+                not isinstance(model_id, str)
+                or model_id != model_id.strip()
+                or model_id not in model_ids
+            ):
+                raise ValueError(
+                    "add_subgraph Agent model_id is outside the live catalog"
+                )
+            if (
+                not isinstance(contract, str)
+                or not contract
+                or contract != contract.strip()
+            ):
+                raise ValueError(
+                    "add_subgraph Agent contract must be non-empty"
+                )
+            if (
+                not isinstance(allowed_tools, list)
+                or any(
+                    not isinstance(tool_id, str)
+                    or not tool_id
+                    or tool_id != tool_id.strip()
+                    for tool_id in allowed_tools
+                )
+                or len(allowed_tools) != len(set(allowed_tools))
+            ):
+                raise ValueError(
+                    "add_subgraph Agent Tool IDs must be canonical"
+                )
+            if (execution_mode, tuple(allowed_tools)) not in execution_profiles:
+                raise ValueError(
+                    "add_subgraph Agent execution mode and Tool set do not "
+                    "form one registered Runtime profile"
+                )
+            for optional_text in (
+                "role_family",
+                "artifact_type",
+                "completion_condition",
+            ):
+                value = agent.get(optional_text)
+                if value is not None and (
+                    not isinstance(value, str)
+                    or not value
+                    or value != value.strip()
+                ):
+                    raise ValueError(
+                        f"add_subgraph Agent {optional_text} must be non-empty text"
+                    )
+            new_ids.add(agent_id)
+            normalized.append(agent)
+        return tuple(normalized)
+
+    role_constraints = domain["role_constraints"]
+    admitted_new_roles = _live_admitted_new_role_families(
+        domain,
+        role_constraints,
+    )
     for position, raw_agent in enumerate(agents):
         if not isinstance(raw_agent, Mapping):
             raise ValueError("add_subgraph Agent declaration must be an object")
@@ -3344,7 +3497,10 @@ class AgentGraphOrchestrator:
         # revision-local gate and its first measured failure stage so the
         # Director repairs the responsible semantic node instead of probing
         # FINISH or repeatedly modifying the Formatter.
-        if verified_qa_semantic_protocol(self.semantic_protocol):
+        if (
+            verified_qa_semantic_protocol(self.semantic_protocol)
+            or env.runtime.dataset_id == "swe_bench"
+        ):
             payload["finish_admissibility"] = _director_neutral_state_projection(
                 env.finish_admissibility()
             )

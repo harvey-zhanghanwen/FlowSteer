@@ -1875,6 +1875,33 @@ def test_swe_direct_condition_is_one_coding_agent_with_repository_tools():
             )
         )
 
+    async def failing_evaluate(_backend, _task, _prediction, *, run_graph=None):
+        del _backend, _task, _prediction, run_graph
+        raise RuntimeError("official harness temporarily unavailable")
+
+    with patch.object(
+        _MODULE,
+        "execution_record_from_call",
+        return_value=SimpleNamespace(
+            to_dict=lambda: {
+                "output": "diff --git a/a.py b/a.py",
+                "metadata": {"response": {"attempt_count": 1}},
+            }
+        ),
+    ), patch.object(_MODULE, "_evaluate_prediction", new=failing_evaluate):
+        persisted_after_evaluator_failure = asyncio.run(
+            _MODULE._direct_one(
+                backend,
+                task,
+                0,
+                model_id="qwen3.5-9b-local",
+                protocol="single_coding_agent_v1",
+                contract="Use repository tools to resolve the issue.",
+                seed=23,
+                run_label="test",
+            )
+        )
+
     node = observed["node"]
     assert node.execution_mode.value == "coding"
     assert node.allowed_tools == ("swebench_repository",)
@@ -1882,4 +1909,17 @@ def test_swe_direct_condition_is_one_coding_agent_with_repository_tools():
     assert result["simple_baseline_topology"] == "single_coding_agent"
     assert result["sampling_coordinate"] == observed["sampling_coordinate"]
     assert result["final_answer"].startswith("diff --git")
-    assert closed == [True]
+    assert persisted_after_evaluator_failure["final_answer"].startswith(
+        "diff --git"
+    )
+    assert persisted_after_evaluator_failure["evaluation"]["valid"] is False
+    assert (
+        persisted_after_evaluator_failure["evaluation"]["reason"]
+        == "evaluator_runtime_failure"
+    )
+    assert (
+        persisted_after_evaluator_failure["evaluation"]["details"]
+        ["terminal_artifact"]["repository_patch"]
+        == persisted_after_evaluator_failure["final_answer"]
+    )
+    assert closed == [True, True]

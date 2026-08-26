@@ -77,10 +77,11 @@ class UpstreamMessage:
     artifact_version: Optional[str] = None
 
     def __post_init__(self) -> None:
+        if not isinstance(self.content, str):
+            raise ValueError("content must be a string")
         for value, name in (
             (self.source_agent_id, "source_agent_id"),
             (self.target_agent_id, "target_agent_id"),
-            (self.content, "content"),
             (self.message_type, "message_type"),
             (self.artifact_type, "artifact_type"),
         ):
@@ -1109,9 +1110,11 @@ class AgentRuntime:
         SkillFlow binds one environment episode to one bounded Agent and one
         SWE repository worktree to one coding episode.  FlowSteer's
         reciprocal block executes both members concurrently and then executes
-        both again for revision, so a stateful resource cannot legally be
-        owned by that block or by multiple graph nodes.  Stateless retrieval
-        and process-isolated computation remain unrestricted.
+        both again for revision.  A stateful resource therefore remains
+        single-owner unless every owner resolves to the same execution adapter
+        and that adapter serializes complete executions against the shared
+        state.  Stateless retrieval and process-isolated computation remain
+        unrestricted.
         """
 
         if self.tool_registry is None:
@@ -1128,6 +1131,28 @@ class AgentRuntime:
                     owners.setdefault(tool_id, []).append(node.id)
 
         for tool_id, agent_ids in sorted(owners.items()):
+            owner_adapters = []
+            for agent_id in agent_ids:
+                mode_value = getattr(
+                    nodes[agent_id].execution_mode,
+                    "value",
+                    nodes[agent_id].execution_mode,
+                )
+                owner_adapters.append(self.execution_adapters.get(mode_value))
+            shared_serialized_adapter = (
+                bool(owner_adapters)
+                and len({id(adapter) for adapter in owner_adapters}) == 1
+                and owner_adapters[0] is not None
+                and bool(
+                    getattr(
+                        owner_adapters[0],
+                        "serializes_stateful_resource",
+                        False,
+                    )
+                )
+            )
+            if shared_serialized_adapter:
+                continue
             if len(agent_ids) != 1:
                 raise AgentRuntimeError(
                     f"stateful tool {tool_id!r} requires one graph Agent owner; "

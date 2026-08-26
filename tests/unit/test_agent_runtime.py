@@ -76,6 +76,79 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
+    @staticmethod
+    def _repository_tool_registry() -> ToolRegistry:
+        tool_id = "swebench_repository"
+        capability = ToolCapability(
+            tool_id=tool_id,
+            dataset_scope=("swe_bench",),
+            action_schemas={"view_file": {"type": "object"}},
+            input_schema={"type": "object"},
+            output_schema={"type": "object"},
+            side_effect="repository_read_write_and_test_process",
+            timeout_seconds=None,
+            version="test-v1",
+        )
+        return ToolRegistry(
+            (
+                ToolRegistration(
+                    tool_id,
+                    FakeTool({"view_file": lambda arguments: dict(arguments)}),
+                    capability,
+                ),
+            )
+        )
+
+    async def test_serialized_repository_adapter_routes_empty_patch_between_agents(
+        self,
+    ) -> None:
+        catalog = registry()
+
+        class SerializedRepositoryAdapter:
+            serializes_stateful_resource = True
+
+            def __init__(self) -> None:
+                self.requests: list[AgentRequest] = []
+
+            async def execute(self, request: AgentRequest) -> AgentResponse:
+                self.requests.append(request)
+                return AgentResponse("" if request.agent.id == "first" else "patch")
+
+        adapter = SerializedRepositoryAdapter()
+        graph = AgentGraph(
+            [
+                AgentNode(
+                    "first",
+                    "m1",
+                    "inspect repository",
+                    allowed_tools=("swebench_repository",),
+                    execution_mode="coding",
+                ),
+                AgentNode(
+                    "second",
+                    "m2",
+                    "continue from repository state",
+                    allowed_tools=("swebench_repository",),
+                    execution_mode="coding",
+                ),
+            ],
+            [AgentRelation("first", "second", True, False)],
+            output_agent_id="second",
+        )
+        runtime = AgentRuntime(
+            catalog,
+            RecordingGateway(),
+            execution_adapters={"coding": adapter},
+            tool_registry=self._repository_tool_registry(),
+            dataset_id="swe_bench",
+        )
+
+        result = await runtime.execute(graph, "repair issue")
+
+        self.assertEqual("patch", result.final_answer)
+        self.assertEqual(["first", "second"], [item.agent.id for item in adapter.requests])
+        self.assertEqual("", adapter.requests[1].upstream[0].content)
+
     async def test_chain_routes_final_outputs_and_models(self) -> None:
         catalog = registry()
         gateway = RecordingGateway()

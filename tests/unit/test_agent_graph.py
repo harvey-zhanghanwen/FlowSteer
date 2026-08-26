@@ -42,6 +42,10 @@ from src.interactive.agent_workflow_env import (
     _evidence_span_matches_read,
 )
 from src.interactive.aime2026_adapter import extract_aime2026_candidate
+from src.interactive.coding_tools import (
+    SWEBENCH_REPOSITORY_TOOL_ID,
+    create_swebench_repository_registry,
+)
 from src.interactive.director import director_validate_live_action_target_domains
 from src.interactive.model_registry import (
     ModelRegistry,
@@ -105,6 +109,63 @@ def test_evidence_provenance_accepts_typography_but_not_paraphrase() -> None:
         "Peggy Seeger had American nationality and was Ewan MacColl's spouse.",
         passage,
     )
+
+
+def test_generic_live_add_domain_publishes_registered_swebench_profiles() -> None:
+    registry = make_registry()
+    gateway = _ImmediateGateway()
+    with tempfile.TemporaryDirectory() as directory:
+        repository_tools = create_swebench_repository_registry(directory)
+        runtime = AgentRuntime(
+            registry,
+            gateway,
+            execution_adapters={
+                "coding": ReasoningExecutionAdapter(gateway),
+            },
+            tool_registry=repository_tools,
+            dataset_id="swe_bench",
+            semantic_protocol="none",
+        )
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=runtime,
+            problem="Repair the repository issue.",
+            semantic_protocol="none",
+        )
+
+        actions = env.model_admissible_action_types()
+        targets = env.model_admissible_action_targets()
+        add_domain = targets["add_subgraph"]
+
+        assert add_domain["semantic_protocol"] == "none"
+        assert add_domain["required_agent_fields"] == [
+            "agent_id",
+            "model_id",
+            "contract",
+            "allowed_tools",
+            "execution_mode",
+        ]
+        assert "role_family" not in add_domain["required_agent_fields"]
+        assert sorted(add_domain["model_ids"]) == sorted(registry.model_ids)
+        assert add_domain["registered_execution_profiles"] == [
+            {"execution_mode": "reasoning", "allowed_tools": []},
+            {
+                "execution_mode": "coding",
+                "allowed_tools": [SWEBENCH_REPOSITORY_TOOL_ID],
+            },
+        ]
+        assert add_domain["endpoint_scope"] == {
+            "relation_endpoint_sources": [
+                "existing_agent_ids",
+                "same_action_agent_ids",
+            ],
+            "output_agent_id_sources": [
+                "existing_agent_ids",
+                "same_action_agent_ids",
+            ],
+        }
+        assert "role_constraints" not in add_domain
+        director_validate_live_action_target_domains(actions, targets)
 
 
 def test_artifact_version_binding_rejects_stale_semantic_input() -> None:

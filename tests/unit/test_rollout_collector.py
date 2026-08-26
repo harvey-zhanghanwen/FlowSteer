@@ -740,6 +740,300 @@ def test_native_sglang_v3_regenerates_malformed_relation_candidate_selector_once
     }
 
 
+def test_native_sglang_v3_generic_add_samples_free_agent_profiles_without_role_phase():
+    domains = {
+        "add_subgraph": {
+            "min_new_agents": 1,
+            "max_new_agents": 2,
+            "existing_agent_ids": ["incumbent"],
+            "semantic_protocol": "none",
+            "required_agent_fields": [
+                "agent_id",
+                "model_id",
+                "contract",
+                "allowed_tools",
+                "execution_mode",
+            ],
+            "model_ids": ["cheap-model", "other-model"],
+            "registered_execution_profiles": [
+                {"execution_mode": "reasoning", "allowed_tools": []},
+                {
+                    "execution_mode": "coding",
+                    "allowed_tools": ["swebench_repository"],
+                },
+            ],
+            "endpoint_scope": {
+                "relation_endpoint_sources": [
+                    "existing_agent_ids",
+                    "same_action_agent_ids",
+                ],
+                "output_agent_id_sources": [
+                    "existing_agent_ids",
+                    "same_action_agent_ids",
+                ],
+            },
+        }
+    }
+    declarations = {
+        "action": "add_subgraph",
+        "agents": [
+            {
+                "agent_id": "node_1",
+                "model_id": "cheap-model",
+                "contract": "inspect the repository issue and produce a patch",
+                "allowed_tools": ["swebench_repository"],
+                "execution_mode": "coding",
+            }
+        ],
+    }
+    final_action = {
+        **declarations,
+        "relations": [
+            {
+                "source_id": "incumbent",
+                "target_id": "node_1",
+                "source_to_target": True,
+                "target_to_source": False,
+            }
+        ],
+        "output_agent_id": "node_1",
+    }
+    actions = ("add_subgraph",)
+    domains_json = director_live_action_target_domains_json(actions, domains)
+    client = ScriptedSGLangClient(
+        [
+            json.dumps(declarations, separators=(",", ":")),
+            json.dumps(final_action, separators=(",", ":")),
+        ],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+    )
+
+    response = asyncio.run(
+        client.propose(
+            "current generic Canvas",
+            action_json_schema=(
+                director_model_admissible_sampling_json_schema_text_v3(actions)
+            ),
+            action_json_schema_version=(
+                DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3
+            ),
+            action_schema_branch=director_model_admissible_schema_branch_v3(actions),
+            action_target_domains_json=domains_json,
+            action_target_domain_version=(
+                DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION
+            ),
+        )
+    )
+
+    assert len(client.payloads) == 2
+    assert client.payloads[0]["sampling_params"]["json_schema"] == (
+        director_live_add_subgraph_agent_declarations_json_schema_text(domains)
+    )
+    assert client.payloads[1]["sampling_params"]["json_schema"] == (
+        director_live_action_parameter_json_schema_text(
+            "add_subgraph",
+            domains,
+            add_agents=declarations["agents"],
+        )
+    )
+    assert response.metadata["action_decoding_strategy"] == (
+        HIERARCHICAL_JSON_SCHEMA_STRATEGY
+    )
+    assert response.metadata["selected_add_agent_roles"] is None
+    assert response.metadata["selected_add_agent_ids"] == ["node_1"]
+    assert response.metadata["request_count"] == 2
+    assert set(response.metadata["hierarchical_phase_receipts"]) == {
+        "add_agent_declarations"
+    }
+    declaration_receipt = response.metadata["hierarchical_phase_receipts"][
+        "add_agent_declarations"
+    ]
+    assert declaration_receipt["prompt_text"] == "current generic Canvas"
+    parameter_messages = decode_director_transcript(
+        response.metadata["prompt_text"]
+    )
+    assert parameter_messages is not None
+    assert json.loads(parameter_messages[-2]["content"]) == declarations
+    assert parameter_messages[-1] == {
+        "role": "user",
+        "content": _ADD_ACTION_CONTINUATION,
+    }
+    schema_request = {
+        "action_json_schema": (
+            director_model_admissible_sampling_json_schema_text_v3(actions)
+        ),
+        "action_json_schema_version": (
+            DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3
+        ),
+        "action_schema_branch": director_model_admissible_schema_branch_v3(actions),
+        "action_target_domains_json": domains_json,
+        "action_target_domain_version": (
+            DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION
+        ),
+    }
+    assert _validate_v3_hierarchical_action_receipt(
+        AgentActionParser().parse(response.text),
+        response.metadata,
+        schema_request,
+    ) == {"add_agent_declarations"}
+
+    invalid_declarations = json.loads(json.dumps(declarations))
+    invalid_declarations["agents"][0]["execution_mode"] = "reasoning"
+    invalid_text = json.dumps(invalid_declarations, separators=(",", ":"))
+    invalid_client = ScriptedSGLangClient(
+        [invalid_text],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+    )
+    rejected = asyncio.run(
+        invalid_client.propose(
+            "current generic Canvas",
+            action_json_schema=(
+                director_model_admissible_sampling_json_schema_text_v3(actions)
+            ),
+            action_json_schema_version=(
+                DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3
+            ),
+            action_schema_branch=director_model_admissible_schema_branch_v3(actions),
+            action_target_domains_json=domains_json,
+            action_target_domain_version=(
+                DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION
+            ),
+        )
+    )
+    assert len(invalid_client.payloads) == 1
+    assert rejected.metadata["action_decoding_strategy"] == (
+        HIERARCHICAL_JSON_SCHEMA_STRATEGY
+    )
+    assert rejected.metadata["parse_failure_phase"] == "add_agent_declarations"
+    assert rejected.metadata["selected_add_agent_roles"] is None
+    assert _validate_v3_hierarchical_action_receipt(
+        None,
+        rejected.metadata,
+        schema_request,
+    ) == {"add_agent_declarations"}
+
+
+def test_collector_binds_generic_add_root_phase_to_canvas_prompt():
+    registry = _registry()
+    domains = {
+        "add_subgraph": {
+            "min_new_agents": 1,
+            "max_new_agents": 1,
+            "existing_agent_ids": [],
+            "semantic_protocol": "none",
+            "required_agent_fields": [
+                "agent_id",
+                "model_id",
+                "contract",
+                "allowed_tools",
+                "execution_mode",
+            ],
+            "model_ids": ["cheap-model"],
+            "registered_execution_profiles": [
+                {"execution_mode": "reasoning", "allowed_tools": []},
+            ],
+            "endpoint_scope": {
+                "relation_endpoint_sources": [
+                    "existing_agent_ids",
+                    "same_action_agent_ids",
+                ],
+                "output_agent_id_sources": [
+                    "existing_agent_ids",
+                    "same_action_agent_ids",
+                ],
+            },
+        }
+    }
+    declarations = {
+        "action": "add_subgraph",
+        "agents": [
+            {
+                "agent_id": "node_1",
+                "model_id": "cheap-model",
+                "contract": "solve the task",
+                "allowed_tools": [],
+                "execution_mode": "reasoning",
+            }
+        ],
+    }
+    final_action = {
+        **declarations,
+        "relations": [],
+        "output_agent_id": "node_1",
+    }
+    actions = ("add_subgraph",)
+    schema_request = {
+        "action_json_schema": (
+            director_model_admissible_sampling_json_schema_text_v3(actions)
+        ),
+        "action_json_schema_version": (
+            DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3
+        ),
+        "action_schema_branch": director_model_admissible_schema_branch_v3(actions),
+        "action_target_domains_json": director_live_action_target_domains_json(
+            actions,
+            domains,
+        ),
+        "action_target_domain_version": (
+            DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION
+        ),
+    }
+    client = ScriptedSGLangClient(
+        [
+            json.dumps(declarations, separators=(",", ":")),
+            json.dumps(final_action, separators=(",", ":")),
+        ],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+    )
+    orchestrator = _orchestrator(registry, client, max_rounds=1)
+    orchestrator.action_schema_request = lambda _env: dict(schema_request)
+    collector = AgentGraphRolloutCollector(
+        orchestrator,
+        AgentWorkflowEnv(
+            registry,
+            gateway=FakeGateway(),
+            execute_on_edit=False,
+        ),
+        _versions(),
+    )
+
+    def evaluator(task, final_answer, final_graph, runtime):
+        assert final_answer is None
+        assert runtime is None
+        return {
+            "evaluator_version": EVALUATOR_VERSION,
+            "valid": True,
+            "reward": 0.0,
+            "metrics": {"f1": 0.0},
+        }
+
+    trajectory = asyncio.run(collector.collect(_task(), 0, evaluator))
+
+    assert trajectory.termination_reason == "max_rounds"
+    assert len(trajectory.turns) == 1
+    decoding = trajectory.turns[0].runtime_summary[
+        "director_action_decoding"
+    ]
+    assert decoding["strategy"] == HIERARCHICAL_JSON_SCHEMA_STRATEGY
+    root_prompt = decoding["phase_receipts"]["add_agent_declarations"][
+        "prompt_text"
+    ]
+    final_prompt = trajectory.turns[0].prompt
+    assert root_prompt != final_prompt
+    root_messages = decode_director_transcript(root_prompt)
+    final_messages = decode_director_transcript(final_prompt)
+    assert root_messages is not None
+    assert final_messages is not None
+    assert final_messages[: len(root_messages)] == root_messages
+    assert final_messages[-1] == {
+        "role": "user",
+        "content": _ADD_ACTION_CONTINUATION,
+    }
+
+
 def test_native_sglang_v3_samples_add_declarations_then_complete_exact_action():
     domains = {
         "add_subgraph": {

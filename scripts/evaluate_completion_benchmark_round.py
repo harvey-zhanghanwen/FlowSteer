@@ -79,7 +79,7 @@ from src.interactive.swebench_reporting import (
     diagnose_swebench_wrong_demo,
 )
 from src.interactive.task_dataset import TASK_SCHEMA_VERSION, iter_task_records
-from src.interactive.task_evaluator import evaluate_task
+from src.interactive.task_evaluator import EvaluationOutcome, evaluate_task
 
 
 # These are aliases, rather than local reimplementations, so the completion
@@ -1156,6 +1156,34 @@ async def _run_evaluator_preflight(
     return _evaluator_preflight_receipt(outcome, dataset_key)
 
 
+def _evaluator_runtime_failure_outcome(
+    task: TaskRecord,
+    prediction: str,
+    error: Exception,
+) -> EvaluationOutcome:
+    """Persist an invalid evaluator receipt without discarding a prediction."""
+
+    details: dict[str, Any] = {
+        "error": _safe_error(error),
+        "error_type": type(error).__name__,
+    }
+    if _dataset_key(task) == "swe_bench":
+        details["terminal_artifact"] = {
+            "kind": "repository_patch",
+            "source": "CodingExecutionAdapter.materialize_workspace_diff",
+            "repository_patch": prediction,
+            "non_empty": bool(prediction.strip()),
+        }
+    return EvaluationOutcome(
+        valid=False,
+        reward=None,
+        metrics={},
+        reason="evaluator_runtime_failure",
+        details=details,
+        evaluator_version=evaluator_version_for(task),
+    )
+
+
 async def _direct_one(
     backend: LiveSmokeBackend,
     task: TaskRecord,
@@ -1261,11 +1289,22 @@ async def _direct_one(
             executions = [
                 execution_record_from_call(call).to_dict() for call in calls
             ]
-            evaluation = await _evaluate_prediction(
-                backend,
-                task,
-                runtime_result.final_answer,
-            )
+            try:
+                evaluation = await _evaluate_prediction(
+                    backend,
+                    task,
+                    runtime_result.final_answer,
+                )
+            except Exception as exc:
+                # Preserve the generated repository patch and execution
+                # receipts when only the official harness call fails.  A
+                # resumed run can then retry the evaluator without repeating
+                # the 28-turn Direct coding episode.
+                evaluation = _evaluator_runtime_failure_outcome(
+                    task,
+                    runtime_result.final_answer,
+                    exc,
+                )
             return {
                 "schema_version": "flowsteer.completion_benchmark.direct_prediction.v1",
                 "dataset_key": dataset_key,
@@ -1485,7 +1524,6 @@ async def _collect_direct(
             task is not None
             and _dataset_key(task) == "swe_bench"
             and isinstance(existing_answer, str)
-            and existing_answer.strip()
             and (
                 not isinstance(evaluation, Mapping)
                 or evaluation.get("valid") is not True
@@ -1505,9 +1543,19 @@ async def _collect_direct(
             )
         ):
             updated = dict(candidate)
-            updated["evaluation"] = asdict(
-                await _evaluate_prediction(backend, task, str(candidate["final_answer"]))
-            )
+            try:
+                rescored_evaluation = await _evaluate_prediction(
+                    backend,
+                    task,
+                    str(candidate["final_answer"]),
+                )
+            except Exception as exc:
+                rescored_evaluation = _evaluator_runtime_failure_outcome(
+                    task,
+                    str(candidate["final_answer"]),
+                    exc,
+                )
+            updated["evaluation"] = asdict(rescored_evaluation)
             updated["rescore_receipt"] = {
                 "mode": (
                     "official_evaluator_only_existing_patch"

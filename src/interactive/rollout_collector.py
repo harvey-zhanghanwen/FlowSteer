@@ -1108,7 +1108,117 @@ class SGLangReceiptDirectorClient:
         selected_modify_agent_id: str | None = None
         selected_relation_candidate: int | None = None
         parameter_prompt = prompt
-        if selected_action == "add_subgraph" and action_target_domains is not None:
+        add_domain = (
+            action_target_domains.get("add_subgraph")
+            if selected_action == "add_subgraph"
+            and action_target_domains is not None
+            else None
+        )
+        generic_free_agent_add = (
+            isinstance(add_domain, Mapping)
+            and add_domain.get("semantic_protocol") == "none"
+        )
+        if generic_free_agent_add:
+            # A generic FlowSteer Canvas has no semantic role inventory to
+            # select first.  Sample complete free-Agent declarations directly
+            # under the Runtime-published execution profiles, then bind the
+            # final ADD action to those exact declarations.  This preserves
+            # Agent count, contract, model, relation, Output, and topology as
+            # Director decisions without labeling the receipt role-first.
+            assert action_target_domains is not None
+            declaration_schema = (
+                director_live_add_subgraph_agent_declarations_json_schema_text(
+                    action_target_domains
+                )
+            )
+            declaration_payload = dict(
+                self._request_payload(prompt, adapter_name, seed)
+            )
+            declaration_sampling = dict(
+                declaration_payload["sampling_params"]
+            )
+            declaration_sampling["json_schema"] = declaration_schema
+            declaration_payload["sampling_params"] = declaration_sampling
+            value, latency_ms, attempt_count = await self._post_with_retries(
+                declaration_payload
+            )
+            total_latency_ms += latency_ms
+            total_attempt_count += attempt_count
+            declaration_response = self._parse_response(
+                prompt,
+                declaration_payload,
+                value,
+                policy_version=policy_version,
+                adapter_name=adapter_name,
+                expected_server_weight_version=expected_server_weight_version,
+                action_json_schema_version=action_schema_version,
+                action_schema_branch=action_schema_branch,
+                action_target_domains_json=action_target_domains_json,
+                action_target_domain_version=action_target_domain_version,
+                latency_ms=latency_ms,
+                attempt_count=attempt_count,
+                generation_seed=seed,
+            )
+            phase_receipts["add_agent_declarations"] = (
+                self._hierarchical_phase_receipt(declaration_response)
+            )
+            try:
+                selected_add_agents = (
+                    director_live_add_subgraph_agent_declarations_from_text(
+                        declaration_response.text,
+                        action_target_domains,
+                    )
+                )
+            except ValueError:
+                # Preserve the exact invalid declaration as a rejected Canvas
+                # turn.  No role-selection phase is fabricated and no Agent is
+                # executed from malformed text.
+                metadata = dict(declaration_response.metadata)
+                metadata.update(
+                    {
+                        "base_prompt_text": prompt,
+                        "action_decoding_strategy": (
+                            HIERARCHICAL_JSON_SCHEMA_STRATEGY
+                        ),
+                        "selected_action": selected_action,
+                        "selected_modify_field": None,
+                        "selected_modify_agent_id": None,
+                        "selected_add_agent_ids": None,
+                        "selected_add_agent_roles": None,
+                        "parameter_schema_branch": None,
+                        "parse_failure_phase": (
+                            _ADD_DECLARATION_PARSE_FAILURE_PHASE
+                        ),
+                        "hierarchical_phase_receipts": phase_receipts,
+                        "request_count": len(phase_receipts),
+                        "latency_ms": total_latency_ms,
+                        "attempt_count": total_attempt_count,
+                    }
+                )
+                return DirectorResponse(
+                    text=declaration_response.text,
+                    metadata=metadata,
+                )
+            selected_declarations_json = json.dumps(
+                {
+                    "action": "add_subgraph",
+                    "agents": [dict(value) for value in selected_add_agents],
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            parameter_prompt = _hierarchical_continuation_prompt(
+                prompt,
+                committed_json=selected_declarations_json,
+                instruction=_ADD_ACTION_CONTINUATION,
+            )
+            parameter_schema = director_live_action_parameter_json_schema_text(
+                "add_subgraph",
+                action_target_domains,
+                add_agents=selected_add_agents,
+            )
+        elif selected_action == "add_subgraph" and action_target_domains is not None:
             role_selection_schema = (
                 director_live_add_subgraph_role_selection_json_schema_text(
                     action_target_domains
@@ -1928,6 +2038,12 @@ def _validate_v3_hierarchical_action_receipt(
     decoding_strategy = metadata.get("action_decoding_strategy")
     parse_failure_phase = metadata.get("parse_failure_phase")
     phase_receipts = metadata.get("hierarchical_phase_receipts")
+    add_domain = domains.get("add_subgraph")
+    generic_free_agent_add = (
+        selected_action == "add_subgraph"
+        and isinstance(add_domain, Mapping)
+        and add_domain.get("semantic_protocol") == "none"
+    )
     parameter_regeneration_attempted = metadata.get(
         "parameter_regeneration_attempted"
     )
@@ -1999,12 +2115,20 @@ def _validate_v3_hierarchical_action_receipt(
         raise ReceiptValidationError(
             "v3 hierarchical receipt has an unsupported parse-failure phase"
         )
-    if parse_failure_phase is not None and (
-        decoding_strategy != ROLE_FIRST_ADD_DECODING_STRATEGY
-        or selected_action != "add_subgraph"
+    valid_generic_declaration_failure = (
+        generic_free_agent_add
+        and decoding_strategy == HIERARCHICAL_JSON_SCHEMA_STRATEGY
+        and parse_failure_phase == _ADD_DECLARATION_PARSE_FAILURE_PHASE
+    )
+    valid_role_first_failure = (
+        selected_action == "add_subgraph"
+        and decoding_strategy == ROLE_FIRST_ADD_DECODING_STRATEGY
+    )
+    if parse_failure_phase is not None and not (
+        valid_generic_declaration_failure or valid_role_first_failure
     ):
         raise ReceiptValidationError(
-            "v3 ADD phase parse failure requires role-first ADD decoding"
+            "v3 ADD phase parse failure has an incompatible decoding strategy"
         )
     if parse_failure_phase is not None and action is not None:
         raise ReceiptValidationError(
@@ -2034,6 +2158,10 @@ def _validate_v3_hierarchical_action_receipt(
 
     if selected_action == "add_subgraph":
         role_first_add = decoding_strategy == ROLE_FIRST_ADD_DECODING_STRATEGY
+        generic_free_agent_add = (
+            isinstance(add_domain, Mapping)
+            and add_domain.get("semantic_protocol") == "none"
+        )
         role_selection_parse_failure = (
             parse_failure_phase == _ADD_ROLE_SELECTION_PARSE_FAILURE_PHASE
         )
@@ -2041,6 +2169,7 @@ def _validate_v3_hierarchical_action_receipt(
             schema_request.get("action_target_domain_version")
             == DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION
             and not role_first_add
+            and not generic_free_agent_add
         ):
             raise ReceiptValidationError(
                 "current live-domain ADD receipt did not use role-first decoding"
@@ -2186,6 +2315,53 @@ def _validate_v3_hierarchical_action_receipt(
                 )
             return expected_phases
         if parse_failure_phase == _ADD_DECLARATION_PARSE_FAILURE_PHASE:
+            if generic_free_agent_add:
+                assert isinstance(declaration_phase, Mapping)
+                try:
+                    director_live_add_subgraph_agent_declarations_from_text(
+                        declaration_phase["text"],
+                        domains,
+                    )
+                except ValueError:
+                    pass
+                else:
+                    raise ReceiptValidationError(
+                        "v3 generic ADD declaration parse-failure sample "
+                        "satisfies the strict live domain"
+                    )
+                if metadata.get("prompt_text") != declaration_phase.get(
+                    "prompt_text"
+                ):
+                    raise ReceiptValidationError(
+                        "v3 generic ADD declaration parse-failure receipt is "
+                        "not bound to its declaration prompt"
+                    )
+                if metadata.get("selected_add_agent_roles") is not None:
+                    raise ReceiptValidationError(
+                        "v3 generic ADD declaration parse failure fabricated "
+                        "selected roles"
+                    )
+                if metadata.get("selected_add_agent_ids") is not None:
+                    raise ReceiptValidationError(
+                        "v3 generic ADD declaration parse failure fabricated "
+                        "Agent declarations"
+                    )
+                if metadata.get("selected_modify_agent_id") is not None:
+                    raise ReceiptValidationError(
+                        "v3 generic ADD declaration parse failure carries a "
+                        "MODIFY target"
+                    )
+                if metadata.get("parameter_schema_branch") is not None:
+                    raise ReceiptValidationError(
+                        "v3 generic ADD declaration parse failure carries a "
+                        "parameter branch"
+                    )
+                if metadata.get("request_count") != len(expected_phases):
+                    raise ReceiptValidationError(
+                        "v3 generic ADD declaration parse-failure request count "
+                        "differs from its completed phases"
+                    )
+                return expected_phases
             assert role_first_add
             assert isinstance(role_phase, Mapping)
             try:
@@ -2335,6 +2511,37 @@ def _validate_v3_hierarchical_action_receipt(
                     "v3 role-first ADD parameter prompt is not conditioned on "
                     "its Agent declarations"
                 )
+        elif generic_free_agent_add:
+            declaration_prompt = declaration_phase.get("prompt_text")
+            if not isinstance(declaration_prompt, str):
+                raise ReceiptValidationError(
+                    "v3 generic ADD declaration phase has no prompt binding"
+                )
+            selected_declarations_json = json.dumps(
+                {
+                    "action": "add_subgraph",
+                    "agents": [dict(value) for value in declarations],
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            expected_parameter_prompt = _hierarchical_continuation_prompt(
+                declaration_prompt,
+                committed_json=selected_declarations_json,
+                instruction=_ADD_ACTION_CONTINUATION,
+            )
+            observed_parameter_prompt = (
+                parameter_failure_receipt.get("prompt_text")
+                if parameter_regeneration_attempted
+                and isinstance(parameter_failure_receipt, Mapping)
+                else metadata.get("prompt_text")
+            )
+            if observed_parameter_prompt != expected_parameter_prompt:
+                raise ReceiptValidationError(
+                    "v3 generic ADD parameter prompt is not conditioned on "
+                    "its Agent declarations"
+                )
         declaration_values = list(declarations)
         if (
             action_value is not None
@@ -2357,7 +2564,7 @@ def _validate_v3_hierarchical_action_receipt(
                 )
         elif metadata.get("selected_add_agent_roles") is not None:
             raise ReceiptValidationError(
-                "legacy v3 add_subgraph receipt unexpectedly carries selected roles"
+                "generic v3 add_subgraph receipt unexpectedly carries selected roles"
             )
         endpoint_ids = set(domains["add_subgraph"]["existing_agent_ids"])
         endpoint_ids.update(declared_ids)
@@ -3516,6 +3723,25 @@ class AgentGraphRolloutCollector:
             )
             if receipt_base_prompt != prompt:
                 raise ReceiptValidationError("Director receipt is bound to a different prompt")
+            generic_free_agent_add = False
+            if (
+                strategy_hint == HIERARCHICAL_JSON_SCHEMA_STRATEGY
+                and metadata.get("selected_action") == "add_subgraph"
+                and schema_request.get("action_json_schema_version")
+                == DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3
+            ):
+                try:
+                    live_domains = json.loads(
+                        schema_request["action_target_domains_json"]
+                    )
+                except (KeyError, TypeError, ValueError):
+                    live_domains = None
+                generic_free_agent_add = (
+                    isinstance(live_domains, Mapping)
+                    and isinstance(live_domains.get("add_subgraph"), Mapping)
+                    and live_domains["add_subgraph"].get("semantic_protocol")
+                    == "none"
+                )
             if strategy_hint == ROLE_FIRST_ADD_DECODING_STRATEGY:
                 raw_phases = metadata.get("hierarchical_phase_receipts")
                 role_phase = (
@@ -3543,6 +3769,20 @@ class AgentGraphRolloutCollector:
                 ) != prompt:
                     raise ReceiptValidationError(
                         "role-first ADD receipt is not rooted in the Canvas prompt"
+                    )
+            elif generic_free_agent_add:
+                raw_phases = metadata.get("hierarchical_phase_receipts")
+                declaration_phase = (
+                    raw_phases.get("add_agent_declarations")
+                    if isinstance(raw_phases, Mapping)
+                    else None
+                )
+                if not isinstance(
+                    declaration_phase,
+                    Mapping,
+                ) or declaration_phase.get("prompt_text") != prompt:
+                    raise ReceiptValidationError(
+                        "generic ADD receipt is not rooted in the Canvas prompt"
                     )
             elif metadata.get("parameter_regeneration_attempted") is True:
                 raw_phases = metadata.get("hierarchical_phase_receipts")

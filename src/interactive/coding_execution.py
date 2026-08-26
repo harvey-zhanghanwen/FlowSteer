@@ -121,6 +121,12 @@ def _submitted_workspace_diff(
 class CodingExecutionAdapter(ToolReactExecutionAdapter):
     """Coding-mode adapter for inspect/edit/test/revision/finalize loops."""
 
+    # The task-scoped lock below serializes every complete coding execution
+    # against the one mutable SWE-bench worktree.  AgentRuntime may therefore
+    # route the same registered repository resource to multiple graph Agents
+    # without concurrent repository mutation or task-budget races.
+    serializes_stateful_resource = True
+
     TESTED_DIFF_COMPLETION = "tested_diff_receipt"
     WORKSPACE_DIFF_COMPLETION = "workspace_diff"
 

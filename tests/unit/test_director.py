@@ -1033,6 +1033,43 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("remaining_rounds", state)
         self.assertIn("finish", state["admissible_action_types"])
 
+    async def test_swebench_canvas_exposes_negative_finish_admission(self) -> None:
+        model_registry = registry()
+        runtime = AgentRuntime(
+            model_registry,
+            FakeGateway(),
+            dataset_id="swe_bench",
+            semantic_protocol="none",
+        )
+        env = AgentWorkflowEnv(
+            model_registry,
+            runtime=runtime,
+            problem="repair the repository issue",
+            semantic_protocol="none",
+            execute_on_edit=True,
+        )
+        orchestrator = AgentGraphOrchestrator(
+            model_registry,
+            ScriptedDirector([]),
+            sampling_action_profile=(
+                DIRECTOR_MODEL_ADMISSIBLE_ACTION_MASK_PROFILE
+            ),
+            sampling_action_schema_version=(
+                DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3
+            ),
+        )
+
+        state = observation_payload(
+            transcript_messages(orchestrator.build_prompt(env, 0, ()))[-1]
+        )
+
+        self.assertEqual(False, state["finish_admissibility"]["admissible"])
+        self.assertEqual(
+            "graph_validation",
+            state["finish_admissibility"]["stage"],
+        )
+        self.assertNotIn("finish", state["admissible_action_types"])
+
     async def test_director_terminal_policy_is_issue_driven_without_role_template(
         self,
     ) -> None:
@@ -2877,6 +2914,114 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
             {"const": True},
             relation["anyOf"][1]["properties"]["target_to_source"],
         )
+
+    def test_v3_generic_add_uses_free_agent_runtime_profiles_without_role_selection(
+        self,
+    ) -> None:
+        domains = {
+            "add_subgraph": {
+                "min_new_agents": 1,
+                "max_new_agents": 2,
+                "existing_agent_ids": ["incumbent"],
+                "semantic_protocol": "none",
+                "required_agent_fields": [
+                    "agent_id",
+                    "model_id",
+                    "contract",
+                    "allowed_tools",
+                    "execution_mode",
+                ],
+                "model_ids": ["qwen", "other"],
+                "registered_execution_profiles": [
+                    {"execution_mode": "reasoning", "allowed_tools": []},
+                    {
+                        "execution_mode": "coding",
+                        "allowed_tools": ["swebench_repository"],
+                    },
+                ],
+                "endpoint_scope": {
+                    "relation_endpoint_sources": [
+                        "existing_agent_ids",
+                        "same_action_agent_ids",
+                    ],
+                    "output_agent_id_sources": [
+                        "existing_agent_ids",
+                        "same_action_agent_ids",
+                    ],
+                },
+            }
+        }
+
+        schema = json.loads(
+            director_live_add_subgraph_agent_declarations_json_schema_text(
+                domains
+            )
+        )
+        first_agent = schema["properties"]["agents"]["oneOf"][0][
+            "prefixItems"
+        ][0]
+        self.assertEqual(2, len(first_agent["oneOf"]))
+        for branch in first_agent["oneOf"]:
+            self.assertNotIn("role_family", branch["required"])
+            self.assertEqual(
+                {"enum": ["qwen", "other"]},
+                branch["properties"]["model_id"],
+            )
+        self.assertEqual(
+            {
+                (branch["properties"]["execution_mode"]["const"],
+                 tuple(branch["properties"]["allowed_tools"]["const"]))
+                for branch in first_agent["oneOf"]
+            },
+            {
+                ("reasoning", ()),
+                ("coding", ("swebench_repository",)),
+            },
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "does not use Agent role selection",
+        ):
+            director_live_add_subgraph_role_selection_json_schema_text(domains)
+
+        coding = (
+            '{"action":"add_subgraph","agents":['
+            '{"agent_id":"node_1","model_id":"qwen",'
+            '"contract":"inspect the repository and produce a patch",'
+            '"allowed_tools":["swebench_repository"],'
+            '"execution_mode":"coding"}]}'
+        )
+        sampled = director_live_add_subgraph_agent_declarations_from_text(
+            coding,
+            domains,
+        )
+        self.assertNotIn("role_family", sampled[0])
+
+        optional_role = json.loads(coding)
+        optional_role["agents"][0]["role_family"] = "repository analysis"
+        sampled_with_role = (
+            director_live_add_subgraph_agent_declarations_from_text(
+                json.dumps(optional_role),
+                domains,
+            )
+        )
+        self.assertEqual("repository analysis", sampled_with_role[0]["role_family"])
+
+        mismatched_profile = json.loads(coding)
+        mismatched_profile["agents"][0]["execution_mode"] = "reasoning"
+        with self.assertRaisesRegex(ValueError, "registered Runtime profile"):
+            director_live_add_subgraph_agent_declarations_from_text(
+                json.dumps(mismatched_profile),
+                domains,
+            )
+
+        missing_mode = json.loads(coding)
+        del missing_mode["agents"][0]["execution_mode"]
+        with self.assertRaisesRegex(ValueError, "fields are invalid"):
+            director_live_add_subgraph_agent_declarations_from_text(
+                json.dumps(missing_mode),
+                domains,
+            )
 
 
 if __name__ == "__main__":

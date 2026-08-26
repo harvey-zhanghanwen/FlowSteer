@@ -536,7 +536,11 @@ async def _retry_terminal_evaluator(
             if isinstance(terminal_artifact, Mapping)
             else None
         )
-        if isinstance(candidate_patch, str) and candidate_patch.strip():
+        # SWE-bench's official harness accepts the exact workspace diff even
+        # when it is the empty string and reports that submission as
+        # ``empty_patch`` / unresolved.  Presence and type, not truthiness,
+        # define an authoritative persisted repository patch here.
+        if isinstance(candidate_patch, str):
             repository_patch = candidate_patch
     started_at = _utc_now()
     if _dataset_key(task) in {"webshop", "alfworld"} and replay_trace_missing:

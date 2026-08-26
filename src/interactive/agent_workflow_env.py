@@ -3469,7 +3469,44 @@ class AgentWorkflowEnv:
                         ),
                     }
                     if self._uses_semantic_lineage_protocol()
-                    else {}
+                    else {
+                        # FlowSteer's free-Agent Canvas still needs an exact
+                        # execution boundary when v3 constrained sampling is
+                        # enabled.  Publish the Runtime's registered
+                        # execution-mode/Tool pairs instead of deriving a
+                        # coding role or prescribing a topology.  The
+                        # Director must select one complete pair for every new
+                        # Agent; role_family remains optional free-text
+                        # metadata under the generic protocol.
+                        "semantic_protocol": "none",
+                        "required_agent_fields": [
+                            "agent_id",
+                            "model_id",
+                            "contract",
+                            "allowed_tools",
+                            "execution_mode",
+                        ],
+                        "model_ids": list(self._available_model_ids()),
+                        "registered_execution_profiles": [
+                            {
+                                "execution_mode": execution_mode,
+                                "allowed_tools": list(allowed_tools),
+                            }
+                            for execution_mode, allowed_tools in (
+                                self.runtime.registered_execution_profiles()
+                            )
+                        ],
+                        "endpoint_scope": {
+                            "relation_endpoint_sources": [
+                                "existing_agent_ids",
+                                "same_action_agent_ids",
+                            ],
+                            "output_agent_id_sources": [
+                                "existing_agent_ids",
+                                "same_action_agent_ids",
+                            ],
+                        },
+                    }
                 ),
             }
         if AgentActionType.MODIFY_AGENT.value in admitted:

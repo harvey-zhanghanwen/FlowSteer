@@ -27,6 +27,15 @@ _STABLE_ZERO_MEXEC_CONFIG_PATH = (
 _STABLE_ZERO_OUTPUT_ADMISSION_CONFIG_PATH = (
     _ROOT / "config" / "evaluation_swebench_skillflow_v3_stable_zero_v12.yaml"
 )
+_STABLE_ZERO_FREE_AGENT_CONFIG_PATH = (
+    _ROOT / "config" / "evaluation_swebench_skillflow_v3_stable_zero_v13.yaml"
+)
+_STABLE_ZERO_DIRECT_REUSE_CONFIG_PATH = (
+    _ROOT / "config" / "evaluation_swebench_skillflow_v3_stable_zero_v14.yaml"
+)
+_STABLE_ZERO_SHARED_WORKSPACE_CONFIG_PATH = (
+    _ROOT / "config" / "evaluation_swebench_skillflow_v3_stable_zero_v15.yaml"
+)
 
 
 def _config() -> dict[str, object]:
@@ -193,6 +202,167 @@ def test_v12_changes_only_runtime_output_admission_condition() -> None:
     assert runtime["max_tool_calls_per_agent_call"] == 28
     assert runtime["task_max_turns"] == 28
     assert runtime["task_max_tool_calls"] == 28
+    assert config["agent_graph"]["model_catalog_path"] == previous[
+        "agent_graph"
+    ]["model_catalog_path"]
+    assert config["evaluation"]["swebench_evaluator_path"] == previous[
+        "evaluation"
+    ]["swebench_evaluator_path"]
+    assert config["evaluation"]["swebench_harness_path"] == previous[
+        "evaluation"
+    ]["swebench_harness_path"]
+    assert config["evaluation"]["swebench_dataset_path"] == previous[
+        "evaluation"
+    ]["swebench_dataset_path"]
+    assert config["grpo"]["enabled"] is False
+    assert config["skills"]["enabled"] is False
+
+
+def test_v13_freezes_free_agent_runtime_and_checkpoint_resume_condition() -> None:
+    previous = dict(load_yaml(_STABLE_ZERO_OUTPUT_ADMISSION_CONFIG_PATH))
+    config = dict(load_yaml(_STABLE_ZERO_FREE_AGENT_CONFIG_PATH))
+
+    validate_completion_benchmark_config(config)
+
+    experiment = config["experiment"]
+    bounded = config["swebench_evaluation"]
+    runtime = config["swe_coding_runtime"]
+    director = config["director"]
+    assert experiment["condition_id"] == (
+        "swebench_skillflow_v3_stable_zero_v13"
+    )
+    assert experiment["prompt_version"] == (
+        "agentgraph.director.minimal-neutral.v10"
+    )
+    assert experiment["tool_version"] == (
+        previous["experiment"]["tool_version"]
+        + "+flowsteer.free-agent-runtime-profile-declaration.v1"
+        + "+flowsteer.direct-evaluator-checkpoint-resume.v1"
+    )
+    assert experiment["seed"] == previous["experiment"]["seed"] == 20260825
+    assert bounded == previous["swebench_evaluation"]
+    assert bounded["sample_count"] == 128
+    assert bounded["concurrency"] == 2
+    assert runtime["max_turns_per_agent_call"] == 28
+    assert runtime["max_tool_calls_per_agent_call"] == 28
+    assert runtime["task_max_turns"] == 28
+    assert runtime["task_max_tool_calls"] == 28
+    assert director["sampling_schema_version"] == (
+        "agentgraph.model-admissible-action-mask.v3"
+    )
+    assert config["agent_graph"]["contract_type"] == "free_text"
+    assert config["agent_graph"]["require_format_agent"] is False
+    assert config["agent_graph"]["model_catalog_path"] == previous[
+        "agent_graph"
+    ]["model_catalog_path"]
+    assert config["evaluation"]["swebench_evaluator_path"] == previous[
+        "evaluation"
+    ]["swebench_evaluator_path"]
+    assert config["evaluation"]["swebench_harness_path"] == previous[
+        "evaluation"
+    ]["swebench_harness_path"]
+    assert config["evaluation"]["swebench_dataset_path"] == previous[
+        "evaluation"
+    ]["swebench_dataset_path"]
+    assert config["grpo"]["enabled"] is False
+    assert config["skills"]["enabled"] is False
+
+
+def test_v14_reuses_v13_direct_checkpoint_without_changing_protocol() -> None:
+    previous = dict(load_yaml(_STABLE_ZERO_FREE_AGENT_CONFIG_PATH))
+    config = dict(load_yaml(_STABLE_ZERO_DIRECT_REUSE_CONFIG_PATH))
+
+    validate_completion_benchmark_config(config)
+
+    experiment = config["experiment"]
+    bounded = config["swebench_evaluation"]
+    runtime = config["swe_coding_runtime"]
+    director = config["director"]
+    assert experiment["condition_id"] == (
+        "swebench_skillflow_v3_stable_zero_v14"
+    )
+    assert experiment["prompt_version"] == previous["experiment"][
+        "prompt_version"
+    ] == "agentgraph.director.minimal-neutral.v10"
+    assert experiment["tool_version"] == (
+        previous["experiment"]["tool_version"]
+        + "+flowsteer.generic-add-receipt-root-binding.v1"
+    )
+    assert experiment["seed"] == previous["experiment"]["seed"] == 20260825
+    previous_bounded = dict(previous["swebench_evaluation"])
+    assert bounded["direct_reused_from"] == (
+        "artifacts/swebench_skillflow_v3_stable_zero_v13/"
+        "direct_predictions.jsonl"
+    )
+    assert {
+        key: value
+        for key, value in bounded.items()
+        if key != "direct_reused_from"
+    } == previous_bounded
+    assert bounded["sample_count"] == 128
+    assert bounded["concurrency"] == 2
+    assert runtime["max_turns_per_agent_call"] == 28
+    assert runtime["max_tool_calls_per_agent_call"] == 28
+    assert runtime["task_max_turns"] == 28
+    assert runtime["task_max_tool_calls"] == 28
+    assert director["sampling_schema_version"] == (
+        "agentgraph.model-admissible-action-mask.v3"
+    )
+    assert config["agent_graph"]["model_catalog_path"] == previous[
+        "agent_graph"
+    ]["model_catalog_path"]
+    assert config["evaluation"]["swebench_evaluator_path"] == previous[
+        "evaluation"
+    ]["swebench_evaluator_path"]
+    assert config["evaluation"]["swebench_harness_path"] == previous[
+        "evaluation"
+    ]["swebench_harness_path"]
+    assert config["evaluation"]["swebench_dataset_path"] == previous[
+        "evaluation"
+    ]["swebench_dataset_path"]
+    assert config["grpo"]["enabled"] is False
+    assert config["skills"]["enabled"] is False
+
+
+def test_v15_freezes_shared_workspace_empty_patch_and_finish_feedback() -> None:
+    previous = dict(load_yaml(_STABLE_ZERO_DIRECT_REUSE_CONFIG_PATH))
+    config = dict(load_yaml(_STABLE_ZERO_SHARED_WORKSPACE_CONFIG_PATH))
+
+    validate_completion_benchmark_config(config)
+
+    experiment = config["experiment"]
+    bounded = config["swebench_evaluation"]
+    runtime = config["swe_coding_runtime"]
+    director = config["director"]
+    assert experiment["condition_id"] == (
+        "swebench_skillflow_v3_stable_zero_v15"
+    )
+    assert experiment["prompt_version"] == previous["experiment"][
+        "prompt_version"
+    ] == "agentgraph.director.minimal-neutral.v10"
+    assert experiment["tool_version"] == (
+        previous["experiment"]["tool_version"]
+        + "+flowsteer.serialized-shared-repository-workspace.v1"
+        + "+flowsteer.empty-patch-communication-envelope.v1"
+        + "+flowsteer.swebench-finish-admissibility-feedback.v1"
+    )
+    assert experiment["seed"] == previous["experiment"]["seed"] == 20260825
+    assert bounded == previous["swebench_evaluation"]
+    assert bounded["direct_reused_from"] == (
+        "artifacts/swebench_skillflow_v3_stable_zero_v13/"
+        "direct_predictions.jsonl"
+    )
+    assert bounded["sample_count"] == 128
+    assert bounded["concurrency"] == 2
+    assert runtime["max_turns_per_agent_call"] == 28
+    assert runtime["max_tool_calls_per_agent_call"] == 28
+    assert runtime["task_max_turns"] == 28
+    assert runtime["task_max_tool_calls"] == 28
+    assert director["sampling_schema_version"] == (
+        "agentgraph.model-admissible-action-mask.v3"
+    )
+    assert config["agent_graph"]["contract_type"] == "free_text"
+    assert config["agent_graph"]["require_format_agent"] is False
     assert config["agent_graph"]["model_catalog_path"] == previous[
         "agent_graph"
     ]["model_catalog_path"]
