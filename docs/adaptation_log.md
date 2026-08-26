@@ -563,3 +563,48 @@ eight and relation counts ranged from zero to six. These are observed Director
 choices, not medical role or topology templates. No training, GRPO, backward
 pass, optimizer step, LoRA update/publication, MACE, Bayesian posterior/EVSI,
 Skill retrieval, injection, or evolution ran; optimizer updates remain zero.
+
+### 10. Receipt-backed failure-demo taxonomy
+
+The offline reporter `scripts/report_healthbench_failure_demos.py` reuses the
+completion runner's frozen `wrong_demos.jsonl` diagnosis, the saved
+AgentGraph trajectories, and the existing multidataset
+CommunicationEnvelope/ReAct/Tool receipt extractors. It made zero model,
+Tool, grader, training, or architecture calls. Its Wrong Demo population is
+the 496 of 525 AgentGraph outputs whose Professional length-adjusted score is
+below the full-score threshold.
+
+Terminal precedence produces the following mutually exclusive primary
+taxonomy:
+
+| Primary failure class | Count | Wrong Demo share | Full-set share |
+| --- | ---: | ---: | ---: |
+| Rubric-level response-quality shortfall | 358 | 72.1774% | 68.1905% |
+| Professional response-length adjustment | 81 | 16.3306% | 15.4286% |
+| Recovered Canvas/graph/relation edit anomaly before `FINISH` | 34 | 6.8548% | 6.4762% |
+| Recovered Director action-parsing anomaly before `FINISH` | 1 | 0.2016% | 0.1905% |
+| `max_rounds` terminal failure | 22 | 4.4355% | 4.1905% |
+
+The rubric class separates into 271 unmet-positive-only, 25
+triggered-negative-only, and 62 combined cases. The recovered Canvas class
+separates into 27 rejected `SET_RELATION`, 5 rejected `MODIFY_AGENT`, and 2
+rejected `ADD_AGENT` edits. The 22 terminal failures separate by first
+observable receipt into 21 graph/Canvas anomalies and one Director parsing
+anomaly. The report selects at least one deterministic frozen representative
+for every non-zero subcategory; task IDs are not hard-coded.
+
+Final Retrieval/Tool, Agent message transport/runtime, Formatter/output
+parsing, evaluator/canonicalization, and provider/collection failure counts
+are zero. Hidden reasoning, semantic use of a delivered message, and failure
+of a mandatory Verifier are not independently observable under this open
+search-space condition and are reported as `N/A`, not invented causes.
+Historical recovered attempts remain separate from the final taxonomy.
+
+The tracked redacted report is
+`reports/healthbench_professional_official_v1/failure_taxonomy_report_zh.md`.
+Full conversations, signed rubrics, the non-scoring physician completion,
+candidate outputs, Director/Canvas/Agent traces, actual communication bodies,
+terminal receipts, and rubric-level evaluator receipts are written only to
+`artifacts/healthbench_professional_official_v1/evaluation/evaluator_private/`.
+That private diagnostic output is excluded from Git and must not enter a model
+prompt or training input.

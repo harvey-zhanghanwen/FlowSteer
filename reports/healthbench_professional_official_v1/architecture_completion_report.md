@@ -64,6 +64,10 @@
 
 The machine-readable and concise reports are `evaluation_report.json` and
 `evaluation_report.md` in this directory.
+The receipt-backed, terminal-first Wrong Demo classification is
+`failure_taxonomy_report_zh.md`; its complete conversations, signed rubrics,
+candidate responses, Director/Canvas/Agent traces, communication bodies, and
+evaluator receipts remain in the ignored evaluator-private artifact boundary.
 
 | Condition | Evaluator valid | Strict raw | Strict length-adjusted | Valid-only length-adjusted |
 | --- | ---: | ---: | ---: | ---: |

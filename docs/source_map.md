@@ -282,6 +282,7 @@ was free text authored by the Director, not a predefined medical role.
 | 525-row JSONL loader and full-conversation projection | **Necessary task-specific adaptation** | Convert the official schema to `TaskRecord` without changing conversation contents or exposing evaluator-only fields. |
 | Rubric item conversion (`criterion_text` to the reference evaluator's criterion field), rubric-level grading, signed-point scoring, length adjustment, and final clipped aggregation | **Necessary task-specific adaptation** over OpenAI `simple-evals` commit `652c89d` | Return reference-compatible `overall_score_length_adjusted` and unadjusted rubric receipts; never EM/F1/Accuracy. |
 | Direct versus AgentGraph paired runner configuration | **Necessary wiring** in the existing evaluation runner | Same 525 IDs, generation/model condition, Tool condition, evaluator, and grader condition. |
+| Receipt-backed failure-demo reporting | **Necessary reporting adaptation** over the completion runner's `wrong_demos.jsonl` diagnosis and the existing multidataset CommunicationEnvelope/ReAct/Tool extractors | `scripts/report_healthbench_failure_demos.py` joins frozen paired/trajectory receipts with the evaluator-only case store. It writes a tracked redacted taxonomy plus an ignored evaluator-private full trace; it performs no model, Tool, grader, or training call. |
 | Medical retrieval or Web browsing | **Not enabled** | The public Professional base protocol declares no Tool interface. Direct and AgentGraph both run with an empty task Tool condition. Existing MedRAG code is not activated. |
 | Doctor, Researcher, Reviewer, Verifier, or other medical role classes/templates | **Not implemented and prohibited as an initial prior** | Agents remain `agent_id + model_id + free-text contract`; the Director chooses Agent count, contracts, models, and relations from feedback. |
 | GRPO, optimizer/backward, LoRA update, MACE, Bayesian posterior/EVSI, Skill retrieval, Skill injection, or Skill evolution | **Not enabled in this round** | No training or learning state may change. |
@@ -306,6 +307,13 @@ short-answer extractor, QA answer tag, answer compression, physician-response
 rewrite, or task-specific Formatter is applied. The sole terminal processing
 is whatever minimal transport normalization the pinned reference evaluator
 requires.
+
+Full failure demos follow `docs/failure_demo_reporting_protocol.md`. Complete
+conversations, rubrics, physician completions, candidate responses, Director
+prompts, Agent inputs/outputs, communication bodies, and grader explanations
+are written only under the ignored `artifacts/.../evaluator_private/`
+boundary. The tracked report retains aggregate taxonomy, task IDs, metrics,
+topology, termination, and redacted receipt summaries only.
 
 The preparation manifest's `model_visible_fields` label describes fields kept
 in the public transport record; it does not mean every listed routing field is

@@ -85,6 +85,11 @@ single-node graph。
 `wrong_demos.jsonl` 收录 496 个低于逐题满分或 terminal failure 的 case；
 它不是“AgentGraph 全部回退”的集合。首个可观察 failure layer 分布为：
 
+下表保留原始首个可观察 layer 视图。为避免 `max_rounds` 与早期
+graph/director anomaly 重复解释，terminal-first 的互斥专业分类、每个非零
+子类的确定性代表样本以及 0/N/A 类别见
+`failure_taxonomy_report_zh.md`；完整链路只保存在 evaluator-private artifact。
+
 | Failure layer | 数量 | AgentGraph 更差 | 解释 |
 | --- | ---: | ---: | --- |
 | `rubric_evaluation` | 358 | 230 | 最终回答未充分满足 positive rubric，或触发 negative rubric；主要属于模型回答质量 |
