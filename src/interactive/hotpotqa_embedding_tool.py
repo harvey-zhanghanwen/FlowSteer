@@ -18,7 +18,9 @@ from dataclasses import dataclass, field
 import inspect
 import json
 import math
+import re
 from typing import Protocol
+import unicodedata
 
 from .agent_runtime import AgentRequest
 from .react_execution import ToolReactExecutionAdapter
@@ -33,6 +35,86 @@ from .tool_runtime import (
 
 HOTPOTQA_RETRIEVAL_TOOL_ID = "qa-retrieval"
 HOTPOTQA_DATASET_SCOPE = ("hotpotqa",)
+
+
+def _normalized_retrieval_query(query: str) -> str:
+    """Canonicalize only for duplicate-request admission, not retrieval.
+
+    DIRECT_REUSE: ``qa_tool_adapter._normalized_retrieval_query`` in the
+    current FlowSteer QA Tool path.  The original query remains unchanged in
+    the request and receipt.
+    """
+
+    normalized = unicodedata.normalize("NFKC", query).casefold()
+    return " ".join(re.findall(r"\w+", normalized, flags=re.UNICODE))
+
+
+@dataclass(frozen=True, slots=True)
+class _HotpotRetrievalState:
+    """Public bounded search/read state adapted from FlowSteer's QA adapter."""
+
+    search_queries: tuple[str, ...]
+    latest_search_doc_ids: tuple[str, ...]
+    read_doc_ids: tuple[str, ...]
+    dispatched_tool_calls: int
+    latest_successful_operation: str | None
+
+    @property
+    def latest_unread_doc_ids(self) -> tuple[str, ...]:
+        read = frozenset(self.read_doc_ids)
+        return tuple(
+            doc_id for doc_id in self.latest_search_doc_ids if doc_id not in read
+        )
+
+
+def _public_retrieval_state(
+    observations: Sequence[Mapping[str, object]],
+) -> _HotpotRetrievalState:
+    search_queries: list[str] = []
+    latest_search_doc_ids: list[str] = []
+    read_doc_ids: list[str] = []
+    dispatched_tool_calls = 0
+    latest_successful_operation: str | None = None
+    for observation in observations:
+        if (
+            observation.get("tool_id") == HOTPOTQA_RETRIEVAL_TOOL_ID
+            and observation.get("observation_status") in {"success", "tool_error"}
+        ):
+            dispatched_tool_calls += 1
+        if observation.get("observation_status") != "success":
+            continue
+        result = observation.get("result")
+        if not isinstance(result, Mapping):
+            continue
+        if result.get("operation") == "search":
+            latest_successful_operation = "search"
+            latest_search_doc_ids = []
+            query = result.get("query")
+            if isinstance(query, str) and query.strip():
+                search_queries.append(query.strip())
+            raw_doc_ids = result.get("doc_ids", ())
+            if isinstance(raw_doc_ids, (list, tuple)):
+                latest_search_doc_ids.extend(
+                    str(item)
+                    for item in raw_doc_ids
+                    if isinstance(item, str) and item.strip()
+                )
+        elif result.get("operation") == "read":
+            latest_successful_operation = "read"
+            doc_id = result.get("doc_id")
+            if (
+                isinstance(doc_id, str)
+                and doc_id.strip()
+                and doc_id.strip() not in read_doc_ids
+            ):
+                read_doc_ids.append(doc_id.strip())
+    return _HotpotRetrievalState(
+        search_queries=tuple(search_queries),
+        latest_search_doc_ids=tuple(dict.fromkeys(latest_search_doc_ids)),
+        read_doc_ids=tuple(read_doc_ids),
+        dispatched_tool_calls=dispatched_tool_calls,
+        latest_successful_operation=latest_successful_operation,
+    )
 
 
 class _TaskScopedEmbeddingIndex(Protocol):
@@ -270,16 +352,57 @@ class HotpotQAEmbeddingReactExecutionAdapter(ToolReactExecutionAdapter):
         request: AgentRequest,
         observations: list[Mapping[str, object]],
     ) -> tuple[str, ...]:
+        actions, _ = self._state_conditioned_action_domain(
+            request,
+            observations,
+        )
+        if actions:
+            return (HOTPOTQA_RETRIEVAL_TOOL_ID,)
+        return ()
+
+    def _state_conditioned_action_domain(
+        self,
+        request: AgentRequest,
+        observations: list[Mapping[str, object]],
+    ) -> tuple[frozenset[tuple[str, str]], bool]:
+        """Expose FlowSteer's bounded HotpotQA multi-hop action domain.
+
+        THIN_ADAPTATION: the state transitions are ported from
+        ``QARetrievalReactExecutionAdapter`` in the current FlowSteer QA path.
+        This task-scoped adapter keeps the local ``doc_id``/``k`` wire and has
+        no dependency on Agent role, relation, output identity, or topology.
+        """
+
         del request
-        for observation in observations:
-            result = observation.get("result")
-            if (
-                observation.get("observation_status") == "success"
-                and isinstance(result, Mapping)
-                and result.get("operation") == "read"
-            ):
-                return ()
-        return (HOTPOTQA_RETRIEVAL_TOOL_ID,)
+        state = _public_retrieval_state(observations)
+        remaining_tool_calls = max(
+            0,
+            self._max_tool_calls - state.dispatched_tool_calls,
+        )
+        successful_read_count = len(state.read_doc_ids)
+        if successful_read_count >= 2:
+            return frozenset(), True
+        if remaining_tool_calls == 0:
+            return frozenset(), successful_read_count > 0
+        if (
+            state.latest_successful_operation == "search"
+            and state.latest_unread_doc_ids
+        ):
+            return frozenset(
+                {(HOTPOTQA_RETRIEVAL_TOOL_ID, "read")}
+            ), False
+        if successful_read_count > 0:
+            # One missing-hop search/read transition requires two remaining
+            # Tool calls. Preserve the first read if a Tool error consumed that
+            # capacity instead of admitting an unfinishable blind search.
+            if remaining_tool_calls >= 2:
+                return frozenset(
+                    {(HOTPOTQA_RETRIEVAL_TOOL_ID, "search")}
+                ), False
+            return frozenset(), True
+        return frozenset(
+            {(HOTPOTQA_RETRIEVAL_TOOL_ID, "search")}
+        ), False
 
     def _contract(
         self,
@@ -306,54 +429,47 @@ class HotpotQAEmbeddingReactExecutionAdapter(ToolReactExecutionAdapter):
         )
         k_schema = properties.get("k", {}) if isinstance(properties, Mapping) else {}
         frozen_k = k_schema.get("const") if isinstance(k_schema, Mapping) else None
-        returned_doc_ids: list[str] = []
-        successful_read = False
-        for observation in observations:
-            if observation.get("observation_status") != "success":
-                continue
-            result = observation.get("result")
-            if not isinstance(result, Mapping):
-                continue
-            if result.get("operation") == "search":
-                raw_doc_ids = result.get("doc_ids", ())
-                if isinstance(raw_doc_ids, (list, tuple)):
-                    returned_doc_ids.extend(
-                        str(item) for item in raw_doc_ids if isinstance(item, str)
-                    )
-            elif result.get("operation") == "read":
-                successful_read = True
-        if successful_read:
-            return (
-                request.agent.contract
-                + "\n\nA public passage read has succeeded and Tool execution is "
-                "complete. Return exactly one StructuredAction JSON object and "
-                "no other text: "
-                "{\"arguments\":{\"value\":\"evidence-supported artifact\"},"
-                "\"kind\":\"complete\",\"name\":\"complete\","
-                "\"resource_id\":null,\"skill_id\":null}. Replace only the "
-                "value string with the artifact required by the completion "
-                "condition. Public observations: "
-                + json.dumps(
-                    [dict(observation) for observation in observations],
-                    ensure_ascii=False,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                )
-            )
-        if returned_doc_ids:
+        state = _public_retrieval_state(observations)
+        actions, completion_admitted = self._state_conditioned_action_domain(
+            request,
+            observations,
+        )
+        action_names = frozenset(action_name for _, action_name in actions)
+        if action_names == {"read"}:
             next_action = (
-                "Legal next action: read only. Search is no longer admissible. "
-                "Use exactly one of these returned doc_id values: "
+                "Current action mask: read only; search and complete are not "
+                "admitted. Use exactly one unread doc_id from the latest "
+                "successful search: "
                 + json.dumps(
-                    list(dict.fromkeys(returned_doc_ids)),
+                    list(state.latest_unread_doc_ids),
                     ensure_ascii=False,
                     separators=(",", ":"),
                 )
                 + "."
             )
+        elif action_names == {"search"} and state.read_doc_ids:
+            next_action = (
+                "Current action mask: search only; read and complete are not "
+                "admitted. Form a distinct focused query for the missing "
+                "entity, relation, or hop. A missing mention in one passage "
+                "is not evidence that another named entity lacks the requested "
+                "fact. Prior successful queries: "
+                + json.dumps(
+                    list(state.search_queries),
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+                + "."
+            )
+        elif completion_admitted and not actions:
+            next_action = (
+                "Current action mask: complete only. Preserve both public read "
+                "observations and return their evidence-supported artifact."
+            )
         else:
             next_action = (
-                "Legal next action: search only, with all required arguments."
+                "Current action mask: search only; read and complete are not "
+                "admitted. Supply all required search arguments."
             )
         return (
             base
@@ -365,10 +481,40 @@ class HotpotQAEmbeddingReactExecutionAdapter(ToolReactExecutionAdapter):
             )
             + ". After a successful search, choose an exact returned doc_id and "
             "call read with exactly {\"doc_id\":\"returned doc_id\"}. Do not "
-            "repeat an identical successful search. After a successful read, "
-            "complete with exactly {\"value\":\"evidence-supported artifact\"}. "
+            "repeat a normalized successful query. After the first successful "
+            "read, use the next search/read transition for the missing entity, "
+            "relation, or hop while the frozen Tool budget remains. Complete "
+            "only on the admitted terminal state, with exactly "
+            "{\"value\":\"evidence-supported artifact\"}. "
             + next_action
         )
+
+    def _tool_action_error(
+        self,
+        *,
+        request: AgentRequest,
+        action: object,
+        observations: list[Mapping[str, object]],
+    ) -> str | None:
+        del request
+        state = _public_retrieval_state(observations)
+        name = getattr(action, "name", None)
+        arguments = getattr(action, "arguments", None)
+        if name == "search" and isinstance(arguments, Mapping):
+            query = arguments.get("query")
+            if isinstance(query, str):
+                normalized = _normalized_retrieval_query(query)
+                prior = {
+                    _normalized_retrieval_query(value)
+                    for value in state.search_queries
+                }
+                if normalized and normalized in prior:
+                    return "hotpotqa_duplicate_normalized_query"
+        if name == "read" and isinstance(arguments, Mapping):
+            doc_id = arguments.get("doc_id")
+            if doc_id not in state.latest_unread_doc_ids:
+                return "hotpotqa_read_not_latest_unread_candidate"
+        return None
 
     def _completion_error(
         self,

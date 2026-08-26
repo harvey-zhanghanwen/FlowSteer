@@ -1048,7 +1048,13 @@ def _report_markdown(report: Mapping[str, Any]) -> str:
         if report.get("input_context") == "question_only_dynamic_embedding_search_read"
         else "The model input uses all ten supplied passages."
     )
-    return f"""# HotpotQA Architecture Validation — Round 01
+    report_title = (
+        "HotpotQA Architecture Validation — Dynamic Embedding Retrieval"
+        if report.get("input_context")
+        == "question_only_dynamic_embedding_search_read"
+        else "HotpotQA Architecture Validation — Round 01"
+    )
+    return f"""# {report_title}
 
 Fixed project-held-out samples: **{report['sample_count']}**. {input_description} No training, backward pass, optimizer step, policy update, MACE, Bayesian, or Skill loop ran.
 

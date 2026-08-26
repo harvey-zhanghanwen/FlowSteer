@@ -1,0 +1,191 @@
+# Inference-only HotpotQA condition with task-scoped dynamic embedding retrieval.
+# The Director sees only the original question. Passage access is available
+# solely through a local Agent ReAct search/read Tool; Web Search is absent.
+
+schema_version: "flowsteer.agentgraph.config.v1"
+experiment:
+  name: "hotpotqa_embedding_retrieval_v4"
+  phase: "hotpotqa_evaluation"
+  training_enabled: false
+  seed: 20260815
+  condition_id: "hotpotqa_embedding_retrieval_v4"
+  prompt_version: "agentgraph.director.minimal.tool.v1"
+  tool_version: "skillflow.hotpotqa.embedding-search-read.action-mask.v4"
+  output_dir: "artifacts/hotpotqa_embedding_retrieval_v4"
+
+data:
+  catalog_path: "config/datasets_agentgraph.yaml"
+  train_path: "/ssd1/iclr/1/FlowSteer/data/agentgraph_v1/train.jsonl"
+  validation_path: "artifacts/hotpotqa_round_01/selected_tasks.jsonl"
+  test_path: "/ssd1/iclr/1/FlowSteer/data/agentgraph_v1/test.jsonl"
+  enforce_split_isolation: true
+  task_schema_version: "flowsteer.agentgraph.task.v1"
+
+hotpotqa_evaluation:
+  dataset_key: "hotpotqa"
+  split: "validation"
+  selection: "sequential"
+  sample_count: 128
+  rollouts_per_task: 1
+  concurrency: 4
+  direct_model_id: "qwen3.5-9b-local"
+  direct_protocol: "round01_saved_outputs_official_rescore_v1"
+  direct_source_path: "artifacts/hotpotqa_round_01/direct_predictions.jsonl"
+  agentgraph_baseline_source_path: "artifacts/hotpotqa_round_01/agentgraph_trajectories.jsonl"
+  agentgraph_protocol: "question_only_dynamic_embedding_search_read_v3"
+  protocol_equivalent_to_direct: false
+
+qa_embedding_retrieval:
+  enabled: true
+  condition_id: "hotpotqa_embedding_retrieval_v4"
+  mode: "model_driven_search_read"
+  dataset_scope: ["hotpotqa"]
+  question_scope: "question_only"
+  source_parquet_glob: "/home/test/datasets/HotpotQA_HF/distractor/train-*.parquet"
+  frozen_validation_tasks: "artifacts/hotpotqa_round_01/selected_tasks.jsonl"
+  development_tasks: "/ssd1/iclr/1/FlowSteer/data/agentgraph_v1/train.jsonl"
+  development_sample_count: 32
+  index_dir: "artifacts/hotpotqa_embedding_retrieval_v4/index"
+  embedding_model: "/ssd1/iclr/.private/skillflow-resources/bge-base-en-v1.5"
+  embedding_model_id: "BAAI/bge-base-en-v1.5"
+  embedding_device: "cpu"
+  normalize_embeddings: true
+  similarity: "cosine"
+  search_top_k: 4
+  max_turns_per_agent_call: 6
+  max_tool_calls_per_agent_call: 4
+  tool_timeout_seconds: 30.0
+  allow_query_rewriting: true
+  web_search_enabled: false
+
+storage:
+  schema_version: "flowsteer.hotpotqa.embedding_retrieval.v1"
+  root: "artifacts/hotpotqa_embedding_retrieval_v4/evidence"
+  selected_tasks_path: "artifacts/hotpotqa_embedding_retrieval_v4/selected_tasks.jsonl"
+  direct_predictions_path: "artifacts/hotpotqa_embedding_retrieval_v4/direct_rescored_predictions.jsonl"
+  trajectories_path: "artifacts/hotpotqa_embedding_retrieval_v4/agentgraph_trajectories.jsonl"
+  failures_path: "artifacts/hotpotqa_embedding_retrieval_v4/collection_failures.jsonl"
+  paired_results_path: "artifacts/hotpotqa_embedding_retrieval_v4/paired_results.jsonl"
+  wrong_demos_path: "artifacts/hotpotqa_embedding_retrieval_v4/wrong_demos.jsonl"
+  error_demos_path: "reports/hotpotqa_embedding_retrieval_v4/error_demos.jsonl"
+  retrieval_profile_selection_path: "artifacts/hotpotqa_embedding_retrieval_v4/profile_selection.json"
+  retrieval_index_manifest_path: "artifacts/hotpotqa_embedding_retrieval_v4/index/manifest.json"
+  retrieval_index_smoke_path: "artifacts/hotpotqa_embedding_retrieval_v4/index_smoke_receipt.json"
+  retrieval_index_rebuild_smoke_path: "artifacts/hotpotqa_embedding_retrieval_v4/index_rebuild_smoke_receipt.json"
+  manifest_path: "artifacts/hotpotqa_embedding_retrieval_v4/run_manifest.json"
+  preflight_receipt_path: "artifacts/hotpotqa_embedding_retrieval_v4/preflight_receipt.json"
+  report_json_path: "reports/hotpotqa_embedding_retrieval_v4/report.json"
+  report_markdown_path: "reports/hotpotqa_embedding_retrieval_v4/report.md"
+
+director:
+  base_model: "${QWEN35_9B_MODEL_PATH:-/home/test/SKILLEV/skillev-new-b2-temp/model/Qwen3.5-9B-modelscope}"
+  tokenizer_path: "${QWEN35_9B_TOKENIZER_PATH:-/home/test/SKILLEV/skillev-new-b2-temp/tokenizer/Qwen3.5-9B}"
+  backend: "sglang"
+  api_base: "http://127.0.0.1:${FLOWSTEER_SUPERVISOR_PORT:-8015}/v1"
+  served_model_name: "supervisor_theta"
+  behavior_policy_version: "qwen35-9b-smoke-step-0001"
+  behavior_adapter_name: "theta_smoke_step_000001"
+  behavior_adapter_checkpoint: "/ssd1/iclr/1/FlowSteer/artifacts/agentgraph_smoke/checkpoint_final/supervisor_lora/step_000001_20260815T071303632043Z/theta"
+  updated_policy_version: "unused-evaluation-only"
+  expected_server_weight_version: "default"
+  live_adapter_name: "theta_smoke_step_000001"
+  prompt_profile: "minimal"
+  dtype: "bfloat16"
+  max_context_tokens: 8192
+  max_action_tokens: 512
+  temperature: 1.0
+  top_p: 1.0
+  top_k: -1
+  max_rounds: 20
+  execute_on_edit: true
+  history_window: 4
+  lora:
+    enabled: true
+    rank: 64
+    alpha: 128
+    dropout: 0.0
+    target_modules: [q_proj, k_proj, v_proj, o_proj]
+
+agent_graph:
+  max_agents: 10
+  contract_type: "free_text"
+  relation_encoding: "two_bit"
+  actions: [add_subgraph, add_agent, modify_agent, delete_agent, set_relation, set_output, finish]
+  executor_selection: "seeded_weighted_random"
+  max_bidirectional_block_size: 2
+  require_unique_output: true
+  require_all_agents_reach_output: true
+  required_evidence_tool_id: "qa-retrieval"
+  model_catalog_path: "config/model_catalog_hotpotqa_embedding_retrieval_v1.yaml"
+
+evaluation:
+  healthbench_judge_model: "gpt-4o-mini"
+  max_environment_steps: 20
+  swebench_harness_enabled: false
+  invalid_evaluator_action: "persist_and_exclude"
+
+grpo:
+  enabled: false
+  objective: "action_masked_one_pass"
+  group_key: [task_id, condition_id, policy_version]
+  samples_per_problem: 1
+  advantage_epsilon: 1.0e-8
+  equal_weight_per_problem: true
+  terminal_task_reward_only: true
+  structural_reward: 0.0
+  exploration_reward: 0.0
+  skill_usage_reward: 0.0
+  require_valid_evaluator: true
+  reject_forced_probes: true
+  reject_fallback_or_manual_repair: true
+  reject_reconstructed_context: true
+  require_exact_behavior_receipt: true
+  optimization_passes_per_rollout_batch: 0
+  max_optimizer_updates: 0
+  learning_rate: 0.0
+  gradient_checkpointing: false
+  max_grad_norm: 0.0
+
+policy_sync:
+  enabled: false
+  api_base: "http://127.0.0.1:${FLOWSTEER_SUPERVISOR_PORT:-8015}"
+  adapter_name_prefix: "theta_embedding_retrieval_unused_"
+  request_timeout_seconds: 120
+  max_retries: 0
+  retry_backoff_seconds: 1
+
+exploration:
+  enabled: false
+  strategy: "none"
+  forced_probe_rollouts: 0
+
+skills:
+  enabled: false
+  initial_library: []
+  retrieval_top_k: 0
+
+gpu:
+  learner_physical: 3
+  rollout_physical: 0
+  gradient_replica_physical: 5
+  learner_device: "cuda:3"
+  rollout_engine: "sglang"
+  gradient_replica_device: "cuda:5"
+  supervisor_gpu_id: 0
+  supervisor_api_base: "http://127.0.0.1:8015/v1"
+  training_enabled: false
+  oom_policy:
+    status: "inactive_evaluation_only"
+    micro_batch_size: 1
+    minimum_micro_batch_size: 1
+    micro_batch_schedule: [1]
+    retry_on_cuda_oom: false
+    split_items_across_learner_and_replica: false
+    gradient_accumulation_steps: 1
+    gradient_checkpointing: false
+
+deployment:
+  exploration_beta: 0.0
+  allow_forced_probes: false
+  active_skills_only: false
+  require_version_compatible_skills: true

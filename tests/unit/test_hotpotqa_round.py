@@ -19,6 +19,21 @@ def test_round_config_is_fixed_heldout_and_training_disabled():
     _MODULE.validate_hotpot_config(config)
 
 
+def test_embedding_v4_config_freezes_question_only_development_profile():
+    config = load_yaml(
+        _ROOT / "config" / "evaluation_hotpotqa_embedding_retrieval_v4.yaml"
+    )
+
+    _MODULE.validate_hotpot_config(config)
+
+    retrieval = config["qa_embedding_retrieval"]
+    assert retrieval["question_scope"] == "question_only"
+    assert retrieval["search_top_k"] == 4
+    assert retrieval["max_tool_calls_per_agent_call"] == 4
+    assert retrieval["max_turns_per_agent_call"] == 6
+    assert retrieval["web_search_enabled"] is False
+
+
 def test_strict_aggregate_keeps_failed_task_in_denominator():
     rows = [
         {

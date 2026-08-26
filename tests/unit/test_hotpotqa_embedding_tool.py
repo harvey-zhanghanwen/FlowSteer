@@ -2,14 +2,22 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+import json
 from typing import Any
 import unittest
 
+from src.interactive.agent_graph import AgentNode
+from src.interactive.agent_runtime import (
+    AgentRequest,
+    AgentResponse,
+    ExecutionPhase,
+)
 from src.interactive.hotpotqa_embedding_tool import (
     HOTPOTQA_RETRIEVAL_TOOL_ID,
     HotpotQAEmbeddingReactExecutionAdapter,
     build_hotpotqa_embedding_tool_registry,
 )
+from src.interactive.model_registry import ModelSpec, ProviderSpec
 from src.interactive.tool_runtime import ToolRequest
 
 
@@ -75,6 +83,55 @@ class _Index:
         return values[doc_id]
 
 
+def _action(
+    kind: str,
+    *,
+    name: str,
+    arguments: object,
+    resource_id: str | None,
+) -> str:
+    return json.dumps(
+        {
+            "kind": kind,
+            "name": name,
+            "arguments": arguments,
+            "resource_id": resource_id,
+            "skill_id": None,
+        }
+    )
+
+
+class _SequenceGateway:
+    def __init__(self, outputs: list[str]) -> None:
+        self.outputs = list(outputs)
+        self.requests: list[AgentRequest] = []
+
+    async def generate(self, request: AgentRequest) -> AgentResponse:
+        self.requests.append(request)
+        return AgentResponse(self.outputs.pop(0), {})
+
+
+def _react_request() -> AgentRequest:
+    return AgentRequest(
+        request_id="run:1:retriever:single",
+        run_id="run",
+        graph_revision=1,
+        problem="Which of Alpha and Beta has the larger value?",
+        agent=AgentNode(
+            "retriever",
+            "m",
+            "Retrieve evidence for both Alpha and Beta, then compare them.",
+            allowed_tools=(HOTPOTQA_RETRIEVAL_TOOL_ID,),
+            execution_mode="react",
+            artifact_type="text",
+            completion_condition="Both entities have read evidence and are compared.",
+        ),
+        model=ModelSpec("m", "fake"),
+        provider=ProviderSpec("fake", kind="test"),
+        phase=ExecutionPhase.SINGLE,
+    )
+
+
 def _contains_forbidden_key(value: Any) -> bool:
     forbidden = {
         "answer",
@@ -95,6 +152,146 @@ def _contains_forbidden_key(value: Any) -> bool:
 
 
 class HotpotQAEmbeddingToolTests(unittest.TestCase):
+    def test_react_can_continue_search_read_after_first_public_read(self) -> None:
+        index = _Index()
+        gateway = _SequenceGateway(
+            [
+                _action(
+                    "tool",
+                    name="search",
+                    arguments={"query": "Alpha value", "k": 2},
+                    resource_id=HOTPOTQA_RETRIEVAL_TOOL_ID,
+                ),
+                _action(
+                    "tool",
+                    name="read",
+                    arguments={"doc_id": "p1"},
+                    resource_id=HOTPOTQA_RETRIEVAL_TOOL_ID,
+                ),
+                _action(
+                    "tool",
+                    name="search",
+                    arguments={"query": "Beta value", "k": 2},
+                    resource_id=HOTPOTQA_RETRIEVAL_TOOL_ID,
+                ),
+                _action(
+                    "tool",
+                    name="read",
+                    arguments={"doc_id": "p2"},
+                    resource_id=HOTPOTQA_RETRIEVAL_TOOL_ID,
+                ),
+                _action(
+                    "complete",
+                    name="complete",
+                    arguments={"value": "Beta"},
+                    resource_id=None,
+                ),
+            ]
+        )
+        adapter = HotpotQAEmbeddingReactExecutionAdapter(
+            gateway=gateway,
+            tool_registry=build_hotpotqa_embedding_tool_registry(
+                index,
+                task_id="task-1",
+            ),
+            max_turns=6,
+            max_tool_calls=4,
+        )
+
+        response = asyncio.run(adapter.execute(_react_request()))
+
+        self.assertEqual("Beta", response.text)
+        self.assertEqual(4, response.metadata["tool_calls"])
+        self.assertEqual(
+            [
+                ("task-1", "Alpha value", 2),
+                ("task-1", "Beta value", 2),
+            ],
+            index.search_calls,
+        )
+        self.assertEqual(
+            [("task-1", "p1"), ("task-1", "p2")],
+            index.read_calls,
+        )
+        contracts = [request.agent.contract for request in gateway.requests]
+        self.assertIn("search only", contracts[0])
+        self.assertIn("read only", contracts[1])
+        self.assertIn("search only", contracts[2])
+        self.assertIn("read only", contracts[3])
+        self.assertIn("complete only", contracts[4])
+
+    def test_action_domain_rejects_early_completion_and_duplicate_query(self) -> None:
+        index = _Index()
+        gateway = _SequenceGateway(
+            [
+                _action(
+                    "tool",
+                    name="search",
+                    arguments={"query": "Alpha value", "k": 2},
+                    resource_id=HOTPOTQA_RETRIEVAL_TOOL_ID,
+                ),
+                _action(
+                    "tool",
+                    name="read",
+                    arguments={"doc_id": "p1"},
+                    resource_id=HOTPOTQA_RETRIEVAL_TOOL_ID,
+                ),
+                _action(
+                    "complete",
+                    name="complete",
+                    arguments={"value": "unsupported early answer"},
+                    resource_id=None,
+                ),
+                _action(
+                    "tool",
+                    name="search",
+                    arguments={"query": "  ALPHA   value  ", "k": 2},
+                    resource_id=HOTPOTQA_RETRIEVAL_TOOL_ID,
+                ),
+                _action(
+                    "tool",
+                    name="search",
+                    arguments={"query": "Beta value", "k": 2},
+                    resource_id=HOTPOTQA_RETRIEVAL_TOOL_ID,
+                ),
+                _action(
+                    "tool",
+                    name="read",
+                    arguments={"doc_id": "p2"},
+                    resource_id=HOTPOTQA_RETRIEVAL_TOOL_ID,
+                ),
+                _action(
+                    "complete",
+                    name="complete",
+                    arguments={"value": "Beta"},
+                    resource_id=None,
+                ),
+            ]
+        )
+        adapter = HotpotQAEmbeddingReactExecutionAdapter(
+            gateway=gateway,
+            tool_registry=build_hotpotqa_embedding_tool_registry(
+                index,
+                task_id="task-1",
+            ),
+            max_turns=7,
+            max_tool_calls=4,
+        )
+
+        response = asyncio.run(adapter.execute(_react_request()))
+
+        self.assertEqual("Beta", response.text)
+        self.assertEqual(4, response.metadata["tool_calls"])
+        self.assertEqual(2, len(index.search_calls))
+        self.assertEqual(
+            "completion_not_admitted",
+            response.metadata["react_trace"][2]["public_error_code"],
+        )
+        self.assertEqual(
+            "hotpotqa_duplicate_normalized_query",
+            response.metadata["react_trace"][3]["public_error_code"],
+        )
+
     def test_react_completion_requires_successful_search_and_read(self) -> None:
         receipt = lambda action: {
             "tool_id": HOTPOTQA_RETRIEVAL_TOOL_ID,

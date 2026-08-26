@@ -78,7 +78,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--config",
-        default="config/evaluation_hotpotqa_embedding_retrieval_v2.yaml",
+        default="config/evaluation_hotpotqa_embedding_retrieval_v4.yaml",
     )
     args = parser.parse_args(argv)
     value = build_from_config(Path(args.config))

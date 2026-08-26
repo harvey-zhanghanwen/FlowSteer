@@ -1,0 +1,29 @@
+{
+  "corpus_version": "flowsteer.hotpotqa.public_context.v1",
+  "document_count": 1589,
+  "duplicate_occurrence_count": 11,
+  "embedding_dimension": 768,
+  "embedding_model": "BAAI/bge-base-en-v1.5",
+  "embedding_model_path": "/ssd1/iclr/.private/skillflow-resources/bge-base-en-v1.5",
+  "embeddings_path": "embeddings.npy",
+  "frozen_top_k": 4,
+  "index_id": "hotpotqa-public-context-bge-base-en-v1.5-d768-topk4-v1",
+  "normalized": true,
+  "passage_count": 1589,
+  "passage_occurrence_count": 1600,
+  "passages_path": "passages.jsonl",
+  "project_splits": [
+    "train",
+    "validation"
+  ],
+  "schema_version": "flowsteer.hotpotqa.embedding_index.v1",
+  "scopes_path": "task_scopes.json",
+  "similarity": "cosine",
+  "source": "HotpotQA_HF/distractor",
+  "source_files": [
+    "/home/test/datasets/HotpotQA_HF/distractor/train-00000-of-00002.parquet",
+    "/home/test/datasets/HotpotQA_HF/distractor/train-00001-of-00002.parquet"
+  ],
+  "source_split": "train",
+  "task_count": 160
+}

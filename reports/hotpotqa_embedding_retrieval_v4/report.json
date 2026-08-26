@@ -1,0 +1,567 @@
+{
+  "agentgraph": {
+    "completed": 128,
+    "completed_only_exact_match": 0.2890625,
+    "completed_only_token_f1": 0.3396949404761905,
+    "denominator": 128,
+    "evaluator_valid": 128,
+    "strict_exact_match": 0.2890625,
+    "strict_token_f1": 0.3396949404761905
+  },
+  "agentgraph_minus_direct": {
+    "exact_match": -0.4375,
+    "token_f1": -0.47782573967086833
+  },
+  "agentgraph_minus_round01_official_rescore": {
+    "exact_match": -0.4609375,
+    "token_f1": -0.49975818452380955
+  },
+  "completed_at": "2026-08-26T22:19:07.231162+00:00",
+  "dataset": "HotpotQA",
+  "direct_local_baseline": {
+    "completed": 128,
+    "completed_only_exact_match": 0.7265625,
+    "completed_only_token_f1": 0.8175206801470588,
+    "denominator": 128,
+    "evaluator_valid": 128,
+    "strict_exact_match": 0.7265625,
+    "strict_token_f1": 0.8175206801470588
+  },
+  "failure_types": {
+    "architecture_gain": 3,
+    "correct": 3,
+    "director_max_rounds": 73,
+    "executor_or_provider_failure": 48,
+    "partial_or_overlong_answer": 1
+  },
+  "input_context": "question_only_dynamic_embedding_search_read",
+  "known_limitations": [
+    "A Director/API exception before terminal collection may not preserve partial turns.",
+    "Paper references use a different published evaluation setup and are not a paired baseline."
+  ],
+  "method_level_changes_performed": false,
+  "model_catalog_path": "config/model_catalog_hotpotqa_embedding_retrieval_v1.yaml",
+  "native_source_split": "train",
+  "paper_references_percent": {
+    "comparability_note": "Reference numbers are contextual only; the paired Local Direct baseline on these fixed project-held-out samples is primary.",
+    "flowsteer": {
+      "exact_match": 89.84,
+      "token_f1": 91.2
+    },
+    "qwen3.5_9b_direct": {
+      "exact_match": 60.94,
+      "token_f1": 75.7
+    },
+    "skillflow": {
+      "exact_match": 92.19,
+      "token_f1": 93.95
+    }
+  },
+  "policy_adapter": "theta_smoke_step_000001",
+  "policy_version": "qwen35-9b-smoke-step-0001",
+  "project_split": "validation",
+  "retrieval_evidence": {
+    "retrieval_index_manifest": {
+      "path": "/ssd1/iclr/1/.tmp/FlowSteer-hotpotqa-embedding-retrieval-v1/artifacts/hotpotqa_embedding_retrieval_v4/index/manifest.json",
+      "value": {
+        "corpus_version": "flowsteer.hotpotqa.public_context.v1",
+        "document_count": 1589,
+        "duplicate_occurrence_count": 11,
+        "embedding_dimension": 768,
+        "embedding_model": "BAAI/bge-base-en-v1.5",
+        "embedding_model_path": "/ssd1/iclr/.private/skillflow-resources/bge-base-en-v1.5",
+        "embeddings_path": "embeddings.npy",
+        "frozen_top_k": 4,
+        "index_id": "hotpotqa-public-context-bge-base-en-v1.5-d768-topk4-v1",
+        "normalized": true,
+        "passage_count": 1589,
+        "passage_occurrence_count": 1600,
+        "passages_path": "passages.jsonl",
+        "project_splits": [
+          "train",
+          "validation"
+        ],
+        "schema_version": "flowsteer.hotpotqa.embedding_index.v1",
+        "scopes_path": "task_scopes.json",
+        "similarity": "cosine",
+        "source": "HotpotQA_HF/distractor",
+        "source_files": [
+          "/home/test/datasets/HotpotQA_HF/distractor/train-00000-of-00002.parquet",
+          "/home/test/datasets/HotpotQA_HF/distractor/train-00001-of-00002.parquet"
+        ],
+        "source_split": "train",
+        "task_count": 160
+      }
+    },
+    "retrieval_index_rebuild_smoke": {
+      "path": "/ssd1/iclr/1/.tmp/FlowSteer-hotpotqa-embedding-retrieval-v1/artifacts/hotpotqa_embedding_retrieval_v4/index_rebuild_smoke_receipt.json",
+      "value": {
+        "answer_private_metadata_absent": true,
+        "completed_at": "2026-08-26T20:04:01.838135+00:00",
+        "index_manifest": {
+          "corpus_version": "flowsteer.hotpotqa.public_context.v1",
+          "document_count": 1589,
+          "duplicate_occurrence_count": 11,
+          "embedding_dimension": 768,
+          "embedding_model": "BAAI/bge-base-en-v1.5",
+          "embedding_model_path": "/ssd1/iclr/.private/skillflow-resources/bge-base-en-v1.5",
+          "embeddings_path": "embeddings.npy",
+          "frozen_top_k": 4,
+          "index_id": "hotpotqa-public-context-bge-base-en-v1.5-d768-topk4-v1",
+          "normalized": true,
+          "passage_count": 1589,
+          "passage_occurrence_count": 1600,
+          "passages_path": "passages.jsonl",
+          "project_splits": [
+            "train",
+            "validation"
+          ],
+          "schema_version": "flowsteer.hotpotqa.embedding_index.v1",
+          "scopes_path": "task_scopes.json",
+          "similarity": "cosine",
+          "source": "HotpotQA_HF/distractor",
+          "source_files": [
+            "/home/test/datasets/HotpotQA_HF/distractor/train-00000-of-00002.parquet",
+            "/home/test/datasets/HotpotQA_HF/distractor/train-00001-of-00002.parquet"
+          ],
+          "source_split": "train",
+          "task_count": 160
+        },
+        "passed": true,
+        "query": "Are Manhattan West and Singer Building both projects in New York?",
+        "query_scope": "question_only",
+        "ranked_doc_ids": [
+          "hotpotqa-passage-000960",
+          "hotpotqa-passage-001315",
+          "hotpotqa-passage-001316",
+          "hotpotqa-passage-001122"
+        ],
+        "same_query_top_k_deterministic": true,
+        "schema_version": "flowsteer.hotpotqa.embedding_retrieval_smoke.v1",
+        "task_id": "hotpotqa:5a80d30655429938b61421fe",
+        "tool_receipts": [
+          {
+            "ended_at_monotonic": 7298466.028122765,
+            "error_type": null,
+            "latency_ms": 16.81959629058838,
+            "request": {
+              "action": "search",
+              "arguments": {
+                "k": 4,
+                "query": "Are Manhattan West and Singer Building both projects in New York?"
+              }
+            },
+            "result": {
+              "completed": true,
+              "value": {
+                "doc_ids": [
+                  "hotpotqa-passage-000960",
+                  "hotpotqa-passage-001315",
+                  "hotpotqa-passage-001316",
+                  "hotpotqa-passage-001122"
+                ],
+                "hits": [
+                  {
+                    "doc_id": "hotpotqa-passage-000960",
+                    "document_id": "hotpotqa-document-000960",
+                    "rank": 1,
+                    "similarity": 0.7037578225135803,
+                    "snippet": "Manhattan West is a 5400000 sqft mixed-use development by Brookfield Properties. The project consists of two large office towers and two smaller residential towers, as well as a 1.5 acre public park. The towers will be built on a platform over Penn Station storage tracks along Ninth Avenue. The buildings will be built close to the developing Hudson Yards region between 31st and 33rd streets. These",
+                    "title": "Manhattan West"
+                  },
+                  {
+                    "doc_id": "hotpotqa-passage-001315",
+                    "document_id": "hotpotqa-document-001315",
+                    "rank": 2,
+                    "similarity": 0.661022424697876,
+                    "snippet": "The Singer Building or Singer Tower, at Liberty Street and Broadway in Lower Manhattan's Financial District, in the U.S. state of New York, was a 47-story office building completed in 1908 as the headquarters of the Singer Manufacturing Company. It was the tallest building in the world from 1908 to 1909. It was torn down in 1968, together with the adjacent City Investing Building, and is now the s",
+                    "title": "Singer Building"
+                  },
+                  {
+                    "doc_id": "hotpotqa-passage-001316",
+                    "document_id": "hotpotqa-document-001316",
+                    "rank": 3,
+                    "similarity": 0.6450952291488647,
+                    "snippet": "The Singer Building was an early skyscraper in New York City.",
+                    "title": "Singer Building (disambiguation)"
+                  },
+                  {
+                    "doc_id": "hotpotqa-passage-001122",
+                    "document_id": "hotpotqa-document-001122",
+                    "rank": 4,
+                    "similarity": 0.566443681716919,
+                    "snippet": "One Liberty Plaza, formerly the U.S. Steel Building, is a skyscraper in Lower Manhattan, in New York City, at the location of the former Singer Building (tallest structure ever dismantled) and the former City Investing Building. One Liberty Plaza is currently owned and operated by Brookfield Office Properties. The building is 743 ft tall and has 54 floors. It was completed in 1973. At 2300000 sqft",
+                    "title": "One Liberty Plaza"
+                  }
+                ],
+                "k": 4,
+                "operation": "search",
+                "query": "Are Manhattan West and Singer Building both projects in New York?",
+                "retrieval_index": {
+                  "corpus_version": "flowsteer.hotpotqa.public_context.v1",
+                  "document_count": 1589,
+                  "embedding_dimension": 768,
+                  "embedding_model": "BAAI/bge-base-en-v1.5",
+                  "frozen_top_k": 4,
+                  "index_id": "hotpotqa-public-context-bge-base-en-v1.5-d768-topk4-v1",
+                  "normalized": true,
+                  "passage_count": 1589,
+                  "similarity": "cosine",
+                  "source": "HotpotQA_HF/distractor",
+                  "split": "train"
+                },
+                "task_id": "hotpotqa:5a80d30655429938b61421fe"
+              }
+            },
+            "started_at_monotonic": 7298466.011303169,
+            "tool_id": "qa-retrieval",
+            "tool_version": "hotpotqa-public-context-bge-base-en-v1.5-d768-topk4-v1"
+          },
+          {
+            "ended_at_monotonic": 7298466.028402767,
+            "error_type": null,
+            "latency_ms": 0.24312175810337067,
+            "request": {
+              "action": "read",
+              "arguments": {
+                "doc_id": "hotpotqa-passage-000960"
+              }
+            },
+            "result": {
+              "completed": true,
+              "value": {
+                "doc_id": "hotpotqa-passage-000960",
+                "operation": "read",
+                "passage": {
+                  "content": "Manhattan West is a 5400000 sqft mixed-use development by Brookfield Properties. The project consists of two large office towers and two smaller residential towers, as well as a 1.5 acre public park. The towers will be built on a platform over Penn Station storage tracks along Ninth Avenue. The buildings will be built close to the developing Hudson Yards region between 31st and 33rd streets. These two buildings have been proposed as of 2010 . Upon its completion the taller west tower will extend 995 ft up to its roof and will be one of the tallest buildings in New York City and the world.",
+                  "doc_id": "hotpotqa-passage-000960",
+                  "document_id": "hotpotqa-document-000960",
+                  "title": "Manhattan West"
+                },
+                "retrieval_index": {
+                  "corpus_version": "flowsteer.hotpotqa.public_context.v1",
+                  "document_count": 1589,
+                  "embedding_dimension": 768,
+                  "embedding_model": "BAAI/bge-base-en-v1.5",
+                  "frozen_top_k": 4,
+                  "index_id": "hotpotqa-public-context-bge-base-en-v1.5-d768-topk4-v1",
+                  "normalized": true,
+                  "passage_count": 1589,
+                  "similarity": "cosine",
+                  "source": "HotpotQA_HF/distractor",
+                  "split": "train"
+                },
+                "task_id": "hotpotqa:5a80d30655429938b61421fe"
+              }
+            },
+            "started_at_monotonic": 7298466.028159645,
+            "tool_id": "qa-retrieval",
+            "tool_version": "hotpotqa-public-context-bge-base-en-v1.5-d768-topk4-v1"
+          }
+        ],
+        "web_search_used": false
+      }
+    },
+    "retrieval_index_smoke": {
+      "path": "/ssd1/iclr/1/.tmp/FlowSteer-hotpotqa-embedding-retrieval-v1/artifacts/hotpotqa_embedding_retrieval_v4/index_smoke_receipt.json",
+      "value": {
+        "answer_private_metadata_absent": true,
+        "completed_at": "2026-08-26T20:03:02.775121+00:00",
+        "index_manifest": {
+          "corpus_version": "flowsteer.hotpotqa.public_context.v1",
+          "document_count": 1589,
+          "duplicate_occurrence_count": 11,
+          "embedding_dimension": 768,
+          "embedding_model": "BAAI/bge-base-en-v1.5",
+          "embedding_model_path": "/ssd1/iclr/.private/skillflow-resources/bge-base-en-v1.5",
+          "embeddings_path": "embeddings.npy",
+          "frozen_top_k": 4,
+          "index_id": "hotpotqa-public-context-bge-base-en-v1.5-d768-topk4-v1",
+          "normalized": true,
+          "passage_count": 1589,
+          "passage_occurrence_count": 1600,
+          "passages_path": "passages.jsonl",
+          "project_splits": [
+            "train",
+            "validation"
+          ],
+          "schema_version": "flowsteer.hotpotqa.embedding_index.v1",
+          "scopes_path": "task_scopes.json",
+          "similarity": "cosine",
+          "source": "HotpotQA_HF/distractor",
+          "source_files": [
+            "/home/test/datasets/HotpotQA_HF/distractor/train-00000-of-00002.parquet",
+            "/home/test/datasets/HotpotQA_HF/distractor/train-00001-of-00002.parquet"
+          ],
+          "source_split": "train",
+          "task_count": 160
+        },
+        "passed": true,
+        "query": "Are Manhattan West and Singer Building both projects in New York?",
+        "query_scope": "question_only",
+        "ranked_doc_ids": [
+          "hotpotqa-passage-000960",
+          "hotpotqa-passage-001315",
+          "hotpotqa-passage-001316",
+          "hotpotqa-passage-001122"
+        ],
+        "same_query_top_k_deterministic": true,
+        "schema_version": "flowsteer.hotpotqa.embedding_retrieval_smoke.v1",
+        "task_id": "hotpotqa:5a80d30655429938b61421fe",
+        "tool_receipts": [
+          {
+            "ended_at_monotonic": 7298406.964158646,
+            "error_type": null,
+            "latency_ms": 24.596501141786575,
+            "request": {
+              "action": "search",
+              "arguments": {
+                "k": 4,
+                "query": "Are Manhattan West and Singer Building both projects in New York?"
+              }
+            },
+            "result": {
+              "completed": true,
+              "value": {
+                "doc_ids": [
+                  "hotpotqa-passage-000960",
+                  "hotpotqa-passage-001315",
+                  "hotpotqa-passage-001316",
+                  "hotpotqa-passage-001122"
+                ],
+                "hits": [
+                  {
+                    "doc_id": "hotpotqa-passage-000960",
+                    "document_id": "hotpotqa-document-000960",
+                    "rank": 1,
+                    "similarity": 0.7037578225135803,
+                    "snippet": "Manhattan West is a 5400000 sqft mixed-use development by Brookfield Properties. The project consists of two large office towers and two smaller residential towers, as well as a 1.5 acre public park. The towers will be built on a platform over Penn Station storage tracks along Ninth Avenue. The buildings will be built close to the developing Hudson Yards region between 31st and 33rd streets. These",
+                    "title": "Manhattan West"
+                  },
+                  {
+                    "doc_id": "hotpotqa-passage-001315",
+                    "document_id": "hotpotqa-document-001315",
+                    "rank": 2,
+                    "similarity": 0.661022424697876,
+                    "snippet": "The Singer Building or Singer Tower, at Liberty Street and Broadway in Lower Manhattan's Financial District, in the U.S. state of New York, was a 47-story office building completed in 1908 as the headquarters of the Singer Manufacturing Company. It was the tallest building in the world from 1908 to 1909. It was torn down in 1968, together with the adjacent City Investing Building, and is now the s",
+                    "title": "Singer Building"
+                  },
+                  {
+                    "doc_id": "hotpotqa-passage-001316",
+                    "document_id": "hotpotqa-document-001316",
+                    "rank": 3,
+                    "similarity": 0.6450952291488647,
+                    "snippet": "The Singer Building was an early skyscraper in New York City.",
+                    "title": "Singer Building (disambiguation)"
+                  },
+                  {
+                    "doc_id": "hotpotqa-passage-001122",
+                    "document_id": "hotpotqa-document-001122",
+                    "rank": 4,
+                    "similarity": 0.566443681716919,
+                    "snippet": "One Liberty Plaza, formerly the U.S. Steel Building, is a skyscraper in Lower Manhattan, in New York City, at the location of the former Singer Building (tallest structure ever dismantled) and the former City Investing Building. One Liberty Plaza is currently owned and operated by Brookfield Office Properties. The building is 743 ft tall and has 54 floors. It was completed in 1973. At 2300000 sqft",
+                    "title": "One Liberty Plaza"
+                  }
+                ],
+                "k": 4,
+                "operation": "search",
+                "query": "Are Manhattan West and Singer Building both projects in New York?",
+                "retrieval_index": {
+                  "corpus_version": "flowsteer.hotpotqa.public_context.v1",
+                  "document_count": 1589,
+                  "embedding_dimension": 768,
+                  "embedding_model": "BAAI/bge-base-en-v1.5",
+                  "frozen_top_k": 4,
+                  "index_id": "hotpotqa-public-context-bge-base-en-v1.5-d768-topk4-v1",
+                  "normalized": true,
+                  "passage_count": 1589,
+                  "similarity": "cosine",
+                  "source": "HotpotQA_HF/distractor",
+                  "split": "train"
+                },
+                "task_id": "hotpotqa:5a80d30655429938b61421fe"
+              }
+            },
+            "started_at_monotonic": 7298406.939562145,
+            "tool_id": "qa-retrieval",
+            "tool_version": "hotpotqa-public-context-bge-base-en-v1.5-d768-topk4-v1"
+          },
+          {
+            "ended_at_monotonic": 7298406.964911023,
+            "error_type": null,
+            "latency_ms": 0.6212424486875534,
+            "request": {
+              "action": "read",
+              "arguments": {
+                "doc_id": "hotpotqa-passage-000960"
+              }
+            },
+            "result": {
+              "completed": true,
+              "value": {
+                "doc_id": "hotpotqa-passage-000960",
+                "operation": "read",
+                "passage": {
+                  "content": "Manhattan West is a 5400000 sqft mixed-use development by Brookfield Properties. The project consists of two large office towers and two smaller residential towers, as well as a 1.5 acre public park. The towers will be built on a platform over Penn Station storage tracks along Ninth Avenue. The buildings will be built close to the developing Hudson Yards region between 31st and 33rd streets. These two buildings have been proposed as of 2010 . Upon its completion the taller west tower will extend 995 ft up to its roof and will be one of the tallest buildings in New York City and the world.",
+                  "doc_id": "hotpotqa-passage-000960",
+                  "document_id": "hotpotqa-document-000960",
+                  "title": "Manhattan West"
+                },
+                "retrieval_index": {
+                  "corpus_version": "flowsteer.hotpotqa.public_context.v1",
+                  "document_count": 1589,
+                  "embedding_dimension": 768,
+                  "embedding_model": "BAAI/bge-base-en-v1.5",
+                  "frozen_top_k": 4,
+                  "index_id": "hotpotqa-public-context-bge-base-en-v1.5-d768-topk4-v1",
+                  "normalized": true,
+                  "passage_count": 1589,
+                  "similarity": "cosine",
+                  "source": "HotpotQA_HF/distractor",
+                  "split": "train"
+                },
+                "task_id": "hotpotqa:5a80d30655429938b61421fe"
+              }
+            },
+            "started_at_monotonic": 7298406.964289781,
+            "tool_id": "qa-retrieval",
+            "tool_version": "hotpotqa-public-context-bge-base-en-v1.5-d768-topk4-v1"
+          }
+        ],
+        "web_search_used": false
+      }
+    },
+    "retrieval_profile_selection": {
+      "path": "/ssd1/iclr/1/.tmp/FlowSteer-hotpotqa-embedding-retrieval-v1/artifacts/hotpotqa_embedding_retrieval_v4/profile_selection.json",
+      "value": {
+        "candidate_top_k": [
+          2,
+          3,
+          4,
+          5
+        ],
+        "development_sample_count": 32,
+        "development_task_ids": [
+          "hotpotqa:5a80d30655429938b61421fe",
+          "hotpotqa:5a7e567b55429949594199a0",
+          "hotpotqa:5a77bd595542995d83181291",
+          "hotpotqa:5abffc58554299012d1db552",
+          "hotpotqa:5ab3dad4554299753aec59cb",
+          "hotpotqa:5ac12fda5542994d76dccdb0",
+          "hotpotqa:5a8e171b554299068b959e5a",
+          "hotpotqa:5a79c7f95542994bb9457099",
+          "hotpotqa:5a731dee5542992359bc3238",
+          "hotpotqa:5ae377a35542994393b9e6db",
+          "hotpotqa:5ae655c855429908198fa599",
+          "hotpotqa:5a7906f55542990784727792",
+          "hotpotqa:5ab74412554299110f219ae8",
+          "hotpotqa:5ac4bfd05542997ea680caab",
+          "hotpotqa:5ab72adb5542993667793f5d",
+          "hotpotqa:5abb06bc554299232ef4a3bb",
+          "hotpotqa:5ab51d295542996a3a96a01f",
+          "hotpotqa:5ae3cf7e5542990afbd1e1e2",
+          "hotpotqa:5adffc93554299025d62a39f",
+          "hotpotqa:5a7315015542994cef4bc448",
+          "hotpotqa:5a75e7215542992db947370a",
+          "hotpotqa:5ab1ce395542997061209579",
+          "hotpotqa:5a8afba155429949d91db458",
+          "hotpotqa:5ae3dde35542992f92d823a4",
+          "hotpotqa:5ade5a245542997c77adee0c",
+          "hotpotqa:5ae65d055542996d980e7b14",
+          "hotpotqa:5a8a698255429930ff3c0dcf",
+          "hotpotqa:5adccafb5542992c1e3a2401",
+          "hotpotqa:5ac4f4255542996feb3fe99d",
+          "hotpotqa:5a85d5ba5542997175ce205a",
+          "hotpotqa:5a8a1eb755429970aeb70261",
+          "hotpotqa:5ac3bb805542993915413909"
+        ],
+        "embedding_model": "BAAI/bge-base-en-v1.5",
+        "full_support_recall_rate_by_top_k": {
+          "2": 0.78125,
+          "3": 0.875,
+          "4": 0.96875,
+          "5": 0.96875
+        },
+        "mean_support_title_recall_by_top_k": {
+          "2": 0.875,
+          "3": 0.921875,
+          "4": 0.984375,
+          "5": 0.984375
+        },
+        "normalize_embeddings": true,
+        "query_scope": "question_only",
+        "schema_version": "flowsteer.hotpotqa.embedding_profile_selection.v1",
+        "selected_at": "2026-08-26T20:02:39.481247+00:00",
+        "selected_max_tool_calls_per_agent_call": 4,
+        "selected_max_turns_per_agent_call": 6,
+        "selected_top_k": 4,
+        "selection_rule": "maximize full supporting-title recall, then mean supporting-title recall, then choose the smallest top-k; Tool budget is two search/read operations per maximum development supporting document",
+        "selection_split": "train/architecture-development",
+        "similarity": "cosine",
+        "validation_answers_consulted": false
+      }
+    }
+  },
+  "retrieval_profile": {
+    "allow_query_rewriting": true,
+    "condition_id": "hotpotqa_embedding_retrieval_v4",
+    "dataset_scope": [
+      "hotpotqa"
+    ],
+    "development_sample_count": 32,
+    "development_tasks": "/ssd1/iclr/1/FlowSteer/data/agentgraph_v1/train.jsonl",
+    "embedding_device": "cpu",
+    "embedding_model": "/ssd1/iclr/.private/skillflow-resources/bge-base-en-v1.5",
+    "embedding_model_id": "BAAI/bge-base-en-v1.5",
+    "enabled": true,
+    "frozen_validation_tasks": "artifacts/hotpotqa_round_01/selected_tasks.jsonl",
+    "index_dir": "artifacts/hotpotqa_embedding_retrieval_v4/index",
+    "max_tool_calls_per_agent_call": 4,
+    "max_turns_per_agent_call": 6,
+    "mode": "model_driven_search_read",
+    "normalize_embeddings": true,
+    "question_scope": "question_only",
+    "search_top_k": 4,
+    "similarity": "cosine",
+    "source_parquet_glob": "/home/test/datasets/HotpotQA_HF/distractor/train-*.parquet",
+    "tool_timeout_seconds": 30.0,
+    "web_search_enabled": false
+  },
+  "round01_agentgraph_official_rescore": {
+    "completed": 128,
+    "denominator": 128,
+    "evaluator_valid": 128,
+    "evaluator_version": "hotpotqa.official.answer.v1",
+    "model_calls": 0,
+    "source_path": "/ssd1/iclr/1/.tmp/FlowSteer-hotpotqa-embedding-retrieval-v1/artifacts/hotpotqa_round_01/agentgraph_trajectories.jsonl",
+    "strict_exact_match": 0.75,
+    "strict_token_f1": 0.839453125
+  },
+  "sample_count": 128,
+  "schema_version": "flowsteer.hotpotqa.round_report.v1",
+  "terminal_failures": 73,
+  "tool_usage": {
+    "failed_calls": 4,
+    "latency_ms": 9485.303205437958,
+    "query_rewrite_tasks": 57,
+    "read_calls": 129,
+    "search_calls": 125,
+    "successful_calls": 250,
+    "tool_calls": 254,
+    "tool_invoked_tasks": 60
+  },
+  "training_performed": false,
+  "typical_wrong_demo_task_ids": [
+    "hotpotqa:5a8d7341554299441c6b9fe5",
+    "hotpotqa:5a82171f5542990a1d231f4a",
+    "hotpotqa:5a84dd955542997b5ce3ff79",
+    "hotpotqa:5a7e36045542991319bc9440",
+    "hotpotqa:5adf44985542993a75d2646d",
+    "hotpotqa:5a832c3455429954d2e2ec41",
+    "hotpotqa:5a7d0db955429909bec76924",
+    "hotpotqa:5a89372855429951533612e6",
+    "hotpotqa:5abd90545542996e802b47d7",
+    "hotpotqa:5aba66c855429939ce03dcdb"
+  ],
+  "wrong_demo_count": 91
+}

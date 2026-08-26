@@ -147,6 +147,23 @@ class ToolReactExecutionAdapter:
         del observations
         return tuple(request.agent.allowed_tools)
 
+    def _state_conditioned_action_domain(
+        self,
+        request: AgentRequest,
+        observations: list[Mapping[str, object]],
+    ) -> tuple[Optional[frozenset[tuple[str, str]]], bool]:
+        """Return the public Tool/completion domain for this continuation.
+
+        DIRECT_REUSE: SkillFlow publishes the legal bounded action set after
+        every Observation.  Generic Tool/ReAct execution leaves every action
+        and explicit completion available; dataset adapters may narrow that
+        domain from measured public state without changing AgentGraph roles or
+        topology.
+        """
+
+        del request, observations
+        return None, True
+
     async def execute(self, request: AgentRequest) -> GatewayResponse:
         mode = getattr(request.agent.execution_mode, "value", request.agent.execution_mode)
         if mode != self._execution_mode:
@@ -205,6 +222,21 @@ class ToolReactExecutionAdapter:
 
             entry["structured_action"] = action.to_value()
             if action.kind is ActionKind.COMPLETE:
+                _, completion_admitted = self._state_conditioned_action_domain(
+                    request,
+                    observations,
+                )
+                if not completion_admitted:
+                    observation = MappingProxyType(
+                        {
+                            "observation_status": "schema_invalid",
+                            "public_error_code": "completion_not_admitted",
+                        }
+                    )
+                    entry.update(observation)
+                    trace.append(entry)
+                    observations.append(observation)
+                    continue
                 if not isinstance(action.arguments, dict) or "value" not in action.arguments:
                     observation = MappingProxyType(
                         {
@@ -296,6 +328,40 @@ class ToolReactExecutionAdapter:
                 trace.append(entry)
                 observations.append(observation)
                 continue
+            admitted_tool_actions, _ = self._state_conditioned_action_domain(
+                request,
+                observations,
+            )
+            if (
+                admitted_tool_actions is not None
+                and (action.resource_id, action.name) not in admitted_tool_actions
+            ):
+                observation = MappingProxyType(
+                    {
+                        "observation_status": "schema_invalid",
+                        "public_error_code": "tool_action_not_admitted",
+                    }
+                )
+                entry.update(observation)
+                trace.append(entry)
+                observations.append(observation)
+                continue
+            action_error = self._tool_action_error(
+                request=request,
+                action=action,
+                observations=observations,
+            )
+            if action_error is not None:
+                observation = MappingProxyType(
+                    {
+                        "observation_status": "schema_invalid",
+                        "public_error_code": action_error,
+                    }
+                )
+                entry.update(observation)
+                trace.append(entry)
+                observations.append(observation)
+                continue
             if tool_calls >= self._max_tool_calls:
                 observation = MappingProxyType(
                     {
@@ -372,6 +438,18 @@ class ToolReactExecutionAdapter:
         """Dataset adapters may add public completion admission checks."""
 
         del action, artifact, tool_receipts
+        return None
+
+    def _tool_action_error(
+        self,
+        *,
+        request: AgentRequest,
+        action: StructuredAction,
+        observations: list[Mapping[str, object]],
+    ) -> Optional[str]:
+        """Dataset adapters may reject a Tool action from public state."""
+
+        del request, action, observations
         return None
 
     def _completion_artifact(

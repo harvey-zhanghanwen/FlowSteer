@@ -22,7 +22,7 @@ from src.interactive.hotpotqa_embedding_tool import (
     HOTPOTQA_RETRIEVAL_TOOL_ID,
     build_hotpotqa_embedding_tool_registry,
 )
-from src.interactive.task_dataset import iter_task_records
+from src.interactive.task_dataset import iter_task_records, qa_question_scope
 from src.interactive.tool_runtime import ToolRequest
 
 
@@ -63,13 +63,14 @@ async def smoke(config_path: Path) -> Mapping[str, object]:
         for item in iter_task_records(development_path, expected_split="train")
         if item.task_id.startswith("hotpotqa:")
     )
+    query = qa_question_scope(task.question)
     index = HotpotQAEmbeddingIndex.open(
         index_dir,
         embedding_model_path=str(section["embedding_model"]),
         embedding_device=str(section["embedding_device"]),
     )
-    first = await index.search(task.task_id, task.question, int(section["search_top_k"]))
-    second = await index.search(task.task_id, task.question, int(section["search_top_k"]))
+    first = await index.search(task.task_id, query, int(section["search_top_k"]))
+    second = await index.search(task.task_id, query, int(section["search_top_k"]))
     deterministic = first == second
     registry = build_hotpotqa_embedding_tool_registry(
         index,
@@ -81,7 +82,7 @@ async def smoke(config_path: Path) -> Mapping[str, object]:
         HOTPOTQA_RETRIEVAL_TOOL_ID,
         ToolRequest(
             "search",
-            {"query": task.question, "k": int(section["search_top_k"])},
+            {"query": query, "k": int(section["search_top_k"])},
         ),
     )
     if search_result is None:
@@ -105,7 +106,8 @@ async def smoke(config_path: Path) -> Mapping[str, object]:
         "schema_version": "flowsteer.hotpotqa.embedding_retrieval_smoke.v1",
         "passed": passed,
         "task_id": task.task_id,
-        "query": task.question,
+        "query": query,
+        "query_scope": "question_only",
         "same_query_top_k_deterministic": deterministic,
         "answer_private_metadata_absent": no_private_metadata,
         "index_manifest": index.manifest.to_value(),
@@ -120,11 +122,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--config",
-        default="config/evaluation_hotpotqa_embedding_retrieval_v2.yaml",
+        default="config/evaluation_hotpotqa_embedding_retrieval_v4.yaml",
     )
     parser.add_argument(
         "--output",
-        default="artifacts/hotpotqa_embedding_retrieval_v1/index_smoke_receipt.json",
+        default="artifacts/hotpotqa_embedding_retrieval_v4/index_smoke_receipt.json",
     )
     args = parser.parse_args(argv)
     config_path = Path(args.config).expanduser().resolve()

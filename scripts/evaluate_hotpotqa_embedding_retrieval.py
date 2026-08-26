@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the frozen HotpotQA dynamic embedding-retrieval AgentGraph condition."""
+"""Run the frozen HotpotQA multi-hop embedding-retrieval condition."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from scripts.evaluate_hotpotqa_round import (  # noqa: E402
 )
 
 
-CONFIG = PROJECT_ROOT / "config/evaluation_hotpotqa_embedding_retrieval_v2.yaml"
+CONFIG = PROJECT_ROOT / "config/evaluation_hotpotqa_embedding_retrieval_v4.yaml"
 
 
 def main() -> int:

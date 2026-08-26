@@ -1,0 +1,166 @@
+{
+  "answer_private_metadata_absent": true,
+  "completed_at": "2026-08-26T20:04:01.838135+00:00",
+  "index_manifest": {
+    "corpus_version": "flowsteer.hotpotqa.public_context.v1",
+    "document_count": 1589,
+    "duplicate_occurrence_count": 11,
+    "embedding_dimension": 768,
+    "embedding_model": "BAAI/bge-base-en-v1.5",
+    "embedding_model_path": "/ssd1/iclr/.private/skillflow-resources/bge-base-en-v1.5",
+    "embeddings_path": "embeddings.npy",
+    "frozen_top_k": 4,
+    "index_id": "hotpotqa-public-context-bge-base-en-v1.5-d768-topk4-v1",
+    "normalized": true,
+    "passage_count": 1589,
+    "passage_occurrence_count": 1600,
+    "passages_path": "passages.jsonl",
+    "project_splits": [
+      "train",
+      "validation"
+    ],
+    "schema_version": "flowsteer.hotpotqa.embedding_index.v1",
+    "scopes_path": "task_scopes.json",
+    "similarity": "cosine",
+    "source": "HotpotQA_HF/distractor",
+    "source_files": [
+      "/home/test/datasets/HotpotQA_HF/distractor/train-00000-of-00002.parquet",
+      "/home/test/datasets/HotpotQA_HF/distractor/train-00001-of-00002.parquet"
+    ],
+    "source_split": "train",
+    "task_count": 160
+  },
+  "passed": true,
+  "query": "Are Manhattan West and Singer Building both projects in New York?",
+  "query_scope": "question_only",
+  "ranked_doc_ids": [
+    "hotpotqa-passage-000960",
+    "hotpotqa-passage-001315",
+    "hotpotqa-passage-001316",
+    "hotpotqa-passage-001122"
+  ],
+  "same_query_top_k_deterministic": true,
+  "schema_version": "flowsteer.hotpotqa.embedding_retrieval_smoke.v1",
+  "task_id": "hotpotqa:5a80d30655429938b61421fe",
+  "tool_receipts": [
+    {
+      "ended_at_monotonic": 7298466.028122765,
+      "error_type": null,
+      "latency_ms": 16.81959629058838,
+      "request": {
+        "action": "search",
+        "arguments": {
+          "k": 4,
+          "query": "Are Manhattan West and Singer Building both projects in New York?"
+        }
+      },
+      "result": {
+        "completed": true,
+        "value": {
+          "doc_ids": [
+            "hotpotqa-passage-000960",
+            "hotpotqa-passage-001315",
+            "hotpotqa-passage-001316",
+            "hotpotqa-passage-001122"
+          ],
+          "hits": [
+            {
+              "doc_id": "hotpotqa-passage-000960",
+              "document_id": "hotpotqa-document-000960",
+              "rank": 1,
+              "similarity": 0.7037578225135803,
+              "snippet": "Manhattan West is a 5400000 sqft mixed-use development by Brookfield Properties. The project consists of two large office towers and two smaller residential towers, as well as a 1.5 acre public park. The towers will be built on a platform over Penn Station storage tracks along Ninth Avenue. The buildings will be built close to the developing Hudson Yards region between 31st and 33rd streets. These",
+              "title": "Manhattan West"
+            },
+            {
+              "doc_id": "hotpotqa-passage-001315",
+              "document_id": "hotpotqa-document-001315",
+              "rank": 2,
+              "similarity": 0.661022424697876,
+              "snippet": "The Singer Building or Singer Tower, at Liberty Street and Broadway in Lower Manhattan's Financial District, in the U.S. state of New York, was a 47-story office building completed in 1908 as the headquarters of the Singer Manufacturing Company. It was the tallest building in the world from 1908 to 1909. It was torn down in 1968, together with the adjacent City Investing Building, and is now the s",
+              "title": "Singer Building"
+            },
+            {
+              "doc_id": "hotpotqa-passage-001316",
+              "document_id": "hotpotqa-document-001316",
+              "rank": 3,
+              "similarity": 0.6450952291488647,
+              "snippet": "The Singer Building was an early skyscraper in New York City.",
+              "title": "Singer Building (disambiguation)"
+            },
+            {
+              "doc_id": "hotpotqa-passage-001122",
+              "document_id": "hotpotqa-document-001122",
+              "rank": 4,
+              "similarity": 0.566443681716919,
+              "snippet": "One Liberty Plaza, formerly the U.S. Steel Building, is a skyscraper in Lower Manhattan, in New York City, at the location of the former Singer Building (tallest structure ever dismantled) and the former City Investing Building. One Liberty Plaza is currently owned and operated by Brookfield Office Properties. The building is 743 ft tall and has 54 floors. It was completed in 1973. At 2300000 sqft",
+              "title": "One Liberty Plaza"
+            }
+          ],
+          "k": 4,
+          "operation": "search",
+          "query": "Are Manhattan West and Singer Building both projects in New York?",
+          "retrieval_index": {
+            "corpus_version": "flowsteer.hotpotqa.public_context.v1",
+            "document_count": 1589,
+            "embedding_dimension": 768,
+            "embedding_model": "BAAI/bge-base-en-v1.5",
+            "frozen_top_k": 4,
+            "index_id": "hotpotqa-public-context-bge-base-en-v1.5-d768-topk4-v1",
+            "normalized": true,
+            "passage_count": 1589,
+            "similarity": "cosine",
+            "source": "HotpotQA_HF/distractor",
+            "split": "train"
+          },
+          "task_id": "hotpotqa:5a80d30655429938b61421fe"
+        }
+      },
+      "started_at_monotonic": 7298466.011303169,
+      "tool_id": "qa-retrieval",
+      "tool_version": "hotpotqa-public-context-bge-base-en-v1.5-d768-topk4-v1"
+    },
+    {
+      "ended_at_monotonic": 7298466.028402767,
+      "error_type": null,
+      "latency_ms": 0.24312175810337067,
+      "request": {
+        "action": "read",
+        "arguments": {
+          "doc_id": "hotpotqa-passage-000960"
+        }
+      },
+      "result": {
+        "completed": true,
+        "value": {
+          "doc_id": "hotpotqa-passage-000960",
+          "operation": "read",
+          "passage": {
+            "content": "Manhattan West is a 5400000 sqft mixed-use development by Brookfield Properties. The project consists of two large office towers and two smaller residential towers, as well as a 1.5 acre public park. The towers will be built on a platform over Penn Station storage tracks along Ninth Avenue. The buildings will be built close to the developing Hudson Yards region between 31st and 33rd streets. These two buildings have been proposed as of 2010 . Upon its completion the taller west tower will extend 995 ft up to its roof and will be one of the tallest buildings in New York City and the world.",
+            "doc_id": "hotpotqa-passage-000960",
+            "document_id": "hotpotqa-document-000960",
+            "title": "Manhattan West"
+          },
+          "retrieval_index": {
+            "corpus_version": "flowsteer.hotpotqa.public_context.v1",
+            "document_count": 1589,
+            "embedding_dimension": 768,
+            "embedding_model": "BAAI/bge-base-en-v1.5",
+            "frozen_top_k": 4,
+            "index_id": "hotpotqa-public-context-bge-base-en-v1.5-d768-topk4-v1",
+            "normalized": true,
+            "passage_count": 1589,
+            "similarity": "cosine",
+            "source": "HotpotQA_HF/distractor",
+            "split": "train"
+          },
+          "task_id": "hotpotqa:5a80d30655429938b61421fe"
+        }
+      },
+      "started_at_monotonic": 7298466.028159645,
+      "tool_id": "qa-retrieval",
+      "tool_version": "hotpotqa-public-context-bge-base-en-v1.5-d768-topk4-v1"
+    }
+  ],
+  "web_search_used": false
+}

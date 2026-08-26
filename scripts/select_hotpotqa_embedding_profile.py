@@ -24,7 +24,7 @@ from src.interactive.hotpotqa_embedding_index import (
     _load_sentence_transformer,
     _task_native_id,
 )
-from src.interactive.task_dataset import iter_task_records
+from src.interactive.task_dataset import iter_task_records, qa_question_scope
 
 
 def _mapping(value: object, name: str) -> Mapping[str, object]:
@@ -112,7 +112,11 @@ def select_profile(config_path: Path) -> Mapping[str, object]:
             for title, sentences in zip(titles, sentence_groups, strict=True)
         ]
         passage_vectors = _encode(model, texts)
-        query_vector = _encode(model, [task.question], batch_size=1)[0]
+        query_vector = _encode(
+            model,
+            [qa_question_scope(task.question)],
+            batch_size=1,
+        )[0]
         ranking = sorted(
             range(len(titles)),
             key=lambda index: (-float(np.dot(passage_vectors[index], query_vector)), index),
@@ -148,6 +152,7 @@ def select_profile(config_path: Path) -> Mapping[str, object]:
     return {
         "schema_version": "flowsteer.hotpotqa.embedding_profile_selection.v1",
         "selection_split": "train/architecture-development",
+        "query_scope": "question_only",
         "validation_answers_consulted": False,
         "development_sample_count": len(tasks),
         "development_task_ids": [task.task_id for task in tasks],
@@ -178,11 +183,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--config",
-        default="config/evaluation_hotpotqa_embedding_retrieval_v2.yaml",
+        default="config/evaluation_hotpotqa_embedding_retrieval_v4.yaml",
     )
     parser.add_argument(
         "--output",
-        default="artifacts/hotpotqa_embedding_retrieval_v1/profile_selection.json",
+        default="artifacts/hotpotqa_embedding_retrieval_v4/profile_selection.json",
     )
     args = parser.parse_args(argv)
     config_path = Path(args.config).expanduser().resolve()
