@@ -165,6 +165,7 @@ Instruction：anti-slip water shoes、size 7.5、khaki、低于 40 美元。
 - Source map：`docs/webshop_initial_adapter_v5_source_map.md`
 - Machine-readable report：`reports/webshop_initial_adapter_v5/development_report.json`
 - Generated summary：`reports/webshop_initial_adapter_v5/development_report.md`
+- Failure taxonomy 与可复现 Wrong Demos：`reports/webshop_initial_adapter_v5/failure_taxonomy_report_zh.md`
 - 完整本地 artifact：`artifacts/webshop_initial_adapter_v5/development/`
   - `selected_tasks.jsonl`
   - `direct_predictions.jsonl`
