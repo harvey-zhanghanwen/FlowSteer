@@ -10,10 +10,12 @@ SWE-bench resolution remains exclusively in ``swebench_adapter.py``.
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from typing import Callable, Mapping, Optional
 
 from .agent_runtime import AgentGateway, AgentRequest, AgentResponse
 from .react_execution import ReactExecutionError, ToolReactExecutionAdapter
+from .scientific_sampling import ScientificSamplingCoordinate
 from .tool_runtime import StructuredAction, ToolRegistry
 
 
@@ -131,6 +133,8 @@ class CodingExecutionAdapter(ToolReactExecutionAdapter):
         ] = None,
         task_max_turns: Optional[int] = None,
         task_max_tool_calls: Optional[int] = None,
+        sampling_base_seed: Optional[int] = None,
+        sampling_coordinate: Optional[ScientificSamplingCoordinate] = None,
     ) -> None:
         if completion_policy not in {
             self.TESTED_DIFF_COMPLETION,
@@ -159,6 +163,8 @@ class CodingExecutionAdapter(ToolReactExecutionAdapter):
             max_tool_calls=max_tool_calls,
             max_action_tokens=max_action_tokens,
             execution_mode="coding",
+            sampling_base_seed=sampling_base_seed,
+            sampling_coordinate=sampling_coordinate,
         )
         self._completion_policy = completion_policy
         self._workspace_diff = workspace_diff
@@ -203,6 +209,24 @@ class CodingExecutionAdapter(ToolReactExecutionAdapter):
         self,
         request: AgentRequest,
     ) -> AgentResponse:
+        task_scoped_tool_binding: tuple[str, ...] = ()
+        if not request.agent.allowed_tools:
+            # NECESSARY_ADAPTATION: SkillFlow's SWE-bench Coding Agent enters
+            # an environment whose repository actions are always available;
+            # they are not a semantic role or a Director Canvas action.  A
+            # free AgentGraph coding node may therefore omit ``allowed_tools``
+            # without losing the task-scoped repository environment.  Keep an
+            # explicit Director selection unchanged and bind only an empty
+            # declaration to the resources already registered for this task.
+            task_scoped_tool_binding = self._tool_registry.resource_ids
+            if task_scoped_tool_binding:
+                request = replace(
+                    request,
+                    agent=replace(
+                        request.agent,
+                        allowed_tools=task_scoped_tool_binding,
+                    ),
+                )
         remaining_turns = self._task_max_turns - self._task_turns_used
         remaining_tools = self._task_max_tool_calls - self._task_tool_calls_used
         if remaining_turns <= 0:
@@ -216,7 +240,8 @@ class CodingExecutionAdapter(ToolReactExecutionAdapter):
         original_turn_limit = self._max_turns
         original_tool_limit = self._max_tool_calls
         prior_receipt_count = len(request.prior_tool_receipts)
-        self._max_turns = min(self._per_call_max_turns, remaining_turns)
+        effective_turn_limit = min(self._per_call_max_turns, remaining_turns)
+        self._max_turns = effective_turn_limit
         self._max_tool_calls = min(
             self._per_call_max_tool_calls,
             prior_receipt_count + max(remaining_tools, 0),
@@ -261,10 +286,71 @@ class CodingExecutionAdapter(ToolReactExecutionAdapter):
             self._task_tool_calls_used + new_tool_calls,
             self._task_max_tool_calls,
         )
+        if (
+            error is not None
+            and isinstance(error, ReactExecutionError)
+            and self._completion_policy == self.WORKSPACE_DIFF_COMPLETION
+            and new_turns >= effective_turn_limit
+            and str(error).endswith("without a valid completion")
+        ):
+            # DIRECT_REUSE: SkillFlow's code-generation environment calls
+            # ``_force_terminate`` at the episode bound and submits the
+            # current repository diff when one exists.  Preserve the same
+            # termination semantic here instead of discarding a legal patch
+            # merely because the model did not emit a separate completion
+            # action on its final bounded turn.
+            workspace_diff = self._materialized_workspace_diff()
+            if workspace_diff is not None:
+                react_trace = tuple(getattr(error, "react_trace", ()))
+                last_turn = (
+                    react_trace[-1].get("turn")
+                    if react_trace and isinstance(react_trace[-1], Mapping)
+                    else None
+                )
+                response = AgentResponse(
+                    workspace_diff,
+                    {
+                        "execution_mode": "coding",
+                        "react_turns_used": (
+                            last_turn
+                            if isinstance(last_turn, int)
+                            else len(request.action_history) + new_turns
+                        ),
+                        "new_react_turns_used": new_turns,
+                        "continued_action_history_count": len(
+                            request.action_history
+                        ),
+                        "continued_tool_receipt_count": prior_receipt_count,
+                        "continuation_source_agent_id": (
+                            request.continuation_source_agent_id
+                        ),
+                        "tool_calls": total_receipts,
+                        "tool_receipts": tuple(
+                            dict(item) for item in current_receipts
+                        ),
+                        "react_trace": react_trace,
+                        "model_calls": tuple(
+                            dict(item) for item in current_model_calls
+                        ),
+                        "truncated": True,
+                        "termination_reason": "max_turns",
+                        "workspace_diff_submitted": True,
+                        "termination_source": (
+                            "SkillFlow training.environment._force_terminate"
+                        ),
+                    },
+                )
+                error = None
         if error is not None:
             raise error
         assert response is not None
+        metadata = dict(response.metadata)
         metadata["task_global_budget"] = self.task_budget_receipt
+        metadata["task_scoped_tool_binding"] = {
+            "source": "ToolRegistry.resource_ids",
+            "applied": bool(task_scoped_tool_binding),
+            "resource_ids": list(task_scoped_tool_binding),
+        }
         if self._repository_runtime_receipt is not None:
             metadata["repository_runtime"] = dict(
                 self._repository_runtime_receipt()
@@ -276,6 +362,85 @@ class CodingExecutionAdapter(ToolReactExecutionAdapter):
             return None
         patch = self._workspace_diff()
         return patch if isinstance(patch, str) and patch.strip() else None
+
+    def materialize_workspace_diff(self) -> str:
+        """Return the task worktree diff used by SkillFlow termination/evaluation."""
+
+        patch = self._materialized_workspace_diff()
+        return patch if patch is not None else ""
+
+    def _state_conditioned_response_schema(
+        self,
+        request: AgentRequest,
+        observations: list[Mapping[str, object]],
+    ) -> Optional[dict[str, object]]:
+        """Require SkillFlow's five-field wire shape for repository actions.
+
+        SkillFlow's native provider emits a complete Tool call envelope even
+        when several repository actions are available.  The local SGLang text
+        boundary needs the equivalent flat compatibility schema: it constrains
+        only the five top-level StructuredAction fields, while the existing
+        ToolRegistry and strict parser remain authoritative for the selected
+        action's argument schema and resource/name pairing.
+        """
+
+        exact = super()._state_conditioned_response_schema(
+            request,
+            observations,
+        )
+        if exact is not None:
+            return exact
+        admitted_tool_actions, completion_admitted = (
+            self._state_conditioned_action_domain(request, observations)
+        )
+        if admitted_tool_actions is None:
+            action_pairs = {
+                (capability.tool_id, action_name)
+                for tool_id in request.agent.allowed_tools
+                for capability in (
+                    self._tool_registry.require_capability(tool_id),
+                )
+                for action_name in capability.action_names
+            }
+        else:
+            action_pairs = set(admitted_tool_actions)
+        if not action_pairs and not completion_admitted:
+            return None
+        action_names = sorted({name for _, name in action_pairs})
+        resource_ids = sorted({tool_id for tool_id, _ in action_pairs})
+        if completion_admitted:
+            action_names.append("complete")
+        return {
+            "type": "object",
+            "required": [
+                "arguments",
+                "kind",
+                "name",
+                "resource_id",
+                "skill_id",
+            ],
+            "properties": {
+                "arguments": {
+                    "type": "object",
+                    "additionalProperties": True,
+                },
+                "kind": {
+                    "enum": [
+                        *(["tool"] if action_pairs else []),
+                        *(["complete"] if completion_admitted else []),
+                    ]
+                },
+                "name": {"enum": action_names},
+                "resource_id": {
+                    "enum": [
+                        *resource_ids,
+                        *([None] if completion_admitted else []),
+                    ]
+                },
+                "skill_id": {"const": None},
+            },
+            "additionalProperties": False,
+        }
 
     def _completion_error(
         self,

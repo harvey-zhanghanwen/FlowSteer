@@ -2172,15 +2172,33 @@ class SWEbenchCodingRuntimeWiringTests(unittest.IsolatedAsyncioTestCase):
         )
         outcome = await backend.evaluate_final_graph(
             task,
-            patch_text,
+            "Output Agent explanatory prose, not a patch.",
             {"nodes": [], "relations": [], "revision": 0},
             rollout_index=0,
+            repository_patch=patch_text,
         )
 
         self.assertTrue(outcome.valid)
         self.assertEqual(1.0, outcome.metrics["resolved"])
         self.assertEqual([(task.task_id, patch_text)], calls)
         self.assertFalse(outcome.details["proxy_metric_used"])
+
+    async def test_swebench_evaluation_without_workspace_diff_fails_closed(
+        self,
+    ) -> None:
+        task = self._task()
+        backend = self._backend(self._config(enabled=False))
+
+        with self.assertRaisesRegex(
+            ConfigurationError,
+            "task workspace diff",
+        ):
+            await backend.evaluate_final_graph(
+                task,
+                "Output Agent prose",
+                {"nodes": [], "relations": [], "revision": 0},
+                rollout_index=0,
+            )
 
     def setUp(self) -> None:
         import tempfile

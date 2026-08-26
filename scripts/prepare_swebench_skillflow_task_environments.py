@@ -268,6 +268,8 @@ def prepare_environment(
     source_path = source_root / plan.environment_name
     python_path = envs_dir / plan.environment_name / "bin/python"
     env_state = state_root / plan.environment_name
+    execution_home = env_state / "home"
+    execution_workdir = env_state / "work"
     receipt_path = env_state / "receipt.json"
     previous = _read_json(receipt_path)
     previous_phases = {
@@ -284,6 +286,8 @@ def prepare_environment(
         "source_path": str(source_path.resolve()),
         "python_path": str(python_path.resolve()),
         "receipt_path": str(receipt_path.resolve()),
+        "host_home": str(execution_home.resolve()),
+        "host_working_directory": str(execution_workdir.resolve()),
         "source": "SkillFlow _env_name + official SWE-bench make_test_spec scripts",
     }
     if _ready_on_disk(previous, python_path=python_path, source_path=source_path):
@@ -296,6 +300,8 @@ def prepare_environment(
         }
 
     env_state.mkdir(parents=True, exist_ok=True)
+    execution_home.mkdir(parents=True, exist_ok=True)
+    execution_workdir.mkdir(parents=True, exist_ok=True)
     source_root.mkdir(parents=True, exist_ok=True)
     envs_dir.mkdir(parents=True, exist_ok=True)
     setup, install = render_official_scripts(
@@ -304,6 +310,12 @@ def prepare_environment(
         envs_dir=envs_dir,
         source_path=source_path,
     )
+    isolated_host_prefix = (
+        f"export HOME={shlex.quote(str(execution_home.resolve()))}\n"
+        f"cd {shlex.quote(str(execution_workdir.resolve()))}\n"
+    )
+    setup = isolated_host_prefix + setup
+    install = isolated_host_prefix + install
     setup_path = env_state / "setup_env.sh"
     install_path = env_state / "install_repo.sh"
     setup_path.write_text(setup, encoding="utf-8")
@@ -369,6 +381,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--jobs", type=int, choices=(1, 2), default=2)
     parser.add_argument("--timeout-seconds", type=int, default=3600)
     parser.add_argument("--limit-environments", type=int)
+    parser.add_argument(
+        "--environment-name",
+        action="append",
+        default=[],
+        help="prepare only this exact SkillFlow environment name (repeatable)",
+    )
     parser.add_argument("--plan-only", action="store_true")
     return parser
 
@@ -390,6 +408,17 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     rows = _load_jsonl(args.dataset_jsonl)
     plans = plan_environments(rows, env_name=module._env_name, make_test_spec=make_test_spec)
+    requested_names = {
+        str(value).strip() for value in args.environment_name if str(value).strip()
+    }
+    if requested_names:
+        available_names = {plan.environment_name for plan in plans}
+        missing_names = sorted(requested_names - available_names)
+        if missing_names:
+            raise SystemExit(
+                "unknown --environment-name value(s): " + ", ".join(missing_names)
+            )
+        plans = [plan for plan in plans if plan.environment_name in requested_names]
     if args.limit_environments is not None:
         plans = plans[: args.limit_environments]
     os.environ["CONDA_EXE"] = str(conda)
@@ -434,6 +463,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "planned": sum(row.get("status") == "planned" for row in results),
         "all_ready": bool(results) and ready == len(results),
         "max_concurrency": args.jobs,
+        "requested_environment_names": sorted(requested_names),
         "runtime_environment": {
             "CONDA_EXE": str(conda),
             "CONDA_ENVS_DIR": str(args.conda_envs_dir.expanduser().resolve()),

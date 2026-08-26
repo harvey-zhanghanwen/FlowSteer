@@ -1691,7 +1691,13 @@ def test_swe_direct_condition_is_one_coding_agent_with_repository_tools():
                 response=SimpleNamespace(
                     metadata={
                         "model_calls": [
-                            {"metadata": {"generation_seed": 23}}
+                            {
+                                "metadata": {
+                                    "generation_seed": observed[
+                                        "expected_generation_seed"
+                                    ]
+                                }
+                            }
                         ]
                     }
                 )
@@ -1705,10 +1711,34 @@ def test_swe_direct_condition_is_one_coding_agent_with_repository_tools():
                 executed_agent_ids=(node.id,),
             )
 
+    def runtime_for_task(
+        task,
+        condition_id,
+        *,
+        sampling_base_seed,
+        sampling_coordinate,
+    ):
+        del task, condition_id
+        observed["sampling_coordinate"] = sampling_coordinate.to_value()
+        observed["expected_generation_seed"] = _MODULE.derive_generation_seed(
+            base_seed=sampling_base_seed,
+            coordinate=sampling_coordinate,
+            step_index=1,
+            phase=_MODULE.GenerationPhase.ACTION,
+        )
+        return (
+            Runtime(),
+            SimpleNamespace(resource_ids=("swebench_repository",)),
+            lambda: closed.append(True),
+        )
+
     backend = SimpleNamespace(
         registry=registry,
         config={
-            "experiment": {"condition_id": "swe-coding"},
+            "experiment": {
+                "condition_id": "swe-coding",
+                "sampling_schedule_purpose": "swe-direct-test",
+            },
             "swebench_evaluation": {
                 "dataset_key": "swe_bench",
                 "direct_completion_condition": (
@@ -1717,11 +1747,7 @@ def test_swe_direct_condition_is_one_coding_agent_with_repository_tools():
             },
             "swe_coding_runtime": {"enabled": True},
         },
-        _runtime_for_task=lambda task, condition_id: (
-            Runtime(),
-            SimpleNamespace(resource_ids=("swebench_repository",)),
-            lambda: closed.append(True),
-        ),
+        _runtime_for_task=runtime_for_task,
     )
     task = _MODULE.TaskRecord(
         task_id="swe_bench:one",
@@ -1770,5 +1796,6 @@ def test_swe_direct_condition_is_one_coding_agent_with_repository_tools():
     assert node.allowed_tools == ("swebench_repository",)
     assert observed["output_agent_id"] == "direct_coding_agent"
     assert result["simple_baseline_topology"] == "single_coding_agent"
+    assert result["sampling_coordinate"] == observed["sampling_coordinate"]
     assert result["final_answer"].startswith("diff --git")
     assert closed == [True]

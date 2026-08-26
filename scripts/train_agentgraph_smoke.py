@@ -2298,6 +2298,8 @@ class LiveSmokeBackend:
                     task_max_tool_calls=int(
                         swe_coding_settings["task_max_tool_calls"]
                     ),
+                    sampling_base_seed=sampling_base_seed,
+                    sampling_coordinate=sampling_coordinate,
                 )
                 runtime = AgentRuntime(
                     self.registry,
@@ -3071,6 +3073,7 @@ class LiveSmokeBackend:
         *,
         rollout_index: int,
         environment_replay_trace: Sequence[Mapping[str, Any]] = (),
+        repository_patch: Optional[str] = None,
     ) -> EvaluationOutcome:
         """Run only the terminal evaluator for an already frozen rollout.
 
@@ -3161,9 +3164,20 @@ class LiveSmokeBackend:
                 self.project_root,
                 str(environment_settings["ragen_adapter_path"]),
             )
+        evaluator_prediction = final_answer or ""
+        if source_key == "swe_bench":
+            if repository_patch is None:
+                raise ConfigurationError(
+                    "SWE-bench evaluation requires the task workspace diff"
+                )
+            # DIRECT_REUSE: SkillFlow evaluates the repository patch produced
+            # by its code-generation environment.  FlowSteer's Output Agent
+            # text remains a routed graph artifact and must never substitute
+            # for the detached worktree's authoritative git diff.
+            evaluator_prediction = repository_patch
         return await evaluate_task(
             task,
-            final_answer or "",
+            evaluator_prediction,
             judge=self.judge,
             judge_model=self.judge_model,
             # The explicit environment runtime already owns a terminal or
@@ -3549,6 +3563,19 @@ class LiveSmokeBackend:
             final_graph: Mapping[str, Any],
             final_runtime: Any,
         ) -> Any:
+            repository_patch: Optional[str] = None
+            if _dataset_key(evaluated_task) == "swe_bench":
+                coding_adapter = task_runtime.execution_adapters.get("coding")
+                materialize = getattr(
+                    coding_adapter,
+                    "materialize_workspace_diff",
+                    None,
+                )
+                if not callable(materialize):
+                    raise ConfigurationError(
+                        "SWE-bench task runtime has no workspace diff materializer"
+                    )
+                repository_patch = materialize()
             return await self.evaluate_final_graph(
                 evaluated_task,
                 final_answer,
@@ -3557,6 +3584,7 @@ class LiveSmokeBackend:
                 environment_replay_trace=(
                     _environment_replay_trace_from_runtime(final_runtime)
                 ),
+                repository_patch=repository_patch,
             )
 
         try:

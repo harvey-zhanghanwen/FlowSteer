@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 import json
 from pathlib import Path
 import sys
@@ -69,8 +70,10 @@ def coding_request() -> AgentRequest:
 class SequenceGateway:
     def __init__(self, outputs: list[str]) -> None:
         self.outputs = list(outputs)
+        self.requests: list[AgentRequest] = []
 
     async def generate(self, request: AgentRequest) -> AgentResponse:
+        self.requests.append(request)
         return AgentResponse(self.outputs.pop(0))
 
 
@@ -93,6 +96,77 @@ class ConcurrentCompleteGateway:
 
 
 class CodingExecutionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_empty_tool_declaration_inherits_task_repository_resource(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "bug.py").write_text("VALUE = 1\n", encoding="utf-8")
+            registration = create_swebench_repository_registration(
+                root,
+                action_profile=SWEBENCH_TOOL_PROFILE_SKILLFLOW_TRAINING,
+                task_command_prefix=("/usr/bin/env",),
+                task_environment_receipt={"task_environment_ready": True},
+                require_task_environment=True,
+            )
+            gateway = SequenceGateway(
+                [
+                    tool("view_file", {"path": "bug.py"}),
+                    complete("done"),
+                ]
+            )
+            adapter = CodingExecutionAdapter(
+                gateway=gateway,
+                tool_registry=ToolRegistry((registration,)),
+                max_turns=2,
+                max_tool_calls=1,
+                completion_policy=CodingExecutionAdapter.WORKSPACE_DIFF_COMPLETION,
+                workspace_diff=lambda: "diff --git a/bug.py b/bug.py\n",
+            )
+            original = coding_request()
+            request = replace(
+                original,
+                agent=replace(original.agent, allowed_tools=()),
+            )
+
+            response = await adapter.execute(request)
+
+        self.assertEqual(
+            (SWEBENCH_REPOSITORY_TOOL_ID,),
+            gateway.requests[0].agent.allowed_tools,
+        )
+        self.assertEqual(
+            "view_file",
+            response.metadata["tool_receipts"][0]["request"]["action"],
+        )
+        self.assertEqual(
+            {
+                "source": "ToolRegistry.resource_ids",
+                "applied": True,
+                "resource_ids": [SWEBENCH_REPOSITORY_TOOL_ID],
+            },
+            response.metadata["task_scoped_tool_binding"],
+        )
+
+    def test_public_workspace_diff_materializer_returns_empty_or_exact_diff(
+        self,
+    ) -> None:
+        values = iter(("", "diff --git a/x b/x\n"))
+        adapter = CodingExecutionAdapter(
+            gateway=SequenceGateway([]),
+            tool_registry=ToolRegistry(()),
+            max_turns=1,
+            max_tool_calls=0,
+            completion_policy=CodingExecutionAdapter.WORKSPACE_DIFF_COMPLETION,
+            workspace_diff=lambda: next(values),
+        )
+
+        self.assertEqual("", adapter.materialize_workspace_diff())
+        self.assertEqual(
+            "diff --git a/x b/x\n",
+            adapter.materialize_workspace_diff(),
+        )
+
     async def test_parallel_graph_nodes_share_serial_task_budget(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -201,6 +275,127 @@ class CodingExecutionTests(unittest.IsolatedAsyncioTestCase):
                 response.metadata["repository_runtime"]["repository"][
                     "observed_pinned_commit"
                 ],
+            )
+
+    async def test_skillflow_episode_bound_submits_existing_workspace_diff(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "bug.py").write_text(
+                "def add(a, b):\n    return a - b\n",
+                encoding="utf-8",
+            )
+            registration = create_swebench_repository_registration(
+                root,
+                action_profile=SWEBENCH_TOOL_PROFILE_SKILLFLOW_TRAINING,
+                task_command_prefix=("/usr/bin/env",),
+                task_environment_receipt={"task_environment_ready": True},
+                require_task_environment=True,
+            )
+            gateway = SequenceGateway(
+                [
+                    tool(
+                        "str_replace_editor",
+                        {
+                            "command": "str_replace",
+                            "path": "bug.py",
+                            "old_str": "return a - b",
+                            "new_str": "return a + b",
+                        },
+                    ),
+                    tool("view_file", {"path": "bug.py"}),
+                ]
+            )
+            adapter = CodingExecutionAdapter(
+                gateway=gateway,
+                tool_registry=ToolRegistry((registration,)),
+                max_turns=2,
+                max_tool_calls=2,
+                completion_policy=CodingExecutionAdapter.WORKSPACE_DIFF_COMPLETION,
+                workspace_diff=registration.backend.materialize_workspace_diff,
+                task_max_turns=2,
+                task_max_tool_calls=2,
+            )
+
+            response = await adapter.execute(coding_request())
+
+            self.assertIn("+    return a + b", response.text)
+            self.assertIs(True, response.metadata["truncated"])
+            self.assertEqual("max_turns", response.metadata["termination_reason"])
+            self.assertIs(True, response.metadata["workspace_diff_submitted"])
+            self.assertEqual(
+                "SkillFlow training.environment._force_terminate",
+                response.metadata["termination_source"],
+            )
+            self.assertEqual(2, len(response.metadata["model_calls"]))
+            self.assertEqual(
+                {
+                    "max_turns": 2,
+                    "turns_used": 2,
+                    "max_tool_calls": 2,
+                    "tool_calls_used": 2,
+                },
+                response.metadata["task_global_budget"],
+            )
+
+    async def test_skillflow_repository_actions_use_five_field_sampling_schema(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "bug.py").write_text(
+                "def add(a, b):\n    return a - b\n",
+                encoding="utf-8",
+            )
+            registration = create_swebench_repository_registration(
+                root,
+                action_profile=SWEBENCH_TOOL_PROFILE_SKILLFLOW_TRAINING,
+                task_command_prefix=("/usr/bin/env",),
+                task_environment_receipt={"task_environment_ready": True},
+                require_task_environment=True,
+            )
+            gateway = SequenceGateway(
+                [
+                    tool(
+                        "str_replace_editor",
+                        {
+                            "command": "str_replace",
+                            "path": "bug.py",
+                            "old_str": "return a - b",
+                            "new_str": "return a + b",
+                        },
+                    ),
+                    complete("done"),
+                ]
+            )
+            adapter = CodingExecutionAdapter(
+                gateway=gateway,
+                tool_registry=ToolRegistry((registration,)),
+                max_turns=2,
+                max_tool_calls=2,
+                completion_policy=CodingExecutionAdapter.WORKSPACE_DIFF_COMPLETION,
+                workspace_diff=registration.backend.materialize_workspace_diff,
+            )
+
+            await adapter.execute(coding_request())
+
+            schema = json.loads(
+                gateway.requests[0].model.metadata["response_json_schema"]
+            )
+            self.assertEqual(
+                {
+                    "arguments",
+                    "kind",
+                    "name",
+                    "resource_id",
+                    "skill_id",
+                },
+                set(schema["required"]),
+            )
+            self.assertIn("str_replace_editor", schema["properties"]["name"]["enum"])
+            self.assertIn("complete", schema["properties"]["name"]["enum"])
+            self.assertEqual(
+                [SWEBENCH_REPOSITORY_TOOL_ID, None],
+                schema["properties"]["resource_id"]["enum"],
             )
 
     async def test_task_global_turn_budget_survives_new_agent_call(self) -> None:

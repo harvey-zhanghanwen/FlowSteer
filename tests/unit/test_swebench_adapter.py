@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import io
 from pathlib import Path
 import sys
+import tarfile
 import tempfile
 from types import ModuleType, SimpleNamespace
 import unittest
@@ -10,10 +12,12 @@ from unittest.mock import patch
 from src.interactive.records import TaskRecord
 from src.interactive.swebench_adapter import (
     OfficialSWEbenchHarness,
+    SWEBENCH_ARCHIVE_OWNER_ROOT,
     SWEBENCH_DATASET_SOURCE_REGULAR_DEV,
     SWEBENCH_DATASET_SOURCE_VERIFIED,
     SWEbenchHarnessUnavailable,
     SWEbenchTaskEnvironmentUnavailable,
+    _copy_to_container_with_root_archive_owner,
 )
 
 
@@ -51,6 +55,45 @@ def record(
 
 
 class OfficialSWEbenchHarnessTests(unittest.IsolatedAsyncioTestCase):
+    def test_root_archive_transport_normalizes_only_tar_ownership(self) -> None:
+        class FakeContainer:
+            def __init__(self) -> None:
+                self.commands: list[str] = []
+                self.destination: str | None = None
+                self.archive: bytes | None = None
+
+            def exec_run(self, command: str) -> None:
+                self.commands.append(command)
+
+            def put_archive(self, destination: str, data: bytes) -> None:
+                self.destination = destination
+                self.archive = data
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "patch.diff"
+            source.write_text("diff --git a/x b/x\n", encoding="utf-8")
+            container = FakeContainer()
+
+            _copy_to_container_with_root_archive_owner(
+                container,
+                source,
+                Path("/tmp/patch.diff"),
+            )
+
+            assert container.archive is not None
+            with tarfile.open(fileobj=io.BytesIO(container.archive)) as archive:
+                member = archive.getmember("patch.diff")
+                payload = archive.extractfile(member)
+                assert payload is not None
+                contents = payload.read().decode("utf-8")
+            self.assertEqual(0, member.uid)
+            self.assertEqual(0, member.gid)
+            self.assertEqual("", member.uname)
+            self.assertEqual("", member.gname)
+            self.assertEqual("diff --git a/x b/x\n", contents)
+            self.assertEqual("/tmp", container.destination)
+            self.assertFalse(source.with_suffix(".tar").exists())
+
     def harness(
         self,
         root: Path,
@@ -74,6 +117,24 @@ class OfficialSWEbenchHarnessTests(unittest.IsolatedAsyncioTestCase):
             evaluation_root=root / "evaluation",
             timeout_seconds=17,
         )
+
+    def test_invalid_archive_owner_mode_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            harness = self.harness(root)
+            harness = OfficialSWEbenchHarness(
+                evaluator_path=harness.evaluator_path,
+                harness_path=harness.harness_path,
+                dataset_source=harness.dataset_source,
+                dataset_path=harness.dataset_path,
+                evaluation_root=harness.evaluation_root,
+                archive_owner_mode="invalid",
+            )
+            with self.assertRaisesRegex(
+                SWEbenchHarnessUnavailable,
+                "archive owner mode",
+            ):
+                harness._configured_module([record()])
 
     async def test_callback_delegates_to_skillflow_official_evaluator(self) -> None:
         calls: list[tuple[str, str, int]] = []

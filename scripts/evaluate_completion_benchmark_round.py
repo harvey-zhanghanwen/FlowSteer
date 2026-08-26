@@ -62,6 +62,13 @@ from src.interactive.graph_diagnostics import (
 )
 from src.interactive.records import TaskRecord
 from src.interactive.rollout_collector import execution_record_from_call
+from src.interactive.scientific_sampling import (
+    GenerationPhase,
+    ScientificSamplingCoordinate,
+    derive_generation_seed,
+    scientific_sampling_schedule_hash,
+    stable_hash,
+)
 from src.interactive.swebench_adapter import OfficialSWEbenchHarness
 from src.interactive.swe_worktree import (
     SWEbenchRepositoryIdentity,
@@ -308,6 +315,10 @@ def validate_completion_benchmark_config(config: Mapping[str, Any]) -> None:
         }.get(dataset_source)
         checks["swe_bench.dataset_source_split_isolation"] = (
             expected_split is not None and bounded.get("split") == expected_split
+        )
+        checks["evaluation.swebench_archive_owner_mode"] = (
+            evaluation.get("swebench_archive_owner_mode", "preserve")
+            in {"preserve", "root"}
         )
         swe_runtime = config.get("swe_coding_runtime")
         if isinstance(swe_runtime, Mapping) and swe_runtime.get("enabled") is True:
@@ -1165,9 +1176,32 @@ async def _direct_one(
     if dataset_key == "swe_bench":
         bounded = _evaluation_section(backend.config)[1]
         condition_id = str(backend.config["experiment"]["condition_id"])
+        experiment = _mapping(backend.config["experiment"], "experiment")
+        sampling_coordinate = ScientificSamplingCoordinate(
+            sampling_schedule_hash=scientific_sampling_schedule_hash(
+                base_seed=seed
+            ),
+            schedule_purpose=str(
+                experiment.get(
+                    "sampling_schedule_purpose",
+                    f"{run_label}:direct",
+                )
+            ),
+            ordered_sequence_hash=stable_hash([task.task_id]),
+            sequence_position=0,
+            task_id=task.task_id,
+            optimizer_step_or_anchor_ordinal=int(
+                experiment.get(
+                    "sampling_anchor_ordinal",
+                    experiment.get("update_step", 0),
+                )
+            ),
+        )
         task_runtime, tool_registry, close_runtime = backend._runtime_for_task(
             task,
             condition_id=condition_id,
+            sampling_base_seed=seed,
+            sampling_coordinate=sampling_coordinate,
         )
         try:
             if tool_registry is None:
@@ -1211,11 +1245,22 @@ async def _direct_one(
                 if isinstance(item, Mapping)
                 and isinstance(item.get("metadata"), Mapping)
             ]
-            if not model_call_seeds or any(
-                actual_seed != seed for actual_seed in model_call_seeds
+            expected_model_call_seeds = [
+                derive_generation_seed(
+                    base_seed=seed,
+                    coordinate=sampling_coordinate,
+                    step_index=step_index,
+                    phase=GenerationPhase.ACTION,
+                )
+                for step_index in range(1, len(model_call_seeds) + 1)
+            ]
+            if (
+                not model_call_seeds
+                or model_call_seeds != expected_model_call_seeds
             ):
                 raise CompletionBenchmarkRoundError(
-                    "Direct Coding Agent generation seed receipts differ from config"
+                    "Direct Coding Agent scientific sampling receipts differ "
+                    "from the SkillFlow schedule"
                 )
             executions = [
                 execution_record_from_call(call).to_dict() for call in calls
@@ -1237,6 +1282,7 @@ async def _direct_one(
                 "provider_id": provider.provider_id,
                 "provider_model": model.model_name,
                 "generation_seed": seed,
+                "sampling_coordinate": sampling_coordinate.to_value(),
                 "final_answer": runtime_result.final_answer,
                 "evaluation": asdict(evaluation),
                 "execution": executions[-1],
@@ -1480,6 +1526,138 @@ async def _collect_direct(
             seed=seed,
         )
     }
+
+    if selected and _dataset_key(selected[0]) == "swe_bench":
+        model = backend.registry.require_model(model_id)
+        provider = backend.registry.provider_for(model_id)
+        for task in selected:
+            if task.task_id in by_task:
+                continue
+            prior_failure: Optional[Mapping[str, Any]] = None
+            for candidate in reversed(failures):
+                error = candidate.get("error")
+                failure_records = candidate.get("failure_records")
+                if (
+                    candidate.get("task_id") == task.task_id
+                    and candidate.get("condition") == "direct_local_qwen35_9b"
+                    and isinstance(error, str)
+                    and "exhausted" in error
+                    and "without a valid completion" in error
+                    and isinstance(failure_records, Sequence)
+                    and not isinstance(failure_records, (str, bytes))
+                    and failure_records
+                ):
+                    prior_failure = candidate
+                    break
+            if prior_failure is None:
+                continue
+            serialized_failures = [
+                dict(item)
+                for item in prior_failure["failure_records"]
+                if isinstance(item, Mapping)
+            ]
+            if not serialized_failures:
+                continue
+            public_metadata = serialized_failures[0].get("metadata", {})
+            if not isinstance(public_metadata, Mapping):
+                public_metadata = {}
+            model_calls = [
+                item
+                for item in public_metadata.get("model_calls", ())
+                if isinstance(item, Mapping)
+            ]
+            input_tokens = sum(
+                int(item.get("metadata", {}).get("prompt_tokens") or 0)
+                for item in model_calls
+                if isinstance(item.get("metadata"), Mapping)
+            )
+            output_tokens = sum(
+                int(item.get("metadata", {}).get("completion_tokens") or 0)
+                for item in model_calls
+                if isinstance(item.get("metadata"), Mapping)
+            )
+            latency_ms = sum(
+                float(item.get("metadata", {}).get("latency_ms") or 0.0)
+                for item in model_calls
+                if isinstance(item.get("metadata"), Mapping)
+            )
+            attempt_count = sum(
+                int(item.get("metadata", {}).get("attempt_count") or 0)
+                for item in model_calls
+                if isinstance(item.get("metadata"), Mapping)
+            )
+            response_metadata = {
+                **dict(public_metadata),
+                "attempt_count": attempt_count,
+                "provider_id": provider.provider_id,
+                "provider_model": model.model_name,
+                "finish_reason": "repository_patch_not_submitted",
+            }
+            execution = {
+                "execution_id": (
+                    f"{run_label}-direct-missing-patch-{task.task_id}"
+                ),
+                "experiment_id": run_label,
+                "graph_revision": 0,
+                "agent_id": "direct_coding_agent",
+                "model_id": model_id,
+                "provider": provider.provider_id,
+                "output": "",
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "latency_ms": latency_ms,
+                "error_type": serialized_failures[0].get("error_type"),
+                "metadata": {
+                    "response": response_metadata,
+                    "runtime_failure": serialized_failures[0],
+                },
+            }
+            evaluation = await _evaluate_prediction(backend, task, "")
+            first_sampling = (
+                model_calls[0].get("scientific_sampling", {})
+                if model_calls
+                else {}
+            )
+            coordinate = (
+                first_sampling.get("coordinate")
+                if isinstance(first_sampling, Mapping)
+                else None
+            )
+            by_task[task.task_id] = {
+                "schema_version": (
+                    "flowsteer.completion_benchmark.direct_prediction.v1"
+                ),
+                "dataset_key": "swe_bench",
+                "task_id": task.task_id,
+                "task": task.to_dict(),
+                "condition": "direct_local_qwen35_9b",
+                "protocol": protocol,
+                "simple_baseline_topology": "single_coding_agent",
+                "model_id": model_id,
+                "provider_id": provider.provider_id,
+                "provider_model": model.model_name,
+                "generation_seed": seed,
+                "sampling_coordinate": coordinate,
+                "final_answer": "",
+                "evaluation": asdict(evaluation),
+                "execution": execution,
+                "executions": [execution],
+                "runtime": {
+                    "run_id": (
+                        f"{run_label}-direct-missing-patch-{task.task_id}"
+                    ),
+                    "generation_valid": False,
+                    "repository_patch_submitted": False,
+                    "failure_records": serialized_failures,
+                },
+                "submission_receipt": {
+                    "status": "missing_patch",
+                    "source": "AgentRuntimeError",
+                    "official_evaluator_called": True,
+                },
+                "started_at": prior_failure.get("recorded_at"),
+                "completed_at": _utc_now(),
+            }
     hotpot_round._persist_ordered(path, selected, by_task)
 
     def checkpoint() -> None:
@@ -1528,12 +1706,18 @@ async def _collect_direct(
     for completed in asyncio.as_completed(jobs):
         task, result = await completed
         if isinstance(result, BaseException):
+            failure_records = getattr(result, "failure_records", ())
             failures.append(
                 {
                     "task_id": task.task_id,
                     "condition": "direct_local_qwen35_9b",
                     "stage": "generation_or_evaluator",
                     "error": _safe_error(result),
+                    "failure_records": [
+                        record.to_dict()
+                        for record in failure_records
+                        if hasattr(record, "to_dict")
+                    ],
                     "recorded_at": _utc_now(),
                 }
             )
@@ -2972,6 +3156,9 @@ def _swebench_harness_from_config(
         evaluation_root=_resolve(root, str(evaluation["swebench_evaluation_root"])),
         docker_namespace=str(evaluation["swebench_docker_namespace"]),
         timeout_seconds=int(evaluation["swebench_timeout_seconds"]),
+        archive_owner_mode=str(
+            evaluation.get("swebench_archive_owner_mode", "preserve")
+        ),
         conda_executable=optional_runtime_path("conda_executable"),
         conda_envs_dir=optional_runtime_path("conda_envs_dir"),
         environment_repository_root=optional_runtime_path(
@@ -3458,6 +3645,25 @@ async def run_completion_benchmark_round(
         judge_model=backend.judge_model,
     )
     manifest["stable_zero"] = stable_zero
+    report = _report(
+        rows,
+        config,
+        tuple(trajectories.values()),
+        collection_failures=failures,
+    )
+    _write_json(paths["report_json"], report)
+    paths["report_markdown"].parent.mkdir(parents=True, exist_ok=True)
+    paths["report_markdown"].write_text(
+        _report_markdown(report), encoding="utf-8"
+    )
+    manifest.update(
+        metrics={
+            "direct": report["direct_local_baseline"],
+            "agentgraph": report["agentgraph"],
+            "delta": report["agentgraph_minus_direct"],
+        },
+        failure_type_counts=report["failure_types"],
+    )
     if canary_only:
         manifest.update(
             status=(
@@ -3475,17 +3681,6 @@ async def run_completion_benchmark_round(
             )
         return manifest
 
-    report = _report(
-        rows,
-        config,
-        tuple(trajectories.values()),
-        collection_failures=failures,
-    )
-    _write_json(paths["report_json"], report)
-    paths["report_markdown"].parent.mkdir(parents=True, exist_ok=True)
-    paths["report_markdown"].write_text(
-        _report_markdown(report), encoding="utf-8"
-    )
     if report["operational_failure_count"]:
         final_status = "completed_with_operational_failures"
     elif report["terminal_failure_count"]:

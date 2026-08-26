@@ -16,6 +16,8 @@ import os
 from pathlib import Path
 import shutil
 import sys
+import tarfile
+import threading
 from typing import Any, Mapping, Sequence
 
 from .records import TaskRecord
@@ -42,6 +44,12 @@ _EXPECTED_SPLIT_BY_SOURCE = {
     SWEBENCH_DATASET_SOURCE_REGULAR_DEV: "validation",
     SWEBENCH_DATASET_SOURCE_VERIFIED: "test",
 }
+SWEBENCH_ARCHIVE_OWNER_PRESERVE = "preserve"
+SWEBENCH_ARCHIVE_OWNER_ROOT = "root"
+SWEBENCH_ARCHIVE_OWNER_MODES = frozenset(
+    {SWEBENCH_ARCHIVE_OWNER_PRESERVE, SWEBENCH_ARCHIVE_OWNER_ROOT}
+)
+_SWEBENCH_ARCHIVE_TRANSPORT_LOCK = threading.Lock()
 
 
 class SWEbenchHarnessUnavailable(RuntimeError):
@@ -50,6 +58,89 @@ class SWEbenchHarnessUnavailable(RuntimeError):
 
 class SWEbenchTaskEnvironmentUnavailable(RuntimeError):
     """SkillFlow's task-specific SWE-bench execution environment is unavailable."""
+
+
+def _root_owned_tar_info(info: tarfile.TarInfo) -> tarfile.TarInfo:
+    """Normalize only archive ownership for a single-ID user namespace."""
+
+    info.uid = 0
+    info.gid = 0
+    info.uname = ""
+    info.gname = ""
+    return info
+
+
+def _copy_to_container_with_root_archive_owner(
+    container: Any,
+    src: Path,
+    dst: Path,
+) -> None:
+    """Mirror the pinned harness transport with root-owned tar headers.
+
+    The official harness remains authoritative for patch application, tests,
+    and grading.  This transport-only adapter is required when Docker runs in
+    a user namespace that maps container uid/gid 0 but cannot represent the
+    host file owner stored by ``tarfile.add``.
+    """
+
+    destination_parent = os.path.dirname(dst)
+    if destination_parent == "":
+        raise ValueError(
+            f"Destination path parent directory cannot be empty!, dst: {dst}"
+        )
+    tar_path = src.with_suffix(".tar")
+    try:
+        with tarfile.open(tar_path, "w") as archive:
+            archive.add(
+                src,
+                arcname=src.name,
+                filter=_root_owned_tar_info,
+            )
+        data = tar_path.read_bytes()
+        container.exec_run(f"mkdir -p {dst.parent}")
+        container.put_archive(destination_parent, data)
+        container.exec_run(f"tar -xf {dst}.tar -C {dst.parent}")
+        container.exec_run(f"rm {dst}.tar")
+    finally:
+        tar_path.unlink(missing_ok=True)
+
+
+def _evaluate_patch_with_archive_transport(
+    module: Any,
+    *,
+    harness_path: Path,
+    archive_owner_mode: str,
+    instance_id: str,
+    prediction: str,
+    timeout_seconds: int,
+) -> tuple[bool, float, str]:
+    """Call SkillFlow while temporarily adapting only harness file transport."""
+
+    with _SWEBENCH_ARCHIVE_TRANSPORT_LOCK:
+        if archive_owner_mode == SWEBENCH_ARCHIVE_OWNER_PRESERVE:
+            return module.evaluate_patch(
+                instance_id,
+                prediction,
+                timeout=timeout_seconds,
+            )
+        harness = harness_path.expanduser().resolve()
+        if str(harness) not in sys.path:
+            sys.path.insert(0, str(harness))
+        from swebench.harness import run_evaluation
+
+        original_copy = run_evaluation.copy_to_container
+        if archive_owner_mode == SWEBENCH_ARCHIVE_OWNER_ROOT:
+            run_evaluation.copy_to_container = (
+                _copy_to_container_with_root_archive_owner
+            )
+        try:
+            return module.evaluate_patch(
+                instance_id,
+                prediction,
+                timeout=timeout_seconds,
+            )
+        finally:
+            run_evaluation.copy_to_container = original_copy
 
 
 @dataclass(frozen=True, slots=True)
@@ -250,6 +341,7 @@ class OfficialSWEbenchHarness:
     evaluation_root: Path = Path("artifacts/swebench_official_evaluation")
     docker_namespace: str = "swebench"
     timeout_seconds: int = 900
+    archive_owner_mode: str = SWEBENCH_ARCHIVE_OWNER_PRESERVE
     conda_executable: Path | None = None
     conda_envs_dir: Path | None = None
     environment_repository_root: Path | None = None
@@ -289,6 +381,10 @@ class OfficialSWEbenchHarness:
             raise SWEbenchHarnessUnavailable("SWE-bench Docker namespace is empty")
         if self.timeout_seconds <= 0:
             raise SWEbenchHarnessUnavailable("SWE-bench timeout must be positive")
+        if self.archive_owner_mode not in SWEBENCH_ARCHIVE_OWNER_MODES:
+            raise SWEbenchHarnessUnavailable(
+                "unsupported SWE-bench archive owner mode"
+            )
         evaluation_root.mkdir(parents=True, exist_ok=True)
         environment = {
                 "SKILLEV_FORMAL_RUNTIME": "1",
@@ -406,6 +502,7 @@ class OfficialSWEbenchHarness:
             "dataset_path": str(self.dataset_path.expanduser().resolve()),
             "selected_instances": len(instance_ids),
             "docker_namespace": self.docker_namespace.strip(),
+            "archive_owner_mode": self.archive_owner_mode,
             "proxy_metric_used": False,
         }
 
@@ -536,10 +633,13 @@ class OfficialSWEbenchHarness:
         module = self._configured_module((record,))
         instance_id = _instance_id(record)
         resolved, score, details = await asyncio.to_thread(
-            module.evaluate_patch,
-            instance_id,
-            str(prediction),
-            timeout=self.timeout_seconds,
+            _evaluate_patch_with_archive_transport,
+            module,
+            harness_path=self.harness_path,
+            archive_owner_mode=self.archive_owner_mode,
+            instance_id=instance_id,
+            prediction=str(prediction),
+            timeout_seconds=self.timeout_seconds,
         )
         return {
             "resolved": bool(resolved),
@@ -559,6 +659,9 @@ __all__ = [
     "SWEBENCH_DATASET_SOURCE_REGULAR_DEV",
     "SWEBENCH_DATASET_SOURCE_VERIFIED",
     "SWEBENCH_EVALUATION_SOURCES",
+    "SWEBENCH_ARCHIVE_OWNER_MODES",
+    "SWEBENCH_ARCHIVE_OWNER_PRESERVE",
+    "SWEBENCH_ARCHIVE_OWNER_ROOT",
     "SWEbenchHarnessUnavailable",
     "SWEbenchTaskEnvironmentUnavailable",
 ]

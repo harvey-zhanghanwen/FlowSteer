@@ -98,12 +98,15 @@ train/test instance overlap 为 0。Gold patch、`test_patch`、`FAIL_TO_PASS` �
 可保留 gold patch，但公开 paired row 与 Wrong Demo 均写成
 `ground_truth=null, ground_truth_role=evaluator_only_redacted`。
 
-配置入口为：
+当前已验证 smoke condition 的配置入口为：
 
 ```text
 config/datasets_swebench_skillflow_v3.yaml
-config/evaluation_swebench_skillflow_v3_initial_v1.yaml
+config/evaluation_swebench_skillflow_v3_initial_v7.yaml
 ```
+
+`initial_v1`--`initial_v6` 保留为逐步解除 repository、task environment、official
+harness transport 与 workspace-patch publication 阻塞的历史条件，不能与 v7 结果混合。
 
 ## 4. 两层动作
 
@@ -144,9 +147,9 @@ execution mode，不是 Agent role，也不是 Director action。
 | 必要适配 | `scripts/prepare_swebench_skillflow_task_environments.py` | SkillFlow `_env_name` + official `make_test_spec` environment/repository scripts；48 个唯一 repo/version 的可恢复物化 |
 | 必要适配 | `src/interactive/swe_worktree.py` | SkillFlow detached worktree lifecycle + active-population setup/base/cleanup preflight |
 | 必要适配 | `src/interactive/coding_tools.py` | deployed repository handlers + typed ToolRegistry envelope + strict task environment binding |
-| 必要适配 | `src/interactive/coding_execution.py` | task workspace diff completion + task-global budget |
-| 必要适配 | `scripts/train_agentgraph_smoke.py::_runtime_for_task` | 每个 task/arm 独立 runtime/worktree |
-| 必要适配 | `src/interactive/swebench_adapter.py` | SkillFlow `_env_python`/Conda binding + `evaluate_patch` + fail-closed official preflight |
+| 必要适配 | `src/interactive/coding_execution.py` | task workspace diff completion + task-global budget；空 `allowed_tools` 继承当前 task 的 SkillFlow repository ToolRegistry，而不改变 Director action space |
+| 必要适配 | `scripts/train_agentgraph_smoke.py::_runtime_for_task` | 每个 task/arm 独立 runtime/worktree；在 cleanup 前物化 authoritative workspace diff |
+| 必要适配 | `src/interactive/swebench_adapter.py` | SkillFlow `_env_python`/Conda binding + `evaluate_patch` + fail-closed official preflight；单 ID user namespace 下只规范化 harness tar header owner，不改变 patch、tests 或判分 |
 | 必要适配 | `src/interactive/swebench_reporting.py` | receipt-only Tool/failure/Resolved reporting |
 | 必要适配 | `scripts/evaluate_completion_benchmark_round.py` | paired Direct vs AgentGraph runner |
 
@@ -252,33 +255,36 @@ SkillFlow official harness 的 infrastructure exception 若带 `diagnostic`，�
 classification、phase、retryable、test/report presence、container exit/OOM 等结构化
 字段；不解析自由文本，也不把 infrastructure failure 转成 `Resolved=false`。
 
-## 8. 已验证状态（2026-08-25）
+## 8. 已验证状态（2026-08-26，v7）
 
-- 数据准备：500 train / 0 validation / 128 fixed IID test，128 个 test instance 唯一且
-  与 train 无交叉；
-- 定向与兼容性测试：Dataset、worktree、Tool、ReAct、CodingExecution、config、
-  evaluator、reporting、Canvas/runtime 和 unified runner 共 558 项通过，另有 103 个
-  subtests 通过；
-- 真实 repository smoke：`astropy__astropy-14182` 的 detached worktree、只读
-  `list_files`、`view_file`、clean initial diff 与 cleanup 通过；task environment 未就绪
-  时 strict SkillFlow Tool registration 明确不可构造；
-- smoke 期间修复了 `.pyinstaller/...` 被错误去掉前导点、导致 list/view 不可组合的
-  path normalization bug；
-- full repository population preflight：补齐 9 个缺失 repository 后，固定 128 tasks
-  全部完成 setup/base-state/cleanup（128/128 ready）；
-- SkillFlow task environment preflight：首个 `swe_astropy_astropy_51` 已按 official spec
-  建立并在独立 detached worktree 完成 9/9 定向测试；当前 1/128 ready、127/128
-  unavailable；
-- environment builder plan-only：固定 128 tasks 映射为 48 个唯一 repo/version；剩余
-  47 个支持最多 2 并发、per-environment source/log/receipt 与失败后阶段恢复；
-- official evaluator preflight：Docker daemon 正常，但当前执行用户无
-  `/var/run/docker.sock` 权限；runner 在模型 runtime 创建前以
-  `failed_runtime_preflight` 停止；
-- model/API calls：0；official task labels：0；Resolved Rate：`null`（不可测）；
-- training/optimizer/Skill evolution：均未运行。
+- 数据与 repository population：500 train / 0 validation / 128 fixed IID test；固定
+  test 的 128 个 instance 唯一、与 train 无交叉，并已完成 repository setup/base-state/
+  cleanup preflight；
+- 当前正式执行范围只是固定 test panel 前 2 题的 Stable Zero canary，不是 128 题完整
+  evaluation，也不是 benchmark estimate；
+- repository Tool 已在实际 Agent execution 中可用。Direct 共执行 `bash=19、view=1`；
+  AgentGraph 共执行 `bash=22、search=2、view=2、str_replace_editor=1`；两臂均未执行
+  `run_tests`，AgentGraph 唯一 edit receipt 失败且没有产生 workspace diff；
+- AgentGraph evaluator 输入已从 Output Agent prose 改为 task worktree 的真实 diff；没有
+  diff 时严格提交 empty patch，不再把自然语言误当 patch；
+- official harness archive transport 已在隔离 user namespace 下通过 preflight。适配只把
+  tar header 的 uid/gid 规范化为 0/0，SkillFlow `evaluate_patch`、official image、patch
+  apply、tests 与 Resolved 判定均保持不变；
+- Direct 2/2 和 AgentGraph 2/2 都具有 official-evaluator-valid receipt；两臂均为
+  `empty_patch -> unresolved`，因此真实 Resolved Rate 都是 `0/2 = 0.00%`；
+- AgentGraph 显式 `FINISH=0/2`、`max_rounds=2/2`。最终自然 topology 都是 parallel：
+  一题 8 Agents / 4 reciprocal relations / depth 1，另一题 3 Agents / 1 directed
+  relation / depth 2；
+- Stable Zero **未通过**。阻塞已从 dataset/repository/evaluator infrastructure 转移为
+  可观察的 policy/runtime failure：Direct 耗尽 repository episode budget；AgentGraph
+  没有在 20 个 Canvas rounds 内收敛到 patch 与 FINISH；
+- 最新定向测试：CodingExecution、SWE-bench adapter、smoke runner 与 completion round
+  共 57 项通过；
+- training、GRPO、MACE、Bayesian、Skill injection/evolution、backward、optimizer update
+  与 LoRA publication 均未运行。
 
-因此当前不能声称 Stable Zero、Direct/AgentGraph Resolved/Failed、Resolved Rate 或
-Wrong Demo task-level 结论。环境 preflight failure 不是 task failure，也不能计为 0%。
+v7 的 `0.00%` 是这 2 个 canary task 的官方 Resolved Rate，可以用于确认端到端记账已经
+打通；它不能外推为 128 题 SWE-bench Verified 的准确率。
 
 ## 9. 运行入口
 
@@ -291,7 +297,7 @@ Wrong Demo task-level 结论。环境 preflight failure 不是 task failure，�
 
 /ssd1/iclr/gpf/venvs/skillflow/bin/python \
   scripts/evaluate_completion_benchmark_round.py \
-  --config config/evaluation_swebench_skillflow_v3_initial_v1.yaml \
+  --config config/evaluation_swebench_skillflow_v3_initial_v7.yaml \
   --prepare-only
 ```
 
@@ -300,8 +306,8 @@ No-model repository/evaluator preflight：
 ```bash
 /ssd1/iclr/gpf/venvs/skillflow/bin/python \
   scripts/preflight_swebench_initial_adapter.py \
-  --config config/evaluation_swebench_skillflow_v3_initial_v1.yaml \
-  --output reports/swebench_skillflow_v3_initial_v1_preflight.json
+  --config config/evaluation_swebench_skillflow_v3_initial_v7.yaml \
+  --output reports/swebench_skillflow_v3_initial_v7_preflight.json
 ```
 
 Task environment plan / materialization（直接复用 SkillFlow environment name 与
@@ -322,19 +328,19 @@ evaluation 与完整 paired evaluation：
 ```bash
 /ssd1/iclr/gpf/venvs/skillflow/bin/python \
   scripts/evaluate_completion_benchmark_round.py \
-  --config config/evaluation_swebench_skillflow_v3_initial_v1.yaml \
+  --config config/evaluation_swebench_skillflow_v3_initial_v7.yaml \
   --canary-only
 
 /ssd1/iclr/gpf/venvs/skillflow/bin/python \
   scripts/evaluate_completion_benchmark_round.py \
-  --config config/evaluation_swebench_skillflow_v3_initial_v1.yaml
+  --config config/evaluation_swebench_skillflow_v3_initial_v7.yaml
 ```
 
 Artifacts 写入独立目录：
 
 ```text
-artifacts/swebench_skillflow_v3_initial_v1/
-reports/swebench_skillflow_v3_initial_v1_report.{json,md}
+artifacts/swebench_skillflow_v3_initial_v7/
+reports/swebench_skillflow_v3_initial_v7_report.{json,md}
 ```
 
 任何没有 official evaluator receipt 的任务均不得进入 Resolved/Failed 分母。

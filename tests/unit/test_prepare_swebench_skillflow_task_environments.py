@@ -157,6 +157,11 @@ def test_prepare_records_ready_and_resume_skips_completed_environment(tmp_path):
     assert first["status"] == "ready"
     assert second["status"] == "ready" and second["resumed"] is True
     assert first["source_path"] == str((sources / _plan().environment_name).resolve())
+    setup_script = (state / _plan().environment_name / "setup_env.sh").read_text(
+        encoding="utf-8"
+    )
+    assert f"export HOME={state / _plan().environment_name / 'home'}" in setup_script
+    assert f"cd {state / _plan().environment_name / 'work'}" in setup_script
 
 
 def test_prepare_persists_failure_and_never_marks_it_ready(tmp_path):
@@ -239,3 +244,19 @@ def test_cli_caps_parallelism_at_two():
                 "3",
             ]
         )
+
+
+def test_cli_accepts_repeatable_exact_environment_filter():
+    args = module._parser().parse_args(
+        [
+            "--conda-executable",
+            "/conda",
+            "--conda-envs-dir",
+            "/envs",
+            "--environment-name",
+            "swe_owner_repo_12",
+            "--environment-name",
+            "swe_other_repo_30",
+        ]
+    )
+    assert args.environment_name == ["swe_owner_repo_12", "swe_other_repo_30"]
