@@ -1,0 +1,52 @@
+# Versioned selection receipt for the highest evaluator-valid HotpotQA
+# AgentGraph condition on the fixed 128-example project validation split.
+# The executable default remains the existing FlowSteer evaluation config;
+# this file records, but does not alter, the measured condition.
+
+schema_version: "flowsteer.agentgraph.best-profile.v1"
+dataset: "hotpotqa"
+status: "selected_evaluator_valid_complete"
+
+selection_scope:
+  benchmark: "HotpotQA"
+  split: "validation"
+  sample_count: 128
+  evaluator_protocol: "hotpotqa_official_normalization_exact_match_and_token_f1"
+  require_agentgraph_complete: true
+  require_evaluator_valid: true
+  exclude_direct: true
+  exclude_canary_or_partial_runs: true
+
+best_profile:
+  condition_id: "hotpotqa_round_01_stable_zero"
+  experiment_name: "hotpotqa_architecture_round_01"
+  source_commit: "deac8b9bbbba84d35ead2b8d96e94db90ea16e22"
+  result_commit: "46083d6b83f64348964f34ee8dbabba031e388b8"
+  next_run_config: "config/evaluation_hotpotqa_round_01.yaml"
+  default_entrypoint: "scripts/evaluate_hotpotqa_round.py"
+  manifest: "artifacts/hotpotqa_round_01/run_manifest.json"
+  report: "reports/hotpotqa_round_01/report.json"
+  trajectories: "artifacts/hotpotqa_round_01/agentgraph_trajectories.jsonl"
+  policy_version: "qwen35-9b-smoke-step-0001"
+  policy_adapter: "theta_smoke_step_000001"
+  prompt_version: "agentgraph.director.minimal.v2"
+  tool_version: "agentgraph.executor-react.v2"
+  model_catalog: "config/model_catalog.yaml"
+
+measured_result:
+  completed: 128
+  evaluator_valid: 128
+  stable_zero_passed: true
+  exact_match: 0.75
+  token_f1: 0.8444010416666666
+  direct_exact_match: 0.7265625
+  direct_token_f1: 0.8207758884803922
+  exact_match_delta: 0.0234375
+  token_f1_delta: 0.02362515318627445
+  optimizer_updates: 0
+
+next_run:
+  selected: true
+  uses_default_cli_config: true
+  full_evaluation_rerun_performed: false
+  training_performed: false
