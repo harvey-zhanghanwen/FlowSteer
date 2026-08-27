@@ -1,0 +1,184 @@
+{
+  "completed_at": "2026-08-27T00:31:49.544717+00:00",
+  "cycled_record_count": 0,
+  "deterministic_rebuild": true,
+  "dynamic_search_read_receipt_fields_present": true,
+  "frozen_split_counts_valid": true,
+  "heldout_validation_count": 128,
+  "index_manifest": {
+    "corpus_version": "flowsteer.hotpotqa.train_qa_memory.v1",
+    "cycled_record_count": 0,
+    "document_template": "Question: {question}\nAnswer: {answer_statement}",
+    "embedding_dimension": 768,
+    "embedding_model": "BAAI/bge-base-en-v1.5",
+    "embedding_model_path": "/ssd1/iclr/.private/skillflow-resources/bge-base-en-v1.5",
+    "embeddings_path": "embeddings.npy",
+    "frozen_top_k": 2,
+    "heldout_validation_count": 128,
+    "index_id": "hotpotqa-train-qa-memory-d768-n512-topk2-v1",
+    "memories_path": "memories.jsonl",
+    "normalized": true,
+    "paraphrase_count": 512,
+    "paraphrase_provenances": [
+      "local-qwen3.5-9b-generate-and-verify"
+    ],
+    "paraphrase_versions": [
+      "hotpotqa-train-qa-paraphrase-v1"
+    ],
+    "schema_version": "flowsteer.hotpotqa.qa_memory_index.v1",
+    "similarity": "cosine",
+    "source": "HotpotQA aligned frozen train",
+    "source_split": "train",
+    "source_train_path": "/ssd1/iclr/1/FlowSteer/data/agentgraph_v1/train.jsonl",
+    "train_record_count": 512,
+    "unique_source_count": 512,
+    "validation_overlap_count": 0
+  },
+  "paraphrase_count": 512,
+  "passed": true,
+  "private_validation_or_evaluator_fields_absent": true,
+  "query": "Are Manhattan West and Singer Building both projects in New York?",
+  "query_source_train_task_id": "hotpotqa:5a80d30655429938b61421fe",
+  "ranked_memory_ids": [
+    "hotpotqa-qa-memory-000000",
+    "hotpotqa-qa-memory-000218"
+  ],
+  "same_query_top_k_deterministic": true,
+  "schema_version": "flowsteer.hotpotqa.qa_memory_retrieval_smoke.v1",
+  "tool_id": "hotpotqa.qa_memory",
+  "tool_receipts": [
+    {
+      "ended_at_monotonic": 7314533.729302469,
+      "error_type": null,
+      "latency_ms": 16.432538628578186,
+      "request": {
+        "action": "search",
+        "arguments": {
+          "k": 2,
+          "query": "Are Manhattan West and Singer Building both projects in New York?"
+        }
+      },
+      "result": {
+        "completed": true,
+        "value": {
+          "hits": [
+            {
+              "memory_id": "hotpotqa-qa-memory-000000",
+              "paraphrase_answer_statement": "The canonical answer is yes. Manhattan West and the Singer Building are both projects located in New York.",
+              "paraphrase_question": "Are Manhattan West and the Singer Building both projects in New York?",
+              "rank": 1,
+              "similarity": 0.7937610149383545,
+              "source_train_task_id": "hotpotqa:5a80d30655429938b61421fe"
+            },
+            {
+              "memory_id": "hotpotqa-qa-memory-000218",
+              "paraphrase_answer_statement": "The record company co-founded by the frontman of Minor Threat and Fugazi is based in Washington, D.C.",
+              "paraphrase_question": "In which city is the record label established by the lead singer of Minor Threat and Fugazi located?",
+              "rank": 2,
+              "similarity": 0.4627859890460968,
+              "source_train_task_id": "hotpotqa:5ae8256355429952e35eaa59"
+            }
+          ],
+          "k": 2,
+          "memory_ids": [
+            "hotpotqa-qa-memory-000000",
+            "hotpotqa-qa-memory-000218"
+          ],
+          "operation": "search",
+          "query": "Are Manhattan West and Singer Building both projects in New York?",
+          "retrieval_index": {
+            "corpus_kind": "train_qa_memory",
+            "corpus_version": "flowsteer.hotpotqa.train_qa_memory.v1",
+            "cycled_record_count": 0,
+            "embedding_dimension": 768,
+            "embedding_model": "BAAI/bge-base-en-v1.5",
+            "frozen_top_k": 2,
+            "heldout_validation_count": 128,
+            "index_id": "hotpotqa-train-qa-memory-d768-n512-topk2-v1",
+            "normalized": true,
+            "paraphrase_count": 512,
+            "paraphrase_provenances": [
+              "local-qwen3.5-9b-generate-and-verify"
+            ],
+            "paraphrase_versions": [
+              "hotpotqa-train-qa-paraphrase-v1"
+            ],
+            "schema_version": "flowsteer.hotpotqa.qa_memory_index.v1",
+            "similarity": "cosine",
+            "source": "HotpotQA aligned frozen train",
+            "split": "train",
+            "train_record_count": 512,
+            "unique_source_count": 512,
+            "validation_overlap_count": 0
+          },
+          "task_id": "hotpotqa:qa-memory-smoke-worker"
+        }
+      },
+      "started_at_monotonic": 7314533.71286993,
+      "tool_id": "hotpotqa.qa_memory",
+      "tool_version": "hotpotqa-train-qa-memory-d768-n512-topk2-v1"
+    },
+    {
+      "ended_at_monotonic": 7314533.729646188,
+      "error_type": null,
+      "latency_ms": 0.2768496051430702,
+      "request": {
+        "action": "read",
+        "arguments": {
+          "memory_id": "hotpotqa-qa-memory-000000"
+        }
+      },
+      "result": {
+        "completed": true,
+        "value": {
+          "memory": {
+            "base_task_id": "hotpotqa:5a80d30655429938b61421fe",
+            "canonical_answer": "yes",
+            "cycled": false,
+            "memory_id": "hotpotqa-qa-memory-000000",
+            "paraphrase_answer_statement": "The canonical answer is yes. Manhattan West and the Singer Building are both projects located in New York.",
+            "paraphrase_provenance": "local-qwen3.5-9b-generate-and-verify",
+            "paraphrase_question": "Are Manhattan West and the Singer Building both projects in New York?",
+            "paraphrase_version": "hotpotqa-train-qa-paraphrase-v1",
+            "source_train_task_id": "hotpotqa:5a80d30655429938b61421fe"
+          },
+          "memory_id": "hotpotqa-qa-memory-000000",
+          "operation": "read",
+          "retrieval_index": {
+            "corpus_kind": "train_qa_memory",
+            "corpus_version": "flowsteer.hotpotqa.train_qa_memory.v1",
+            "cycled_record_count": 0,
+            "embedding_dimension": 768,
+            "embedding_model": "BAAI/bge-base-en-v1.5",
+            "frozen_top_k": 2,
+            "heldout_validation_count": 128,
+            "index_id": "hotpotqa-train-qa-memory-d768-n512-topk2-v1",
+            "normalized": true,
+            "paraphrase_count": 512,
+            "paraphrase_provenances": [
+              "local-qwen3.5-9b-generate-and-verify"
+            ],
+            "paraphrase_versions": [
+              "hotpotqa-train-qa-paraphrase-v1"
+            ],
+            "schema_version": "flowsteer.hotpotqa.qa_memory_index.v1",
+            "similarity": "cosine",
+            "source": "HotpotQA aligned frozen train",
+            "split": "train",
+            "train_record_count": 512,
+            "unique_source_count": 512,
+            "validation_overlap_count": 0
+          },
+          "task_id": "hotpotqa:qa-memory-smoke-worker"
+        }
+      },
+      "started_at_monotonic": 7314533.729369339,
+      "tool_id": "hotpotqa.qa_memory",
+      "tool_version": "hotpotqa-train-qa-memory-d768-n512-topk2-v1"
+    }
+  ],
+  "train_record_count": 512,
+  "unique_source_count": 512,
+  "validation_overlap_count": 0,
+  "web_search_used": false
+}
