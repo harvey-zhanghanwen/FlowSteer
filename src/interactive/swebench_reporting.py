@@ -18,7 +18,7 @@ from typing import Any, Optional
 SWEBENCH_TOOL_ACTION_GROUPS: Mapping[str, tuple[str, ...]] = {
     "search": ("search_code",),
     "view": ("view_file",),
-    "edit": ("apply_patch", "exact_edit", "str_replace_editor"),
+    "edit": ("apply_patch", "edit_file", "exact_edit", "str_replace_editor"),
     "test": ("run_tests",),
     "command": ("bash",),
 }

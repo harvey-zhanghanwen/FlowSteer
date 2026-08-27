@@ -426,6 +426,51 @@ class RepositoryToolBackendTests(unittest.TestCase):
         self.assertIn("+GENERATED = True", patch_text)
         self.assertNotIn("test_generated.py", patch_text)
 
+    def test_workspace_diff_includes_staged_and_unstaged_changes(self) -> None:
+        subprocess.run(
+            ["git", "init", "-q"], cwd=self.root, check=True, capture_output=True
+        )
+        subprocess.run(
+            ["git", "add", "."], cwd=self.root, check=True, capture_output=True
+        )
+        subprocess.run(
+            [
+                "git",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "-c",
+                "user.name=Fixture",
+                "commit",
+                "-q",
+                "-m",
+                "base",
+            ],
+            cwd=self.root,
+            check=True,
+            capture_output=True,
+        )
+        source = self.root / "pkg" / "maths.py"
+        source.write_text(
+            "def add(left, right):\n    return left * right\n",
+            encoding="utf-8",
+        )
+        subprocess.run(
+            ["git", "add", "pkg/maths.py"],
+            cwd=self.root,
+            check=True,
+            capture_output=True,
+        )
+        source.write_text(
+            "def add(left, right):\n    return left + right\n",
+            encoding="utf-8",
+        )
+
+        patch_text = self.backend.materialize_workspace_diff()
+
+        self.assertIn("-    return left - right", patch_text)
+        self.assertIn("+    return left + right", patch_text)
+        self.assertNotIn("return left * right", patch_text)
+
 
 class RepositoryToolRegistryTests(unittest.IsolatedAsyncioTestCase):
     async def test_skillflow_training_profile_uses_deployed_action_schemas(

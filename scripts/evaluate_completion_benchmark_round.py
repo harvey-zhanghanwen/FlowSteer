@@ -3227,6 +3227,13 @@ def _swebench_harness_from_config(
         environment_repository_root=optional_runtime_path(
             "environment_repository_root"
         ),
+        repository_store=optional_runtime_path("repository_store"),
+        evaluator_worktree_root=optional_runtime_path(
+            "official_docker_evaluator_worktree_root"
+        ),
+        bind_mount_base_image_key=str(
+            runtime.get("official_docker_bind_mount_base_image_key", "")
+        ).strip(),
     )
 
 
@@ -3322,7 +3329,12 @@ def _completion_stable_zero_check(
                 and isinstance(value["details"].get("resolved"), bool)
                 and value["details"].get("proxy_metric_used") is False
                 and value["details"].get("harness_details")
-                in {"empty_patch", "resolved", "unresolved"}
+                in {
+                    "empty_patch",
+                    "patch_apply_failed",
+                    "resolved",
+                    "unresolved",
+                }
                 for value in (direct_evaluation, graph_evaluation)
             ) and bool(
                 isinstance(direct_patch, str)

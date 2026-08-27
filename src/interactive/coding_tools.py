@@ -1100,8 +1100,11 @@ class RepositoryToolBackend:
         detached worktree with ``git diff`` and excludes test files.  The
         tracked-worktree path is authoritative because a legitimate
         repository command may change a file without going through one of the
-        editor helpers below.  The dependency-light difflib path is retained
-        only for synthetic unit-test directories that are not Git worktrees.
+        editor helpers below.  NECESSARY_ADAPTATION: repository agents can run
+        ``git add`` through SkillFlow's public ``bash`` action, so diff against
+        ``HEAD`` to include both staged and unstaged changes in the submitted
+        patch.  The dependency-light difflib path is retained only for
+        synthetic unit-test directories that are not Git worktrees.
         """
 
         try:
@@ -1109,6 +1112,8 @@ class RepositoryToolBackend:
                 [
                     "git",
                     "diff",
+                    "HEAD",
+                    "--binary",
                     "--",
                     ".",
                     ":(exclude)tests/",

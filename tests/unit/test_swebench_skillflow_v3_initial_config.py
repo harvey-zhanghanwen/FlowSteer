@@ -42,6 +42,12 @@ _STABLE_ZERO_DOCKER_FALLBACK_CONFIG_PATH = (
 _STABLE_ZERO_DOCKER_ACTIVATION_CONFIG_PATH = (
     _ROOT / "config" / "evaluation_swebench_skillflow_v3_stable_zero_v17.yaml"
 )
+_STABLE_ZERO_COMPLETE_PATCH_CONFIG_PATH = (
+    _ROOT / "config" / "evaluation_swebench_skillflow_v3_stable_zero_v18.yaml"
+)
+_STABLE_ZERO_COMPLETE_HARNESS_CONFIG_PATH = (
+    _ROOT / "config" / "evaluation_swebench_skillflow_v3_stable_zero_v19.yaml"
+)
 
 
 def _config() -> dict[str, object]:
@@ -437,5 +443,61 @@ def test_v17_keeps_v16_protocol_and_versions_testbed_activation() -> None:
         "official_docker_fallback_instance_ids"
     ] == ["pydata__xarray-7229", "pydata__xarray-7393"]
     assert config["swebench_evaluation"]["sample_count"] == 128
+    assert config["grpo"]["enabled"] is False
+    assert config["skills"]["enabled"] is False
+
+
+def test_v18_exports_complete_patch_and_configures_official_evaluator_runtime() -> None:
+    previous = dict(load_yaml(_STABLE_ZERO_DOCKER_ACTIVATION_CONFIG_PATH))
+    config = dict(load_yaml(_STABLE_ZERO_COMPLETE_PATCH_CONFIG_PATH))
+
+    validate_completion_benchmark_config(config)
+
+    assert config["experiment"]["condition_id"] == (
+        "swebench_skillflow_v3_stable_zero_v18"
+    )
+    assert config["experiment"]["tool_version"] == (
+        previous["experiment"]["tool_version"]
+        + "+flowsteer.workspace-diff-head-binary.v1"
+        + "+flowsteer.swebench-bind-mounted-task-environment.v1"
+    )
+    assert config["experiment"]["catalog_order_namespace"] == previous[
+        "experiment"
+    ]["catalog_order_namespace"]
+    assert config["swebench_evaluation"]["sample_count"] == 128
+    assert config["swebench_evaluation"]["stable_zero_sample_count"] == 3
+    assert config["swebench_evaluation"]["direct_reused_from"].endswith(
+        "stable_zero_v17/direct_predictions.jsonl"
+    )
+    runtime = config["swe_coding_runtime"]
+    assert runtime["official_docker_bind_mount_base_image_key"] == (
+        "sweb.base.py.x86_64:latest"
+    )
+    assert runtime["official_docker_evaluator_worktree_root"].endswith(
+        "/evaluator_worktrees"
+    )
+    assert config["grpo"]["enabled"] is False
+    assert config["skills"]["enabled"] is False
+
+
+def test_v19_recollects_direct_with_complete_patch_protocol() -> None:
+    previous = dict(load_yaml(_STABLE_ZERO_COMPLETE_PATCH_CONFIG_PATH))
+    config = dict(load_yaml(_STABLE_ZERO_COMPLETE_HARNESS_CONFIG_PATH))
+
+    validate_completion_benchmark_config(config)
+
+    bounded = config["swebench_evaluation"]
+    assert config["experiment"]["condition_id"] == (
+        "swebench_skillflow_v3_stable_zero_v19"
+    )
+    assert bounded["sample_count"] == 128
+    assert bounded["stable_zero_sample_count"] == 3
+    assert bounded["direct_protocol"] != previous["swebench_evaluation"][
+        "direct_protocol"
+    ]
+    assert "direct_reused_from" not in bounded
+    assert config["experiment"]["catalog_order_namespace"] == previous[
+        "experiment"
+    ]["catalog_order_namespace"]
     assert config["grpo"]["enabled"] is False
     assert config["skills"]["enabled"] is False

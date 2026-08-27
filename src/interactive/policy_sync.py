@@ -269,7 +269,6 @@ class SGLangPolicyPublisher:
         payload = self._json_object(response, "SGLang server-info response")
         required_integer_fields = (
             "context_length",
-            "max_running_requests",
             "max_total_num_tokens",
         )
         for field_name in required_integer_fields:
@@ -278,6 +277,46 @@ class SGLangPolicyPublisher:
                 raise _RequestFailure(
                     f"SGLang server-info {field_name} must be a positive integer"
                 )
+        max_running_requests = payload.get("max_running_requests")
+        max_running_requests_source = "server_info.max_running_requests"
+        if max_running_requests is None:
+            internal_states = payload.get("internal_states")
+            if not isinstance(internal_states, list) or not internal_states:
+                raise _RequestFailure(
+                    "SGLang server-info must contain a positive "
+                    "max_running_requests value or internal_states"
+                )
+            effective_per_dp: list[int] = []
+            for state in internal_states:
+                if not isinstance(state, Mapping):
+                    raise _RequestFailure(
+                        "SGLang server-info internal_states must contain objects"
+                    )
+                value = state.get("effective_max_running_requests_per_dp")
+                if (
+                    isinstance(value, bool)
+                    or not isinstance(value, int)
+                    or value <= 0
+                ):
+                    raise _RequestFailure(
+                        "SGLang server-info "
+                        "effective_max_running_requests_per_dp must be a "
+                        "positive integer"
+                    )
+                effective_per_dp.append(value)
+            max_running_requests = sum(effective_per_dp)
+            max_running_requests_source = (
+                "server_info.internal_states[*]."
+                "effective_max_running_requests_per_dp"
+            )
+        if (
+            isinstance(max_running_requests, bool)
+            or not isinstance(max_running_requests, int)
+            or max_running_requests <= 0
+        ):
+            raise _RequestFailure(
+                "SGLang server-info max_running_requests must be a positive integer"
+            )
         deterministic = payload.get("enable_deterministic_inference")
         if not isinstance(deterministic, bool):
             raise _RequestFailure(
@@ -292,7 +331,8 @@ class SGLangPolicyPublisher:
         return {
             "schema_version": "flowsteer.sglang.server-runtime-receipt.v1",
             "context_length": int(payload["context_length"]),
-            "max_running_requests": int(payload["max_running_requests"]),
+            "max_running_requests": int(max_running_requests),
+            "max_running_requests_source": max_running_requests_source,
             "max_total_num_tokens": int(payload["max_total_num_tokens"]),
             "enable_deterministic_inference": deterministic,
             "sampling_backend": str(payload["sampling_backend"]),

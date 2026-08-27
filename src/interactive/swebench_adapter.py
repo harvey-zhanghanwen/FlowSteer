@@ -18,9 +18,13 @@ import shutil
 import sys
 import tarfile
 import threading
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, MutableMapping, Sequence
 
 from .records import TaskRecord
+from .swe_worktree import (
+    PreparedSWEbenchWorktree,
+    prepare_swebench_worktree_for_task,
+)
 
 
 DEFAULT_SKILLFLOW_SWE_EVALUATOR = Path(
@@ -113,6 +117,7 @@ def _evaluate_patch_with_archive_transport(
     instance_id: str,
     prediction: str,
     timeout_seconds: int,
+    build_container_factory: Callable[[Any], Any] | None = None,
 ) -> tuple[bool, float, str]:
     """Call SkillFlow while temporarily adapting only harness file transport."""
 
@@ -129,9 +134,14 @@ def _evaluate_patch_with_archive_transport(
         from swebench.harness import run_evaluation
 
         original_copy = run_evaluation.copy_to_container
+        original_build_container = run_evaluation.build_container
         if archive_owner_mode == SWEBENCH_ARCHIVE_OWNER_ROOT:
             run_evaluation.copy_to_container = (
                 _copy_to_container_with_root_archive_owner
+            )
+        if build_container_factory is not None:
+            run_evaluation.build_container = build_container_factory(
+                original_build_container
             )
         try:
             return module.evaluate_patch(
@@ -141,6 +151,7 @@ def _evaluate_patch_with_archive_transport(
             )
         finally:
             run_evaluation.copy_to_container = original_copy
+            run_evaluation.build_container = original_build_container
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,6 +192,183 @@ class SkillFlowSWEbenchTaskEnvironment:
             "conda_executable": self.conda_executable,
             "task_environment_ready": True,
         }
+
+
+def _bind_mounted_build_container_factory(
+    *,
+    prepared: PreparedSWEbenchWorktree,
+    task_environment: SkillFlowSWEbenchTaskEnvironment,
+    base_image_key: str,
+    runtime_receipt: MutableMapping[str, Any],
+) -> Callable[[Any], Any]:
+    """Use official ``run_instance`` with a SkillFlow task environment.
+
+    The official harness still owns patch application, ``eval_script``
+    execution, test-log parsing, and ``Resolved`` grading.  This factory only
+    replaces ``docker_build.build_container`` when the official per-instance
+    image is absent from the task-scoped rootless Docker daemon.
+    """
+
+    environment_root = (
+        Path(task_environment.python_executable).expanduser().resolve().parents[1]
+    )
+    repository_root = prepared.repo_root.expanduser().resolve()
+    git_common_dir = (
+        prepared.source_repository.expanduser().resolve() / ".git"
+    )
+    if not environment_root.is_dir() or not (
+        environment_root / "conda-meta"
+    ).is_dir():
+        raise SWEbenchTaskEnvironmentUnavailable(
+            "SkillFlow task-specific Conda environment is unavailable"
+        )
+    if not repository_root.is_dir() or not (repository_root / ".git").exists():
+        raise SWEbenchTaskEnvironmentUnavailable(
+            "task-scoped SWE-bench worktree is unavailable"
+        )
+    if not git_common_dir.is_dir():
+        raise SWEbenchTaskEnvironmentUnavailable(
+            "task-scoped SWE-bench Git common directory is unavailable"
+        )
+    if prepared.pinned_commit != prepared.identity.base_commit:
+        raise SWEbenchTaskEnvironmentUnavailable(
+            "task-scoped SWE-bench worktree does not match base_commit"
+        )
+
+    def factory(original_build_container: Any) -> Any:
+        def build_container(
+            test_spec: Any,
+            client: Any,
+            run_id: str,
+            logger: Any,
+            nocache: bool,
+            force_rebuild: bool = False,
+        ) -> Any:
+            if str(test_spec.instance_id) != prepared.identity.instance_id:
+                raise RuntimeError(
+                    "SWE-bench evaluator container received another instance"
+                )
+            from docker.errors import ImageNotFound
+
+            try:
+                local_image = client.images.get(test_spec.instance_image_key)
+            except ImageNotFound:
+                pass
+            else:
+                runtime_receipt.update(
+                    {
+                        "mode": "instance_image",
+                        "instance_image_key": str(test_spec.instance_image_key),
+                        "local_image_id": str(getattr(local_image, "id", "")),
+                        "official_run_instance": True,
+                        "official_eval_script": True,
+                        "official_grading": True,
+                    }
+                )
+                return original_build_container(
+                    test_spec,
+                    client,
+                    run_id,
+                    logger,
+                    nocache,
+                    force_rebuild,
+                )
+
+            try:
+                base_image = client.images.get(base_image_key)
+            except Exception as exc:
+                raise SWEbenchHarnessUnavailable(
+                    f"SWE-bench Python base image is unavailable: {base_image_key}"
+                ) from exc
+
+            from docker.types import Mount
+            from swebench.harness.constants import DOCKER_USER
+
+            mounts = [
+                Mount(
+                    target="/testbed",
+                    source=str(repository_root),
+                    type="bind",
+                    read_only=False,
+                ),
+                # A linked worktree stores an absolute gitdir pointer in
+                # ``/testbed/.git``.  The official harness runs ``git apply``,
+                # ``git diff``, ``git reset``, and ``git checkout``; mount the
+                # corresponding Git common directory at that exact path so
+                # those upstream commands operate on the prepared worktree.
+                Mount(
+                    target=str(git_common_dir),
+                    source=str(git_common_dir),
+                    type="bind",
+                    read_only=False,
+                ),
+                Mount(
+                    target="/opt/miniconda3/envs/testbed",
+                    source=str(environment_root),
+                    type="bind",
+                    read_only=True,
+                ),
+            ]
+            official_prefix = Path("/opt/miniconda3/envs/testbed")
+            if environment_root != official_prefix:
+                mounts.append(
+                    Mount(
+                        target=str(environment_root),
+                        source=str(environment_root),
+                        type="bind",
+                        read_only=True,
+                    )
+                )
+            run_args = test_spec.docker_specs.get("run_args", {})
+            container = client.containers.create(
+                image=base_image_key,
+                name=test_spec.get_instance_container_name(run_id),
+                user=DOCKER_USER,
+                detach=True,
+                command="tail -f /dev/null",
+                platform=test_spec.platform,
+                cap_add=run_args.get("cap_add", []),
+                mounts=mounts,
+                environment={
+                    "CUDA_VISIBLE_DEVICES": "",
+                    "PYTHONDONTWRITEBYTECODE": "1",
+                },
+            )
+            runtime_receipt.update(
+                {
+                    "mode": "bind_mount",
+                    "base_image_key": base_image_key,
+                    "base_image_id": str(getattr(base_image, "id", "")),
+                    "instance_image_key": str(test_spec.instance_image_key),
+                    "task_environment": dict(task_environment.receipt()),
+                    "repository": {
+                        "instance_id": prepared.identity.instance_id,
+                        "repo": prepared.identity.repo,
+                        "base_commit": prepared.identity.base_commit,
+                        "observed_pinned_commit": prepared.pinned_commit,
+                        "workspace": str(repository_root),
+                        "git_common_dir": str(git_common_dir),
+                        "workspace_isolation": "task_scoped_detached_worktree",
+                        "base_state_verified": (
+                            prepared.pinned_commit
+                            == prepared.identity.base_commit
+                        ),
+                    },
+                    "container_name": str(container.name),
+                    "official_run_instance": True,
+                    "official_eval_script": True,
+                    "official_grading": True,
+                }
+            )
+            logger.info(
+                "Using SkillFlow task environment and task-scoped worktree "
+                "with the official SWE-bench run_instance evaluator"
+            )
+            return container
+
+        return build_container
+
+    return factory
 
 
 def _load_skillflow_evaluator(path: Path) -> Any:
@@ -345,6 +533,9 @@ class OfficialSWEbenchHarness:
     conda_executable: Path | None = None
     conda_envs_dir: Path | None = None
     environment_repository_root: Path | None = None
+    repository_store: Path | None = None
+    evaluator_worktree_root: Path | None = None
+    bind_mount_base_image_key: str = ""
 
     @property
     def verified_path(self) -> Path:
@@ -489,6 +680,27 @@ class OfficialSWEbenchHarness:
             client = docker.from_env(timeout=60)
             try:
                 client.ping()
+                bind_mount_ready = False
+                if self.bind_mount_base_image_key.strip():
+                    if self.repository_store is None:
+                        raise SWEbenchHarnessUnavailable(
+                            "SWE-bench repository store is not configured"
+                        )
+                    repository_store = self.repository_store.expanduser().resolve()
+                    if not repository_store.is_dir():
+                        raise SWEbenchHarnessUnavailable(
+                            "SWE-bench repository store is unavailable"
+                        )
+                    if self.evaluator_worktree_root is None:
+                        raise SWEbenchHarnessUnavailable(
+                            "SWE-bench evaluator worktree root is not configured"
+                        )
+                    evaluator_worktree_root = (
+                        self.evaluator_worktree_root.expanduser().resolve()
+                    )
+                    evaluator_worktree_root.mkdir(parents=True, exist_ok=True)
+                    client.images.get(self.bind_mount_base_image_key.strip())
+                    bind_mount_ready = True
             finally:
                 client.close()
         except Exception as exc:
@@ -503,6 +715,8 @@ class OfficialSWEbenchHarness:
             "selected_instances": len(instance_ids),
             "docker_namespace": self.docker_namespace.strip(),
             "archive_owner_mode": self.archive_owner_mode,
+            "bind_mount_base_image_key": self.bind_mount_base_image_key.strip(),
+            "bind_mount_fallback_ready": bind_mount_ready,
             "proxy_metric_used": False,
         }
 
@@ -632,20 +846,64 @@ class OfficialSWEbenchHarness:
         _require_source_split(record, self.dataset_source)
         module = self._configured_module((record,))
         instance_id = _instance_id(record)
-        resolved, score, details = await asyncio.to_thread(
-            _evaluate_patch_with_archive_transport,
-            module,
-            harness_path=self.harness_path,
-            archive_owner_mode=self.archive_owner_mode,
-            instance_id=instance_id,
-            prediction=str(prediction),
-            timeout_seconds=self.timeout_seconds,
-        )
+        prepared: PreparedSWEbenchWorktree | None = None
+        runtime_receipt: dict[str, Any] = {
+            "mode": "not_started" if not str(prediction).strip() else "instance_image",
+            "instance_id": instance_id,
+            "official_run_instance": bool(str(prediction).strip()),
+            "official_eval_script": bool(str(prediction).strip()),
+            "official_grading": bool(str(prediction).strip()),
+        }
+        build_container_factory = None
+        if (
+            str(prediction).strip()
+            and self.bind_mount_base_image_key.strip()
+            and self.repository_store is not None
+            and self.evaluator_worktree_root is not None
+        ):
+            try:
+                task_environment = self._task_environment_from_module(module, record)
+            except SWEbenchTaskEnvironmentUnavailable:
+                task_environment = None
+            if task_environment is not None:
+                evaluator_worktree_root = (
+                    self.evaluator_worktree_root.expanduser().resolve()
+                )
+                evaluator_worktree_root.mkdir(parents=True, exist_ok=True)
+                prepared = await asyncio.to_thread(
+                    prepare_swebench_worktree_for_task,
+                    record,
+                    repository_store=self.repository_store.expanduser().resolve(),
+                    worktree_root=evaluator_worktree_root,
+                    setup_timeout_seconds=float(self.timeout_seconds),
+                    cleanup_timeout_seconds=30.0,
+                )
+                build_container_factory = _bind_mounted_build_container_factory(
+                    prepared=prepared,
+                    task_environment=task_environment,
+                    base_image_key=self.bind_mount_base_image_key.strip(),
+                    runtime_receipt=runtime_receipt,
+                )
+        try:
+            resolved, score, details = await asyncio.to_thread(
+                _evaluate_patch_with_archive_transport,
+                module,
+                harness_path=self.harness_path,
+                archive_owner_mode=self.archive_owner_mode,
+                instance_id=instance_id,
+                prediction=str(prediction),
+                timeout_seconds=self.timeout_seconds,
+                build_container_factory=build_container_factory,
+            )
+        finally:
+            if prepared is not None:
+                await asyncio.to_thread(prepared.cleanup)
         return {
             "resolved": bool(resolved),
             "official_score": float(score),
             "harness_details": str(details),
             "instance_id": instance_id,
+            "container_runtime": runtime_receipt,
             "proxy_metric_used": False,
         }
 

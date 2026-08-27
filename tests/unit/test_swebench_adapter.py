@@ -12,12 +12,18 @@ from unittest.mock import patch
 from src.interactive.records import TaskRecord
 from src.interactive.swebench_adapter import (
     OfficialSWEbenchHarness,
+    SkillFlowSWEbenchTaskEnvironment,
     SWEBENCH_ARCHIVE_OWNER_ROOT,
     SWEBENCH_DATASET_SOURCE_REGULAR_DEV,
     SWEBENCH_DATASET_SOURCE_VERIFIED,
     SWEbenchHarnessUnavailable,
     SWEbenchTaskEnvironmentUnavailable,
+    _bind_mounted_build_container_factory,
     _copy_to_container_with_root_archive_owner,
+)
+from src.interactive.swe_worktree import (
+    PreparedSWEbenchWorktree,
+    SWEbenchRepositoryIdentity,
 )
 
 
@@ -55,6 +61,120 @@ def record(
 
 
 class OfficialSWEbenchHarnessTests(unittest.IsolatedAsyncioTestCase):
+    def test_bind_mount_includes_linked_worktree_git_common_directory(
+        self,
+    ) -> None:
+        from docker.errors import ImageNotFound
+
+        class FakeImages:
+            def get(self, image_key: str) -> SimpleNamespace:
+                if image_key == "instance-image":
+                    raise ImageNotFound("instance image unavailable")
+                return SimpleNamespace(id="base-image-id")
+
+        class FakeContainers:
+            def __init__(self) -> None:
+                self.kwargs: dict[str, object] | None = None
+
+            def create(self, **kwargs: object) -> SimpleNamespace:
+                self.kwargs = kwargs
+                return SimpleNamespace(name="container-name")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source_repository = root / "repositories" / "owner__repo"
+            git_common_dir = source_repository / ".git"
+            git_common_dir.mkdir(parents=True)
+            worktree_root = root / "worktrees"
+            repository_root = worktree_root / "task"
+            repository_root.mkdir(parents=True)
+            (repository_root / ".git").write_text(
+                f"gitdir: {git_common_dir}/worktrees/task\n",
+                encoding="utf-8",
+            )
+            environment_root = root / "envs" / "swe_owner_repo_10"
+            (environment_root / "conda-meta").mkdir(parents=True)
+            python_executable = environment_root / "bin" / "python"
+            python_executable.parent.mkdir()
+            python_executable.write_text("", encoding="utf-8")
+            prepared = PreparedSWEbenchWorktree(
+                identity=SWEbenchRepositoryIdentity(
+                    instance_id="owner__repo-1",
+                    repo="owner/repo",
+                    base_commit="base-commit",
+                ),
+                source_repository=source_repository,
+                repo_root=repository_root,
+                pinned_commit="base-commit",
+                worktree_root=worktree_root,
+            )
+            task_environment = SkillFlowSWEbenchTaskEnvironment(
+                instance_id="owner__repo-1",
+                repo="owner/repo",
+                version="1.0",
+                environment_name="swe_owner_repo_10",
+                python_executable=str(python_executable),
+                conda_executable="/bin/false",
+            )
+            runtime_receipt: dict[str, object] = {}
+            build_container = _bind_mounted_build_container_factory(
+                prepared=prepared,
+                task_environment=task_environment,
+                base_image_key="base-image",
+                runtime_receipt=runtime_receipt,
+            )(lambda *_args, **_kwargs: None)
+            client = SimpleNamespace(
+                images=FakeImages(),
+                containers=FakeContainers(),
+            )
+            test_spec = SimpleNamespace(
+                instance_id="owner__repo-1",
+                instance_image_key="instance-image",
+                docker_specs={"run_args": {}},
+                platform="linux/amd64",
+                get_instance_container_name=lambda run_id: f"container-{run_id}",
+            )
+            constants = ModuleType("swebench.harness.constants")
+            constants.DOCKER_USER = "root"
+            swebench_module = ModuleType("swebench")
+            swebench_module.__path__ = []
+            harness_module = ModuleType("swebench.harness")
+            harness_module.__path__ = []
+            with patch.dict(
+                sys.modules,
+                {
+                    "swebench": swebench_module,
+                    "swebench.harness": harness_module,
+                    "swebench.harness.constants": constants,
+                },
+            ):
+                build_container(
+                    test_spec,
+                    client,
+                    "run-id",
+                    SimpleNamespace(info=lambda *_args: None),
+                    False,
+                )
+
+            assert client.containers.kwargs is not None
+            mounts = client.containers.kwargs["mounts"]
+            mount_by_target = {mount["Target"]: mount for mount in mounts}
+            self.assertFalse(mount_by_target["/testbed"]["ReadOnly"])
+            self.assertEqual(
+                str(git_common_dir.resolve()),
+                mount_by_target[str(git_common_dir.resolve())]["Source"],
+            )
+            self.assertFalse(
+                mount_by_target[str(git_common_dir.resolve())]["ReadOnly"]
+            )
+            self.assertTrue(
+                mount_by_target["/opt/miniconda3/envs/testbed"]["ReadOnly"]
+            )
+            self.assertEqual(
+                str(git_common_dir.resolve()),
+                runtime_receipt["repository"]["git_common_dir"],
+            )
+
     def test_root_archive_transport_normalizes_only_tar_ownership(self) -> None:
         class FakeContainer:
             def __init__(self) -> None:

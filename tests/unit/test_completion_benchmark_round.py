@@ -686,6 +686,37 @@ def test_swebench_stable_zero_accepts_official_empty_patch_receipts():
         is False
     )
 
+    # SkillFlow's formal evaluator returns patch_apply_failed as an official
+    # unresolved outcome rather than an evaluator infrastructure exception.
+    # Stable Zero therefore accepts its receipt while the task remains scored
+    # as Resolved=0.
+    direct[task.task_id]["final_answer"] = "not a valid patch"
+    direct[task.task_id]["evaluation"]["details"][
+        "harness_details"
+    ] = "patch_apply_failed"
+    trajectory["final_answer"] = "diff --git a/x b/x\n"
+    trajectory["evaluation"]["details"]["harness_details"] = "unresolved"
+    trajectory["evaluation"]["details"]["terminal_artifact"].update(
+        {
+            "repository_patch": "diff --git a/x b/x\n",
+            "non_empty": True,
+        }
+    )
+
+    patch_failure_result = _MODULE._completion_stable_zero_check(
+        (task,),
+        direct,
+        {task.task_id: trajectory},
+        dataset_key="swe_bench",
+    )
+
+    assert patch_failure_result["passed"] is True
+    assert (
+        patch_failure_result["checks"][0]["official_harness_receipts_valid"]
+        is True
+    )
+    assert direct[task.task_id]["evaluation"]["details"]["resolved"] is False
+
 
 def test_environment_stable_zero_uses_terminal_receipt_not_free_text_answer():
     task = _MODULE.TaskRecord(

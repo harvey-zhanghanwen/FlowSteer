@@ -166,7 +166,7 @@ def test_aggregate_uses_structured_receipts_and_deduplicates_continuation_prefix
     second_receipts = [
         first_receipt,
         _receipt("view_file", {"ok": True}),
-        _receipt("apply_patch", {"ok": True, "changed": True}),
+        _receipt("edit_file", {"ok": True, "changed": True}),
         _receipt("run_tests", {"ok": True, "passed": False, "timed_out": False}),
     ]
     trajectory = _trajectory(
@@ -225,7 +225,7 @@ def test_aggregate_uses_structured_receipts_and_deduplicates_continuation_prefix
 
     graph = report["arms"]["agentgraph"]
     assert graph["raw_tool_action_counts"] == {
-        "apply_patch": 1,
+        "edit_file": 1,
         "run_tests": 1,
         "search_code": 1,
         "view_file": 1,

@@ -39,23 +39,22 @@ class _SGLangControl:
         self.fail_canary = False
         self.models_failures_remaining = 0
         self.rejected_unloads: set[str] = set()
+        self.server_info_payload: dict[str, Any] = {
+            "context_length": 32768,
+            "max_running_requests": 4,
+            "max_total_num_tokens": 717868,
+            "enable_deterministic_inference": True,
+            "sampling_backend": "pytorch",
+            "attention_backend": "fa3",
+            "cuda_graph_backend_decode": "disabled",
+            "weight_version": "default",
+        }
 
     def get(self, url: str, **kwargs: Any) -> _Response:
         operation = url.removesuffix("/").rsplit("/", 1)[-1]
         self.calls.append(("get", operation, kwargs))
         if operation == "server_info":
-            return _Response(
-                {
-                    "context_length": 32768,
-                    "max_running_requests": 4,
-                    "max_total_num_tokens": 717868,
-                    "enable_deterministic_inference": True,
-                    "sampling_backend": "pytorch",
-                    "attention_backend": "fa3",
-                    "cuda_graph_backend_decode": "disabled",
-                    "weight_version": "default",
-                }
-            )
+            return _Response(dict(self.server_info_payload))
         if self.models_failures_remaining:
             self.models_failures_remaining -= 1
             return _Response({}, status_code=503)
@@ -233,6 +232,23 @@ class PolicySyncTests(unittest.TestCase):
         self.assertEqual(receipt["sampling_backend"], "pytorch")
         self.assertEqual(receipt["attention_backend"], "fa3")
         self.assertEqual(receipt["request_attempts"], {"server_info": 1})
+
+    def test_server_runtime_receipt_uses_sglang_effective_per_dp_value(self) -> None:
+        control = _SGLangControl(set())
+        control.server_info_payload["max_running_requests"] = None
+        control.server_info_payload["internal_states"] = [
+            {"effective_max_running_requests_per_dp": 41},
+            {"effective_max_running_requests_per_dp": 41},
+        ]
+
+        receipt = self.publisher(control).server_runtime_receipt()
+
+        self.assertEqual(receipt["max_running_requests"], 82)
+        self.assertEqual(
+            receipt["max_running_requests_source"],
+            "server_info.internal_states[*]."
+            "effective_max_running_requests_per_dp",
+        )
 
     def test_failed_canary_unloads_candidate_and_preserves_behavior_adapter(
         self,
