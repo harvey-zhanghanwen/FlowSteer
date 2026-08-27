@@ -3643,6 +3643,9 @@ class AgentWorkflowEnv:
                             "execution_mode",
                         ],
                         "model_ids": list(self._available_model_ids()),
+                        "preserved_input_agent_ids": list(
+                            self._current_successful_evidence_worker_ids()
+                        ),
                         "registered_execution_profiles": [
                             {
                                 "execution_mode": execution_mode,

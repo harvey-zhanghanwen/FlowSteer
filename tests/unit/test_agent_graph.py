@@ -1316,6 +1316,10 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             ],
             worker_targets["add_subgraph"]["registered_execution_profiles"],
         )
+        self.assertEqual(
+            ["worker"],
+            worker_targets["add_subgraph"]["preserved_input_agent_ids"],
+        )
         downstream_declarations = [
             {
                 "agent_id": "node_1",
@@ -1336,6 +1340,18 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
                 item["source_id"] != item["target_id"]
                 for item in relation_candidates
             )
+        )
+        self.assertIn(
+            {
+                "source_id": "worker",
+                "target_id": "node_1",
+                "source_to_target": True,
+                "target_to_source": False,
+            },
+            relation_candidates,
+        )
+        self.assertFalse(
+            any(item["target_id"] == "worker" for item in relation_candidates)
         )
         action_schema = json.loads(
             director_live_action_parameter_json_schema_text(

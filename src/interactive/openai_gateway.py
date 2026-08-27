@@ -440,6 +440,9 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
     hotpot_semantic = request.semantic_protocol == "hotpotqa_verified_answer_slot_v1"
     unified_qa_semantic = request.semantic_protocol == "qa_verified_answer_lineage_v2"
     semantic_lineage = hotpot_semantic or unified_qa_semantic
+    exact_answer_terminal = (
+        request.terminal_protocol == "exact_single_answer_tag"
+    )
     if execution_mode in {"react", "coding"}:
         # SkillFlow's BoundedAgent asks the policy for one StructuredAction per
         # model turn.  The execution adapter, not this provider boundary,
@@ -512,6 +515,12 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
                 "one `Evidence: ...` field. Do not put a sentence or question restatement "
                 "in the Candidate answer field."
             )
+        if request.is_output_agent and exact_answer_terminal:
+            protocol += (
+                " When completion is admissible, arguments.value must be exactly "
+                "one non-empty <answer>...</answer> wrapper containing only the "
+                "short task answer and no explanation."
+            )
     elif request.is_format_agent and semantic_lineage:
         protocol = (
             "You are the terminal FlowSteer Format Operator. The solution has already "
@@ -576,6 +585,12 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
             "to a short answer span. If the task supplies legal or admissible actions and asks "
             "for one action, return exactly one listed executable action with no explanation."
         )
+        if exact_answer_terminal:
+            protocol += (
+                " For this terminal protocol, return exactly one non-empty "
+                "<answer>...</answer> wrapper containing only the short task "
+                "answer and no explanation."
+            )
     else:
         protocol = (
             "You are an intermediate AgentGraph node. Follow your assigned contract and "

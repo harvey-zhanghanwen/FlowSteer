@@ -34,6 +34,7 @@ def request(
     problem: str = "Solve the task",
     upstream_artifact: str = "evidence",
     semantic_protocol: str = "none",
+    terminal_protocol: str = "none",
     communication_condition: CommunicationCondition = CommunicationCondition.NORMAL,
 ) -> AgentRequest:
     provider = ProviderSpec(
@@ -68,6 +69,7 @@ def request(
         is_format_predecessor=is_format_predecessor,
         communication_condition=communication_condition,
         semantic_protocol=semantic_protocol,
+        terminal_protocol=terminal_protocol,
         upstream=(
             UpstreamMessage(
                 "source",
@@ -255,6 +257,29 @@ class MessageTests(unittest.TestCase):
         self.assertIn("only its declared keys in arguments", system)
         self.assertIn("Do not emit <answer> tags", system)
         self.assertNotIn("unique Output Agent", system)
+
+    def test_exact_terminal_protocol_reaches_free_reasoning_output(self) -> None:
+        messages = build_agent_messages(
+            request(terminal_protocol="exact_single_answer_tag")
+        )
+        system = messages[0]["content"]
+
+        self.assertIn("unique Output Agent", system)
+        self.assertIn("exactly one non-empty <answer>...</answer>", system)
+        self.assertIn("only the short task answer", system)
+
+    def test_exact_terminal_protocol_reaches_free_react_output_complete(self) -> None:
+        messages = build_agent_messages(
+            request(
+                execution_mode="react",
+                terminal_protocol="exact_single_answer_tag",
+            )
+        )
+        system = messages[0]["content"]
+
+        self.assertIn("StructuredAction JSON object", system)
+        self.assertIn("arguments.value", system)
+        self.assertIn("exactly one non-empty <answer>...</answer>", system)
 
     def test_reasoner_aligns_fact_propositions_to_answer_slot(self) -> None:
         messages = build_agent_messages(

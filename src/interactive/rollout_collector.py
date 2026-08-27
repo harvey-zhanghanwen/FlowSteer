@@ -3133,6 +3133,7 @@ def _request_record(call: AgentCallRecord) -> Mapping[str, Any]:
         "is_format_agent": request.is_format_agent,
         "is_format_predecessor": request.is_format_predecessor,
         "semantic_protocol": request.semantic_protocol,
+        "terminal_protocol": request.terminal_protocol,
         "continuation_source_agent_id": request.continuation_source_agent_id,
         "communication_condition": request.communication_condition.value,
         "upstream": [item.to_dict() for item in request.upstream],

@@ -165,6 +165,7 @@ class AgentRequest:
     own_draft: Optional[str] = None
     peer_draft: Optional[UpstreamMessage] = None
     semantic_protocol: str = "none"
+    terminal_protocol: str = "none"
     # SkillFlow continuation state: a repaired Agent keeps the public
     # Action--Observation history and measured Tool receipts from its failed
     # bounded execution.  These fields never contain hidden reasoning and do
@@ -190,6 +191,8 @@ class AgentRequest:
             "qa_verified_answer_lineage_v2",
         }:
             raise ValueError("unsupported AgentRequest semantic_protocol")
+        if self.terminal_protocol not in {"none", "exact_single_answer_tag"}:
+            raise ValueError("unsupported AgentRequest terminal_protocol")
         if any(not isinstance(item, Mapping) for item in self.action_history):
             raise TypeError("AgentRequest.action_history must contain mappings")
         if any(not isinstance(item, Mapping) for item in self.prior_tool_receipts):
@@ -463,6 +466,7 @@ class AgentRuntime:
         tool_registry: Optional[ToolRegistry] = None,
         dataset_id: Optional[str] = None,
         semantic_protocol: str = "none",
+        terminal_protocol: str = "none",
     ) -> None:
         if max_concurrency is not None and (
             type(max_concurrency) is not int or max_concurrency <= 0
@@ -480,6 +484,8 @@ class AgentRuntime:
             "qa_verified_answer_lineage_v2",
         }:
             raise ValueError("unsupported AgentRuntime semantic_protocol")
+        if terminal_protocol not in {"none", "exact_single_answer_tag"}:
+            raise ValueError("unsupported AgentRuntime terminal_protocol")
         self.model_registry = model_registry
         self.gateway = gateway
         adapters: Dict[str, AgentExecutionAdapter] = {
@@ -499,6 +505,7 @@ class AgentRuntime:
         self.tool_registry = tool_registry
         self.dataset_id = None if dataset_id is None else dataset_id.strip()
         self.semantic_protocol = semantic_protocol
+        self.terminal_protocol = terminal_protocol
         self.timeout_seconds = timeout_seconds
         self._global_semaphore = (
             asyncio.Semaphore(max_concurrency) if max_concurrency is not None else None
@@ -1864,6 +1871,7 @@ class AgentRuntime:
             own_draft=own_draft,
             peer_draft=peer_draft,
             semantic_protocol=self.semantic_protocol,
+            terminal_protocol=self.terminal_protocol,
             action_history=action_history,
             prior_tool_receipts=prior_tool_receipts,
             continuation_source_agent_id=continuation_source_agent_id,

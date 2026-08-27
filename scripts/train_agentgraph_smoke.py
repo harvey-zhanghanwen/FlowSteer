@@ -1965,6 +1965,7 @@ class LiveSmokeBackend:
         *,
         condition_id: Optional[str] = None,
         semantic_protocol: str = "none",
+        terminal_protocol: str = "none",
         sampling_base_seed: int | None = None,
         sampling_coordinate: ScientificSamplingCoordinate | None = None,
     ) -> tuple[AgentRuntime, Any, Callable[[], None]]:
@@ -2137,6 +2138,7 @@ class LiveSmokeBackend:
                     tool_registry=tool_registry,
                     dataset_id=source_key,
                     semantic_protocol=semantic_protocol,
+                    terminal_protocol=terminal_protocol,
                 )
             except BaseException:
                 prepared.cleanup()
@@ -2168,6 +2170,7 @@ class LiveSmokeBackend:
                 tool_registry=tool_registry,
                 dataset_id=source_key,
                 semantic_protocol=semantic_protocol,
+                terminal_protocol=terminal_protocol,
             )
             return runtime, tool_registry, lambda: None
 
@@ -2203,6 +2206,7 @@ class LiveSmokeBackend:
                     tool_registry=opened.registry,
                     dataset_id=source_key,
                     semantic_protocol=semantic_protocol,
+                    terminal_protocol=terminal_protocol,
                 )
             except BaseException:
                 opened.close()
@@ -2244,6 +2248,7 @@ class LiveSmokeBackend:
                 tool_registry=resources.tool_registry,
                 dataset_id=source_key,
                 semantic_protocol=semantic_protocol,
+                terminal_protocol=terminal_protocol,
             )
 
             # EnvironmentExecutionAdapter closes the request-scoped simulator
@@ -2353,6 +2358,7 @@ class LiveSmokeBackend:
                 tool_registry=opened.registry,
                 dataset_id=source_key,
                 semantic_protocol=semantic_protocol,
+                terminal_protocol=terminal_protocol,
             )
         except BaseException:
             opened.close()
@@ -3270,6 +3276,7 @@ class LiveSmokeBackend:
             task,
             condition_id=resolved_condition_id,
             semantic_protocol=semantic_protocol,
+            terminal_protocol=terminal_protocol,
             sampling_base_seed=base_seed,
             sampling_coordinate=sampling_coordinate,
         )

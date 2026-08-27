@@ -2195,6 +2195,72 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
                 domains,
             )
 
+    def test_topology_neutral_role_family_is_a_bounded_identifier(self) -> None:
+        domains = {
+            "add_subgraph": {
+                "min_new_agents": 1,
+                "max_new_agents": 1,
+                "existing_agent_ids": [],
+                "topology_neutral": True,
+                "required_agent_fields": [
+                    "agent_id",
+                    "model_id",
+                    "contract",
+                    "role_family",
+                    "allowed_tools",
+                    "execution_mode",
+                ],
+                "model_ids": ["qwen"],
+                "registered_execution_profiles": [
+                    {"execution_mode": "reasoning", "allowed_tools": []}
+                ],
+                "preserved_input_agent_ids": [],
+                "endpoint_scope": {
+                    "relation_endpoint_sources": [
+                        "existing_agent_ids",
+                        "same_action_agent_ids",
+                    ],
+                    "output_agent_id_sources": [
+                        "existing_agent_ids",
+                        "same_action_agent_ids",
+                    ],
+                },
+            }
+        }
+        schema = json.loads(
+            director_live_add_subgraph_role_selection_json_schema_text(domains)
+        )
+        role_schema = schema["properties"]["agents"]["oneOf"][0][
+            "prefixItems"
+        ][0]["properties"]["role_family"]
+        self.assertEqual(64, role_schema["maxLength"])
+        self.assertEqual(r"^[a-z][a-z0-9_]{0,63}$", role_schema["pattern"])
+        self.assertEqual(
+            ({"agent_id": "node_1", "role_family": "answer_synthesizer"},),
+            director_live_add_subgraph_role_selection_from_text(
+                '{"action":"add_subgraph","agents":['
+                '{"agent_id":"node_1","role_family":"answer_synthesizer"}]}',
+                domains,
+            ),
+        )
+        for invalid_role in ("answer synthesizer", "x" * 65):
+            with self.subTest(role_family=invalid_role):
+                with self.assertRaisesRegex(ValueError, "outside the live domain"):
+                    director_live_add_subgraph_role_selection_from_text(
+                        json.dumps(
+                            {
+                                "action": "add_subgraph",
+                                "agents": [
+                                    {
+                                        "agent_id": "node_1",
+                                        "role_family": invalid_role,
+                                    }
+                                ],
+                            }
+                        ),
+                        domains,
+                    )
+
     def test_hotpotqa_v3_binds_semantic_relation_directions_and_format_output(
         self,
     ) -> None:

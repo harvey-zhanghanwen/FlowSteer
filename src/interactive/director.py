@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 import json
 import os
 import random
+import re
 import socket
 import time
 from typing import Any, Mapping, Optional, Protocol, Sequence, Tuple
@@ -572,6 +573,13 @@ _SUPPORTED_DIRECTOR_SYSTEM_PROMPTS = frozenset(
 
 
 _NON_EMPTY_STRING_SCHEMA = {"type": "string", "minLength": 1}
+_ROLE_FAMILY_IDENTIFIER_PATTERN = r"^[a-z][a-z0-9_]{0,63}$"
+_ROLE_FAMILY_IDENTIFIER_SCHEMA = {
+    "type": "string",
+    "minLength": 1,
+    "maxLength": 64,
+    "pattern": _ROLE_FAMILY_IDENTIFIER_PATTERN,
+}
 # Qwen3.5/SGLang returns the sampled EOS token in ``text`` even when the
 # JSON-Schema grammar has already closed the object.  Keep that token in the
 # exact generation receipt, but admit it as the sole transport-level suffix
@@ -1071,7 +1079,7 @@ def _live_topology_neutral_agent_schema_branches(
     role_schema: Mapping[str, Any] = (
         {"const": role_family}
         if role_family is not None
-        else _NON_EMPTY_STRING_SCHEMA
+        else _ROLE_FAMILY_IDENTIFIER_SCHEMA
     )
     branches: list[Mapping[str, Any]] = []
     for execution_mode, allowed_tools in profiles:
@@ -1698,7 +1706,7 @@ def director_live_add_subgraph_role_selection_json_schema_text(
     if not topology_neutral and not role_families:
         raise ValueError("add_subgraph role domain is empty")
     role_family_schema: Mapping[str, Any] = (
-        _NON_EMPTY_STRING_SCHEMA
+        _ROLE_FAMILY_IDENTIFIER_SCHEMA
         if topology_neutral
         else {"enum": list(role_families)}
     )
@@ -1810,8 +1818,13 @@ def director_live_add_subgraph_role_selection_from_text(
             raise ValueError(
                 "add_subgraph selected Agent role changed its Canvas node ID"
             )
-        if not isinstance(role_family, str) or not role_family.strip() or (
-            not topology_neutral and role_family not in admitted_new_roles
+        if (
+            not isinstance(role_family, str)
+            or not re.fullmatch(_ROLE_FAMILY_IDENTIFIER_PATTERN, role_family)
+            or (
+                not topology_neutral
+                and role_family not in admitted_new_roles
+            )
         ):
             raise ValueError(
                 "add_subgraph selected Agent role is outside the live domain"
@@ -1904,6 +1917,13 @@ def _live_add_subgraph_agents(
             not isinstance(role_family, str)
             or not role_family
             or role_family != role_family.strip()
+            or (
+                topology_neutral
+                and not re.fullmatch(
+                    _ROLE_FAMILY_IDENTIFIER_PATTERN,
+                    role_family,
+                )
+            )
         ):
             raise ValueError("add_subgraph Agent role is outside the live domain")
         constraint = (
@@ -2036,6 +2056,18 @@ def director_live_add_subgraph_relation_candidates(
         agents,
     )
     domain = action_target_domains["add_subgraph"]
+    raw_preserved_input_ids = domain.get("preserved_input_agent_ids", ())
+    if (
+        not isinstance(raw_preserved_input_ids, (list, tuple))
+        or any(
+            not isinstance(agent_id, str) or not agent_id
+            for agent_id in raw_preserved_input_ids
+        )
+        or len(raw_preserved_input_ids) != len(set(raw_preserved_input_ids))
+        or not set(raw_preserved_input_ids) <= set(domain["existing_agent_ids"])
+    ):
+        raise ValueError("add_subgraph preserved input Agent IDs are invalid")
+    preserved_input_ids = set(raw_preserved_input_ids)
     if _topology_neutral_add_domain(domain):
         # FlowSteer's ADD may include at most one live relation edit.  Every
         # candidate is incident to a newly declared node, has distinct
@@ -2075,23 +2107,15 @@ def director_live_add_subgraph_relation_candidates(
                             "target_to_source": True,
                         }
                     )
-        return tuple(candidates)
+        return tuple(
+            candidate
+            for candidate in candidates
+            if candidate["target_id"] not in preserved_input_ids
+        )
     if not verified_qa_semantic_protocol(domain.get("semantic_protocol")):
         return ()
     if _live_add_subgraph_isolated_boundary(domain):
         return ()
-    raw_preserved_input_ids = domain.get("preserved_input_agent_ids", ())
-    if (
-        not isinstance(raw_preserved_input_ids, (list, tuple))
-        or any(
-            not isinstance(agent_id, str) or not agent_id
-            for agent_id in raw_preserved_input_ids
-        )
-        or len(raw_preserved_input_ids) != len(set(raw_preserved_input_ids))
-        or not set(raw_preserved_input_ids) <= set(domain["existing_agent_ids"])
-    ):
-        raise ValueError("add_subgraph preserved input Agent IDs are invalid")
-    preserved_input_ids = set(raw_preserved_input_ids)
     role_constraints = domain["role_constraints"]
     roles = _live_existing_agent_roles(domain, role_constraints)
     for agent in normalized_agents:
