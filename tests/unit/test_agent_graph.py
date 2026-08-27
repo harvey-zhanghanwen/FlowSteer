@@ -435,6 +435,14 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         )
         env._progressive_execution_revision = singleton.revision
         self.assertNotIn("finish", env.model_admissible_action_types())
+        self.assertNotIn("modify_agent", env.model_admissible_action_types())
+        self.assertNotIn("set_output", env.model_admissible_action_types())
+        self.assertEqual(
+            [{"execution_mode": "reasoning", "allowed_tools": []}],
+            env.model_admissible_action_targets()["add_agent"][
+                "execution_profiles"
+            ],
+        )
 
         routed = AgentGraph(
             [
@@ -515,10 +523,8 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         tool_output_env._progressive_execution_revision = tool_output.revision
         self.assertFalse(tool_output_env.finish_admissibility()["admissible"])
         self.assertNotIn(
-            "tool_output",
-            tool_output_env.model_admissible_action_targets()["set_output"][
-                "agent_ids"
-            ],
+            "set_output",
+            tool_output_env.model_admissible_action_targets(),
         )
 
     async def test_runtime_profiles_authorize_add_subgraph_and_modify(self) -> None:

@@ -361,6 +361,23 @@ class AgentWorkflowEnv:
         """Project the live, state-conditioned Canvas action domain."""
 
         node_ids = tuple(node.id for node in self._graph.nodes)
+        successful_evidence_ids = set(
+            self._current_successful_evidence_agent_ids()
+        )
+        modifiable_ids = tuple(
+            agent_id
+            for agent_id in node_ids
+            if agent_id not in successful_evidence_ids
+            or agent_id in self._failed_agent_ids
+        )
+        output_target_ids = tuple(
+            node.id
+            for node in self._graph.nodes
+            if not (
+                self.require_evidence_relation
+                and self.required_evidence_tool_id in node.allowed_tools
+            )
+        )
         repair_required_ids = (
             self._failed_agent_ids - self._repair_attempted_failed_agent_ids
         )
@@ -397,7 +414,10 @@ class AgentWorkflowEnv:
                 AgentActionType.ADD_SUBGRAPH.value,
             } and not can_add:
                 continue
-            if action_type == AgentActionType.MODIFY_AGENT.value and not node_ids:
+            if (
+                action_type == AgentActionType.MODIFY_AGENT.value
+                and not modifiable_ids
+            ):
                 continue
             if action_type == AgentActionType.DELETE_AGENT.value and not deletable_ids:
                 continue
@@ -411,7 +431,10 @@ class AgentWorkflowEnv:
                 continue
             if action_type == AgentActionType.SET_RELATION.value and len(node_ids) < 2:
                 continue
-            if action_type == AgentActionType.SET_OUTPUT.value and not node_ids:
+            if (
+                action_type == AgentActionType.SET_OUTPUT.value
+                and not output_target_ids
+            ):
                 continue
             if (
                 action_type == AgentActionType.FINISH.value
@@ -429,6 +452,27 @@ class AgentWorkflowEnv:
         model_ids = list(self.model_registry.model_ids)
         profiles = self.registered_execution_profiles()
         serialized_profiles = self._serialized_execution_profiles(profiles)
+        successful_evidence_ids = set(
+            self._current_successful_evidence_agent_ids()
+        )
+        output_target_ids = [
+            node.id
+            for node in self._graph.nodes
+            if not (
+                self.require_evidence_relation
+                and self.required_evidence_tool_id in node.allowed_tools
+            )
+        ]
+        add_profiles = profiles
+        if successful_evidence_ids and not output_target_ids:
+            # The current revision already owns a receipt-grounded retrieval
+            # artifact.  The next functional unit must be a no-Tool consumer;
+            # this preserves the worker and leaves its role, contract, model,
+            # relation direction, and final Output selection model-authored.
+            add_profiles = tuple(
+                profile for profile in profiles if not profile[1]
+            )
+        serialized_add_profiles = self._serialized_execution_profiles(add_profiles)
         result: dict[str, object] = {
             "registered_execution_profiles": serialized_profiles,
             "finish_admissibility": self.finish_admissibility(),
@@ -436,7 +480,7 @@ class AgentWorkflowEnv:
         if AgentActionType.ADD_AGENT.value in admitted:
             result[AgentActionType.ADD_AGENT.value] = {
                 "model_ids": model_ids,
-                "execution_profiles": serialized_profiles,
+                "execution_profiles": serialized_add_profiles,
             }
         if AgentActionType.ADD_SUBGRAPH.value in admitted:
             remaining = (
@@ -449,7 +493,7 @@ class AgentWorkflowEnv:
             )
             result[AgentActionType.ADD_SUBGRAPH.value] = {
                 "model_ids": model_ids,
-                "execution_profiles": serialized_profiles,
+                "execution_profiles": serialized_add_profiles,
                 "existing_agent_ids": node_ids,
                 "max_new_agents": remaining,
             }
@@ -466,7 +510,12 @@ class AgentWorkflowEnv:
                         self._failed_agent_ids
                         - self._repair_attempted_failed_agent_ids
                     )
-                    else node_ids
+                    else [
+                        agent_id
+                        for agent_id in node_ids
+                        if agent_id not in successful_evidence_ids
+                        or agent_id in self._failed_agent_ids
+                    ]
                 ),
                 "model_ids": model_ids,
                 "execution_profiles": serialized_profiles,
@@ -485,14 +534,7 @@ class AgentWorkflowEnv:
             }
         if AgentActionType.SET_OUTPUT.value in admitted:
             result[AgentActionType.SET_OUTPUT.value] = {
-                "agent_ids": [
-                    node.id
-                    for node in self._graph.nodes
-                    if not (
-                        self.require_evidence_relation
-                        and self.required_evidence_tool_id in node.allowed_tools
-                    )
-                ],
+                "agent_ids": output_target_ids,
             }
         if AgentActionType.FINISH.value in admitted:
             result[AgentActionType.FINISH.value] = {"admissible": True}
@@ -1292,6 +1334,40 @@ class AgentWorkflowEnv:
             f"Tool receipts for {missing}; preserve the current graph and "
             "repair or augment it with a Tool-capable ReAct Agent"
         )
+
+    def _current_successful_evidence_agent_ids(self) -> Tuple[str, ...]:
+        """Return current-revision workers with successful search and read."""
+
+        tool_id = self.required_evidence_tool_id
+        execution = self._progressive_execution
+        if (
+            tool_id is None
+            or execution is None
+            or self._progressive_execution_revision != self._graph.revision
+        ):
+            return ()
+        successful: list[str] = []
+        for agent_id, metadata in execution.output_metadata.items():
+            if not self._graph.has_node(agent_id) or not isinstance(
+                metadata, Mapping
+            ):
+                continue
+            receipts = metadata.get("tool_receipts", ())
+            if not isinstance(receipts, (list, tuple)):
+                continue
+            actions = {
+                str(request["action"])
+                for receipt in receipts
+                if isinstance(receipt, Mapping)
+                and receipt.get("tool_id") == tool_id
+                and receipt.get("error_type") is None
+                and isinstance(receipt.get("result"), Mapping)
+                and isinstance((request := receipt.get("request")), Mapping)
+                and request.get("action") in {"search", "read"}
+            }
+            if actions == {"search", "read"}:
+                successful.append(agent_id)
+        return tuple(successful)
 
     def _cached_progressive_execution(self) -> Optional[AgentRuntimeResult]:
         if self._progressive_execution_revision != self._graph.revision:

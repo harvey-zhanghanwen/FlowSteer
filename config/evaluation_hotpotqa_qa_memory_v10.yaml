@@ -1,19 +1,19 @@
-# Development-only HotpotQA QA-memory condition.  v8 reuses the frozen v1
+# Development-only HotpotQA QA-memory condition.  v10 reuses the frozen v1
 # train-only QA-memory corpus and evaluator protocol; no validation answer is
 # used to select this recovery/action-decoding change.
 schema_version: "flowsteer.agentgraph.config.v1"
 experiment:
-  name: "hotpotqa_qa_memory_v8"
+  name: "hotpotqa_qa_memory_v10"
   # The bounded HotpotQA runner accepts only its inference/evaluation phase;
   # development provenance remains explicit in sampling_schedule_purpose below.
   phase: "hotpotqa_evaluation"
   training_enabled: false
   seed: 20260815
-  condition_id: "hotpotqa_qa_memory_v8"
-  sampling_schedule_purpose: "hotpotqa_qa_memory_v8_development_only"
+  condition_id: "hotpotqa_qa_memory_v10"
+  sampling_schedule_purpose: "hotpotqa_qa_memory_v10_development_only"
   prompt_version: "agentgraph.director.minimal.capability-domain.v3-construction-progress"
   tool_version: "skillflow.hotpotqa.train-qa-memory.search-read.v1"
-  output_dir: "artifacts/hotpotqa_qa_memory_v8"
+  output_dir: "artifacts/hotpotqa_qa_memory_v10"
 
 data:
   catalog_path: "config/datasets_agentgraph.yaml"
@@ -34,12 +34,12 @@ hotpotqa_evaluation:
   direct_protocol: "round01_saved_outputs_official_rescore_v1"
   direct_source_path: "artifacts/hotpotqa_round_01/direct_predictions.jsonl"
   agentgraph_baseline_source_path: "artifacts/hotpotqa_round_01/agentgraph_trajectories.jsonl"
-  agentgraph_protocol: "question_only_dynamic_train_qa_memory_search_read_v8"
+  agentgraph_protocol: "question_only_dynamic_train_qa_memory_search_read_v10"
   protocol_equivalent_to_direct: false
 
 qa_embedding_retrieval:
   enabled: true
-  condition_id: "hotpotqa_qa_memory_v8"
+  condition_id: "hotpotqa_qa_memory_v10"
   mode: "model_driven_search_read"
   corpus_kind: "train_qa_memory"
   index_scope: "global_train_only"
@@ -64,29 +64,30 @@ qa_embedding_retrieval:
   profile_candidate_top_k: [2, 3, 4, 5]
   max_turns_per_agent_call: 6
   max_tool_calls_per_agent_call: 4
+  max_action_tokens: 4096
   tool_timeout_seconds: 30.0
   allow_query_rewriting: true
   web_search_enabled: false
 
 storage:
   schema_version: "flowsteer.hotpotqa.qa_memory_retrieval.v1"
-  root: "artifacts/hotpotqa_qa_memory_v8/evidence"
-  selected_tasks_path: "artifacts/hotpotqa_qa_memory_v8/selected_tasks.jsonl"
-  direct_predictions_path: "artifacts/hotpotqa_qa_memory_v8/direct_rescored_predictions.jsonl"
-  trajectories_path: "artifacts/hotpotqa_qa_memory_v8/agentgraph_trajectories.jsonl"
-  failures_path: "artifacts/hotpotqa_qa_memory_v8/collection_failures.jsonl"
-  paired_results_path: "artifacts/hotpotqa_qa_memory_v8/paired_results.jsonl"
-  wrong_demos_path: "artifacts/hotpotqa_qa_memory_v8/wrong_demos.jsonl"
-  error_demos_path: "reports/hotpotqa_qa_memory_v8/error_demos.jsonl"
+  root: "artifacts/hotpotqa_qa_memory_v10/evidence"
+  selected_tasks_path: "artifacts/hotpotqa_qa_memory_v10/selected_tasks.jsonl"
+  direct_predictions_path: "artifacts/hotpotqa_qa_memory_v10/direct_rescored_predictions.jsonl"
+  trajectories_path: "artifacts/hotpotqa_qa_memory_v10/agentgraph_trajectories.jsonl"
+  failures_path: "artifacts/hotpotqa_qa_memory_v10/collection_failures.jsonl"
+  paired_results_path: "artifacts/hotpotqa_qa_memory_v10/paired_results.jsonl"
+  wrong_demos_path: "artifacts/hotpotqa_qa_memory_v10/wrong_demos.jsonl"
+  error_demos_path: "reports/hotpotqa_qa_memory_v10/error_demos.jsonl"
   retrieval_profile_selection_path: "artifacts/hotpotqa_qa_memory_v1/profile_selection.json"
   retrieval_index_manifest_path: "artifacts/hotpotqa_qa_memory_v1/index/manifest.json"
   retrieval_index_smoke_path: "artifacts/hotpotqa_qa_memory_v1/index_smoke_receipt.json"
   retrieval_index_rebuild_smoke_path: "artifacts/hotpotqa_qa_memory_v1/index_rebuild_smoke_receipt.json"
   paraphrase_manifest_path: "artifacts/hotpotqa_qa_memory_v1/paraphrase_manifest.json"
-  manifest_path: "artifacts/hotpotqa_qa_memory_v8/run_manifest.json"
-  preflight_receipt_path: "artifacts/hotpotqa_qa_memory_v8/preflight_receipt.json"
-  report_json_path: "reports/hotpotqa_qa_memory_v8/report.json"
-  report_markdown_path: "reports/hotpotqa_qa_memory_v8/report.md"
+  manifest_path: "artifacts/hotpotqa_qa_memory_v10/run_manifest.json"
+  preflight_receipt_path: "artifacts/hotpotqa_qa_memory_v10/preflight_receipt.json"
+  report_json_path: "reports/hotpotqa_qa_memory_v10/report.json"
+  report_markdown_path: "reports/hotpotqa_qa_memory_v10/report.md"
 
 director:
   base_model: "${QWEN35_9B_MODEL_PATH:-/home/test/SKILLEV/skillev-new-b2-temp/model/Qwen3.5-9B-modelscope}"
@@ -132,7 +133,7 @@ agent_graph:
   require_evidence_relation: true
   recovery_policy: "preserve_diagnose_repair_augment"
   director_feedback_mode: "control_plane"
-  model_catalog_path: "config/model_catalog_hotpotqa_qa_memory_v8.yaml"
+  model_catalog_path: "config/model_catalog_hotpotqa_qa_memory_v10.yaml"
 
 evaluation:
   healthbench_judge_model: "gpt-4o-mini"

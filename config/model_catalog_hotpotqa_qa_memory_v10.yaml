@@ -1,0 +1,24 @@
+# Development v8 recorded only HTTP 429 from the external provider.  This
+# frozen v10 canary therefore uses the already registered local worker arm; it
+# does not change the Director model or the QA-memory retrieval protocol.
+providers:
+  - provider_id: "local-director"
+    kind: "openai-compatible"
+    endpoint: "http://127.0.0.1:${FLOWSTEER_SUPERVISOR_PORT:-8015}/v1"
+    max_concurrency: 1
+    api_key_env: "SGLANG_API_KEY"
+
+models:
+  - model_id: "qwen3.5-9b-local"
+    provider_id: "local-director"
+    model_name: "supervisor_theta"
+    selection_weight: 10.0
+    cheap_weight: 10.0
+    fast_weight: 9.0
+    context_window: 8192
+    metadata:
+      chat_template_enable_thinking: "false"
+      max_tokens: "4096"
+      sampling_backend: "sglang"
+      deployment_locality: "local"
+      supports_top_k: "true"

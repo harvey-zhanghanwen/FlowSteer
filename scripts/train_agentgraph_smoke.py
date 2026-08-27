@@ -705,7 +705,12 @@ class LiveSmokeBackend:
                 tool_registry=task_tool_registry,
                 max_turns=int(retrieval["max_turns_per_agent_call"]),
                 max_tool_calls=int(retrieval["max_tool_calls_per_agent_call"]),
-                max_action_tokens=int(director["max_action_tokens"]),
+                max_action_tokens=int(
+                    retrieval.get(
+                        "max_action_tokens",
+                        director["max_action_tokens"],
+                    )
+                ),
                 sampling_base_seed=base_seed,
                 sampling_coordinate=sampling_coordinate,
             )

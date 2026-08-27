@@ -34,6 +34,17 @@ def test_embedding_v4_config_freezes_question_only_development_profile():
     assert retrieval["web_search_enabled"] is False
 
 
+def test_qa_memory_v10_separates_director_and_worker_action_budgets():
+    config = load_yaml(
+        _ROOT / "config" / "evaluation_hotpotqa_qa_memory_v10.yaml"
+    )
+
+    _MODULE.validate_hotpot_config(config)
+
+    assert config["director"]["max_action_tokens"] == 1024
+    assert config["qa_embedding_retrieval"]["max_action_tokens"] == 4096
+
+
 def test_strict_aggregate_keeps_failed_task_in_denominator():
     rows = [
         {
