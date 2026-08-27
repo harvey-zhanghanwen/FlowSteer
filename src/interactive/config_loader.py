@@ -153,6 +153,14 @@ def validate_agent_graph_config(value: Mapping[str, Any]) -> None:
             )
     if graph.get("contract_type") != "free_text" or graph.get("relation_encoding") != "two_bit":
         raise ConfigurationError("AgentGraph requires free-text contracts and two-bit relations")
+    director_feedback_mode = graph.get(
+        "director_feedback_mode", "artifact_preview"
+    )
+    if director_feedback_mode not in {"artifact_preview", "control_plane"}:
+        raise ConfigurationError(
+            "agent_graph.director_feedback_mode must be artifact_preview or "
+            "control_plane"
+        )
     require_format_agent = graph.get("require_format_agent")
     if require_format_agent is not None and type(require_format_agent) is not bool:
         raise ConfigurationError(
@@ -298,10 +306,22 @@ def validate_agent_graph_config(value: Mapping[str, Any]) -> None:
                 "qa_verified_answer_lineage_v2 requires "
                 "preserve_diagnose_repair_augment recovery"
             )
-        if required_evidence_tool_id != "qa-retrieval":
+        admitted_shared_qa_evidence_tool_ids = {"qa-retrieval"}
+        if set(shared_qa_sources) == {"triviaqa"}:
+            admitted_shared_qa_evidence_tool_ids.add("triviaqa.qa_memory")
+        if required_evidence_tool_id not in admitted_shared_qa_evidence_tool_ids:
             raise ConfigurationError(
-                "qa_verified_answer_lineage_v2 requires the qa-retrieval "
-                "evidence tool"
+                "qa_verified_answer_lineage_v2 requires a dataset-admitted "
+                "evidence tool; expected one of "
+                f"{sorted(admitted_shared_qa_evidence_tool_ids)!r}"
+            )
+        if (
+            required_evidence_tool_id == "triviaqa.qa_memory"
+            and director_feedback_mode != "control_plane"
+        ):
+            raise ConfigurationError(
+                "TriviaQA QA-memory requires "
+                "agent_graph.director_feedback_mode=control_plane"
             )
         if any(
             terminal_protocols.get(source) != "exact_single_answer_tag"

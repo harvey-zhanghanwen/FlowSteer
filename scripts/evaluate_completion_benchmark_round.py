@@ -371,12 +371,30 @@ def validate_completion_benchmark_config(config: Mapping[str, Any]) -> None:
         )
     for name in (
         "behavior_policy_version",
-        "behavior_adapter_name",
-        "behavior_adapter_checkpoint",
         "expected_server_weight_version",
     ):
         if not str(director.get(name, "")).strip():
             raise ConfigurationError(f"director.{name} must be non-empty")
+    adapter_name = director.get("behavior_adapter_name")
+    adapter_checkpoint = director.get("behavior_adapter_checkpoint")
+    has_adapter_name = isinstance(adapter_name, str) and bool(
+        adapter_name.strip()
+    )
+    has_adapter_checkpoint = isinstance(adapter_checkpoint, str) and bool(
+        adapter_checkpoint.strip()
+    )
+    if has_adapter_name != has_adapter_checkpoint:
+        raise ConfigurationError(
+            "director behavior adapter name and checkpoint must either both "
+            "be non-empty or both be null"
+        )
+    if not has_adapter_name and (
+        adapter_name is not None or adapter_checkpoint is not None
+    ):
+        raise ConfigurationError(
+            "base-model evaluation requires null behavior adapter name and "
+            "checkpoint"
+        )
 
 
 def _runtime_dataset_registry_coordinates(
@@ -416,8 +434,71 @@ def _load_json_mapping(path: Path, name: str) -> Mapping[str, Any]:
     return value
 
 
+def _linked_worktree_primary_root(root: Path) -> Optional[Path]:
+    """Return the primary worktree root for one Git linked worktree.
+
+    A dataset manifest prepared in the primary worktree may retain an absolute
+    provenance path.  Feature worktrees contain the same tracked preparation
+    catalog at the same repository-relative path.  Git records that relation
+    in the linked worktree's ``.git`` file; no content or commit comparison is
+    needed here.
+    """
+
+    marker = root / ".git"
+    if not marker.is_file():
+        return None
+    try:
+        prefix, separator, raw_gitdir = marker.read_text(
+            encoding="utf-8"
+        ).strip().partition(":")
+    except OSError:
+        return None
+    if prefix.strip().casefold() != "gitdir" or not separator:
+        return None
+    gitdir = Path(raw_gitdir.strip())
+    if not gitdir.is_absolute():
+        gitdir = (root / gitdir).resolve()
+    if gitdir.parent.name != "worktrees":
+        return None
+    common_git_dir = gitdir.parent.parent
+    if common_git_dir.name != ".git":
+        return None
+    return common_git_dir.parent.resolve()
+
+
 def _same_resolved_path(root: Path, left: str, right: str) -> bool:
-    return _resolve(root, left).resolve() == _resolve(root, right).resolve()
+    left_path = _resolve(root, left).resolve()
+    right_path = _resolve(root, right).resolve()
+    if left_path == right_path:
+        return True
+    primary_root = _linked_worktree_primary_root(root.resolve())
+    if primary_root is None:
+        return False
+    worktree_root = root.resolve()
+    for primary_candidate, worktree_candidate in (
+        (left_path, right_path),
+        (right_path, left_path),
+    ):
+        try:
+            relative = worktree_candidate.relative_to(worktree_root)
+        except ValueError:
+            continue
+        if primary_candidate == (primary_root / relative).resolve():
+            return True
+    return False
+
+
+def _resolve_linked_worktree_runtime_path(root: Path, value: str) -> Path:
+    """Resolve a runtime artifact from this or the primary linked worktree."""
+
+    local = _resolve(root, value)
+    if local.exists() or local.is_absolute() and Path(value).is_absolute():
+        return local
+    primary_root = _linked_worktree_primary_root(root.resolve())
+    if primary_root is None:
+        return local
+    candidate = primary_root / value
+    return candidate if candidate.exists() else local
 
 
 def _validate_runtime_dataset_registry(
@@ -443,7 +524,7 @@ def _validate_runtime_dataset_registry(
             "data.registry_dataset_key must match the evaluation dataset_key"
         )
 
-    registry_path = _resolve(root, registry_value)
+    registry_path = _resolve_linked_worktree_runtime_path(root, registry_value)
     registry = load_yaml(registry_path)
     if registry.get("schema_version") != _RUNTIME_DATASET_REGISTRY_SCHEMA:
         raise ConfigurationError(
@@ -476,7 +557,9 @@ def _validate_runtime_dataset_registry(
         raise ConfigurationError(
             "runtime dataset preparation_catalog_path must be non-empty"
         )
-    preparation_catalog_path = _resolve(root, preparation_catalog_value)
+    preparation_catalog_path = _resolve_linked_worktree_runtime_path(
+        root, preparation_catalog_value
+    )
     if not preparation_catalog_path.is_file():
         raise ConfigurationError(
             "runtime dataset preparation catalog does not exist: "
@@ -520,7 +603,9 @@ def _validate_runtime_dataset_registry(
             raise ConfigurationError(
                 f"data.{data_field} differs from the runtime dataset registry"
             )
-        resolved_split_path = _resolve(root, registry_split_path)
+        resolved_split_path = _resolve_linked_worktree_runtime_path(
+            root, registry_split_path
+        )
         if not resolved_split_path.is_file():
             raise ConfigurationError(
                 f"runtime dataset {split} file does not exist: "
@@ -546,7 +631,7 @@ def _validate_runtime_dataset_registry(
         raise ConfigurationError(
             "runtime dataset manifest.schema_version must be non-empty"
         )
-    manifest_path = _resolve(root, manifest_value)
+    manifest_path = _resolve_linked_worktree_runtime_path(root, manifest_value)
     manifest = _load_json_mapping(manifest_path, "runtime dataset manifest")
     if manifest.get("schema_version") != expected_manifest_schema:
         raise ConfigurationError(
@@ -2401,13 +2486,31 @@ async def run_completion_benchmark_round(
                 selected,
             )
         director = _mapping(config["director"], "director")
-        adapter_preflight = await asyncio.to_thread(
-            backend.publisher.ensure_loaded_adapter,
-            checkpoint_path=str(
-                _resolve(root, str(director["behavior_adapter_checkpoint"]))
-            ),
-            adapter_name=str(director["behavior_adapter_name"]),
+        behavior_adapter_name = director.get("behavior_adapter_name")
+        behavior_adapter_checkpoint = director.get(
+            "behavior_adapter_checkpoint"
         )
+        if isinstance(behavior_adapter_name, str) and isinstance(
+            behavior_adapter_checkpoint, str
+        ):
+            adapter_preflight = await asyncio.to_thread(
+                backend.publisher.ensure_loaded_adapter,
+                checkpoint_path=str(
+                    _resolve(root, behavior_adapter_checkpoint)
+                ),
+                adapter_name=behavior_adapter_name,
+            )
+        else:
+            adapter_preflight = {
+                "status": "ready",
+                "success": True,
+                "mode": "base_model_no_adapter",
+                "training_performed": False,
+                "policy_published": False,
+                "adapter_name": None,
+                "checkpoint_path": None,
+                "canary_succeeded": None,
+            }
         sglang_server_runtime = await asyncio.to_thread(
             backend.publisher.server_runtime_receipt
         )

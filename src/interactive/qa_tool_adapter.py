@@ -58,8 +58,24 @@ from .tool_runtime import (
 # under one capability prevents the Canvas from assigning ``read`` without the
 # search action that produces its opaque passage_id.
 QA_RETRIEVAL_TOOL_ID = "qa-retrieval"
+TRIVIAQA_QA_MEMORY_TOOL_ID = "triviaqa.qa_memory"
 QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL = "qa_verified_answer_lineage_v2"
 DEFAULT_QA_DATASET_SCOPE = ("hotpotqa", "triviaqa")
+_QA_MEMORY_OPTIONAL_FIELDS = (
+    "memory_id",
+    "source_train_task_id",
+    "base_task_id",
+    "cycled_training_sample",
+    "cycle_index",
+    "paraphrase_question",
+    "paraphrase_answer_statement",
+    "canonical_answer",
+    "paraphrase_version",
+    "paraphrase_provenance",
+)
+_SUPPORTED_QA_RETRIEVAL_TOOL_IDS = frozenset(
+    {QA_RETRIEVAL_TOOL_ID, TRIVIAQA_QA_MEMORY_TOOL_ID}
+)
 _PROVIDED_PASSAGE = re.compile(
     r"^\[(?P<title>[^\]]+)\]\s*(?P<text>.+)$",
     flags=re.DOTALL,
@@ -2882,12 +2898,15 @@ def _public_search_transition_mirror(
     passage_ids: list[str] = []
     hit_passage_ids: list[str] = []
     hits_complete = True
-    expected_hit_fields = {
+    required_hit_fields = {
         "document_id",
         "passage_id",
         "rank",
         "snippet",
         "title",
+    }
+    admitted_hit_fields = required_hit_fields | set(_QA_MEMORY_OPTIONAL_FIELDS) | {
+        "similarity"
     }
     for expected_rank, (passage_id, hit) in enumerate(
         zip(raw_passage_ids, raw_hits),
@@ -2897,7 +2916,11 @@ def _public_search_transition_mirror(
             hits_complete = False
             continue
         passage_ids.append(passage_id.strip())
-        if not isinstance(hit, Mapping) or set(hit) != expected_hit_fields:
+        if (
+            not isinstance(hit, Mapping)
+            or not required_hit_fields <= set(hit)
+            or not set(hit) <= admitted_hit_fields
+        ):
             hits_complete = False
             continue
         hit_passage_id = hit.get("passage_id")
@@ -2925,7 +2948,8 @@ def _public_search_transition_mirror(
         observation.get("observation_status") == "success"
         and executed_action.get("kind") == "tool"
         and executed_action.get("name") == "search"
-        and executed_action.get("resource_id") == QA_RETRIEVAL_TOOL_ID
+        and executed_action.get("resource_id")
+        in _SUPPORTED_QA_RETRIEVAL_TOOL_IDS
         and set(arguments) == {"query", "limit"}
         and isinstance(action_query, str)
         and bool(action_query.strip())
@@ -2952,19 +2976,22 @@ def _public_read_transition_mirror(
     if not isinstance(executed_action, Mapping) or not isinstance(result, Mapping):
         return False, None
     arguments = executed_action.get("arguments")
-    passage = result.get("passage")
+    passage = result.get("memory", result.get("passage"))
     if not isinstance(arguments, Mapping) or not isinstance(passage, Mapping):
         return False, None
-    action_passage_id = arguments.get("passage_id")
-    result_passage_id = result.get("passage_id", passage.get("passage_id"))
-    passage_passage_id = passage.get("passage_id")
+    action_passage_id = _retrieval_record_id(arguments)
+    result_passage_id = _retrieval_record_id(result)
+    if result_passage_id is None:
+        result_passage_id = _retrieval_record_id(passage)
+    passage_passage_id = _retrieval_record_id(passage)
     passage_text = passage.get("text")
     verified = bool(
         observation.get("observation_status") == "success"
         and executed_action.get("kind") == "tool"
         and executed_action.get("name") == "read"
-        and executed_action.get("resource_id") == QA_RETRIEVAL_TOOL_ID
-        and set(arguments) == {"passage_id"}
+        and executed_action.get("resource_id")
+        in _SUPPORTED_QA_RETRIEVAL_TOOL_IDS
+        and set(arguments) in ({"passage_id"}, {"memory_id"})
         and isinstance(action_passage_id, str)
         and bool(action_passage_id.strip())
         and isinstance(result_passage_id, str)
@@ -3927,6 +3954,71 @@ def _index_identity(index: _RetrievalIndex) -> dict[str, object]:
     }
 
 
+def _qa_memory_projection(value: object) -> dict[str, object]:
+    """Project only versioned train-memory fields admitted to worker Agents."""
+
+    result: dict[str, object] = {}
+    for field_name in _QA_MEMORY_OPTIONAL_FIELDS:
+        field_value = getattr(value, field_name, None)
+        if field_value is None:
+            continue
+        if isinstance(field_value, Mapping):
+            result[field_name] = dict(field_value)
+        elif isinstance(field_value, tuple):
+            result[field_name] = list(field_value)
+        elif isinstance(field_value, (str, int, float, bool, list)):
+            result[field_name] = field_value
+    return result
+
+
+def _is_qa_memory_index(index: _RetrievalIndex) -> bool:
+    return (
+        getattr(index.manifest, "tool_id", None)
+        == TRIVIAQA_QA_MEMORY_TOOL_ID
+    )
+
+
+def _retrieval_record_id(value: Mapping[str, object]) -> object:
+    """Read a QA-memory ID or the existing SkillFlow passage compatibility ID."""
+
+    return value.get("memory_id", value.get("passage_id"))
+
+
+def _semantic_compatible_read_receipt(
+    receipt: Mapping[str, object],
+    retrieval_tool_id: str,
+) -> Mapping[str, object]:
+    """Return an internal passage-shaped view without changing the receipt wire.
+
+    The canonical Tool receipt remains owned by ``triviaqa.qa_memory`` and keeps
+    ``read(memory_id)``.  Existing v63 semantic validators consume this copied
+    compatibility view only, so their entity/relation/scope gates remain
+    unchanged.
+    """
+
+    if retrieval_tool_id != TRIVIAQA_QA_MEMORY_TOOL_ID:
+        return receipt
+    compatible = deepcopy(dict(receipt))
+    request = compatible.get("request")
+    if isinstance(request, dict):
+        arguments = request.get("arguments")
+        if isinstance(arguments, dict) and set(arguments) == {"memory_id"}:
+            request["arguments"] = {"passage_id": arguments["memory_id"]}
+    result = compatible.get("result")
+    if isinstance(result, dict):
+        value = result.get("value", result)
+        if isinstance(value, dict):
+            memory = value.get("memory")
+            if isinstance(memory, Mapping):
+                passage = dict(memory)
+                memory_id = _retrieval_record_id(passage)
+                if isinstance(memory_id, str):
+                    passage.setdefault("passage_id", memory_id)
+                    value.setdefault("passage_id", memory_id)
+                value.setdefault("passage", passage)
+    return compatible
+
+
 def _validate_action(request: ToolRequest, expected_action: str) -> None:
     if request.action != expected_action:
         raise ValueError(
@@ -3940,6 +4032,7 @@ class QASearchToolBackend:
 
     index: _RetrievalIndex
     index_identity: Mapping[str, object]
+    fixed_search_limit: int | None = None
 
     async def invoke(self, request: ToolRequest) -> ToolResult:
         # SkillFlow opens SQLite with its default thread affinity.  Keeping the
@@ -3954,29 +4047,38 @@ class QASearchToolBackend:
             raise ValueError("search query must be non-empty text")
         if type(limit) is not int or limit < 1:
             raise ValueError("search limit must be a positive integer")
+        if self.fixed_search_limit is not None and limit != self.fixed_search_limit:
+            raise ValueError(
+                "search limit differs from the frozen embedding-index top-k"
+            )
 
         raw_hits = self.index.search(query, limit=limit)
         hits = await raw_hits if inspect.isawaitable(raw_hits) else raw_hits
-        public_hits = [
-            {
+        public_hits: list[dict[str, object]] = []
+        for hit in hits:
+            public_hit: dict[str, object] = {
                 "passage_id": str(getattr(hit, "passage_id")),
                 "document_id": str(getattr(hit, "document_id")),
                 "title": str(getattr(hit, "title")),
                 "snippet": str(getattr(hit, "snippet")),
                 "rank": int(getattr(hit, "rank")),
             }
-            for hit in hits
-        ]
-        return ToolResult(
-            {
-                "operation": "search",
-                "retrieval_index": dict(self.index_identity),
-                "query": query,
-                "top_k": limit,
-                "passage_ids": [hit["passage_id"] for hit in public_hits],
-                "hits": public_hits,
-            }
-        )
+            public_hit.update(_qa_memory_projection(hit))
+            similarity = getattr(hit, "similarity", None)
+            if similarity is not None:
+                public_hit["similarity"] = float(similarity)
+            public_hits.append(public_hit)
+        result: dict[str, object] = {
+            "operation": "search",
+            "retrieval_index": dict(self.index_identity),
+            "query": query,
+            "top_k": limit,
+            "passage_ids": [hit["passage_id"] for hit in public_hits],
+            "hits": public_hits,
+        }
+        if _is_qa_memory_index(self.index):
+            result["memory_ids"] = [hit["memory_id"] for hit in public_hits]
+        return ToolResult(result)
 
 
 @dataclass(frozen=True, slots=True)
@@ -3990,9 +4092,11 @@ class QAReadToolBackend:
         # See QASearchToolBackend.invoke for the upstream SQLite thread
         # affinity preserved by this async adapter boundary.
         _validate_action(request, "read")
-        if set(request.arguments) != {"passage_id"}:
-            raise ValueError("read arguments must contain exactly passage_id")
-        passage_id = request.arguments["passage_id"]
+        qa_memory = _is_qa_memory_index(self.index)
+        id_field = "memory_id" if qa_memory else "passage_id"
+        if set(request.arguments) != {id_field}:
+            raise ValueError(f"read arguments must contain exactly {id_field}")
+        passage_id = request.arguments[id_field]
         if not isinstance(passage_id, str) or not passage_id.strip():
             raise ValueError("read passage_id must be non-empty text")
 
@@ -4006,6 +4110,21 @@ class QAReadToolBackend:
             "title": str(getattr(passage, "title")),
             "text": str(getattr(passage, "text")),
         }
+        public_passage.update(_qa_memory_projection(passage))
+        if qa_memory:
+            # ``memory_id/memory`` is the canonical worker-facing wire.
+            # ``passage_id/passage`` is an explicit compatibility projection
+            # consumed by the unchanged v63 semantic artifact validators.
+            return ToolResult(
+                {
+                    "operation": "read",
+                    "retrieval_index": dict(self.index_identity),
+                    "memory_id": public_passage["memory_id"],
+                    "memory": public_passage,
+                    "passage_id": public_passage["passage_id"],
+                    "passage": public_passage,
+                }
+            )
         return ToolResult(
             {
                 "operation": "read",
@@ -4022,12 +4141,14 @@ class QARetrievalToolBackend:
 
     index: _RetrievalIndex
     index_identity: Mapping[str, object]
+    fixed_search_limit: int | None = None
 
     async def invoke(self, request: ToolRequest) -> ToolResult:
         if request.action == "search":
             return await QASearchToolBackend(
                 self.index,
                 self.index_identity,
+                self.fixed_search_limit,
             ).invoke(request)
         if request.action == "read":
             return await QAReadToolBackend(
@@ -4052,6 +4173,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         max_action_tokens: int = 512,
         task_type: str | None = None,
         completion_policy: str = "required_tool_call",
+        retrieval_tool_id: str = QA_RETRIEVAL_TOOL_ID,
         sampling_base_seed: int | None = None,
         sampling_coordinate: ScientificSamplingCoordinate | None = None,
     ) -> None:
@@ -4066,6 +4188,10 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 "QA completion_policy must be optional, required_tool_call, "
                 "or required_evidence"
             )
+        if retrieval_tool_id not in _SUPPORTED_QA_RETRIEVAL_TOOL_IDS:
+            raise ValueError(
+                "retrieval_tool_id must be qa-retrieval or triviaqa.qa_memory"
+            )
         super().__init__(
             gateway=gateway,
             tool_registry=tool_registry,
@@ -4077,6 +4203,31 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         )
         self._task_type = task_type
         self._completion_policy = completion_policy
+        self._retrieval_tool_id = retrieval_tool_id
+        self._frozen_search_limit: int | None = None
+        if retrieval_tool_id == TRIVIAQA_QA_MEMORY_TOOL_ID:
+            capability = tool_registry.require_capability(retrieval_tool_id)
+            search_schema = capability.action_schemas.get("search")
+            properties = (
+                search_schema.get("properties")
+                if isinstance(search_schema, Mapping)
+                else None
+            )
+            limit_schema = (
+                properties.get("limit")
+                if isinstance(properties, Mapping)
+                else None
+            )
+            frozen_limit = (
+                limit_schema.get("const")
+                if isinstance(limit_schema, Mapping)
+                else None
+            )
+            if type(frozen_limit) is not int or frozen_limit < 1:
+                raise ValueError(
+                    "TriviaQA QA-memory search schema must freeze a positive top-k"
+                )
+            self._frozen_search_limit = frozen_limit
         self._retrieval_completion_required: ContextVar[bool] = ContextVar(
             f"qa_retrieval_completion_required_{id(self)}",
             default=False,
@@ -4162,18 +4313,34 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 original_question=original_question,
                 artifact=message.content,
                 tool_receipts=message_receipts,
+                retrieval_tool_id=self._retrieval_tool_id,
             ) is not None:
                 continue
             validated_receipts.extend(message_receipts)
         return tuple(validated_receipts)
 
     @staticmethod
-    def _successful_read_receipt(receipt: Mapping[str, object]) -> bool:
+    def _successful_read_receipt(
+        receipt: Mapping[str, object],
+        retrieval_tool_id: str = QA_RETRIEVAL_TOOL_ID,
+    ) -> bool:
         from .agent_workflow_env import AgentWorkflowEnv
 
         return AgentWorkflowEnv._successful_read_receipt(
-            receipt,
-            QA_RETRIEVAL_TOOL_ID,
+            _semantic_compatible_read_receipt(receipt, retrieval_tool_id),
+            retrieval_tool_id,
+        )
+
+    @staticmethod
+    def _successful_read_text(
+        receipt: Mapping[str, object],
+        retrieval_tool_id: str = QA_RETRIEVAL_TOOL_ID,
+    ) -> Optional[str]:
+        from .agent_workflow_env import AgentWorkflowEnv
+
+        return AgentWorkflowEnv._successful_read_text(
+            _semantic_compatible_read_receipt(receipt, retrieval_tool_id),
+            retrieval_tool_id,
         )
 
     def _hotpot_tool_plan_exhausted(
@@ -4209,8 +4376,9 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         )
         return _FACTUAL_QA_RETRIEVAL_STRATEGIES[index]
 
-    @staticmethod
-    def _factual_search_limit(search_attempt_count: int) -> int:
+    def _factual_search_limit(self, search_attempt_count: int) -> int:
+        if self._frozen_search_limit is not None:
+            return self._frozen_search_limit
         index = min(
             max(search_attempt_count, 0),
             len(_FACTUAL_QA_SEARCH_LIMITS) - 1,
@@ -4946,7 +5114,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 and isinstance(executed_action, Mapping)
                 and executed_action.get("kind") == "tool"
                 and executed_action.get("resource_id")
-                == QA_RETRIEVAL_TOOL_ID
+                in _SUPPORTED_QA_RETRIEVAL_TOOL_IDS
                 and executed_action.get("name") == "read"
             ):
                 observation.pop("executed_action", None)
@@ -5282,7 +5450,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         required = (
             self._completion_policy == "required_evidence"
             and self._max_tool_calls > 0
-            and QA_RETRIEVAL_TOOL_ID in request.agent.allowed_tools
+            and self._retrieval_tool_id in request.agent.allowed_tools
         )
         search_queries: list[str] = []
         successful_search_observations: list[Mapping[str, object]] = []
@@ -5314,7 +5482,8 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         # completion but never consume this Reasoner's own bounded Tool budget.
         for receipt in self._semantic_upstream_tool_receipts.get():
             if not isinstance(receipt, Mapping) or not self._successful_read_receipt(
-                receipt
+                receipt,
+                self._retrieval_tool_id,
             ):
                 continue
             receipt_request = receipt.get("request")
@@ -5337,7 +5506,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 continue
             arguments = receipt_request.get("arguments")
             assert isinstance(arguments, Mapping)
-            passage_id = arguments.get("passage_id")
+            passage_id = _retrieval_record_id(arguments)
             if (
                 isinstance(passage_id, str)
                 and passage_id.strip()
@@ -5403,7 +5572,8 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             if isinstance(executed_action, Mapping):
                 if (
                     executed_action.get("kind") == "tool"
-                    and executed_action.get("resource_id") == QA_RETRIEVAL_TOOL_ID
+                    and executed_action.get("resource_id")
+                    == self._retrieval_tool_id
                 ):
                     dispatched_tool_calls += 1
                     if status == "tool_error":
@@ -5540,7 +5710,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 ):
                     arguments = executed_action.get("arguments")
                     if isinstance(arguments, Mapping):
-                        raw_passage_id = arguments.get("passage_id")
+                        raw_passage_id = _retrieval_record_id(arguments)
                 if isinstance(raw_passage_id, str) and raw_passage_id.strip():
                     passage_id = raw_passage_id.strip()
                     if passage_id not in read_passage_ids:
@@ -5776,7 +5946,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     and remaining_tool_calls >= 1
                 ):
                     return frozenset(
-                        {(QA_RETRIEVAL_TOOL_ID, "read")}
+                        {(self._retrieval_tool_id, "read")}
                     ), False
                 if (
                     state.location_containment_repair_search_count
@@ -5784,14 +5954,14 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     and remaining_tool_calls >= 2
                 ):
                     return frozenset(
-                        {(QA_RETRIEVAL_TOOL_ID, "search")}
+                        {(self._retrieval_tool_id, "search")}
                     ), False
                 return frozenset(), False
             actions: set[tuple[str, str]] = set()
             if state.latest_unread_passage_ids and remaining_tool_calls >= 1:
-                actions.add((QA_RETRIEVAL_TOOL_ID, "read"))
+                actions.add((self._retrieval_tool_id, "read"))
             if not strategies_exhausted and remaining_tool_calls >= 2:
-                actions.add((QA_RETRIEVAL_TOOL_ID, "search"))
+                actions.add((self._retrieval_tool_id, "search"))
             if not actions:
                 return frozenset(), False
             return frozenset(actions), False
@@ -5799,17 +5969,17 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         if state.successful_read_count > 0:
             return frozenset(), True
         if state.latest_unread_passage_ids and remaining_tool_calls >= 1:
-            actions = {(QA_RETRIEVAL_TOOL_ID, "read")}
+            actions = {(self._retrieval_tool_id, "read")}
             # The latest public title/snippet list is retrieval evidence for
             # candidate selection, not proof.  If none of those candidates
             # jointly matches entity, relation, and scope, admit the next
             # strategy search without forcing an irrelevant read first.
             if not strategies_exhausted and remaining_tool_calls >= 2:
-                actions.add((QA_RETRIEVAL_TOOL_ID, "search"))
+                actions.add((self._retrieval_tool_id, "search"))
             return frozenset(actions), False
         if strategies_exhausted or remaining_tool_calls < 2:
             return frozenset(), False
-        return frozenset({(QA_RETRIEVAL_TOOL_ID, "search")}), False
+        return frozenset({(self._retrieval_tool_id, "search")}), False
 
     def _state_conditioned_action_domain(
         self,
@@ -5830,7 +6000,10 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             )
         else:
             upstream_completion_admitted = any(
-                self._successful_read_receipt(receipt)
+                self._successful_read_receipt(
+                    receipt,
+                    self._retrieval_tool_id,
+                )
                 for receipt in self._direct_upstream_tool_receipts(request)
             )
 
@@ -5871,7 +6044,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 # draft selected one public SearchHit; require its exact opaque
                 # ID to be read before FlowSteer performs another Canvas repair.
                 return admitted(
-                    frozenset({(QA_RETRIEVAL_TOOL_ID, "read")}),
+                    frozenset({(self._retrieval_tool_id, "read")}),
                     False,
                 )
             location_containment_repair = (
@@ -5882,7 +6055,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 and isinstance(state.location_containment_repair_anchor, str)
             )
             if (
-                (QA_RETRIEVAL_TOOL_ID, "read") in tool_actions
+                (self._retrieval_tool_id, "read") in tool_actions
                 and not location_containment_repair
                 and self._latest_search_has_public_candidate_metadata(
                     observations
@@ -5908,7 +6081,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     # it before another search. A rejected read re-opens the
                     # bounded retrieval strategy through semantic feedback.
                     tool_actions = frozenset(
-                        {(QA_RETRIEVAL_TOOL_ID, "read")}
+                        {(self._retrieval_tool_id, "read")}
                     )
                 else:
                     # The public search receipt has no question-compatible
@@ -5920,7 +6093,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     tool_actions = frozenset(
                         action
                         for action in tool_actions
-                        if action == (QA_RETRIEVAL_TOOL_ID, "search")
+                        if action == (self._retrieval_tool_id, "search")
                     )
             return admitted(tool_actions, completion)
 
@@ -5952,11 +6125,11 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 and remaining_tool_calls >= 1
             ):
                 return admitted(
-                    frozenset({(QA_RETRIEVAL_TOOL_ID, "read")}), False
+                    frozenset({(self._retrieval_tool_id, "read")}), False
                 )
             if remaining_tool_calls >= 2:
                 return admitted(
-                    frozenset({(QA_RETRIEVAL_TOOL_ID, "search")}), False
+                    frozenset({(self._retrieval_tool_id, "search")}), False
                 )
             return admitted(frozenset(), state.successful_read_count > 0)
 
@@ -5977,11 +6150,11 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 and state.latest_unread_passage_ids
             ):
                 return admitted(
-                    frozenset({(QA_RETRIEVAL_TOOL_ID, "read")}), False
+                    frozenset({(self._retrieval_tool_id, "read")}), False
                 )
             if remaining_tool_calls >= 2:
                 return admitted(
-                    frozenset({(QA_RETRIEVAL_TOOL_ID, "search")}), False
+                    frozenset({(self._retrieval_tool_id, "search")}), False
                 )
             return admitted(frozenset(), True)
 
@@ -5994,7 +6167,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             # Preserve the successfully read evidence and admit completion.
             return admitted(frozenset(), state.successful_read_count > 0)
         return admitted(
-            frozenset({(QA_RETRIEVAL_TOOL_ID, action_name)}), False
+            frozenset({(self._retrieval_tool_id, action_name)}), False
         )
 
     def _completion_arguments_schema(
@@ -6740,6 +6913,36 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             role_family = (request.agent.role_family or "").casefold()
             if (
                 role_family == "evidence_retriever"
+                and self._retrieval_tool_id == TRIVIAQA_QA_MEMORY_TOOL_ID
+                and state.read_passage_ids
+            ):
+                value_schema = argument_properties.get("value")
+                value_properties = (
+                    value_schema.get("properties")
+                    if isinstance(value_schema, Mapping)
+                    else None
+                )
+                if isinstance(value_properties, dict):
+                    # PROJECT_NECESSARY_ADAPTATION: the unchanged v63 semantic
+                    # lineage artifact calls this compatibility field
+                    # ``passage_id``.  A QA-memory worker, however, performs the
+                    # canonical SkillFlow Tool transition ``read(memory_id)``.
+                    # Bind the compatibility field to the exact successfully
+                    # read opaque IDs so a document/source ID or placeholder
+                    # cannot be substituted for Tool provenance.
+                    value_properties["passage_id"] = {
+                        "type": "string",
+                        "enum": list(state.read_passage_ids),
+                        "description": (
+                            "Copy exactly one memory_id from a successful "
+                            "triviaqa.qa_memory read receipt in this execution. "
+                            "This compatibility field must never contain a "
+                            "source_train_task_id, document_id, title, or "
+                            "placeholder."
+                        ),
+                    }
+            if (
+                role_family == "evidence_retriever"
                 and state.semantic_repair_kind == "structure"
                 and isinstance(state.semantic_repair_error_code, str)
             ):
@@ -7023,11 +7226,16 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 or state.latest_unread_passage_ids
             )
         )
-        argument_properties["passage_id"] = {
+        read_id_field = (
+            "memory_id"
+            if self._retrieval_tool_id == TRIVIAQA_QA_MEMORY_TOOL_ID
+            else "passage_id"
+        )
+        argument_properties[read_id_field] = {
             "type": "string",
             "enum": list(admitted_passage_ids),
             "description": (
-                "Choose one exact opaque passage_id only when its public title "
+                f"Choose one exact opaque {read_id_field} only when its public title "
                 "and snippet jointly match "
                 + (
                     "the receipt-grounded locality, its geographic type or "
@@ -7321,7 +7529,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         requires_retrieval = (
             self._completion_policy != "optional"
             and self._max_tool_calls > 0
-            and QA_RETRIEVAL_TOOL_ID in request.agent.allowed_tools
+            and self._retrieval_tool_id in request.agent.allowed_tools
         )
         semantic_reasoner_protocol = (
             request.semantic_protocol
@@ -7896,6 +8104,13 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     "predicate, and object_or_attribute_value surfaces. Do not select "
                     "or emit candidate_answer, answer_slot, or final_answer."
                 )
+                if self._retrieval_tool_id == TRIVIAQA_QA_MEMORY_TOOL_ID:
+                    terminal_wire += (
+                        " For triviaqa.qa_memory, copy the exact opaque memory_id "
+                        "from the successful read(memory_id) receipt into the "
+                        "artifact's passage_id compatibility field; never copy "
+                        "source_train_task_id, document_id, title, or a placeholder."
+                    )
             else:
                 terminal_wire += (
                     " The Evidence Retriever owns only receipt-grounded entity, "
@@ -7936,7 +8151,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         evidence_continuation = ""
         if (
             self._completion_policy == "required_evidence"
-            and QA_RETRIEVAL_TOOL_ID in request.agent.allowed_tools
+            and self._retrieval_tool_id in request.agent.allowed_tools
         ):
             evidence_continuation = (
                 "\nRequired-evidence ReAct continuation: preserve any semantic "
@@ -7956,7 +8171,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             elif (
                 location_containment_repair
                 and admitted_actions
-                == frozenset({(QA_RETRIEVAL_TOOL_ID, "search")})
+                == frozenset({(self._retrieval_tool_id, "search")})
             ):
                 evidence_continuation += (
                     "The typed feedback requires a public location relation-"
@@ -7984,8 +8199,8 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 self._unified_factual_protocol(request)
                 and searched_passage_ids
                 and admitted_actions is not None
-                and (QA_RETRIEVAL_TOOL_ID, "read") in admitted_actions
-                and (QA_RETRIEVAL_TOOL_ID, "search") in admitted_actions
+                and (self._retrieval_tool_id, "read") in admitted_actions
+                and (self._retrieval_tool_id, "search") in admitted_actions
             ):
                 transition_guidance = _factual_transition_frontier_guidance(
                     evidence_state.strategy_progress_count
@@ -8021,13 +8236,20 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     "scope modifiers and any ordinal constraint."
                 )
             elif searched_passage_ids and admitted_actions == frozenset(
-                {(QA_RETRIEVAL_TOOL_ID, "read")}
+                {(self._retrieval_tool_id, "read")}
             ):
                 read_wire = {
-                    "arguments": {"passage_id": searched_passage_ids[0]},
+                    "arguments": {
+                        (
+                            "memory_id"
+                            if self._retrieval_tool_id
+                            == TRIVIAQA_QA_MEMORY_TOOL_ID
+                            else "passage_id"
+                        ): searched_passage_ids[0]
+                    },
                     "kind": "tool",
                     "name": "read",
-                    "resource_id": QA_RETRIEVAL_TOOL_ID,
+                    "resource_id": self._retrieval_tool_id,
                     "skill_id": None,
                 }
                 read_alignment = (
@@ -8144,11 +8366,53 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 separators=(",", ":"),
             )
         )
+        qa_memory_wire = ""
+        if self._retrieval_tool_id == TRIVIAQA_QA_MEMORY_TOOL_ID:
+            # NECESSARY_ADAPTATION: v63's state machine and semantic artifact
+            # deliberately retain their internal ``passage_id`` compatibility
+            # projection.  The worker-facing Tool wire must nevertheless be
+            # unambiguous: the registered resource is ``triviaqa.qa_memory``
+            # and its read action accepts only ``memory_id``.  Rewrite only
+            # execution-policy prose, never the semantic artifact contract or
+            # persisted canonical receipt.
+            guidance = guidance.replace(
+                "qa-retrieval", TRIVIAQA_QA_MEMORY_TOOL_ID
+            )
+            terminal_wire = terminal_wire.replace(
+                "qa-retrieval", TRIVIAQA_QA_MEMORY_TOOL_ID
+            )
+            for old, new in (
+                ("qa-retrieval", TRIVIAQA_QA_MEMORY_TOOL_ID),
+                ("one exact unread passage_id", "one exact unread memory_id"),
+                ("only one passage_id", "only one memory_id"),
+                ("one exact passage_id", "one exact memory_id"),
+                ("passage_id returned by", "memory_id returned by"),
+                ("only passage_id", "only memory_id"),
+                ("returned passage_id", "returned memory_id"),
+            ):
+                evidence_continuation = evidence_continuation.replace(old, new)
+            qa_guidance = (
+                "\nSkillFlow QA execution guidance: "
+                + guidance
+                + terminal_wire
+                if guidance
+                else ""
+            )
+            qa_memory_wire = (
+                "\nTriviaQA QA-memory Tool wire: Tool actions use the exact "
+                "resource_id triviaqa.qa_memory. Search arguments contain exactly "
+                "query and limit, with the schema-frozen limit. Read arguments "
+                "contain exactly memory_id copied from the latest successful search "
+                "observation. The structured semantic artifact continues to use its "
+                "existing passage_id provenance field, set to that same memory_id; "
+                "this does not rename the Tool or its canonical receipt."
+            )
         return (
             contract
             + qa_guidance
             + evidence_continuation
             + public_state_text
+            + qa_memory_wire
         )
 
     @staticmethod
@@ -8204,6 +8468,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         original_question: str,
         artifact: str,
         tool_receipts: Sequence[Mapping[str, object]],
+        retrieval_tool_id: str = QA_RETRIEVAL_TOOL_ID,
     ) -> bool:
         """Prove a completion-only ordinal repair from the cited public read."""
 
@@ -8250,9 +8515,13 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         question_surface = identity["question_surface"]
         assert isinstance(question_surface, str)
         for receipt in tool_receipts:
+            receipt = _semantic_compatible_read_receipt(
+                receipt,
+                retrieval_tool_id,
+            )
             if not AgentWorkflowEnv._successful_read_receipt(
                 receipt,
-                QA_RETRIEVAL_TOOL_ID,
+                retrieval_tool_id,
             ):
                 continue
             receipt_request = receipt.get("request")
@@ -8285,7 +8554,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             passage_title = passage.get("title")
             read_text = AgentWorkflowEnv._successful_read_text(
                 receipt,
-                QA_RETRIEVAL_TOOL_ID,
+                retrieval_tool_id,
             )
             if (
                 isinstance(passage_title, str)
@@ -8308,6 +8577,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         artifact: str,
         tool_receipts: Sequence[Mapping[str, object]],
         require_answer_type_binding: bool = False,
+        retrieval_tool_id: str = QA_RETRIEVAL_TOOL_ID,
     ) -> bool:
         """Prove that entity/relation repair can stay on one public read.
 
@@ -8368,9 +8638,13 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         ):
             return False
         for receipt in tool_receipts:
+            receipt = _semantic_compatible_read_receipt(
+                receipt,
+                retrieval_tool_id,
+            )
             if not AgentWorkflowEnv._successful_read_receipt(
                 receipt,
-                QA_RETRIEVAL_TOOL_ID,
+                retrieval_tool_id,
             ):
                 continue
             receipt_request = receipt.get("request")
@@ -8403,7 +8677,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             title = passage.get("title")
             read_text = AgentWorkflowEnv._successful_read_text(
                 receipt,
-                QA_RETRIEVAL_TOOL_ID,
+                retrieval_tool_id,
             )
             if (
                 not isinstance(title, str)
@@ -8510,6 +8784,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         original_question: str,
         artifact: str,
         tool_receipts: Sequence[Mapping[str, object]],
+        retrieval_tool_id: str = QA_RETRIEVAL_TOOL_ID,
     ) -> str | None:
         """Validate one answer-free Retriever artifact against one read receipt.
 
@@ -8621,9 +8896,13 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         cited_read_text: str | None = None
         cited_read_title: str | None = None
         for receipt in tool_receipts:
+            receipt = _semantic_compatible_read_receipt(
+                receipt,
+                retrieval_tool_id,
+            )
             if not AgentWorkflowEnv._successful_read_receipt(
                 receipt,
-                QA_RETRIEVAL_TOOL_ID,
+                retrieval_tool_id,
             ):
                 continue
             receipt_request = receipt.get("request")
@@ -8651,7 +8930,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 continue
             cited_read_text = AgentWorkflowEnv._successful_read_text(
                 receipt,
-                QA_RETRIEVAL_TOOL_ID,
+                retrieval_tool_id,
             )
             if cited_read_text is not None:
                 raw_title = passage.get("title")
@@ -9032,7 +9311,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         qa_receipts = tuple(
             receipt
             for receipt in tool_receipts
-            if receipt.get("tool_id") == QA_RETRIEVAL_TOOL_ID
+            if receipt.get("tool_id") == self._retrieval_tool_id
         )
         successful_search_queries: list[str] = []
         successful_search_observations: list[Mapping[str, object]] = []
@@ -9066,7 +9345,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     "executed_action": {
                         "kind": "tool",
                         "name": "search",
-                        "resource_id": QA_RETRIEVAL_TOOL_ID,
+                        "resource_id": self._retrieval_tool_id,
                         "skill_id": None,
                         "arguments": dict(arguments)
                         if isinstance(arguments, Mapping)
@@ -9147,7 +9426,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         if self._retrieval_completion_required.get():
             retrieval_admitted = False
             for receipt in evidence_tool_receipts:
-                if receipt.get("tool_id") != QA_RETRIEVAL_TOOL_ID:
+                if receipt.get("tool_id") != self._retrieval_tool_id:
                     continue
                 receipt_request = receipt.get("request")
                 if not isinstance(receipt_request, Mapping) or receipt_request.get(
@@ -9157,7 +9436,10 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 if self._completion_policy == "required_tool_call":
                     retrieval_admitted = True
                     break
-                if self._successful_read_receipt(receipt):
+                if self._successful_read_receipt(
+                    receipt,
+                    self._retrieval_tool_id,
+                ):
                     retrieval_admitted = True
                     break
             if not retrieval_admitted:
@@ -9175,6 +9457,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 original_question=evidence_retriever_question,
                 artifact=artifact,
                 tool_receipts=tool_receipts,
+                retrieval_tool_id=self._retrieval_tool_id,
             )
             if issue is None:
                 return None
@@ -9227,6 +9510,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     original_question=evidence_retriever_question,
                     artifact=artifact,
                     tool_receipts=tool_receipts,
+                    retrieval_tool_id=self._retrieval_tool_id,
                 )
             )
             entity_relation_structure_repair = bool(
@@ -9242,6 +9526,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     original_question=evidence_retriever_question,
                     artifact=artifact,
                     tool_receipts=tool_receipts,
+                    retrieval_tool_id=self._retrieval_tool_id,
                 )
             )
             relation_structure_repair = bool(
@@ -9256,6 +9541,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     artifact=artifact,
                     tool_receipts=tool_receipts,
                     require_answer_type_binding=True,
+                    retrieval_tool_id=self._retrieval_tool_id,
                 )
             )
             structured_repair = (
@@ -9324,9 +9610,9 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             for receipt in evidence_tool_receipts
             if isinstance(receipt, Mapping)
             for text in (
-                AgentWorkflowEnv._successful_read_text(
+                self._successful_read_text(
                     receipt,
-                    QA_RETRIEVAL_TOOL_ID,
+                    self._retrieval_tool_id,
                 ),
             )
             if text is not None
@@ -9514,7 +9800,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         if (
             self._unified_factual_protocol(request)
             and action.kind is ActionKind.TOOL
-            and action.resource_id == QA_RETRIEVAL_TOOL_ID
+            and action.resource_id == self._retrieval_tool_id
             and action.name == "search"
         ):
             location_containment_repair = (
@@ -9876,6 +10162,12 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     )
                     if (
                         prior_limits
+                        and self._retrieval_tool_id
+                        == TRIVIAQA_QA_MEMORY_TOOL_ID
+                    ):
+                        return "qa_retrieval_duplicate_normalized_query"
+                    if (
+                        prior_limits
                         and not (
                             query_term_set_signature
                             == latest_query_term_set_signature
@@ -9964,14 +10256,14 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 return f"qa_required_evidence_next_action_{expected_action}"
         if (
             action.kind is not ActionKind.TOOL
-            or action.resource_id != QA_RETRIEVAL_TOOL_ID
+            or action.resource_id != self._retrieval_tool_id
             or action.name != "read"
         ):
             return None
         arguments = action.arguments
         if not isinstance(arguments, dict):
             return None
-        passage_id = arguments.get("passage_id")
+        passage_id = _retrieval_record_id(arguments)
         if not isinstance(passage_id, str) or not passage_id.strip():
             return None
 
@@ -10027,6 +10319,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
 def build_qa_tool_registry(
     index: _RetrievalIndex,
     *,
+    tool_id: str | None = None,
     dataset_scope: Sequence[str] = DEFAULT_QA_DATASET_SCOPE,
     timeout_seconds: float = 10.0,
 ) -> ToolRegistry:
@@ -10038,9 +10331,28 @@ def build_qa_tool_registry(
 
     if isinstance(dataset_scope, (str, bytes)):
         raise TypeError("dataset_scope must be a sequence of dataset IDs")
+    manifest_tool_id = getattr(index.manifest, "tool_id", None)
+    resolved_tool_id = (
+        manifest_tool_id
+        if tool_id is None and manifest_tool_id is not None
+        else tool_id or QA_RETRIEVAL_TOOL_ID
+    )
+    if resolved_tool_id not in _SUPPORTED_QA_RETRIEVAL_TOOL_IDS:
+        raise ValueError("QA retrieval Tool ID is unsupported")
+    if (
+        manifest_tool_id is not None
+        and manifest_tool_id != resolved_tool_id
+    ):
+        raise ValueError("retrieval manifest Tool ID differs from registration")
     scope = tuple(dataset_scope)
     identity = _index_identity(index)
     version = str(identity["index_id"])
+    qa_memory = resolved_tool_id == TRIVIAQA_QA_MEMORY_TOOL_ID
+    frozen_top_k = getattr(index.manifest, "frozen_top_k", None)
+    if frozen_top_k is not None and (
+        type(frozen_top_k) is not int or frozen_top_k < 1
+    ):
+        raise ValueError("retrieval manifest frozen_top_k must be a positive integer")
     identity_schema = {
         "type": "object",
         "additionalProperties": False,
@@ -10065,7 +10377,11 @@ def build_qa_tool_registry(
         "required": ["query", "limit"],
         "properties": {
             "query": {"type": "string", "minLength": 1},
-            "limit": {"type": "integer", "minimum": 1},
+            "limit": (
+                {"const": frozen_top_k}
+                if frozen_top_k is not None
+                else {"type": "integer", "minimum": 1}
+            ),
         },
     }
     search_input_schema["properties"]["query"]["description"] = (
@@ -10074,24 +10390,64 @@ def build_qa_tool_registry(
     search_input_schema["properties"]["limit"]["description"] = (
         "The positive number of ranked public passages to return."
     )
+    read_id_field = "memory_id" if qa_memory else "passage_id"
     read_input_schema = {
         "type": "object",
         "additionalProperties": False,
-        "required": ["passage_id"],
+        "required": [read_id_field],
         "properties": {
-            "passage_id": {
+            read_id_field: {
                 "type": "string",
                 "minLength": 1,
                 "description": (
-                    "The exact canonical passage_id returned by a successful "
-                    "search action in this execution; a title or document_id "
-                    "is not a passage_id."
+                    f"The exact canonical {read_id_field} returned by a successful "
+                    f"search action in this execution; a title or document_id "
+                    f"is not a {read_id_field}."
                 ),
             },
         },
     }
+    search_required = [
+        "operation",
+        "retrieval_index",
+        "query",
+        "top_k",
+        "passage_ids",
+        "hits",
+    ]
+    search_properties: dict[str, object] = {
+        "operation": {"const": "search"},
+        "retrieval_index": identity_schema,
+        "query": {"type": "string"},
+        "top_k": {"type": "integer"},
+        "passage_ids": {
+            "type": "array",
+            "items": {"type": "string"},
+        },
+        "hits": {"type": "array", "items": {"type": "object"}},
+    }
+    read_required = ["operation", "retrieval_index", "passage_id", "passage"]
+    read_properties: dict[str, object] = {
+        "operation": {"const": "read"},
+        "retrieval_index": identity_schema,
+        "passage_id": {"type": "string"},
+        "passage": {"type": "object"},
+    }
+    if qa_memory:
+        search_required.append("memory_ids")
+        search_properties["memory_ids"] = {
+            "type": "array",
+            "items": {"type": "string"},
+        }
+        read_required.extend(("memory_id", "memory"))
+        read_properties.update(
+            {
+                "memory_id": {"type": "string"},
+                "memory": {"type": "object"},
+            }
+        )
     retrieval_capability = ToolCapability(
-        tool_id=QA_RETRIEVAL_TOOL_ID,
+        tool_id=resolved_tool_id,
         dataset_scope=scope,
         action_schemas={
             "search": search_input_schema,
@@ -10105,41 +10461,14 @@ def build_qa_tool_registry(
                 {
                     "type": "object",
                     "additionalProperties": False,
-                    "required": [
-                        "operation",
-                        "retrieval_index",
-                        "query",
-                        "top_k",
-                        "passage_ids",
-                        "hits",
-                    ],
-                    "properties": {
-                        "operation": {"const": "search"},
-                        "retrieval_index": identity_schema,
-                        "query": {"type": "string"},
-                        "top_k": {"type": "integer"},
-                        "passage_ids": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                        },
-                        "hits": {"type": "array", "items": {"type": "object"}},
-                    },
+                    "required": search_required,
+                    "properties": search_properties,
                 },
                 {
                     "type": "object",
                     "additionalProperties": False,
-                    "required": [
-                        "operation",
-                        "retrieval_index",
-                        "passage_id",
-                        "passage",
-                    ],
-                    "properties": {
-                        "operation": {"const": "read"},
-                        "retrieval_index": identity_schema,
-                        "passage_id": {"type": "string"},
-                        "passage": {"type": "object"},
-                    },
+                    "required": read_required,
+                    "properties": read_properties,
                 },
             ],
         },
@@ -10150,8 +10479,8 @@ def build_qa_tool_registry(
     return ToolRegistry(
         (
             ToolRegistration(
-                QA_RETRIEVAL_TOOL_ID,
-                QARetrievalToolBackend(index, identity),
+                resolved_tool_id,
+                QARetrievalToolBackend(index, identity, frozen_top_k),
                 retrieval_capability,
             ),
         )
@@ -10167,6 +10496,22 @@ class OpenQAToolRegistry:
     _index: _RetrievalIndex = field(repr=False)
     _cleanup: Callable[[], None] | None = field(default=None, repr=False)
     _closed: bool = field(default=False, init=False, repr=False)
+
+    @property
+    def tool_id(self) -> str:
+        value = getattr(self._index.manifest, "tool_id", QA_RETRIEVAL_TOOL_ID)
+        return str(value)
+
+    @property
+    def frozen_tool_budget(self) -> Mapping[str, int]:
+        value = getattr(self._index.manifest, "tool_budget", None)
+        if not isinstance(value, Mapping):
+            return {}
+        return {
+            key: item
+            for key, item in value.items()
+            if isinstance(key, str) and type(item) is int and item > 0
+        }
 
     def close(self) -> None:
         if not self._closed:
@@ -10199,17 +10544,40 @@ def open_qa_tool_registry(
     dataset_scope: Sequence[str] = DEFAULT_QA_DATASET_SCOPE,
     timeout_seconds: float = 10.0,
 ) -> OpenQAToolRegistry:
-    """Open SkillFlow's immutable index and register search/read resources."""
+    """Open an immutable SkillFlow index or TriviaQA train QA-memory index."""
 
-    retrieval_index_class = _load_retrieval_index_class(Path(skillflow_source))
+    resolved_index_path = Path(index_path)
+    if resolved_index_path.is_dir():
+        manifest_path = resolved_index_path / "manifest.json"
+        try:
+            with manifest_path.open("r", encoding="utf-8") as handle:
+                manifest_value = json.load(handle)
+        except (OSError, TypeError, ValueError) as exc:
+            raise SkillFlowRetrievalError(
+                f"QA retrieval manifest could not be read: {manifest_path}"
+            ) from exc
+        if not isinstance(manifest_value, Mapping):
+            raise SkillFlowRetrievalError("QA retrieval manifest must be a mapping")
+        if (
+            manifest_value.get("record_kind") != "qa_memory"
+            or manifest_value.get("tool_id") != TRIVIAQA_QA_MEMORY_TOOL_ID
+        ):
+            raise SkillFlowRetrievalError(
+                "directory index is not a TriviaQA QA-memory index"
+            )
+        from .triviaqa_qa_memory import TriviaQAQAMemoryIndex
+
+        retrieval_index_class = TriviaQAQAMemoryIndex
+    else:
+        retrieval_index_class = _load_retrieval_index_class(Path(skillflow_source))
     try:
         index = _ThreadAffineRetrievalWorker(
             retrieval_index_class,
-            Path(index_path),
+            resolved_index_path,
         )
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
         raise SkillFlowRetrievalError(
-            f"SkillFlow retrieval index could not be opened: {Path(index_path)}"
+            f"SkillFlow retrieval index could not be opened: {resolved_index_path}"
         ) from exc
     try:
         registry = build_qa_tool_registry(
@@ -10321,6 +10689,7 @@ __all__ = [
     "QAReadToolBackend",
     "QA_RETRIEVAL_TOOL_ID",
     "QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL",
+    "TRIVIAQA_QA_MEMORY_TOOL_ID",
     "QASearchToolBackend",
     "build_qa_tool_registry",
     "open_qa_tool_registry",

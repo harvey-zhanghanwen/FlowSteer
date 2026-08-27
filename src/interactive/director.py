@@ -3161,7 +3161,11 @@ class AgentGraphOrchestrator:
             )
         dataset_id = env.runtime.dataset_id
         return [
-            capability.to_value()
+            {
+                "tool_id": capability.tool_id,
+                "action_names": list(capability.action_names),
+                "availability": capability.availability,
+            }
             for capability in self.tool_registry.capabilities
             if dataset_id is None or capability.supports_dataset(dataset_id)
         ]
@@ -3185,11 +3189,16 @@ class AgentGraphOrchestrator:
             for relation in env.graph.relations
             for source_id, target_id in relation.directed_edges()
         ]
+        control_plane = env.director_feedback_mode == "control_plane"
         payload: dict[str, Any] = {
             "current_graph": env.graph.to_dict(),
             "topology_statistics": env.graph.topology_statistics(),
-            "canvas_feedback": _director_neutral_feedback_projection(
-                snapshot.last_feedback
+            "canvas_feedback": (
+                env.director_control_plane_feedback()
+                if control_plane
+                else _director_neutral_feedback_projection(
+                    snapshot.last_feedback
+                )
             ),
             "admissible_action_types": list(
                 env.model_admissible_action_types()
@@ -3206,6 +3215,15 @@ class AgentGraphOrchestrator:
                 "required_tool_id": env.required_tool_id,
             },
         }
+        if control_plane:
+            # Director samples Canvas edits but is never an AgentRuntime Tool
+            # principal. Tool capabilities below are assignment metadata for
+            # worker Agents only; no Tool schema or execution handle is bound
+            # to the local Qwen3.5-9B provider request.
+            payload["director_execution_profile"] = {
+                "allowed_tools": [],
+                "tool_calls_enabled": False,
+            }
         if verified_qa_semantic_protocol(self.semantic_protocol):
             payload["action_target_domains"] = (
                 env.model_admissible_action_targets()
@@ -3223,17 +3241,19 @@ class AgentGraphOrchestrator:
                         "source_id": action_value.get("source_id"),
                         "target_id": action_value.get("target_id"),
                     }
-                reason = " ".join(
-                    _director_neutral_feedback_projection(entry.feedback).split()
-                )
-                recent_rejections.append(
-                    {
-                        "revision": entry.revision,
-                        "action": action_value.get("action"),
-                        "target": target,
-                        "reason": reason[:360],
-                    }
-                )
+                rejection = {
+                    "revision": entry.revision,
+                    "action": action_value.get("action"),
+                    "target": target,
+                }
+                if not control_plane:
+                    reason = " ".join(
+                        _director_neutral_feedback_projection(
+                            entry.feedback
+                        ).split()
+                    )
+                    rejection["reason"] = reason[:360]
+                recent_rejections.append(rejection)
                 if len(recent_rejections) >= 3:
                     break
             if recent_rejections:
@@ -3288,29 +3308,48 @@ class AgentGraphOrchestrator:
             payload["directed_edges"] = directed_edges
         if partial_validation.issues:
             payload["structural_issues"] = [
-                {
-                    "code": issue.code,
-                    "message": issue.message,
-                }
+                (
+                    {
+                        "code": issue.code,
+                        "agent_ids": list(issue.agent_ids),
+                    }
+                    if control_plane
+                    else {
+                        "code": issue.code,
+                        "message": issue.message,
+                    }
+                )
                 for issue in partial_validation.issues
             ]
         if env.graph.output_agent_id is not None:
             format_issue = env.format_agent_issue()
             if format_issue is not None:
-                payload["terminal_format_issue"] = format_issue
+                payload["terminal_format_issue"] = (
+                    {"present": True}
+                    if control_plane
+                    else format_issue
+                )
         # FlowSteer returns terminal-constraint state to the policy, while
         # SkillFlow accepts completion only after validation.  Expose the
         # revision-local gate and its first measured failure stage so the
         # Director repairs the responsible semantic node instead of probing
         # FINISH or repeatedly modifying the Formatter.
         if verified_qa_semantic_protocol(self.semantic_protocol):
-            payload["finish_admissibility"] = _director_neutral_state_projection(
-                env.finish_admissibility()
+            payload["finish_admissibility"] = (
+                env.director_control_plane_finish_admissibility()
+                if control_plane
+                else _director_neutral_state_projection(
+                    env.finish_admissibility()
+                )
             )
         else:
             finish_admissibility = env.finish_admissibility()
             if finish_admissibility.get("admissible") is True:
-                payload["finish_admissibility"] = finish_admissibility
+                payload["finish_admissibility"] = (
+                    env.director_control_plane_finish_admissibility()
+                    if control_plane
+                    else finish_admissibility
+                )
         if include_task_context:
             payload.update(
                 {

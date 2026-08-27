@@ -149,6 +149,15 @@ def _receipt_signature(receipt: Mapping[str, Any]) -> str:
 def _iter_retrieval_receipts(
     trajectory: Mapping[str, Any],
 ) -> Iterable[dict[str, Any]]:
+    """Yield lossless QA-memory receipts from successful and failed workers.
+
+    ``AgentRuntime`` stores receipts from completed workers under execution
+    records and receipts from a failed bounded ReAct call under the typed
+    ``failure_records`` control-plane receipt.  Counting only completed
+    executions would incorrectly report zero worker Tool calls for a genuine
+    retrieval attempt that ended in coverage or semantic validation failure.
+    """
+
     seen: set[str] = set()
     for round_index, execution_position, execution in base._iter_executions(trajectory):
         metadata = base._mapping(execution.get("metadata"))
@@ -170,6 +179,11 @@ def _iter_retrieval_receipts(
                 base._mapping(raw_receipt.get("request")).get("action", "")
             ).casefold()
             yield {
+                "execution_outcome": "completed",
+                "artifact_available": (
+                    isinstance(execution.get("output"), str)
+                    or isinstance(response.get("text"), str)
+                ),
                 "round_index": round_index,
                 "execution_position": execution_position,
                 "receipt_position": receipt_position,
@@ -182,6 +196,57 @@ def _iter_retrieval_receipts(
                 "request_allowed_tools": base._list(request_agent.get("allowed_tools")),
                 "receipt": dict(raw_receipt),
             }
+
+    for turn_position, raw_turn in enumerate(base._list(trajectory.get("turns"))):
+        turn = base._mapping(raw_turn)
+        round_index = turn.get("round_index", turn_position)
+        if not isinstance(round_index, int):
+            round_index = turn_position
+        snapshot = base._mapping(turn.get("graph_snapshot"))
+        nodes = {
+            node.get("id"): node
+            for node in base._list(snapshot.get("nodes"))
+            if isinstance(node, Mapping) and isinstance(node.get("id"), str)
+        }
+        runtime = base._mapping(turn.get("runtime_summary"))
+        for failure_position, raw_failure in enumerate(
+            base._list(runtime.get("failure_records"))
+        ):
+            failure = base._mapping(raw_failure)
+            agent_id = failure.get("agent_id")
+            agent = base._mapping(nodes.get(agent_id))
+            metadata = base._mapping(failure.get("metadata"))
+            for receipt_position, raw_receipt in enumerate(
+                base._list(metadata.get("tool_receipts"))
+            ):
+                if not isinstance(raw_receipt, Mapping):
+                    continue
+                if raw_receipt.get("tool_id") != QA_MEMORY_TOOL_ID:
+                    continue
+                signature = _receipt_signature(raw_receipt)
+                if signature in seen:
+                    continue
+                seen.add(signature)
+                action = str(
+                    base._mapping(raw_receipt.get("request")).get("action", "")
+                ).casefold()
+                yield {
+                    "execution_outcome": "failed",
+                    "artifact_available": False,
+                    "round_index": round_index,
+                    "execution_position": failure_position,
+                    "receipt_position": receipt_position,
+                    "signature": signature,
+                    "action": action,
+                    "agent_id": agent_id,
+                    "request_agent_id": agent_id,
+                    "request_execution_role": "worker",
+                    "request_execution_mode": agent.get("execution_mode"),
+                    "request_allowed_tools": base._list(
+                        agent.get("allowed_tools")
+                    ),
+                    "receipt": dict(raw_receipt),
+                }
 
 
 def _directed_edges(snapshot: object) -> set[tuple[str, str]]:
@@ -388,8 +453,11 @@ def _trajectory_control_plane(
         (message["source_agent_id"], message["target_agent_id"])
         for message in messages
     }
+    artifact_receipts = [
+        item for item in receipts if item.get("artifact_available") is True
+    ]
     immediate_routes: list[dict[str, Any]] = []
-    for item in receipts:
+    for item in artifact_receipts:
         matching = [
             message
             for message in messages
@@ -404,11 +472,16 @@ def _trajectory_control_plane(
                 "routes": matching,
             }
         )
+    artifact_owner_ids = {
+        str(item["agent_id"])
+        for item in artifact_receipts
+        if isinstance(item.get("agent_id"), str)
+    }
     output_lineage = all(
         any(_reachable(owner, output, communication_edges) for output in output_ids)
-        for owner in owner_ids
-    ) if owner_ids and output_ids else False
-    routed = bool(receipts) and all(
+        for owner in artifact_owner_ids
+    ) if artifact_owner_ids and output_ids else False
+    routed = bool(artifact_receipts) and all(
         route["routed"] for route in immediate_routes
     ) and output_lineage
     output_inbox_messages = [
@@ -419,12 +492,17 @@ def _trajectory_control_plane(
         for message in output_inbox_messages
         for signature in message["receipt_signatures"]
     }
+    canonical_artifact_signatures = {
+        str(item["signature"])
+        for item in artifact_receipts
+        if str(item["signature"]) in canonical_worker_signatures
+    }
     missing_output_inbox_signatures = sorted(
-        canonical_worker_signatures - output_inbox_signatures
+        canonical_artifact_signatures - output_inbox_signatures
     )
     output_inbox_receipt_lineage = (
-        bool(receipts)
-        and len(canonical_worker_signatures) == len(receipts)
+        bool(artifact_receipts)
+        and len(canonical_artifact_signatures) == len(artifact_receipts)
         and bool(output_inbox_messages)
         and not missing_output_inbox_signatures
     )
@@ -439,6 +517,7 @@ def _trajectory_control_plane(
         "director_exposed_retrieval_values": exposed_values,
         "director_exposed_memory_ids": exposed_memory_ids,
         "retrieval_tool_call_count": len(receipts),
+        "retrieval_artifact_receipt_count": len(artifact_receipts),
         "search_count": sum(item["action"] == "search" for item in receipts),
         "read_count": sum(item["action"] == "read" for item in receipts),
         "worker_agent_ids": sorted(owner_ids),
@@ -454,7 +533,7 @@ def _trajectory_control_plane(
         "output_inbox_receipt_lineage": output_inbox_receipt_lineage,
         "output_inbox_message_count": len(output_inbox_messages),
         "output_inbox_canonical_receipt_count": len(
-            canonical_worker_signatures & output_inbox_signatures
+            canonical_artifact_signatures & output_inbox_signatures
         ),
         "output_inbox_missing_canonical_receipt_signatures": (
             missing_output_inbox_signatures
@@ -495,14 +574,19 @@ def _aggregate_control_plane(
     retrieval_tasks = [
         value for value in per_task.values() if value["retrieval_tool_call_count"] > 0
     ]
+    artifact_tasks = [
+        value
+        for value in per_task.values()
+        if value["retrieval_artifact_receipt_count"] > 0
+    ]
     routed_tasks = [
         value
-        for value in retrieval_tasks
+        for value in artifact_tasks
         if value["retrieval_artifact_routed_via_relation"] is True
     ]
     output_lineage_tasks = [
         value
-        for value in retrieval_tasks
+        for value in artifact_tasks
         if value["output_inbox_receipt_lineage"] is True
     ]
     assertions = {
@@ -517,14 +601,15 @@ def _aggregate_control_plane(
         and ownership_violations == 0,
         "worker_ownership_violation_count": ownership_violations,
         "retrieval_tasks": len(retrieval_tasks),
+        "retrieval_artifact_tasks": len(artifact_tasks),
         "retrieval_tasks_with_relation_route": len(routed_tasks),
-        "retrieval_artifact_routed_via_relation": bool(retrieval_tasks)
-        and len(routed_tasks) == len(retrieval_tasks),
+        "retrieval_artifact_routed_via_relation": bool(artifact_tasks)
+        and len(routed_tasks) == len(artifact_tasks),
         "retrieval_tasks_with_output_inbox_receipt_lineage": len(
             output_lineage_tasks
         ),
-        "output_inbox_receipt_lineage": bool(retrieval_tasks)
-        and len(output_lineage_tasks) == len(retrieval_tasks),
+        "output_inbox_receipt_lineage": bool(artifact_tasks)
+        and len(output_lineage_tasks) == len(artifact_tasks),
     }
     return (
         {

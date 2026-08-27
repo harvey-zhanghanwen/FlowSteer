@@ -390,6 +390,40 @@ def _assert_field_names_are_diagnostic_only_and_output_inbox_lineage_is_independ
     assert result["output_inbox_missing_canonical_receipt_signatures"] == []
 
 
+def _assert_failed_worker_receipts_count_without_claiming_artifact_route() -> None:
+    task_id = "triviaqa:validation:failed-worker"
+    trajectory = _trajectory(task_id)
+    turn = trajectory["turns"][0]  # type: ignore[index]
+    search = _receipt("search", 11)
+    read = _receipt("read", 12)
+    turn["executions"] = []
+    turn["runtime_summary"] = {
+        "failure_records": [
+            {
+                "agent_id": "retriever",
+                "error_type": "ReactExecutionError",
+                "metadata": {"tool_receipts": [search, read]},
+            }
+        ],
+        "output_agent_id": "formatter",
+    }
+
+    result = analysis._trajectory_control_plane(task_id, trajectory)  # noqa: SLF001
+    assert result["retrieval_tool_call_count"] == 2
+    assert result["retrieval_artifact_receipt_count"] == 0
+    assert result["worker_ownership_violations"] == []
+    assert result["retrieval_artifact_routed_via_relation"] is False
+
+    control, _ = analysis._aggregate_control_plane(  # noqa: SLF001
+        [task_id], {task_id: trajectory}
+    )
+    assertions = control["assertions"]
+    assert assertions["retrieval_tool_calls_by_worker"] == 2
+    assert assertions["retrieval_tool_calls_by_worker_gt_0"] is True
+    assert assertions["retrieval_artifact_tasks"] == 0
+    assert assertions["retrieval_artifact_routed_via_relation"] is False
+
+
 class TriviaQAQAMemoryResultAnalysisTests(unittest.TestCase):
     def test_formal_report_metrics_tool_ownership_isolation_routing_and_demos(
         self,
@@ -405,3 +439,8 @@ class TriviaQAQAMemoryResultAnalysisTests(unittest.TestCase):
         self,
     ) -> None:
         _assert_field_names_are_diagnostic_only_and_output_inbox_lineage_is_independent()
+
+    def test_failed_worker_receipts_count_without_claiming_artifact_route(
+        self,
+    ) -> None:
+        _assert_failed_worker_receipts_count_without_claiming_artifact_route()

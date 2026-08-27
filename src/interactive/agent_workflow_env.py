@@ -47,6 +47,7 @@ class AgentWorkflowStateError(RuntimeError):
 
 _HOTPOTQA_SEMANTIC_PROTOCOL = "hotpotqa_verified_answer_slot_v1"
 _QA_SEMANTIC_PROTOCOL = "qa_verified_answer_lineage_v2"
+_TRIVIAQA_QA_MEMORY_TOOL_ID = "triviaqa.qa_memory"
 _PRESERVE_REPAIR_RECOVERY_POLICY = "preserve_diagnose_repair_augment"
 _SEMANTIC_LINEAGE_PROTOCOLS = frozenset(
     {_HOTPOTQA_SEMANTIC_PROTOCOL, _QA_SEMANTIC_PROTOCOL}
@@ -373,6 +374,7 @@ class AgentWorkflowEnv:
         semantic_protocol: str = "none",
         recovery_policy: str = "default",
         required_evidence_tool_id: Optional[str] = None,
+        director_feedback_mode: str = "artifact_preview",
     ) -> None:
         if runtime is None and gateway is None:
             raise AgentWorkflowStateError("gateway or runtime is required")
@@ -423,16 +425,29 @@ class AgentWorkflowEnv:
             raise AgentWorkflowStateError(
                 "required_evidence_tool_id must be non-empty text or None"
             )
+        if director_feedback_mode not in {"artifact_preview", "control_plane"}:
+            raise AgentWorkflowStateError(
+                "director_feedback_mode must be artifact_preview or control_plane"
+            )
         if semantic_protocol in _SEMANTIC_LINEAGE_PROTOCOLS:
             if recovery_policy != _PRESERVE_REPAIR_RECOVERY_POLICY:
                 raise AgentWorkflowStateError(
                     f"{semantic_protocol} requires "
                     "recovery_policy=preserve_diagnose_repair_augment"
                 )
-            if required_evidence_tool_id != "qa-retrieval":
+            dataset_id = None if runtime is None else runtime.dataset_id
+            admitted_evidence_tool_ids = (
+                {"qa-retrieval", "triviaqa.qa_memory"}
+                if semantic_protocol == _QA_SEMANTIC_PROTOCOL
+                and isinstance(dataset_id, str)
+                and dataset_id.casefold() == "triviaqa"
+                else {"qa-retrieval"}
+            )
+            if required_evidence_tool_id not in admitted_evidence_tool_ids:
                 raise AgentWorkflowStateError(
                     f"{semantic_protocol} requires "
-                    "required_evidence_tool_id='qa-retrieval'"
+                    "a dataset-admitted required_evidence_tool_id; expected one "
+                    f"of {sorted(admitted_evidence_tool_ids)!r}"
                 )
         if semantic_protocol == _QA_SEMANTIC_PROTOCOL:
             dataset_id = None if runtime is None else runtime.dataset_id
@@ -490,6 +505,7 @@ class AgentWorkflowEnv:
             if required_evidence_tool_id is None
             else required_evidence_tool_id.strip()
         )
+        self.director_feedback_mode = director_feedback_mode
         self.allowed_action_types = resolved_allowed_actions
         self._allowed_action_type_set = frozenset(resolved_allowed_actions)
         self.parser = AgentActionParser()
@@ -541,6 +557,106 @@ class AgentWorkflowEnv:
     @property
     def problem(self) -> str:
         return self._problem
+
+    def director_control_plane_feedback(self) -> dict[str, object]:
+        """Return the latest Canvas receipt without data-plane content."""
+
+        if not self._history:
+            return {
+                "status": "initial_canvas",
+                "graph_revision": self._graph.revision,
+            }
+        entry = self._history[-1]
+        action = None if entry.action is None else entry.action.to_dict()
+        action_target: object = None
+        if isinstance(action, Mapping):
+            action_target = action.get("agent_id")
+            if action_target is None and action.get("source_id") is not None:
+                action_target = {
+                    "source_id": action.get("source_id"),
+                    "target_id": action.get("target_id"),
+                }
+        result: dict[str, object] = {
+            "status": (
+                "finished"
+                if entry.done
+                else "accepted"
+                if entry.accepted
+                else "rejected"
+            ),
+            "accepted": entry.accepted,
+            "done": entry.done,
+            "graph_revision": entry.revision,
+            "action": None if action is None else action.get("action"),
+            "target": action_target,
+            "execution_reused": entry.execution_reused,
+        }
+        if self.director_feedback_mode != "control_plane":
+            return result
+        for marker, field_name in (
+            ("execution_result=", "execution_receipt"),
+            ("execution_error=", "failure_receipt"),
+        ):
+            marker_index = entry.feedback.find(marker)
+            if marker_index < 0:
+                continue
+            try:
+                value = json.loads(entry.feedback[marker_index + len(marker) :])
+            except (TypeError, ValueError, json.JSONDecodeError):
+                break
+            if isinstance(value, Mapping):
+                result[field_name] = dict(value)
+            break
+        return result
+
+    def director_control_plane_finish_admissibility(self) -> dict[str, object]:
+        """Project the FINISH gate to typed, content-free control state."""
+
+        admission = self.finish_admissibility()
+        projected: dict[str, object] = {
+            field: admission[field]
+            for field in (
+                "admissible",
+                "stage",
+                "graph_revision",
+                "submission_semantics",
+            )
+            if field in admission
+        }
+        issues = admission.get("issues")
+        if isinstance(issues, (list, tuple)):
+            projected["issues"] = [
+                {
+                    field: item[field]
+                    for field in ("code", "agent_ids")
+                    if field in item
+                }
+                for item in issues
+                if isinstance(item, Mapping)
+            ]
+        attribution = admission.get("failure_attribution")
+        if isinstance(attribution, Mapping):
+            safe_attribution_fields = (
+                "responsible_constraint",
+                "responsible_role_family",
+                "responsible_agent_id",
+                "responsible_agent_ids",
+                "format_target_agent_ids",
+                "preserve_agent_ids",
+                "delete_allowed_before_replacement_takeover",
+                "operational_diagnosis",
+                "corpus_level_oracle_claim",
+            )
+            projected["failure_attribution"] = {
+                field: attribution[field]
+                for field in safe_attribution_fields
+                if field in attribution
+            }
+        if "semantic_lineage_diagnostic" in admission:
+            projected["semantic_lineage_diagnostic_present"] = True
+        if self.recovery_policy == _PRESERVE_REPAIR_RECOVERY_POLICY:
+            projected["recovery_state"] = self._control_plane_recovery_state()
+        return projected
 
     @property
     def graph(self) -> AgentGraph:
@@ -2275,8 +2391,14 @@ class AgentWorkflowEnv:
                     request = value.get("request")
                     assert isinstance(request, Mapping)
                     arguments = request.get("arguments")
+                    record_id_field = (
+                        "memory_id"
+                        if self.required_evidence_tool_id
+                        == _TRIVIAQA_QA_MEMORY_TOOL_ID
+                        else "passage_id"
+                    )
                     passage_id = (
-                        arguments.get("passage_id")
+                        arguments.get(record_id_field)
                         if isinstance(arguments, Mapping)
                         else None
                     )
@@ -2444,8 +2566,14 @@ class AgentWorkflowEnv:
                         if isinstance(request, Mapping)
                         else None
                     )
+                    record_id_field = (
+                        "memory_id"
+                        if self.required_evidence_tool_id
+                        == _TRIVIAQA_QA_MEMORY_TOOL_ID
+                        else "passage_id"
+                    )
                     passage_id = (
-                        arguments.get("passage_id")
+                        arguments.get(record_id_field)
                         if isinstance(arguments, Mapping)
                         else None
                     )
@@ -3732,6 +3860,7 @@ class AgentWorkflowEnv:
             semantic_protocol=self.semantic_protocol,
             recovery_policy=self.recovery_policy,
             required_evidence_tool_id=self.required_evidence_tool_id,
+            director_feedback_mode=self.director_feedback_mode,
         )
         result._turn_count = state.turn_count
         result._finished = state.finished
@@ -4263,6 +4392,17 @@ class AgentWorkflowEnv:
         if execution_error is not None:
             return f"{feedback}; {self._execution_error_feedback(execution_error)}"
         if execution is None:
+            if self.director_feedback_mode == "control_plane":
+                result = json.dumps(
+                    {
+                        "status": "not_executed",
+                        "graph_revision": self._graph.revision,
+                        "recovery_state": self._control_plane_recovery_state(),
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+                return f"{feedback}; execution_result={result}"
             if self.recovery_policy == _PRESERVE_REPAIR_RECOVERY_POLICY:
                 state = json.dumps(
                     self.recovery_state(),
@@ -4271,6 +4411,14 @@ class AgentWorkflowEnv:
                 )
                 return f"{feedback}; recovery_state={state}"
             return feedback
+
+        if self.director_feedback_mode == "control_plane":
+            result = json.dumps(
+                self._control_plane_execution_receipt(execution),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            return f"{feedback}; execution_result={result}"
 
         # FlowSteer's progressive Canvas returns the just-executed workflow
         # result to the policy after an edit.  Keep this receipt deliberately
@@ -4373,6 +4521,184 @@ class AgentWorkflowEnv:
             separators=(",", ":"),
         )
         return f"{feedback}; execution_result={result}"
+
+    @staticmethod
+    def _control_plane_tool_receipt_summary(
+        receipts: object,
+    ) -> dict[str, object]:
+        """Return Tool call status without request or observation payloads."""
+
+        if not isinstance(receipts, (list, tuple)):
+            receipts = ()
+        admitted = tuple(item for item in receipts if isinstance(item, Mapping))
+        successful = tuple(
+            item
+            for item in admitted
+            if item.get("error_type") is None
+            and isinstance(item.get("result"), Mapping)
+            and item["result"].get("completed") is not False
+        )
+        return {
+            "receipt_count": len(admitted),
+            "successful_receipt_count": len(successful),
+            "tool_ids": sorted(
+                {
+                    str(item["tool_id"])
+                    for item in admitted
+                    if item.get("tool_id") is not None
+                }
+            ),
+            "actions": sorted(
+                {
+                    str(request["action"])
+                    for item in admitted
+                    for request in (item.get("request"),)
+                    if isinstance(request, Mapping)
+                    and request.get("action") is not None
+                }
+            ),
+            "error_types": sorted(
+                {
+                    str(item["error_type"])
+                    for item in admitted
+                    if item.get("error_type") is not None
+                }
+            ),
+        }
+
+    def _control_plane_recovery_state(self) -> dict[str, object]:
+        """Project preserve/repair state without semantic or Tool content."""
+
+        state = self.recovery_state()
+        safe_fields = (
+            "policy",
+            "phase",
+            "preserved_agent_ids",
+            "previous_revision_preserved_agent_ids",
+            "failed_agent_ids",
+            "react_turn_exhausted_agent_ids",
+            "repair_exhausted_agent_ids",
+            "mandatory_repair_agent_ids",
+            "active_auxiliary_replacement_agent_ids",
+            "diagnosed_unusable_agent_ids",
+            "unresolved_dirty_agent_ids",
+            "terminal_unreachable_agent_ids",
+            "active_semantic_lineage_agent_ids",
+            "redundant_after_replacement_takeover_agent_ids",
+            "deletable_agent_ids",
+            "repair_exhausted_auxiliary_takeover_delete_agent_ids",
+            "capacity_recovery_delete_agent_ids",
+        )
+        return {field: state[field] for field in safe_fields if field in state}
+
+    def _control_plane_execution_receipt(
+        self,
+        execution: AgentRuntimeResult,
+    ) -> dict[str, object]:
+        """Project execution state without exposing Agent or Tool content.
+
+        The exact worker artifacts, upstream messages, query arguments, Tool
+        observations and provenance receipts remain in ``AgentRuntimeResult``
+        and the lossless trajectory.  Only scheduling, routing, artifact
+        presence and receipt status cross the Director control-plane boundary.
+        """
+
+        calls_by_agent = {
+            call.request.agent.id: call for call in execution.calls
+        }
+        output_calls = [
+            call
+            for call in execution.calls
+            if call.request.agent.id == execution.output_agent_id
+        ]
+        output_request = output_calls[-1].request if output_calls else None
+        output_inbox: list[dict[str, object]] = []
+        if output_request is not None:
+            for message in output_request.upstream:
+                output_inbox.append(
+                    {
+                        "source_agent_id": message.source_agent_id,
+                        "target_agent_id": message.target_agent_id,
+                        "message_type": message.message_type,
+                        "artifact_type": message.artifact_type,
+                        "graph_revision": message.graph_revision,
+                        "environment_revision": message.environment_revision,
+                        "artifact_present": bool(message.content.strip()),
+                        "tool_receipt_summary": (
+                            self._control_plane_tool_receipt_summary(
+                                message.tool_receipts
+                            )
+                        ),
+                    }
+                )
+
+        agents: list[dict[str, object]] = []
+        known_agent_ids = tuple(
+            sorted(
+                set(execution.outputs)
+                | set(execution.executed_agent_ids)
+                | set(execution.reused_agent_ids)
+                | set(execution.deferred_agent_ids)
+            )
+        )
+        for agent_id in known_agent_ids:
+            if not self._graph.has_node(agent_id):
+                continue
+            node = self._graph.get_node(agent_id)
+            call = calls_by_agent.get(agent_id)
+            own_receipts = (
+                ()
+                if call is None
+                else call.response.metadata.get("tool_receipts", ())
+            )
+            output_metadata = execution.output_metadata.get(agent_id, {})
+            artifact_version = output_metadata.get("artifact_version")
+            agents.append(
+                {
+                    "agent_id": agent_id,
+                    "model_id": (
+                        node.model_id
+                        if call is None
+                        else call.request.model.model_id
+                    ),
+                    "role_family": node.role_family,
+                    "execution_mode": node.execution_mode.value,
+                    "allowed_tools": list(node.allowed_tools),
+                    "artifact_type": node.artifact_type,
+                    "artifact_present": bool(
+                        execution.outputs.get(agent_id, "").strip()
+                    ),
+                    "artifact_version_present": bool(artifact_version),
+                    "is_output_agent": agent_id == execution.output_agent_id,
+                    "upstream_source_ids": (
+                        []
+                        if call is None
+                        else [
+                            message.source_agent_id
+                            for message in call.request.upstream
+                        ]
+                    ),
+                    "tool_receipt_summary": (
+                        self._control_plane_tool_receipt_summary(own_receipts)
+                    ),
+                }
+            )
+        return {
+            "status": "success",
+            "graph_revision": execution.graph_revision,
+            "output_agent_id": execution.output_agent_id,
+            "output_artifact_present": bool(
+                execution.final_answer is not None
+                and execution.final_answer.strip()
+            ),
+            "executed_agent_ids": list(execution.executed_agent_ids),
+            "reused_agent_ids": list(execution.reused_agent_ids),
+            "deferred_agent_ids": list(execution.deferred_agent_ids),
+            "topology": self._graph.topology_statistics(),
+            "output_inbox": output_inbox,
+            "agents": agents,
+            "recovery_state": self._control_plane_recovery_state(),
+        }
 
     def _terminal_validation_error(self, answer: str) -> Optional[str]:
         """Apply the configured task terminal protocol before accepting FINISH.
@@ -6984,14 +7310,28 @@ class AgentWorkflowEnv:
         if not isinstance(request, Mapping) or request.get("action") != "read":
             return False
         arguments = request.get("arguments")
+        if not isinstance(arguments, Mapping):
+            return False
         if (
-            not isinstance(arguments, Mapping)
-            or set(arguments) != {"passage_id"}
-            or not isinstance(arguments.get("passage_id"), str)
-            or not arguments["passage_id"].strip()
+            required_tool_id == _TRIVIAQA_QA_MEMORY_TOOL_ID
+            and set(arguments) == {"memory_id"}
+        ):
+            record_id_field = "memory_id"
+            record_field = "memory"
+        elif set(arguments) == {"passage_id"}:
+            # Internal-only compatibility view used by the unchanged v63
+            # semantic validators. The canonical worker receipt remains
+            # read(memory_id) and is never rewritten in the trajectory.
+            record_id_field = "passage_id"
+            record_field = "passage"
+        else:
+            return False
+        if (
+            not isinstance(arguments.get(record_id_field), str)
+            or not arguments[record_id_field].strip()
         ):
             return False
-        request_passage_id = arguments["passage_id"]
+        request_record_id = arguments[record_id_field]
         result = receipt.get("result")
         if (
             not isinstance(result, Mapping)
@@ -7001,13 +7341,13 @@ class AgentWorkflowEnv:
         value = result.get("value", result)
         if not isinstance(value, Mapping) or value.get("operation") != "read":
             return False
-        passage = value.get("passage")
+        record = value.get(record_field)
         return (
-            isinstance(passage, Mapping)
-            and value.get("passage_id") == request_passage_id
-            and passage.get("passage_id") == request_passage_id
-            and isinstance(passage.get("text"), str)
-            and bool(passage["text"].strip())
+            isinstance(record, Mapping)
+            and value.get(record_id_field) == request_record_id
+            and record.get(record_id_field) == request_record_id
+            and isinstance(record.get("text"), str)
+            and bool(record["text"].strip())
         )
 
     @staticmethod
@@ -7024,11 +7364,19 @@ class AgentWorkflowEnv:
         assert isinstance(result, Mapping)
         value = result.get("value", result)
         assert isinstance(value, Mapping)
-        passage = value["passage"]
-        assert isinstance(passage, Mapping)
-        text = passage["text"]
+        request = receipt["request"]
+        assert isinstance(request, Mapping)
+        arguments = request["arguments"]
+        assert isinstance(arguments, Mapping)
+        record = value[
+            "memory"
+            if set(arguments) == {"memory_id"}
+            else "passage"
+        ]
+        assert isinstance(record, Mapping)
+        text = record["text"]
         assert isinstance(text, str)
-        raw_title = passage.get("title")
+        raw_title = record.get("title")
         passage_title = (
             raw_title.strip()
             if isinstance(raw_title, str) and raw_title.strip()
@@ -7916,6 +8264,7 @@ class AgentWorkflowEnv:
                         ),
                         artifact=artifact,
                         tool_receipts=public_receipts,
+                        retrieval_tool_id=self.required_evidence_tool_id,
                     )
                     is not None
                 ):
@@ -8814,6 +9163,7 @@ class AgentWorkflowEnv:
                 original_question=hotpotqa_question_scope(self._problem),
                 artifact=artifact,
                 tool_receipts=public_receipts,
+                retrieval_tool_id=self.required_evidence_tool_id,
             )
             return completion_issue is None
         if role_family == "reasoner":
@@ -9755,6 +10105,71 @@ class AgentWorkflowEnv:
         return summary
 
     def _execution_error_feedback(self, exc: AgentRuntimeError) -> str:
+        if self.director_feedback_mode == "control_plane":
+            failed_agents: list[dict[str, object]] = []
+            for record in exc.failure_records[:4]:
+                node = (
+                    self._graph.get_node(record.agent_id)
+                    if self._graph.has_node(record.agent_id)
+                    else None
+                )
+                model_id = None if node is None else node.model_id
+                provider_id = (
+                    None
+                    if model_id is None
+                    else self.model_registry.provider_for(model_id).provider_id
+                )
+                category, retryability, status_code = (
+                    self._execution_failure_diagnosis(record)
+                )
+                react_summary = self._react_public_error_summary(record)
+                item: dict[str, object] = {
+                    "agent_id": record.agent_id,
+                    "model_id": model_id,
+                    "provider_id": provider_id,
+                    "phase": record.phase.value,
+                    "error_type": record.error_type,
+                    "failure_category": category,
+                    "retryability": retryability,
+                    "tool_receipt_summary": (
+                        self._control_plane_tool_receipt_summary(
+                            record.metadata.get("tool_receipts", ())
+                        )
+                    ),
+                    "react_summary": {
+                        field: react_summary[field]
+                        for field in (
+                            "react_turn_count",
+                            "observation_status_counts",
+                            "public_error_code_counts",
+                            "successful_tool_receipt_count",
+                            "successful_evidence_read_count",
+                            "terminal_failure_diagnosis",
+                        )
+                        if field in react_summary
+                    },
+                }
+                if status_code is not None:
+                    item["http_status"] = status_code
+                failed_agents.append(item)
+            payload = json.dumps(
+                {
+                    "type": type(exc).__name__,
+                    "code": "agent_runtime_execution_failed",
+                    "failed_agents": failed_agents,
+                    "blocked_agent_ids": list(exc.blocked_agent_ids),
+                    "pending_agent_ids": list(exc.pending_agent_ids),
+                    "preserved_agent_ids": (
+                        []
+                        if exc.partial_result is None
+                        else sorted(exc.partial_result.outputs)
+                    ),
+                    "recovery_state": self._control_plane_recovery_state(),
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            return f"execution_error={payload}"
         message = " ".join(str(exc).split())
         if len(message) > 240:
             message = message[:237] + "..."

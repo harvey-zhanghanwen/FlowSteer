@@ -129,6 +129,12 @@ from .qa_tool_adapter import (
     build_qa_tool_registry,
     open_qa_tool_registry,
 )
+from .triviaqa_qa_memory import (
+    QA_MEMORY_TOOL_ID as TRIVIAQA_QA_MEMORY_TOOL_ID,
+    TriviaQAQAMemoryIndex,
+    TriviaQAQAMemoryRecord,
+    build_triviaqa_qa_memory_index,
+)
 from .coding_tools import (
     RepositoryToolBackend,
     SWEBENCH_REPOSITORY_TOOL_ID,
@@ -244,6 +250,10 @@ __all__ = [
     'QA_RETRIEVAL_TOOL_ID',
     'build_qa_tool_registry',
     'open_qa_tool_registry',
+    'TRIVIAQA_QA_MEMORY_TOOL_ID',
+    'TriviaQAQAMemoryIndex',
+    'TriviaQAQAMemoryRecord',
+    'build_triviaqa_qa_memory_index',
     'RepositoryToolBackend',
     'SWEBENCH_REPOSITORY_TOOL_ID',
     'create_swebench_repository_registry',

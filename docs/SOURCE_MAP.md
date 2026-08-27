@@ -1332,3 +1332,27 @@ The v63 complete static suite passes 1,013 tests plus 197 subtests. Prepare-only
 reproduces the v62 `selected_tasks.jsonl` byte-for-byte with the same ordered
 128 validation records. Stable Zero and fixed-128 scores are not claimed until
 their corresponding versioned executions complete.
+
+## TriviaQA train QA-memory unified-v2 source boundary
+
+This condition extends the existing `unified_architecture_v2` v63 Runtime; it
+does not introduce a second Director, Canvas, AgentGraph, ReAct loop or
+evaluator.  The versioned entry point is
+`config/evaluation_triviaqa_qa_memory_unified_v2.yaml`, and the local Tool
+identity is `triviaqa.qa_memory`.
+
+| Current module/boundary | Classification | Primary source retained | Minimal adaptation and exclusion |
+| --- | --- | --- | --- |
+| `tool_runtime.py::{StructuredAction,ToolRegistry,ToolRequest,ToolResult}`; `react_execution.py::ToolReactExecutionAdapter`; `qa_tool_adapter.py::{open_qa_tool_registry,QARetrievalReactExecutionAdapter}` | SkillFlow direct reuse | SkillFlow's public `StructuredAction -> ToolResult -> Observation` contract, bounded ReAct continuation, Tool registry and `search`/`read` action boundary | The same contracts execute inside one Tool-capable worker Agent. ReAct remains an Agent execution policy rather than a Director role or an AgentGraph topology template. |
+| `agent_workflow_env.py::AgentWorkflowEnv.step`; `director.py::AgentGraphOrchestrator.run`; `agent_runtime.py` relation routing; `rollout_collector.py` | FlowSteer direct reuse at the orchestration boundary, with the existing heterogeneous-Agent compatibility layer | Progressive Canvas editing, one admitted edit or functional subgraph followed by execution and feedback, explicit `FINISH`, and lossless trajectory receipts | The free heterogeneous AgentGraph, model-labelled nodes and typed relation messages remain the already-documented project adaptation because FlowSteer's fixed Operator graph does not provide them. This condition does not change the Canvas action vocabulary or prescribe a chain, fan-in, reciprocal edge or role order. |
+| `triviaqa_qa_memory.py`; `triviaqa_embedding_index.py`; `generate_triviaqa_qa_memory_paraphrases.py`; `build_triviaqa_qa_memory_index.py`; `select_triviaqa_qa_memory_profile.py` | Necessary TriviaQA adaptation | The existing frozen project split and the existing local normalized dense-index implementation | Exactly 512 frozen train QA records are represented by semantic-preserving question paraphrases and answer statements that preserve the canonical answer span. The manifest records 512 memories, 512 unique train sources, zero cycled rows for this materialization, 768-dimensional L2-normalized embeddings and frozen top-k 3. The 128 held-out validation identities are checked for split isolation and no validation question, answer, accepted alias, supporting fact or evaluator receipt is indexed. |
+| `qa_tool_adapter.py` QA-memory projection and `train_agentgraph_smoke.py::_runtime_for_task` | Necessary Tool compatibility adaptation | The reused SkillFlow Tool/ReAct boundary and existing v63 semantic-lineage admission | The exact local Tool ID is bound to a worker's `execution_mode=react` and `allowed_tools=["triviaqa.qa_memory"]`; `search(query,limit)` returns ranked dense-retrieval candidates and `read(memory_id)` returns the selected train-memory record with a worker-owned Tool receipt. Retrieval is performed during Agent execution, never by static prefetch and never by Web Search. |
+| `agent_workflow_env.py::{director_control_plane_feedback,director_control_plane_finish_admissibility}`; `director.py::_canvas_observation` | Necessary control-plane isolation adaptation | FlowSteer's Canvas feedback and explicit terminal admission remain authoritative | The local Qwen3.5-9B Director has `allowed_tools=[]`, performs zero retrieval calls and receives no query, similarity, QA-memory text, top-k record or Agent artifact body. It sees only Canvas state plus structured execution/failure, artifact-presence, relation-routing and Tool-receipt summaries. Exact data-plane content remains in worker/runtime trajectory receipts. |
+| `AgentRuntime` communication envelopes; v63 evidence/Reasoner/Verifier/Formatter lineage; QA-memory v2 focused tests and result analyzer | Necessary provenance/admission adaptation | Existing explicit AgentGraph relations, artifact versions, SkillFlow Tool receipts and the unchanged `triviaqa.official.answer.v1` evaluator | A worker retrieval artifact must reach downstream reasoning, verification and Output through explicit relations. Output may consume only provenance-bearing upstream artifacts. Admission/reporting asserts `director_tool_calls=0`, `retrieval_tool_calls_by_worker>0` and `retrieval_artifact_routed_via_relation=true`; failure is reported rather than repaired by injecting retrieval content into the Director. |
+
+The condition is inference-only. `skills`, exploration, GRPO, backward,
+optimizer updates, LoRA publication and policy synchronization are disabled,
+and the Director remains local Qwen3.5-9B. The QA-memory registry contains no
+browser, HTTP search or Web Search capability. Stable Zero and fixed-128
+scores are reported only from completed version-bound manifests; this source
+map does not claim a formal result.

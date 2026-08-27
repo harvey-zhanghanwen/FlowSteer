@@ -2305,6 +2305,34 @@ class LiveSmokeBackend:
                 timeout_seconds=float(qa_settings["tool_timeout_seconds"]),
             )
         try:
+            opened_tool_id = str(
+                getattr(opened, "tool_id", opened.registry.resource_ids[0])
+            ).strip()
+            graph_value = self.config.get("agent_graph")
+            configured_evidence_tool_id = (
+                str(graph_value.get("required_evidence_tool_id", "")).strip()
+                if isinstance(graph_value, Mapping)
+                else ""
+            )
+            if (
+                configured_evidence_tool_id
+                and opened_tool_id != configured_evidence_tool_id
+            ):
+                raise ConfigurationError(
+                    "opened QA retrieval Tool ID differs from "
+                    "agent_graph.required_evidence_tool_id"
+                )
+            frozen_tool_budget = getattr(opened, "frozen_tool_budget", {})
+            if frozen_tool_budget and frozen_tool_budget != {
+                "max_tool_calls_per_agent_call": int(
+                    qa_settings["max_tool_calls"]
+                ),
+                "max_turns_per_agent_call": int(qa_settings["max_turns"]),
+            }:
+                raise ConfigurationError(
+                    "qa_tool_runtime budget differs from the frozen retrieval "
+                    "index manifest"
+                )
             adapter = QARetrievalReactExecutionAdapter(
                 gateway=self.runtime.gateway,
                 tool_registry=opened.registry,
@@ -2313,6 +2341,7 @@ class LiveSmokeBackend:
                 max_action_tokens=tool_action_tokens,
                 task_type=str(task_type),
                 completion_policy=str(qa_settings["completion_policy"]),
+                retrieval_tool_id=opened_tool_id,
                 sampling_base_seed=sampling_base_seed,
                 sampling_coordinate=sampling_coordinate,
             )
@@ -3292,6 +3321,11 @@ class LiveSmokeBackend:
                 semantic_protocol=semantic_protocol,
                 recovery_policy=recovery_policy,
                 required_evidence_tool_id=required_evidence_tool_id,
+                director_feedback_mode=str(
+                    graph_config.get(
+                        "director_feedback_mode", "artifact_preview"
+                    )
+                ),
                 allowed_actions=(
                     tuple(str(value) for value in graph_config["actions"])
                     if graph_config.get("actions") is not None

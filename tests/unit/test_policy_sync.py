@@ -39,6 +39,7 @@ class _SGLangControl:
         self.fail_canary = False
         self.models_failures_remaining = 0
         self.rejected_unloads: set[str] = set()
+        self.max_running_requests: int | None = 4
 
     def get(self, url: str, **kwargs: Any) -> _Response:
         operation = url.removesuffix("/").rsplit("/", 1)[-1]
@@ -47,7 +48,7 @@ class _SGLangControl:
             return _Response(
                 {
                     "context_length": 32768,
-                    "max_running_requests": 4,
+                    "max_running_requests": self.max_running_requests,
                     "max_total_num_tokens": 717868,
                     "enable_deterministic_inference": True,
                     "sampling_backend": "pytorch",
@@ -228,11 +229,26 @@ class PolicySyncTests(unittest.TestCase):
             "flowsteer.sglang.server-runtime-receipt.v1",
         )
         self.assertEqual(receipt["max_running_requests"], 4)
+        self.assertEqual(receipt["max_running_requests_mode"], "explicit")
         self.assertEqual(receipt["max_total_num_tokens"], 717868)
         self.assertTrue(receipt["enable_deterministic_inference"])
         self.assertEqual(receipt["sampling_backend"], "pytorch")
         self.assertEqual(receipt["attention_backend"], "fa3")
         self.assertEqual(receipt["request_attempts"], {"server_info": 1})
+
+    def test_server_runtime_receipt_preserves_auto_running_request_limit(
+        self,
+    ) -> None:
+        control = _SGLangControl(set())
+        control.max_running_requests = None
+
+        receipt = self.publisher(control).server_runtime_receipt()
+
+        self.assertIsNone(receipt["max_running_requests"])
+        self.assertEqual(
+            receipt["max_running_requests_mode"], "server_default"
+        )
+        self.assertEqual(receipt["max_total_num_tokens"], 717868)
 
     def test_failed_canary_unloads_candidate_and_preserves_behavior_adapter(
         self,
