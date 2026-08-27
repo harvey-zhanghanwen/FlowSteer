@@ -1376,3 +1376,16 @@ official evaluator are unchanged.
 The v15 condition changes no task IDs, QA-memory record, embedding model,
 top-k, Tool budget, Director prompt, model catalog or evaluator.  It remains
 inference-only and preserves the worker-only retrieval boundary.
+
+## TriviaQA QA-memory v17 completed-trajectory reporting gate
+
+| Current module/boundary | Classification | Primary source retained | Minimal compatibility adaptation |
+| --- | --- | --- | --- |
+| `analyze_triviaqa_qa_memory_results.py::_director_payload_diagnostics` | Necessary reporting correction | Existing Director control-plane isolation and exact worker Tool receipts | Count only a provenance identifier or an explicit JSON field/value pair as structural data-plane exposure. An unlabeled answer phrase repeated in a Director-authored `current_graph` contract remains a lexical diagnostic and cannot fail the isolation gate. |
+| `analyze_triviaqa_qa_memory_results.py::_aggregate_control_plane` | DIRECT_REUSE from `evaluate_hotpotqa_round.py::_retrieval_boundary_statistics` | HotpotQA's completed retrieval-task denominator: an explicit-FINISH retrieval artifact must have a directed path to Output | Apply relation-route and Output-inbox lineage strong assertions only to explicit-FINISH retrieval artifact tasks. Preserve all retrieval and unfinished counts as diagnostics; unfinished trajectories remain terminal failures and receive strict zero task metrics rather than weakening the completion gate. |
+| `agent_workflow_env.py::{_role_conditional_semantic_issue,_current_successful_evidence_worker_ids}` | Necessary terminal-admission correction | Existing FlowSteer progressive Output provenance and SkillFlow lossless Tool receipts | Before explicit `FINISH`, require every current non-Output worker that owns the dataset Tool and has a successful search/read pair to have those exact current receipts in the selected Output artifact provenance. This closes a stale-artifact case after worker re-execution without imposing roles, Agent count, relation direction or a fixed topology. |
+
+The v17 condition changes only the versioned reporting and terminal-admission
+semantics above. Its frozen sampling schedule purpose, seed, selected 128
+tasks, Director and Agent models, QA-memory index, embedding model, top-k, Tool
+budget and official TriviaQA evaluator remain identical to v16.

@@ -1870,6 +1870,103 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(0, runtime.execute_count)
         self.assertEqual([], gateway.requests)
 
+    def test_free_topology_finish_requires_each_current_worker_receipt_lineage(
+        self,
+    ) -> None:
+        registry = make_registry()
+        first_receipts = _trivia_memory_receipts()
+        second_receipts = json.loads(json.dumps(_trivia_memory_receipts()))
+        second_receipts[0]["request"]["arguments"]["query"] = "second query"
+        second_receipts[1]["request"]["arguments"]["memory_id"] = "memory-002"
+        second_receipts[1]["result"]["value"]["memory_id"] = "memory-002"
+        second_receipts[1]["result"]["value"]["memory"]["memory_id"] = (
+            "memory-002"
+        )
+        workers = (
+            AgentNode(
+                "worker_1",
+                "balanced",
+                "retrieve first evidence",
+                execution_mode="react",
+                allowed_tools=("triviaqa.qa_memory",),
+            ),
+            AgentNode(
+                "worker_2",
+                "balanced",
+                "retrieve second evidence",
+                execution_mode="react",
+                allowed_tools=("triviaqa.qa_memory",),
+            ),
+        )
+        output = AgentNode("output", "balanced", "answer from evidence")
+        graph = AgentGraph(
+            [*workers, output],
+            [
+                AgentRelation("worker_1", "output", True, False),
+                AgentRelation("worker_2", "output", True, False),
+            ],
+            output_agent_id="output",
+        )
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_TriviaMemoryProfileRuntime(registry),  # type: ignore[arg-type]
+            problem="Which author wrote the novel?",
+            graph=graph,
+            execute_on_edit=True,
+            require_exact_answer_tag=True,
+            required_evidence_tool_id="triviaqa.qa_memory",
+            require_evidence_relation=True,
+            director_feedback_mode="control_plane",
+        )
+
+        def execution_with(provenance: list[dict[str, object]]) -> AgentRuntimeResult:
+            return AgentRuntimeResult(
+                run_id="two-workers",
+                graph_revision=graph.revision,
+                output_agent_id="output",
+                final_answer="<answer>Ada</answer>",
+                outputs={
+                    "worker_1": "first evidence",
+                    "worker_2": "second evidence",
+                    "output": "<answer>Ada</answer>",
+                },
+                calls=(),
+                block_completion_order=(("worker_1", "worker_2"), ("output",)),
+                output_metadata={
+                    "worker_1": {"tool_receipts": first_receipts},
+                    "worker_2": {"tool_receipts": second_receipts},
+                    "output": {"input_artifact_provenance": provenance},
+                },
+            )
+
+        stale = execution_with(
+            [
+                {
+                    "source_agent_id": "worker_1",
+                    "target_agent_id": "output",
+                    "tool_receipts": first_receipts,
+                }
+            ]
+        )
+        issue = env._required_evidence_issue(stale)
+        self.assertIn("worker_2", issue or "")
+
+        current = execution_with(
+            [
+                {
+                    "source_agent_id": "worker_1",
+                    "target_agent_id": "output",
+                    "tool_receipts": first_receipts,
+                },
+                {
+                    "source_agent_id": "worker_2",
+                    "target_agent_id": "output",
+                    "tool_receipts": second_receipts,
+                },
+            ]
+        )
+        self.assertIsNone(env._required_evidence_issue(current))
+
     async def test_null_output_executes_an_output_free_component(self) -> None:
         registry = make_registry()
         gateway = _ImmediateGateway()

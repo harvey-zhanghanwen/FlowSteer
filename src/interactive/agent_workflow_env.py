@@ -8220,11 +8220,11 @@ class AgentWorkflowEnv:
 
         The role-conditional protocol intentionally does not impose a
         Retriever -> Reasoner -> Verifier -> Formatter spine.  FINISH requires
-        only one non-Output ReAct worker with a completed QA-memory search and
-        read, a non-empty evidence artifact, and an explicit directed path from
-        that worker into the selected Output Agent.  Any further reasoning,
-        verification, formatting, fan-out, or reciprocal exchange remains a
-        Director-selected Canvas capability rather than a terminal template.
+        every current non-Output ReAct worker with a completed QA-memory search
+        and read to have its current receipts in the selected Output artifact's
+        provenance.  Any further reasoning, verification, formatting, fan-out,
+        or reciprocal exchange remains a Director-selected Canvas capability
+        rather than a terminal template.
         """
 
         output_id = self._graph.output_agent_id
@@ -8237,35 +8237,59 @@ class AgentWorkflowEnv:
         if not isinstance(output_metadata, Mapping):
             return "The selected Output artifact has no execution provenance"
         provenance = output_metadata.get("input_artifact_provenance", ())
-        if isinstance(provenance, (list, tuple)):
-            public_receipts = tuple(
+        provenance_items = (
+            provenance if isinstance(provenance, (list, tuple)) else ()
+        )
+        public_receipts = tuple(
+            receipt
+            for message in provenance_items
+            if isinstance(message, Mapping)
+            and isinstance(message.get("source_agent_id"), str)
+            and message.get("source_agent_id") != output_id
+            and isinstance(message.get("tool_receipts"), (list, tuple))
+            for receipt in message.get("tool_receipts", ())
+            if isinstance(receipt, Mapping)
+        )
+        successful_worker_ids = self._current_successful_evidence_worker_ids(
+            execution.output_metadata
+        )
+        if not successful_worker_ids:
+            return (
+                "Evidence-grounded QA has no current non-Output ReAct worker "
+                f"with completed {self.required_evidence_tool_id!r} search and "
+                "read receipts"
+            )
+        for worker_id in successful_worker_ids:
+            worker_metadata = execution.output_metadata.get(worker_id)
+            assert isinstance(worker_metadata, Mapping)
+            worker_receipts = worker_metadata.get("tool_receipts", ())
+            assert isinstance(worker_receipts, (list, tuple))
+            current_successful_receipts = tuple(
                 receipt
-                for message in provenance
-                if isinstance(message, Mapping)
-                and isinstance(message.get("source_agent_id"), str)
-                and message.get("source_agent_id") != output_id
-                and isinstance(message.get("tool_receipts"), (list, tuple))
-                for receipt in message.get("tool_receipts", ())
+                for receipt in worker_receipts
                 if isinstance(receipt, Mapping)
+                and (
+                    self._successful_search_receipt(
+                        receipt, self.required_evidence_tool_id
+                    )
+                    or self._successful_read_receipt(
+                        receipt, self.required_evidence_tool_id
+                    )
+                )
             )
             if any(
-                self._successful_search_receipt(
-                    receipt, self.required_evidence_tool_id
-                )
-                for receipt in public_receipts
-            ) and any(
-                self._successful_read_receipt(
-                    receipt, self.required_evidence_tool_id
-                )
-                for receipt in public_receipts
+                receipt not in public_receipts
+                for receipt in current_successful_receipts
             ):
-                return None
+                return (
+                    f"The selected Output artifact has not consumed the current "
+                    f"{self.required_evidence_tool_id!r} receipt lineage from "
+                    f"worker {worker_id!r}; preserve the worker artifact and "
+                    "re-execute its directed downstream dependency before "
+                    "FINISH"
+                )
 
-        return (
-            "The selected Output artifact did not actually consume an explicitly "
-            "routed upstream ReAct worker artifact with completed "
-            f"{self.required_evidence_tool_id!r} search and read receipts"
-        )
+        return None
 
     def _required_evidence_issue(
         self,
@@ -8295,15 +8319,16 @@ class AgentWorkflowEnv:
             )
         return self._role_conditional_semantic_issue(execution)
 
-    def _current_successful_evidence_worker_ids(self) -> Tuple[str, ...]:
+    def _current_successful_evidence_worker_ids(
+        self,
+        output_metadata: Optional[Mapping[str, Mapping[str, object]]] = None,
+    ) -> Tuple[str, ...]:
         """Return current workers with one successful search/read pair."""
 
         required_tool_id = self.required_evidence_tool_id
         if required_tool_id is None:
             return ()
-        metadata_by_agent: Mapping[str, Mapping[str, object]] = (
-            self._progressive_output_metadata
-        )
+        metadata_by_agent = output_metadata or self._progressive_output_metadata
         if (
             not metadata_by_agent
             and self._progressive_execution is not None
@@ -8312,7 +8337,11 @@ class AgentWorkflowEnv:
             metadata_by_agent = self._progressive_execution.output_metadata
         successful: list[str] = []
         for node in self._graph.nodes:
-            if node.id in self._failed_agent_ids:
+            if (
+                node.id in self._failed_agent_ids
+                or node.id == self._graph.output_agent_id
+                or required_tool_id not in node.allowed_tools
+            ):
                 continue
             metadata = metadata_by_agent.get(node.id)
             if not isinstance(metadata, Mapping):

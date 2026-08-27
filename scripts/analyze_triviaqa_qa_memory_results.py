@@ -657,8 +657,6 @@ def _director_payload_diagnostics(
 
     director_text = _director_visible_text(trajectory)
     director_input_text = "\n".join(_director_input_texts(trajectory))
-    task = base._mapping(trajectory.get("task"))
-    public_question = str(task.get("question", ""))
     exposures: list[dict[str, str]] = []
     collisions: list[dict[str, str]] = []
     for field, values in receipt_data_values.items():
@@ -670,18 +668,12 @@ def _director_payload_diagnostics(
             structurally_exposed = appears_in_input and (
                 (
                     field in PROVENANCE_IDENTIFIER_FIELDS
-                    and value not in public_question
                 )
                 or (
                     field in SEMANTIC_PAYLOAD_FIELDS
                     and _labeled_payload_value_present(
                         director_input_text, field, value
                     )
-                )
-                or (
-                    field in {"paraphrase_question", "paraphrase_answer_statement"}
-                    and len(value.strip()) >= 20
-                    and value not in public_question
                 )
             )
             (exposures if structurally_exposed else collisions).append(item)
@@ -835,6 +827,7 @@ def _trajectory_control_plane(
 
     return {
         "task_id": task_id,
+        "explicit_finish": trajectory.get("explicit_finish") is True,
         "director_tool_calls": director_calls,
         "director_allowed_tools": [],
         "director_retrieval_payload_markers": payload_markers,
@@ -911,14 +904,26 @@ def _aggregate_control_plane(
         for value in per_task.values()
         if value["retrieval_artifact_receipt_count"] > 0
     ]
+    finished_retrieval_tasks = [
+        value for value in retrieval_tasks if value["explicit_finish"] is True
+    ]
+    unfinished_retrieval_tasks = [
+        value for value in retrieval_tasks if value["explicit_finish"] is not True
+    ]
+    finished_artifact_tasks = [
+        value for value in artifact_tasks if value["explicit_finish"] is True
+    ]
+    unfinished_artifact_tasks = [
+        value for value in artifact_tasks if value["explicit_finish"] is not True
+    ]
     routed_tasks = [
         value
-        for value in artifact_tasks
+        for value in finished_artifact_tasks
         if value["retrieval_artifact_routed_via_relation"] is True
     ]
     output_lineage_tasks = [
         value
-        for value in artifact_tasks
+        for value in finished_artifact_tasks
         if value["output_inbox_receipt_lineage"] is True
     ]
     assertions = {
@@ -933,15 +938,21 @@ def _aggregate_control_plane(
         and ownership_violations == 0,
         "worker_ownership_violation_count": ownership_violations,
         "retrieval_tasks": len(retrieval_tasks),
+        "retrieval_invoked_tasks": len(retrieval_tasks),
+        "finished_retrieval_invoked_tasks": len(finished_retrieval_tasks),
+        "unfinished_retrieval_invoked_tasks": len(unfinished_retrieval_tasks),
         "retrieval_artifact_tasks": len(artifact_tasks),
+        "finished_retrieval_artifact_tasks": len(finished_artifact_tasks),
+        "unfinished_retrieval_artifact_tasks": len(unfinished_artifact_tasks),
         "retrieval_tasks_with_relation_route": len(routed_tasks),
-        "retrieval_artifact_routed_via_relation": bool(artifact_tasks)
-        and len(routed_tasks) == len(artifact_tasks),
+        "retrieval_artifact_routed_tasks": len(routed_tasks),
+        "retrieval_artifact_routed_via_relation": bool(finished_artifact_tasks)
+        and len(routed_tasks) == len(finished_artifact_tasks),
         "retrieval_tasks_with_output_inbox_receipt_lineage": len(
             output_lineage_tasks
         ),
-        "output_inbox_receipt_lineage": bool(artifact_tasks)
-        and len(output_lineage_tasks) == len(artifact_tasks),
+        "output_inbox_receipt_lineage": bool(finished_artifact_tasks)
+        and len(output_lineage_tasks) == len(finished_artifact_tasks),
     }
     return (
         {
@@ -1244,9 +1255,9 @@ def _render_markdown(report: Mapping[str, Any]) -> str:
         f"- terminal failure：**{terminal.get('failure_count')}**；termination：`{json.dumps(terminal.get('termination_reason_counts'), ensure_ascii=False, sort_keys=True)}`。",
         f"- `director_tool_calls=0`：**{assertions.get('director_tool_calls_eq_0')}**（实测 {assertions.get('director_tool_calls')}）。",
         f"- `retrieval_tool_calls_by_worker>0`：**{assertions.get('retrieval_tool_calls_by_worker_gt_0')}**（实测 {assertions.get('retrieval_tool_calls_by_worker')}；ownership violations={assertions.get('worker_ownership_violation_count')}）。",
-        f"- `retrieval_artifact_routed_via_relation=true`：**{assertions.get('retrieval_artifact_routed_via_relation')}**（{assertions.get('retrieval_tasks_with_relation_route')}/{assertions.get('retrieval_tasks')} retrieval tasks）。",
+        f"- `retrieval_artifact_routed_via_relation=true`：**{assertions.get('retrieval_artifact_routed_via_relation')}**（{assertions.get('retrieval_artifact_routed_tasks')}/{assertions.get('finished_retrieval_artifact_tasks')} explicit-FINISH retrieval artifact tasks；unfinished={assertions.get('unfinished_retrieval_invoked_tasks')}）。",
         f"- Director 数据面隔离：**{assertions.get('director_data_plane_isolated')}**（canonical receipt actual-value exposure={assertions.get('director_retrieval_payload_exposure_count')}；字段名仅作诊断）。",
-        f"- Output inbox receipt lineage（独立强断言）：**{assertions.get('output_inbox_receipt_lineage')}**（{assertions.get('retrieval_tasks_with_output_inbox_receipt_lineage')}/{assertions.get('retrieval_tasks')} retrieval tasks）。",
+        f"- Output inbox receipt lineage（独立强断言）：**{assertions.get('output_inbox_receipt_lineage')}**（{assertions.get('retrieval_tasks_with_output_inbox_receipt_lineage')}/{assertions.get('finished_retrieval_artifact_tasks')} explicit-FINISH retrieval artifact tasks）。",
         "",
         "### Worker Agent Tool ownership",
         "",

@@ -410,6 +410,16 @@ def _assert_bare_answer_collision_is_not_a_payload_exposure() -> None:
     ]
 
     trajectory["turns"][0]["prompt"] = (  # type: ignore[index]
+        'current_graph={"nodes":[{"contract":"The answer is train answer"}]}'
+    )
+    result = analysis._trajectory_control_plane(task_id, trajectory)  # noqa: SLF001
+    assert result["director_exposed_retrieval_values"] == []
+    assert {
+        "field": "paraphrase_answer_statement",
+        "value": "The answer is train answer",
+    } in result["director_retrieval_value_collisions"]
+
+    trajectory["turns"][0]["prompt"] = (  # type: ignore[index]
         'Leaked record: {"canonical_answer":"train answer"}'
     )
     result = analysis._trajectory_control_plane(task_id, trajectory)  # noqa: SLF001
@@ -506,6 +516,48 @@ def _assert_failed_worker_receipts_count_without_claiming_artifact_route() -> No
     assert assertions["retrieval_artifact_routed_via_relation"] is False
 
 
+def _assert_completed_route_gate_ignores_unfinished_retrieval_artifact_task() -> None:
+    completed_id = "triviaqa:validation:completed"
+    unfinished_id = "triviaqa:validation:unfinished"
+    completed = _trajectory(completed_id)
+    worker_receipts = completed["turns"][0]["executions"][0]["metadata"][  # type: ignore[index]
+        "response"
+    ]["tool_receipts"]
+    completed["turns"][0]["executions"][2]["metadata"]["request"][  # type: ignore[index]
+        "upstream"
+    ][0]["tool_receipts"] = worker_receipts
+
+    unfinished = _trajectory(unfinished_id)
+    unfinished["explicit_finish"] = False
+    unfinished["termination_reason"] = "max_rounds"
+    unfinished["turns"][0]["graph_snapshot"]["relations"] = []  # type: ignore[index]
+    unfinished["turns"][1]["graph_snapshot"]["relations"] = []  # type: ignore[index]
+
+    control, _ = analysis._aggregate_control_plane(  # noqa: SLF001
+        [completed_id, unfinished_id],
+        {completed_id: completed, unfinished_id: unfinished},
+    )
+    assertions = control["assertions"]
+    assert assertions["retrieval_invoked_tasks"] == 2
+    assert assertions["finished_retrieval_invoked_tasks"] == 1
+    assert assertions["unfinished_retrieval_invoked_tasks"] == 1
+    assert assertions["finished_retrieval_artifact_tasks"] == 1
+    assert assertions["unfinished_retrieval_artifact_tasks"] == 1
+    assert assertions["retrieval_artifact_routed_tasks"] == 1
+    assert assertions["retrieval_artifact_routed_via_relation"] is True
+    assert assertions["output_inbox_receipt_lineage"] is True
+
+    completed["turns"][0]["graph_snapshot"]["relations"] = []  # type: ignore[index]
+    completed["turns"][1]["graph_snapshot"]["relations"] = []  # type: ignore[index]
+    control, _ = analysis._aggregate_control_plane(  # noqa: SLF001
+        [completed_id], {completed_id: completed}
+    )
+    assertions = control["assertions"]
+    assert assertions["finished_retrieval_artifact_tasks"] == 1
+    assert assertions["retrieval_artifact_routed_tasks"] == 0
+    assert assertions["retrieval_artifact_routed_via_relation"] is False
+
+
 class TriviaQAQAMemoryResultAnalysisTests(unittest.TestCase):
     def test_formal_report_metrics_tool_ownership_isolation_routing_and_demos(
         self,
@@ -529,6 +581,11 @@ class TriviaQAQAMemoryResultAnalysisTests(unittest.TestCase):
 
     def test_bare_answer_collision_is_not_a_payload_exposure(self) -> None:
         _assert_bare_answer_collision_is_not_a_payload_exposure()
+
+    def test_completed_route_gate_ignores_unfinished_retrieval_artifact_task(
+        self,
+    ) -> None:
+        _assert_completed_route_gate_ignores_unfinished_retrieval_artifact_task()
 
     def test_post_hoc_retrieval_coverage_uses_official_normalization(self) -> None:
         _assert_post_hoc_retrieval_coverage_uses_official_normalization()
