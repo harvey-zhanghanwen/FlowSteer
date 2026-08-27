@@ -1049,6 +1049,59 @@ def _live_execution_profiles(
     return tuple(profiles)
 
 
+def _topology_neutral_add_domain(domain: Mapping[str, Any]) -> bool:
+    """Return whether ADD exposes live bounds without a semantic role prior."""
+
+    value = domain.get("topology_neutral")
+    if value not in {None, True}:
+        raise ValueError("add_subgraph topology_neutral marker is invalid")
+    return value is True
+
+
+def _live_topology_neutral_agent_schema_branches(
+    required_fields: Sequence[str],
+    model_ids: Sequence[str],
+    profiles: Sequence[tuple[str, tuple[str, ...]]],
+    *,
+    agent_id: str,
+    role_family: Optional[str] = None,
+) -> tuple[Mapping[str, Any], ...]:
+    """Bind one free-role Agent declaration to registered Runtime profiles."""
+
+    role_schema: Mapping[str, Any] = (
+        {"const": role_family}
+        if role_family is not None
+        else _NON_EMPTY_STRING_SCHEMA
+    )
+    branches: list[Mapping[str, Any]] = []
+    for execution_mode, allowed_tools in profiles:
+        properties = json.loads(
+            json.dumps(_AGENT_SPEC_JSON_SCHEMA["properties"])
+        )
+        properties.update(
+            {
+                "agent_id": {"const": agent_id},
+                "model_id": {"enum": list(model_ids)},
+                "role_family": dict(role_schema),
+                "execution_mode": {"const": execution_mode},
+                "allowed_tools": {"const": list(allowed_tools)},
+            }
+        )
+        branches.append(
+            {
+                "type": "object",
+                "additionalProperties": False,
+                "required": list(required_fields),
+                "properties": properties,
+            }
+        )
+    if not branches:
+        raise ValueError(
+            "add_subgraph topology-neutral execution profile domain is empty"
+        )
+    return tuple(branches)
+
+
 def _live_role_agent_schema(
     required_fields: Sequence[str],
     role_family: str,
@@ -1454,10 +1507,20 @@ def director_live_add_subgraph_agent_declarations_json_schema_text(
         for key in ("relation_endpoint_sources", "output_agent_id_sources")
     ):
         raise ValueError("add_subgraph endpoint scope is incomplete")
+    topology_neutral = _topology_neutral_add_domain(domain)
     role_constraints = domain.get("role_constraints")
-    if not isinstance(role_constraints, Mapping) or not role_constraints:
+    if not topology_neutral and (
+        not isinstance(role_constraints, Mapping) or not role_constraints
+    ):
         raise ValueError("add_subgraph role constraints are missing")
-    if role_conditional_qa_protocol(domain):
+    registered_profiles: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    if topology_neutral:
+        registered_profiles = _live_execution_profiles(
+            domain.get("registered_execution_profiles"),
+            label="add_subgraph.registered_execution_profiles",
+        )
+    elif role_conditional_qa_protocol(domain):
+        assert isinstance(role_constraints, Mapping)
         registered_profiles = set(
             _live_execution_profiles(
                 domain.get("registered_execution_profiles"),
@@ -1480,11 +1543,16 @@ def director_live_add_subgraph_agent_declarations_json_schema_text(
                 raise ValueError(
                     f"{role_family} exposes an unregistered execution profile"
                 )
-    admitted_new_roles = _live_admitted_new_role_families(
-        domain,
-        role_constraints,
+    admitted_new_roles = (
+        ()
+        if topology_neutral
+        else _live_admitted_new_role_families(
+            domain,
+            role_constraints,
+        )
     )
     if verified_qa_semantic_protocol(domain.get("semantic_protocol")):
+        assert isinstance(role_constraints, Mapping)
         existing_roles = _live_existing_agent_roles(domain, role_constraints)
         _live_hotpotqa_output_domain(domain, existing_roles)
     new_agent_ids = _live_new_agent_ids(existing_agent_ids, max_agents)
@@ -1507,9 +1575,8 @@ def director_live_add_subgraph_agent_declarations_json_schema_text(
                     "add_subgraph selected Agent role changed its Canvas node ID"
                 )
             role_family = value.get("role_family")
-            if (
-                not isinstance(role_family, str)
-                or role_family not in admitted_new_roles
+            if not isinstance(role_family, str) or not role_family.strip() or (
+                not topology_neutral and role_family not in admitted_new_roles
             ):
                 raise ValueError(
                     "add_subgraph selected Agent role is outside the live domain"
@@ -1521,29 +1588,45 @@ def director_live_add_subgraph_agent_declarations_json_schema_text(
         len(selected_roles) if selected_roles is not None else max_agents
     )
     for position, agent_id in enumerate(new_agent_ids[:positional_count]):
-        admitted_roles = (
-            ((selected_roles[position], role_constraints[selected_roles[position]]),)
-            if selected_roles is not None
-            else tuple(
-                (role_family, role_constraints[role_family])
-                for role_family in admitted_new_roles
+        if topology_neutral:
+            role_branches = list(
+                _live_topology_neutral_agent_schema_branches(
+                    required_fields,
+                    model_ids,
+                    registered_profiles,
+                    agent_id=agent_id,
+                    role_family=(
+                        None
+                        if selected_roles is None
+                        else selected_roles[position]
+                    ),
+                )
             )
-        )
-        role_branches = [
-            branch
-            for role_family, constraint in admitted_roles
-            if isinstance(role_family, str)
-            and role_family
-            and isinstance(constraint, Mapping)
-            for branch in _live_role_agent_schema_branches(
-                required_fields,
-                domain,
-                role_family,
-                constraint,
-                model_ids,
-                agent_id=agent_id,
+        else:
+            assert isinstance(role_constraints, Mapping)
+            admitted_roles = (
+                ((selected_roles[position], role_constraints[selected_roles[position]]),)
+                if selected_roles is not None
+                else tuple(
+                    (role_family, role_constraints[role_family])
+                    for role_family in admitted_new_roles
+                )
             )
-        ]
+            role_branches = [
+                branch
+                for role_family, constraint in admitted_roles
+                if isinstance(role_family, str)
+                and role_family
+                and isinstance(constraint, Mapping)
+                for branch in _live_role_agent_schema_branches(
+                    required_fields,
+                    domain,
+                    role_family,
+                    constraint,
+                    model_ids,
+                    agent_id=agent_id,
+                )
+            ]
         if not role_branches:
             raise ValueError("add_subgraph role constraints are malformed")
         positional_agent_schemas.append({"anyOf": role_branches})
@@ -1600,15 +1683,25 @@ def director_live_add_subgraph_role_selection_json_schema_text(
     min_agents = domain["min_new_agents"]
     max_agents = domain["max_new_agents"]
     existing_agent_ids = domain["existing_agent_ids"]
-    role_constraints = domain["role_constraints"]
-    admitted_new_roles = _live_admitted_new_role_families(
-        domain,
-        role_constraints,
+    topology_neutral = _topology_neutral_add_domain(domain)
+    role_constraints = domain.get("role_constraints")
+    admitted_new_roles = (
+        ()
+        if topology_neutral
+        else _live_admitted_new_role_families(
+            domain,
+            role_constraints,
+        )
     )
     new_agent_ids = _live_new_agent_ids(existing_agent_ids, max_agents)
     role_families = admitted_new_roles
-    if not role_families:
+    if not topology_neutral and not role_families:
         raise ValueError("add_subgraph role domain is empty")
+    role_family_schema: Mapping[str, Any] = (
+        _NON_EMPTY_STRING_SCHEMA
+        if topology_neutral
+        else {"enum": list(role_families)}
+    )
     positional_roles = [
         {
             "type": "object",
@@ -1616,7 +1709,7 @@ def director_live_add_subgraph_role_selection_json_schema_text(
             "required": ["agent_id", "role_family"],
             "properties": {
                 "agent_id": {"const": agent_id},
-                "role_family": {"enum": list(role_families)},
+                "role_family": dict(role_family_schema),
             },
         }
         for agent_id in new_agent_ids
@@ -1694,10 +1787,15 @@ def director_live_add_subgraph_role_selection_from_text(
         action_target_domains
     )
     expected_ids = _live_new_agent_ids(domain["existing_agent_ids"], max_agents)
-    role_constraints = domain["role_constraints"]
-    admitted_new_roles = _live_admitted_new_role_families(
-        domain,
-        role_constraints,
+    topology_neutral = _topology_neutral_add_domain(domain)
+    role_constraints = domain.get("role_constraints")
+    admitted_new_roles = (
+        ()
+        if topology_neutral
+        else _live_admitted_new_role_families(
+            domain,
+            role_constraints,
+        )
     )
     normalized: list[dict[str, str]] = []
     for position, value in enumerate(agents):
@@ -1712,9 +1810,8 @@ def director_live_add_subgraph_role_selection_from_text(
             raise ValueError(
                 "add_subgraph selected Agent role changed its Canvas node ID"
             )
-        if (
-            not isinstance(role_family, str)
-            or role_family not in admitted_new_roles
+        if not isinstance(role_family, str) or not role_family.strip() or (
+            not topology_neutral and role_family not in admitted_new_roles
         ):
             raise ValueError(
                 "add_subgraph selected Agent role is outside the live domain"
@@ -1752,10 +1849,23 @@ def _live_add_subgraph_agents(
         domain["existing_agent_ids"],
         max_agents,
     )
-    role_constraints = domain["role_constraints"]
-    admitted_new_roles = _live_admitted_new_role_families(
-        domain,
-        role_constraints,
+    topology_neutral = _topology_neutral_add_domain(domain)
+    role_constraints = domain.get("role_constraints")
+    admitted_new_roles = (
+        ()
+        if topology_neutral
+        else _live_admitted_new_role_families(
+            domain,
+            role_constraints,
+        )
+    )
+    registered_profiles = (
+        _live_execution_profiles(
+            domain.get("registered_execution_profiles"),
+            label="add_subgraph.registered_execution_profiles",
+        )
+        if topology_neutral
+        else ()
     )
     model_ids = set(domain["model_ids"])
     required_fields = set(domain["required_agent_fields"])
@@ -1796,53 +1906,69 @@ def _live_add_subgraph_agents(
             or role_family != role_family.strip()
         ):
             raise ValueError("add_subgraph Agent role is outside the live domain")
-        constraint = role_constraints.get(role_family)
-        if (
-            role_family not in admitted_new_roles
-            or not isinstance(constraint, Mapping)
-        ):
-            raise ValueError("add_subgraph Agent role is outside the live domain")
-        contract_domain = constraint.get("contracts")
-        if contract_domain is not None and contract not in _live_string_domain(
-            contract_domain,
-            label=f"{role_family}.contracts",
-        ):
-            raise ValueError("add_subgraph Agent contract violates its role")
-        completion_condition_domain = constraint.get("completion_conditions")
-        if (
-            completion_condition_domain is not None
-            and agent.get("completion_condition")
-            not in _live_string_domain(
-                completion_condition_domain,
-                label=f"{role_family}.completion_conditions",
-            )
-        ):
-            raise ValueError(
-                "add_subgraph Agent completion_condition violates its role"
-            )
-        artifact_type_domain = constraint.get("artifact_types")
-        if (
-            artifact_type_domain is not None
-            and agent.get("artifact_type")
-            not in _live_string_domain(
-                artifact_type_domain,
-                label=f"{role_family}.artifact_types",
-            )
-        ):
-            raise ValueError(
-                "add_subgraph Agent artifact_type violates its role"
-            )
-        if (
-            execution_mode not in constraint.get("execution_modes", ())
-        ):
-            raise ValueError("add_subgraph Agent execution mode violates its role")
-        if not isinstance(allowed_tools, list) or allowed_tools not in [
-            list(tool_set) for tool_set in constraint.get("allowed_tools", ())
-        ]:
-            raise ValueError("add_subgraph Agent Tool set violates its role")
+        constraint = (
+            None
+            if topology_neutral
+            else role_constraints.get(role_family)
+        )
+        if topology_neutral:
+            if (
+                not isinstance(allowed_tools, list)
+                or (execution_mode, tuple(allowed_tools))
+                not in registered_profiles
+            ):
+                raise ValueError(
+                    "add_subgraph Agent execution mode and Tool set do not "
+                    "form one registered profile"
+                )
+        else:
+            if (
+                role_family not in admitted_new_roles
+                or not isinstance(constraint, Mapping)
+            ):
+                raise ValueError("add_subgraph Agent role is outside the live domain")
+            contract_domain = constraint.get("contracts")
+            if contract_domain is not None and contract not in _live_string_domain(
+                contract_domain,
+                label=f"{role_family}.contracts",
+            ):
+                raise ValueError("add_subgraph Agent contract violates its role")
+            completion_condition_domain = constraint.get("completion_conditions")
+            if (
+                completion_condition_domain is not None
+                and agent.get("completion_condition")
+                not in _live_string_domain(
+                    completion_condition_domain,
+                    label=f"{role_family}.completion_conditions",
+                )
+            ):
+                raise ValueError(
+                    "add_subgraph Agent completion_condition violates its role"
+                )
+            artifact_type_domain = constraint.get("artifact_types")
+            if (
+                artifact_type_domain is not None
+                and agent.get("artifact_type")
+                not in _live_string_domain(
+                    artifact_type_domain,
+                    label=f"{role_family}.artifact_types",
+                )
+            ):
+                raise ValueError(
+                    "add_subgraph Agent artifact_type violates its role"
+                )
+            if execution_mode not in constraint.get("execution_modes", ()):
+                raise ValueError(
+                    "add_subgraph Agent execution mode violates its role"
+                )
+            if not isinstance(allowed_tools, list) or allowed_tools not in [
+                list(tool_set) for tool_set in constraint.get("allowed_tools", ())
+            ]:
+                raise ValueError("add_subgraph Agent Tool set violates its role")
         if any(tool_id != tool_id.strip() for tool_id in allowed_tools):
             raise ValueError("add_subgraph Agent Tool IDs must be canonical")
         if role_conditional_qa_protocol(domain):
+            assert isinstance(constraint, Mapping)
             execution_profiles = _live_execution_profiles(
                 constraint.get("execution_profiles"),
                 label=f"{role_family}.execution_profiles",
@@ -1910,6 +2036,46 @@ def director_live_add_subgraph_relation_candidates(
         agents,
     )
     domain = action_target_domains["add_subgraph"]
+    if _topology_neutral_add_domain(domain):
+        # FlowSteer's ADD may include at most one live relation edit.  Every
+        # candidate is incident to a newly declared node, has distinct
+        # endpoints, and therefore cannot be a no-op.  One-way edges cannot
+        # create a cycle through a new node; reciprocal communication is
+        # admitted only inside the same newly declared two-Agent unit.
+        ordered_new_ids = [agent["agent_id"] for agent in normalized_agents]
+        new_ids = set(ordered_new_ids)
+        endpoint_ids = [*domain["existing_agent_ids"], *ordered_new_ids]
+        candidates: list[dict[str, Any]] = []
+        for source_index, source_id in enumerate(endpoint_ids):
+            for target_id in endpoint_ids[source_index + 1 :]:
+                if source_id not in new_ids and target_id not in new_ids:
+                    continue
+                candidates.extend(
+                    (
+                        {
+                            "source_id": source_id,
+                            "target_id": target_id,
+                            "source_to_target": True,
+                            "target_to_source": False,
+                        },
+                        {
+                            "source_id": target_id,
+                            "target_id": source_id,
+                            "source_to_target": True,
+                            "target_to_source": False,
+                        },
+                    )
+                )
+                if source_id in new_ids and target_id in new_ids:
+                    candidates.append(
+                        {
+                            "source_id": source_id,
+                            "target_id": target_id,
+                            "source_to_target": True,
+                            "target_to_source": True,
+                        }
+                    )
+        return tuple(candidates)
     if not verified_qa_semantic_protocol(domain.get("semantic_protocol")):
         return ()
     if _live_add_subgraph_isolated_boundary(domain):
@@ -2254,7 +2420,11 @@ def director_live_action_parameter_json_schema_text(
             director_state_conditioned_sampling_json_schema_text("add_subgraph")
         )
         schema["properties"]["agents"] = {"const": list(normalized_agents)}
-        if verified_qa_semantic_protocol(domain.get("semantic_protocol")):
+        topology_neutral = _topology_neutral_add_domain(domain)
+        if (
+            verified_qa_semantic_protocol(domain.get("semantic_protocol"))
+            or topology_neutral
+        ):
             relation_candidates = director_live_add_subgraph_relation_candidates(
                 action_target_domains,
                 normalized_agents,
@@ -2294,6 +2464,7 @@ def director_live_action_parameter_json_schema_text(
                     "type": "array",
                     "maxItems": 0,
                 }
+        if verified_qa_semantic_protocol(domain.get("semantic_protocol")):
             roles = _live_existing_agent_roles(
                 domain,
                 domain["role_constraints"],
@@ -2337,6 +2508,11 @@ def director_live_action_parameter_json_schema_text(
                 if output_ids
                 else {"type": "null"}
             )
+        elif topology_neutral:
+            # Output selection remains its own execute-after-edit Canvas step.
+            # This prevents a Tool-capable worker from becoming Output inside
+            # the same ADD before the routed-evidence gate can inspect it.
+            schema["properties"]["output_agent_id"] = {"type": "null"}
         else:
             relation_items = schema["properties"]["relations"]["items"]
             for branch in relation_items["anyOf"]:

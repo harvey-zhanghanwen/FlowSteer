@@ -297,9 +297,9 @@ class ConfigLoaderTests(unittest.TestCase):
         self.assertFalse(config["grpo"]["enabled"])
         self.assertFalse(config["skills"]["enabled"])
 
-    def test_trivia_qa_memory_free_topology_v5_keeps_director_control_plane_only(self) -> None:
+    def test_trivia_qa_memory_free_topology_v7_keeps_director_control_plane_only(self) -> None:
         config = load_yaml(
-            "config/evaluation_triviaqa_qa_memory_free_topology_v5.yaml"
+            "config/evaluation_triviaqa_qa_memory_free_topology_v7.yaml"
         )
         validate_agent_graph_config(config)
 
@@ -326,12 +326,19 @@ class ConfigLoaderTests(unittest.TestCase):
             config["qa_tool_runtime"]["mode"],
         )
         self.assertEqual(
-            "agentgraph.sglang-flat-action-sampling-schema.v1",
+            "agentgraph.model-admissible-action-mask.v2",
             config["director"]["sampling_schema_version"],
         )
-        self.assertNotIn("sampling_action_profile", config["director"])
+        self.assertEqual(
+            "model_admissible_canvas_actions",
+            config["director"]["sampling_action_profile"],
+        )
         self.assertFalse(config["experiment"]["training_enabled"])
         self.assertFalse(config["grpo"]["enabled"])
+        self.assertEqual(
+            "preserve_diagnose_repair_augment",
+            config["agent_graph"]["recovery_policy"],
+        )
 
     def test_shared_qa_semantic_protocol_combination_is_fail_closed(self) -> None:
         mutations = (

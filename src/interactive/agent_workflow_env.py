@@ -779,6 +779,30 @@ class AgentWorkflowEnv:
             and allowed_tools in {(), (required_tool_id,)}
         )
 
+    def _topology_neutral_registered_execution_profiles(
+        self,
+    ) -> Tuple[Tuple[str, Tuple[str, ...]], ...]:
+        """Return registered profiles for a topology-neutral Tool Canvas.
+
+        FlowSteer's live action domain must bind ``execution_mode`` and
+        ``allowed_tools`` as one executable profile.  This projection keeps
+        every no-Tool Runtime profile and the exact dataset worker profile;
+        it does not assign either profile to a role or prescribe an edge.
+        """
+
+        required_tool_id = self.required_evidence_tool_id
+        return tuple(
+            (execution_mode, allowed_tools)
+            for execution_mode, allowed_tools in (
+                self.runtime.registered_execution_profiles()
+            )
+            if allowed_tools == ()
+            or (
+                required_tool_id is not None
+                and allowed_tools == (required_tool_id,)
+            )
+        )
+
     def _role_conditional_execution_profiles_for(
         self,
         role_family: str,
@@ -879,16 +903,20 @@ class AgentWorkflowEnv:
 
         finish_admitted = self.finish_admissibility().get("admissible") is True
         if (
-            self._uses_semantic_lineage_protocol()
-            and self.recovery_policy == _PRESERVE_REPAIR_RECOVERY_POLICY
-            and finish_admitted
+            (
+                self._uses_semantic_lineage_protocol()
+                and self.recovery_policy == _PRESERVE_REPAIR_RECOVERY_POLICY
+            )
+            or self.require_evidence_relation
+        ) and (
+            finish_admitted
             and AgentActionType.FINISH.value in self._allowed_action_type_set
         ):
-            # Once the current revision has a verified semantic lineage and a
-            # valid terminal artifact, further edits can only endanger the
-            # already completed answer.  FlowSteer's action mask still asks the
-            # Director to emit the explicit terminal action; it does not finish
-            # automatically.
+            # Once the current revision has either a verified semantic lineage
+            # or the configured routed-evidence receipt and a valid terminal
+            # artifact, further edits can only endanger the completed answer.
+            # FlowSteer's action mask still asks the Director to emit the
+            # explicit terminal action; it does not finish automatically.
             return (AgentActionType.FINISH.value,)
 
         mandatory_repair_ids = self._mandatory_repair_agent_ids()
@@ -1988,6 +2016,14 @@ class AgentWorkflowEnv:
         admitted: list[str] = []
         for node in self._graph.nodes:
             if node.id == self._graph.output_agent_id:
+                continue
+            if (
+                self.require_evidence_relation
+                and self.required_evidence_tool_id in node.allowed_tools
+            ):
+                # The QA-memory Tool is a worker capability.  Output consumes
+                # an explicitly routed artifact and must not retrieve its own
+                # answer outside that AgentGraph communication edge.
                 continue
             if self._uses_semantic_lineage_protocol():
                 role_family = (node.role_family or "").casefold()
@@ -3568,7 +3604,42 @@ class AgentWorkflowEnv:
                         ),
                     }
                     if self._uses_semantic_lineage_protocol()
-                    else {}
+                    else {
+                        # NECESSARY_ADAPTATION: the generic QA-memory profile
+                        # keeps semantic_protocol=none, but v3 still needs the
+                        # live domains that prevent invented Agent IDs and bind
+                        # mode/Tool capability atomically.  Roles, contracts,
+                        # Agent count, relations, and topology remain sampled.
+                        "topology_neutral": True,
+                        "required_agent_fields": [
+                            "agent_id",
+                            "model_id",
+                            "contract",
+                            "role_family",
+                            "allowed_tools",
+                            "execution_mode",
+                        ],
+                        "model_ids": list(self._available_model_ids()),
+                        "registered_execution_profiles": [
+                            {
+                                "execution_mode": execution_mode,
+                                "allowed_tools": list(allowed_tools),
+                            }
+                            for execution_mode, allowed_tools in (
+                                self._topology_neutral_registered_execution_profiles()
+                            )
+                        ],
+                        "endpoint_scope": {
+                            "relation_endpoint_sources": [
+                                "existing_agent_ids",
+                                "same_action_agent_ids",
+                            ],
+                            "output_agent_id_sources": [
+                                "existing_agent_ids",
+                                "same_action_agent_ids",
+                            ],
+                        },
+                    }
                 ),
             }
         if AgentActionType.MODIFY_AGENT.value in admitted:
@@ -8106,6 +8177,16 @@ class AgentWorkflowEnv:
 
         if not self.require_evidence_relation:
             return None
+        output_agent_id = self._graph.output_agent_id
+        if output_agent_id is None or not self._graph.has_node(output_agent_id):
+            return "The current Canvas has no selected Output Agent"
+        output_agent = self._graph.get_node(output_agent_id)
+        if self.required_evidence_tool_id in output_agent.allowed_tools:
+            return (
+                f"Output Agent {output_agent_id!r} must consume a provenance-"
+                "bearing upstream artifact and cannot hold the worker retrieval "
+                f"Tool {self.required_evidence_tool_id!r}"
+            )
         return self._role_conditional_semantic_issue(execution)
 
     def _semantic_protocol_issue(
