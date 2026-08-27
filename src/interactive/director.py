@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from itertools import combinations
 import json
 import os
 import random
@@ -2236,6 +2237,129 @@ def director_live_add_subgraph_relation_candidates(
     )
 
 
+def director_live_add_subgraph_relation_sets(
+    action_target_domains: Mapping[str, Any],
+    agents: Sequence[Mapping[str, Any]],
+) -> tuple[tuple[dict[str, Any], ...], ...]:
+    """Enumerate topology-neutral ADD relations for one executable unit.
+
+    This is the parameter-schema projection of the same complete-sink
+    invariant enforced authoritatively by ``AgentWorkflowEnv`` before
+    execute-after-edit.  It does not select a role or topology: directed,
+    fan-in/fan-out and bounded reciprocal combinations remain available when
+    all current and newly declared Agents can reach a newly declared sink.
+    """
+
+    normalized_agents = _live_add_subgraph_agents(
+        action_target_domains,
+        agents,
+    )
+    domain = action_target_domains["add_subgraph"]
+    if not _topology_neutral_add_domain(domain):
+        return ()
+    preserved_input_ids = tuple(domain.get("preserved_input_agent_ids", ()))
+    if not preserved_input_ids:
+        return ((),)
+    existing_ids = tuple(domain["existing_agent_ids"])
+    new_ids = tuple(agent["agent_id"] for agent in normalized_agents)
+    endpoint_ids = (*existing_ids, *new_ids)
+    endpoint_set = set(endpoint_ids)
+    raw_existing_relations = domain.get("existing_relations", ())
+    if not isinstance(raw_existing_relations, (list, tuple)):
+        raise ValueError("add_subgraph existing relations are invalid")
+
+    existing_edges: set[tuple[str, str]] = set()
+    for relation in raw_existing_relations:
+        if not isinstance(relation, Mapping):
+            raise ValueError("add_subgraph existing relation is malformed")
+        source_id = relation.get("source_id")
+        target_id = relation.get("target_id")
+        source_to_target = relation.get("source_to_target")
+        target_to_source = relation.get("target_to_source")
+        if (
+            source_id not in endpoint_set
+            or target_id not in endpoint_set
+            or source_id == target_id
+            or type(source_to_target) is not bool
+            or type(target_to_source) is not bool
+            or not (source_to_target or target_to_source)
+        ):
+            raise ValueError("add_subgraph existing relation is invalid")
+        if source_to_target:
+            existing_edges.add((source_id, target_id))
+        if target_to_source:
+            existing_edges.add((target_id, source_id))
+
+    candidates = director_live_add_subgraph_relation_candidates(
+        action_target_domains,
+        normalized_agents,
+    )
+    minimum = len(new_ids)
+    maximum = min(len(candidates), minimum + 2)
+    admitted: list[tuple[dict[str, Any], ...]] = []
+    for count in range(minimum, maximum + 1):
+        for selected in combinations(candidates, count):
+            unordered_pairs = {
+                frozenset((item["source_id"], item["target_id"]))
+                for item in selected
+            }
+            if len(unordered_pairs) != len(selected):
+                continue
+            if any(
+                not any(
+                    new_id in (item["source_id"], item["target_id"])
+                    for item in selected
+                )
+                for new_id in new_ids
+            ):
+                continue
+
+            edges = set(existing_edges)
+            for item in selected:
+                if item["source_to_target"]:
+                    edges.add((item["source_id"], item["target_id"]))
+                if item["target_to_source"]:
+                    edges.add((item["target_id"], item["source_id"]))
+            reachable = {agent_id: {agent_id} for agent_id in endpoint_ids}
+            for source_id, target_id in edges:
+                reachable[source_id].add(target_id)
+            changed = True
+            while changed:
+                changed = False
+                for source_id in endpoint_ids:
+                    expanded = set(reachable[source_id])
+                    for target_id in tuple(reachable[source_id]):
+                        expanded.update(reachable[target_id])
+                    if expanded != reachable[source_id]:
+                        reachable[source_id] = expanded
+                        changed = True
+
+            visited: set[str] = set()
+            invalid_component = False
+            for source_id in endpoint_ids:
+                if source_id in visited:
+                    continue
+                component = {
+                    target_id
+                    for target_id in endpoint_ids
+                    if target_id in reachable[source_id]
+                    and source_id in reachable[target_id]
+                }
+                visited.update(component)
+                if len(component) > 2:
+                    invalid_component = True
+                    break
+            if invalid_component:
+                continue
+            if not any(
+                all(sink_id in reachable[source_id] for source_id in endpoint_ids)
+                for sink_id in new_ids
+            ):
+                continue
+            admitted.append(tuple(dict(item) for item in selected))
+    return tuple(admitted)
+
+
 def director_live_add_subgraph_agent_declarations_from_text(
     text: str,
     action_target_domains: Mapping[str, Any],
@@ -2453,55 +2577,47 @@ def director_live_action_parameter_json_schema_text(
                 normalized_agents,
             )
             if relation_candidates:
-                connected_unit_min_relations = (
-                    len(normalized_agents)
+                connected_relation_sets = (
+                    director_live_add_subgraph_relation_sets(
+                        action_target_domains,
+                        normalized_agents,
+                    )
                     if topology_neutral
                     and bool(domain.get("preserved_input_agent_ids"))
-                    else None
+                    else ()
                 )
-                schema["properties"]["relations"] = {
-                    "type": "array",
-                    # After the QA-memory worker has produced a preserved
-                    # artifact, one FlowSteer ADD is one complete executable
-                    # functional unit.  One incident relation per new Agent is
-                    # the minimum that can connect that unit before the
-                    # execute-after-edit boundary.  Two optional extra edits
-                    # retain fan-in/fan-out and reciprocal search-space motifs;
-                    # authoritative Canvas validation below still requires a
-                    # common reachable sink.  Other protocols retain the
-                    # upstream one-relation edit.
-                    **(
-                        {
-                            "minItems": connected_unit_min_relations,
-                            "maxItems": min(
-                                len(relation_candidates),
-                                connected_unit_min_relations + 2,
-                            ),
-                        }
-                        if connected_unit_min_relations is not None
-                        else {"maxItems": 1}
-                    ),
-                    "uniqueItems": True,
-                    "items": {
-                        "anyOf": [
-                            {
-                                "type": "object",
-                                "additionalProperties": False,
-                                "required": [
-                                    "source_id",
-                                    "target_id",
-                                    "source_to_target",
-                                    "target_to_source",
-                                ],
-                                "properties": {
-                                    key: {"const": value}
-                                    for key, value in candidate.items()
-                                },
-                            }
-                            for candidate in relation_candidates
+                if connected_relation_sets:
+                    schema["properties"]["relations"] = {
+                        "oneOf": [
+                            {"const": [dict(item) for item in relation_set]}
+                            for relation_set in connected_relation_sets
                         ]
-                    },
-                }
+                    }
+                else:
+                    schema["properties"]["relations"] = {
+                        "type": "array",
+                        "maxItems": 1,
+                        "uniqueItems": True,
+                        "items": {
+                            "anyOf": [
+                                {
+                                    "type": "object",
+                                    "additionalProperties": False,
+                                    "required": [
+                                        "source_id",
+                                        "target_id",
+                                        "source_to_target",
+                                        "target_to_source",
+                                    ],
+                                    "properties": {
+                                        key: {"const": value}
+                                        for key, value in candidate.items()
+                                    },
+                                }
+                                for candidate in relation_candidates
+                            ]
+                        },
+                    }
             else:
                 schema["properties"]["relations"] = {
                     "type": "array",
@@ -3293,7 +3409,10 @@ class AgentGraphOrchestrator:
         is computed before evaluation.
         """
 
-        if not verified_qa_semantic_protocol(self.semantic_protocol):
+        if (
+            not verified_qa_semantic_protocol(self.semantic_protocol)
+            and not env.require_evidence_relation
+        ):
             return None
         if env.model_admissible_action_types():
             return None
@@ -3932,6 +4051,7 @@ __all__ = [
     "director_live_add_subgraph_role_selection_from_text",
     "director_live_add_subgraph_role_selection_json_schema_text",
     "director_live_add_subgraph_relation_candidates",
+    "director_live_add_subgraph_relation_sets",
     "director_live_action_parameter_json_schema_text",
     "director_live_action_target_domains_json",
     "director_live_modify_agent_selector_json_schema_text",

@@ -45,6 +45,7 @@ from src.interactive.director import (
     director_live_action_parameter_json_schema_text,
     director_live_add_subgraph_agent_declarations_json_schema_text,
     director_live_add_subgraph_relation_candidates,
+    director_live_add_subgraph_relation_sets,
     director_validate_live_action_target_domains,
 )
 from src.interactive.model_registry import (
@@ -1269,8 +1270,84 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         relation_schema = schema["properties"]["relations"]
-        self.assertEqual(2, relation_schema["minItems"])
-        self.assertGreaterEqual(relation_schema["maxItems"], 2)
+        relation_sets = director_live_add_subgraph_relation_sets(
+            domains,
+            declarations,
+        )
+        self.assertTrue(relation_sets)
+        self.assertEqual(
+            [[dict(item) for item in relation_set] for relation_set in relation_sets],
+            [branch["const"] for branch in relation_schema["oneOf"]],
+        )
+        for relation_set in relation_sets:
+            self.assertTrue(
+                all(
+                    any(
+                        new_id in (item["source_id"], item["target_id"])
+                        for item in relation_set
+                    )
+                    for new_id in ("node_1", "node_2")
+                )
+            )
+            self.assertEqual(
+                len(relation_set),
+                len(
+                    {
+                        frozenset((item["source_id"], item["target_id"]))
+                        for item in relation_set
+                    }
+                ),
+            )
+        def directed_edges(relation_set):
+            edges = set()
+            for item in relation_set:
+                if item["source_to_target"]:
+                    edges.add((item["source_id"], item["target_id"]))
+                if item["target_to_source"]:
+                    edges.add((item["target_id"], item["source_id"]))
+            return frozenset(edges)
+
+        directed_edge_sets = {
+            directed_edges(relation_set) for relation_set in relation_sets
+        }
+        self.assertNotIn(
+            frozenset(
+                {
+                    ("worker", "node_1"),
+                    ("worker", "node_2"),
+                }
+            ),
+            directed_edge_sets,
+        )
+        self.assertIn(
+            frozenset(
+                {
+                    ("worker", "node_1"),
+                    ("node_1", "node_2"),
+                }
+            ),
+            directed_edge_sets,
+        )
+        self.assertIn(
+            frozenset(
+                {
+                    ("worker", "node_1"),
+                    ("worker", "node_2"),
+                    ("node_1", "node_2"),
+                }
+            ),
+            directed_edge_sets,
+        )
+        self.assertIn(
+            frozenset(
+                {
+                    ("worker", "node_1"),
+                    ("node_1", "node_2"),
+                    ("node_2", "node_1"),
+                }
+            ),
+            directed_edge_sets,
+        )
 
         disconnected = await env.step(
             json.dumps(

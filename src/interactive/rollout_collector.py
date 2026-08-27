@@ -58,6 +58,7 @@ from .director import (
     director_live_add_subgraph_role_selection_from_text,
     director_live_add_subgraph_role_selection_json_schema_text,
     director_live_add_subgraph_relation_candidates,
+    director_live_add_subgraph_relation_sets,
     director_live_action_parameter_json_schema_text,
     director_live_action_target_domains_json,
     director_live_modify_agent_selector_json_schema_text,
@@ -2558,6 +2559,34 @@ def _validate_v3_hierarchical_action_receipt(
                         "v3 verified-QA add_subgraph repeats an unordered relation pair"
                     )
                 relation_pairs.add(relation_pair)
+        elif (
+            add_domain.get("topology_neutral") is True
+            and add_domain.get("preserved_input_agent_ids")
+            and action_value is not None
+        ):
+            allowed_relation_sets = {
+                json.dumps(
+                    [dict(item) for item in relation_set],
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                for relation_set in director_live_add_subgraph_relation_sets(
+                    domains,
+                    declarations,
+                )
+            }
+            relation_set_identity = json.dumps(
+                [dict(item) for item in action_value.get("relations", ())],
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            if relation_set_identity not in allowed_relation_sets:
+                raise ReceiptValidationError(
+                    "v3 topology-neutral add_subgraph does not close one "
+                    "complete executable functional unit"
+                )
         output_agent_id = (
             None if action_value is None else action_value.get("output_agent_id")
         )

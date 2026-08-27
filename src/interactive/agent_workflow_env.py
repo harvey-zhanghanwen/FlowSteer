@@ -1158,6 +1158,19 @@ class AgentWorkflowEnv:
             # A Formatter is exposed only after the prospective Canvas passes
             # the same Format-lineage checks used by authoritative admission.
             return (AgentActionType.SET_OUTPUT.value,)
+        if (
+            self.require_evidence_relation
+            and not self._uses_semantic_lineage_protocol()
+            and self._graph.output_agent_id is None
+            and output_target_ids
+            and AgentActionType.SET_OUTPUT.value in self._allowed_action_type_set
+        ):
+            # FlowSteer's execute-after-edit boundary has completed the
+            # topology-neutral functional unit.  Select its model-authored
+            # complete sink before sampling another ADD; the unit itself may
+            # still be a chain, fan-in/fan-out DAG, or reciprocal two-Agent
+            # block and no role is prescribed here.
+            return (AgentActionType.SET_OUTPUT.value,)
 
         terminal_reachability_candidates = (
             self._terminal_reachability_relation_candidates()
@@ -3693,8 +3706,22 @@ class AgentWorkflowEnv:
                         ],
                         "model_ids": list(self._available_model_ids()),
                         "preserved_input_agent_ids": list(
-                            self._current_successful_evidence_worker_ids()
+                            dict.fromkeys(
+                                (
+                                    *self._preserved_input_agent_ids(),
+                                    *self._current_successful_evidence_worker_ids(),
+                                )
+                            )
                         ),
+                        "existing_relations": [
+                            {
+                                "source_id": relation.source_id,
+                                "target_id": relation.target_id,
+                                "source_to_target": relation.source_to_target,
+                                "target_to_source": relation.target_to_source,
+                            }
+                            for relation in self._graph.relations
+                        ],
                         "registered_execution_profiles": [
                             {
                                 "execution_mode": execution_mode,

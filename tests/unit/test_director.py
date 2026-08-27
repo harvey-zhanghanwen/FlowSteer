@@ -1561,6 +1561,38 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("recovery_state", result.terminal_canvas_diagnosis)
 
+    def test_topology_neutral_qa_memory_empty_canvas_domain_is_typed(self) -> None:
+        model_registry = registry()
+
+        class ExhaustedEvidenceEnv(AgentWorkflowEnv):
+            def model_admissible_action_types(self):
+                return ()
+
+        env = ExhaustedEvidenceEnv(
+            model_registry,
+            gateway=FakeGateway(),
+            required_evidence_tool_id="triviaqa.qa_memory",
+            require_evidence_relation=True,
+        )
+        env.reset("task")
+        orchestrator = AgentGraphOrchestrator(
+            model_registry,
+            ScriptedDirector([]),
+            max_rounds=3,
+        )
+
+        diagnosis = orchestrator.terminal_canvas_diagnosis(env)
+
+        self.assertIsNotNone(diagnosis)
+        assert diagnosis is not None
+        self.assertEqual(
+            "canvas_action_domain_exhausted",
+            diagnosis["public_error_code"],
+        )
+        self.assertEqual(env.graph.revision, diagnosis["graph_revision"])
+        self.assertIn("finish_admissibility", diagnosis)
+        self.assertIn("recovery_state", diagnosis)
+
     async def test_progressive_action_mask_switches_only_after_finish_admission(
         self,
     ) -> None:
