@@ -742,15 +742,33 @@ def director_live_action_parameter_json_schema_text(
             "properties": {
                 "action": {"const": "add_subgraph"},
                 "agents": {"const": agents},
-                "relations": {
-                    "type": "array",
-                    "maxItems": 1,
-                    "items": (
-                        {"enum": list(relation_candidates)}
-                        if relation_candidates
-                        else _RELATION_SPEC_JSON_SCHEMA
-                    ),
-                },
+                "relations": (
+                    {
+                        "type": "array",
+                        "maxItems": 1,
+                        "items": {
+                            "anyOf": [
+                                {
+                                    "type": "object",
+                                    "additionalProperties": False,
+                                    "required": [
+                                        "source_id",
+                                        "target_id",
+                                        "source_to_target",
+                                        "target_to_source",
+                                    ],
+                                    "properties": {
+                                        name: {"const": value}
+                                        for name, value in candidate.items()
+                                    },
+                                }
+                                for candidate in relation_candidates
+                            ]
+                        },
+                    }
+                    if relation_candidates
+                    else {"const": []}
+                ),
                 # DIRECT_REUSE: TriviaQA v10 keeps Output selection as its own
                 # execute-after-edit Canvas step so a Tool worker cannot become
                 # Output inside the same ADD transaction.

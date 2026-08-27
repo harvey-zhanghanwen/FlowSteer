@@ -462,7 +462,13 @@ def test_v11_add_schema_preserves_worker_input_and_defers_output_selection():
     )
 
     self_relations = schema["properties"]["relations"]
-    self_relations_candidates = self_relations["items"]["enum"]
+    self_relations_candidates = [
+        {
+            name: value_schema["const"]
+            for name, value_schema in branch["properties"].items()
+        }
+        for branch in self_relations["items"]["anyOf"]
+    ]
     assert self_relations["maxItems"] == 1
     assert schema["properties"]["output_agent_id"] == {"type": "null"}
     assert {
@@ -475,6 +481,45 @@ def test_v11_add_schema_preserves_worker_input_and_defers_output_selection():
         candidate["target_id"] == "worker"
         for candidate in self_relations_candidates
     )
+
+
+def test_v11_first_add_schema_forces_empty_relations_without_a_live_endpoint():
+    domains = {
+        "add_subgraph": {
+            "model_ids": ["cheap-model"],
+            "execution_profiles": [
+                {
+                    "execution_mode": "react",
+                    "allowed_tools": ["hotpotqa.qa_memory"],
+                },
+            ],
+            "existing_agent_ids": [],
+            "preserved_input_agent_ids": [],
+            "output_agent_ids": [],
+            "max_new_agents": 1,
+        }
+    }
+    agents = [
+        {
+            "agent_id": "worker",
+            "model_id": "cheap-model",
+            "contract": "retrieve relevant train demonstrations",
+            "role_family": "retrieval_worker",
+            "execution_mode": "react",
+            "allowed_tools": ["hotpotqa.qa_memory"],
+        }
+    ]
+
+    schema = json.loads(
+        director_live_action_parameter_json_schema_text(
+            "add_subgraph",
+            domains,
+            add_agents=agents,
+        )
+    )
+
+    assert schema["properties"]["relations"] == {"const": []}
+    assert schema["properties"]["output_agent_id"] == {"type": "null"}
 
 
 def test_v11_role_family_is_a_bounded_identifier_not_a_fixed_role_enum():
