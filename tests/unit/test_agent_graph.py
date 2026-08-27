@@ -735,6 +735,9 @@ class _TriviaMemoryProfileRuntime:
             ("react", ("triviaqa.qa_memory",)),
         )
 
+    def validate_execution_contracts(self, nodes) -> None:
+        del nodes
+
 
 def _trivia_memory_receipts() -> tuple[dict[str, object], dict[str, object]]:
     return (
@@ -1210,6 +1213,151 @@ class _HotpotSemanticGateway(_ImmediateGateway):
 
 
 class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
+    async def test_free_topology_add_closes_functional_unit_before_execution(
+        self,
+    ) -> None:
+        registry = make_registry()
+        worker = AgentNode(
+            "worker",
+            "balanced",
+            "retrieve evidence",
+            execution_mode="react",
+            allowed_tools=("triviaqa.qa_memory",),
+        )
+        graph = AgentGraph([worker])
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_TriviaMemoryProfileRuntime(registry),  # type: ignore[arg-type]
+            problem="Which author wrote the novel?",
+            graph=graph,
+            execute_on_edit=False,
+            require_exact_answer_tag=True,
+            required_evidence_tool_id="triviaqa.qa_memory",
+            require_evidence_relation=True,
+            recovery_policy="preserve_diagnose_repair_augment",
+            director_feedback_mode="control_plane",
+        )
+        env._progressive_outputs = {"worker": "receipt-grounded evidence"}
+        env._progressive_output_metadata = {
+            "worker": {"tool_receipts": _trivia_memory_receipts()}
+        }
+
+        domains = env.model_admissible_action_targets()
+        declarations = [
+            {
+                "agent_id": "node_1",
+                "model_id": "balanced",
+                "contract": "derive an answer from routed evidence",
+                "role_family": "answerer",
+                "allowed_tools": [],
+                "execution_mode": "reasoning",
+            },
+            {
+                "agent_id": "node_2",
+                "model_id": "balanced",
+                "contract": "check the answer against its evidence",
+                "role_family": "verifier",
+                "allowed_tools": [],
+                "execution_mode": "reasoning",
+            },
+        ]
+        schema = json.loads(
+            director_live_action_parameter_json_schema_text(
+                "add_subgraph",
+                domains,
+                add_agents=declarations,
+            )
+        )
+        relation_schema = schema["properties"]["relations"]
+        self.assertEqual(2, relation_schema["minItems"])
+        self.assertGreaterEqual(relation_schema["maxItems"], 2)
+
+        disconnected = await env.step(
+            json.dumps(
+                {
+                    "action": "add_subgraph",
+                    "agents": declarations,
+                    "relations": [
+                        {
+                            "source_id": "worker",
+                            "target_id": "node_1",
+                            "source_to_target": True,
+                            "target_to_source": False,
+                        }
+                    ],
+                }
+            )
+        )
+        self.assertFalse(disconnected.accepted)
+        self.assertIn("connected functional unit", disconnected.feedback)
+        self.assertEqual(("worker",), tuple(node.id for node in env.graph.nodes))
+
+        connected = await env.step(
+            json.dumps(
+                {
+                    "action": "add_subgraph",
+                    "agents": declarations,
+                    "relations": [
+                        {
+                            "source_id": "worker",
+                            "target_id": "node_1",
+                            "source_to_target": True,
+                            "target_to_source": False,
+                        },
+                        {
+                            "source_id": "node_1",
+                            "target_id": "node_2",
+                            "source_to_target": True,
+                            "target_to_source": False,
+                        },
+                    ],
+                }
+            )
+        )
+        self.assertTrue(connected.accepted, connected.feedback)
+        self.assertEqual(("node_2",), env._model_admissible_output_agent_ids())
+
+        fan_in = AgentGraph(
+            [
+                worker,
+                AgentNode("left", "balanced", "left branch"),
+                AgentNode("right", "balanced", "right branch"),
+                AgentNode("sink", "balanced", "merge both branches"),
+            ],
+            [
+                AgentRelation("worker", "left", True, False),
+                AgentRelation("worker", "right", True, False),
+                AgentRelation("left", "sink", True, False),
+                AgentRelation("right", "sink", True, False),
+            ],
+        )
+        self.assertEqual(
+            ("sink",),
+            env._complete_output_candidate_ids_for(
+                fan_in,
+                include_current_output=True,
+            ),
+        )
+
+        with_output = fan_in.fork()
+        with_output.set_output("sink")
+        output_env = AgentWorkflowEnv(
+            registry,
+            runtime=_TriviaMemoryProfileRuntime(registry),  # type: ignore[arg-type]
+            problem="Which author wrote the novel?",
+            graph=with_output,
+            execute_on_edit=False,
+            require_exact_answer_tag=True,
+            required_evidence_tool_id="triviaqa.qa_memory",
+            require_evidence_relation=True,
+            recovery_policy="preserve_diagnose_repair_augment",
+            director_feedback_mode="control_plane",
+        )
+        self.assertNotEqual(
+            ("set_relation",),
+            output_env.model_admissible_action_types(),
+        )
+
     async def test_triviaqa_free_topology_evidence_gate_requires_routed_worker(self) -> None:
         registry = make_registry()
         empty_env = AgentWorkflowEnv(
@@ -1389,7 +1537,18 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             outputs={"worker": "receipt-grounded evidence", "output": "Ada"},
             calls=(),
             block_completion_order=(("worker",), ("output",)),
-            output_metadata={"worker": {"tool_receipts": _trivia_memory_receipts()}},
+            output_metadata={
+                "worker": {"tool_receipts": _trivia_memory_receipts()},
+                "output": {
+                    "input_artifact_provenance": [
+                        {
+                            "source_agent_id": "worker",
+                            "target_agent_id": "output",
+                            "tool_receipts": _trivia_memory_receipts(),
+                        }
+                    ]
+                },
+            },
         )
         env._progressive_execution_revision = routed.revision
 

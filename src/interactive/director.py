@@ -2037,15 +2037,14 @@ def director_live_add_subgraph_relation_candidates(
     order (Retriever/Repair -> Reasoner -> Verifier -> Formatter).  ADD may
     only describe a relation incident to an Agent declared by that same
     transaction; edits between two existing Canvas Agents belong to the live
-    ``set_relation`` domain.  Because the final ADD schema admits at most one
-    relation, a one-way edge incident to a new Agent cannot introduce a cycle.
-    A reciprocal edge is exposed here only between two Agents from this same
-    transaction: making a new Agent reciprocal with an existing Agent could
-    enlarge an already reciprocal Canvas block beyond its executable two-Agent
-    bound, which cannot be decided from role metadata alone.  The subsequent
-    Canvas-validated ``set_relation`` domain may still make that edge
-    reciprocal after execution feedback.  A one-way relation is always encoded
-    as its actual sender ``source_id`` to receiver ``target_id`` with
+    ``set_relation`` domain.  The topology-neutral QA-memory path may combine
+    several of these candidates in the same ADD so the sampled functional unit
+    is connected before FlowSteer's execute-after-edit boundary.  A reciprocal
+    edge is exposed here only between two Agents from this same transaction:
+    making a new Agent reciprocal with an existing Agent could enlarge an
+    already reciprocal Canvas block beyond its executable two-Agent bound,
+    which cannot be decided from role metadata alone.  A one-way relation is
+    always encoded as its actual sender ``source_id`` to receiver ``target_id`` with
     ``(true,false)`` instead of the directionally equivalent but ambiguous
     ``(false,true)``.  No relation is required, so the Director still selects
     the graph topology.
@@ -2454,14 +2453,34 @@ def director_live_action_parameter_json_schema_text(
                 normalized_agents,
             )
             if relation_candidates:
+                connected_unit_min_relations = (
+                    len(normalized_agents)
+                    if topology_neutral
+                    and bool(domain.get("preserved_input_agent_ids"))
+                    else None
+                )
                 schema["properties"]["relations"] = {
                     "type": "array",
-                    # xgrammar supports exact candidate branches but JSON
-                    # Schema has no portable unique-by-unordered-endpoint-pair
-                    # constraint.  Keep ADD as one executable relation edit;
-                    # FlowSteer's subsequent set_relation turns grow or make
-                    # that relation reciprocal after execution feedback.
-                    "maxItems": 1,
+                    # After the QA-memory worker has produced a preserved
+                    # artifact, one FlowSteer ADD is one complete executable
+                    # functional unit.  One incident relation per new Agent is
+                    # the minimum that can connect that unit before the
+                    # execute-after-edit boundary.  Two optional extra edits
+                    # retain fan-in/fan-out and reciprocal search-space motifs;
+                    # authoritative Canvas validation below still requires a
+                    # common reachable sink.  Other protocols retain the
+                    # upstream one-relation edit.
+                    **(
+                        {
+                            "minItems": connected_unit_min_relations,
+                            "maxItems": min(
+                                len(relation_candidates),
+                                connected_unit_min_relations + 2,
+                            ),
+                        }
+                        if connected_unit_min_relations is not None
+                        else {"maxItems": 1}
+                    ),
                     "uniqueItems": True,
                     "items": {
                         "anyOf": [

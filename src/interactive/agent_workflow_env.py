@@ -2022,12 +2022,25 @@ class AgentWorkflowEnv:
     def _model_admissible_output_agent_ids(self) -> Tuple[str, ...]:
         """Return Output targets accepted by the same prospective Canvas gate."""
 
+        return self._complete_output_candidate_ids_for(
+            self._graph,
+            include_current_output=False,
+        )
+
+    def _complete_output_candidate_ids_for(
+        self,
+        graph: AgentGraph,
+        *,
+        include_current_output: bool,
+    ) -> Tuple[str, ...]:
+        """Return non-Tool sinks that make the prospective Canvas complete."""
+
         active_lineage = set(self._active_semantic_lineage_ids())
-        if self._graph.output_agent_id in active_lineage:
+        if graph.output_agent_id in active_lineage:
             return ()
         admitted: list[str] = []
-        for node in self._graph.nodes:
-            if node.id == self._graph.output_agent_id:
+        for node in graph.nodes:
+            if not include_current_output and node.id == graph.output_agent_id:
                 continue
             if (
                 self.require_evidence_relation
@@ -2046,14 +2059,14 @@ class AgentWorkflowEnv:
                 )
                 if role_family not in admitted_output_roles:
                     continue
-            candidate = self._graph.fork()
+            candidate = graph.fork()
             try:
                 candidate.set_output(node.id)
             except GraphMutationError:
                 continue
             validation = candidate.validate(
                 self.model_registry,
-                require_complete=False,
+                require_complete=self.require_evidence_relation,
             )
             if not validation.valid:
                 continue
@@ -2066,6 +2079,42 @@ class AgentWorkflowEnv:
                 continue
             admitted.append(node.id)
         return tuple(admitted)
+
+    def _topology_neutral_add_completion_issue(
+        self,
+        action: AgentAction,
+        candidate: AgentGraph,
+    ) -> Optional[str]:
+        """Require one ADD transaction to close its executable functional unit.
+
+        FlowSteer executes after every accepted Canvas edit.  Once a QA-memory
+        worker has materialized search/read receipts, a topology-neutral ADD
+        must therefore connect every new Agent before that execution boundary,
+        rather than create successful disconnected artifacts whose predecessor
+        identities the preservation policy must later invalidate.  The
+        Director still chooses Agent count, responsibilities and all relation
+        directions; this gate asks only that some non-Tool node can be selected
+        as a complete Output sink after the transaction.
+        """
+
+        if (
+            action.action_type is not AgentActionType.ADD_SUBGRAPH
+            or not self.require_evidence_relation
+            or self._uses_semantic_lineage_protocol()
+            or not self._graph.nodes
+            or not self._current_successful_evidence_worker_ids()
+        ):
+            return None
+        if self._complete_output_candidate_ids_for(
+            candidate,
+            include_current_output=True,
+        ):
+            return None
+        return (
+            "add_subgraph must commit one connected functional unit before "
+            "execute-after-edit: route every new Agent into a common reachable "
+            "non-Tool Output candidate within this transaction"
+        )
 
     def _model_admissible_modify_agent_ids(self) -> Tuple[str, ...]:
         """Exclude an already verified semantic lineage from repair targets."""
@@ -4204,6 +4253,15 @@ class AgentWorkflowEnv:
             return self._reject_after_count(
                 action,
                 "edit rejected: " + semantic_edit_issue,
+            )
+        add_completion_issue = self._topology_neutral_add_completion_issue(
+            action,
+            candidate,
+        )
+        if add_completion_issue is not None:
+            return self._reject_after_count(
+                action,
+                "edit rejected: " + add_completion_issue,
             )
         preserved_input_issue = self._preserved_input_change_issue_for(candidate)
         if preserved_input_issue is not None:
