@@ -913,7 +913,8 @@ class AgentWorkflowEnv:
         terminate the current public state from the next model observation.
         """
 
-        finish_admitted = self.finish_admissibility().get("admissible") is True
+        finish_admission = self.finish_admissibility()
+        finish_admitted = finish_admission.get("admissible") is True
         if (
             (
                 self._uses_semantic_lineage_protocol()
@@ -930,6 +931,19 @@ class AgentWorkflowEnv:
             # FlowSteer's action mask still asks the Director to emit the
             # explicit terminal action; it does not finish automatically.
             return (AgentActionType.FINISH.value,)
+
+        if (
+            finish_admission.get("stage") == "terminal_protocol"
+            and self._graph.output_agent_id is not None
+            and AgentActionType.MODIFY_AGENT.value
+            in self._allowed_action_type_set
+        ):
+            # The current evidence lineage and semantic answer are already
+            # valid; only the selected Output artifact violates the configured
+            # terminal serialization protocol.  Keep FlowSteer's next edit on
+            # that measured repair boundary instead of allowing an unrelated
+            # topology or Tool-capability mutation to discard valid evidence.
+            return (AgentActionType.MODIFY_AGENT.value,)
 
         mandatory_repair_ids = self._mandatory_repair_agent_ids()
         if (
@@ -2133,6 +2147,9 @@ class AgentWorkflowEnv:
         """Exclude an already verified semantic lineage from repair targets."""
 
         node_ids = tuple(node.id for node in self._graph.nodes)
+        terminal_protocol_repair_id = self._terminal_protocol_repair_agent_id()
+        if terminal_protocol_repair_id is not None:
+            return (terminal_protocol_repair_id,)
         if self.recovery_policy != _PRESERVE_REPAIR_RECOVERY_POLICY:
             return node_ids
 
@@ -3746,6 +3763,9 @@ class AgentWorkflowEnv:
             }
         if AgentActionType.MODIFY_AGENT.value in admitted:
             modifiable_node_ids = list(self._model_admissible_modify_agent_ids())
+            terminal_protocol_repair_id = (
+                self._terminal_protocol_repair_agent_id()
+            )
             base_mutable_fields = [
                 "model_id",
                 "contract",
@@ -3829,6 +3849,8 @@ class AgentWorkflowEnv:
                             self._uses_semantic_lineage_protocol()
                             and agent_id in self._react_exhausted_agent_ids
                         )
+                        else ["contract", "completion_condition"]
+                        if agent_id == terminal_protocol_repair_id
                         else base_mutable_fields
                     )
                     if not (
@@ -4928,6 +4950,17 @@ class AgentWorkflowEnv:
             f"exact_single_answer_tag={exact_wrapper}, non_empty={non_empty}; "
             "modify the Output Agent contract/model or graph before retrying"
         )
+
+    def _terminal_protocol_repair_agent_id(self) -> Optional[str]:
+        """Return the selected Output only for a pure terminal-protocol fault."""
+
+        output_agent_id = self._graph.output_agent_id
+        if output_agent_id is None or not self._graph.has_node(output_agent_id):
+            return None
+        admission = self.finish_admissibility()
+        if admission.get("stage") != "terminal_protocol":
+            return None
+        return output_agent_id
 
     def _allows_unconsumed_auxiliary_terminal_reachability(
         self,

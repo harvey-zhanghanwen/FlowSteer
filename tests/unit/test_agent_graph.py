@@ -1967,6 +1967,66 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIsNone(env._required_evidence_issue(current))
 
+    def test_free_topology_terminal_protocol_repairs_only_output_contract(
+        self,
+    ) -> None:
+        registry = make_registry()
+        receipts = _trivia_memory_receipts()
+        worker = AgentNode(
+            "worker",
+            "balanced",
+            "retrieve evidence",
+            execution_mode="react",
+            allowed_tools=("triviaqa.qa_memory",),
+        )
+        output = AgentNode("output", "balanced", "answer from evidence")
+        graph = AgentGraph(
+            [worker, output],
+            [AgentRelation("worker", "output", True, False)],
+            output_agent_id="output",
+        )
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_TriviaMemoryProfileRuntime(registry),  # type: ignore[arg-type]
+            problem="Which author wrote the novel?",
+            graph=graph,
+            execute_on_edit=True,
+            require_exact_answer_tag=True,
+            required_evidence_tool_id="triviaqa.qa_memory",
+            require_evidence_relation=True,
+            director_feedback_mode="control_plane",
+        )
+        env._progressive_execution = AgentRuntimeResult(
+            run_id="terminal-repair",
+            graph_revision=graph.revision,
+            output_agent_id="output",
+            final_answer="Ada",
+            outputs={"worker": "evidence", "output": "Ada"},
+            calls=(),
+            block_completion_order=(("worker",), ("output",)),
+            output_metadata={
+                "worker": {"tool_receipts": receipts},
+                "output": {
+                    "input_artifact_provenance": [
+                        {
+                            "source_agent_id": "worker",
+                            "target_agent_id": "output",
+                            "tool_receipts": receipts,
+                        }
+                    ]
+                },
+            },
+        )
+        env._progressive_execution_revision = graph.revision
+
+        self.assertEqual(("modify_agent",), env.model_admissible_action_types())
+        modify = env.model_admissible_action_targets()["modify_agent"]
+        self.assertEqual(["output"], modify["agent_ids"])
+        self.assertEqual(
+            ["contract", "completion_condition"],
+            modify["per_agent_candidates"][0]["mutable_fields"],
+        )
+
     async def test_null_output_executes_an_output_free_component(self) -> None:
         registry = make_registry()
         gateway = _ImmediateGateway()
