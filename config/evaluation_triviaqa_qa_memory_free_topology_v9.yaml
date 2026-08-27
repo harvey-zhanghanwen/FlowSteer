@@ -1,4 +1,4 @@
-# TriviaQA fixed-128 inference-only QA-memory condition.  This v8 profile
+# TriviaQA fixed-128 inference-only QA-memory condition.  This v9 profile
 # preserves the existing train-only QA-memory index and runtime, but replaces
 # the v3 semantic lineage protocol with FlowSteer's topology-neutral evidence
 # relation gate.  The Director receives control-plane feedback only; a Canvas
@@ -7,18 +7,18 @@
 schema_version: "flowsteer.agentgraph.config.v1"
 execution_timeout: 600.0
 experiment:
-  name: "triviaqa_qa_memory_free_topology_v8"
+  name: "triviaqa_qa_memory_free_topology_v9"
   phase: "triviaqa_evaluation"
   baseline_id: "triviaqa_round_01_stable_zero"
-  step_id: "unified_v2_dynamic_train_qa_memory_worker_relation_v8"
+  step_id: "unified_v2_dynamic_train_qa_memory_worker_relation_v9"
   training_enabled: false
   seed: 20260826
-  condition_id: "triviaqa_qa_memory_free_topology_v8_worker_relation"
-  sampling_schedule_purpose: "triviaqa_fixed128_qa_memory_free_topology_v8"
-  catalog_order_namespace: "triviaqa_qa_memory_free_topology_v8"
+  condition_id: "triviaqa_qa_memory_free_topology_v9_worker_relation"
+  sampling_schedule_purpose: "triviaqa_fixed128_qa_memory_free_topology_v9"
+  catalog_order_namespace: "triviaqa_qa_memory_free_topology_v9"
   prompt_version: "agentgraph.director.minimal-neutral.v10"
-  tool_version: "skillflow.search-read+flowsteer.v63+triviaqa-train-qa-memory-bge.v8"
-  output_dir: "artifacts/triviaqa_qa_memory_free_topology_v8"
+  tool_version: "skillflow.search-read+flowsteer.v63+triviaqa-train-qa-memory-bge.v9"
+  output_dir: "artifacts/triviaqa_qa_memory_free_topology_v9"
 
 data:
   catalog_path: "config/joint_qa_partitions_v2.yaml"
@@ -48,12 +48,12 @@ triviaqa_evaluation:
   direct_context_mode: "question_only"
   direct_reused_from: "reports/triviaqa_qa_memory_v1_baseline/direct_question_only_predictions.jsonl"
   legacy_deterministic_prefetch_enabled: false
-  agentgraph_protocol: "question_plus_worker_dynamic_train_qa_memory_free_topology_v8"
+  agentgraph_protocol: "question_plus_worker_dynamic_train_qa_memory_free_topology_v9"
   protocol_equivalent_to_direct: false
 
 qa_tool_runtime:
   enabled: true
-  condition_id: "triviaqa_qa_memory_free_topology_v8_worker_relation"
+  condition_id: "triviaqa_qa_memory_free_topology_v9_worker_relation"
   mode: "model_driven_search_read"
   passage_source: "external_corpus"
   dataset_scope: ["triviaqa"]
@@ -66,17 +66,17 @@ qa_tool_runtime:
 
 storage:
   schema_version: "flowsteer.completion_benchmark.round.v1"
-  root: "artifacts/triviaqa_qa_memory_free_topology_v8/evidence"
-  selected_tasks_path: "artifacts/triviaqa_qa_memory_free_topology_v8/selected_tasks.jsonl"
-  direct_predictions_path: "artifacts/triviaqa_qa_memory_free_topology_v8/direct_question_only_predictions.jsonl"
-  trajectories_path: "artifacts/triviaqa_qa_memory_free_topology_v8/agentgraph_trajectories.jsonl"
-  failures_path: "artifacts/triviaqa_qa_memory_free_topology_v8/collection_failures.jsonl"
-  paired_results_path: "artifacts/triviaqa_qa_memory_free_topology_v8/paired_results.jsonl"
-  wrong_demos_path: "artifacts/triviaqa_qa_memory_free_topology_v8/wrong_demos.jsonl"
-  manifest_path: "artifacts/triviaqa_qa_memory_free_topology_v8/run_manifest.json"
-  preflight_receipt_path: "artifacts/triviaqa_qa_memory_free_topology_v8/preflight_receipt.json"
-  report_json_path: "reports/triviaqa_qa_memory_free_topology_v8/report.json"
-  report_markdown_path: "reports/triviaqa_qa_memory_free_topology_v8/report.md"
+  root: "artifacts/triviaqa_qa_memory_free_topology_v9/evidence"
+  selected_tasks_path: "artifacts/triviaqa_qa_memory_free_topology_v9/selected_tasks.jsonl"
+  direct_predictions_path: "artifacts/triviaqa_qa_memory_free_topology_v9/direct_question_only_predictions.jsonl"
+  trajectories_path: "artifacts/triviaqa_qa_memory_free_topology_v9/agentgraph_trajectories.jsonl"
+  failures_path: "artifacts/triviaqa_qa_memory_free_topology_v9/collection_failures.jsonl"
+  paired_results_path: "artifacts/triviaqa_qa_memory_free_topology_v9/paired_results.jsonl"
+  wrong_demos_path: "artifacts/triviaqa_qa_memory_free_topology_v9/wrong_demos.jsonl"
+  manifest_path: "artifacts/triviaqa_qa_memory_free_topology_v9/run_manifest.json"
+  preflight_receipt_path: "artifacts/triviaqa_qa_memory_free_topology_v9/preflight_receipt.json"
+  report_json_path: "reports/triviaqa_qa_memory_free_topology_v9/report.json"
+  report_markdown_path: "reports/triviaqa_qa_memory_free_topology_v9/report.md"
 
 director:
   base_model: "${QWEN35_9B_MODEL_PATH:-/ssd1/iclr/gpf/models/Qwen3.5-9B}"
@@ -84,7 +84,7 @@ director:
   backend: "sglang"
   api_base: "http://127.0.0.1:${FLOWSTEER_SUPERVISOR_PORT:-8015}/v1"
   served_model_name: "supervisor_theta"
-  behavior_policy_version: "qwen35-9b-base-triviaqa-qa-memory-free-topology-v8"
+  behavior_policy_version: "qwen35-9b-base-triviaqa-qa-memory-free-topology-v9"
   behavior_adapter_name: null
   behavior_adapter_checkpoint: null
   updated_policy_version: "unused-evaluation-only"
@@ -165,7 +165,7 @@ grpo:
 policy_sync:
   enabled: false
   api_base: "http://127.0.0.1:${FLOWSTEER_SUPERVISOR_PORT:-8015}"
-  adapter_name_prefix: "theta_triviaqa_qa_memory_free_topology_v8_unused_"
+  adapter_name_prefix: "theta_triviaqa_qa_memory_free_topology_v9_unused_"
   request_timeout_seconds: 120
   max_retries: 0
   retry_backoff_seconds: 1
