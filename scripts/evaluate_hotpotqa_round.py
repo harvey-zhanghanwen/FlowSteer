@@ -434,6 +434,7 @@ async def _collect_direct(
     selected: Sequence[TaskRecord],
     config: Mapping[str, Any],
     path: Path,
+    failures_path: Path,
     failures: list[dict[str, Any]],
     manifest: dict[str, Any],
     manifest_path: Path,
@@ -543,6 +544,7 @@ async def _collect_direct(
                     "recorded_at": _utc_now(),
                 }
             )
+            _atomic_jsonl(failures_path, failures)
         else:
             by_task[task.task_id] = dict(result)
             _persist_ordered(path, selected, by_task)
@@ -561,6 +563,7 @@ async def _collect_graph(
     selected: Sequence[TaskRecord],
     config: Mapping[str, Any],
     path: Path,
+    failures_path: Path,
     failures: list[dict[str, Any]],
     manifest: dict[str, Any],
     manifest_path: Path,
@@ -652,6 +655,11 @@ async def _collect_graph(
                     "recorded_at": _utc_now(),
                 }
             )
+            # Keep failure recovery as durable as successful trajectory
+            # recovery. A later process restart must not repay a failed
+            # provider/runtime attempt merely because the batch had not yet
+            # reached its final mirror checkpoint.
+            _atomic_jsonl(failures_path, failures)
         else:
             if not isinstance(result, TrajectoryRecord):
                 raise HotpotRoundError("backend returned a non-trajectory result")
@@ -1433,6 +1441,7 @@ async def run_hotpot_round(
         active,
         config,
         paths["direct"],
+        paths["failures"],
         failures,
         manifest,
         paths["manifest"],
@@ -1446,6 +1455,7 @@ async def run_hotpot_round(
         active,
         config,
         paths["trajectories"],
+        paths["failures"],
         failures,
         manifest,
         paths["manifest"],

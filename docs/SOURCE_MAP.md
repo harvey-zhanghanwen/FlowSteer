@@ -125,7 +125,25 @@ execution. Web Search is not registered. This condition is inference-only:
 Skills, GRPO, LoRA, backward, optimizer updates, MACE, and Bayesian updates are
 disabled.
 
-`hotpotqa_embedding_retrieval_v4` is the first formal condition whose runtime,
-development profile, deterministic rebuild smoke, and Tool smoke all share the
-same question-only boundary.  Earlier v2/v3 conditions are retained only as
-diagnostic evidence and are not the current next-run profile.
+`hotpotqa_embedding_retrieval_v4` is retained as a passage-only diagnostic
+condition.  It is not the current QA-memory condition and is not the
+Round-01 best profile.
+
+## HotpotQA train-QA-memory retrieval condition (v7)
+
+| Local boundary | Reused source | Adaptation and status |
+| --- | --- | --- |
+| `hotpotqa_qa_memory.py`, `hotpotqa_embedding_index.py` | SkillFlow retrieval/index interfaces (`open`, `search`, `read`) and its normalized BGE embedding convention | Necessary HotpotQA adapter: materializes only the frozen 512 training QA records as semantic-preserving question paraphrases plus answer statements.  Canonical answer spans are retained inside the training memory; the 128 validation IDs, answers, aliases, supporting facts, and evaluator receipts are excluded. |
+| `qa_tool_adapter.py`, `react_execution.py`, per-Agent Tool receipts | FlowSteer AgentGraph Tool adapter/Canvas relation path and SkillFlow bounded ReAct runtime | Direct reuse with the dataset-specific `hotpotqa.qa_memory` registry binding.  Only a Canvas worker with `execution_mode=react` can dynamically issue `search(query, k)` and `read(memory_id)`; the Director has no Tool and receives only control-plane receipt summaries.  Evidence reaches an Output Agent only through an explicit relation. |
+| `select_hotpotqa_qa_memory_profile.py` | Existing project development-profile selection boundary | Necessary compatibility adapter that freezes BGE-base-en-v1.5, cosine/L2 normalization, `top_k=2`, and the Tool budget using only training/architecture-development tasks.  Validation answers are never used for profile selection. |
+| `evaluate_hotpotqa_round.py` durable failure collection | Existing FlowSteer-style atomic per-record checkpoint/recovery boundary | Minimal reliability fix: a collection failure is checkpointed when observed, so a restart does not repeat a failed attempt merely because the final aggregate write has not run. |
+| `scientific_sampling.py`, `openai_gateway.py`, task-coordinate generation seeds | SkillFlow `runtime/openai_provider.py`, `rollout/types.py`, and its per-turn sampling semantics | Direct port of request-level generation-seed handling for the local Qwen3.5-9B deployment.  This affects sampling reproducibility, not the evaluator or answer recovery. |
+
+The formal v7 receipt demonstrates the intended control/data-plane separation:
+`director_tool_calls=0`, `retrieval_tool_calls_by_worker=1764`, and
+`retrieval_artifact_routed_via_relation=true`.  It has **not** improved the
+benchmark: on the frozen 128 held-out records its strict AgentGraph result is
+EM 4.69 / F1 6.40, against paired local Direct EM 72.66 / F1 81.75 and the
+saved Round-01 AgentGraph rescore EM 75.00 / F1 83.95.  v7 is preserved as
+reproducible regression evidence only and must not replace
+`hotpotqa_round_01_stable_zero` as the best profile or default next run.
