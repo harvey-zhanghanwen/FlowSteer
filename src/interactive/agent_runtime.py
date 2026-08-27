@@ -1908,10 +1908,20 @@ class AgentRuntime:
             input_artifact_provenance.append(message.to_dict())
         metadata["input_artifact_versions"] = input_artifact_versions
         metadata["input_artifact_provenance"] = input_artifact_provenance
+        qa_memory_receipt_present = any(
+            isinstance(receipt.get("tool_id"), str)
+            and str(receipt["tool_id"]).endswith(".qa_memory")
+            for message in inputs
+            for receipt in message.tool_receipts
+        ) or any(
+            isinstance(receipt.get("tool_id"), str)
+            and str(receipt["tool_id"]).endswith(".qa_memory")
+            for receipt in _tool_receipts_from_metadata(metadata)
+        )
         if self.semantic_protocol in {
             "hotpotqa_verified_answer_slot_v1",
             "qa_verified_answer_lineage_v2",
-        }:
+        } or qa_memory_receipt_present:
             # A Reasoner artifact may cite evidence read by an upstream
             # Retriever as well as evidence read during its own bounded ReAct
             # execution.  Preserve that public receipt lineage across every

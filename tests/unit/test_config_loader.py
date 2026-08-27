@@ -363,6 +363,39 @@ class ConfigLoaderTests(unittest.TestCase):
         self.assertFalse(config["grpo"]["enabled"])
         self.assertFalse(config["skills"]["enabled"])
 
+    def test_trivia_qa_memory_free_topology_v11_is_loadable_and_inference_only(self) -> None:
+        config = load_yaml(
+            "config/evaluation_triviaqa_qa_memory_free_topology_v11.yaml"
+        )
+        validate_agent_graph_config(config)
+
+        self.assertEqual(
+            "triviaqa_qa_memory_free_topology_v11_worker_relation",
+            config["experiment"]["condition_id"],
+        )
+        self.assertEqual(
+            "control_plane", config["agent_graph"]["director_feedback_mode"]
+        )
+        self.assertEqual(
+            "none", config["agent_graph"]["semantic_protocol_by_source"]["triviaqa"]
+        )
+        self.assertEqual(
+            "triviaqa.qa_memory",
+            config["agent_graph"]["required_evidence_tool_id"],
+        )
+        self.assertTrue(config["agent_graph"]["require_evidence_relation"])
+        self.assertFalse(config["agent_graph"]["require_format_agent"])
+        self.assertEqual(
+            "exact_single_answer_tag",
+            config["agent_graph"]["terminal_protocol_by_source"]["triviaqa"],
+        )
+        self.assertEqual(
+            "model_driven_search_read", config["qa_tool_runtime"]["mode"]
+        )
+        self.assertFalse(config["experiment"]["training_enabled"])
+        self.assertFalse(config["grpo"]["enabled"])
+        self.assertFalse(config["skills"]["enabled"])
+
     def test_shared_qa_semantic_protocol_combination_is_fail_closed(self) -> None:
         mutations = (
             ("prompt_version", "agentgraph.director.minimal-neutral.v10"),

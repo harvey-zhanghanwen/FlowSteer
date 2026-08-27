@@ -8148,25 +8148,20 @@ class AgentWorkflowEnv:
         if self.required_evidence_tool_id is None:
             return "Evidence-grounded QA has no configured retrieval Tool"
 
-        routed_worker_ids = self._directed_ancestor_ids(self._graph, output_id)
-        for worker_id in routed_worker_ids:
-            worker = self._graph.get_node(worker_id)
-            if (
-                worker.execution_mode.value != "react"
-                or self.required_evidence_tool_id not in worker.allowed_tools
-            ):
-                continue
-            artifact = execution.outputs.get(worker_id)
-            if not isinstance(artifact, str) or not artifact.strip():
-                continue
-            metadata = execution.output_metadata.get(worker_id)
-            if not isinstance(metadata, Mapping):
-                continue
-            receipts = metadata.get("tool_receipts", ())
-            if not isinstance(receipts, (list, tuple)):
-                continue
+        output_metadata = execution.output_metadata.get(output_id)
+        if not isinstance(output_metadata, Mapping):
+            return "The selected Output artifact has no execution provenance"
+        provenance = output_metadata.get("input_artifact_provenance", ())
+        if isinstance(provenance, (list, tuple)):
             public_receipts = tuple(
-                receipt for receipt in receipts if isinstance(receipt, Mapping)
+                receipt
+                for message in provenance
+                if isinstance(message, Mapping)
+                and isinstance(message.get("source_agent_id"), str)
+                and message.get("source_agent_id") != output_id
+                and isinstance(message.get("tool_receipts"), (list, tuple))
+                for receipt in message.get("tool_receipts", ())
+                if isinstance(receipt, Mapping)
             )
             if any(
                 self._successful_search_receipt(
@@ -8182,8 +8177,8 @@ class AgentWorkflowEnv:
                 return None
 
         return (
-            "The selected Output Agent has no explicitly routed upstream ReAct "
-            "worker artifact with completed "
+            "The selected Output artifact did not actually consume an explicitly "
+            "routed upstream ReAct worker artifact with completed "
             f"{self.required_evidence_tool_id!r} search and read receipts"
         )
 

@@ -8405,7 +8405,13 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 "contain exactly memory_id copied from the latest successful search "
                 "observation. The structured semantic artifact continues to use its "
                 "existing passage_id provenance field, set to that same memory_id; "
-                "this does not rename the Tool or its canonical receipt."
+                "this does not rename the Tool or its canonical receipt. Retrieved "
+                "records are train-split QA demonstrations. Before transferring a "
+                "canonical answer, align entity identity, predicate or relation, "
+                "qualifiers and requested answer slot with the current question. "
+                "Embedding similarity is not factual entailment; when alignment fails, "
+                "report that the memory does not cover the current fact and do not copy "
+                "its answer."
             )
         return (
             contract

@@ -258,6 +258,30 @@ class MessageTests(unittest.TestCase):
         self.assertIn("Do not emit <answer> tags", system)
         self.assertNotIn("unique Output Agent", system)
 
+    def test_qamemory_prompt_marks_hits_as_training_demonstrations_not_entailment(
+        self,
+    ) -> None:
+        item = request(
+            is_output_agent=False,
+            execution_mode="react",
+            semantic_protocol="none",
+        )
+        item = replace(
+            item,
+            agent=replace(
+                item.agent,
+                allowed_tools=("triviaqa.qa_memory",),
+            ),
+        )
+
+        system = build_agent_messages(item)[0]["content"]
+
+        self.assertIn("semantic-neighbor training examples", system)
+        self.assertIn("not automatically facts about the current question", system)
+        self.assertIn("entity identity", system)
+        self.assertIn("requested answer slot", system)
+        self.assertIn("only when those fields are semantically aligned", system)
+
     def test_exact_terminal_protocol_reaches_free_reasoning_output(self) -> None:
         messages = build_agent_messages(
             request(terminal_protocol="exact_single_answer_tag")

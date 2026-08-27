@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 import unittest
 
@@ -89,6 +90,7 @@ def _tool_receipts() -> tuple[dict[str, object], ...]:
             "result": {
                 "completed": True,
                 "value": {
+                    "operation": "search",
                     "hits": [
                         {
                             "memory_id": "memory-1",
@@ -113,6 +115,8 @@ def _tool_receipts() -> tuple[dict[str, object], ...]:
             "result": {
                 "completed": True,
                 "value": {
+                    "operation": "read",
+                    "memory_id": "memory-1",
                     "memory": {
                         "memory_id": "memory-1",
                         "paraphrase_question": PARAPHRASE_QUESTION,
@@ -319,6 +323,108 @@ class TriviaQAQAMemoryV2ControlPlaneTests(unittest.IsolatedAsyncioTestCase):
         assert client.provider_payload is not None
         self.assertNotIn("tools", client.provider_payload)
         self.assertNotIn("tool_choice", client.provider_payload)
+
+    async def test_qamemory_receipt_lineage_is_transitive_without_semantic_protocol(
+        self,
+    ) -> None:
+        registry = _registry()
+        retrieval_adapter = _RetrievalAdapter()
+        runtime = AgentRuntime(
+            registry,
+            _OutputGateway(),
+            execution_adapters={"react": retrieval_adapter},
+            tool_registry=_tool_registry(),
+            dataset_id="triviaqa",
+            semantic_protocol="none",
+        )
+        graph = AgentGraph(
+            [
+                AgentNode(
+                    "retriever",
+                    "m",
+                    "retrieve a relevant train-split QA demonstration",
+                    allowed_tools=(QA_MEMORY_TOOL_ID,),
+                    execution_mode="react",
+                ),
+                AgentNode("reasoner", "m", "align the retrieved demonstration"),
+                AgentNode("output", "m", "return the selected answer"),
+            ],
+            [
+                AgentRelation("retriever", "reasoner", True, False),
+                AgentRelation("reasoner", "output", True, False),
+            ],
+            output_agent_id="output",
+        )
+
+        result = await runtime.execute(
+            graph,
+            "Who invented the marine chronometer?",
+            run_id="triviaqa-qamemory-lineage-none",
+        )
+
+        self.assertEqual("none", runtime.semantic_protocol)
+        self.assertEqual(
+            ["search", "read"],
+            [
+                receipt["request"]["action"]
+                for receipt in result.output_metadata["reasoner"]["tool_receipts"]
+            ],
+        )
+        output_provenance = result.output_metadata["output"][
+            "input_artifact_provenance"
+        ]
+        self.assertEqual(["reasoner"], [item["source_agent_id"] for item in output_provenance])
+        self.assertEqual(
+            ["search", "read"],
+            [
+                receipt["request"]["action"]
+                for receipt in output_provenance[0]["tool_receipts"]
+            ],
+        )
+
+    async def test_finish_gate_requires_receipts_in_output_input_provenance(
+        self,
+    ) -> None:
+        registry = _registry()
+        runtime = AgentRuntime(
+            registry,
+            _OutputGateway(),
+            execution_adapters={"react": _RetrievalAdapter()},
+            tool_registry=_tool_registry(),
+            dataset_id="triviaqa",
+            semantic_protocol="none",
+        )
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=runtime,
+            problem="Who invented the marine chronometer?",
+            graph=_graph(),
+            required_evidence_tool_id=QA_MEMORY_TOOL_ID,
+            require_evidence_relation=True,
+        )
+        execution = await runtime.execute(
+            env.graph,
+            env.problem,
+            run_id="triviaqa-qamemory-finish-provenance",
+        )
+        self.assertIsNone(env._required_evidence_issue(execution))
+
+        # Keep the Retriever's successful receipts and graph ancestry but
+        # remove the evidence actually consumed by Output.  FINISH must reject
+        # this state rather than infer provenance from topology alone.
+        stripped_metadata = {
+            agent_id: dict(metadata)
+            for agent_id, metadata in execution.output_metadata.items()
+        }
+        stripped_metadata["output"]["input_artifact_provenance"] = []
+        stripped_execution = replace(
+            execution,
+            output_metadata=stripped_metadata,
+        )
+        self.assertIn(
+            "did not actually consume",
+            env._required_evidence_issue(stripped_execution) or "",
+        )
 
     def test_failure_receipt_is_typed_but_content_free(self) -> None:
         registry = _registry()

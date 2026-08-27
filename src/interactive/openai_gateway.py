@@ -285,6 +285,19 @@ def _format_upstream(
     return "\n\n".join(rendered)
 
 
+def _uses_qa_memory(request: AgentRequest) -> bool:
+    """Return whether this Agent or its routed inputs carry QA-memory data."""
+
+    if any(tool_id.endswith(".qa_memory") for tool_id in request.agent.allowed_tools):
+        return True
+    return any(
+        isinstance(receipt.get("tool_id"), str)
+        and str(receipt["tool_id"]).endswith(".qa_memory")
+        for message in request.upstream
+        for receipt in message.tool_receipts
+    )
+
+
 def _semantic_role(request: AgentRequest) -> str:
     role_family = request.agent.role_family
     return role_family.casefold() if isinstance(role_family, str) else ""
@@ -443,6 +456,7 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
     exact_answer_terminal = (
         request.terminal_protocol == "exact_single_answer_tag"
     )
+    qa_memory_context = _uses_qa_memory(request)
     if execution_mode in {"react", "coding"}:
         # SkillFlow's BoundedAgent asks the policy for one StructuredAction per
         # model turn.  The execution adapter, not this provider boundary,
@@ -463,6 +477,16 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
             "the eventual artifact or answer fields into a Tool action. Do not "
             "emit <answer> tags in this internal action."
         )
+        if qa_memory_context:
+            protocol += (
+                " QA-memory search returns semantic-neighbor training examples, not "
+                "automatically facts about the current question. Before completing, "
+                "align the current question and each read record by entity identity, "
+                "predicate or relation, qualifiers and requested answer slot. Copy a "
+                "retrieved canonical answer only when those fields are semantically "
+                "aligned. Otherwise state that the memory does not cover the current "
+                "fact and do not transfer its answer to the current task."
+            )
         if semantic_lineage and semantic_role == "reasoner":
             protocol += (
                 " ReAct is only this node's execution schedule, not its role. "
@@ -591,6 +615,15 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
                 "<answer>...</answer> wrapper containing only the short task "
                 "answer and no explanation."
             )
+        if qa_memory_context:
+            protocol += (
+                " Treat upstream QA-memory records as retrieved demonstrations. "
+                "Embedding similarity alone is not factual support: accept a memory "
+                "answer only when entity binding, requested relation, qualifiers and "
+                "answer slot align with the current question. If a memory is unrelated, "
+                "use the remaining valid upstream reasoning and the public task, and "
+                "never copy the unrelated record's canonical answer."
+            )
     else:
         protocol = (
             "You are an intermediate AgentGraph node. Follow your assigned contract and "
@@ -606,6 +639,13 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
             "Do not present a task-level final answer and "
             "do not use <answer> tags."
         )
+        if qa_memory_context:
+            protocol += (
+                " For QA-memory inputs, explicitly check entity binding, predicate or "
+                "relation, qualifiers and requested answer slot before using a retrieved "
+                "answer. Preserve a coverage failure for an analogous but unrelated "
+                "training example; do not treat semantic similarity as entailment."
+            )
     if request.is_format_agent:
         # FlowSteer's Format Operator normally receives the problem and the
         # computed solution under its fixed extraction prompt.  Do not inject
