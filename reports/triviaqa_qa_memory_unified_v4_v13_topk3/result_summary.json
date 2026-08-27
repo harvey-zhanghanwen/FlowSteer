@@ -55,7 +55,7 @@
     "top_k_projection_count": 455,
     "top_k_projection_complete_count": 452,
     "retrieval_tasks": 125,
-    "retrieval_tasks_with_relation_route": 108,
+    "retrieval_tasks_with_relation_route": 124,
     "retrieval_tasks_with_output_inbox_receipt_lineage": 119
   },
   "terminal": {

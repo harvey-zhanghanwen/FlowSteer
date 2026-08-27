@@ -308,7 +308,15 @@ def _observed_communication(
     for round_index, _, execution in base._iter_executions(trajectory):
         request = base._mapping(base._mapping(execution.get("metadata")).get("request"))
         target = execution.get("agent_id")
-        for upstream in base._list(request.get("upstream")):
+        communication_envelopes = list(base._list(request.get("upstream")))
+        # FlowSteer's bidirectional exchange stores the peer-to-peer envelope
+        # separately from ordinary predecessor messages.  It is still an
+        # observed AgentGraph communication with the same receipt schema and
+        # must participate in relation/lineage verification.
+        peer_draft = request.get("peer_draft")
+        if isinstance(peer_draft, Mapping):
+            communication_envelopes.append(peer_draft)
+        for upstream in communication_envelopes:
             if not isinstance(upstream, Mapping):
                 continue
             source = upstream.get("source_agent_id")

@@ -24,7 +24,7 @@
 - 静态 prefetch：关闭。
 - Web Search：未配置、未调用；配置中的 `passage_source=external_corpus` 是现有 runtime 对本地独立索引的枚举值，不表示 HTTP 或 Web Search。
 - ordered top-k artifact：452/455 个 projection 完全满足 1 次 search + 3 次有序 read；3 个 projection 有额外 ReAct Tool action，因而未通过严格 exact-batch 断言。
-- relation routing：125 个发生检索的任务中，108 个满足严格的历史 receipt-to-relation 完整路由；119 个满足 Output inbox receipt lineage。其余是本轮真实 AgentGraph execution failure，不在报告中隐藏。
+- relation routing：125 个发生检索的任务中，124 个把 QA-memory receipt artifact 通过 `upstream` 或双向 exchange 的 `peer_draft` 沿显式 relation 发送给下一 Agent；唯一真实未完成路由的是 `triviaqa:tc_26`（`max_rounds`，没有 Output Agent）。119 个任务满足“所有历史 receipt 均进入 Output inbox”的强断言；该断言还把后续已被替换的旧 batch 计为缺失，因此不等同于 6 个 runtime 路由 bug。
 
 ## 正式准确率
 
@@ -40,7 +40,7 @@ AgentGraph terminal failure 为 128/128，其中 `canvas_action_domain_exhausted
 
 - 定向单元与端到端测试：204 passed，39 subtests passed。
 - 关键断言：`director_tool_calls=0`、`director_requests_toolless=true`、`director_data_plane_isolated=true`、`retrieval_tool_calls_by_worker>0`、`worker_ownership_violation_count=0`、`reasoner_qamemory_tool_unassigned=true`。
-- 失败断言按真实结果保留：`native_top_k_batches_complete=false`、`retrieval_artifact_routed_via_relation=false`、`output_inbox_receipt_lineage=false`。
+- 失败断言按真实结果保留：`native_top_k_batches_complete=false`、`retrieval_artifact_routed_via_relation=false`（124/125，唯一真实失败为 `tc_26`）、`output_inbox_receipt_lineage=false`（119/125 的 all-historical 强断言）。
 - 本轮为 inference-only：没有 GRPO、LoRA、backward、optimizer update、MACE 或 Skill 训练。
 
 ## 证据文件

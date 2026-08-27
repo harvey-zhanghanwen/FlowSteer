@@ -636,6 +636,23 @@ def _assert_director_outputs_are_not_misclassified_as_request_payload() -> None:
     assert result["director_exposed_memory_ids"] == []
 
 
+def _assert_bidirectional_peer_draft_counts_as_observed_communication() -> None:
+    task_id = "triviaqa:validation:peer-draft"
+    trajectory = _trajectory(task_id)
+    reasoner_request = trajectory["turns"][0]["executions"][1]["metadata"][  # type: ignore[index]
+        "request"
+    ]
+    reasoner_request["peer_draft"] = reasoner_request["upstream"].pop()
+
+    result = analysis._trajectory_control_plane(task_id, trajectory)  # noqa: SLF001
+
+    assert result["observed_communication_edges"] == [
+        ["reasoner", "formatter"],
+        ["retriever", "reasoner"],
+    ]
+    assert result["retrieval_artifact_routed_via_relation"] is True
+
+
 def _assert_failed_worker_receipts_count_without_claiming_artifact_route() -> None:
     task_id = "triviaqa:validation:failed-worker"
     trajectory = _trajectory(task_id)
@@ -849,6 +866,9 @@ class TriviaQAQAMemoryResultAnalysisTests(unittest.TestCase):
 
     def test_director_outputs_are_not_misclassified_as_request_payload(self) -> None:
         _assert_director_outputs_are_not_misclassified_as_request_payload()
+
+    def test_bidirectional_peer_draft_counts_as_observed_communication(self) -> None:
+        _assert_bidirectional_peer_draft_counts_as_observed_communication()
 
     def test_failed_worker_receipts_count_without_claiming_artifact_route(
         self,
