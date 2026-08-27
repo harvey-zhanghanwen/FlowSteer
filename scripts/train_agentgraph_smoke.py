@@ -752,6 +752,16 @@ class LiveSmokeBackend:
             runtime=task_runtime,
             execute_on_edit=bool(director["execute_on_edit"]),
             max_agents=int(graph_config["max_agents"]),
+            max_agents_per_subgraph=int(
+                graph_config.get("max_agents_per_subgraph", 3)
+            ),
+            require_exact_answer_tag=(
+                str(graph_config.get("terminal_protocol", "none"))
+                == "exact_single_answer_tag"
+            ),
+            require_format_agent=bool(
+                graph_config.get("require_format_agent", False)
+            ),
             allowed_actions=tuple(
                 str(action) for action in graph_config["actions"]
             ),

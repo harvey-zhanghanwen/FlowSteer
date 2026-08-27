@@ -345,6 +345,30 @@ class AgentWorkflowEnv:
             )
         return tuple(profiles)
 
+    def _topology_neutral_registered_execution_profiles(
+        self,
+    ) -> Tuple[Tuple[str, Tuple[str, ...]], ...]:
+        """Project the staged worker/downstream Runtime capability domain.
+
+        DIRECT_REUSE: this is the topology-neutral Tool Canvas projection from
+        the TriviaQA v10 architecture.  It fixes only capability ownership: the
+        first functional unit materializes one worker Tool artifact and later
+        units consume it without the Tool.  Roles, contracts, models, Agent
+        count after that first unit, relations and final topology remain under
+        the Director's progressive Canvas editing policy.
+        """
+
+        profiles = self.registered_execution_profiles()
+        tool_id = self.required_evidence_tool_id
+        if not self.require_evidence_relation or tool_id is None:
+            return profiles
+        successful_workers = self._current_successful_evidence_agent_ids()
+        if not self._graph.nodes and not successful_workers:
+            return tuple(profile for profile in profiles if profile[1] == (tool_id,))
+        if successful_workers:
+            return tuple(profile for profile in profiles if not profile[1])
+        return profiles
+
     @staticmethod
     def _serialized_execution_profiles(
         profiles: Sequence[Tuple[str, Tuple[str, ...]]],
@@ -463,15 +487,7 @@ class AgentWorkflowEnv:
                 and self.required_evidence_tool_id in node.allowed_tools
             )
         ]
-        add_profiles = profiles
-        if successful_evidence_ids and not output_target_ids:
-            # The current revision already owns a receipt-grounded retrieval
-            # artifact.  The next functional unit must be a no-Tool consumer;
-            # this preserves the worker and leaves its role, contract, model,
-            # relation direction, and final Output selection model-authored.
-            add_profiles = tuple(
-                profile for profile in profiles if not profile[1]
-            )
+        add_profiles = self._topology_neutral_registered_execution_profiles()
         serialized_add_profiles = self._serialized_execution_profiles(add_profiles)
         result: dict[str, object] = {
             "registered_execution_profiles": serialized_profiles,
@@ -495,7 +511,15 @@ class AgentWorkflowEnv:
                 "model_ids": model_ids,
                 "execution_profiles": serialized_add_profiles,
                 "existing_agent_ids": node_ids,
-                "max_new_agents": remaining,
+                "max_new_agents": (
+                    1
+                    if not node_ids
+                    and self.require_evidence_relation
+                    and self.required_evidence_tool_id is not None
+                    else remaining
+                ),
+                "preserved_input_agent_ids": sorted(successful_evidence_ids),
+                "output_agent_ids": output_target_ids,
             }
         if AgentActionType.MODIFY_AGENT.value in admitted:
             result[AgentActionType.MODIFY_AGENT.value] = {
@@ -519,6 +543,7 @@ class AgentWorkflowEnv:
                 ),
                 "model_ids": model_ids,
                 "execution_profiles": serialized_profiles,
+                "output_agent_id": self._graph.output_agent_id,
             }
         if AgentActionType.DELETE_AGENT.value in admitted:
             result[AgentActionType.DELETE_AGENT.value] = {
@@ -531,6 +556,7 @@ class AgentWorkflowEnv:
         if AgentActionType.SET_RELATION.value in admitted:
             result[AgentActionType.SET_RELATION.value] = {
                 "agent_ids": node_ids,
+                "preserved_input_agent_ids": sorted(successful_evidence_ids),
             }
         if AgentActionType.SET_OUTPUT.value in admitted:
             result[AgentActionType.SET_OUTPUT.value] = {
@@ -587,6 +613,63 @@ class AgentWorkflowEnv:
             for source_id, target_id in relation.directed_edges()
             if source_id == agent_id
         }
+
+    def _tool_dataflow_mutation_issue(
+        self,
+        action: AgentAction,
+        candidate: AgentGraph,
+    ) -> Optional[str]:
+        """Enforce the worker -> downstream artifact boundary authoritatively.
+
+        DIRECT_REUSE + NECESSARY_ADAPTATION: TriviaQA v10 filters incoming
+        relations to successful Tool workers in the live Director domain.  This
+        Canvas-side check is the corresponding authoritative boundary for the
+        simpler HotpotQA declaration-first decoder and also closes its
+        ADD/MODIFY Output-Tool loopholes.
+        """
+
+        tool_id = self.required_evidence_tool_id
+        if tool_id is None or not self.require_evidence_relation:
+            return None
+        output_id = candidate.output_agent_id
+        if output_id is not None and tool_id in candidate.get_node(output_id).allowed_tools:
+            return (
+                f"Output Agent {output_id!r} cannot hold retrieval Tool {tool_id!r}; "
+                "route the worker artifact to a no-Tool downstream Agent and select "
+                "that consumer as Output"
+            )
+        preserved = set(self._current_successful_evidence_agent_ids())
+        if not preserved:
+            return None
+        if action.action_type in {
+            AgentActionType.MODIFY_AGENT,
+            AgentActionType.DELETE_AGENT,
+        } and action.agent_id in preserved:
+            return (
+                f"successful Tool worker {action.agent_id!r} and its artifact are "
+                "preserved; repair or augment downstream instead"
+            )
+        previous_edges = {
+            edge
+            for relation in self._graph.relations
+            for edge in relation.directed_edges()
+        }
+        candidate_edges = {
+            edge
+            for relation in candidate.relations
+            for edge in relation.directed_edges()
+        }
+        incoming = sorted(
+            (source_id, target_id)
+            for source_id, target_id in candidate_edges - previous_edges
+            if target_id in preserved
+        )
+        if incoming:
+            return (
+                "a successful Tool worker cannot receive a new upstream edge; "
+                f"preserve worker -> downstream dataflow, rejected_edges={incoming!r}"
+            )
+        return None
 
     def _replacement_takeover_agent_ids(self, agent_id: str) -> Tuple[str, ...]:
         if not self._graph.has_node(agent_id):
@@ -953,6 +1036,12 @@ class AgentWorkflowEnv:
                 f"edit rejected: {self._format_issues(validation)}",
                 validation.issues,
             )
+        tool_dataflow_issue = self._tool_dataflow_mutation_issue(action, candidate)
+        if tool_dataflow_issue is not None:
+            return self._reject_after_count(
+                action,
+                "edit rejected: " + tool_dataflow_issue,
+            )
         if (
             action.action_type in {
                 AgentActionType.SET_OUTPUT,
@@ -1286,24 +1375,16 @@ class AgentWorkflowEnv:
                 "upstream artifact and cannot hold the worker retrieval Tool "
                 f"{tool_id!r}"
             )
-        routed_ids = {output_id}
-        pending = list(self._graph.directed_predecessors(output_id))
-        while pending:
-            agent_id = pending.pop(0)
-            if agent_id in routed_ids:
-                continue
-            routed_ids.add(agent_id)
-            pending.extend(self._graph.directed_predecessors(agent_id))
-
+        # DIRECT_REUSE: the TriviaQA runtime binds each artifact to its actual
+        # input_artifact_provenance and propagates public Tool receipts through
+        # each explicit relation.  FINISH therefore checks what Output consumed,
+        # not merely whether some graph ancestor happened to call a Tool.
+        output_metadata = execution.output_metadata.get(output_id)
+        if not isinstance(output_metadata, Mapping):
+            return "the current Output artifact has no execution provenance"
         successful_actions: set[str] = set()
-        successful_agents: set[str] = set()
-        for agent_id in routed_ids:
-            metadata = execution.output_metadata.get(agent_id)
-            if not isinstance(metadata, Mapping):
-                continue
-            receipts = metadata.get("tool_receipts", ())
-            if not isinstance(receipts, (list, tuple)):
-                continue
+        receipts = output_metadata.get("tool_receipts", ())
+        if isinstance(receipts, (list, tuple)):
             for receipt in receipts:
                 if not isinstance(receipt, Mapping):
                     continue
@@ -1316,16 +1397,26 @@ class AgentWorkflowEnv:
                     and request.get("action") in {"search", "read"}
                 ):
                     successful_actions.add(str(request["action"]))
-                    successful_agents.add(agent_id)
         missing = sorted({"search", "read"} - successful_actions)
         if not missing:
-            if (
-                self.require_evidence_relation
-                and not (successful_agents - {output_id})
-            ):
+            provenance = output_metadata.get("input_artifact_provenance", ())
+            routed_receipt_present = isinstance(provenance, (list, tuple)) and any(
+                isinstance(message, Mapping)
+                and isinstance(message.get("source_agent_id"), str)
+                and message.get("source_agent_id") != output_id
+                and isinstance(message.get("tool_receipts"), (list, tuple))
+                and any(
+                    isinstance(receipt, Mapping)
+                    and receipt.get("tool_id") == tool_id
+                    and receipt.get("error_type") is None
+                    for receipt in message.get("tool_receipts", ())
+                )
+                for message in provenance
+            )
+            if self.require_evidence_relation and not routed_receipt_present:
                 return (
-                    f"the routed Output path requires {tool_id} evidence from a "
-                    "distinct upstream Tool-capable Agent connected by an explicit "
+                    f"the Output artifact must actually consume {tool_id} receipts "
+                    "from a distinct upstream artifact routed by an explicit "
                     "AgentGraph relation"
                 )
             return None

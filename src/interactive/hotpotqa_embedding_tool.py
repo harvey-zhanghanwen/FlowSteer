@@ -570,7 +570,12 @@ class HotpotQAEmbeddingReactExecutionAdapter(ToolReactExecutionAdapter):
             self._max_tool_calls - state.dispatched_tool_calls,
         )
         successful_read_count = len(state.read_doc_ids)
-        if successful_read_count >= 2:
+        # DIRECT_REUSE: SkillFlow/FlowSteer's shared QA retrieval adapter
+        # admits completion after one successful public read.  QA-memory hits
+        # are complete train-split demonstrations rather than task-scoped
+        # passage hops, so forcing a second search/read only adds an unrelated
+        # example and consumes the bounded ReAct turn budget.
+        if successful_read_count >= 1:
             return frozenset(), True
         if remaining_tool_calls == 0:
             return frozenset(), successful_read_count > 0
@@ -581,15 +586,6 @@ class HotpotQAEmbeddingReactExecutionAdapter(ToolReactExecutionAdapter):
             return frozenset(
                 {(tool_id, "read")}
             ), False
-        if successful_read_count > 0:
-            # One missing-hop search/read transition requires two remaining
-            # Tool calls. Preserve the first read if a Tool error consumed that
-            # capacity instead of admitting an unfinishable blind search.
-            if remaining_tool_calls >= 2:
-                return frozenset(
-                    {(tool_id, "search")}
-                ), False
-            return frozenset(), True
         return frozenset(
             {(tool_id, "search")}
         ), False
@@ -653,8 +649,13 @@ class HotpotQAEmbeddingReactExecutionAdapter(ToolReactExecutionAdapter):
             )
         elif completion_admitted and not actions:
             next_action = (
-                "Current action mask: complete only. Preserve both public read "
-                "observations and return their evidence-supported artifact."
+                "Current action mask: complete only. Treat the public read as a "
+                "retrieved train-split demonstration. Align its entity identity, "
+                "predicate or relation, qualifiers and requested answer slot with "
+                "the current question. If these fields do not align, explicitly "
+                "report that the memory does not cover the current fact and do not "
+                "copy its canonical answer. Return the best task artifact permitted "
+                "by the assigned contract."
             )
         else:
             next_action = (
@@ -678,10 +679,10 @@ class HotpotQAEmbeddingReactExecutionAdapter(ToolReactExecutionAdapter):
                 separators=(",", ":"),
             )
             + ". Do not "
-            "repeat a normalized successful query. After the first successful "
-            "read, use the next search/read transition for the missing entity, "
-            "relation, or hop while the frozen Tool budget remains. Complete "
-            "only on the admitted terminal state, with exactly "
+            "repeat a normalized successful query. Embedding similarity identifies "
+            "semantic-neighbor training examples; it is not factual entailment for "
+            "the current question. Complete only on the admitted terminal state, "
+            "after the semantic-alignment check, with exactly "
             "{\"value\":\"evidence-supported artifact\"}. "
             + next_action
         )

@@ -153,6 +153,19 @@ def _format_upstream(
     return "\n\n".join(rendered)
 
 
+def _uses_qa_memory(request: AgentRequest) -> bool:
+    """Return whether this worker or its routed inputs carry QA-memory data."""
+
+    if any(tool_id.endswith(".qa_memory") for tool_id in request.agent.allowed_tools):
+        return True
+    return any(
+        isinstance(receipt.get("tool_id"), str)
+        and str(receipt["tool_id"]).endswith(".qa_memory")
+        for message in request.upstream
+        for receipt in message.tool_receipts
+    )
+
+
 def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
     """Build finite-phase prompts without exposing provider credentials."""
 
@@ -161,6 +174,7 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
         "value",
         request.agent.execution_mode,
     )
+    qa_memory_context = _uses_qa_memory(request)
     if execution_mode in {"react", "coding"}:
         # SkillFlow's BoundedAgent asks the policy for one StructuredAction per
         # model turn.  The execution adapter, not this provider boundary,
@@ -176,6 +190,16 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
             "observation; a complete action supplies the declared node "
             "artifact. Do not emit <answer> tags in this internal action."
         )
+        if qa_memory_context:
+            protocol += (
+                " QA-memory search returns semantic-neighbor training examples, not "
+                "automatically facts about the current question. Before completing, "
+                "align the current question and each read record by entity identity, "
+                "predicate or relation, qualifiers and requested answer slot. Copy a "
+                "retrieved canonical answer only when those fields are semantically "
+                "aligned. Otherwise state that the retrieved example does not cover "
+                "the current fact and do not transfer its answer to the current task."
+            )
     elif request.is_format_agent:
         protocol = (
             "You are the terminal Format Agent. The semantic answer must already have "
@@ -208,6 +232,16 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
             "or an explanation. If the task supplies legal or admissible actions and asks "
             "for one action, return exactly one listed executable action with no explanation."
         )
+        if qa_memory_context:
+            protocol += (
+                " Treat upstream QA-memory records as retrieved demonstrations. "
+                "Accept a memory-derived candidate only when the upstream artifact "
+                "preserves the current entity binding, requested relation, qualifiers "
+                "and answer slot; an embedding similarity score alone is not factual "
+                "support. If a retrieved record is unrelated, answer the public task "
+                "from the remaining valid upstream reasoning and the task itself, and "
+                "never copy the unrelated record's canonical answer."
+            )
     else:
         protocol = (
             "You are an intermediate AgentGraph node. Follow your assigned contract and "
@@ -218,6 +252,14 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
             "Do not present a task-level final answer and "
             "do not use <answer> tags."
         )
+        if qa_memory_context:
+            protocol += (
+                " For QA-memory inputs, explicitly check entity binding, predicate or "
+                "relation, qualifiers and the requested answer slot before using a "
+                "retrieved answer. Preserve a clear coverage failure when the memory "
+                "is only an analogous training example; do not convert semantic "
+                "similarity into unsupported factual evidence."
+            )
     if request.is_format_agent:
         # FlowSteer's Format Operator normally receives the problem and the
         # computed solution under its fixed extraction prompt.  Do not inject

@@ -124,13 +124,32 @@ def validate_agent_graph_config(value: Mapping[str, Any]) -> None:
         "set_output",
         "finish",
     ]
-    progressive_actions = ["add_subgraph", *legacy_actions]
+    subgraph_actions = [
+        "add_subgraph",
+        "modify_agent",
+        "delete_agent",
+        "set_relation",
+        "set_output",
+        "finish",
+    ]
+    historical_mixed_actions = ["add_subgraph", *legacy_actions]
     actions = graph.get("actions")
-    if actions != legacy_actions and actions != progressive_actions:
-        # Historical six-action configs remain replayable while a versioned
-        # condition may enable FlowSteer's functional-subgraph transaction.
+    action_tuple = tuple(actions) if isinstance(actions, list) else ()
+    if action_tuple not in {
+        tuple(legacy_actions),
+        tuple(subgraph_actions),
+        tuple(historical_mixed_actions),
+    }:
+        # DIRECT_REUSE: current TriviaQA/FlowSteer accepts either the historical
+        # scalar ADD profile or the execute-after-edit functional-subgraph
+        # profile.  It does not require both ADD interfaces in one search space.
         raise ConfigurationError(
-            "AgentGraph search space must contain the supported atomic actions"
+            "AgentGraph actions must use the legacy scalar profile or the "
+            "FlowSteer-compatible add_subgraph profile"
+        )
+    if action_tuple == tuple(subgraph_actions) and graph.get("max_agents_per_subgraph") != 3:
+        raise ConfigurationError(
+            "add_subgraph profile requires max_agents_per_subgraph=3"
         )
     recovery_policy = graph.get("recovery_policy", "default")
     if recovery_policy not in {

@@ -477,7 +477,16 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             block_completion_order=(("worker",), ("output",)),
             output_metadata={
                 "worker": {"tool_receipts": (receipt, read_receipt)},
-                "output": {},
+                "output": {
+                    "tool_receipts": (receipt, read_receipt),
+                    "input_artifact_provenance": (
+                        {
+                            "source_agent_id": "worker",
+                            "target_agent_id": "output",
+                            "tool_receipts": (receipt, read_receipt),
+                        },
+                    ),
+                },
             },
         )
         routed_env._progressive_execution_revision = routed.revision
@@ -526,6 +535,91 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             "set_output",
             tool_output_env.model_admissible_action_targets(),
         )
+
+    async def test_successful_worker_and_output_tool_boundaries_are_authoritative(self) -> None:
+        registry = make_registry()
+        receipt = {
+            "tool_id": "qa-retrieval",
+            "request": {"action": "search"},
+            "result": {"hits": ["m1"]},
+            "error_type": None,
+        }
+        read_receipt = {
+            "tool_id": "qa-retrieval",
+            "request": {"action": "read"},
+            "result": {"memory_id": "m1"},
+            "error_type": None,
+        }
+        graph = AgentGraph(
+            [
+                AgentNode(
+                    "worker",
+                    "balanced",
+                    "retrieve",
+                    execution_mode="react",
+                    allowed_tools=("qa-retrieval",),
+                ),
+                AgentNode("output", "balanced", "answer"),
+            ],
+            [AgentRelation("worker", "output", True, False)],
+            output_agent_id="output",
+        )
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_ProfileRuntime(registry),  # type: ignore[arg-type]
+            problem="question",
+            graph=graph,
+            execute_on_edit=True,
+            required_evidence_tool_id="qa-retrieval",
+            require_evidence_relation=True,
+        )
+        env._progressive_execution = AgentRuntimeResult(
+            run_id="routed",
+            graph_revision=graph.revision,
+            output_agent_id="output",
+            final_answer="answer",
+            outputs={"worker": "evidence", "output": "answer"},
+            calls=(),
+            block_completion_order=(("worker",), ("output",)),
+            output_metadata={
+                "worker": {"tool_receipts": (receipt, read_receipt)},
+                "output": {},
+            },
+        )
+        env._progressive_execution_revision = graph.revision
+
+        output_tool = await env.step(
+            '{"action":"modify_agent","agent_id":"output",'
+            '"execution_mode":"react","allowed_tools":["qa-retrieval"]}'
+        )
+        self.assertFalse(output_tool.accepted)
+        self.assertIn("Output Agent", output_tool.feedback)
+
+        incoming = await env.step(
+            '{"action":"add_subgraph","agents":[{"agent_id":"helper",'
+            '"model_id":"balanced","contract":"analyze",'
+            '"execution_mode":"reasoning","allowed_tools":[]}],'
+            '"relations":[{"source_id":"helper","target_id":"worker",'
+            '"source_to_target":true,"target_to_source":false}]}'
+        )
+        self.assertFalse(incoming.accepted)
+        self.assertIn("cannot receive a new upstream edge", incoming.feedback)
+
+        empty = AgentWorkflowEnv(
+            registry,
+            runtime=_ProfileRuntime(registry),  # type: ignore[arg-type]
+            problem="question",
+            required_evidence_tool_id="qa-retrieval",
+            require_evidence_relation=True,
+        )
+        tool_as_output = await empty.step(
+            '{"action":"add_subgraph","agents":[{"agent_id":"worker",'
+            '"model_id":"balanced","contract":"retrieve",'
+            '"execution_mode":"react","allowed_tools":["qa-retrieval"]}],'
+            '"relations":[],"output_agent_id":"worker"}'
+        )
+        self.assertFalse(tool_as_output.accepted)
+        self.assertIn("cannot hold retrieval Tool", tool_as_output.feedback)
 
     async def test_runtime_profiles_authorize_add_subgraph_and_modify(self) -> None:
         registry = make_registry()

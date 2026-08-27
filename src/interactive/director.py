@@ -6,6 +6,7 @@ import asyncio
 from dataclasses import dataclass, field
 import json
 import os
+import re
 import socket
 import time
 from typing import Any, Mapping, Optional, Protocol, Sequence, Tuple
@@ -30,6 +31,13 @@ One accepted Canvas edit is one execution boundary. ReAct is an Agent execution 
 # the current FlowSteer implementation.  They mirror AgentActionParser; the
 # parser remains authoritative after generation.
 _NON_EMPTY_STRING_SCHEMA = {"type": "string", "minLength": 1}
+_ROLE_FAMILY_IDENTIFIER_PATTERN = r"^[a-z][a-z0-9_]{0,63}$"
+_ROLE_FAMILY_IDENTIFIER_SCHEMA = {
+    "type": "string",
+    "minLength": 1,
+    "maxLength": 64,
+    "pattern": _ROLE_FAMILY_IDENTIFIER_PATTERN,
+}
 _AGENT_SPEC_JSON_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
@@ -38,7 +46,7 @@ _AGENT_SPEC_JSON_SCHEMA = {
         "agent_id": _NON_EMPTY_STRING_SCHEMA,
         "model_id": _NON_EMPTY_STRING_SCHEMA,
         "contract": _NON_EMPTY_STRING_SCHEMA,
-        "role_family": _NON_EMPTY_STRING_SCHEMA,
+        "role_family": _ROLE_FAMILY_IDENTIFIER_SCHEMA,
         "allowed_tools": {
             "type": "array",
             "items": _NON_EMPTY_STRING_SCHEMA,
@@ -72,7 +80,7 @@ _RELATION_SPEC_JSON_SCHEMA = {
 _MUTABLE_AGENT_PROPERTIES = {
     "model_id": _NON_EMPTY_STRING_SCHEMA,
     "contract": _NON_EMPTY_STRING_SCHEMA,
-    "role_family": _NON_EMPTY_STRING_SCHEMA,
+    "role_family": _ROLE_FAMILY_IDENTIFIER_SCHEMA,
     "allowed_tools": {
         "type": "array",
         "items": _NON_EMPTY_STRING_SCHEMA,
@@ -114,7 +122,7 @@ DIRECTOR_ACTION_JSON_SCHEMA = {
                 "agent_id": _NON_EMPTY_STRING_SCHEMA,
                 "model_id": _NON_EMPTY_STRING_SCHEMA,
                 "contract": _NON_EMPTY_STRING_SCHEMA,
-                "role_family": _NON_EMPTY_STRING_SCHEMA,
+                "role_family": _ROLE_FAMILY_IDENTIFIER_SCHEMA,
                 "allowed_tools": _MUTABLE_AGENT_PROPERTIES["allowed_tools"],
                 "execution_mode": _MUTABLE_AGENT_PROPERTIES["execution_mode"],
                 "artifact_type": _NON_EMPTY_STRING_SCHEMA,
@@ -441,7 +449,7 @@ def _live_agent_schema(
         "agent_id": _NON_EMPTY_STRING_SCHEMA,
         "model_id": {"enum": model_ids},
         "contract": _NON_EMPTY_STRING_SCHEMA,
-        "role_family": _NON_EMPTY_STRING_SCHEMA,
+        "role_family": _ROLE_FAMILY_IDENTIFIER_SCHEMA,
         "artifact_type": _NON_EMPTY_STRING_SCHEMA,
         "completion_condition": _NON_EMPTY_STRING_SCHEMA,
     }
@@ -528,6 +536,15 @@ def director_live_add_subgraph_agent_declarations_from_text(
             mode = declaration.get("execution_mode")
             if not isinstance(mode, str):
                 raise ValueError("ADD declaration has no execution mode")
+            role_family = declaration.get("role_family")
+            if role_family is not None and (
+                not isinstance(role_family, str)
+                or re.fullmatch(_ROLE_FAMILY_IDENTIFIER_PATTERN, role_family)
+                is None
+            ):
+                raise ValueError(
+                    "ADD declaration role_family is not a bounded identifier"
+                )
             _, tools = _live_execution_profile_for_mode(domain, mode)
             value = dict(declaration)
             existing_tools = value.get("allowed_tools")
@@ -628,6 +645,75 @@ def director_live_modify_agent_field_selector_json_schema_text() -> str:
     )
 
 
+def _topology_neutral_add_relation_candidates(
+    domain: Mapping[str, Any],
+    agents: Sequence[Mapping[str, Any]],
+) -> tuple[dict[str, Any], ...]:
+    """Project FlowSteer ADD relations without changing preserved worker input.
+
+    DIRECT_REUSE: this is the topology-neutral relation projection used by the
+    TriviaQA v10 Canvas.  Every candidate touches a newly declared Agent;
+    reciprocal communication is admitted only between Agents in this same
+    functional unit.  Successful Tool workers may send to new downstream
+    Agents but cannot receive a new dependency.
+    """
+
+    existing = [
+        str(value)
+        for value in domain.get("existing_agent_ids", ())
+        if isinstance(value, str) and value
+    ]
+    new_ids = [
+        str(agent.get("agent_id"))
+        for agent in agents
+        if isinstance(agent.get("agent_id"), str) and agent.get("agent_id")
+    ]
+    if len(new_ids) != len(agents) or len(new_ids) != len(set(new_ids)):
+        raise ValueError("add_subgraph committed Agent IDs are invalid")
+    raw_preserved = domain.get("preserved_input_agent_ids", ())
+    if (
+        not isinstance(raw_preserved, (list, tuple))
+        or any(not isinstance(agent_id, str) or not agent_id for agent_id in raw_preserved)
+        or len(raw_preserved) != len(set(raw_preserved))
+        or not set(raw_preserved) <= set(existing)
+    ):
+        raise ValueError("add_subgraph preserved input Agent IDs are invalid")
+    preserved = set(raw_preserved)
+    new_id_set = set(new_ids)
+    endpoint_ids = [*existing, *new_ids]
+    candidates: list[dict[str, Any]] = []
+    for source_index, source_id in enumerate(endpoint_ids):
+        for target_id in endpoint_ids[source_index + 1 :]:
+            if source_id not in new_id_set and target_id not in new_id_set:
+                continue
+            forward = {
+                "source_id": source_id,
+                "target_id": target_id,
+                "source_to_target": True,
+                "target_to_source": False,
+            }
+            reverse = {
+                "source_id": target_id,
+                "target_id": source_id,
+                "source_to_target": True,
+                "target_to_source": False,
+            }
+            if forward["target_id"] not in preserved:
+                candidates.append(forward)
+            if reverse["target_id"] not in preserved:
+                candidates.append(reverse)
+            if source_id in new_id_set and target_id in new_id_set:
+                candidates.append(
+                    {
+                        "source_id": source_id,
+                        "target_id": target_id,
+                        "source_to_target": True,
+                        "target_to_source": True,
+                    }
+                )
+    return tuple(candidates)
+
+
 def director_live_action_parameter_json_schema_text(
     action: str,
     action_target_domains: Mapping[str, Any],
@@ -645,13 +731,10 @@ def director_live_action_parameter_json_schema_text(
         if not add_agents:
             raise ValueError("add_subgraph parameters require committed Agents")
         agents = [dict(agent) for agent in add_agents]
-        existing = [
-            str(value)
-            for value in domain.get("existing_agent_ids", ())
-            if isinstance(value, str) and value
-        ]
-        agent_ids = [str(agent["agent_id"]) for agent in agents]
-        endpoint_ids = list(dict.fromkeys([*existing, *agent_ids]))
+        relation_candidates = _topology_neutral_add_relation_candidates(
+            domain,
+            agents,
+        )
         schema = {
             "type": "object",
             "additionalProperties": False,
@@ -661,25 +744,17 @@ def director_live_action_parameter_json_schema_text(
                 "agents": {"const": agents},
                 "relations": {
                     "type": "array",
-                    "maxItems": len(endpoint_ids) * max(len(endpoint_ids) - 1, 0),
-                    "items": {
-                        "type": "object",
-                        "additionalProperties": False,
-                        "required": [
-                            "source_id",
-                            "target_id",
-                            "source_to_target",
-                            "target_to_source",
-                        ],
-                        "properties": {
-                            "source_id": {"enum": endpoint_ids},
-                            "target_id": {"enum": endpoint_ids},
-                            "source_to_target": {"type": "boolean"},
-                            "target_to_source": {"type": "boolean"},
-                        },
-                    },
+                    "maxItems": 1,
+                    "items": (
+                        {"enum": list(relation_candidates)}
+                        if relation_candidates
+                        else _RELATION_SPEC_JSON_SCHEMA
+                    ),
                 },
-                "output_agent_id": {"enum": [*endpoint_ids, None]},
+                # DIRECT_REUSE: TriviaQA v10 keeps Output selection as its own
+                # execute-after-edit Canvas step so a Tool worker cannot become
+                # Output inside the same ADD transaction.
+                "output_agent_id": {"type": "null"},
             },
         }
     elif action == "add_agent":
@@ -716,6 +791,17 @@ def director_live_action_parameter_json_schema_text(
                     "modify_agent execution-profile parameters require a profile"
                 )
             execution_mode, allowed_tools = execution_profile
+            if allowed_tools:
+                current_output_id = domain.get("output_agent_id")
+                agent_ids = [
+                    agent_id
+                    for agent_id in agent_ids
+                    if agent_id != current_output_id
+                ]
+                if not agent_ids:
+                    raise ValueError(
+                        "modify_agent Tool profile has no non-Output Agent target"
+                    )
             required = ["action", "agent_id", "execution_mode", "allowed_tools"]
             properties = {
                 "action": {"const": "modify_agent"},

@@ -18,6 +18,7 @@ from src.interactive.director import (
     DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3,
     director_live_action_parameter_json_schema_text,
     director_live_action_target_domains_json,
+    director_live_add_subgraph_agent_declarations_from_text,
     director_live_add_subgraph_agent_declarations_json_schema_text,
     director_live_modify_agent_field_selector_json_schema_text,
     director_model_admissible_sampling_json_schema_text,
@@ -426,6 +427,84 @@ def test_sglang_client_v3_binds_add_subgraph_to_live_domains():
     parsed = AgentActionParser().parse(response.text)
     assert parsed.relations[0].source_id == "searcher"
     assert parsed.relations[0].target_id == "answerer"
+
+
+def test_v11_add_schema_preserves_worker_input_and_defers_output_selection():
+    domains = {
+        "add_subgraph": {
+            "model_ids": ["cheap-model"],
+            "execution_profiles": [
+                {"execution_mode": "reasoning", "allowed_tools": []},
+            ],
+            "existing_agent_ids": ["worker"],
+            "preserved_input_agent_ids": ["worker"],
+            "output_agent_ids": [],
+            "max_new_agents": 2,
+        }
+    }
+    agents = [
+        {
+            "agent_id": "consumer",
+            "model_id": "cheap-model",
+            "contract": "consume the retrieved artifact",
+            "role_family": "evidence_consumer",
+            "execution_mode": "reasoning",
+            "allowed_tools": [],
+        }
+    ]
+
+    schema = json.loads(
+        director_live_action_parameter_json_schema_text(
+            "add_subgraph",
+            domains,
+            add_agents=agents,
+        )
+    )
+
+    self_relations = schema["properties"]["relations"]
+    self_relations_candidates = self_relations["items"]["enum"]
+    assert self_relations["maxItems"] == 1
+    assert schema["properties"]["output_agent_id"] == {"type": "null"}
+    assert {
+        "source_id": "worker",
+        "target_id": "consumer",
+        "source_to_target": True,
+        "target_to_source": False,
+    } in self_relations_candidates
+    assert not any(
+        candidate["target_id"] == "worker"
+        for candidate in self_relations_candidates
+    )
+
+
+def test_v11_role_family_is_a_bounded_identifier_not_a_fixed_role_enum():
+    domains = {
+        "add_subgraph": {
+            "model_ids": ["cheap-model"],
+            "execution_profiles": [
+                {"execution_mode": "reasoning", "allowed_tools": []},
+            ],
+            "existing_agent_ids": [],
+            "preserved_input_agent_ids": [],
+            "max_new_agents": 1,
+        }
+    }
+    schema = json.loads(
+        director_live_add_subgraph_agent_declarations_json_schema_text(domains)
+    )
+    role_schema = schema["properties"]["agents"]["items"]["properties"][
+        "role_family"
+    ]
+    assert role_schema["pattern"] == "^[a-z][a-z0-9_]{0,63}$"
+    assert "enum" not in role_schema
+    with pytest.raises(ValueError, match="bounded identifier"):
+        director_live_add_subgraph_agent_declarations_from_text(
+            '{"action":"add_subgraph","agents":[{"agent_id":"a",'
+            '"model_id":"cheap-model","contract":"solve",'
+            '"role_family":"' + ("x" * 65) + '",'
+            '"execution_mode":"reasoning"}]}',
+            domains,
+        )
 
 
 def test_modify_execution_profile_is_selected_and_bound_atomically():

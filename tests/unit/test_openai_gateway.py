@@ -69,6 +69,40 @@ class MessageTests(unittest.TestCase):
         with self.assertRaises(OpenAICompatibleGatewayError):
             build_agent_messages(broken)
 
+    def test_output_treats_routed_qa_memory_as_demonstration_not_fact(self) -> None:
+        item = request()
+        object.__setattr__(
+            item,
+            "agent",
+            AgentNode("agent", "model", "answer", execution_mode="reasoning"),
+        )
+        object.__setattr__(item, "is_output_agent", True)
+        receipt = {
+            "tool_id": "hotpotqa.qa_memory",
+            "request": {"action": "read"},
+            "result": {"memory_id": "m1"},
+            "error_type": None,
+        }
+        object.__setattr__(
+            item,
+            "upstream",
+            (
+                UpstreamMessage(
+                    "worker",
+                    "agent",
+                    "retrieved candidate",
+                    tool_receipts=(receipt,),
+                ),
+            ),
+        )
+
+        system = build_agent_messages(item)[0]["content"]
+
+        self.assertIn("retrieved demonstrations", system)
+        self.assertIn("entity binding", system)
+        self.assertIn("answer slot", system)
+        self.assertIn("never copy the unrelated record", system)
+
 
 class GatewayTests(unittest.IsolatedAsyncioTestCase):
     async def test_request_and_response_mapping(self) -> None:

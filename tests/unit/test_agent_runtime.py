@@ -66,6 +66,68 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(["m1", "m2"], [request.model.model_id for request in gateway.requests])
         self.assertEqual(snapshot.to_dict(), graph.snapshot().to_dict())
 
+    async def test_tool_receipt_provenance_survives_multi_hop_relations(self) -> None:
+        catalog = registry()
+        search_receipt = {
+            "tool_id": "hotpotqa.qa_memory",
+            "request": {"action": "search"},
+            "result": {"hits": ["memory-1"]},
+            "error_type": None,
+        }
+        read_receipt = {
+            "tool_id": "hotpotqa.qa_memory",
+            "request": {"action": "read"},
+            "result": {"memory_id": "memory-1"},
+            "error_type": None,
+        }
+
+        class ProvenanceGateway:
+            def __init__(self) -> None:
+                self.requests: list[AgentRequest] = []
+
+            async def generate(self, item: AgentRequest) -> AgentResponse:
+                self.requests.append(item)
+                metadata = (
+                    {"tool_receipts": (search_receipt, read_receipt)}
+                    if item.agent.id == "worker"
+                    else {}
+                )
+                return AgentResponse(item.agent.id, metadata)
+
+        gateway = ProvenanceGateway()
+        graph = AgentGraph(
+            [
+                AgentNode("worker", "m1", "retrieve"),
+                AgentNode("reasoner", "m1", "reason"),
+                AgentNode("output", "m2", "answer"),
+            ],
+            [
+                AgentRelation("worker", "reasoner", True, False),
+                AgentRelation("reasoner", "output", True, False),
+            ],
+            output_agent_id="output",
+        )
+
+        result = await AgentRuntime(catalog, gateway).execute(
+            graph,
+            "question",
+            run_id="provenance",
+        )
+
+        self.assertEqual(
+            [search_receipt, read_receipt],
+            [dict(item) for item in result.output_metadata["output"]["tool_receipts"]],
+        )
+        output_input = result.output_metadata["output"][
+            "input_artifact_provenance"
+        ][0]
+        self.assertEqual("reasoner", output_input["source_agent_id"])
+        self.assertEqual(2, len(output_input["tool_receipts"]))
+        output_request = next(
+            item for item in gateway.requests if item.agent.id == "output"
+        )
+        self.assertEqual(2, len(output_request.upstream[0].tool_receipts))
+
     async def test_fanin_has_sorted_inputs(self) -> None:
         catalog = registry()
         gateway = RecordingGateway()

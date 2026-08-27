@@ -45,6 +45,27 @@ def test_qa_memory_v10_separates_director_and_worker_action_budgets():
     assert config["qa_embedding_retrieval"]["max_action_tokens"] == 4096
 
 
+def test_qa_memory_v11_freezes_worker_only_local_retrieval_dataflow():
+    config = load_yaml(
+        _ROOT / "config" / "evaluation_hotpotqa_qa_memory_v11.yaml"
+    )
+
+    _MODULE.validate_hotpot_config(config)
+
+    retrieval = config["qa_embedding_retrieval"]
+    graph = config["agent_graph"]
+    assert retrieval["corpus_kind"] == "train_qa_memory"
+    assert retrieval["train_sample_count"] == 512
+    assert retrieval["validation_sample_count"] == 128
+    assert retrieval["search_top_k"] == 2
+    assert retrieval["web_search_enabled"] is False
+    assert graph["required_evidence_tool_id"] == "hotpotqa.qa_memory"
+    assert graph["require_evidence_relation"] is True
+    assert graph["terminal_protocol"] == "exact_single_answer_tag"
+    assert graph["require_format_agent"] is False
+    assert "add_agent" not in graph["actions"]
+
+
 def test_strict_aggregate_keeps_failed_task_in_denominator():
     rows = [
         {

@@ -278,7 +278,7 @@ def _contains_forbidden_key(value: Any) -> bool:
 
 
 class HotpotQAEmbeddingToolTests(unittest.TestCase):
-    def test_react_can_continue_search_read_after_first_public_read(self) -> None:
+    def test_react_completes_after_one_search_read_pair(self) -> None:
         index = _Index()
         gateway = _SequenceGateway(
             [
@@ -295,21 +295,9 @@ class HotpotQAEmbeddingToolTests(unittest.TestCase):
                     resource_id=HOTPOTQA_RETRIEVAL_TOOL_ID,
                 ),
                 _action(
-                    "tool",
-                    name="search",
-                    arguments={"query": "Beta value", "k": 2},
-                    resource_id=HOTPOTQA_RETRIEVAL_TOOL_ID,
-                ),
-                _action(
-                    "tool",
-                    name="read",
-                    arguments={"doc_id": "p2"},
-                    resource_id=HOTPOTQA_RETRIEVAL_TOOL_ID,
-                ),
-                _action(
                     "complete",
                     name="complete",
-                    arguments={"value": "Beta"},
+                    arguments={"value": "aligned artifact"},
                     resource_id=None,
                 ),
             ]
@@ -326,31 +314,26 @@ class HotpotQAEmbeddingToolTests(unittest.TestCase):
 
         response = asyncio.run(adapter.execute(_react_request()))
 
-        self.assertEqual("Beta", response.text)
-        self.assertEqual(4, response.metadata["tool_calls"])
+        self.assertEqual("aligned artifact", response.text)
+        self.assertEqual(2, response.metadata["tool_calls"])
         self.assertEqual(
-            [
-                ("task-1", "Alpha value", 2),
-                ("task-1", "Beta value", 2),
-            ],
+            [("task-1", "Alpha value", 2)],
             index.search_calls,
         )
         self.assertEqual(
-            [("task-1", "p1"), ("task-1", "p2")],
+            [("task-1", "p1")],
             index.read_calls,
         )
         contracts = [request.agent.contract for request in gateway.requests]
         self.assertIn("search only", contracts[0])
         self.assertIn("read only", contracts[1])
-        self.assertIn("search only", contracts[2])
-        self.assertIn("read only", contracts[3])
-        self.assertIn("complete only", contracts[4])
+        self.assertIn("complete only", contracts[2])
         response_schemas = [
             json.loads(request.model.metadata["response_json_schema"])
             for request in gateway.requests
         ]
         self.assertEqual(
-            ["search", "read", "search", "read", "complete"],
+            ["search", "read", "complete"],
             [schema["properties"]["name"]["const"] for schema in response_schemas],
         )
         self.assertTrue(
@@ -375,13 +358,13 @@ class HotpotQAEmbeddingToolTests(unittest.TestCase):
         )
         self.assertEqual(
             ["value"],
-            response_schemas[4]["properties"]["arguments"]["required"],
+            response_schemas[2]["properties"]["arguments"]["required"],
         )
         self.assertIsNone(
-            response_schemas[4]["properties"]["resource_id"]["const"]
+            response_schemas[2]["properties"]["resource_id"]["const"]
         )
 
-    def test_action_domain_rejects_early_completion_and_duplicate_query(self) -> None:
+    def test_action_domain_admits_completion_after_first_public_read(self) -> None:
         index = _Index()
         gateway = _SequenceGateway(
             [
@@ -441,17 +424,9 @@ class HotpotQAEmbeddingToolTests(unittest.TestCase):
 
         response = asyncio.run(adapter.execute(_react_request()))
 
-        self.assertEqual("Beta", response.text)
-        self.assertEqual(4, response.metadata["tool_calls"])
-        self.assertEqual(2, len(index.search_calls))
-        self.assertEqual(
-            "completion_not_admitted",
-            response.metadata["react_trace"][2]["public_error_code"],
-        )
-        self.assertEqual(
-            "hotpotqa_duplicate_normalized_query",
-            response.metadata["react_trace"][3]["public_error_code"],
-        )
+        self.assertEqual("unsupported early answer", response.text)
+        self.assertEqual(2, response.metadata["tool_calls"])
+        self.assertEqual(1, len(index.search_calls))
 
     def test_react_completion_requires_successful_search_and_read(self) -> None:
         receipt = lambda action: {
