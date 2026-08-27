@@ -1,0 +1,68 @@
+{
+  "schema_version": "flowsteer.triviaqa.qa_memory.formal-result-summary.v1",
+  "condition_id": "triviaqa_qa_memory_unified_v4_v13_worker_topk3",
+  "status": "completed_with_terminal_failures",
+  "scope": "fixed held-out validation",
+  "sample_count": 128,
+  "metric_protocol": "triviaqa.official.answer.v1",
+  "database": {
+    "source_dataset": "TriviaQA",
+    "source_configuration": "rc.nocontext",
+    "validation_prefix_count": 128,
+    "train_slice_start": 128,
+    "train_slice_stop": 640,
+    "memory_count": 512,
+    "unique_source_count": 512,
+    "cycled_count": 0,
+    "validation_overlap_count": 0,
+    "validation_content_indexed": false,
+    "paraphrase_method": "semantic-preserving-question-and-answer-paraphrase",
+    "paraphrase_version": "triviaqa.qa_memory.paraphrase.v12",
+    "semantic_admission_version": "triviaqa.qa_memory.semantic_admission.v13",
+    "semantic_admission_checked_count": 512,
+    "semantic_repair_count": 19,
+    "retained_checkpoint_count": 493,
+    "embedding_model": "bge-base-en-v1.5",
+    "embedding_dimension": 768,
+    "normalization": "l2",
+    "similarity": "dot_product",
+    "frozen_top_k": 3
+  },
+  "metrics": {
+    "direct": {
+      "evaluator_valid": 128,
+      "exact_match": 0.3515625,
+      "token_f1": 0.40815972222222224
+    },
+    "agentgraph": {
+      "evaluator_valid": 128,
+      "exact_match": 0.0,
+      "token_f1": 0.0
+    },
+    "agentgraph_minus_direct": {
+      "exact_match": -0.3515625,
+      "token_f1": -0.40815972222222224
+    }
+  },
+  "tool_and_routing": {
+    "director_tool_calls": 0,
+    "director_request_allowed_tools": [],
+    "director_data_plane_isolated": true,
+    "director_retrieval_payload_exposure_count": 0,
+    "retrieval_tool_calls_by_worker": 1856,
+    "worker_ownership_violation_count": 0,
+    "reasoner_qamemory_tool_unassigned": true,
+    "top_k_projection_count": 455,
+    "top_k_projection_complete_count": 452,
+    "retrieval_tasks": 125,
+    "retrieval_tasks_with_relation_route": 108,
+    "retrieval_tasks_with_output_inbox_receipt_lineage": 119
+  },
+  "terminal": {
+    "failure_count": 128,
+    "canvas_action_domain_exhausted": 121,
+    "max_rounds": 7
+  },
+  "training_enabled": false,
+  "optimizer_updates": 0
+}

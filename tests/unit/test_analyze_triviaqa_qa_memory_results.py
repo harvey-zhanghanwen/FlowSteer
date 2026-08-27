@@ -613,6 +613,29 @@ def _assert_field_names_are_diagnostic_only_and_output_inbox_lineage_is_independ
     assert result["output_inbox_missing_canonical_receipt_signatures"] == []
 
 
+def _assert_director_outputs_are_not_misclassified_as_request_payload() -> None:
+    task_id = "triviaqa:validation:director-output"
+    trajectory = _trajectory(task_id)
+    turn = trajectory["turns"][0]  # type: ignore[index]
+    turn["prompt"] = _director_prompt(
+        diagnostic=(
+            "The public task or graph state may contain the bare span "
+            "train answer without containing a QA-memory record."
+        )
+    )
+    turn["policy_response"] = (
+        '{"action":"add_subgraph","diagnostic":"memory-train-1"}'
+    )
+    turn["action"]["diagnostic"] = "The emitted candidate was train answer"
+    turn["canvas_feedback"] = "memory-train-1"
+    turn["reconstructed_context"] = "train answer"
+
+    result = analysis._trajectory_control_plane(task_id, trajectory)  # noqa: SLF001
+
+    assert result["director_exposed_retrieval_values"] == []
+    assert result["director_exposed_memory_ids"] == []
+
+
 def _assert_failed_worker_receipts_count_without_claiming_artifact_route() -> None:
     task_id = "triviaqa:validation:failed-worker"
     trajectory = _trajectory(task_id)
@@ -823,6 +846,9 @@ class TriviaQAQAMemoryResultAnalysisTests(unittest.TestCase):
         self,
     ) -> None:
         _assert_field_names_are_diagnostic_only_and_output_inbox_lineage_is_independent()
+
+    def test_director_outputs_are_not_misclassified_as_request_payload(self) -> None:
+        _assert_director_outputs_are_not_misclassified_as_request_payload()
 
     def test_failed_worker_receipts_count_without_claiming_artifact_route(
         self,

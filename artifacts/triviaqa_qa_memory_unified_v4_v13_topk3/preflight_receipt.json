@@ -1,0 +1,33 @@
+{
+  "adapter_name": null,
+  "canary_succeeded": null,
+  "checkpoint_path": null,
+  "evaluator_preflight": {
+    "evaluator_version": "triviaqa.official.answer.v1",
+    "passed": true
+  },
+  "healthbench_judge_model": null,
+  "healthbench_judge_receipt": null,
+  "mode": "base_model_no_adapter",
+  "policy_published": false,
+  "sglang_server_runtime": {
+    "attention_backend": "fa3",
+    "context_length": 32768,
+    "cuda_graph_backend_decode": null,
+    "enable_deterministic_inference": false,
+    "max_running_requests": null,
+    "max_running_requests_mode": "server_default",
+    "max_total_num_tokens": 717868,
+    "recorded_at": "2026-08-27T20:24:52.618403+00:00",
+    "request_attempts": {
+      "server_info": 1
+    },
+    "sampling_backend": "flashinfer",
+    "schema_version": "flowsteer.sglang.server-runtime-receipt.v1",
+    "weight_version": "default"
+  },
+  "status": "ready",
+  "success": true,
+  "swebench_harness_receipt": null,
+  "training_performed": false
+}

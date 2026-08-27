@@ -68,6 +68,21 @@ CANONICAL_RECEIPT_DATA_FIELDS = (
     "source_train_task_id",
     "base_task_id",
 )
+# A bare answer span is not sufficient evidence of QA-memory injection: it may
+# already occur in the public task, numeric graph state, or the Director's own
+# prior structured action.  Record identity and paraphrase fields are
+# provenance-bearing data-plane values; a serialized QA-memory record also
+# exposes at least one of these fields.  ``canonical_answer`` remains part of
+# receipt lineage matching and field-name diagnostics below.
+DIRECTOR_PROVENANCE_BEARING_DATA_FIELDS = frozenset(
+    {
+        "memory_id",
+        "paraphrase_question",
+        "paraphrase_answer_statement",
+        "source_train_task_id",
+        "base_task_id",
+    }
+)
 QA_MEMORY_BATCH_ARTIFACT_FIELDS = (
     "question_scope",
     "retrieval_query",
@@ -335,19 +350,19 @@ def _reachable(
 
 
 def _director_visible_text(trajectory: Mapping[str, Any]) -> str:
+    """Return only persisted Director request text.
+
+    ``policy_response``, parsed ``action``, Canvas feedback, and reconstructed
+    context are runtime outputs or derived diagnostics.  Treating those fields
+    as Director input confounds a model-emitted answer span with data-plane
+    payload injection.  The canonical request is persisted in ``prompt`` and
+    is independently schema-checked by ``_director_execution_profiles``.
+    """
+
     values: list[object] = []
     for raw_turn in base._list(trajectory.get("turns")):
         turn = base._mapping(raw_turn)
-        values.extend(
-            turn.get(key)
-            for key in (
-                "prompt",
-                "policy_response",
-                "action",
-                "canvas_feedback",
-                "reconstructed_context",
-            )
-        )
+        values.append(turn.get("prompt"))
     return json.dumps(values, ensure_ascii=False, sort_keys=True, default=str)
 
 
@@ -1046,6 +1061,7 @@ def _trajectory_control_plane(
     exposed_values = [
         {"field": field, "value": value}
         for field, values in receipt_data_values.items()
+        if field in DIRECTOR_PROVENANCE_BEARING_DATA_FIELDS
         for value in values
         if value in director_text
     ]
@@ -1608,6 +1624,13 @@ def _render_markdown(report: Mapping[str, Any]) -> str:
     terminal = base._mapping(report.get("terminal"))
     control = base._mapping(report.get("control_plane_and_tool_routing"))
     assertions = base._mapping(control.get("assertions"))
+    if run.get("status") == "complete":
+        delta_note = "该差值来自同一固定 128 条 held-out validation 的完整正式结果。"
+    else:
+        delta_note = (
+            "partial 状态下该值仅是固定分母 fail-closed snapshot，"
+            "不是完整 128 条正式结果。"
+        )
     lines = [
         "# TriviaQA QA-memory 正式结果分析",
         "",
@@ -1620,7 +1643,7 @@ def _render_markdown(report: Mapping[str, Any]) -> str:
         f"| Direct | {direct.get('denominator')} | {direct.get('completed')} | {direct.get('evaluator_valid')} | {_percentage(direct.get('strict_exact_match'))} | {_percentage(direct.get('strict_token_f1'))} |",
         f"| AgentGraph | {graph.get('denominator')} | {graph.get('completed')} | {graph.get('evaluator_valid')} | {_percentage(graph.get('strict_exact_match'))} | {_percentage(graph.get('strict_token_f1'))} |",
         "",
-        f"AgentGraph − Direct：**{_percentage(delta.get('exact_match'))} EM**，**{_percentage(delta.get('token_f1'))} F1**。partial 状态下该值仅是固定分母 fail-closed snapshot，不是完整 128 条正式结果。",
+        f"AgentGraph − Direct：**{_percentage(delta.get('exact_match'))} EM**，**{_percentage(delta.get('token_f1'))} F1**。{delta_note}",
         "",
         "## Terminal 与三项边界断言",
         "",
