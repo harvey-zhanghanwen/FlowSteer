@@ -1356,3 +1356,22 @@ and the Director remains local Qwen3.5-9B. The QA-memory registry contains no
 browser, HTTP search or Web Search capability. Stable Zero and fixed-128
 scores are reported only from completed version-bound manifests; this source
 map does not claim a formal result.
+
+## TriviaQA QA-memory v15 bounded relation-prefix decoding
+
+The v14 fixed-128 condition persisted 121 trajectories and seven Director
+HTTP 400 collection failures.  The failure occurs in the hierarchical ADD
+parameter request: expanding every complete functional-unit relation set into
+one JSON-Schema `oneOf` can reach thousands of alternatives and megabytes of
+schema text as the Canvas grows.  The worker Tool, AgentGraph validator and
+official evaluator are unchanged.
+
+| Current module/boundary | Classification | Primary source retained | Minimal compatibility adaptation |
+| --- | --- | --- | --- |
+| `director.py::{director_live_add_subgraph_relation_candidates,director_live_add_subgraph_relation_sets}`; `agent_workflow_env.py::_topology_neutral_add_completion_issue`; `AgentGraphValidator` | FlowSteer direct reuse | One `ADD_SUBGRAPH` transaction is one executable functional unit followed by execution; the complete Canvas must admit a common reachable non-Tool Output candidate | None. These functions remain the authoritative legal relation-set and Canvas-admission domain. |
+| `director.py::{director_live_add_subgraph_relation_prefix_domain,director_live_add_subgraph_relation_prefix_selector_json_schema_text,director_live_action_parameter_json_schema_text}`; `rollout_collector.py::SGLangReceiptDirectorClient._propose_hierarchical_action` | Necessary SGLang/SkillFlow compatibility adaptation | Existing role-first hierarchical decoding and exact phase receipts; SkillFlow's bounded structured action followed by an observation | Factor the unchanged finite relation-set domain into candidate-index prefix decisions. `STOP=-1` is schema-admissible only for a complete legal set. Every chain, fan-in/fan-out and bounded reciprocal set remains reachable; complete sets stay a Python feasibility oracle and are not expanded into the SGLang grammar. The final canonical `add_subgraph` action is still model-generated under a const-bound schema and is not synthesized in code. |
+| `_validate_v3_hierarchical_action_receipt` and v15 focused tests | FlowSteer trajectory validation reuse plus necessary receipt extension | Exact prompt, token, seed, action-domain and Canvas receipts | Replay every relation-prefix phase, selected candidate index, STOP decision, final relation list and request count. Invalid prefixes and premature STOP fail closed before Canvas execution. |
+
+The v15 condition changes no task IDs, QA-memory record, embedding model,
+top-k, Tool budget, Director prompt, model catalog or evaluator.  It remains
+inference-only and preserves the worker-only retrieval boundary.

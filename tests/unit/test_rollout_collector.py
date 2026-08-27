@@ -37,6 +37,9 @@ from src.interactive.director import (
     director_model_admissible_schema_branch_v1,
     director_model_admissible_schema_branch_v3,
     director_live_add_subgraph_agent_declarations_json_schema_text,
+    director_live_add_subgraph_relation_candidates,
+    director_live_add_subgraph_relation_prefix_selector_json_schema_text,
+    director_live_add_subgraph_relation_sets,
     director_live_add_subgraph_role_selection_json_schema_text,
     director_live_action_parameter_json_schema_text,
     director_live_action_target_domains_json,
@@ -63,6 +66,7 @@ from src.interactive.rollout_collector import (
     SGLangReceiptDirectorClient,
     _ADD_ACTION_CONTINUATION,
     _ADD_DECLARATION_CONTINUATION,
+    _ADD_RELATION_FINALIZATION_CONTINUATION,
     _hierarchical_continuation_prompt,
     _validate_v3_hierarchical_action_receipt,
     select_balanced_tasks,
@@ -1022,6 +1026,172 @@ def test_native_sglang_v3_samples_add_declarations_then_complete_exact_action():
         "role": "user",
         "content": _ADD_DECLARATION_CONTINUATION,
     }
+
+
+def test_native_sglang_v3_factors_topology_neutral_add_relations_by_prefix():
+    domains = {
+        "add_subgraph": {
+            "min_new_agents": 1,
+            "max_new_agents": 3,
+            "existing_agent_ids": ["worker"],
+            "existing_relations": [],
+            "preserved_input_agent_ids": ["worker"],
+            "required_agent_fields": [
+                "agent_id",
+                "model_id",
+                "contract",
+                "role_family",
+                "allowed_tools",
+                "execution_mode",
+            ],
+            "model_ids": ["cheap-model"],
+            "registered_execution_profiles": [
+                {"execution_mode": "reasoning", "allowed_tools": []}
+            ],
+            "topology_neutral": True,
+            "endpoint_scope": {
+                "relation_endpoint_sources": [
+                    "existing_agent_ids",
+                    "same_action_agent_ids",
+                ],
+                "output_agent_id_sources": [
+                    "existing_agent_ids",
+                    "same_action_agent_ids",
+                ],
+            },
+        }
+    }
+    actions = ("add_subgraph",)
+    role_selection = {
+        "action": "add_subgraph",
+        "agents": [{"agent_id": "node_1", "role_family": "answerer"}],
+    }
+    declarations = {
+        "action": "add_subgraph",
+        "agents": [
+            {
+                "agent_id": "node_1",
+                "model_id": "cheap-model",
+                "contract": "answer from routed evidence",
+                "role_family": "answerer",
+                "allowed_tools": [],
+                "execution_mode": "reasoning",
+            }
+        ],
+    }
+    relation_candidates = director_live_add_subgraph_relation_candidates(
+        domains,
+        declarations["agents"],
+    )
+    relation_set = director_live_add_subgraph_relation_sets(
+        domains,
+        declarations["agents"],
+    )[0]
+    selected_indices = [
+        relation_candidates.index(dict(item)) for item in relation_set
+    ]
+    assert len(selected_indices) == 1
+    relation_choice = {
+        "action": "add_subgraph",
+        "candidate_index": selected_indices[0],
+    }
+    relation_stop = {"action": "add_subgraph", "candidate_index": -1}
+    final_action = {
+        **declarations,
+        "relations": [dict(item) for item in relation_set],
+        "output_agent_id": None,
+    }
+    client = ScriptedSGLangClient(
+        [
+            json.dumps(role_selection, separators=(",", ":")),
+            json.dumps(declarations, separators=(",", ":")),
+            json.dumps(relation_choice, separators=(",", ":")),
+            json.dumps(relation_stop, separators=(",", ":")),
+            json.dumps(final_action, separators=(",", ":")),
+        ],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+    )
+    domains_json = director_live_action_target_domains_json(actions, domains)
+
+    response = asyncio.run(
+        client.propose(
+            "current Canvas",
+            action_json_schema=(
+                director_model_admissible_sampling_json_schema_text_v3(actions)
+            ),
+            action_json_schema_version=(
+                DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3
+            ),
+            action_schema_branch=director_model_admissible_schema_branch_v3(actions),
+            action_target_domains_json=domains_json,
+            action_target_domain_version=(
+                DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION
+            ),
+        )
+    )
+
+    assert len(client.payloads) == 5
+    assert client.payloads[2]["sampling_params"]["json_schema"] == (
+        director_live_add_subgraph_relation_prefix_selector_json_schema_text(
+            domains,
+            declarations["agents"],
+            [],
+        )
+    )
+    assert client.payloads[3]["sampling_params"]["json_schema"] == (
+        director_live_add_subgraph_relation_prefix_selector_json_schema_text(
+            domains,
+            declarations["agents"],
+            selected_indices,
+        )
+    )
+    assert client.payloads[4]["sampling_params"]["json_schema"] == (
+        director_live_action_parameter_json_schema_text(
+            "add_subgraph",
+            domains,
+            add_agents=declarations["agents"],
+            relation_candidate_indices=selected_indices,
+        )
+    )
+    assert response.text == json.dumps(final_action, separators=(",", ":"))
+    assert response.metadata["selected_add_relation_candidate_indices"] == (
+        selected_indices
+    )
+    assert response.metadata["request_count"] == 5
+    assert set(response.metadata["hierarchical_phase_receipts"]) == {
+        "add_agent_role_selection",
+        "add_agent_declarations",
+        "add_relation_candidate_selection_0",
+        "add_relation_candidate_selection_1",
+    }
+    parameter_messages = decode_director_transcript(
+        response.metadata["prompt_text"]
+    )
+    assert parameter_messages is not None
+    assert json.loads(parameter_messages[-2]["content"]) == relation_stop
+    assert parameter_messages[-1] == {
+        "role": "user",
+        "content": _ADD_RELATION_FINALIZATION_CONTINUATION,
+    }
+    schema_request = {
+        "action_json_schema": (
+            director_model_admissible_sampling_json_schema_text_v3(actions)
+        ),
+        "action_json_schema_version": (
+            DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3
+        ),
+        "action_schema_branch": director_model_admissible_schema_branch_v3(actions),
+        "action_target_domains_json": domains_json,
+        "action_target_domain_version": (
+            DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION
+        ),
+    }
+    assert _validate_v3_hierarchical_action_receipt(
+        AgentActionParser().parse(response.text),
+        response.metadata,
+        schema_request,
+    ) == set(response.metadata["hierarchical_phase_receipts"])
 
 
 def test_native_sglang_v3_regenerates_malformed_add_role_selection_once():

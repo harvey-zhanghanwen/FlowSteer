@@ -40,6 +40,7 @@ from .agent_runtime import AgentCallRecord, AgentRuntimeResult
 from .agent_workflow_env import AgentWorkflowEnv
 from .director import (
     AgentGraphOrchestrator,
+    DIRECTOR_ADD_RELATION_STOP_INDEX,
     DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION,
     DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION,
     DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V1,
@@ -58,6 +59,8 @@ from .director import (
     director_live_add_subgraph_role_selection_from_text,
     director_live_add_subgraph_role_selection_json_schema_text,
     director_live_add_subgraph_relation_candidates,
+    director_live_add_subgraph_relation_prefix_domain,
+    director_live_add_subgraph_relation_prefix_selector_json_schema_text,
     director_live_add_subgraph_relation_sets,
     director_live_action_parameter_json_schema_text,
     director_live_action_target_domains_json,
@@ -123,9 +126,41 @@ _ADD_ACTION_CONTINUATION = (
     "agents unchanged. Select only relations and output_agent_id allowed by "
     "the current schema. Return only the JSON object."
 )
+_ADD_RELATION_FINALIZATION_CONTINUATION = (
+    "Complete the add_subgraph action using the committed Agent declarations "
+    "and relation selections. Keep agents and relations unchanged. Return only "
+    "the JSON object required by the current schema."
+)
 _PARAMETER_REGENERATION_CONTINUATION = (
     "Return one complete JSON object that conforms to the current schema."
 )
+
+
+def _add_relation_prefix_instruction(domain: Mapping[str, Any]) -> str:
+    """Render one neutral, bounded relation-candidate continuation."""
+
+    admitted = list(domain["next_relation_candidate_indices"])
+    if domain["stop_admissible"]:
+        admitted.append(DIRECTOR_ADD_RELATION_STOP_INDEX)
+    payload = {
+        "relation_candidates": domain["relation_candidates"],
+        "selected_candidate_indices": domain[
+            "selected_relation_candidate_indices"
+        ],
+        "admissible_candidate_indices": admitted,
+        "stop_index": DIRECTOR_ADD_RELATION_STOP_INDEX,
+    }
+    return (
+        "Select one relation candidate index for this add_subgraph functional "
+        "unit. Use the stop index only when it is admissible. Return only the "
+        "JSON object required by the current schema.\n\n"
+        + json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    )
 
 
 def _sglang_backend_sampling_seed(seed: int) -> int:
@@ -1164,6 +1199,7 @@ class SGLangReceiptDirectorClient:
 
         selected_add_agent_roles: tuple[dict[str, str], ...] | None = None
         selected_add_agents: tuple[dict[str, Any], ...] | None = None
+        selected_add_relation_candidate_indices: tuple[int, ...] | None = None
         selected_modify_field: str | None = None
         selected_modify_agent_id: str | None = None
         selected_relation_candidate: int | None = None
@@ -1413,16 +1449,133 @@ class SGLangReceiptDirectorClient:
                 sort_keys=True,
                 separators=(",", ":"),
             )
-            parameter_prompt = _hierarchical_continuation_prompt(
-                declaration_prompt,
-                committed_json=selected_declarations_json,
-                instruction=_ADD_ACTION_CONTINUATION,
+            add_domain = action_target_domains.get("add_subgraph", {})
+            prefix_sampling_required = (
+                isinstance(add_domain, Mapping)
+                and add_domain.get("topology_neutral") is True
+                and bool(add_domain.get("preserved_input_agent_ids"))
             )
-            parameter_schema = director_live_action_parameter_json_schema_text(
-                "add_subgraph",
-                action_target_domains,
-                add_agents=selected_add_agents,
-            )
+            if prefix_sampling_required:
+                selected_indices: list[int] = []
+                prefix_domain = director_live_add_subgraph_relation_prefix_domain(
+                    action_target_domains,
+                    selected_add_agents,
+                    selected_indices,
+                )
+                relation_prompt = _hierarchical_continuation_prompt(
+                    declaration_prompt,
+                    committed_json=selected_declarations_json,
+                    instruction=_add_relation_prefix_instruction(prefix_domain),
+                )
+                maximum_relation_phases = len(selected_add_agents) + 3
+                for ordinal in range(maximum_relation_phases):
+                    relation_schema = (
+                        director_live_add_subgraph_relation_prefix_selector_json_schema_text(
+                            action_target_domains,
+                            selected_add_agents,
+                            selected_indices,
+                        )
+                    )
+                    relation_payload = dict(
+                        self._request_payload(relation_prompt, adapter_name, seed)
+                    )
+                    relation_sampling = dict(
+                        relation_payload["sampling_params"]
+                    )
+                    relation_sampling["json_schema"] = relation_schema
+                    relation_payload["sampling_params"] = relation_sampling
+                    value, latency_ms, attempt_count = await self._post_with_retries(
+                        relation_payload
+                    )
+                    total_latency_ms += latency_ms
+                    total_attempt_count += attempt_count
+                    relation_response = self._parse_response(
+                        relation_prompt,
+                        relation_payload,
+                        value,
+                        policy_version=policy_version,
+                        adapter_name=adapter_name,
+                        expected_server_weight_version=(
+                            expected_server_weight_version
+                        ),
+                        action_json_schema_version=action_schema_version,
+                        action_schema_branch=action_schema_branch,
+                        action_target_domains_json=action_target_domains_json,
+                        action_target_domain_version=action_target_domain_version,
+                        latency_ms=latency_ms,
+                        attempt_count=attempt_count,
+                        generation_seed=seed,
+                    )
+                    admitted_indices = json.loads(relation_schema)["properties"][
+                        "candidate_index"
+                    ]["enum"]
+                    selected_index = self._hierarchical_index_choice(
+                        relation_response.text,
+                        admitted=admitted_indices,
+                        required_action="add_subgraph",
+                    )
+                    phase_receipts[
+                        f"add_relation_candidate_selection_{ordinal}"
+                    ] = self._hierarchical_phase_receipt(relation_response)
+                    selected_index_json = json.dumps(
+                        {
+                            "action": "add_subgraph",
+                            "candidate_index": selected_index,
+                        },
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    if selected_index == DIRECTOR_ADD_RELATION_STOP_INDEX:
+                        selected_add_relation_candidate_indices = tuple(
+                            selected_indices
+                        )
+                        parameter_prompt = _hierarchical_continuation_prompt(
+                            str(relation_response.metadata["prompt_text"]),
+                            committed_json=selected_index_json,
+                            instruction=(
+                                _ADD_RELATION_FINALIZATION_CONTINUATION
+                            ),
+                        )
+                        break
+                    selected_indices.append(selected_index)
+                    prefix_domain = (
+                        director_live_add_subgraph_relation_prefix_domain(
+                            action_target_domains,
+                            selected_add_agents,
+                            selected_indices,
+                        )
+                    )
+                    relation_prompt = _hierarchical_continuation_prompt(
+                        str(relation_response.metadata["prompt_text"]),
+                        committed_json=selected_index_json,
+                        instruction=_add_relation_prefix_instruction(
+                            prefix_domain
+                        ),
+                    )
+                else:  # pragma: no cover - prefix-domain invariant
+                    raise ReceiptValidationError(
+                        "add_subgraph relation prefix exceeded its bounded domain"
+                    )
+                parameter_schema = director_live_action_parameter_json_schema_text(
+                    "add_subgraph",
+                    action_target_domains,
+                    add_agents=selected_add_agents,
+                    relation_candidate_indices=(
+                        selected_add_relation_candidate_indices
+                    ),
+                )
+            else:
+                parameter_prompt = _hierarchical_continuation_prompt(
+                    declaration_prompt,
+                    committed_json=selected_declarations_json,
+                    instruction=_ADD_ACTION_CONTINUATION,
+                )
+                parameter_schema = director_live_action_parameter_json_schema_text(
+                    "add_subgraph",
+                    action_target_domains,
+                    add_agents=selected_add_agents,
+                )
         elif selected_action == "modify_agent":
             admitted_modify_fields: Sequence[str] | None = None
             if action_target_domains is not None:
@@ -1800,6 +1953,11 @@ class SGLangReceiptDirectorClient:
                 None
                 if selected_add_agent_roles is None
                 else [dict(value) for value in selected_add_agent_roles]
+            )
+            metadata["selected_add_relation_candidate_indices"] = (
+                None
+                if selected_add_relation_candidate_indices is None
+                else list(selected_add_relation_candidate_indices)
             )
             metadata["selected_modify_agent_id"] = selected_modify_agent_id
         if selected_relation_candidate is not None:
@@ -2415,14 +2573,43 @@ def _validate_v3_hierarchical_action_receipt(
                 domains,
                 selected_agent_roles=selected_roles,
             )
+        except ValueError as exc:
+            raise ReceiptValidationError(
+                "v3 add_subgraph declaration receipt violates its live domain"
+            ) from exc
+        add_domain = domains["add_subgraph"]
+        prefix_sampling_required = (
+            add_domain.get("topology_neutral") is True
+            and bool(add_domain.get("preserved_input_agent_ids"))
+        )
+        raw_relation_indices = metadata.get(
+            "selected_add_relation_candidate_indices"
+        )
+        if prefix_sampling_required:
+            if (
+                not isinstance(raw_relation_indices, list)
+                or any(type(index) is not int for index in raw_relation_indices)
+            ):
+                raise ReceiptValidationError(
+                    "v3 topology-neutral ADD has no relation-prefix receipt"
+                )
+            selected_relation_indices = tuple(raw_relation_indices)
+        else:
+            if raw_relation_indices is not None:
+                raise ReceiptValidationError(
+                    "v3 ADD carries an unexpected relation-prefix receipt"
+                )
+            selected_relation_indices = None
+        try:
             director_live_action_parameter_json_schema_text(
                 "add_subgraph",
                 domains,
                 add_agents=declarations,
+                relation_candidate_indices=selected_relation_indices,
             )
         except ValueError as exc:
             raise ReceiptValidationError(
-                "v3 add_subgraph declaration receipt violates its live domain"
+                "v3 add_subgraph relation-prefix receipt violates its live domain"
             ) from exc
         if role_first_add:
             assert selected_roles is not None
@@ -2463,11 +2650,98 @@ def _validate_v3_hierarchical_action_receipt(
                 sort_keys=True,
                 separators=(",", ":"),
             )
-            expected_parameter_prompt = _hierarchical_continuation_prompt(
-                declaration_prompt,
-                committed_json=selected_declarations_json,
-                instruction=_ADD_ACTION_CONTINUATION,
-            )
+            if prefix_sampling_required:
+                assert selected_relation_indices is not None
+                prefix: list[int] = []
+                prefix_domain = (
+                    director_live_add_subgraph_relation_prefix_domain(
+                        domains,
+                        declarations,
+                        prefix,
+                    )
+                )
+                relation_prompt = _hierarchical_continuation_prompt(
+                    declaration_prompt,
+                    committed_json=selected_declarations_json,
+                    instruction=_add_relation_prefix_instruction(prefix_domain),
+                )
+                for ordinal in range(len(selected_relation_indices) + 1):
+                    phase_name = f"add_relation_candidate_selection_{ordinal}"
+                    expected_phases.add(phase_name)
+                    relation_phase = (
+                        phase_receipts.get(phase_name)
+                        if isinstance(phase_receipts, Mapping)
+                        else None
+                    )
+                    if not isinstance(relation_phase, Mapping):
+                        raise ReceiptValidationError(
+                            "v3 ADD relation-prefix phase receipt is missing"
+                        )
+                    if relation_phase.get("prompt_text") != relation_prompt:
+                        raise ReceiptValidationError(
+                            "v3 ADD relation-prefix prompt is not bound to its prefix"
+                        )
+                    relation_schema = (
+                        director_live_add_subgraph_relation_prefix_selector_json_schema_text(
+                            domains,
+                            declarations,
+                            prefix,
+                        )
+                    )
+                    admitted_indices = json.loads(relation_schema)["properties"][
+                        "candidate_index"
+                    ]["enum"]
+                    selected_index = SGLangReceiptDirectorClient._hierarchical_index_choice(
+                        relation_phase.get("text"),
+                        admitted=admitted_indices,
+                        required_action="add_subgraph",
+                    )
+                    expected_index = (
+                        selected_relation_indices[ordinal]
+                        if ordinal < len(selected_relation_indices)
+                        else DIRECTOR_ADD_RELATION_STOP_INDEX
+                    )
+                    if selected_index != expected_index:
+                        raise ReceiptValidationError(
+                            "v3 ADD relation-prefix phase differs from metadata"
+                        )
+                    selected_index_json = json.dumps(
+                        {
+                            "action": "add_subgraph",
+                            "candidate_index": selected_index,
+                        },
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    if selected_index == DIRECTOR_ADD_RELATION_STOP_INDEX:
+                        expected_parameter_prompt = _hierarchical_continuation_prompt(
+                            relation_prompt,
+                            committed_json=selected_index_json,
+                            instruction=_ADD_RELATION_FINALIZATION_CONTINUATION,
+                        )
+                        break
+                    prefix.append(selected_index)
+                    prefix_domain = (
+                        director_live_add_subgraph_relation_prefix_domain(
+                            domains,
+                            declarations,
+                            prefix,
+                        )
+                    )
+                    relation_prompt = _hierarchical_continuation_prompt(
+                        relation_prompt,
+                        committed_json=selected_index_json,
+                        instruction=_add_relation_prefix_instruction(
+                            prefix_domain
+                        ),
+                    )
+            else:
+                expected_parameter_prompt = _hierarchical_continuation_prompt(
+                    declaration_prompt,
+                    committed_json=selected_declarations_json,
+                    instruction=_ADD_ACTION_CONTINUATION,
+                )
             observed_parameter_prompt = (
                 parameter_failure_receipt.get("prompt_text")
                 if parameter_regeneration_attempted
@@ -2516,7 +2790,6 @@ def _validate_v3_hierarchical_action_receipt(
                 raise ReceiptValidationError(
                     "v3 add_subgraph relation endpoint is outside the live domain"
                 )
-        add_domain = domains["add_subgraph"]
         if verified_qa_semantic_protocol(add_domain.get("semantic_protocol")):
             if (
                 action_value is not None

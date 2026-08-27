@@ -2360,6 +2360,134 @@ def director_live_add_subgraph_relation_sets(
     return tuple(admitted)
 
 
+DIRECTOR_ADD_RELATION_STOP_INDEX = -1
+
+
+def director_live_add_subgraph_relation_prefix_domain(
+    action_target_domains: Mapping[str, Any],
+    agents: Sequence[Mapping[str, Any]],
+    selected_relation_candidate_indices: Sequence[int] = (),
+) -> Mapping[str, Any]:
+    """Project complete functional-unit relations as one bounded prefix step.
+
+    The authoritative legal relation sets remain the topology-neutral sets
+    computed above.  This projection factors that finite domain into small
+    candidate-index decisions so SGLang never receives the combinatorial
+    ``oneOf`` expansion.  Candidate ordering is canonical, so every legal
+    chain, fan-in/fan-out block, and bounded reciprocal block remains
+    reachable without introducing a topology template.
+    """
+
+    normalized_agents = _live_add_subgraph_agents(
+        action_target_domains,
+        agents,
+    )
+    candidates = director_live_add_subgraph_relation_candidates(
+        action_target_domains,
+        normalized_agents,
+    )
+    relation_sets = director_live_add_subgraph_relation_sets(
+        action_target_domains,
+        normalized_agents,
+    )
+    if not candidates or not relation_sets:
+        raise ValueError("add_subgraph has no topology-neutral relation set")
+    identities = {
+        json.dumps(
+            candidate,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ): index
+        for index, candidate in enumerate(candidates)
+    }
+    indexed_sets: list[tuple[int, ...]] = []
+    for relation_set in relation_sets:
+        try:
+            indexed_sets.append(
+                tuple(
+                    identities[
+                        json.dumps(
+                            item,
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        )
+                    ]
+                    for item in relation_set
+                )
+            )
+        except KeyError as exc:  # pragma: no cover - internal invariant
+            raise ValueError(
+                "topology-neutral relation set is outside its candidate domain"
+            ) from exc
+
+    if not isinstance(selected_relation_candidate_indices, (list, tuple)):
+        raise ValueError("relation candidate prefix must be a sequence")
+    prefix = tuple(selected_relation_candidate_indices)
+    if any(type(index) is not int or index < 0 for index in prefix):
+        raise ValueError("relation candidate prefix contains an invalid index")
+    if tuple(sorted(set(prefix))) != prefix:
+        raise ValueError("relation candidate prefix must be canonical and unique")
+    matching_sets = tuple(
+        candidate_set
+        for candidate_set in indexed_sets
+        if candidate_set[: len(prefix)] == prefix
+    )
+    if not matching_sets:
+        raise ValueError("relation candidate prefix cannot complete a functional unit")
+    stop_admissible = prefix in matching_sets
+    next_indices = tuple(
+        sorted(
+            {
+                candidate_set[len(prefix)]
+                for candidate_set in matching_sets
+                if len(candidate_set) > len(prefix)
+            }
+        )
+    )
+    return {
+        "selected_relation_candidate_indices": list(prefix),
+        "next_relation_candidate_indices": list(next_indices),
+        "stop_admissible": stop_admissible,
+        "relation_candidates": [dict(candidate) for candidate in candidates],
+        "selected_relations": [dict(candidates[index]) for index in prefix],
+    }
+
+
+def director_live_add_subgraph_relation_prefix_selector_json_schema_text(
+    action_target_domains: Mapping[str, Any],
+    agents: Sequence[Mapping[str, Any]],
+    selected_relation_candidate_indices: Sequence[int] = (),
+) -> str:
+    """Render one small relation-prefix decision for hierarchical ADD."""
+
+    domain = director_live_add_subgraph_relation_prefix_domain(
+        action_target_domains,
+        agents,
+        selected_relation_candidate_indices,
+    )
+    admitted = list(domain["next_relation_candidate_indices"])
+    if domain["stop_admissible"]:
+        admitted.append(DIRECTOR_ADD_RELATION_STOP_INDEX)
+    if not admitted:
+        raise ValueError("relation candidate prefix has no admissible decision")
+    return json.dumps(
+        {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["action", "candidate_index"],
+            "properties": {
+                "action": {"const": "add_subgraph"},
+                "candidate_index": {"enum": admitted},
+            },
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
 def director_live_add_subgraph_agent_declarations_from_text(
     text: str,
     action_target_domains: Mapping[str, Any],
@@ -2533,6 +2661,7 @@ def director_live_action_parameter_json_schema_text(
     action_target_domains: Mapping[str, Any],
     *,
     add_agents: Optional[Sequence[Mapping[str, Any]]] = None,
+    relation_candidate_indices: Optional[Sequence[int]] = None,
     modify_field: Optional[str] = None,
     modify_agent_id: Optional[str] = None,
     relation_candidate_index: Optional[int] = None,
@@ -2587,11 +2716,24 @@ def director_live_action_parameter_json_schema_text(
                     else ()
                 )
                 if connected_relation_sets:
+                    if relation_candidate_indices is None:
+                        raise ValueError(
+                            "topology-neutral add_subgraph requires a sampled "
+                            "complete relation prefix"
+                        )
+                    prefix_domain = (
+                        director_live_add_subgraph_relation_prefix_domain(
+                            action_target_domains,
+                            normalized_agents,
+                            relation_candidate_indices,
+                        )
+                    )
+                    if prefix_domain["stop_admissible"] is not True:
+                        raise ValueError(
+                            "topology-neutral add_subgraph relation prefix is incomplete"
+                        )
                     schema["properties"]["relations"] = {
-                        "oneOf": [
-                            {"const": [dict(item) for item in relation_set]}
-                            for relation_set in connected_relation_sets
-                        ]
+                        "const": prefix_domain["selected_relations"]
                     }
                 else:
                     schema["properties"]["relations"] = {
@@ -4051,7 +4193,10 @@ __all__ = [
     "director_live_add_subgraph_role_selection_from_text",
     "director_live_add_subgraph_role_selection_json_schema_text",
     "director_live_add_subgraph_relation_candidates",
+    "director_live_add_subgraph_relation_prefix_domain",
+    "director_live_add_subgraph_relation_prefix_selector_json_schema_text",
     "director_live_add_subgraph_relation_sets",
+    "DIRECTOR_ADD_RELATION_STOP_INDEX",
     "director_live_action_parameter_json_schema_text",
     "director_live_action_target_domains_json",
     "director_live_modify_agent_selector_json_schema_text",

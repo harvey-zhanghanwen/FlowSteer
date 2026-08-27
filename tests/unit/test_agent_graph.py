@@ -42,9 +42,12 @@ from src.interactive.agent_workflow_env import (
     _evidence_span_matches_read,
 )
 from src.interactive.director import (
+    DIRECTOR_ADD_RELATION_STOP_INDEX,
     director_live_action_parameter_json_schema_text,
     director_live_add_subgraph_agent_declarations_json_schema_text,
     director_live_add_subgraph_relation_candidates,
+    director_live_add_subgraph_relation_prefix_domain,
+    director_live_add_subgraph_relation_prefix_selector_json_schema_text,
     director_live_add_subgraph_relation_sets,
     director_validate_live_action_target_domains,
 )
@@ -1262,22 +1265,30 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
                 "execution_mode": "reasoning",
             },
         ]
-        schema = json.loads(
-            director_live_action_parameter_json_schema_text(
-                "add_subgraph",
-                domains,
-                add_agents=declarations,
-            )
-        )
-        relation_schema = schema["properties"]["relations"]
         relation_sets = director_live_add_subgraph_relation_sets(
             domains,
             declarations,
         )
         self.assertTrue(relation_sets)
+        relation_candidates = director_live_add_subgraph_relation_candidates(
+            domains,
+            declarations,
+        )
+        selected_indices = [
+            relation_candidates.index(dict(item)) for item in relation_sets[0]
+        ]
+        schema = json.loads(
+            director_live_action_parameter_json_schema_text(
+                "add_subgraph",
+                domains,
+                add_agents=declarations,
+                relation_candidate_indices=selected_indices,
+            )
+        )
+        relation_schema = schema["properties"]["relations"]
         self.assertEqual(
-            [[dict(item) for item in relation_set] for relation_set in relation_sets],
-            [branch["const"] for branch in relation_schema["oneOf"]],
+            [dict(item) for item in relation_sets[0]],
+            relation_schema["const"],
         )
         for relation_set in relation_sets:
             self.assertTrue(
@@ -1328,6 +1339,93 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             ),
             directed_edge_sets,
         )
+
+        three_agent_declarations = [
+            *declarations,
+            {
+                "agent_id": "node_3",
+                "model_id": "balanced",
+                "contract": "merge the functional unit result",
+                "role_family": "answerer",
+                "allowed_tools": [],
+                "execution_mode": "reasoning",
+            },
+        ]
+        three_agent_candidates = (
+            director_live_add_subgraph_relation_candidates(
+                domains,
+                three_agent_declarations,
+            )
+        )
+        three_agent_sets = director_live_add_subgraph_relation_sets(
+            domains,
+            three_agent_declarations,
+        )
+        self.assertTrue(three_agent_sets)
+        initial_prefix = director_live_add_subgraph_relation_prefix_domain(
+            domains,
+            three_agent_declarations,
+            [],
+        )
+        self.assertFalse(initial_prefix["stop_admissible"])
+        for relation_set in three_agent_sets:
+            indices = [
+                three_agent_candidates.index(dict(item)) for item in relation_set
+            ]
+            prefix = []
+            for selected_index in indices:
+                prefix_domain = (
+                    director_live_add_subgraph_relation_prefix_domain(
+                        domains,
+                        three_agent_declarations,
+                        prefix,
+                    )
+                )
+                self.assertIn(
+                    selected_index,
+                    prefix_domain["next_relation_candidate_indices"],
+                )
+                selector_schema = (
+                    director_live_add_subgraph_relation_prefix_selector_json_schema_text(
+                        domains,
+                        three_agent_declarations,
+                        prefix,
+                    )
+                )
+                self.assertLess(len(selector_schema.encode("utf-8")), 4096)
+                prefix.append(selected_index)
+            completed = director_live_add_subgraph_relation_prefix_domain(
+                domains,
+                three_agent_declarations,
+                prefix,
+            )
+            self.assertTrue(completed["stop_admissible"])
+            terminal_selector = json.loads(
+                director_live_add_subgraph_relation_prefix_selector_json_schema_text(
+                    domains,
+                    three_agent_declarations,
+                    prefix,
+                )
+            )
+            self.assertIn(
+                DIRECTOR_ADD_RELATION_STOP_INDEX,
+                terminal_selector["properties"]["candidate_index"]["enum"],
+            )
+            final_schema = director_live_action_parameter_json_schema_text(
+                "add_subgraph",
+                domains,
+                add_agents=three_agent_declarations,
+                relation_candidate_indices=prefix,
+            )
+            self.assertLess(len(final_schema.encode("utf-8")), 16384)
+
+        with self.assertRaises(ValueError):
+            director_live_action_parameter_json_schema_text(
+                "add_subgraph",
+                domains,
+                add_agents=three_agent_declarations,
+                relation_candidate_indices=[],
+            )
         self.assertIn(
             frozenset(
                 {
@@ -1583,6 +1681,7 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
                 "add_subgraph",
                 worker_targets,
                 add_agents=downstream_declarations,
+                relation_candidate_indices=[0],
             )
         )
         self.assertEqual(
