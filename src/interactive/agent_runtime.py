@@ -273,8 +273,105 @@ class AgentRuntimeResult:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class AgentFailureRecord:
+    """Public execution-failure receipt for one Agent invocation.
+
+    SkillFlow retains the sampled action and public observation when a bounded
+    executor fails to complete.  AgentGraph keeps the same public receipt at
+    the Runtime boundary so a Canvas correction does not erase already-spent
+    Tool calls.  The record is diagnostic state, not an upstream semantic
+    artifact.
+    """
+
+    request_id: str
+    agent_id: str
+    phase: ExecutionPhase
+    graph_revision: int
+    error_type: str
+    message: str
+    metadata: Mapping[str, object] = field(default_factory=dict, compare=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))
+
+    def to_dict(self) -> Dict[str, object]:
+        return {
+            "request_id": self.request_id,
+            "agent_id": self.agent_id,
+            "phase": self.phase.value,
+            "graph_revision": self.graph_revision,
+            "error_type": self.error_type,
+            "message": self.message,
+            "metadata": dict(self.metadata),
+        }
+
+
 class AgentRuntimeError(RuntimeError):
     """Wraps a gateway or scheduler failure with AgentGraph context."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        failure_records: Tuple[AgentFailureRecord, ...] = (),
+        partial_result: Optional[AgentRuntimeResult] = None,
+        blocked_agent_ids: Tuple[str, ...] = (),
+        pending_agent_ids: Tuple[str, ...] = (),
+    ) -> None:
+        super().__init__(message)
+        self.failure_records = tuple(failure_records)
+        self.partial_result = partial_result
+        self.blocked_agent_ids = tuple(sorted(set(blocked_agent_ids)))
+        self.pending_agent_ids = tuple(sorted(set(pending_agent_ids)))
+
+
+def _public_failure_metadata(exc: BaseException) -> Mapping[str, object]:
+    """Copy only adapter-published public execution receipts.
+
+    The local HotpotQA adapter currently publishes one immutable ``metadata``
+    mapping, while the newer shared adapter exposes the same receipt fields as
+    typed exception attributes.  Accepting both forms is the minimal
+    compatibility boundary; no hidden reasoning state is inferred.
+    """
+
+    result: Dict[str, object] = {}
+    published = getattr(exc, "metadata", None)
+    if isinstance(published, Mapping):
+        result.update(dict(published))
+    for field_name in (
+        "react_trace",
+        "tool_receipts",
+        "model_calls",
+        "retry_receipts",
+        "environment_reset_receipt",
+        "environment_receipts",
+        "evaluator_environment_trace",
+    ):
+        value = getattr(exc, field_name, None)
+        if isinstance(value, Mapping):
+            result[field_name] = dict(value)
+        elif isinstance(value, (list, tuple)):
+            result[field_name] = [
+                dict(item) if isinstance(item, Mapping) else item for item in value
+            ]
+    for field_name in (
+        "environment_revision",
+        "environment_terminal",
+        "cause_error_type",
+        "tool_plan_exhausted",
+        "provider_id",
+        "model_id",
+        "http_status",
+        "request_status",
+    ):
+        value = getattr(exc, field_name, None)
+        if value is not None:
+            result[field_name] = value
+    node_unusable = getattr(exc, "node_unusable", None)
+    if type(node_unusable) is bool:
+        result["node_unusable"] = node_unusable
+    return MappingProxyType(result)
 
 
 @dataclass(frozen=True, slots=True)
@@ -360,6 +457,40 @@ class AgentRuntime:
             for provider_id in self.model_registry.provider_ids
             if self.model_registry.require_provider(provider_id).max_concurrency is not None
         }
+
+    def registered_execution_profiles(
+        self,
+    ) -> Tuple[Tuple[str, Tuple[str, ...]], ...]:
+        """Return execution-mode/Tool pairs runnable by this Runtime.
+
+        This is the shared FlowSteer Canvas capability boundary.  Each item is
+        ``(execution_mode, allowed_tools)``; it describes registered executors
+        and available task-scoped resources without introducing semantic role
+        or workflow constraints.
+        """
+
+        profiles: List[Tuple[str, Tuple[str, ...]]] = []
+        for mode_value in ("reasoning", "react", "coding"):
+            if mode_value not in self.execution_adapters:
+                continue
+            if mode_value != "coding":
+                profiles.append((mode_value, ()))
+            if mode_value == "reasoning" or self.tool_registry is None:
+                continue
+            for tool_id in self.tool_registry.resource_ids:
+                try:
+                    capability = self.tool_registry.require_capability(tool_id)
+                except KeyError:
+                    continue
+                if not capability.availability:
+                    continue
+                if (
+                    self.dataset_id is not None
+                    and not capability.supports_dataset(self.dataset_id)
+                ):
+                    continue
+                profiles.append((mode_value, (tool_id,)))
+        return tuple(profiles)
 
     async def execute(
         self,
@@ -494,23 +625,19 @@ class AgentRuntime:
                 completed: List[
                     Tuple[Tuple[str, ...], Dict[str, str], bool]
                 ] = []
-                failure: Optional[BaseException] = None
+                failures: List[Tuple[Tuple[str, ...], BaseException]] = []
                 for task in sorted(done, key=lambda item: active[item]):
                     component = active.pop(task)
                     try:
                         block_outputs, reused = task.result()
                         completed.append((component, block_outputs, reused))
                     except BaseException as exc:
-                        failure = exc
-                        break
-                if failure is not None:
-                    await _cancel_and_wait(list(active))  # type: ignore[arg-type]
-                    if isinstance(failure, asyncio.CancelledError):
-                        raise failure
-                    if isinstance(failure, AgentRuntimeError):
-                        raise failure
-                    raise AgentRuntimeError(f"AgentGraph block execution failed: {failure}") from failure
+                        failures.append((component, exc))
 
+                # Preserve every independent block that completed in this
+                # scheduler tick before propagating a sibling failure.  This
+                # is FlowSteer's partial-execution boundary: valid artifacts
+                # and call receipts remain available for Canvas diagnosis.
                 for component, block_outputs, reused in completed:
                     outputs.update(block_outputs)
                     completion_order.append(component)
@@ -518,6 +645,73 @@ class AgentRuntime:
                         reused_agents.update(component)
                     else:
                         executed_agents.update(component)
+                if failures:
+                    await _cancel_and_wait(list(active))  # type: ignore[arg-type]
+                    failure_component, failure = failures[0]
+                    if isinstance(failure, asyncio.CancelledError):
+                        raise failure
+                    failed_agent_ids = {
+                        agent_id
+                        for component, _ in failures
+                        for agent_id in component
+                    }
+                    blocked_agent_ids = tuple(
+                        sorted(
+                            execution_graph.dirty_closure(failed_agent_ids)
+                            - failed_agent_ids
+                        )
+                    )
+                    partial_result = AgentRuntimeResult(
+                        run_id=resolved_run_id,
+                        graph_revision=snapshot.revision,
+                        output_agent_id=execution_graph.output_agent_id,
+                        final_answer=None,
+                        outputs=outputs,
+                        calls=tuple(
+                            sorted(calls, key=lambda record: record.request.request_id)
+                        ),
+                        block_completion_order=tuple(completion_order),
+                        executed_agent_ids=tuple(sorted(executed_agents)),
+                        reused_agent_ids=tuple(sorted(reused_agents)),
+                        communication_condition=resolved_condition,
+                        output_metadata=output_metadata,
+                    )
+                    pending_agent_ids = tuple(
+                        sorted(set(nodes) - set(partial_result.outputs))
+                    )
+                    failure_records = tuple(
+                        sorted(
+                            (
+                                record
+                                for _, item in failures
+                                if isinstance(item, AgentRuntimeError)
+                                for record in item.failure_records
+                            ),
+                            key=lambda record: (
+                                record.request_id,
+                                record.error_type,
+                            ),
+                        )
+                    )
+                    if isinstance(failure, AgentRuntimeError):
+                        raise AgentRuntimeError(
+                            str(failure),
+                            failure_records=failure_records,
+                            partial_result=partial_result,
+                            blocked_agent_ids=(
+                                *failure.blocked_agent_ids,
+                                *blocked_agent_ids,
+                            ),
+                            pending_agent_ids=pending_agent_ids,
+                        ) from failure
+                    raise AgentRuntimeError(
+                        f"AgentGraph block {failure_component!r} execution failed: "
+                        f"{failure}",
+                        partial_result=partial_result,
+                        blocked_agent_ids=blocked_agent_ids,
+                        pending_agent_ids=pending_agent_ids,
+                    ) from failure
+
                 newly_ready: Set[Tuple[str, ...]] = set()
                 for component, _, _ in completed:
                     for successor in plan.successors[component]:
@@ -939,16 +1133,39 @@ class AgentRuntime:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            nested_records = (
+                exc.failure_records
+                if isinstance(exc, AgentRuntimeError) and exc.failure_records
+                else (
+                    AgentFailureRecord(
+                        request_id=request.request_id,
+                        agent_id=request.agent.id,
+                        phase=request.phase,
+                        graph_revision=request.graph_revision,
+                        error_type=type(exc).__name__,
+                        message=" ".join(str(exc).split()),
+                        metadata=_public_failure_metadata(exc),
+                    ),
+                )
+            )
             raise AgentRuntimeError(
-                f"gateway failed for agent {request.agent.id!r} during {request.phase.value}: {exc}"
+                f"gateway failed for agent {request.agent.id!r} during "
+                f"{request.phase.value}: {exc}",
+                failure_records=nested_records,
+                pending_agent_ids=(request.agent.id,),
             ) from exc
-        response = raw_response if isinstance(raw_response, AgentResponse) else AgentResponse(raw_response)
+        response = (
+            raw_response
+            if isinstance(raw_response, AgentResponse)
+            else AgentResponse(raw_response)
+        )
         calls.append(AgentCallRecord(request=request, response=response))
         return response
 
 
 __all__ = [
     "AgentCallRecord",
+    "AgentFailureRecord",
     "AgentGateway",
     "AgentExecutionAdapter",
     "AgentRequest",

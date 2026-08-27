@@ -11,6 +11,9 @@ from typing import Any, Dict, Mapping, Optional, Sequence
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import SchemaError
+
 from .agent_runtime import (
     AgentRequest,
     AgentResponse,
@@ -48,6 +51,50 @@ def _integer(metadata: Mapping[str, str], key: str, default: int) -> int:
     if parsed <= 0:
         raise OpenAICompatibleGatewayError(f"model metadata {key} must be positive")
     return parsed
+
+
+def _non_negative_integer(
+    metadata: Mapping[str, str],
+    key: str,
+    default: Optional[int],
+) -> Optional[int]:
+    value = metadata.get(key)
+    if value is None:
+        return default
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise OpenAICompatibleGatewayError(
+            f"model metadata {key} must be an integer"
+        ) from exc
+    if not 0 <= parsed < 2**64:
+        raise OpenAICompatibleGatewayError(
+            f"model metadata {key} must be an unsigned 64-bit integer"
+        )
+    return parsed
+
+
+def supports_local_sglang_top_k(request: AgentRequest) -> bool:
+    """Return whether this exact model arm declares local SGLang ``top_k``."""
+
+    provider_metadata = request.provider.metadata
+    model_metadata = request.model.metadata
+
+    def declared_value(key: str) -> str:
+        value = model_metadata.get(key, provider_metadata.get(key, ""))
+        return value.strip().casefold() if isinstance(value, str) else ""
+
+    return bool(
+        declared_value("sampling_backend") == "sglang"
+        and declared_value("deployment_locality") == "local"
+        and declared_value("supports_top_k") == "true"
+    )
+
+
+def _sglang_backend_sampling_seed(seed: int) -> int:
+    """Project a scientific uint64 seed into SGLang's signed int64 domain."""
+
+    return seed & ((1 << 63) - 1)
 
 
 def _visible_message_content(
@@ -304,10 +351,34 @@ class OpenAICompatibleGateway:
             "top_p": top_p,
             "max_tokens": _integer(metadata, "max_tokens", self.default_max_tokens),
         }
-        if self.default_seed is not None:
-            # SkillFlow's OpenAI-compatible provider sends the configured seed
-            # to the serving boundary.  Keep the same fixed-run contract here.
-            payload["seed"] = self.default_seed
+        generation_seed = _non_negative_integer(
+            metadata,
+            "generation_seed",
+            self.default_seed,
+        )
+        if generation_seed is not None:
+            # DIRECT_REUSE: SkillFlow derives one scientific seed for each
+            # bounded rollout step. A request-level seed therefore takes
+            # precedence over the gateway's legacy fixed-run default.
+            payload["seed"] = (
+                _sglang_backend_sampling_seed(generation_seed)
+                if supports_local_sglang_top_k(request)
+                else generation_seed
+            )
+        if supports_local_sglang_top_k(request):
+            raw_top_k = metadata.get("top_k")
+            if raw_top_k is not None:
+                try:
+                    top_k = int(raw_top_k)
+                except (TypeError, ValueError) as exc:
+                    raise OpenAICompatibleGatewayError(
+                        "model metadata top_k must be an integer"
+                    ) from exc
+                if top_k != -1 and top_k <= 0:
+                    raise OpenAICompatibleGatewayError(
+                        "model metadata top_k must be -1 or a positive integer"
+                    )
+                payload["top_k"] = top_k
         thinking = metadata.get("chat_template_enable_thinking")
         if thinking is not None:
             normalized = thinking.strip().lower()
@@ -321,6 +392,43 @@ class OpenAICompatibleGateway:
             # accompanied only by reasoning_content.
             payload["chat_template_kwargs"] = {
                 "enable_thinking": normalized == "true"
+            }
+        response_schema_text = metadata.get("response_json_schema")
+        if response_schema_text is not None:
+            if (
+                not isinstance(response_schema_text, str)
+                or not response_schema_text.strip()
+            ):
+                raise OpenAICompatibleGatewayError(
+                    "model metadata response_json_schema must be non-empty JSON text"
+                )
+            try:
+                response_schema = json.loads(response_schema_text)
+            except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise OpenAICompatibleGatewayError(
+                    "model metadata response_json_schema is not valid JSON"
+                ) from exc
+            if not isinstance(response_schema, dict):
+                raise OpenAICompatibleGatewayError(
+                    "model metadata response_json_schema must decode to an object"
+                )
+            try:
+                Draft202012Validator.check_schema(response_schema)
+            except SchemaError as exc:
+                raise OpenAICompatibleGatewayError(
+                    "model metadata response_json_schema is not a valid JSON Schema"
+                ) from exc
+            # DIRECT_REUSE: SkillFlow's OpenAI provider forwards the current
+            # ModelRequest response schema through the standard strict
+            # structured-output boundary.  Provider failures are surfaced;
+            # this gateway never retries by removing the schema.
+            payload["response_format"] = {
+                "json_schema": {
+                    "name": "skillev_action",
+                    "schema": response_schema,
+                    "strict": True,
+                },
+                "type": "json_schema",
             }
         return payload
 
@@ -339,6 +447,11 @@ class OpenAICompatibleGateway:
                     f"{request.provider.api_key_env}"
                 )
         payload = self.request_payload(request)
+        scientific_generation_seed = _non_negative_integer(
+            request.model.metadata,
+            "generation_seed",
+            self.default_seed,
+        )
         url = endpoint.rstrip("/") + "/chat/completions"
 
         last_error: BaseException | None = None
@@ -355,7 +468,8 @@ class OpenAICompatibleGateway:
                             0.0,
                         ),
                         "attempt_count": attempt + 1,
-                        "generation_seed": payload.get("seed"),
+                        "generation_seed": scientific_generation_seed,
+                        "backend_generation_seed": payload.get("seed"),
                     }
                 )
                 return AgentResponse(parsed.text, metadata)

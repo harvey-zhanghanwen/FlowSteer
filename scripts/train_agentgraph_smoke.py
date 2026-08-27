@@ -33,6 +33,7 @@ from src.interactive.config_loader import (
 from src.interactive.director import AgentGraphOrchestrator
 from src.interactive.grpo_objective import same_condition_advantages
 from src.interactive.hotpotqa_embedding_index import HotpotQAEmbeddingIndex
+from src.interactive.hotpotqa_qa_memory_index import HotpotQAQAMemoryIndex
 from src.interactive.hotpotqa_embedding_tool import (
     HotpotQAEmbeddingReactExecutionAdapter,
     build_hotpotqa_embedding_tool_registry,
@@ -49,6 +50,11 @@ from src.interactive.rollout_collector import (
     AgentGraphRolloutCollector,
     RolloutGate,
     SGLangReceiptDirectorClient,
+)
+from src.interactive.scientific_sampling import (
+    ScientificSamplingCoordinate,
+    scientific_sampling_schedule_hash,
+    stable_hash,
 )
 from src.interactive.smoke_trainer import (
     Qwen35OnePassSmokeTrainer,
@@ -397,7 +403,9 @@ class LiveSmokeBackend:
         judge: Optional[JudgeCallback],
         judge_model: str,
         project_root: Path,
-        hotpotqa_embedding_index: Optional[HotpotQAEmbeddingIndex] = None,
+        hotpotqa_embedding_index: Optional[
+            HotpotQAEmbeddingIndex | HotpotQAQAMemoryIndex
+        ] = None,
     ) -> None:
         self.config = config
         self.registry = registry
@@ -478,7 +486,9 @@ class LiveSmokeBackend:
 
         gateway = OpenAICompatibleGateway(default_seed=int(experiment["seed"]))
         runtime = AgentRuntime(registry, gateway)
-        hotpotqa_embedding_index: Optional[HotpotQAEmbeddingIndex] = None
+        hotpotqa_embedding_index: Optional[
+            HotpotQAEmbeddingIndex | HotpotQAQAMemoryIndex
+        ] = None
         raw_embedding_retrieval = config.get("qa_embedding_retrieval")
         if raw_embedding_retrieval is not None:
             retrieval = _mapping(
@@ -486,11 +496,24 @@ class LiveSmokeBackend:
                 "qa_embedding_retrieval",
             )
             index_dir = _resolve(root, str(retrieval["index_dir"]))
-            hotpotqa_embedding_index = HotpotQAEmbeddingIndex.open(
-                index_dir,
-                embedding_model_path=str(retrieval["embedding_model"]),
-                embedding_device=str(retrieval["embedding_device"]),
-            )
+            corpus_kind = str(retrieval.get("corpus_kind", "public_context"))
+            if corpus_kind == "train_qa_memory":
+                hotpotqa_embedding_index = HotpotQAQAMemoryIndex.open(
+                    index_dir,
+                    embedding_model_path=str(retrieval["embedding_model"]),
+                    embedding_device=str(retrieval["embedding_device"]),
+                )
+            elif corpus_kind == "public_context":
+                hotpotqa_embedding_index = HotpotQAEmbeddingIndex.open(
+                    index_dir,
+                    embedding_model_path=str(retrieval["embedding_model"]),
+                    embedding_device=str(retrieval["embedding_device"]),
+                )
+            else:
+                raise ConfigurationError(
+                    "qa_embedding_retrieval.corpus_kind must be public_context "
+                    "or train_qa_memory"
+                )
             manifest = hotpotqa_embedding_index.manifest
             if (
                 manifest.embedding_model != str(retrieval["embedding_model_id"])
@@ -500,6 +523,15 @@ class LiveSmokeBackend:
             ):
                 raise ConfigurationError(
                     "HotpotQA embedding index manifest differs from the frozen config"
+                )
+            if corpus_kind == "train_qa_memory" and (
+                manifest.train_record_count != int(retrieval["train_sample_count"])
+                or manifest.heldout_validation_count
+                != int(retrieval["validation_sample_count"])
+                or manifest.validation_overlap_count != 0
+            ):
+                raise ConfigurationError(
+                    "HotpotQA QA-memory manifest violates frozen split isolation"
                 )
         evidence_store = EvidenceStore(_resolve(root, str(storage["root"])))
 
@@ -623,6 +655,29 @@ class LiveSmokeBackend:
         director = _mapping(self.config["director"], "director")
         graph_config = _mapping(self.config["agent_graph"], "agent_graph")
         experiment = _mapping(self.config["experiment"], "experiment")
+        base_seed = int(experiment["seed"])
+        condition_id = str(
+            experiment.get("condition_id", "natural_smoke")
+        ).strip()
+        if not condition_id:
+            raise ConfigurationError("experiment.condition_id must be non-empty")
+        sampling_schedule_purpose = str(
+            experiment.get("sampling_schedule_purpose", condition_id)
+        ).strip()
+        if not sampling_schedule_purpose:
+            raise ConfigurationError(
+                "experiment.sampling_schedule_purpose must be non-empty"
+            )
+        sampling_coordinate = ScientificSamplingCoordinate(
+            sampling_schedule_hash=scientific_sampling_schedule_hash(
+                base_seed=base_seed
+            ),
+            schedule_purpose=sampling_schedule_purpose,
+            ordered_sequence_hash=stable_hash([task.task_id]),
+            sequence_position=rollout_index,
+            task_id=task.task_id,
+            optimizer_step_or_anchor_ordinal=0,
+        )
         runtime_task = task
         task_runtime = self.runtime
         task_tool_registry = None
@@ -641,6 +696,7 @@ class LiveSmokeBackend:
             task_tool_registry = build_hotpotqa_embedding_tool_registry(
                 self.hotpotqa_embedding_index,
                 task_id=task.task_id,
+                tool_id=str(retrieval.get("tool_id", "qa-retrieval")),
                 frozen_top_k=int(retrieval["search_top_k"]),
                 timeout_seconds=float(retrieval["tool_timeout_seconds"]),
             )
@@ -649,6 +705,9 @@ class LiveSmokeBackend:
                 tool_registry=task_tool_registry,
                 max_turns=int(retrieval["max_turns_per_agent_call"]),
                 max_tool_calls=int(retrieval["max_tool_calls_per_agent_call"]),
+                max_action_tokens=int(director["max_action_tokens"]),
+                sampling_base_seed=base_seed,
+                sampling_coordinate=sampling_coordinate,
             )
             task_runtime = AgentRuntime(
                 self.registry,
@@ -671,16 +730,41 @@ class LiveSmokeBackend:
             seed=int(experiment["seed"]) + rollout_index,
             history_window=int(director["history_window"]),
             tool_registry=task_tool_registry,
+            sampling_action_profile=(
+                str(director["sampling_action_profile"]).strip()
+                if director.get("sampling_action_profile") is not None
+                else None
+            ),
+            sampling_action_schema_version=str(
+                director.get(
+                    "sampling_action_schema_version",
+                    "agentgraph.model-admissible-action-mask.v2",
+                )
+            ).strip(),
         )
         environment = AgentWorkflowEnv(
             self.registry,
             runtime=task_runtime,
             execute_on_edit=bool(director["execute_on_edit"]),
             max_agents=int(graph_config["max_agents"]),
+            allowed_actions=tuple(
+                str(action) for action in graph_config["actions"]
+            ),
+            recovery_policy=str(
+                graph_config.get("recovery_policy", "default")
+            ),
+            director_feedback_mode=str(
+                graph_config.get("director_feedback_mode", "content")
+            ),
             required_evidence_tool_id=(
                 str(graph_config["required_evidence_tool_id"])
                 if task_tool_registry is not None
                 else None
+            ),
+            require_evidence_relation=(
+                bool(graph_config.get("require_evidence_relation", False))
+                if task_tool_registry is not None
+                else False
             ),
         )
         collector = AgentGraphRolloutCollector(

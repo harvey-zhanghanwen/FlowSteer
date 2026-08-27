@@ -22,6 +22,9 @@ models:
     metadata:
       chat_template_enable_thinking: "false"
       max_tokens: "4096"
+      sampling_backend: "sglang"
+      deployment_locality: "local"
+      supports_top_k: "true"
 
   - model_id: "qwen3.5-flash"
     provider_id: "vectorengine"

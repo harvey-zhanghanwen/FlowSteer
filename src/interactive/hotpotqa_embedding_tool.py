@@ -1,14 +1,16 @@
-"""Task-scoped HotpotQA embedding retrieval for the shared ToolRegistry.
+"""HotpotQA embedding retrieval for the shared ToolRegistry.
 
 This is a thin adapter around the public-context embedding index.  It keeps
 FlowSteer's ToolRegistry/ReAct boundary and SkillFlow's dynamic search/read
 execution shape: retrieval happens only when an Agent dispatches a Tool
 action, never as evaluation-time prefetch.
 
-The registry binds one HotpotQA ``task_id`` at construction time.  Agent
-actions therefore cannot select another task's corpus.  Results are projected
-through a public-field allowlist so answers, supporting-fact labels, evaluator
-state, and other private metadata cannot enter Tool observations or receipts.
+The registry supports the existing task-scoped public-passage index and the
+train-only global QA-memory index.  In the passage condition, ``task_id``
+selects the current task's public context.  In the QA-memory condition it is
+only evaluation-call provenance in the receipt and is never passed to global
+``search(query, k)`` or ``read(memory_id)``.  Results are projected through an
+explicit corpus-specific allowlist.
 """
 
 from __future__ import annotations
@@ -23,6 +25,7 @@ from typing import Protocol
 import unicodedata
 
 from .agent_runtime import AgentRequest
+from .hotpotqa_qa_memory_index import QA_MEMORY_CORPUS_VERSION
 from .react_execution import ToolReactExecutionAdapter
 from .tool_runtime import (
     ToolCapability,
@@ -34,7 +37,11 @@ from .tool_runtime import (
 
 
 HOTPOTQA_RETRIEVAL_TOOL_ID = "qa-retrieval"
+HOTPOTQA_QA_MEMORY_TOOL_ID = "hotpotqa.qa_memory"
 HOTPOTQA_DATASET_SCOPE = ("hotpotqa",)
+
+_PASSAGE_INDEX_KIND = "public_passage"
+_QA_MEMORY_INDEX_KIND = "train_qa_memory"
 
 
 def _normalized_retrieval_query(query: str) -> str:
@@ -69,6 +76,8 @@ class _HotpotRetrievalState:
 
 def _public_retrieval_state(
     observations: Sequence[Mapping[str, object]],
+    *,
+    tool_id: str = HOTPOTQA_RETRIEVAL_TOOL_ID,
 ) -> _HotpotRetrievalState:
     search_queries: list[str] = []
     latest_search_doc_ids: list[str] = []
@@ -77,7 +86,7 @@ def _public_retrieval_state(
     latest_successful_operation: str | None = None
     for observation in observations:
         if (
-            observation.get("tool_id") == HOTPOTQA_RETRIEVAL_TOOL_ID
+            observation.get("tool_id") == tool_id
             and observation.get("observation_status") in {"success", "tool_error"}
         ):
             dispatched_tool_calls += 1
@@ -92,7 +101,7 @@ def _public_retrieval_state(
             query = result.get("query")
             if isinstance(query, str) and query.strip():
                 search_queries.append(query.strip())
-            raw_doc_ids = result.get("doc_ids", ())
+            raw_doc_ids = result.get("memory_ids", result.get("doc_ids", ()))
             if isinstance(raw_doc_ids, (list, tuple)):
                 latest_search_doc_ids.extend(
                     str(item)
@@ -101,7 +110,7 @@ def _public_retrieval_state(
                 )
         elif result.get("operation") == "read":
             latest_successful_operation = "read"
-            doc_id = result.get("doc_id")
+            doc_id = result.get("memory_id", result.get("doc_id"))
             if (
                 isinstance(doc_id, str)
                 and doc_id.strip()
@@ -117,22 +126,17 @@ def _public_retrieval_state(
     )
 
 
-class _TaskScopedEmbeddingIndex(Protocol):
-    """Public contract implemented by ``HotpotQAEmbeddingIndex``."""
+class _EmbeddingIndex(Protocol):
+    """Common manifest boundary for the two supported dense indices."""
 
     @property
     def manifest(self) -> object:
         ...
 
-    def search(
-        self,
-        task_id: str,
-        query: str,
-        k: int,
-    ) -> Sequence[object]:
+    def search(self, *args: object) -> Sequence[object]:
         ...
 
-    def read(self, task_id: str, doc_id: str) -> object:
+    def read(self, *args: object) -> object:
         ...
 
 
@@ -167,7 +171,11 @@ def _positive_integer(value: object, *, field_name: str) -> int:
     return value
 
 
-def _index_identity(index: _TaskScopedEmbeddingIndex) -> dict[str, object]:
+def _index_identity(
+    index: _EmbeddingIndex,
+    *,
+    index_kind: str,
+) -> dict[str, object]:
     """Return only public, replay-relevant manifest fields."""
 
     manifest = index.manifest
@@ -175,8 +183,12 @@ def _index_identity(index: _TaskScopedEmbeddingIndex) -> dict[str, object]:
         _optional_manifest_field(manifest, "index_id"),
         field_name="retrieval manifest index_id",
     )
-    identity: dict[str, object] = {"index_id": index_id}
+    identity: dict[str, object] = {
+        "index_id": index_id,
+        "corpus_kind": index_kind,
+    }
     aliases = {
+        "schema_version": ("schema_version",),
         "corpus_version": ("corpus_version",),
         "source": ("source", "source_dataset"),
         "split": ("split", "source_split"),
@@ -186,13 +198,65 @@ def _index_identity(index: _TaskScopedEmbeddingIndex) -> dict[str, object]:
         "similarity": ("similarity", "similarity_metric"),
         "document_count": ("document_count", "doc_count"),
         "passage_count": ("passage_count",),
+        "train_record_count": ("train_record_count",),
+        "unique_source_count": ("unique_source_count",),
+        "cycled_record_count": ("cycled_record_count",),
+        "paraphrase_count": ("paraphrase_count",),
+        "heldout_validation_count": ("heldout_validation_count",),
+        "validation_overlap_count": ("validation_overlap_count",),
+        "paraphrase_versions": ("paraphrase_versions",),
+        "paraphrase_provenances": ("paraphrase_provenances",),
         "frozen_top_k": ("frozen_top_k",),
     }
     for public_name, candidate_names in aliases.items():
         raw = _optional_manifest_field(manifest, *candidate_names)
         if raw is not None:
-            identity[public_name] = raw
+            identity[public_name] = list(raw) if isinstance(raw, tuple) else raw
     return identity
+
+
+def _call_parameter_names(callback: object, *, name: str) -> tuple[str, ...]:
+    if not callable(callback):
+        raise TypeError(f"embedding index {name} must be callable")
+    try:
+        signature = inspect.signature(callback)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(f"embedding index {name} signature is unavailable") from exc
+    parameters: list[str] = []
+    for parameter in signature.parameters.values():
+        if parameter.kind in {
+            inspect.Parameter.VAR_POSITIONAL,
+            inspect.Parameter.VAR_KEYWORD,
+        }:
+            raise TypeError(f"embedding index {name} cannot use variadic arguments")
+        parameters.append(parameter.name)
+    return tuple(parameters)
+
+
+def _index_kind(index: _EmbeddingIndex) -> str:
+    """Fail closed unless manifest kind and callable signatures agree."""
+
+    manifest = index.manifest
+    corpus_version = _required_text(
+        _optional_manifest_field(manifest, "corpus_version"),
+        field_name="retrieval manifest corpus_version",
+    )
+    search_parameters = _call_parameter_names(index.search, name="search")
+    read_parameters = _call_parameter_names(index.read, name="read")
+    if corpus_version == QA_MEMORY_CORPUS_VERSION:
+        if _optional_manifest_field(manifest, "source_split", "split") != "train":
+            raise ValueError("QA-memory retrieval index must use the train split")
+        if _optional_manifest_field(manifest, "validation_overlap_count") != 0:
+            raise ValueError("QA-memory retrieval index overlaps held-out validation")
+        if search_parameters != ("query", "k") or read_parameters != ("memory_id",):
+            raise TypeError("QA-memory manifest and global search/read signatures differ")
+        return _QA_MEMORY_INDEX_KIND
+    if search_parameters != ("task_id", "query", "k") or read_parameters not in {
+        ("task_id", "doc_id"),
+        ("task_id", "passage_id"),
+    }:
+        raise TypeError("passage manifest and task-scoped search/read signatures differ")
+    return _PASSAGE_INDEX_KIND
 
 
 def _validate_action(request: ToolRequest, expected_action: str) -> None:
@@ -233,14 +297,91 @@ def _public_hit(raw_hit: object, *, expected_rank: int) -> dict[str, object]:
     }
 
 
+def _public_memory_hit(
+    raw_hit: object,
+    *,
+    expected_rank: int,
+) -> dict[str, object]:
+    memory_id = _required_text(
+        _field(raw_hit, "memory_id"), field_name="search hit memory_id"
+    )
+    rank = _field(raw_hit, "rank")
+    if type(rank) is not int or rank != expected_rank:
+        raise ValueError("QA-memory search ranks must be contiguous and one-based")
+    similarity = _field(raw_hit, "similarity")
+    if type(similarity) not in {int, float} or not math.isfinite(float(similarity)):
+        raise ValueError("QA-memory search similarity must be finite")
+    return {
+        "memory_id": memory_id,
+        "source_train_task_id": _required_text(
+            _field(raw_hit, "source_train_task_id"),
+            field_name="search hit source_train_task_id",
+        ),
+        "paraphrase_question": _required_text(
+            _field(raw_hit, "paraphrase_question"),
+            field_name="search hit paraphrase_question",
+        ),
+        "paraphrase_answer_statement": _required_text(
+            _field(raw_hit, "paraphrase_answer_statement"),
+            field_name="search hit paraphrase_answer_statement",
+        ),
+        "similarity": float(similarity),
+        "rank": rank,
+    }
+
+
+def _public_memory(raw_memory: object, *, expected_memory_id: str) -> dict[str, object]:
+    memory_id = _required_text(
+        _field(raw_memory, "memory_id"), field_name="read memory memory_id"
+    )
+    if memory_id != expected_memory_id:
+        raise ValueError("QA-memory read returned a different memory_id")
+    cycled = _field(raw_memory, "cycled")
+    if not isinstance(cycled, bool):
+        raise TypeError("read memory cycled must be a boolean")
+    return {
+        "memory_id": memory_id,
+        "source_train_task_id": _required_text(
+            _field(raw_memory, "source_train_task_id"),
+            field_name="read memory source_train_task_id",
+        ),
+        "base_task_id": _required_text(
+            _field(raw_memory, "base_task_id"),
+            field_name="read memory base_task_id",
+        ),
+        "cycled": cycled,
+        "paraphrase_question": _required_text(
+            _field(raw_memory, "paraphrase_question"),
+            field_name="read memory paraphrase_question",
+        ),
+        "paraphrase_answer_statement": _required_text(
+            _field(raw_memory, "paraphrase_answer_statement"),
+            field_name="read memory paraphrase_answer_statement",
+        ),
+        "canonical_answer": _required_text(
+            _field(raw_memory, "canonical_answer"),
+            field_name="read memory canonical_answer",
+        ),
+        "paraphrase_version": _required_text(
+            _field(raw_memory, "paraphrase_version"),
+            field_name="read memory paraphrase_version",
+        ),
+        "paraphrase_provenance": _required_text(
+            _field(raw_memory, "paraphrase_provenance"),
+            field_name="read memory paraphrase_provenance",
+        ),
+    }
+
+
 @dataclass(slots=True)
 class HotpotQAEmbeddingToolBackend:
-    """Dispatch task-bound embedding ``search`` and evidence ``read``."""
+    """Dispatch either task-scoped passage or global train-memory retrieval."""
 
-    index: _TaskScopedEmbeddingIndex
+    index: _EmbeddingIndex
     task_id: str
     frozen_top_k: int
     index_identity: Mapping[str, object]
+    index_kind: str
     _search_returned_doc_ids: set[str] = field(
         default_factory=set,
         init=False,
@@ -267,20 +408,32 @@ class HotpotQAEmbeddingToolBackend:
         if type(k) is not int or k != self.frozen_top_k:
             raise ValueError("search k differs from the frozen embedding top-k")
 
-        candidate = self.index.search(self.task_id, query, k)
+        if self.index_kind == _QA_MEMORY_INDEX_KIND:
+            candidate = self.index.search(query, k)
+        else:
+            candidate = self.index.search(self.task_id, query, k)
         raw_hits = await candidate if inspect.isawaitable(candidate) else candidate
         if not isinstance(raw_hits, Sequence) or isinstance(raw_hits, (str, bytes)):
             raise TypeError("embedding search must return a sequence of hits")
         if len(raw_hits) > self.frozen_top_k:
             raise ValueError("embedding search returned more than frozen top-k hits")
-        hits = [
-            _public_hit(raw_hit, expected_rank=rank)
-            for rank, raw_hit in enumerate(raw_hits, start=1)
-        ]
-        doc_ids = [str(hit["doc_id"]) for hit in hits]
-        if len(set(doc_ids)) != len(doc_ids):
-            raise ValueError("embedding search returned duplicate doc_id values")
-        self._search_returned_doc_ids.update(doc_ids)
+        if self.index_kind == _QA_MEMORY_INDEX_KIND:
+            hits = [
+                _public_memory_hit(raw_hit, expected_rank=rank)
+                for rank, raw_hit in enumerate(raw_hits, start=1)
+            ]
+            resource_id_key = "memory_ids"
+            resource_ids = [str(hit["memory_id"]) for hit in hits]
+        else:
+            hits = [
+                _public_hit(raw_hit, expected_rank=rank)
+                for rank, raw_hit in enumerate(raw_hits, start=1)
+            ]
+            resource_id_key = "doc_ids"
+            resource_ids = [str(hit["doc_id"]) for hit in hits]
+        if len(set(resource_ids)) != len(resource_ids):
+            raise ValueError("embedding search returned duplicate resource IDs")
+        self._search_returned_doc_ids.update(resource_ids)
         return ToolResult(
             {
                 "operation": "search",
@@ -288,7 +441,7 @@ class HotpotQAEmbeddingToolBackend:
                 "retrieval_index": dict(self.index_identity),
                 "query": query,
                 "k": k,
-                "doc_ids": doc_ids,
+                resource_id_key: resource_ids,
                 "hits": hits,
             }
         )
@@ -296,35 +449,57 @@ class HotpotQAEmbeddingToolBackend:
 
     async def _read(self, request: ToolRequest) -> ToolResult:
         _validate_action(request, "read")
-        if set(request.arguments) != {"doc_id"}:
-            raise ValueError("read arguments must contain exactly doc_id")
-        doc_id = _required_text(
-            request.arguments["doc_id"], field_name="read doc_id"
+        id_field = (
+            "memory_id"
+            if self.index_kind == _QA_MEMORY_INDEX_KIND
+            else "doc_id"
         )
-        if doc_id not in self._search_returned_doc_ids:
-            raise ValueError("read doc_id was not returned by a successful search")
+        if set(request.arguments) != {id_field}:
+            raise ValueError(f"read arguments must contain exactly {id_field}")
+        resource_id = _required_text(
+            request.arguments[id_field], field_name=f"read {id_field}"
+        )
+        if resource_id not in self._search_returned_doc_ids:
+            raise ValueError(
+                f"read {id_field} was not returned by a successful search"
+            )
 
-        candidate = self.index.read(self.task_id, doc_id)
-        raw_passage = (
-            await candidate if inspect.isawaitable(candidate) else candidate
-        )
+        if self.index_kind == _QA_MEMORY_INDEX_KIND:
+            candidate = self.index.read(resource_id)
+        else:
+            candidate = self.index.read(self.task_id, resource_id)
+        raw_value = await candidate if inspect.isawaitable(candidate) else candidate
+        if self.index_kind == _QA_MEMORY_INDEX_KIND:
+            public_memory = _public_memory(
+                raw_value,
+                expected_memory_id=resource_id,
+            )
+            return ToolResult(
+                {
+                    "operation": "read",
+                    "task_id": self.task_id,
+                    "retrieval_index": dict(self.index_identity),
+                    "memory_id": resource_id,
+                    "memory": public_memory,
+                }
+            )
         returned_passage_id = _required_text(
-            _field(raw_passage, "passage_id"),
+            _field(raw_value, "passage_id"),
             field_name="read passage passage_id",
         )
-        if returned_passage_id != doc_id:
+        if returned_passage_id != resource_id:
             raise ValueError("embedding read returned a different passage_id")
         public_passage = {
             "doc_id": returned_passage_id,
             "document_id": _required_text(
-                _field(raw_passage, "document_id"),
+                _field(raw_value, "document_id"),
                 field_name="read passage document_id",
             ),
             "title": _required_text(
-                _field(raw_passage, "title"), field_name="read passage title"
+                _field(raw_value, "title"), field_name="read passage title"
             ),
             "content": _required_text(
-                _field(raw_passage, "text"), field_name="read passage text"
+                _field(raw_value, "text"), field_name="read passage text"
             ),
         }
         return ToolResult(
@@ -332,7 +507,7 @@ class HotpotQAEmbeddingToolBackend:
                 "operation": "read",
                 "task_id": self.task_id,
                 "retrieval_index": dict(self.index_identity),
-                "doc_id": doc_id,
+                "doc_id": resource_id,
                 "passage": public_passage,
             }
         )
@@ -347,6 +522,20 @@ class HotpotQAEmbeddingReactExecutionAdapter(ToolReactExecutionAdapter):
     progressive Canvas search space.
     """
 
+    def _active_retrieval_tool_id(self) -> str:
+        resource_ids = self._tool_registry.resource_ids
+        if len(resource_ids) != 1:
+            raise ValueError("HotpotQA retrieval adapter requires one Tool resource")
+        return resource_ids[0]
+
+    def _read_identifier_name(self) -> str:
+        capability = self._tool_registry.require_capability(
+            self._active_retrieval_tool_id()
+        )
+        schema = capability.action_schemas.get("read", {})
+        required = schema.get("required", ()) if isinstance(schema, Mapping) else ()
+        return "memory_id" if tuple(required) == ("memory_id",) else "doc_id"
+
     def _allowed_tools_for_turn(
         self,
         request: AgentRequest,
@@ -357,7 +546,7 @@ class HotpotQAEmbeddingReactExecutionAdapter(ToolReactExecutionAdapter):
             observations,
         )
         if actions:
-            return (HOTPOTQA_RETRIEVAL_TOOL_ID,)
+            return (self._active_retrieval_tool_id(),)
         return ()
 
     def _state_conditioned_action_domain(
@@ -374,7 +563,8 @@ class HotpotQAEmbeddingReactExecutionAdapter(ToolReactExecutionAdapter):
         """
 
         del request
-        state = _public_retrieval_state(observations)
+        tool_id = self._active_retrieval_tool_id()
+        state = _public_retrieval_state(observations, tool_id=tool_id)
         remaining_tool_calls = max(
             0,
             self._max_tool_calls - state.dispatched_tool_calls,
@@ -389,7 +579,7 @@ class HotpotQAEmbeddingReactExecutionAdapter(ToolReactExecutionAdapter):
             and state.latest_unread_doc_ids
         ):
             return frozenset(
-                {(HOTPOTQA_RETRIEVAL_TOOL_ID, "read")}
+                {(tool_id, "read")}
             ), False
         if successful_read_count > 0:
             # One missing-hop search/read transition requires two remaining
@@ -397,11 +587,11 @@ class HotpotQAEmbeddingReactExecutionAdapter(ToolReactExecutionAdapter):
             # capacity instead of admitting an unfinishable blind search.
             if remaining_tool_calls >= 2:
                 return frozenset(
-                    {(HOTPOTQA_RETRIEVAL_TOOL_ID, "search")}
+                    {(tool_id, "search")}
                 ), False
             return frozenset(), True
         return frozenset(
-            {(HOTPOTQA_RETRIEVAL_TOOL_ID, "search")}
+            {(tool_id, "search")}
         ), False
 
     def _contract(
@@ -410,9 +600,8 @@ class HotpotQAEmbeddingReactExecutionAdapter(ToolReactExecutionAdapter):
         observations: list[Mapping[str, object]],
     ) -> str:
         base = super()._contract(request, observations)
-        capability = self._tool_registry.require_capability(
-            HOTPOTQA_RETRIEVAL_TOOL_ID
-        )
+        tool_id = self._active_retrieval_tool_id()
+        capability = self._tool_registry.require_capability(tool_id)
         schemas = capability.input_schema.get("oneOf", ())
         search_schema = next(
             (
@@ -429,7 +618,8 @@ class HotpotQAEmbeddingReactExecutionAdapter(ToolReactExecutionAdapter):
         )
         k_schema = properties.get("k", {}) if isinstance(properties, Mapping) else {}
         frozen_k = k_schema.get("const") if isinstance(k_schema, Mapping) else None
-        state = _public_retrieval_state(observations)
+        state = _public_retrieval_state(observations, tool_id=tool_id)
+        read_identifier = self._read_identifier_name()
         actions, completion_admitted = self._state_conditioned_action_domain(
             request,
             observations,
@@ -438,7 +628,7 @@ class HotpotQAEmbeddingReactExecutionAdapter(ToolReactExecutionAdapter):
         if action_names == {"read"}:
             next_action = (
                 "Current action mask: read only; search and complete are not "
-                "admitted. Use exactly one unread doc_id from the latest "
+                f"admitted. Use exactly one unread {read_identifier} from the latest "
                 "successful search: "
                 + json.dumps(
                     list(state.latest_unread_doc_ids),
@@ -479,8 +669,15 @@ class HotpotQAEmbeddingReactExecutionAdapter(ToolReactExecutionAdapter):
                 sort_keys=True,
                 separators=(",", ":"),
             )
-            + ". After a successful search, choose an exact returned doc_id and "
-            "call read with exactly {\"doc_id\":\"returned doc_id\"}. Do not "
+            + ". After a successful search, choose an exact returned "
+            + read_identifier
+            + " and call read with exactly "
+            + json.dumps(
+                {read_identifier: f"returned {read_identifier}"},
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + ". Do not "
             "repeat a normalized successful query. After the first successful "
             "read, use the next search/read transition for the missing entity, "
             "relation, or hop while the frozen Tool budget remains. Complete "
@@ -497,7 +694,10 @@ class HotpotQAEmbeddingReactExecutionAdapter(ToolReactExecutionAdapter):
         observations: list[Mapping[str, object]],
     ) -> str | None:
         del request
-        state = _public_retrieval_state(observations)
+        state = _public_retrieval_state(
+            observations,
+            tool_id=self._active_retrieval_tool_id(),
+        )
         name = getattr(action, "name", None)
         arguments = getattr(action, "arguments", None)
         if name == "search" and isinstance(arguments, Mapping):
@@ -511,8 +711,8 @@ class HotpotQAEmbeddingReactExecutionAdapter(ToolReactExecutionAdapter):
                 if normalized and normalized in prior:
                     return "hotpotqa_duplicate_normalized_query"
         if name == "read" and isinstance(arguments, Mapping):
-            doc_id = arguments.get("doc_id")
-            if doc_id not in state.latest_unread_doc_ids:
+            resource_id = arguments.get(self._read_identifier_name())
+            if resource_id not in state.latest_unread_doc_ids:
                 return "hotpotqa_read_not_latest_unread_candidate"
         return None
 
@@ -524,10 +724,15 @@ class HotpotQAEmbeddingReactExecutionAdapter(ToolReactExecutionAdapter):
         tool_receipts: list[dict[str, object]],
     ) -> str | None:
         del action, artifact
+        tool_id = (
+            self._active_retrieval_tool_id()
+            if hasattr(self, "_tool_registry")
+            else HOTPOTQA_RETRIEVAL_TOOL_ID
+        )
         successful_actions = {
             str(request["action"])
             for receipt in tool_receipts
-            if receipt.get("tool_id") == HOTPOTQA_RETRIEVAL_TOOL_ID
+            if receipt.get("tool_id") == tool_id
             and receipt.get("error_type") is None
             and isinstance(receipt.get("result"), Mapping)
             and isinstance((request := receipt.get("request")), Mapping)
@@ -541,20 +746,25 @@ class HotpotQAEmbeddingReactExecutionAdapter(ToolReactExecutionAdapter):
 
 
 def build_hotpotqa_embedding_tool_registry(
-    index: _TaskScopedEmbeddingIndex,
+    index: _EmbeddingIndex,
     *,
     task_id: str,
+    tool_id: str = HOTPOTQA_RETRIEVAL_TOOL_ID,
     frozen_top_k: int | None = None,
     timeout_seconds: float = 10.0,
 ) -> ToolRegistry:
-    """Build one task-bound, read-only dynamic retrieval Tool registry.
+    """Build one read-only dynamic retrieval Tool registry.
 
     ``frozen_top_k`` must be present in the index manifest.  Supplying it here
     is an assertion and cannot override the manifest, which keeps validation
     runs fail-closed against architecture-development configuration drift.
+    ``task_id`` scopes the legacy passage index; for train QA-memory it is only
+    recorded as the evaluation-call context in Tool results/receipts.
     """
 
     normalized_task_id = _required_text(task_id, field_name="task_id")
+    normalized_tool_id = _required_text(tool_id, field_name="tool_id")
+    index_kind = _index_kind(index)
     manifest_top_k = _positive_integer(
         _optional_manifest_field(index.manifest, "frozen_top_k"),
         field_name="retrieval manifest frozen_top_k",
@@ -568,7 +778,7 @@ def build_hotpotqa_embedding_tool_registry(
     if not isinstance(timeout_seconds, (int, float)) or timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be positive")
 
-    identity = _index_identity(index)
+    identity = _index_identity(index, index_kind=index_kind)
     version = str(identity["index_id"])
     search_schema = {
         "title": "search",
@@ -584,21 +794,26 @@ def build_hotpotqa_embedding_tool_registry(
             },
             "k": {
                 "const": manifest_top_k,
-                "description": "Frozen number of embedding-ranked passages.",
+                "description": "Frozen number of embedding-ranked candidates.",
             },
         },
     }
+    read_identifier = (
+        "memory_id" if index_kind == _QA_MEMORY_INDEX_KIND else "doc_id"
+    )
     read_schema = {
         "title": "read",
         "description": "Arguments for the read Tool action.",
         "type": "object",
         "additionalProperties": False,
-        "required": ["doc_id"],
+        "required": [read_identifier],
         "properties": {
-            "doc_id": {
+            read_identifier: {
                 "type": "string",
                 "minLength": 1,
-                "description": "Exact doc_id returned by a successful search.",
+                "description": (
+                    f"Exact {read_identifier} returned by a successful search."
+                ),
             }
         },
     }
@@ -633,11 +848,102 @@ def build_hotpotqa_embedding_tool_registry(
             "content": {"type": "string"},
         },
     }
-    capability = ToolCapability(
-        tool_id=HOTPOTQA_RETRIEVAL_TOOL_ID,
-        dataset_scope=HOTPOTQA_DATASET_SCOPE,
-        input_schema={"oneOf": [search_schema, read_schema]},
-        output_schema={
+    memory_hit_schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": [
+            "memory_id",
+            "source_train_task_id",
+            "paraphrase_question",
+            "paraphrase_answer_statement",
+            "similarity",
+            "rank",
+        ],
+        "properties": {
+            "memory_id": {"type": "string"},
+            "source_train_task_id": {"type": "string"},
+            "paraphrase_question": {"type": "string"},
+            "paraphrase_answer_statement": {"type": "string"},
+            "similarity": {"type": "number"},
+            "rank": {"type": "integer", "minimum": 1},
+        },
+    }
+    memory_schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": [
+            "memory_id",
+            "source_train_task_id",
+            "base_task_id",
+            "cycled",
+            "paraphrase_question",
+            "paraphrase_answer_statement",
+            "canonical_answer",
+            "paraphrase_version",
+            "paraphrase_provenance",
+        ],
+        "properties": {
+            "memory_id": {"type": "string"},
+            "source_train_task_id": {"type": "string"},
+            "base_task_id": {"type": "string"},
+            "cycled": {"type": "boolean"},
+            "paraphrase_question": {"type": "string"},
+            "paraphrase_answer_statement": {"type": "string"},
+            "canonical_answer": {"type": "string"},
+            "paraphrase_version": {"type": "string"},
+            "paraphrase_provenance": {"type": "string"},
+        },
+    }
+    if index_kind == _QA_MEMORY_INDEX_KIND:
+        output_schema = {
+            "oneOf": [
+                {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": [
+                        "operation",
+                        "task_id",
+                        "retrieval_index",
+                        "query",
+                        "k",
+                        "memory_ids",
+                        "hits",
+                    ],
+                    "properties": {
+                        "operation": {"const": "search"},
+                        "task_id": {"type": "string"},
+                        "retrieval_index": {"type": "object"},
+                        "query": {"type": "string"},
+                        "k": {"const": manifest_top_k},
+                        "memory_ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                        },
+                        "hits": {"type": "array", "items": memory_hit_schema},
+                    },
+                },
+                {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": [
+                        "operation",
+                        "task_id",
+                        "retrieval_index",
+                        "memory_id",
+                        "memory",
+                    ],
+                    "properties": {
+                        "operation": {"const": "read"},
+                        "task_id": {"type": "string"},
+                        "retrieval_index": {"type": "object"},
+                        "memory_id": {"type": "string"},
+                        "memory": memory_schema,
+                    },
+                },
+            ]
+        }
+    else:
+        output_schema = {
             "oneOf": [
                 {
                     "type": "object",
@@ -683,7 +989,16 @@ def build_hotpotqa_embedding_tool_registry(
                     },
                 },
             ]
+        }
+    capability = ToolCapability(
+        tool_id=normalized_tool_id,
+        dataset_scope=HOTPOTQA_DATASET_SCOPE,
+        action_schemas={
+            "search": search_schema,
+            "read": read_schema,
         },
+        input_schema={"oneOf": [search_schema, read_schema]},
+        output_schema=output_schema,
         side_effect="none",
         timeout_seconds=float(timeout_seconds),
         version=version,
@@ -691,12 +1006,13 @@ def build_hotpotqa_embedding_tool_registry(
     return ToolRegistry(
         (
             ToolRegistration(
-                HOTPOTQA_RETRIEVAL_TOOL_ID,
+                normalized_tool_id,
                 HotpotQAEmbeddingToolBackend(
                     index=index,
                     task_id=normalized_task_id,
                     frozen_top_k=manifest_top_k,
                     index_identity=identity,
+                    index_kind=index_kind,
                 ),
                 capability,
             ),
@@ -706,6 +1022,7 @@ def build_hotpotqa_embedding_tool_registry(
 
 __all__ = [
     "HOTPOTQA_DATASET_SCOPE",
+    "HOTPOTQA_QA_MEMORY_TOOL_ID",
     "HOTPOTQA_RETRIEVAL_TOOL_ID",
     "HotpotQAEmbeddingToolBackend",
     "HotpotQAEmbeddingReactExecutionAdapter",

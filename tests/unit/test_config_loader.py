@@ -82,6 +82,11 @@ class ConfigLoaderTests(unittest.TestCase):
         with self.assertRaises(ConfigurationError):
             validate_agent_graph_config(config)
 
+        config = load_yaml("config/training_agent_graph.yaml")
+        config["agent_graph"]["recovery_policy"] = "delete_on_failure"
+        with self.assertRaises(ConfigurationError):
+            validate_agent_graph_config(config)
+
     def test_smoke_config_is_strictly_bounded(self) -> None:
         config = load_yaml("config/training_agentgraph_smoke.yaml")
         validate_agent_graph_config(config)

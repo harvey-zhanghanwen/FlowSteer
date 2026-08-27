@@ -62,3 +62,61 @@ def test_strict_aggregate_keeps_failed_task_in_denominator():
     assert result["strict_exact_match"] == 0.5
     assert result["strict_token_f1"] == 0.4
     assert result["completed_only_exact_match"] == 1.0
+
+
+def test_retrieval_boundary_requires_worker_receipt_and_relation_path():
+    trajectories = {
+        "task-1": {
+            "explicit_finish": True,
+            "turns": [
+                {
+                    "action": {"action": "add_agent"},
+                    "graph_snapshot": {
+                        "output_agent_id": "output",
+                        "relations": [
+                            {
+                                "source_id": "worker",
+                                "target_id": "output",
+                                "source_to_target": True,
+                                "target_to_source": False,
+                            }
+                        ],
+                    },
+                    "executions": [
+                        {
+                            "agent_id": "worker",
+                            "metadata": {
+                                "response": {
+                                    "tool_receipts": [
+                                        {
+                                            "tool_id": "hotpotqa.qa_memory",
+                                            "result": {
+                                                "value": {
+                                                    "memory_ids": ["memory-1"],
+                                                    "hits": [
+                                                        {
+                                                            "source_train_task_id": "train-1"
+                                                        }
+                                                    ],
+                                                }
+                                            },
+                                        }
+                                    ]
+                                }
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+    }
+
+    result = _MODULE._retrieval_boundary_statistics(
+        trajectories,
+        tool_id="hotpotqa.qa_memory",
+    )
+
+    assert result["director_tool_calls"] == 0
+    assert result["retrieval_tool_calls_by_worker"] == 1
+    assert result["retrieval_artifact_routed_via_relation"] is True
+    assert result["unique_train_base_task_ids_retrieved"] == 1

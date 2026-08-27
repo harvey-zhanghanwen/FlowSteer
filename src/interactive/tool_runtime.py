@@ -18,6 +18,9 @@ import time
 from types import MappingProxyType
 from typing import Any, Optional, Protocol, Union, cast
 
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import SchemaError
+
 
 JsonValue = Union[
     None,
@@ -183,6 +186,7 @@ class ToolCapability:
 
     tool_id: str
     dataset_scope: tuple[str, ...]
+    action_schemas: Mapping[str, Mapping[str, object]]
     input_schema: Mapping[str, object]
     output_schema: Mapping[str, object]
     side_effect: str
@@ -208,6 +212,31 @@ class ToolCapability:
             or len(set(self.dataset_scope)) != len(self.dataset_scope)
         ):
             raise ValueError("dataset_scope must contain unique non-empty strings")
+        if not isinstance(self.action_schemas, Mapping):
+            raise TypeError("action_schemas must be a mapping")
+        raw_action_schemas: dict[str, object] = {}
+        for name, schema in self.action_schemas.items():
+            if (
+                not isinstance(name, str)
+                or not name.strip()
+                or not isinstance(schema, Mapping)
+            ):
+                raise ValueError(
+                    "action_schemas must map non-empty action names to JSON schemas"
+                )
+            normalized_name = name.strip()
+            if normalized_name in raw_action_schemas:
+                raise ValueError("action_schemas action names must be unique")
+            normalized_schema = _normalize_json(dict(schema))
+            if not isinstance(normalized_schema, dict):
+                raise TypeError("action schema must be a JSON object")
+            try:
+                Draft202012Validator.check_schema(normalized_schema)
+            except SchemaError as exc:
+                raise ValueError(
+                    f"action schema for {normalized_name!r} is invalid: {exc.message}"
+                ) from exc
+            raw_action_schemas[normalized_name] = normalized_schema
         if self.timeout_seconds is not None and self.timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive when supplied")
         if type(self.availability) is not bool:
@@ -224,16 +253,67 @@ class ToolCapability:
         )
         object.__setattr__(self, "side_effect", self.side_effect.strip())
         object.__setattr__(self, "version", self.version.strip())
+        action_schemas = _normalize_json(raw_action_schemas)
         object.__setattr__(self, "input_schema", MappingProxyType(input_schema))
         object.__setattr__(self, "output_schema", MappingProxyType(output_schema))
+        if not isinstance(action_schemas, dict) or any(
+            not isinstance(schema, dict) for schema in action_schemas.values()
+        ):
+            raise TypeError("action_schemas must contain JSON objects")
+        object.__setattr__(
+            self,
+            "action_schemas",
+            MappingProxyType(action_schemas),
+        )
+
+    @property
+    def action_names(self) -> tuple[str, ...]:
+        """Return the fixed StructuredAction domain registered for this Tool."""
+
+        return tuple(self.action_schemas)
 
     def supports_dataset(self, dataset_id: str) -> bool:
         return "*" in self.dataset_scope or dataset_id in self.dataset_scope
+
+    def argument_validation_error(
+        self,
+        action_name: str,
+        arguments: Mapping[str, object],
+    ) -> Optional[dict[str, object]]:
+        """Return the first deterministic Draft 2020-12 validation error."""
+
+        schema = self.action_schemas.get(action_name)
+        if schema is None:
+            return {
+                "message": "action is absent from the registered action schema",
+                "instance_path": [],
+                "schema_path": [],
+            }
+        errors = sorted(
+            Draft202012Validator(dict(schema)).iter_errors(dict(arguments)),
+            key=lambda item: (
+                tuple(str(value) for value in item.absolute_path),
+                tuple(str(value) for value in item.absolute_schema_path),
+                item.message,
+            ),
+        )
+        if not errors:
+            return None
+        error = errors[0]
+        return {
+            "message": error.message,
+            "instance_path": list(error.absolute_path),
+            "schema_path": list(error.absolute_schema_path),
+        }
 
     def to_value(self) -> dict[str, object]:
         return {
             "tool_id": self.tool_id,
             "dataset_scope": list(self.dataset_scope),
+            "action_names": list(self.action_names),
+            "action_schemas": {
+                name: dict(schema) for name, schema in self.action_schemas.items()
+            },
             "input_schema": dict(self.input_schema),
             "output_schema": dict(self.output_schema),
             "side_effect": self.side_effect,

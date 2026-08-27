@@ -6,11 +6,20 @@ import unittest
 from src.interactive.agent_graph import AgentGraph, AgentGraphValidationError, AgentNode, AgentRelation
 from src.interactive.agent_runtime import (
     AgentRequest,
+    AgentResponse,
     AgentRuntime,
     AgentRuntimeError,
     ExecutionPhase,
+    ReasoningExecutionAdapter,
 )
 from src.interactive.model_registry import ModelRegistry, ModelSpec, ProviderSpec
+from src.interactive.react_execution import ReactExecutionError
+from src.interactive.tool_runtime import (
+    FakeTool,
+    ToolCapability,
+    ToolRegistration,
+    ToolRegistry,
+)
 
 
 def registry() -> ModelRegistry:
@@ -211,6 +220,137 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
             await AgentRuntime(catalog, gateway).execute(graph, "q")
         await asyncio.wait_for(gateway.b_cancelled.wait(), timeout=1.0)
         self.assertNotIn("c", gateway.called)
+
+    async def test_react_failure_preserves_receipts_and_completed_sibling(self) -> None:
+        catalog = registry()
+
+        class PartialFailureGateway:
+            def __init__(self) -> None:
+                self.sibling_completed = asyncio.Event()
+                self.called: list[str] = []
+
+            async def generate(self, request: AgentRequest) -> AgentResponse:
+                self.called.append(request.agent.id)
+                if request.agent.id == "a":
+                    await self.sibling_completed.wait()
+                    raise ReactExecutionError(
+                        "bounded execution exhausted",
+                        metadata={
+                            "react_trace": [
+                                {
+                                    "turn": 1,
+                                    "observation_status": "success",
+                                }
+                            ],
+                            "tool_receipts": [
+                                {"tool_id": "qa.search", "success": True}
+                            ],
+                            "model_calls": [
+                                {
+                                    "turn": 1,
+                                    "request_id": request.request_id + ":react:1",
+                                }
+                            ],
+                        },
+                    )
+                if request.agent.id == "b":
+                    self.sibling_completed.set()
+                    return AgentResponse(
+                        "durable sibling artifact",
+                        {"provider_request_id": "sibling-ok"},
+                    )
+                return AgentResponse("must not run")
+
+        gateway = PartialFailureGateway()
+        graph = AgentGraph(
+            [AgentNode(name, "m1", name) for name in ("a", "b", "c")],
+            [
+                AgentRelation("a", "c", True, False),
+                AgentRelation("b", "c", True, False),
+            ],
+            output_agent_id="c",
+        )
+
+        with self.assertRaises(AgentRuntimeError) as raised:
+            await AgentRuntime(catalog, gateway).execute(
+                graph,
+                "question",
+                require_complete=False,
+            )
+
+        failure = raised.exception.failure_records[0]
+        self.assertEqual("a", failure.agent_id)
+        self.assertEqual("ReactExecutionError", failure.error_type)
+        self.assertEqual(
+            "success",
+            failure.metadata["react_trace"][0]["observation_status"],
+        )
+        self.assertEqual(
+            "qa.search",
+            failure.metadata["tool_receipts"][0]["tool_id"],
+        )
+        self.assertTrue(
+            failure.metadata["model_calls"][0]["request_id"].endswith(
+                ":react:1"
+            )
+        )
+        partial = raised.exception.partial_result
+        self.assertIsNotNone(partial)
+        assert partial is not None
+        self.assertEqual(
+            {"b": "durable sibling artifact"},
+            dict(partial.outputs),
+        )
+        self.assertEqual(("b",), partial.executed_agent_ids)
+        self.assertEqual(1, len(partial.calls))
+        self.assertEqual(("c",), raised.exception.blocked_agent_ids)
+        self.assertEqual(("a", "c"), raised.exception.pending_agent_ids)
+        self.assertNotIn("c", gateway.called)
+
+    async def test_registered_execution_profiles_expose_task_scoped_tools(self) -> None:
+        catalog = registry()
+        gateway = RecordingGateway()
+        tools = ToolRegistry(
+            (
+                ToolRegistration(
+                    "qa.search",
+                    FakeTool({"search": lambda arguments: arguments}),
+                    ToolCapability(
+                        tool_id="qa.search",
+                        dataset_scope=("hotpotqa",),
+                        action_schemas={
+                            "search": {
+                                "type": "object",
+                                "additionalProperties": True,
+                            }
+                        },
+                        input_schema={"type": "object"},
+                        output_schema={"type": "object"},
+                        side_effect="none",
+                        timeout_seconds=1.0,
+                        version="qa-search-v1",
+                    ),
+                ),
+            )
+        )
+        runtime = AgentRuntime(
+            catalog,
+            gateway,
+            execution_adapters={
+                "react": ReasoningExecutionAdapter(gateway),
+            },
+            tool_registry=tools,
+            dataset_id="hotpotqa",
+        )
+
+        self.assertEqual(
+            (
+                ("reasoning", ()),
+                ("react", ()),
+                ("react", ("qa.search",)),
+            ),
+            runtime.registered_execution_profiles(),
+        )
 
     async def test_global_concurrency_limit(self) -> None:
         catalog = registry()

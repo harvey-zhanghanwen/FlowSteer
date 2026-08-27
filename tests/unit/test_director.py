@@ -85,15 +85,15 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.final_graph["output_agent_id"], "solver")
         self.assertEqual(client.seeds, [1, 2, 3])
 
-        # An incomplete graph is not executed.  Once set_output makes the graph
-        # complete, FlowSteer's progressive result is returned in Canvas
-        # feedback and therefore appears in the next neutral Director state.
-        self.assertIsNone(result.turns[0].canvas_result.execution)
+        # FlowSteer's progressive Canvas executes each accepted functional
+        # edit, including a one-Agent incomplete graph.  Once set_output makes
+        # the graph complete, its result appears in the next neutral state.
+        self.assertIsNotNone(result.turns[0].canvas_result.execution)
         self.assertIsNotNone(result.turns[1].canvas_result.execution)
         self.assertIn("execution_result=", result.turns[1].canvas_result.feedback)
         self.assertIn("answer from solver", result.turns[1].canvas_result.feedback)
         # Finish reuses the successful result for the unchanged graph revision.
-        self.assertEqual(len(gateway.requests), 1)
+        self.assertEqual(len(gateway.requests), 2)
 
         initial_state = json.loads(client.prompts[0].split("\n\n", 1)[1])
         complete_state = json.loads(client.prompts[2].split("\n\n", 1)[1])
@@ -102,6 +102,23 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(initial_state["max_agents"], 10)
         self.assertEqual(initial_state["recent_canvas_history"], [])
         self.assertFalse(initial_state["complete_validation"]["valid"])
+        self.assertIn("add_agent", initial_state["admissible_actions"])
+        self.assertNotIn("finish", initial_state["admissible_actions"])
+        self.assertEqual(
+            [
+                {
+                    "execution_mode": "reasoning",
+                    "allowed_tools": [],
+                }
+            ],
+            initial_state["action_target_domains"][
+                "registered_execution_profiles"
+            ],
+        )
+        self.assertEqual(
+            "preserve -> diagnose -> repair -> augment",
+            initial_state["recovery_state"]["strategy"],
+        )
         self.assertEqual(complete_state["remaining_rounds"], 18)
         self.assertTrue(complete_state["complete_validation"]["valid"])
         self.assertIn("execution_result=", complete_state["canvas_feedback"])

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 import re
-from typing import Mapping, Optional, Tuple, Union
+from typing import Mapping, Optional, Sequence, Tuple, Union
 
 from .agent_action_parser import (
     AgentAction,
@@ -33,6 +33,13 @@ from .model_registry import ModelRegistry
 
 class AgentWorkflowStateError(RuntimeError):
     """Raised for invalid environment construction or restoration."""
+
+
+_PRESERVE_REPAIR_RECOVERY_POLICY = "preserve_diagnose_repair_augment"
+_SUPPORTED_RECOVERY_POLICIES = frozenset(
+    {"default", _PRESERVE_REPAIR_RECOVERY_POLICY}
+)
+_SUPPORTED_DIRECTOR_FEEDBACK_MODES = frozenset({"content", "control_plane"})
 
 
 def _answer_protocol_state(answer: str) -> tuple[int, bool, bool]:
@@ -104,6 +111,8 @@ class AgentWorkflowStepResult:
     validation_issues: Tuple[GraphValidationIssue, ...] = ()
     execution: Optional[AgentRuntimeResult] = None
     execution_reused: bool = False
+    partial_execution: Optional[AgentRuntimeResult] = None
+    execution_failure_records: Tuple[object, ...] = ()
 
     @property
     def success(self) -> bool:
@@ -131,6 +140,10 @@ class AgentWorkflowEnv:
         require_exact_answer_tag: bool = False,
         require_format_agent: bool = False,
         required_evidence_tool_id: Optional[str] = None,
+        require_evidence_relation: bool = False,
+        allowed_actions: Optional[Sequence[str]] = None,
+        recovery_policy: str = "default",
+        director_feedback_mode: str = "content",
     ) -> None:
         if runtime is None and gateway is None:
             raise AgentWorkflowStateError("gateway or runtime is required")
@@ -159,6 +172,43 @@ class AgentWorkflowEnv:
             raise AgentWorkflowStateError(
                 "required_evidence_tool_id must be non-empty text or None"
             )
+        if type(require_evidence_relation) is not bool:
+            raise AgentWorkflowStateError("require_evidence_relation must be bool")
+        if require_evidence_relation and required_evidence_tool_id is None:
+            raise AgentWorkflowStateError(
+                "require_evidence_relation requires required_evidence_tool_id"
+            )
+        if (
+            not isinstance(recovery_policy, str)
+            or recovery_policy not in _SUPPORTED_RECOVERY_POLICIES
+        ):
+            raise AgentWorkflowStateError(
+                "recovery_policy must be default or "
+                f"{_PRESERVE_REPAIR_RECOVERY_POLICY}"
+            )
+        if director_feedback_mode not in _SUPPORTED_DIRECTOR_FEEDBACK_MODES:
+            raise AgentWorkflowStateError(
+                "director_feedback_mode must be content or control_plane"
+            )
+        if allowed_actions is None:
+            resolved_allowed_actions = tuple(item.value for item in AgentActionType)
+        else:
+            if isinstance(allowed_actions, (str, bytes)) or not allowed_actions:
+                raise AgentWorkflowStateError(
+                    "allowed_actions must be a non-empty sequence"
+                )
+            resolved_allowed_actions = tuple(allowed_actions)
+            known_actions = {item.value for item in AgentActionType}
+            if (
+                any(
+                    not isinstance(item, str) or item not in known_actions
+                    for item in resolved_allowed_actions
+                )
+                or len(resolved_allowed_actions) != len(set(resolved_allowed_actions))
+            ):
+                raise AgentWorkflowStateError(
+                    "allowed_actions contains an unknown or duplicate action"
+                )
         self.model_registry = model_registry
         self.runtime = runtime or AgentRuntime(model_registry, gateway)  # type: ignore[arg-type]
         self.execute_on_edit = execute_on_edit
@@ -171,6 +221,11 @@ class AgentWorkflowEnv:
             if required_evidence_tool_id is None
             else required_evidence_tool_id.strip()
         )
+        self.require_evidence_relation = require_evidence_relation
+        self.allowed_action_types = resolved_allowed_actions
+        self._allowed_action_type_set = frozenset(resolved_allowed_actions)
+        self.recovery_policy = recovery_policy
+        self.director_feedback_mode = director_feedback_mode
         self.parser = AgentActionParser()
         self._problem = problem.strip()
         self._graph = graph.fork() if graph is not None else AgentGraph()
@@ -184,7 +239,12 @@ class AgentWorkflowEnv:
         self._progressive_output_metadata: dict[
             str, dict[str, object]
         ] = {}
+        self._failed_agent_ids: set[str] = set()
+        self._diagnosed_unusable_agent_ids: set[str] = set()
+        self._failed_output_agent_ids: set[str] = set()
+        self._unresolved_dirty_agent_ids: set[str] = set()
         self._validate_agent_limit(self._graph)
+        self._validate_graph_execution_profiles(self._graph)
         partial = self._graph.validate(self.model_registry, require_complete=False)
         if not partial.valid:
             raise AgentWorkflowStateError(self._format_issues(partial))
@@ -213,11 +273,361 @@ class AgentWorkflowEnv:
     def history(self) -> Tuple[AgentWorkflowHistoryEntry, ...]:
         return tuple(self._history)
 
+    @property
+    def unresolved_dirty_agent_ids(self) -> Tuple[str, ...]:
+        return tuple(sorted(self._unresolved_dirty_agent_ids))
+
+    def registered_execution_profiles(
+        self,
+    ) -> Tuple[Tuple[str, Tuple[str, ...]], ...]:
+        """Return the execution-mode/Tool pairs registered by this Runtime.
+
+        The Runtime is the capability authority.  Role metadata and Director
+        text cannot create an executor or grant a Tool capability.
+        """
+
+        provider = getattr(self.runtime, "registered_execution_profiles", None)
+        if not callable(provider):
+            raise AgentWorkflowStateError(
+                "AgentRuntime must expose registered_execution_profiles()"
+            )
+        raw_profiles = provider()
+        if not isinstance(raw_profiles, (list, tuple)):
+            raise AgentWorkflowStateError(
+                "registered execution profiles must be a sequence"
+            )
+        profiles: list[tuple[str, tuple[str, ...]]] = []
+        for raw_profile in raw_profiles:
+            if (
+                not isinstance(raw_profile, (list, tuple))
+                or len(raw_profile) != 2
+            ):
+                raise AgentWorkflowStateError(
+                    "registered execution profile is malformed"
+                )
+            execution_mode, raw_tools = raw_profile
+            if (
+                execution_mode not in {"reasoning", "react", "coding"}
+                or not isinstance(raw_tools, (list, tuple))
+                or any(
+                    not isinstance(tool_id, str) or not tool_id
+                    for tool_id in raw_tools
+                )
+                or len(raw_tools) != len(set(raw_tools))
+            ):
+                raise AgentWorkflowStateError(
+                    "registered execution profile is invalid"
+                )
+            profile = (execution_mode, tuple(raw_tools))
+            if (
+                self.required_evidence_tool_id is not None
+                and execution_mode == "react"
+                and profile
+                != ("react", (self.required_evidence_tool_id,))
+            ):
+                # A task-scoped retrieval Runtime may technically execute an
+                # empty ReAct loop, but that pair cannot satisfy this Canvas'
+                # required evidence capability and is therefore not a live
+                # Agent declaration target.
+                continue
+            if profile in profiles:
+                raise AgentWorkflowStateError(
+                    "registered execution profiles contain a duplicate"
+                )
+            profiles.append(profile)
+        if not profiles:
+            raise AgentWorkflowStateError(
+                "AgentRuntime has no registered execution profiles"
+            )
+        return tuple(profiles)
+
+    @staticmethod
+    def _serialized_execution_profiles(
+        profiles: Sequence[Tuple[str, Tuple[str, ...]]],
+    ) -> list[dict[str, object]]:
+        return [
+            {
+                "execution_mode": execution_mode,
+                "allowed_tools": list(allowed_tools),
+            }
+            for execution_mode, allowed_tools in profiles
+        ]
+
+    def model_admissible_action_types(self) -> Tuple[str, ...]:
+        """Project the live, state-conditioned Canvas action domain."""
+
+        node_ids = tuple(node.id for node in self._graph.nodes)
+        if (
+            self.recovery_policy == _PRESERVE_REPAIR_RECOVERY_POLICY
+            and self._failed_agent_ids
+            and AgentActionType.MODIFY_AGENT.value in self._allowed_action_type_set
+        ):
+            # DIRECT_REUSE + NECESSARY_ADAPTATION: FlowSteer's typed provider
+            # recovery keeps the failed node and its artifacts in place, and
+            # admits repair before unrelated augmentation.  The live target
+            # domain below narrows MODIFY to the measured failed workers.
+            return (AgentActionType.MODIFY_AGENT.value,)
+        can_add = self.max_agents is None or len(node_ids) < self.max_agents
+        deletable_ids = {
+            agent_id
+            for agent_id in node_ids
+            if self._delete_admission_issue(agent_id) is None
+        }
+        finish_admissible = self.finish_admissibility()["admissible"] is True
+        admitted: list[str] = []
+        for action_type in self.allowed_action_types:
+            if action_type in {
+                AgentActionType.ADD_AGENT.value,
+                AgentActionType.ADD_SUBGRAPH.value,
+            } and not can_add:
+                continue
+            if action_type == AgentActionType.MODIFY_AGENT.value and not node_ids:
+                continue
+            if action_type == AgentActionType.DELETE_AGENT.value and not deletable_ids:
+                continue
+            if action_type == AgentActionType.SET_RELATION.value and len(node_ids) < 2:
+                continue
+            if action_type == AgentActionType.SET_OUTPUT.value and not node_ids:
+                continue
+            if (
+                action_type == AgentActionType.FINISH.value
+                and not finish_admissible
+            ):
+                continue
+            admitted.append(action_type)
+        return tuple(admitted)
+
+    def model_admissible_action_targets(self) -> dict[str, object]:
+        """Return the live domains that correspond to admissible actions."""
+
+        admitted = set(self.model_admissible_action_types())
+        node_ids = [node.id for node in self._graph.nodes]
+        model_ids = list(self.model_registry.model_ids)
+        profiles = self.registered_execution_profiles()
+        serialized_profiles = self._serialized_execution_profiles(profiles)
+        result: dict[str, object] = {
+            "registered_execution_profiles": serialized_profiles,
+            "finish_admissibility": self.finish_admissibility(),
+        }
+        if AgentActionType.ADD_AGENT.value in admitted:
+            result[AgentActionType.ADD_AGENT.value] = {
+                "model_ids": model_ids,
+                "execution_profiles": serialized_profiles,
+            }
+        if AgentActionType.ADD_SUBGRAPH.value in admitted:
+            remaining = (
+                self.max_agents_per_subgraph
+                if self.max_agents is None
+                else min(
+                    self.max_agents_per_subgraph,
+                    self.max_agents - len(node_ids),
+                )
+            )
+            result[AgentActionType.ADD_SUBGRAPH.value] = {
+                "model_ids": model_ids,
+                "execution_profiles": serialized_profiles,
+                "existing_agent_ids": node_ids,
+                "max_new_agents": remaining,
+            }
+        if AgentActionType.MODIFY_AGENT.value in admitted:
+            result[AgentActionType.MODIFY_AGENT.value] = {
+                "agent_ids": (
+                    sorted(self._failed_agent_ids)
+                    if self.recovery_policy
+                    == _PRESERVE_REPAIR_RECOVERY_POLICY
+                    and self._failed_agent_ids
+                    else node_ids
+                ),
+                "model_ids": model_ids,
+                "execution_profiles": serialized_profiles,
+            }
+        if AgentActionType.DELETE_AGENT.value in admitted:
+            result[AgentActionType.DELETE_AGENT.value] = {
+                "agent_ids": [
+                    agent_id
+                    for agent_id in node_ids
+                    if self._delete_admission_issue(agent_id) is None
+                ],
+            }
+        if AgentActionType.SET_RELATION.value in admitted:
+            result[AgentActionType.SET_RELATION.value] = {
+                "agent_ids": node_ids,
+            }
+        if AgentActionType.SET_OUTPUT.value in admitted:
+            result[AgentActionType.SET_OUTPUT.value] = {
+                "agent_ids": node_ids,
+            }
+        if AgentActionType.FINISH.value in admitted:
+            result[AgentActionType.FINISH.value] = {"admissible": True}
+        return result
+
+    def finish_admissibility(self) -> dict[str, object]:
+        """Return the current revision's complete terminal admission state."""
+
+        validation = self._graph.validate(
+            self.model_registry,
+            require_complete=True,
+        )
+        if not validation.valid:
+            return {
+                "admissible": False,
+                "reason": self._format_issues(validation),
+            }
+        format_issue = self.format_agent_issue()
+        if format_issue is not None:
+            return {"admissible": False, "reason": format_issue}
+        if not self.execute_on_edit:
+            return {"admissible": True, "reason": "execute_on_finish"}
+        execution = self._cached_progressive_execution()
+        if execution is None:
+            return {
+                "admissible": False,
+                "reason": "current graph revision has no successful execution receipt",
+            }
+        if execution.final_answer is None:
+            return {
+                "admissible": False,
+                "reason": "current Output Agent produced no terminal artifact",
+            }
+        terminal_issue = self._terminal_validation_error(execution.final_answer)
+        if terminal_issue is not None:
+            return {"admissible": False, "reason": terminal_issue}
+        evidence_issue = self._required_evidence_issue(execution)
+        if evidence_issue is not None:
+            return {"admissible": False, "reason": evidence_issue}
+        return {
+            "admissible": True,
+            "reason": "current graph revision passed terminal admission",
+        }
+
+    @staticmethod
+    def _directed_successors(graph: AgentGraph, agent_id: str) -> set[str]:
+        return {
+            target_id
+            for relation in graph.relations
+            for source_id, target_id in relation.directed_edges()
+            if source_id == agent_id
+        }
+
+    def _replacement_takeover_agent_ids(self, agent_id: str) -> Tuple[str, ...]:
+        if not self._graph.has_node(agent_id):
+            return ()
+        failed = self._graph.get_node(agent_id)
+        failed_role = (failed.role_family or "").casefold()
+        failed_artifact_type = failed.artifact_type.casefold()
+        failed_downstream = self._directed_successors(self._graph, agent_id)
+        output_takeover_required = agent_id in self._failed_output_agent_ids
+        replacements: list[str] = []
+        for candidate in self._graph.nodes:
+            artifact = self._progressive_outputs.get(candidate.id)
+            if (
+                candidate.id == agent_id
+                or candidate.id in self._diagnosed_unusable_agent_ids
+                or (candidate.role_family or "").casefold() != failed_role
+                or candidate.artifact_type.casefold() != failed_artifact_type
+                or not isinstance(artifact, str)
+                or not artifact.strip()
+                or not failed_downstream
+                <= self._directed_successors(self._graph, candidate.id)
+                or (
+                    output_takeover_required
+                    and self._graph.output_agent_id != candidate.id
+                )
+            ):
+                continue
+            replacements.append(candidate.id)
+        return tuple(replacements)
+
+    def _delete_admission_issue(self, agent_id: Optional[str]) -> Optional[str]:
+        if self.recovery_policy != _PRESERVE_REPAIR_RECOVERY_POLICY:
+            return None
+        if agent_id is None or not self._graph.has_node(agent_id):
+            return None
+        replacements = self._replacement_takeover_agent_ids(agent_id)
+        if (
+            agent_id in self._diagnosed_unusable_agent_ids
+            and replacements
+        ):
+            return None
+        return (
+            f"recovery_policy={_PRESERVE_REPAIR_RECOVERY_POLICY} protects Agent "
+            f"{agent_id!r}. Use preserve -> diagnose -> repair -> augment; "
+            "delete is admitted only after a typed node_unusable diagnosis and "
+            "a successful same-role_family/same-artifact_type replacement has "
+            "taken over every downstream edge and any previous Output identity"
+        )
+
+    def _record_failure_state(self, records: Sequence[object]) -> None:
+        """Record typed Runtime failures without inferring node unusability."""
+
+        current_ids = {node.id for node in self._graph.nodes}
+        for record in records:
+            agent_id = getattr(record, "agent_id", None)
+            metadata = getattr(record, "metadata", None)
+            if agent_id not in current_ids or not isinstance(metadata, Mapping):
+                continue
+            self._failed_agent_ids.add(agent_id)
+            self._unresolved_dirty_agent_ids.add(agent_id)
+            if metadata.get("node_unusable") is True:
+                self._diagnosed_unusable_agent_ids.add(agent_id)
+                if self._graph.output_agent_id == agent_id:
+                    self._failed_output_agent_ids.add(agent_id)
+            else:
+                self._diagnosed_unusable_agent_ids.discard(agent_id)
+
+    def _mark_agents_recovered(self, agent_ids: Sequence[str]) -> None:
+        recovered = set(agent_ids)
+        self._failed_agent_ids.difference_update(recovered)
+        self._diagnosed_unusable_agent_ids.difference_update(recovered)
+        self._failed_output_agent_ids.difference_update(recovered)
+
+    def _clear_failure_state(self) -> None:
+        self._failed_agent_ids.clear()
+        self._diagnosed_unusable_agent_ids.clear()
+        self._failed_output_agent_ids.clear()
+        self._unresolved_dirty_agent_ids.clear()
+
+    def recovery_state(self) -> dict[str, object]:
+        """Expose topology-neutral preserve/repair state to the Director."""
+
+        deletable = [
+            node.id
+            for node in self._graph.nodes
+            if self._delete_admission_issue(node.id) is None
+        ]
+        replacements = {
+            agent_id: list(self._replacement_takeover_agent_ids(agent_id))
+            for agent_id in sorted(self._diagnosed_unusable_agent_ids)
+        }
+        return {
+            "policy": self.recovery_policy,
+            "strategy": "preserve -> diagnose -> repair -> augment",
+            "phase": (
+                "augment"
+                if any(replacements.values())
+                else "repair"
+                if self._diagnosed_unusable_agent_ids
+                else "diagnose"
+                if self._failed_agent_ids
+                else "preserve"
+            ),
+            "failed_agent_ids": sorted(self._failed_agent_ids),
+            "diagnosed_unusable_agent_ids": sorted(
+                self._diagnosed_unusable_agent_ids
+            ),
+            "unresolved_dirty_agent_ids": list(
+                self.unresolved_dirty_agent_ids
+            ),
+            "replacement_takeover_agent_ids": replacements,
+            "deletable_agent_ids": deletable,
+        }
+
     def reset(self, problem: str, graph: Optional[AgentGraph] = None) -> AgentWorkflowSnapshot:
         if not isinstance(problem, str) or not problem.strip():
             raise AgentWorkflowStateError("problem must be a non-empty string")
         candidate = graph.fork() if graph is not None else AgentGraph()
         self._validate_agent_limit(candidate)
+        self._validate_graph_execution_profiles(candidate)
         validation = candidate.validate(self.model_registry, require_complete=False)
         if not validation.valid:
             raise AgentWorkflowStateError(self._format_issues(validation))
@@ -228,6 +638,7 @@ class AgentWorkflowEnv:
         self._last_feedback = ""
         self._history.clear()
         self._clear_progressive_execution()
+        self._clear_failure_state()
         return self.snapshot()
 
     def snapshot(self) -> AgentWorkflowSnapshot:
@@ -243,6 +654,7 @@ class AgentWorkflowEnv:
     def restore(self, snapshot: AgentWorkflowSnapshot) -> None:
         graph = AgentGraph.from_snapshot(snapshot.graph)
         self._validate_agent_limit(graph)
+        self._validate_graph_execution_profiles(graph)
         validation = graph.validate(self.model_registry, require_complete=False)
         if not validation.valid:
             raise AgentWorkflowStateError(self._format_issues(validation))
@@ -256,6 +668,7 @@ class AgentWorkflowEnv:
         # A restored environment must therefore execute its current graph once
         # before it can establish a revision-local progressive result again.
         self._clear_progressive_execution()
+        self._clear_failure_state()
 
     def fork(self, snapshot: Optional[AgentWorkflowSnapshot] = None) -> "AgentWorkflowEnv":
         state = snapshot or self.snapshot()
@@ -270,11 +683,28 @@ class AgentWorkflowEnv:
             require_exact_answer_tag=self.require_exact_answer_tag,
             require_format_agent=self.require_format_agent,
             required_evidence_tool_id=self.required_evidence_tool_id,
+            require_evidence_relation=self.require_evidence_relation,
+            allowed_actions=self.allowed_action_types,
+            recovery_policy=self.recovery_policy,
+            director_feedback_mode=self.director_feedback_mode,
         )
         result._turn_count = state.turn_count
         result._finished = state.finished
         result._last_feedback = state.last_feedback
         result._history = list(state.history)
+        result._failed_agent_ids = set(self._failed_agent_ids)
+        result._diagnosed_unusable_agent_ids = set(
+            self._diagnosed_unusable_agent_ids
+        )
+        result._failed_output_agent_ids = set(self._failed_output_agent_ids)
+        result._unresolved_dirty_agent_ids = set(
+            self._unresolved_dirty_agent_ids
+        )
+        result._progressive_outputs = dict(self._progressive_outputs)
+        result._progressive_output_metadata = {
+            agent_id: dict(metadata)
+            for agent_id, metadata in self._progressive_output_metadata.items()
+        }
         return result
 
     async def step(self, action_or_response: Union[AgentAction, str]) -> AgentWorkflowStepResult:
@@ -294,6 +724,19 @@ class AgentWorkflowEnv:
             return self._reject(None, "action must be AgentAction or JSON text")
 
         self._turn_count += 1
+        if action.action_type.value not in self._allowed_action_type_set:
+            return self._reject_after_count(
+                action,
+                "action rejected: action type is outside the configured Canvas "
+                f"action set {list(self.allowed_action_types)!r}",
+            )
+        if action.action_type is AgentActionType.DELETE_AGENT:
+            delete_issue = self._delete_admission_issue(action.agent_id)
+            if delete_issue is not None:
+                return self._reject_after_count(
+                    action,
+                    "edit rejected: " + delete_issue,
+                )
         if action.action_type is AgentActionType.FINISH:
             validation = self._graph.validate(self.model_registry, require_complete=True)
             if not validation.valid:
@@ -320,9 +763,25 @@ class AgentWorkflowEnv:
                         format_output_agent=self.require_format_agent,
                     )
                 except AgentRuntimeError as exc:
+                    failure_records = tuple(
+                        getattr(exc, "failure_records", ())
+                    )
+                    self._record_failure_state(
+                        failure_records,
+                    )
+                    self._unresolved_dirty_agent_ids.update(
+                        agent_id
+                        for agent_id in (
+                            *getattr(exc, "blocked_agent_ids", ()),
+                            *getattr(exc, "pending_agent_ids", ()),
+                        )
+                        if self._graph.has_node(agent_id)
+                    )
                     return self._reject_after_count(
                         action,
                         "cannot finish: " + self._execution_error_feedback(exc),
+                        partial_execution=getattr(exc, "partial_result", None),
+                        execution_failure_records=failure_records,
                     )
             if execution.final_answer is None:
                 return self._reject_after_count(
@@ -368,6 +827,29 @@ class AgentWorkflowEnv:
         except (GraphMutationError, TypeError, ValueError) as exc:
             return self._reject_after_count(action, f"edit rejected: {exc}")
         if candidate.revision == previous_revision:
+            cached_execution = self._cached_progressive_execution()
+            if cached_execution is not None:
+                self._last_feedback = (
+                    f"accepted {action.action_type.value} at revision "
+                    f"{self._graph.revision}; execution_result_reused=true"
+                )
+                self._record_history(
+                    accepted=True,
+                    done=False,
+                    action=action,
+                    feedback=self._last_feedback,
+                    execution_reused=True,
+                )
+                return AgentWorkflowStepResult(
+                    accepted=True,
+                    done=False,
+                    action=action,
+                    revision=self._graph.revision,
+                    feedback=self._last_feedback,
+                    snapshot=self.snapshot(),
+                    execution=cached_execution,
+                    execution_reused=True,
+                )
             return self._reject_after_count(
                 action,
                 "edit rejected: action made no graph change; modify an Agent "
@@ -399,6 +881,8 @@ class AgentWorkflowEnv:
         execution = None
         execution_reused = False
         execution_error: Optional[AgentRuntimeError] = None
+        partial_execution: Optional[AgentRuntimeResult] = None
+        execution_failure_records: Tuple[object, ...] = ()
         if self.execute_on_edit:
             if self._graph.nodes:
                 try:
@@ -416,6 +900,34 @@ class AgentWorkflowEnv:
                     # feedback.  A provider/runtime failure must not roll back
                     # a structurally valid edit or abort the Director rollout.
                     execution_error = exc
+                    partial_execution = getattr(exc, "partial_result", None)
+                    execution_failure_records = tuple(
+                        getattr(exc, "failure_records", ())
+                    )
+                    if partial_execution is not None:
+                        self._progressive_outputs.update(
+                            dict(partial_execution.outputs)
+                        )
+                        self._progressive_output_metadata.update(
+                            {
+                                agent_id: dict(metadata)
+                                for agent_id, metadata in (
+                                    partial_execution.output_metadata.items()
+                                )
+                            }
+                        )
+                        self._mark_agents_recovered(partial_execution.outputs)
+                    self._record_failure_state(
+                        execution_failure_records,
+                    )
+                    self._unresolved_dirty_agent_ids.update(
+                        agent_id
+                        for agent_id in (
+                            *getattr(exc, "blocked_agent_ids", ()),
+                            *getattr(exc, "pending_agent_ids", ()),
+                        )
+                        if self._graph.has_node(agent_id)
+                    )
                 else:
                     self._progressive_outputs = dict(execution.outputs)
                     self._progressive_output_metadata = {
@@ -424,6 +936,10 @@ class AgentWorkflowEnv:
                     }
                     self._progressive_execution = execution
                     self._progressive_execution_revision = self._graph.revision
+                    self._mark_agents_recovered(execution.outputs)
+                    self._unresolved_dirty_agent_ids.difference_update(
+                        execution.outputs
+                    )
             else:
                 self._clear_progressive_execution()
         self._last_feedback = self._accepted_feedback(
@@ -447,6 +963,8 @@ class AgentWorkflowEnv:
             snapshot=self.snapshot(),
             execution=execution,
             execution_reused=execution_reused,
+            partial_execution=partial_execution,
+            execution_failure_records=execution_failure_records,
         )
 
     def _accepted_feedback(
@@ -466,7 +984,8 @@ class AgentWorkflowEnv:
         # FlowSteer's progressive Canvas returns the just-executed workflow
         # result to the policy after an edit.  Keep this receipt deliberately
         # compact: it is state feedback, not a task-specific Director template.
-        answer = execution.final_answer
+        expose_content = self.director_feedback_mode == "content"
+        answer = execution.final_answer if expose_content else None
         if answer is not None and len(answer) > 400:
             answer = answer[:397] + "..."
         output_calls = [
@@ -478,11 +997,28 @@ class AgentWorkflowEnv:
         output_inbox = []
         if output_request is not None:
             for message in output_request.upstream[:4]:
-                content = " ".join(message.content.split())
-                if len(content) > 160:
-                    content = content[:157] + "..."
-                output_inbox.append(
+                successful_actions = sorted(
                     {
+                        str(receipt.get("request", {}).get("action"))
+                        for receipt in message.tool_receipts
+                        if isinstance(receipt, Mapping)
+                        and isinstance(receipt.get("request"), Mapping)
+                        and receipt.get("error_type") is None
+                        and isinstance(receipt.get("result"), Mapping)
+                        and receipt.get("request", {}).get("action") is not None
+                    }
+                )
+                failed_actions = sorted(
+                    {
+                        str(receipt.get("request", {}).get("action"))
+                        for receipt in message.tool_receipts
+                        if isinstance(receipt, Mapping)
+                        and isinstance(receipt.get("request"), Mapping)
+                        and receipt.get("error_type") is not None
+                        and receipt.get("request", {}).get("action") is not None
+                    }
+                )
+                item = {
                         "source_agent_id": message.source_agent_id,
                         "target_agent_id": message.target_agent_id,
                         "message_type": message.message_type,
@@ -498,21 +1034,57 @@ class AgentWorkflowEnv:
                                 if receipt.get("tool_id") is not None
                             }
                         ),
-                        "content_preview": content,
+                        "successful_tool_actions": successful_actions,
+                        "failed_tool_actions": failed_actions,
                     }
-                )
+                if expose_content:
+                    content = " ".join(message.content.split())
+                    if len(content) > 160:
+                        content = content[:157] + "..."
+                    item["content_preview"] = content
+                output_inbox.append(item)
         calls_by_agent = {
             call.request.agent.id: call for call in execution.calls
         }
         agent_artifacts = []
         for agent_id, artifact in sorted(execution.outputs.items()):
             call = calls_by_agent.get(agent_id)
-            preview = " ".join(artifact.split())
-            if len(preview) > 160:
-                preview = preview[:157] + "..."
-            agent_artifacts.append(
+            output_metadata = execution.output_metadata.get(agent_id, {})
+            tool_receipts = output_metadata.get("tool_receipts", ())
+            if not isinstance(tool_receipts, (list, tuple)):
+                tool_receipts = ()
+            tool_ids = sorted(
                 {
+                    str(receipt.get("tool_id"))
+                    for receipt in tool_receipts
+                    if isinstance(receipt, Mapping)
+                    and receipt.get("tool_id") is not None
+                }
+            )
+            successful_tool_actions = sorted(
+                {
+                    str(receipt.get("request", {}).get("action"))
+                    for receipt in tool_receipts
+                    if isinstance(receipt, Mapping)
+                    and isinstance(receipt.get("request"), Mapping)
+                    and receipt.get("error_type") is None
+                    and isinstance(receipt.get("result"), Mapping)
+                    and receipt.get("request", {}).get("action") is not None
+                }
+            )
+            failed_tool_actions = sorted(
+                {
+                    str(receipt.get("request", {}).get("action"))
+                    for receipt in tool_receipts
+                    if isinstance(receipt, Mapping)
+                    and isinstance(receipt.get("request"), Mapping)
+                    and receipt.get("error_type") is not None
+                    and receipt.get("request", {}).get("action") is not None
+                }
+            )
+            item = {
                     "agent_id": agent_id,
+                    "artifact_id": f"revision-{self._graph.revision}:{agent_id}",
                     "model_id": None if call is None else call.request.model.model_id,
                     "role_family": self._graph.get_node(agent_id).role_family,
                     "execution_mode": self._graph.get_node(
@@ -528,7 +1100,12 @@ class AgentWorkflowEnv:
                         agent_id
                     ).completion_condition,
                     "execution_role": (
-                        "format" if agent_id == execution.output_agent_id else "worker"
+                        "format"
+                        if self.require_format_agent
+                        and agent_id == execution.output_agent_id
+                        else "output"
+                        if agent_id == execution.output_agent_id
+                        else "worker"
                     ),
                     "is_output_agent": agent_id == execution.output_agent_id,
                     "upstream_source_ids": (
@@ -536,9 +1113,17 @@ class AgentWorkflowEnv:
                         if call is None
                         else [item.source_agent_id for item in call.request.upstream]
                     ),
-                    "artifact_preview": preview,
+                    "tool_receipt_count": len(tool_receipts),
+                    "tool_ids": tool_ids,
+                    "successful_tool_actions": successful_tool_actions,
+                    "failed_tool_actions": failed_tool_actions,
                 }
-            )
+            if expose_content:
+                preview = " ".join(artifact.split())
+                if len(preview) > 160:
+                    preview = preview[:157] + "..."
+                item["artifact_preview"] = preview
+            agent_artifacts.append(item)
         result = json.dumps(
             {
                 "output_agent_id": execution.output_agent_id,
@@ -552,6 +1137,7 @@ class AgentWorkflowEnv:
                 "topology": self._graph.topology_statistics(),
                 "output_inbox": output_inbox,
                 "agent_artifacts": agent_artifacts,
+                "feedback_mode": self.director_feedback_mode,
             },
             ensure_ascii=False,
             separators=(",", ":"),
@@ -605,6 +1191,7 @@ class AgentWorkflowEnv:
             pending.extend(self._graph.directed_predecessors(agent_id))
 
         successful_actions: set[str] = set()
+        successful_agents: set[str] = set()
         for agent_id in routed_ids:
             metadata = execution.output_metadata.get(agent_id)
             if not isinstance(metadata, Mapping):
@@ -624,8 +1211,18 @@ class AgentWorkflowEnv:
                     and request.get("action") in {"search", "read"}
                 ):
                     successful_actions.add(str(request["action"]))
+                    successful_agents.add(agent_id)
         missing = sorted({"search", "read"} - successful_actions)
         if not missing:
+            if (
+                self.require_evidence_relation
+                and not (successful_agents - {output_id})
+            ):
+                return (
+                    f"the routed Output path requires {tool_id} evidence from a "
+                    "distinct upstream Tool-capable Agent connected by an explicit "
+                    "AgentGraph relation"
+                )
             return None
         return (
             f"the routed Output path requires successful dynamic {tool_id} "
@@ -786,6 +1383,12 @@ class AgentWorkflowEnv:
         if action.action_type is AgentActionType.ADD_AGENT:
             if action.agent_id is None or action.model_id is None or action.contract is None:
                 raise GraphMutationError("add_agent action is incomplete")
+            profile_issue = self._execution_profile_issue(
+                action.execution_mode or "reasoning",
+                action.allowed_tools or (),
+            )
+            if profile_issue is not None:
+                raise GraphMutationError(profile_issue)
             if (
                 self.max_agents is not None
                 and len(graph.nodes) >= self.max_agents
@@ -810,6 +1413,23 @@ class AgentWorkflowEnv:
         elif action.action_type is AgentActionType.MODIFY_AGENT:
             if action.agent_id is None:
                 raise GraphMutationError("modify_agent action is incomplete")
+            current = graph.get_node(action.agent_id)
+            mode_value = (
+                current.execution_mode.value
+                if action.execution_mode is None
+                else action.execution_mode
+            )
+            allowed_tools = (
+                current.allowed_tools
+                if action.allowed_tools is None
+                else action.allowed_tools
+            )
+            profile_issue = self._execution_profile_issue(
+                mode_value,
+                allowed_tools,
+            )
+            if profile_issue is not None:
+                raise GraphMutationError(profile_issue)
             graph.modify_agent(
                 action.agent_id,
                 model_id=action.model_id,
@@ -880,6 +1500,9 @@ class AgentWorkflowEnv:
         action: Optional[AgentAction],
         feedback: str,
         issues: Tuple[GraphValidationIssue, ...] = (),
+        *,
+        partial_execution: Optional[AgentRuntimeResult] = None,
+        execution_failure_records: Tuple[object, ...] = (),
     ) -> AgentWorkflowStepResult:
         self._last_feedback = feedback
         self._record_history(
@@ -896,6 +1519,8 @@ class AgentWorkflowEnv:
             feedback=feedback,
             snapshot=self.snapshot(),
             validation_issues=issues,
+            partial_execution=partial_execution,
+            execution_failure_records=execution_failure_records,
         )
 
     def _record_history(
@@ -924,6 +1549,32 @@ class AgentWorkflowEnv:
             raise AgentWorkflowStateError(
                 f"graph has {len(graph.nodes)} agents but max_agents={self.max_agents}"
             )
+
+    def _execution_profile_issue(
+        self,
+        execution_mode: str,
+        allowed_tools: Sequence[str],
+    ) -> Optional[str]:
+        profile = (execution_mode, tuple(allowed_tools))
+        registered = self.registered_execution_profiles()
+        if profile in registered:
+            return None
+        return (
+            "execution_mode/allowed_tools pair is outside the live Runtime "
+            f"capability domain: {profile!r}; registered_profiles="
+            f"{list(registered)!r}"
+        )
+
+    def _validate_graph_execution_profiles(self, graph: AgentGraph) -> None:
+        for node in graph.nodes:
+            issue = self._execution_profile_issue(
+                node.execution_mode.value,
+                node.allowed_tools,
+            )
+            if issue is not None:
+                raise AgentWorkflowStateError(
+                    f"Agent {node.id!r} has an invalid execution profile: {issue}"
+                )
 
     @staticmethod
     def _format_issues(validation: GraphValidationResult) -> str:

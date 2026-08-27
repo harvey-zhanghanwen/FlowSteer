@@ -10,9 +10,22 @@ import pytest
 from src.interactive.agent_action_parser import AgentActionParser
 from src.interactive.agent_runtime import AgentResponse
 from src.interactive.agent_workflow_env import AgentWorkflowEnv
-from src.interactive.director import AgentGraphOrchestrator
+from src.interactive.director import (
+    AgentGraphOrchestrator,
+    DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION,
+    DIRECTOR_MODEL_ADMISSIBLE_ACTION_MASK_PROFILE,
+    DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION,
+    DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3,
+    director_live_action_target_domains_json,
+    director_live_add_subgraph_agent_declarations_json_schema_text,
+    director_model_admissible_sampling_json_schema_text,
+    director_model_admissible_schema_branch,
+    director_model_admissible_schema_branch_v3,
+    director_state_conditioned_sampling_json_schema_text,
+)
 from src.interactive.model_registry import ModelRegistry, ModelSpec, ProviderSpec
 from src.interactive.persistence import EvidenceStore
+from src.interactive.react_execution import ReactExecutionError
 from src.interactive.records import TaskRecord
 from src.interactive.rollout_collector import (
     AGENTGRAPH_SMOKE_SOURCES,
@@ -95,6 +108,30 @@ class FakeGateway:
                 "max_tokens": 64,
             },
         )
+
+
+class FailOnceReceiptGateway(FakeGateway):
+    def __init__(self) -> None:
+        self.failed = False
+
+    async def generate(self, request):
+        if not self.failed:
+            self.failed = True
+            raise ReactExecutionError(
+                "bounded execution exhausted",
+                metadata={
+                    "react_trace": (
+                        {"turn": 1, "observation_status": "success"},
+                    ),
+                    "tool_receipts": (
+                        {"tool_id": "qa.search", "success": True},
+                    ),
+                    "model_calls": (
+                        {"turn": 1, "request_id": request.request_id},
+                    ),
+                },
+            )
+        return await super().generate(request)
 
 
 class UnifiedMetadataGateway:
@@ -240,6 +277,220 @@ def test_sglang_client_rejects_disagreeing_token_receipts():
     with pytest.raises(ReceiptValidationError, match="output_ids disagree"):
         asyncio.run(client.propose("prompt"))
     assert client.rollout_gate.in_flight == 0
+
+
+def test_sglang_client_uses_two_stage_model_admissible_action_schema():
+    actions = ("add_subgraph", "add_agent")
+    client = ScriptedSGLangClient(
+        [
+            '{"action":"add_subgraph"}',
+            '{"action":"add_subgraph","agents":[{"agent_id":"searcher",'
+            '"model_id":"cheap-model","contract":"retrieve evidence",'
+            '"execution_mode":"react","allowed_tools":["hotpotqa.qa_memory"]}],'
+            '"relations":[]}',
+        ],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+    )
+
+    response = asyncio.run(
+        client.propose(
+            "prompt",
+            seed=23,
+            action_json_schema=(
+                director_model_admissible_sampling_json_schema_text(actions)
+            ),
+            action_json_schema_version=(
+                DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION
+            ),
+            action_schema_branch=director_model_admissible_schema_branch(actions),
+        )
+    )
+
+    assert len(client.payloads) == 2
+    assert client.payloads[0]["sampling_params"]["json_schema"] == (
+        director_model_admissible_sampling_json_schema_text(actions)
+    )
+    assert client.payloads[1]["sampling_params"]["json_schema"] == (
+        director_state_conditioned_sampling_json_schema_text("add_subgraph")
+    )
+    assert response.metadata["selected_action"] == "add_subgraph"
+    assert response.metadata["action_decoding_strategy"] == (
+        "hierarchical_json_schema"
+    )
+    assert response.metadata["base_prompt_text"] == "prompt"
+    assert response.metadata["request_count"] == 2
+    assert response.metadata["hierarchical_phase_receipts"][
+        "action_selection"
+    ]["receipt_verified"] is True
+    parsed = AgentActionParser().parse(response.text)
+    assert parsed.action_type.value == "add_subgraph"
+
+
+def test_sglang_client_v3_binds_add_subgraph_to_live_domains():
+    actions = ("add_subgraph", "add_agent")
+    domains = {
+        "registered_execution_profiles": [
+            {"execution_mode": "reasoning", "allowed_tools": []},
+            {
+                "execution_mode": "react",
+                "allowed_tools": ["hotpotqa.qa_memory"],
+            },
+        ],
+        "finish_admissibility": {
+            "admissible": False,
+            "reason": "graph has no Output Agent",
+        },
+        "add_subgraph": {
+            "model_ids": ["cheap-model"],
+            "execution_profiles": [
+                {"execution_mode": "reasoning", "allowed_tools": []},
+                {
+                    "execution_mode": "react",
+                    "allowed_tools": ["hotpotqa.qa_memory"],
+                },
+            ],
+            "existing_agent_ids": [],
+            "max_new_agents": 3,
+        },
+        "add_agent": {
+            "model_ids": ["cheap-model"],
+            "execution_profiles": [
+                {"execution_mode": "reasoning", "allowed_tools": []},
+                {
+                    "execution_mode": "react",
+                    "allowed_tools": ["hotpotqa.qa_memory"],
+                },
+            ],
+        },
+    }
+    client = ScriptedSGLangClient(
+        [
+            '{"action":"add_subgraph"}',
+            '{"action":"add_subgraph","agents":[{"agent_id":"searcher",'
+            '"model_id":"cheap-model","contract":"retrieve evidence",'
+            '"execution_mode":"react","allowed_tools":["hotpotqa.qa_memory"]},'
+            '{"agent_id":"answerer","model_id":"cheap-model",'
+            '"contract":"answer from upstream evidence",'
+            '"execution_mode":"reasoning"}]}',
+            '{"action":"add_subgraph","agents":[{"agent_id":"searcher",'
+            '"model_id":"cheap-model","contract":"retrieve evidence",'
+            '"execution_mode":"react","allowed_tools":["hotpotqa.qa_memory"]},'
+            '{"agent_id":"answerer","model_id":"cheap-model",'
+            '"contract":"answer from upstream evidence",'
+            '"execution_mode":"reasoning","allowed_tools":[]}],"relations":['
+            '{"source_id":"searcher","target_id":"answerer",'
+            '"source_to_target":true,"target_to_source":false}],'
+            '"output_agent_id":"answerer"}',
+        ],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+    )
+
+    response = asyncio.run(
+        client.propose(
+            "prompt",
+            seed=23,
+            action_json_schema=(
+                director_model_admissible_sampling_json_schema_text(actions)
+            ),
+            action_json_schema_version=(
+                DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3
+            ),
+            action_schema_branch=director_model_admissible_schema_branch_v3(
+                actions
+            ),
+            action_target_domains_json=director_live_action_target_domains_json(
+                actions,
+                domains,
+            ),
+            action_target_domain_version=(
+                DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION
+            ),
+        )
+    )
+
+    assert len(client.payloads) == 3
+    assert client.payloads[1]["sampling_params"]["json_schema"] == (
+        director_live_add_subgraph_agent_declarations_json_schema_text(domains)
+    )
+    assert response.metadata["selected_add_agent_ids"] == [
+        "searcher",
+        "answerer",
+    ]
+    assert response.metadata["action_target_domain_version"] == (
+        DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION
+    )
+    parsed = AgentActionParser().parse(response.text)
+    assert parsed.relations[0].source_id == "searcher"
+    assert parsed.relations[0].target_id == "answerer"
+
+
+def test_collector_forwards_v3_live_action_schema_and_persists_receipt():
+    registry = _registry()
+    client = ScriptedSGLangClient(
+        [
+            '{"action":"add_agent"}',
+            '{"action":"add_agent","execution_mode":"reasoning"}',
+            '{"action":"add_agent","agent_id":"solver",'
+            '"model_id":"cheap-model","contract":"solve directly",'
+            '"execution_mode":"reasoning","allowed_tools":[]}',
+        ],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+    )
+    orchestrator = AgentGraphOrchestrator(
+        registry,
+        client,
+        max_rounds=1,
+        seed=7,
+        sampling_action_profile=DIRECTOR_MODEL_ADMISSIBLE_ACTION_MASK_PROFILE,
+        sampling_action_schema_version=(
+            DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3
+        ),
+    )
+    collector = AgentGraphRolloutCollector(
+        orchestrator,
+        AgentWorkflowEnv(registry, gateway=FakeGateway()),
+        _versions(),
+    )
+
+    trajectory = asyncio.run(
+        collector.collect(
+            _task(),
+            0,
+            lambda *args: {
+                "evaluator_version": EVALUATOR_VERSION,
+                "valid": True,
+                "reward": 0.0,
+                "metrics": {"finished": 0.0},
+                "reason": "maximum rounds",
+            },
+        )
+    )
+
+    assert len(client.payloads) == 3
+    assert all(
+        "json_schema" in payload["sampling_params"]
+        for payload in client.payloads
+    )
+    receipt = trajectory.turns[0].runtime_summary
+    assert receipt["director_action_schema_version"] == (
+        DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3
+    )
+    assert receipt["director_action_target_domain_version"] == (
+        DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION
+    )
+    assert receipt["director_action_decoding"]["strategy"] == (
+        "hierarchical_json_schema"
+    )
+    assert receipt["director_action_decoding"]["selected_action"] == (
+        "add_agent"
+    )
+    assert receipt["director_action_decoding"]["selected_execution_mode"] == (
+        "reasoning"
+    )
+    assert receipt["director_action_decoding"]["selected_allowed_tools"] == []
 
 
 def test_rollout_gate_pauses_drains_and_guards_policy_route():
@@ -436,6 +687,64 @@ def test_collector_does_not_duplicate_reused_progressive_execution():
     assert trajectory.turns[1].execution_reused is False
     assert trajectory.turns[2].executions == ()
     assert trajectory.turns[2].execution_reused is True
+
+
+def test_collector_persists_public_failure_receipts_before_canvas_repair():
+    registry = _registry()
+    client = ScriptedSGLangClient(
+        [
+            (
+                '{"action":"add_subgraph","agents":['
+                '{"agent_id":"solver","model_id":"cheap-model",'
+                '"contract":"solve directly"}],"relations":[],'
+                '"output_agent_id":"solver"}'
+            ),
+            (
+                '{"action":"modify_agent","agent_id":"solver",'
+                '"contract":"solve after execution feedback"}'
+            ),
+            '{"action":"finish"}',
+        ],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+    )
+    collector = AgentGraphRolloutCollector(
+        AgentGraphOrchestrator(registry, client, max_rounds=3),
+        AgentWorkflowEnv(
+            registry,
+            gateway=FailOnceReceiptGateway(),
+            execute_on_edit=True,
+        ),
+        _versions(),
+    )
+
+    def evaluator(task, final_answer, final_graph, runtime):
+        assert final_answer == "final answer"
+        assert runtime is not None
+        return {
+            "evaluator_version": EVALUATOR_VERSION,
+            "valid": True,
+            "reward": 1.0,
+            "metrics": {"f1": 1.0},
+            "reason": "exact",
+        }
+
+    trajectory = asyncio.run(collector.collect(_task(), 0, evaluator))
+
+    failed_turn = trajectory.turns[0]
+    failure = failed_turn.runtime_summary["failure_records"][0]
+    assert failed_turn.runtime_summary["execution_status"] == "failed"
+    assert failure["agent_id"] == "solver"
+    assert failure["error_type"] == "ReactExecutionError"
+    assert failure["metadata"]["react_trace"][0]["observation_status"] == (
+        "success"
+    )
+    assert failure["metadata"]["tool_receipts"][0]["tool_id"] == "qa.search"
+    assert failure["metadata"]["model_calls"][0]["request_id"].endswith(
+        ":solver:single"
+    )
+    assert trajectory.explicit_finish is True
+    json.dumps(trajectory.to_dict())
 
 
 def test_collector_returns_complete_max_rounds_trajectory():

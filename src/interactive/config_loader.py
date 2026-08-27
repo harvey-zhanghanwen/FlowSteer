@@ -132,6 +132,26 @@ def validate_agent_graph_config(value: Mapping[str, Any]) -> None:
         raise ConfigurationError(
             "AgentGraph search space must contain the supported atomic actions"
         )
+    recovery_policy = graph.get("recovery_policy", "default")
+    if recovery_policy not in {
+        "default",
+        "preserve_diagnose_repair_augment",
+    }:
+        raise ConfigurationError(
+            "agent_graph.recovery_policy must be default or "
+            "preserve_diagnose_repair_augment"
+        )
+    if graph.get("director_feedback_mode", "content") not in {
+        "content",
+        "control_plane",
+    }:
+        raise ConfigurationError(
+            "agent_graph.director_feedback_mode must be content or control_plane"
+        )
+    if type(graph.get("require_evidence_relation", False)) is not bool:
+        raise ConfigurationError(
+            "agent_graph.require_evidence_relation must be boolean"
+        )
     if graph.get("contract_type") != "free_text" or graph.get("relation_encoding") != "two_bit":
         raise ConfigurationError("AgentGraph requires free-text contracts and two-bit relations")
     max_agents = graph.get("max_agents")

@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import random
 import tempfile
+from types import SimpleNamespace
 import unittest
 
 from src.interactive.agent_action_parser import (
@@ -16,7 +17,7 @@ from src.interactive.agent_graph import (
     AgentRelation,
     GraphMutationError,
 )
-from src.interactive.agent_runtime import AgentRequest
+from src.interactive.agent_runtime import AgentRequest, AgentRuntimeResult
 from src.interactive.agent_workflow_env import AgentWorkflowEnv, AgentWorkflowStateError
 from src.interactive.model_registry import (
     ModelRegistry,
@@ -305,7 +306,281 @@ class _FailOnceGateway(_ImmediateGateway):
         return f"answer:{request.agent.id}"
 
 
+class _ProfileRuntime:
+    def __init__(self, model_registry: ModelRegistry) -> None:
+        self.model_registry = model_registry
+
+    def registered_execution_profiles(self):
+        return (
+            ("reasoning", ()),
+            ("react", ("qa-retrieval",)),
+        )
+
+
 class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
+    async def test_control_plane_feedback_hides_agent_artifact_content(self) -> None:
+        registry = make_registry()
+        env = AgentWorkflowEnv(
+            registry,
+            _ImmediateGateway(),
+            problem="question",
+            execute_on_edit=True,
+            director_feedback_mode="control_plane",
+        )
+        result = await env.step(
+            '{"action":"add_agent","agent_id":"worker",'
+            '"model_id":"balanced","contract":"produce private evidence"}'
+        )
+
+        self.assertTrue(result.accepted)
+        self.assertIn('"feedback_mode":"control_plane"', result.feedback)
+        self.assertIn('"artifact_id":"revision-1:worker"', result.feedback)
+        self.assertNotIn("answer:worker", result.feedback)
+        self.assertNotIn("artifact_preview", result.feedback)
+
+        output = await env.step('{"action":"set_output","agent_id":"worker"}')
+        self.assertIn('"execution_role":"output"', output.feedback)
+        self.assertNotIn('"execution_role":"format"', output.feedback)
+
+    async def test_control_plane_exposes_only_tool_receipt_summary(self) -> None:
+        registry = make_registry()
+        graph = AgentGraph(
+            [AgentNode("worker", "balanced", "retrieve")],
+            output_agent_id="worker",
+        )
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_ProfileRuntime(registry),  # type: ignore[arg-type]
+            problem="question",
+            graph=graph,
+            director_feedback_mode="control_plane",
+        )
+        execution = AgentRuntimeResult(
+            run_id="run",
+            graph_revision=graph.revision,
+            output_agent_id="worker",
+            final_answer="<answer>x</answer>",
+            outputs={"worker": "private artifact"},
+            calls=(),
+            block_completion_order=(("worker",),),
+            executed_agent_ids=("worker",),
+            output_metadata={
+                "worker": {
+                    "tool_receipts": (
+                        {
+                            "tool_id": "qa-retrieval",
+                            "request": {"action": "search", "query": "private"},
+                            "result": {"canonical_answer": "private-answer"},
+                            "error_type": None,
+                        },
+                    )
+                }
+            },
+        )
+        feedback = env._accepted_feedback(
+            AgentActionParser().parse('{"action":"set_output","agent_id":"worker"}'),
+            execution,
+        )
+
+        self.assertIn('"tool_receipt_count":1', feedback)
+        self.assertIn('"successful_tool_actions":["search"]', feedback)
+        self.assertIn('"tool_ids":["qa-retrieval"]', feedback)
+        self.assertNotIn("private-answer", feedback)
+        self.assertNotIn('"query"', feedback)
+
+    async def test_finish_action_mask_requires_distinct_routed_tool_evidence(self) -> None:
+        registry = make_registry()
+        singleton = AgentGraph(
+            [
+                AgentNode(
+                    "worker",
+                    "balanced",
+                    "retrieve and answer",
+                    execution_mode="react",
+                    allowed_tools=("qa-retrieval",),
+                )
+            ],
+            output_agent_id="worker",
+        )
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_ProfileRuntime(registry),  # type: ignore[arg-type]
+            problem="question",
+            graph=singleton,
+            execute_on_edit=True,
+            required_evidence_tool_id="qa-retrieval",
+            require_evidence_relation=True,
+        )
+        receipt = {
+            "tool_id": "qa-retrieval",
+            "request": {"action": "search"},
+            "result": {"hits": ["m1"]},
+            "error_type": None,
+        }
+        read_receipt = {
+            "tool_id": "qa-retrieval",
+            "request": {"action": "read"},
+            "result": {"memory_id": "m1"},
+            "error_type": None,
+        }
+        env._progressive_execution = AgentRuntimeResult(
+            run_id="single",
+            graph_revision=singleton.revision,
+            output_agent_id="worker",
+            final_answer="answer",
+            outputs={"worker": "answer"},
+            calls=(),
+            block_completion_order=(("worker",),),
+            output_metadata={"worker": {"tool_receipts": (receipt, read_receipt)}},
+        )
+        env._progressive_execution_revision = singleton.revision
+        self.assertNotIn("finish", env.model_admissible_action_types())
+
+        routed = AgentGraph(
+            [
+                AgentNode(
+                    "worker",
+                    "balanced",
+                    "retrieve",
+                    execution_mode="react",
+                    allowed_tools=("qa-retrieval",),
+                ),
+                AgentNode("output", "balanced", "answer"),
+            ],
+            [AgentRelation("worker", "output", True, False)],
+            output_agent_id="output",
+        )
+        routed_env = AgentWorkflowEnv(
+            registry,
+            runtime=_ProfileRuntime(registry),  # type: ignore[arg-type]
+            problem="question",
+            graph=routed,
+            execute_on_edit=True,
+            required_evidence_tool_id="qa-retrieval",
+            require_evidence_relation=True,
+        )
+        routed_env._progressive_execution = AgentRuntimeResult(
+            run_id="routed",
+            graph_revision=routed.revision,
+            output_agent_id="output",
+            final_answer="answer",
+            outputs={"worker": "evidence", "output": "answer"},
+            calls=(),
+            block_completion_order=(("worker",), ("output",)),
+            output_metadata={
+                "worker": {"tool_receipts": (receipt, read_receipt)},
+                "output": {},
+            },
+        )
+        routed_env._progressive_execution_revision = routed.revision
+        self.assertIn("finish", routed_env.model_admissible_action_types())
+        self.assertTrue(routed_env.finish_admissibility()["admissible"])
+
+    async def test_runtime_profiles_authorize_add_subgraph_and_modify(self) -> None:
+        registry = make_registry()
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_ProfileRuntime(registry),  # type: ignore[arg-type]
+            problem="question",
+            max_agents=4,
+            required_evidence_tool_id="qa-retrieval",
+        )
+
+        targets = env.model_admissible_action_targets()
+        self.assertEqual(
+            [
+                {"execution_mode": "reasoning", "allowed_tools": []},
+                {
+                    "execution_mode": "react",
+                    "allowed_tools": ["qa-retrieval"],
+                },
+            ],
+            targets["registered_execution_profiles"],
+        )
+        added = await env.step(
+            '{"action":"add_agent","agent_id":"a","model_id":"balanced",'
+            '"contract":"retrieve","execution_mode":"react",'
+            '"allowed_tools":["qa-retrieval"]}'
+        )
+        self.assertTrue(added.accepted)
+
+        coding_modify = await env.step(
+            '{"action":"modify_agent","agent_id":"a",'
+            '"execution_mode":"coding","allowed_tools":[]}'
+        )
+        self.assertFalse(coding_modify.accepted)
+        self.assertIn("outside the live Runtime capability domain", coding_modify.feedback)
+
+        coding_subgraph = await env.step(
+            '{"action":"add_subgraph","agents":[{"agent_id":"b",'
+            '"model_id":"balanced","contract":"work",'
+            '"execution_mode":"coding","allowed_tools":[]}],"relations":[]}'
+        )
+        self.assertFalse(coding_subgraph.accepted)
+        self.assertEqual(["a"], [node.id for node in env.graph.nodes])
+
+    async def test_delete_requires_typed_unusable_and_complete_takeover(self) -> None:
+        registry = make_registry()
+        graph = AgentGraph(
+            [
+                AgentNode(
+                    "failed",
+                    "balanced",
+                    "produce artifact",
+                    role_family="research",
+                    artifact_type="evidence",
+                ),
+                AgentNode(
+                    "replacement",
+                    "balanced",
+                    "produce replacement artifact",
+                    role_family="research",
+                    artifact_type="evidence",
+                ),
+            ],
+            output_agent_id="failed",
+        )
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_ProfileRuntime(registry),  # type: ignore[arg-type]
+            problem="question",
+            graph=graph,
+            recovery_policy="preserve_diagnose_repair_augment",
+        )
+        env._progressive_outputs["replacement"] = "replacement artifact"
+
+        env._record_failure_state(
+            (
+                SimpleNamespace(
+                    agent_id="failed",
+                    metadata={"node_unusable": False},
+                ),
+            )
+        )
+        protected = await env.step(
+            '{"action":"delete_agent","agent_id":"failed"}'
+        )
+        self.assertFalse(protected.accepted)
+
+        env._record_failure_state(
+            (
+                SimpleNamespace(
+                    agent_id="failed",
+                    metadata={"node_unusable": True},
+                ),
+            )
+        )
+        before_takeover = await env.step(
+            '{"action":"delete_agent","agent_id":"failed"}'
+        )
+        self.assertFalse(before_takeover.accepted)
+        await env.step('{"action":"set_output","agent_id":"replacement"}')
+        deleted = await env.step(
+            '{"action":"delete_agent","agent_id":"failed"}'
+        )
+        self.assertTrue(deleted.accepted)
+        self.assertEqual(["replacement"], [node.id for node in env.graph.nodes])
+
     async def test_transactional_edits_finish_and_fork(self) -> None:
         registry = make_registry()
         gateway = _ImmediateGateway()
@@ -350,17 +625,17 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             problem="question",
             execute_on_edit=True,
         )
-        await env.step(
+        added = await env.step(
             '{"action":"add_agent","agent_id":"a","model_id":"balanced","contract":"answer"}'
         )
+        self.assertIsNone(added.execution)
+        self.assertIn("execution_error=", added.feedback)
 
         edited = await env.step('{"action":"set_output","agent_id":"a"}')
 
         self.assertTrue(edited.accepted)
         self.assertFalse(edited.done)
-        self.assertIsNone(edited.execution)
-        self.assertIn("execution_error=", edited.feedback)
-        self.assertIn("temporary executor failure", edited.feedback)
+        self.assertIsNotNone(edited.execution)
         self.assertEqual("a", env.graph.output_agent_id)
 
         retried = await env.step('{"action":"finish"}')
@@ -388,7 +663,9 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(finished.accepted)
         self.assertIs(progressive.execution, finished.execution)
         self.assertTrue(finished.execution_reused)
-        self.assertEqual(1, len(gateway.requests))
+        # One execution follows each accepted Canvas edit; FINISH reuses the
+        # current revision's second result.
+        self.assertEqual(2, len(gateway.requests))
 
     async def test_noop_edit_reuses_same_revision_execution(self) -> None:
         registry = make_registry()
@@ -409,7 +686,7 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(first.execution, repeated.execution)
         self.assertTrue(repeated.execution_reused)
         self.assertTrue(repeated.snapshot.history[-1].execution_reused)
-        self.assertEqual(1, len(gateway.requests))
+        self.assertEqual(2, len(gateway.requests))
 
     async def test_history_survives_snapshot_restore_and_fork(self) -> None:
         registry = make_registry()

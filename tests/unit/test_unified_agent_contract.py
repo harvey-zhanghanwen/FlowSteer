@@ -23,6 +23,7 @@ def capability(tool_id: str = "wiki.search") -> ToolCapability:
     return ToolCapability(
         tool_id=tool_id,
         dataset_scope=("triviaqa",),
+        action_schemas={"search": {"type": "object"}},
         input_schema={"type": "object"},
         output_schema={"type": "object"},
         side_effect="none",
@@ -81,6 +82,28 @@ class AgentExecutionContractTests(unittest.TestCase):
 
 
 class ToolRegistryTests(unittest.IsolatedAsyncioTestCase):
+    def test_capability_serializes_and_validates_fixed_action_schema(self) -> None:
+        fixed = capability()
+        self.assertEqual(("search",), fixed.action_names)
+        self.assertEqual(
+            {"search": {"type": "object"}},
+            fixed.to_value()["action_schemas"],
+        )
+        self.assertIsNone(fixed.argument_validation_error("search", {}))
+        self.assertIsNotNone(fixed.argument_validation_error("read", {}))
+
+        with self.assertRaisesRegex(ValueError, "invalid"):
+            ToolCapability(
+                tool_id="broken",
+                dataset_scope=("triviaqa",),
+                action_schemas={"search": {"type": "not-a-json-schema-type"}},
+                input_schema={"type": "object"},
+                output_schema={"type": "object"},
+                side_effect="none",
+                timeout_seconds=1.0,
+                version="broken-v1",
+            )
+
     async def test_skillflow_registry_port_emits_measured_receipt(self) -> None:
         backend = FakeTool({"search": lambda arguments: {"query": arguments["query"]}})
         registry = ToolRegistry(

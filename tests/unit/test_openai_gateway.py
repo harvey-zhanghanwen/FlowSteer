@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import unittest
 from unittest.mock import patch
@@ -55,10 +56,12 @@ class MessageTests(unittest.TestCase):
         messages = build_agent_messages(request(ExecutionPhase.REVISION))
         text = messages[1]["content"]
         self.assertIn("Your draft:\nown", text)
-        self.assertIn("Peer draft from peer:\npeer draft", text)
+        self.assertIn("Peer artifact envelope:", text)
+        self.assertIn("source_agent: peer", text)
+        self.assertIn("artifact:\npeer draft", text)
         self.assertIn("External upstream messages", text)
-        self.assertIn("<answer>...</answer>", messages[0]["content"])
-        self.assertIn("exactly one listed executable action", messages[0]["content"])
+        self.assertIn("intermediate AgentGraph node", messages[0]["content"])
+        self.assertIn("Do not present a task-level final answer", messages[0]["content"])
 
     def test_revision_without_drafts_is_rejected(self) -> None:
         broken = request(ExecutionPhase.SINGLE)
@@ -94,6 +97,27 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.metadata["attempt_count"], 1)
         self.assertEqual(response.metadata["generation_seed"], 17)
 
+    def test_request_level_scientific_seed_overrides_gateway_default(self) -> None:
+        item = request()
+        object.__setattr__(
+            item,
+            "model",
+            ModelSpec(
+                "model",
+                "provider",
+                model_name="remote-model-id",
+                metadata={
+                    "temperature": "1.0",
+                    "top_p": "1.0",
+                    "generation_seed": "18446744073709551614",
+                },
+            ),
+        )
+
+        payload = OpenAICompatibleGateway(default_seed=17).request_payload(item)
+
+        self.assertEqual(18446744073709551614, payload["seed"])
+
     async def test_missing_credential_names_variable_without_printing_key(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
             with self.assertRaisesRegex(OpenAICompatibleGatewayError, "TEST_FLOWSTEER_KEY"):
@@ -122,6 +146,53 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             payload["chat_template_kwargs"],
             {"enable_thinking": False},
         )
+
+    def test_skillflow_response_schema_is_forwarded_strictly(self) -> None:
+        item = request()
+        schema = {
+            "type": "object",
+            "required": ["kind"],
+            "properties": {"kind": {"const": "complete"}},
+            "additionalProperties": False,
+        }
+        object.__setattr__(
+            item,
+            "model",
+            ModelSpec(
+                "model",
+                "provider",
+                model_name="supervisor_theta",
+                metadata={"response_json_schema": json.dumps(schema)},
+            ),
+        )
+
+        payload = OpenAICompatibleGateway().request_payload(item)
+
+        self.assertEqual("json_schema", payload["response_format"]["type"])
+        self.assertEqual(
+            {"name": "skillev_action", "schema": schema, "strict": True},
+            payload["response_format"]["json_schema"],
+        )
+
+    def test_response_schema_errors_fail_closed(self) -> None:
+        for raw_schema in ("{", "[]", '{"type":"not-a-json-schema-type"}'):
+            with self.subTest(raw_schema=raw_schema):
+                item = request()
+                object.__setattr__(
+                    item,
+                    "model",
+                    ModelSpec(
+                        "model",
+                        "provider",
+                        model_name="supervisor_theta",
+                        metadata={"response_json_schema": raw_schema},
+                    ),
+                )
+                with self.assertRaisesRegex(
+                    OpenAICompatibleGatewayError,
+                    "response_json_schema",
+                ):
+                    OpenAICompatibleGateway().request_payload(item)
 
 
 if __name__ == "__main__":

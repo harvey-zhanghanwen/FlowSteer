@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from collections import Counter
+from collections import Counter, defaultdict
 from dataclasses import asdict
 from datetime import datetime, timezone
 import json
@@ -170,6 +170,45 @@ def validate_hotpot_config(config: Mapping[str, Any]) -> None:
                 "HotpotQA embedding retrieval condition is invalid: "
                 + ", ".join(failed_retrieval)
             )
+        corpus_kind = retrieval.get("corpus_kind", "public_context")
+        if corpus_kind not in {"public_context", "train_qa_memory"}:
+            raise ConfigurationError(
+                "qa_embedding_retrieval.corpus_kind must be public_context "
+                "or train_qa_memory"
+            )
+        if corpus_kind == "train_qa_memory":
+            qa_memory_checks = {
+                "index_scope": retrieval.get("index_scope") == "global_train_only",
+                "train_sample_count": retrieval.get("train_sample_count") == 512,
+                "validation_sample_count": retrieval.get("validation_sample_count") == 128,
+                "tool_id": retrieval.get("tool_id") == "hotpotqa.qa_memory",
+                "required_evidence_tool_id": (
+                    _mapping(config["agent_graph"], "agent_graph").get(
+                        "required_evidence_tool_id"
+                    )
+                    == "hotpotqa.qa_memory"
+                ),
+                "director_feedback_mode": (
+                    _mapping(config["agent_graph"], "agent_graph").get(
+                        "director_feedback_mode"
+                    )
+                    == "control_plane"
+                ),
+                "require_evidence_relation": (
+                    _mapping(config["agent_graph"], "agent_graph").get(
+                        "require_evidence_relation"
+                    )
+                    is True
+                ),
+            }
+            failed_qa_memory = [
+                name for name, valid in qa_memory_checks.items() if not valid
+            ]
+            if failed_qa_memory:
+                raise ConfigurationError(
+                    "HotpotQA QA-memory condition is invalid: "
+                    + ", ".join(failed_qa_memory)
+                )
         for name in (
             "search_top_k",
             "max_turns_per_agent_call",
@@ -205,6 +244,7 @@ def _paths(config: Mapping[str, Any], root: Path) -> dict[str, Path]:
         "retrieval_index_manifest": "retrieval_index_manifest_path",
         "retrieval_index_smoke": "retrieval_index_smoke_path",
         "retrieval_index_rebuild_smoke": "retrieval_index_rebuild_smoke_path",
+        "paraphrase_manifest": "paraphrase_manifest_path",
     }
     for name, field in optional_names.items():
         if storage.get(field) is not None:
@@ -795,6 +835,135 @@ def _tool_statistics(
     }
 
 
+def _directed_path_exists(
+    graph: Mapping[str, Any], source_id: str, target_id: str
+) -> bool:
+    if source_id == target_id:
+        return True
+    relations = graph.get("relations", ())
+    if not isinstance(relations, list):
+        return False
+    successors: dict[str, set[str]] = defaultdict(set)
+    for relation in relations:
+        if not isinstance(relation, Mapping):
+            continue
+        source = relation.get("source_id")
+        target = relation.get("target_id")
+        if not isinstance(source, str) or not isinstance(target, str):
+            continue
+        if relation.get("source_to_target") is True:
+            successors[source].add(target)
+        if relation.get("target_to_source") is True:
+            successors[target].add(source)
+    pending = [source_id]
+    visited: set[str] = set()
+    while pending:
+        current = pending.pop()
+        if current in visited:
+            continue
+        visited.add(current)
+        if target_id in successors.get(current, set()):
+            return True
+        pending.extend(successors.get(current, set()) - visited)
+    return False
+
+
+def _retrieval_boundary_statistics(
+    trajectories: Mapping[str, Mapping[str, Any]], *, tool_id: str
+) -> Mapping[str, Any]:
+    worker_calls = 0
+    invoked_tasks = 0
+    finished_invoked_tasks = 0
+    routed_tasks = 0
+    worker_agent_ids: set[str] = set()
+    memory_ids: set[str] = set()
+    base_task_ids: set[str] = set()
+    director_tool_calls = 0
+    for trajectory in trajectories.values():
+        turns = trajectory.get("turns", ())
+        if not isinstance(turns, list):
+            continue
+        task_worker_ids: set[str] = set()
+        final_graph: Mapping[str, Any] = {}
+        for turn in turns:
+            if not isinstance(turn, Mapping):
+                continue
+            action = turn.get("action")
+            if isinstance(action, Mapping) and (
+                action.get("action") in {"search", "read"}
+                or action.get("kind") in {"tool", "skill"}
+            ):
+                director_tool_calls += 1
+            graph = turn.get("graph_snapshot")
+            if isinstance(graph, Mapping):
+                final_graph = graph
+            executions = turn.get("executions", ())
+            if not isinstance(executions, list):
+                continue
+            for execution in executions:
+                if not isinstance(execution, Mapping):
+                    continue
+                agent_id = execution.get("agent_id")
+                metadata = execution.get("metadata")
+                response = metadata.get("response") if isinstance(metadata, Mapping) else None
+                receipts = response.get("tool_receipts", ()) if isinstance(response, Mapping) else ()
+                if not isinstance(agent_id, str) or not isinstance(receipts, list):
+                    continue
+                matching = [
+                    receipt
+                    for receipt in receipts
+                    if isinstance(receipt, Mapping)
+                    and receipt.get("tool_id") == tool_id
+                ]
+                if not matching:
+                    continue
+                task_worker_ids.add(agent_id)
+                worker_agent_ids.add(agent_id)
+                worker_calls += len(matching)
+                for receipt in matching:
+                    result = receipt.get("result")
+                    value = result.get("value") if isinstance(result, Mapping) else None
+                    if not isinstance(value, Mapping):
+                        continue
+                    for raw_id in value.get("memory_ids", value.get("doc_ids", ())):
+                        if isinstance(raw_id, str):
+                            memory_ids.add(raw_id)
+                    hits = value.get("hits", ())
+                    if isinstance(hits, list):
+                        for hit in hits:
+                            if not isinstance(hit, Mapping):
+                                continue
+                            base_id = hit.get(
+                                "source_train_task_id",
+                                hit.get("base_task_id"),
+                            )
+                            if isinstance(base_id, str):
+                                base_task_ids.add(base_id)
+        if task_worker_ids:
+            invoked_tasks += 1
+            output_agent_id = final_graph.get("output_agent_id")
+            if trajectory.get("explicit_finish") is True:
+                finished_invoked_tasks += 1
+                if isinstance(output_agent_id, str) and all(
+                    _directed_path_exists(final_graph, worker_id, output_agent_id)
+                    for worker_id in task_worker_ids
+                ):
+                    routed_tasks += 1
+    return {
+        "director_tool_calls": director_tool_calls,
+        "retrieval_tool_calls_by_worker": worker_calls,
+        "retrieval_worker_agent_ids": sorted(worker_agent_ids),
+        "retrieval_invoked_tasks": invoked_tasks,
+        "finished_retrieval_invoked_tasks": finished_invoked_tasks,
+        "retrieval_artifact_routed_tasks": routed_tasks,
+        "retrieval_artifact_routed_via_relation": (
+            finished_invoked_tasks > 0 and routed_tasks == finished_invoked_tasks
+        ),
+        "unique_memory_ids_retrieved": len(memory_ids),
+        "unique_train_base_task_ids_retrieved": len(base_task_ids),
+    }
+
+
 def _failure_type(
     direct: Optional[Mapping[str, Any]],
     trajectory: Optional[Mapping[str, Any]],
@@ -972,6 +1141,15 @@ async def _official_rescore_saved_agentgraph(
     }
 
 
+def _input_context(config: Mapping[str, Any]) -> str:
+    retrieval = config.get("qa_embedding_retrieval")
+    if not isinstance(retrieval, Mapping):
+        return "full_10_passages"
+    if retrieval.get("corpus_kind") == "train_qa_memory":
+        return "question_only_dynamic_train_qa_memory_search_read"
+    return "question_only_dynamic_embedding_search_read"
+
+
 def _report(rows: Sequence[Mapping[str, Any]], config: Mapping[str, Any]) -> Mapping[str, Any]:
     direct = _aggregate(rows, "direct")
     graph = _aggregate(rows, "agentgraph")
@@ -982,11 +1160,7 @@ def _report(rows: Sequence[Mapping[str, Any]], config: Mapping[str, Any]) -> Map
         "dataset": "HotpotQA",
         "project_split": "validation",
         "native_source_split": "train",
-        "input_context": (
-            "question_only_dynamic_embedding_search_read"
-            if config.get("qa_embedding_retrieval") is not None
-            else "full_10_passages"
-        ),
+        "input_context": _input_context(config),
         "sample_count": len(rows),
         "direct_local_baseline": direct,
         "agentgraph": graph,
@@ -1029,6 +1203,12 @@ def _report_markdown(report: Mapping[str, Any]) -> str:
     failures = report["failure_types"]
     failure_lines = "\n".join(f"- `{name}`: {count}" for name, count in failures.items())
     tool = report.get("tool_usage") if isinstance(report.get("tool_usage"), Mapping) else {}
+    boundary = (
+        report.get("retrieval_execution_boundary")
+        if isinstance(report.get("retrieval_execution_boundary"), Mapping)
+        else {}
+    )
+    qa_memory = report.get("qa_memory") if isinstance(report.get("qa_memory"), Mapping) else {}
     baseline = (
         report.get("round01_agentgraph_official_rescore")
         if isinstance(report.get("round01_agentgraph_official_rescore"), Mapping)
@@ -1041,17 +1221,26 @@ def _report_markdown(report: Mapping[str, Any]) -> str:
             f"answer evaluator: **{100 * baseline['strict_exact_match']:.2f} EM**, "
             f"**{100 * baseline['strict_token_f1']:.2f} F1**.\n"
         )
-    input_description = (
-        "The Director and Agent Runtime receive only the original question; "
-        "public passages are obtained dynamically through the task-scoped "
-        "embedding search/read Tool."
-        if report.get("input_context") == "question_only_dynamic_embedding_search_read"
-        else "The model input uses all ten supplied passages."
-    )
+    if report.get("input_context") == "question_only_dynamic_train_qa_memory_search_read":
+        input_description = (
+            "The Director receives the original question and control-plane Canvas "
+            "receipts only. Tool-capable worker Agents dynamically search/read the "
+            "global train-only QA-memory and route evidence through graph relations."
+        )
+    elif report.get("input_context") == "question_only_dynamic_embedding_search_read":
+        input_description = (
+            "The Director and Agent Runtime receive only the original question; "
+            "public passages are obtained dynamically through the task-scoped "
+            "embedding search/read Tool."
+        )
+    else:
+        input_description = "The model input uses all ten supplied passages."
     report_title = (
         "HotpotQA Architecture Validation — Dynamic Embedding Retrieval"
-        if report.get("input_context")
-        == "question_only_dynamic_embedding_search_read"
+        if report.get("input_context") in {
+            "question_only_dynamic_embedding_search_read",
+            "question_only_dynamic_train_qa_memory_search_read",
+        }
         else "HotpotQA Architecture Validation — Round 01"
     )
     return f"""# {report_title}
@@ -1073,6 +1262,10 @@ Terminal failures: **{report.get('terminal_failures', 0)}**.
 - Calls: **{tool.get('tool_calls', 0)}** (`search`={tool.get('search_calls', 0)}, `read`={tool.get('read_calls', 0)})
 - Successful / failed calls: **{tool.get('successful_calls', 0)} / {tool.get('failed_calls', 0)}**
 - Tasks with query rewriting: **{tool.get('query_rewrite_tasks', 0)}**
+- Director Tool calls: **{boundary.get('director_tool_calls', 0)}**
+- Worker retrieval Tool calls: **{boundary.get('retrieval_tool_calls_by_worker', 0)}**
+- Retrieval artifact routed via AgentGraph relation: **{boundary.get('retrieval_artifact_routed_via_relation', False)}**
+- QA-memory records / unique sources / cycled: **{qa_memory.get('train_record_count', 'N/A')} / {qa_memory.get('unique_source_count', 'N/A')} / {qa_memory.get('cycled_record_count', 'N/A')}**
 
 ## Failure types
 
@@ -1090,6 +1283,7 @@ def _stable_zero_check(
     trajectories: Mapping[str, Mapping[str, Any]],
     *,
     require_dynamic_retrieval: bool = False,
+    retrieval_tool_id: str = "qa-retrieval",
 ) -> Mapping[str, Any]:
     checks: list[dict[str, Any]] = []
     for task in tasks:
@@ -1106,7 +1300,7 @@ def _stable_zero_check(
         )
         tool_receipts = _tool_receipts(trajectory)
         retrieval_receipt = any(
-            receipt.get("tool_id") == "qa-retrieval"
+            receipt.get("tool_id") == retrieval_tool_id
             and receipt.get("error_type") is None
             for receipt in tool_receipts
         )
@@ -1171,11 +1365,7 @@ async def run_hotpot_round(
         "selected_task_ids": [task.task_id for task in selected],
         "sample_count": len(selected),
         "fixed_split": "validation",
-        "input_context": (
-            "question_only_dynamic_embedding_search_read"
-            if config.get("qa_embedding_retrieval") is not None
-            else "full_10_passages"
-        ),
+        "input_context": _input_context(config),
         "training_enabled": False,
         "optimizer_updates": 0,
         "artifacts": {name: str(path) for name, path in paths.items()},
@@ -1206,6 +1396,24 @@ async def run_hotpot_round(
         preflight = {
             **dict(preflight),
             "evaluator_known_answer": asdict(known_answer),
+        }
+        director_payload = backend.director_client.request_payload(
+            "Canvas control-plane preflight",
+            seed=int(_mapping(config["experiment"], "experiment")["seed"]),
+        )
+        forbidden_director_fields = sorted(
+            set(director_payload)
+            & {"tools", "tool_choice", "allowed_tools", "retrieval", "documents"}
+        )
+        if forbidden_director_fields:
+            raise HotpotRoundError(
+                "Director request unexpectedly exposes Tool/retrieval fields"
+            )
+        preflight["director_request_boundary"] = {
+            "director_tool_calls": 0,
+            "allowed_tools": [],
+            "retrieval_payload_present": False,
+            "forbidden_fields_present": forbidden_director_fields,
         }
         _write_json(paths["preflight"], preflight)
     except Exception as exc:
@@ -1272,6 +1480,12 @@ async def run_hotpot_round(
         direct,
         trajectories,
         require_dynamic_retrieval=config.get("qa_embedding_retrieval") is not None,
+        retrieval_tool_id=str(
+            _mapping(
+                config.get("qa_embedding_retrieval", {}),
+                "qa_embedding_retrieval",
+            ).get("tool_id", "qa-retrieval")
+        ),
     )
     manifest["stable_zero"] = stable_zero
     if not stable_zero["passed"]:
@@ -1297,15 +1511,31 @@ async def run_hotpot_round(
             else None
         ),
     }
+    retrieval_configuration = config.get("qa_embedding_retrieval")
+    if isinstance(retrieval_configuration, Mapping):
+        tool_id = str(retrieval_configuration.get("tool_id", "qa-retrieval"))
+        report = {
+            **dict(report),
+            "retrieval_execution_boundary": _retrieval_boundary_statistics(
+                trajectories,
+                tool_id=tool_id,
+            ),
+        }
     if config.get("qa_embedding_retrieval") is not None:
+        retrieval_config = _mapping(
+            config["qa_embedding_retrieval"], "qa_embedding_retrieval"
+        )
+        evidence_names = [
+            "retrieval_profile_selection",
+            "retrieval_index_manifest",
+            "retrieval_index_smoke",
+            "retrieval_index_rebuild_smoke",
+        ]
+        if retrieval_config.get("corpus_kind") == "train_qa_memory":
+            evidence_names.append("paraphrase_manifest")
         required_retrieval_artifacts = {
             name: paths[name]
-            for name in (
-                "retrieval_profile_selection",
-                "retrieval_index_manifest",
-                "retrieval_index_smoke",
-                "retrieval_index_rebuild_smoke",
-            )
+            for name in evidence_names
         }
         missing = [str(path) for path in required_retrieval_artifacts.values() if not path.is_file()]
         if missing:
@@ -1322,6 +1552,51 @@ async def run_hotpot_round(
                 for name, path in required_retrieval_artifacts.items()
             },
         }
+        if retrieval_config.get("corpus_kind") == "train_qa_memory":
+            index_manifest = _read_json(paths["retrieval_index_manifest"])
+            paraphrase_manifest = _read_json(paths["paraphrase_manifest"])
+            boundary = _mapping(
+                report["retrieval_execution_boundary"],
+                "retrieval_execution_boundary",
+            )
+            if (
+                boundary.get("director_tool_calls") != 0
+                or not isinstance(
+                    boundary.get("retrieval_tool_calls_by_worker"), int
+                )
+                or int(boundary["retrieval_tool_calls_by_worker"]) < 1
+                or boundary.get("retrieval_artifact_routed_via_relation") is not True
+            ):
+                raise HotpotRoundError(
+                    "QA-memory Director/worker/relation execution assertions failed"
+                )
+            report = {
+                **dict(report),
+                "qa_memory": {
+                    "train_record_count": index_manifest.get("train_record_count"),
+                    "unique_source_count": index_manifest.get("unique_source_count"),
+                    "cycled_record_count": index_manifest.get("cycled_record_count"),
+                    "paraphrase_count": index_manifest.get("paraphrase_count"),
+                    "paraphrase_versions": index_manifest.get("paraphrase_versions"),
+                    "paraphrase_provenances": index_manifest.get(
+                        "paraphrase_provenances"
+                    ),
+                    "heldout_validation_count": index_manifest.get(
+                        "heldout_validation_count"
+                    ),
+                    "validation_overlap_count": index_manifest.get(
+                        "validation_overlap_count"
+                    ),
+                    "embedding_model": index_manifest.get("embedding_model"),
+                    "embedding_dimension": index_manifest.get(
+                        "embedding_dimension"
+                    ),
+                    "normalized": index_manifest.get("normalized"),
+                    "similarity": index_manifest.get("similarity"),
+                    "frozen_top_k": index_manifest.get("frozen_top_k"),
+                    "materialization": paraphrase_manifest,
+                },
+            }
     baseline_source = _mapping(
         config["hotpotqa_evaluation"], "hotpotqa_evaluation"
     ).get("agentgraph_baseline_source_path")

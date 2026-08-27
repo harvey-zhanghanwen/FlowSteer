@@ -20,6 +20,14 @@ from .agent_runtime import (
     AgentResponse,
     GatewayResponse,
 )
+from .openai_gateway import supports_local_sglang_top_k
+from .scientific_sampling import (
+    GenerationPhase,
+    SCIENTIFIC_SAMPLING_ALGORITHM,
+    ScientificSamplingCoordinate,
+    derive_generation_seed,
+    scientific_sampling_schedule_hash,
+)
 from .tool_runtime import (
     ActionKind,
     StructuredAction,
@@ -73,7 +81,10 @@ class ToolReactExecutionAdapter:
         tool_registry: ToolRegistry,
         max_turns: int,
         max_tool_calls: int,
+        max_action_tokens: int = 512,
         execution_mode: str = "react",
+        sampling_base_seed: int | None = None,
+        sampling_coordinate: ScientificSamplingCoordinate | None = None,
     ) -> None:
         if not hasattr(gateway, "generate"):
             raise TypeError("gateway must implement generate")
@@ -83,13 +94,43 @@ class ToolReactExecutionAdapter:
             raise ValueError("max_turns must be a positive integer")
         if type(max_tool_calls) is not int or max_tool_calls < 0:
             raise ValueError("max_tool_calls must be a non-negative integer")
+        if type(max_action_tokens) is not int or max_action_tokens < 1:
+            raise ValueError("max_action_tokens must be a positive integer")
         if execution_mode not in {"react", "coding"}:
             raise ValueError("execution_mode must be react or coding")
+        if (sampling_base_seed is None) != (sampling_coordinate is None):
+            raise ValueError(
+                "sampling_base_seed and sampling_coordinate must be supplied together"
+            )
+        if sampling_base_seed is not None and (
+            type(sampling_base_seed) is not int
+            or not 0 <= sampling_base_seed < 2**64
+        ):
+            raise ValueError("sampling_base_seed must be an unsigned 64-bit integer")
+        if sampling_coordinate is not None and not isinstance(
+            sampling_coordinate,
+            ScientificSamplingCoordinate,
+        ):
+            raise TypeError(
+                "sampling_coordinate must be a ScientificSamplingCoordinate"
+            )
+        if (
+            sampling_base_seed is not None
+            and sampling_coordinate is not None
+            and sampling_coordinate.sampling_schedule_hash
+            != scientific_sampling_schedule_hash(base_seed=sampling_base_seed)
+        ):
+            raise ValueError(
+                "sampling_coordinate schedule hash does not match sampling_base_seed"
+            )
         self._gateway = gateway
         self._tool_registry = tool_registry
         self._max_turns = max_turns
         self._max_tool_calls = max_tool_calls
+        self._max_action_tokens = max_action_tokens
         self._execution_mode = execution_mode
+        self._sampling_base_seed = sampling_base_seed
+        self._sampling_coordinate = sampling_coordinate
 
     def _contract(
         self,
@@ -164,6 +205,88 @@ class ToolReactExecutionAdapter:
         del request, observations
         return None, True
 
+    def _completion_arguments_schema(
+        self,
+        request: AgentRequest,
+    ) -> Mapping[str, object]:
+        """Return the JSON Schema for an admitted completion's arguments."""
+
+        del request
+        return {
+            "type": "object",
+            "required": ["value"],
+            "properties": {
+                "value": {
+                    "description": (
+                        "The completed artifact required by the Agent contract"
+                    )
+                }
+            },
+            "additionalProperties": False,
+        }
+
+    def _state_conditioned_response_schema(
+        self,
+        request: AgentRequest,
+        observations: list[Mapping[str, object]],
+    ) -> Optional[dict[str, object]]:
+        """Build SkillFlow's strict schema when exactly one action is legal.
+
+        SkillFlow sends the request-scoped response schema through
+        ``response_format.json_schema``.  A generic Tool domain may contain
+        mutually exclusive actions, so this thin adapter constrains a measured
+        state with exactly one legal Tool action or completion.  Missing schema
+        metadata for such a narrowed state is an execution error rather than an
+        unconstrained fallback.
+        """
+
+        admitted_tool_actions, completion_admitted = (
+            self._state_conditioned_action_domain(request, observations)
+        )
+        arguments_schema: Optional[Mapping[str, object]] = None
+        kind: Optional[str] = None
+        name: Optional[str] = None
+        resource_id: Optional[str] = None
+        if admitted_tool_actions is not None and len(admitted_tool_actions) == 1:
+            if completion_admitted:
+                return None
+            resource_id, name = next(iter(admitted_tool_actions))
+            capability = self._tool_registry.require_capability(resource_id)
+            arguments_schema = capability.action_schemas.get(name)
+            if arguments_schema is None:
+                raise ReactExecutionError(
+                    "admitted Tool action has no registered argument schema"
+                )
+            kind = "tool"
+        elif (
+            admitted_tool_actions is not None
+            and not admitted_tool_actions
+            and completion_admitted
+        ):
+            arguments_schema = self._completion_arguments_schema(request)
+            kind = "complete"
+            name = "complete"
+        if arguments_schema is None or kind is None or name is None:
+            return None
+        return {
+            "type": "object",
+            "required": [
+                "arguments",
+                "kind",
+                "name",
+                "resource_id",
+                "skill_id",
+            ],
+            "properties": {
+                "arguments": dict(arguments_schema),
+                "kind": {"const": kind},
+                "name": {"const": name},
+                "resource_id": {"const": resource_id},
+                "skill_id": {"const": None},
+            },
+            "additionalProperties": False,
+        }
+
     async def execute(self, request: AgentRequest) -> GatewayResponse:
         mode = getattr(request.agent.execution_mode, "value", request.agent.execution_mode)
         if mode != self._execution_mode:
@@ -182,6 +305,74 @@ class ToolReactExecutionAdapter:
                 request,
                 agent=replace(request.agent, allowed_tools=allowed_tools),
             )
+            response_schema = self._state_conditioned_response_schema(
+                masked_request,
+                observations,
+            )
+            admitted_tool_actions, _ = self._state_conditioned_action_domain(
+                masked_request,
+                observations,
+            )
+            if admitted_tool_actions is not None and response_schema is None:
+                raise ReactExecutionError(
+                    "state-conditioned StructuredAction schema is unavailable"
+                )
+            model_metadata = dict(masked_request.model.metadata)
+            model_metadata["max_tokens"] = str(self._max_action_tokens)
+            # The schema belongs to this exact public state.  Never carry a
+            # prior turn's schema into the next request.
+            model_metadata.pop("response_json_schema", None)
+            scientific_sampling_receipt: dict[str, object] | None = None
+            requested_sampling: dict[str, object] = {
+                "temperature": None,
+                "top_p": None,
+                "top_k": None,
+                "max_tokens": self._max_action_tokens,
+                "seed": None,
+            }
+            if (
+                self._sampling_base_seed is not None
+                and self._sampling_coordinate is not None
+            ):
+                generation_seed = derive_generation_seed(
+                    base_seed=self._sampling_base_seed,
+                    coordinate=self._sampling_coordinate,
+                    step_index=turn,
+                    phase=GenerationPhase.ACTION,
+                )
+                # DIRECT_REUSE: SkillFlow fixes temperature=1, top_p=1 and one
+                # step-specific seed. Native top_k=-1 remains gated by an
+                # explicitly declared local SGLang capability.
+                model_metadata["temperature"] = "1.0"
+                model_metadata["top_p"] = "1.0"
+                model_metadata["generation_seed"] = str(generation_seed)
+                top_k = None
+                if supports_local_sglang_top_k(masked_request):
+                    top_k = -1
+                    model_metadata["top_k"] = "-1"
+                requested_sampling = {
+                    "temperature": 1.0,
+                    "top_p": 1.0,
+                    "top_k": top_k,
+                    "max_tokens": self._max_action_tokens,
+                    "seed": generation_seed,
+                }
+                scientific_sampling_receipt = {
+                    "algorithm": SCIENTIFIC_SAMPLING_ALGORITHM,
+                    "base_seed": self._sampling_base_seed,
+                    "coordinate": self._sampling_coordinate.to_value(),
+                    "phase": GenerationPhase.ACTION.value,
+                    "step_index": turn,
+                    "generation_seed": generation_seed,
+                    "requested_sampling": dict(requested_sampling),
+                }
+            if response_schema is not None:
+                model_metadata["response_json_schema"] = json.dumps(
+                    response_schema,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
             agent = replace(
                 masked_request.agent,
                 contract=self._contract(masked_request, observations),
@@ -190,6 +381,10 @@ class ToolReactExecutionAdapter:
                 masked_request,
                 request_id=f"{request.request_id}:react:{turn}",
                 agent=agent,
+                model=replace(
+                    masked_request.model,
+                    metadata=model_metadata,
+                ),
             )
             generated = await self._gateway.generate(turn_request)
             response = (
@@ -199,6 +394,15 @@ class ToolReactExecutionAdapter:
                 {
                     "turn": turn,
                     "request_id": turn_request.request_id,
+                    "requested_sampling": dict(requested_sampling),
+                    **(
+                        {
+                            "algorithm": SCIENTIFIC_SAMPLING_ALGORITHM,
+                            "scientific_sampling": scientific_sampling_receipt,
+                        }
+                        if scientific_sampling_receipt is not None
+                        else {}
+                    ),
                     "metadata": dict(response.metadata),
                 }
             )
@@ -237,7 +441,10 @@ class ToolReactExecutionAdapter:
                     trace.append(entry)
                     observations.append(observation)
                     continue
-                if not isinstance(action.arguments, dict) or "value" not in action.arguments:
+                if (
+                    not isinstance(action.arguments, dict)
+                    or set(action.arguments) != {"value"}
+                ):
                     observation = MappingProxyType(
                         {
                             "observation_status": "schema_invalid",
@@ -328,6 +535,20 @@ class ToolReactExecutionAdapter:
                 trace.append(entry)
                 observations.append(observation)
                 continue
+            capability = self._tool_registry.require_capability(action.resource_id)
+            if action.name not in capability.action_names:
+                observation = MappingProxyType(
+                    {
+                        "observation_status": "schema_invalid",
+                        "public_error_code": "tool_action_not_registered",
+                        "tool_id": action.resource_id,
+                        "allowed_action_names": list(capability.action_names),
+                    }
+                )
+                entry.update(observation)
+                trace.append(entry)
+                observations.append(observation)
+                continue
             admitted_tool_actions, _ = self._state_conditioned_action_domain(
                 request,
                 observations,
@@ -378,6 +599,25 @@ class ToolReactExecutionAdapter:
                     {
                         "observation_status": "schema_invalid",
                         "public_error_code": "tool_arguments_not_object",
+                    }
+                )
+                entry.update(observation)
+                trace.append(entry)
+                observations.append(observation)
+                continue
+
+            argument_validation_error = capability.argument_validation_error(
+                action.name,
+                action.arguments,
+            )
+            if argument_validation_error is not None:
+                observation = MappingProxyType(
+                    {
+                        "observation_status": "schema_invalid",
+                        "public_error_code": "tool_arguments_schema_invalid",
+                        "tool_id": action.resource_id,
+                        "action_name": action.name,
+                        "argument_validation": argument_validation_error,
                     }
                 )
                 entry.update(observation)

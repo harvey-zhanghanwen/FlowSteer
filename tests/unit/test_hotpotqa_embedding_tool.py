@@ -13,6 +13,7 @@ from src.interactive.agent_runtime import (
     ExecutionPhase,
 )
 from src.interactive.hotpotqa_embedding_tool import (
+    HOTPOTQA_QA_MEMORY_TOOL_ID,
     HOTPOTQA_RETRIEVAL_TOOL_ID,
     HotpotQAEmbeddingReactExecutionAdapter,
     build_hotpotqa_embedding_tool_registry,
@@ -83,6 +84,110 @@ class _Index:
         return values[doc_id]
 
 
+@dataclass(frozen=True)
+class _QAMemoryManifest:
+    schema_version: str = "flowsteer.hotpotqa.qa_memory_index.v1"
+    index_id: str = "hotpotqa-train-qa-memory-test-v1"
+    corpus_version: str = "flowsteer.hotpotqa.train_qa_memory.v1"
+    source: str = "HotpotQA aligned frozen train"
+    source_split: str = "train"
+    embedding_model: str = "test-encoder"
+    embedding_dimension: int = 3
+    normalized: bool = True
+    similarity: str = "cosine"
+    frozen_top_k: int = 2
+    train_record_count: int = 512
+    unique_source_count: int = 400
+    cycled_record_count: int = 112
+    paraphrase_count: int = 512
+    heldout_validation_count: int = 128
+    validation_overlap_count: int = 0
+    paraphrase_versions: tuple[str, ...] = ("semantic-paraphrase-v1",)
+    paraphrase_provenances: tuple[str, ...] = ("offline-train-only",)
+
+
+@dataclass(frozen=True)
+class _QAMemoryHit:
+    memory_id: str
+    source_train_task_id: str
+    paraphrase_question: str
+    paraphrase_answer_statement: str
+    similarity: float
+    rank: int
+    evaluator_receipt: str = "PRIVATE RECEIPT"
+
+
+@dataclass(frozen=True)
+class _QAMemory:
+    memory_id: str
+    source_train_task_id: str
+    base_task_id: str
+    cycled: bool
+    paraphrase_question: str
+    paraphrase_answer_statement: str
+    canonical_answer: str
+    paraphrase_version: str
+    paraphrase_provenance: str
+    supporting_facts: tuple[str, ...] = ("PRIVATE SUPPORT",)
+
+
+class _QAMemoryIndex:
+    manifest = _QAMemoryManifest()
+
+    def __init__(self) -> None:
+        self.search_calls: list[tuple[str, int]] = []
+        self.read_calls: list[str] = []
+
+    def search(self, query: str, k: int) -> tuple[_QAMemoryHit, ...]:
+        self.search_calls.append((query, k))
+        return (
+            _QAMemoryHit(
+                "memory-1",
+                "hotpotqa:train-a",
+                "Which person wrote Alpha?",
+                "The writer of Alpha is Ada Lovelace.",
+                0.93,
+                1,
+            ),
+            _QAMemoryHit(
+                "memory-2",
+                "hotpotqa:train-b",
+                "Who authored Beta?",
+                "Beta was authored by Grace Hopper.",
+                0.81,
+                2,
+            ),
+        )
+
+    def read(self, memory_id: str) -> _QAMemory:
+        self.read_calls.append(memory_id)
+        values = {
+            "memory-1": _QAMemory(
+                "memory-1",
+                "hotpotqa:train-a",
+                "hotpotqa:train-a",
+                False,
+                "Which person wrote Alpha?",
+                "The writer of Alpha is Ada Lovelace.",
+                "Ada Lovelace",
+                "semantic-paraphrase-v1",
+                "offline-train-only",
+            ),
+            "memory-2": _QAMemory(
+                "memory-2",
+                "hotpotqa:train-b",
+                "hotpotqa:train-b",
+                False,
+                "Who authored Beta?",
+                "Beta was authored by Grace Hopper.",
+                "Grace Hopper",
+                "semantic-paraphrase-v1",
+                "offline-train-only",
+            ),
+        }
+        return values[memory_id]
+
+
 def _action(
     kind: str,
     *,
@@ -125,6 +230,27 @@ def _react_request() -> AgentRequest:
             execution_mode="react",
             artifact_type="text",
             completion_condition="Both entities have read evidence and are compared.",
+        ),
+        model=ModelSpec("m", "fake"),
+        provider=ProviderSpec("fake", kind="test"),
+        phase=ExecutionPhase.SINGLE,
+    )
+
+
+def _qa_memory_worker_request() -> AgentRequest:
+    return AgentRequest(
+        request_id="run:1:qa-memory-worker:single",
+        run_id="run",
+        graph_revision=1,
+        problem="Who wrote Alpha?",
+        agent=AgentNode(
+            "qa-memory-worker",
+            "m",
+            "Retrieve relevant train QA-memory evidence for the question.",
+            allowed_tools=(HOTPOTQA_QA_MEMORY_TOOL_ID,),
+            execution_mode="react",
+            artifact_type="text",
+            completion_condition="Return an evidence artifact after dynamic retrieval.",
         ),
         model=ModelSpec("m", "fake"),
         provider=ProviderSpec("fake", kind="test"),
@@ -219,6 +345,41 @@ class HotpotQAEmbeddingToolTests(unittest.TestCase):
         self.assertIn("search only", contracts[2])
         self.assertIn("read only", contracts[3])
         self.assertIn("complete only", contracts[4])
+        response_schemas = [
+            json.loads(request.model.metadata["response_json_schema"])
+            for request in gateway.requests
+        ]
+        self.assertEqual(
+            ["search", "read", "search", "read", "complete"],
+            [schema["properties"]["name"]["const"] for schema in response_schemas],
+        )
+        self.assertTrue(
+            all(
+                set(schema["required"])
+                == {"arguments", "kind", "name", "resource_id", "skill_id"}
+                and schema["additionalProperties"] is False
+                for schema in response_schemas
+            )
+        )
+        self.assertEqual(
+            2,
+            response_schemas[0]["properties"]["arguments"]["properties"]["k"][
+                "const"
+            ],
+        )
+        self.assertEqual(
+            "string",
+            response_schemas[1]["properties"]["arguments"]["properties"][
+                "doc_id"
+            ]["type"],
+        )
+        self.assertEqual(
+            ["value"],
+            response_schemas[4]["properties"]["arguments"]["required"],
+        )
+        self.assertIsNone(
+            response_schemas[4]["properties"]["resource_id"]["const"]
+        )
 
     def test_action_domain_rejects_early_completion_and_duplicate_query(self) -> None:
         index = _Index()
@@ -335,12 +496,32 @@ class HotpotQAEmbeddingToolTests(unittest.TestCase):
         self.assertEqual((HOTPOTQA_RETRIEVAL_TOOL_ID,), registry.resource_ids)
         capability = registry.require_capability(HOTPOTQA_RETRIEVAL_TOOL_ID)
         self.assertEqual(("hotpotqa",), capability.dataset_scope)
+        self.assertEqual(("read", "search"), capability.action_names)
         action_schemas = {
             schema["title"]: schema for schema in capability.input_schema["oneOf"]
         }
         self.assertEqual({"read", "search"}, set(action_schemas))
+        self.assertEqual(
+            action_schemas["search"],
+            dict(capability.action_schemas["search"]),
+        )
+        self.assertEqual(
+            action_schemas["read"],
+            dict(capability.action_schemas["read"]),
+        )
         self.assertEqual(2, action_schemas["search"]["properties"]["k"]["const"])
         self.assertNotIn("task_id", action_schemas["search"]["properties"])
+        self.assertIsNone(
+            capability.argument_validation_error(
+                "search", {"query": "Alpha", "k": 2}
+            )
+        )
+        self.assertIn(
+            "2",
+            capability.argument_validation_error(
+                "search", {"query": "Alpha", "k": 1}
+            )["message"],
+        )
         self.assertEqual("none", capability.side_effect)
 
     def test_search_is_task_scoped_and_receipt_preserves_ranked_hits(self) -> None:
@@ -437,6 +618,165 @@ class HotpotQAEmbeddingToolTests(unittest.TestCase):
         self.assertIsNone(leaked)
         self.assertEqual("ValueError", leaked_receipt.error_type)
         self.assertEqual([], index.search_calls)
+
+    def test_qa_memory_registry_uses_global_search_and_public_memory_allowlist(
+        self,
+    ) -> None:
+        index = _QAMemoryIndex()
+        registry = build_hotpotqa_embedding_tool_registry(
+            index,
+            task_id="hotpotqa:heldout-validation-001",
+            tool_id=HOTPOTQA_QA_MEMORY_TOOL_ID,
+        )
+
+        search_result, search_receipt = asyncio.run(
+            registry.ainvoke_with_receipt(
+                HOTPOTQA_QA_MEMORY_TOOL_ID,
+                ToolRequest("search", {"query": "Alpha author", "k": 2}),
+            )
+        )
+
+        self.assertIsNotNone(search_result)
+        assert search_result is not None
+        self.assertEqual([("Alpha author", 2)], index.search_calls)
+        self.assertEqual([], index.read_calls)
+        self.assertEqual(
+            "hotpotqa:heldout-validation-001",
+            search_result.value["task_id"],
+        )
+        self.assertEqual(
+            "train_qa_memory",
+            search_result.value["retrieval_index"]["corpus_kind"],
+        )
+        self.assertEqual(
+            ["memory-1", "memory-2"], search_result.value["memory_ids"]
+        )
+        self.assertEqual(
+            {
+                "memory_id",
+                "source_train_task_id",
+                "paraphrase_question",
+                "paraphrase_answer_statement",
+                "similarity",
+                "rank",
+            },
+            set(search_result.value["hits"][0]),
+        )
+        self.assertEqual(HOTPOTQA_QA_MEMORY_TOOL_ID, search_receipt.tool_id)
+
+        read_result, read_receipt = asyncio.run(
+            registry.ainvoke_with_receipt(
+                HOTPOTQA_QA_MEMORY_TOOL_ID,
+                ToolRequest("read", {"memory_id": "memory-1"}),
+            )
+        )
+
+        self.assertIsNotNone(read_result)
+        assert read_result is not None
+        self.assertEqual(["memory-1"], index.read_calls)
+        self.assertEqual("memory-1", read_result.value["memory_id"])
+        self.assertEqual(
+            {
+                "memory_id",
+                "source_train_task_id",
+                "base_task_id",
+                "cycled",
+                "paraphrase_question",
+                "paraphrase_answer_statement",
+                "canonical_answer",
+                "paraphrase_version",
+                "paraphrase_provenance",
+            },
+            set(read_result.value["memory"]),
+        )
+        self.assertEqual("Ada Lovelace", read_result.value["memory"]["canonical_answer"])
+        self.assertFalse(_contains_forbidden_key(search_receipt.to_value()))
+        self.assertFalse(_contains_forbidden_key(read_receipt.to_value()))
+        capability = registry.require_capability(HOTPOTQA_QA_MEMORY_TOOL_ID)
+        self.assertEqual(
+            ["memory_id"], capability.action_schemas["read"]["required"]
+        )
+        self.assertEqual((HOTPOTQA_QA_MEMORY_TOOL_ID,), registry.resource_ids)
+        self.assertFalse(
+            any("web" in resource_id.casefold() for resource_id in registry.resource_ids)
+        )
+
+    def test_qa_memory_react_receipts_are_emitted_inside_worker_execution(
+        self,
+    ) -> None:
+        index = _QAMemoryIndex()
+        gateway = _SequenceGateway(
+            [
+                _action(
+                    "tool",
+                    name="search",
+                    arguments={"query": "Alpha author", "k": 2},
+                    resource_id=HOTPOTQA_QA_MEMORY_TOOL_ID,
+                ),
+                _action(
+                    "tool",
+                    name="read",
+                    arguments={"memory_id": "memory-1"},
+                    resource_id=HOTPOTQA_QA_MEMORY_TOOL_ID,
+                ),
+                _action(
+                    "complete",
+                    name="complete",
+                    arguments={"value": "Ada Lovelace"},
+                    resource_id=None,
+                ),
+            ]
+        )
+        adapter = HotpotQAEmbeddingReactExecutionAdapter(
+            gateway=gateway,
+            tool_registry=build_hotpotqa_embedding_tool_registry(
+                index,
+                task_id="hotpotqa:heldout-validation-001",
+                tool_id=HOTPOTQA_QA_MEMORY_TOOL_ID,
+            ),
+            max_turns=3,
+            max_tool_calls=2,
+        )
+
+        response = asyncio.run(adapter.execute(_qa_memory_worker_request()))
+
+        self.assertEqual("Ada Lovelace", response.text)
+        self.assertEqual([("Alpha author", 2)], index.search_calls)
+        self.assertEqual(["memory-1"], index.read_calls)
+        self.assertTrue(
+            all(
+                request.agent.id == "qa-memory-worker"
+                and "qa-memory-worker" in request.request_id
+                for request in gateway.requests
+            )
+        )
+        self.assertEqual(
+            [HOTPOTQA_QA_MEMORY_TOOL_ID, HOTPOTQA_QA_MEMORY_TOOL_ID],
+            [receipt["tool_id"] for receipt in response.metadata["tool_receipts"]],
+        )
+        self.assertTrue(
+            all(
+                entry["structured_action"].get("resource_id")
+                in {HOTPOTQA_QA_MEMORY_TOOL_ID, None}
+                for entry in response.metadata["react_trace"]
+            )
+        )
+        serialized = json.dumps(dict(response.metadata), ensure_ascii=False).casefold()
+        self.assertNotIn("web search", serialized)
+        self.assertNotIn("web_search", serialized)
+
+    def test_manifest_and_search_signature_mismatch_fails_closed(self) -> None:
+        class _MismatchedIndex(_Index):
+            manifest = _QAMemoryManifest()
+
+        with self.assertRaisesRegex(
+            TypeError, "QA-memory manifest and global search/read signatures differ"
+        ):
+            build_hotpotqa_embedding_tool_registry(
+                _MismatchedIndex(),
+                task_id="task-1",
+                tool_id=HOTPOTQA_QA_MEMORY_TOOL_ID,
+            )
 
     def test_factory_rejects_top_k_that_disagrees_with_manifest(self) -> None:
         with self.assertRaisesRegex(ValueError, "differs from the index manifest"):
