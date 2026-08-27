@@ -297,9 +297,9 @@ class ConfigLoaderTests(unittest.TestCase):
         self.assertFalse(config["grpo"]["enabled"])
         self.assertFalse(config["skills"]["enabled"])
 
-    def test_trivia_qa_memory_free_topology_v4_keeps_director_control_plane_only(self) -> None:
+    def test_trivia_qa_memory_free_topology_v5_keeps_director_control_plane_only(self) -> None:
         config = load_yaml(
-            "config/evaluation_triviaqa_qa_memory_free_topology_v4.yaml"
+            "config/evaluation_triviaqa_qa_memory_free_topology_v5.yaml"
         )
         validate_agent_graph_config(config)
 
@@ -325,6 +325,11 @@ class ConfigLoaderTests(unittest.TestCase):
             "model_driven_search_read",
             config["qa_tool_runtime"]["mode"],
         )
+        self.assertEqual(
+            "agentgraph.sglang-flat-action-sampling-schema.v1",
+            config["director"]["sampling_schema_version"],
+        )
+        self.assertNotIn("sampling_action_profile", config["director"])
         self.assertFalse(config["experiment"]["training_enabled"])
         self.assertFalse(config["grpo"]["enabled"])
 
