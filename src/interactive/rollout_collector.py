@@ -1509,11 +1509,73 @@ class SGLangReceiptDirectorClient:
                     admitted_indices = json.loads(relation_schema)["properties"][
                         "candidate_index"
                     ]["enum"]
-                    selected_index = self._hierarchical_index_choice(
-                        relation_response.text,
-                        admitted=admitted_indices,
-                        required_action="add_subgraph",
-                    )
+                    try:
+                        selected_index = self._hierarchical_index_choice(
+                            relation_response.text,
+                            admitted=admitted_indices,
+                            required_action="add_subgraph",
+                        )
+                    except ReceiptValidationError:
+                        if not _hierarchical_selector_serialization_failed(
+                            relation_response.text
+                        ):
+                            raise
+                        # Directly reuse the bounded structured-regeneration
+                        # boundary used by the existing set_relation selector:
+                        # preserve the exact malformed sample, then issue one
+                        # request with the same schema, route, and seed.  Never
+                        # infer or default a candidate index from bad text.
+                        phase_receipts[
+                            f"add_relation_candidate_serialization_failure_{ordinal}"
+                        ] = self._hierarchical_phase_receipt(relation_response)
+                        regeneration_prompt = _hierarchical_continuation_prompt(
+                            relation_prompt,
+                            committed_json=relation_response.text,
+                            instruction=_PARAMETER_REGENERATION_CONTINUATION,
+                        )
+                        regeneration_payload = dict(
+                            self._request_payload(
+                                regeneration_prompt,
+                                adapter_name,
+                                seed,
+                            )
+                        )
+                        regeneration_sampling = dict(
+                            regeneration_payload["sampling_params"]
+                        )
+                        regeneration_sampling["json_schema"] = relation_schema
+                        regeneration_payload["sampling_params"] = (
+                            regeneration_sampling
+                        )
+                        value, latency_ms, attempt_count = (
+                            await self._post_with_retries(regeneration_payload)
+                        )
+                        total_latency_ms += latency_ms
+                        total_attempt_count += attempt_count
+                        relation_response = self._parse_response(
+                            regeneration_prompt,
+                            regeneration_payload,
+                            value,
+                            policy_version=policy_version,
+                            adapter_name=adapter_name,
+                            expected_server_weight_version=(
+                                expected_server_weight_version
+                            ),
+                            action_json_schema_version=action_schema_version,
+                            action_schema_branch=action_schema_branch,
+                            action_target_domains_json=action_target_domains_json,
+                            action_target_domain_version=(
+                                action_target_domain_version
+                            ),
+                            latency_ms=latency_ms,
+                            attempt_count=attempt_count,
+                            generation_seed=seed,
+                        )
+                        selected_index = self._hierarchical_index_choice(
+                            relation_response.text,
+                            admitted=admitted_indices,
+                            required_action="add_subgraph",
+                        )
                     phase_receipts[
                         f"add_relation_candidate_selection_{ordinal}"
                     ] = self._hierarchical_phase_receipt(relation_response)
@@ -2668,6 +2730,9 @@ def _validate_v3_hierarchical_action_receipt(
                 for ordinal in range(len(selected_relation_indices) + 1):
                     phase_name = f"add_relation_candidate_selection_{ordinal}"
                     expected_phases.add(phase_name)
+                    failure_phase_name = (
+                        f"add_relation_candidate_serialization_failure_{ordinal}"
+                    )
                     relation_phase = (
                         phase_receipts.get(phase_name)
                         if isinstance(phase_receipts, Mapping)
@@ -2677,7 +2742,50 @@ def _validate_v3_hierarchical_action_receipt(
                         raise ReceiptValidationError(
                             "v3 ADD relation-prefix phase receipt is missing"
                         )
-                    if relation_phase.get("prompt_text") != relation_prompt:
+                    failure_phase = (
+                        phase_receipts.get(failure_phase_name)
+                        if isinstance(phase_receipts, Mapping)
+                        else None
+                    )
+                    expected_relation_prompt = relation_prompt
+                    if failure_phase is not None:
+                        if not isinstance(failure_phase, Mapping):
+                            raise ReceiptValidationError(
+                                "v3 ADD relation-prefix failure receipt is malformed"
+                            )
+                        failed_text = failure_phase.get("text")
+                        failed_prompt = failure_phase.get("prompt_text")
+                        if (
+                            not isinstance(failed_text, str)
+                            or not failed_text
+                            or failed_prompt != relation_prompt
+                            or not _hierarchical_selector_serialization_failed(
+                                failed_text
+                            )
+                        ):
+                            raise ReceiptValidationError(
+                                "v3 ADD relation-prefix retry is not rooted in "
+                                "a serialization failure"
+                            )
+                        expected_relation_prompt = _hierarchical_continuation_prompt(
+                            relation_prompt,
+                            committed_json=failed_text,
+                            instruction=_PARAMETER_REGENERATION_CONTINUATION,
+                        )
+                        if failure_phase.get("generation_seed") != (
+                            relation_phase.get("generation_seed")
+                        ):
+                            raise ReceiptValidationError(
+                                "v3 ADD relation-prefix retry changed its generation seed"
+                            )
+                        if failure_phase.get("backend_sampling_seed") != (
+                            relation_phase.get("backend_sampling_seed")
+                        ):
+                            raise ReceiptValidationError(
+                                "v3 ADD relation-prefix retry changed its backend seed"
+                            )
+                        expected_phases.add(failure_phase_name)
+                    if relation_phase.get("prompt_text") != expected_relation_prompt:
                         raise ReceiptValidationError(
                             "v3 ADD relation-prefix prompt is not bound to its prefix"
                         )
@@ -2716,7 +2824,7 @@ def _validate_v3_hierarchical_action_receipt(
                     )
                     if selected_index == DIRECTOR_ADD_RELATION_STOP_INDEX:
                         expected_parameter_prompt = _hierarchical_continuation_prompt(
-                            relation_prompt,
+                            expected_relation_prompt,
                             committed_json=selected_index_json,
                             instruction=_ADD_RELATION_FINALIZATION_CONTINUATION,
                         )
@@ -2730,7 +2838,7 @@ def _validate_v3_hierarchical_action_receipt(
                         )
                     )
                     relation_prompt = _hierarchical_continuation_prompt(
-                        relation_prompt,
+                        expected_relation_prompt,
                         committed_json=selected_index_json,
                         instruction=_add_relation_prefix_instruction(
                             prefix_domain

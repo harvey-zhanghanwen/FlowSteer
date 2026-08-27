@@ -67,6 +67,7 @@ from src.interactive.rollout_collector import (
     _ADD_ACTION_CONTINUATION,
     _ADD_DECLARATION_CONTINUATION,
     _ADD_RELATION_FINALIZATION_CONTINUATION,
+    _PARAMETER_REGENERATION_CONTINUATION,
     _hierarchical_continuation_prompt,
     _validate_v3_hierarchical_action_receipt,
     select_balanced_tasks,
@@ -1028,7 +1029,7 @@ def test_native_sglang_v3_samples_add_declarations_then_complete_exact_action():
     }
 
 
-def test_native_sglang_v3_factors_topology_neutral_add_relations_by_prefix():
+def test_native_sglang_v3_regenerates_truncated_add_relation_prefix_once():
     domains = {
         "add_subgraph": {
             "min_new_agents": 1,
@@ -1095,6 +1096,9 @@ def test_native_sglang_v3_factors_topology_neutral_add_relations_by_prefix():
         "action": "add_subgraph",
         "candidate_index": selected_indices[0],
     }
+    truncated_relation_choice = (
+        '{"action":"add_subgraph","candidate_index":'
+    )
     relation_stop = {"action": "add_subgraph", "candidate_index": -1}
     final_action = {
         **declarations,
@@ -1105,6 +1109,7 @@ def test_native_sglang_v3_factors_topology_neutral_add_relations_by_prefix():
         [
             json.dumps(role_selection, separators=(",", ":")),
             json.dumps(declarations, separators=(",", ":")),
+            truncated_relation_choice,
             json.dumps(relation_choice, separators=(",", ":")),
             json.dumps(relation_stop, separators=(",", ":")),
             json.dumps(final_action, separators=(",", ":")),
@@ -1131,7 +1136,7 @@ def test_native_sglang_v3_factors_topology_neutral_add_relations_by_prefix():
         )
     )
 
-    assert len(client.payloads) == 5
+    assert len(client.payloads) == 6
     assert client.payloads[2]["sampling_params"]["json_schema"] == (
         director_live_add_subgraph_relation_prefix_selector_json_schema_text(
             domains,
@@ -1140,13 +1145,16 @@ def test_native_sglang_v3_factors_topology_neutral_add_relations_by_prefix():
         )
     )
     assert client.payloads[3]["sampling_params"]["json_schema"] == (
+        client.payloads[2]["sampling_params"]["json_schema"]
+    )
+    assert client.payloads[4]["sampling_params"]["json_schema"] == (
         director_live_add_subgraph_relation_prefix_selector_json_schema_text(
             domains,
             declarations["agents"],
             selected_indices,
         )
     )
-    assert client.payloads[4]["sampling_params"]["json_schema"] == (
+    assert client.payloads[5]["sampling_params"]["json_schema"] == (
         director_live_action_parameter_json_schema_text(
             "add_subgraph",
             domains,
@@ -1158,13 +1166,38 @@ def test_native_sglang_v3_factors_topology_neutral_add_relations_by_prefix():
     assert response.metadata["selected_add_relation_candidate_indices"] == (
         selected_indices
     )
-    assert response.metadata["request_count"] == 5
+    assert response.metadata["request_count"] == 6
     assert set(response.metadata["hierarchical_phase_receipts"]) == {
         "add_agent_role_selection",
         "add_agent_declarations",
+        "add_relation_candidate_serialization_failure_0",
         "add_relation_candidate_selection_0",
         "add_relation_candidate_selection_1",
     }
+    phases = response.metadata["hierarchical_phase_receipts"]
+    failure_receipt = phases[
+        "add_relation_candidate_serialization_failure_0"
+    ]
+    repaired_receipt = phases["add_relation_candidate_selection_0"]
+    assert failure_receipt["text"] == truncated_relation_choice
+    regeneration_messages = decode_director_transcript(
+        repaired_receipt["prompt_text"]
+    )
+    assert regeneration_messages is not None
+    assert regeneration_messages[-2] == {
+        "role": "assistant",
+        "content": truncated_relation_choice,
+    }
+    assert regeneration_messages[-1] == {
+        "role": "user",
+        "content": _PARAMETER_REGENERATION_CONTINUATION,
+    }
+    assert failure_receipt["generation_seed"] == repaired_receipt[
+        "generation_seed"
+    ]
+    assert failure_receipt["backend_sampling_seed"] == repaired_receipt[
+        "backend_sampling_seed"
+    ]
     parameter_messages = decode_director_transcript(
         response.metadata["prompt_text"]
     )
@@ -1192,6 +1225,24 @@ def test_native_sglang_v3_factors_topology_neutral_add_relations_by_prefix():
         response.metadata,
         schema_request,
     ) == set(response.metadata["hierarchical_phase_receipts"])
+    tampered_phases = {
+        name: dict(receipt)
+        for name, receipt in response.metadata[
+            "hierarchical_phase_receipts"
+        ].items()
+    }
+    tampered_phases[
+        "add_relation_candidate_serialization_failure_0"
+    ]["text"] = json.dumps(relation_choice, separators=(",", ":"))
+    with pytest.raises(ReceiptValidationError, match="serialization failure"):
+        _validate_v3_hierarchical_action_receipt(
+            AgentActionParser().parse(response.text),
+            {
+                **response.metadata,
+                "hierarchical_phase_receipts": tampered_phases,
+            },
+            schema_request,
+        )
 
 
 def test_native_sglang_v3_regenerates_malformed_add_role_selection_once():
