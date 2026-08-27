@@ -28,6 +28,7 @@ def _receipt(action: str, ordinal: int) -> dict[str, object]:
     if action == "search":
         arguments = {"query": "rewritten public question", "limit": 3}
         value: dict[str, object] = {
+            "operation": "search",
             "hits": [
                 {
                     "memory_id": "memory-train-1",
@@ -42,12 +43,18 @@ def _receipt(action: str, ordinal: int) -> dict[str, object]:
     else:
         arguments = {"memory_id": "memory-train-1"}
         value = {
+            "operation": "read",
+            "memory_id": "memory-train-1",
             "memory": {
                 "memory_id": "memory-train-1",
                 "source_train_task_id": "triviaqa:train:1",
                 "paraphrase_question": "A semantically equivalent train question",
                 "paraphrase_answer_statement": "The answer is train answer",
                 "canonical_answer": "train answer",
+                "text": (
+                    "Question: A semantically equivalent train question\n"
+                    "Answer: The answer is train answer"
+                ),
             }
         }
     return {
@@ -97,6 +104,39 @@ def _trajectory(task_id: str) -> dict[str, object]:
         "execution_role": "worker",
         "graph_revision": 3,
         "problem": "public validation question",
+    }
+    output_metadata = {
+        "retriever": {
+            "artifact_version": "artifact-retriever-current",
+            "tool_receipts": [search, read],
+            "input_artifact_provenance": [],
+        },
+        "reasoner": {
+            "artifact_version": "artifact-reasoner-current",
+            "tool_receipts": [search, read],
+            "input_artifact_provenance": [
+                {
+                    "source_agent_id": "retriever",
+                    "target_agent_id": "reasoner",
+                    "artifact_version": "artifact-retriever-current",
+                    "artifact_type": "evidence",
+                    "tool_receipts": [search, read],
+                }
+            ],
+        },
+        "formatter": {
+            "artifact_version": "artifact-formatter-current",
+            "tool_receipts": [search, read],
+            "input_artifact_provenance": [
+                {
+                    "source_agent_id": "reasoner",
+                    "target_agent_id": "formatter",
+                    "artifact_version": "artifact-reasoner-current",
+                    "artifact_type": "semantic_answer",
+                    "tool_receipts": [search, read],
+                }
+            ],
+        },
     }
     return {
         "schema_version": "flowsteer.agentgraph.trajectory.v1",
@@ -170,6 +210,7 @@ def _trajectory(task_id: str) -> dict[str, object]:
                                         "target_agent_id": "reasoner",
                                         "artifact_type": "evidence",
                                         "artifact": "evidence artifact",
+                                        "artifact_version": "artifact-retriever-current",
                                         "tool_receipts": [search, read],
                                     }
                                 ],
@@ -195,7 +236,8 @@ def _trajectory(task_id: str) -> dict[str, object]:
                                         "target_agent_id": "formatter",
                                         "artifact_type": "semantic_answer",
                                         "artifact": "semantic wrong answer",
-                                        "tool_receipts": [],
+                                        "artifact_version": "artifact-reasoner-current",
+                                        "tool_receipts": [search, read],
                                     }
                                 ],
                             },
@@ -206,6 +248,7 @@ def _trajectory(task_id: str) -> dict[str, object]:
                 "runtime_summary": {
                     "output_agent_id": "formatter",
                     "final_answer": "<answer>wrong answer</answer>",
+                    "output_metadata": output_metadata,
                 },
             },
             {
@@ -221,6 +264,7 @@ def _trajectory(task_id: str) -> dict[str, object]:
                 "runtime_summary": {
                     "output_agent_id": "formatter",
                     "final_answer": "<answer>wrong answer</answer>",
+                    "output_metadata": output_metadata,
                 },
             },
         ],
@@ -336,8 +380,8 @@ def _assert_formal_report_metrics_tool_ownership_isolation_routing_and_demos() -
     assert assertions["retrieval_tool_calls_by_worker_gt_0"] is True
     assert assertions["worker_ownership_violation_count"] == 0
     assert assertions["retrieval_artifact_routed_via_relation"] is True
-    assert assertions["output_inbox_receipt_lineage"] is False
-    assert assertions["retrieval_tasks_with_output_inbox_receipt_lineage"] == 0
+    assert assertions["output_inbox_receipt_lineage"] is True
+    assert assertions["retrieval_tasks_with_output_inbox_receipt_lineage"] == 3
     assert report["wrong_demo_selection"]["actual_count"] == 3
     assert report["wrong_demo_selection"]["minimum_formal_count_met"] is True
     assert all(demo["actual_execution_chain"] for demo in report["wrong_demos"])
@@ -348,7 +392,8 @@ def _assert_control_plane_assertions_fail_closed_on_payload_leak_and_missing_rel
     trajectory["turns"][0]["prompt"] = (  # type: ignore[index]
         "Leaked paraphrase_answer_statement and memory-train-1"
     )
-    trajectory["turns"][0]["graph_snapshot"]["relations"] = []  # type: ignore[index]
+    for turn in trajectory["turns"]:  # type: ignore[union-attr]
+        turn["graph_snapshot"]["relations"] = []
 
     result = analysis._trajectory_control_plane(  # noqa: SLF001
         "triviaqa:validation:leak", trajectory
@@ -380,19 +425,7 @@ def _assert_field_names_are_diagnostic_only_and_output_inbox_lineage_is_independ
     assert control["director_payload_exposures"] == {}
     assert assertions["director_data_plane_isolated"] is True
     assert assertions["retrieval_artifact_routed_via_relation"] is True
-    assert assertions["output_inbox_receipt_lineage"] is False
-
-    worker_receipts = trajectory["turns"][0]["executions"][0]["metadata"][  # type: ignore[index]
-        "response"
-    ]["tool_receipts"]
-    trajectory["turns"][0]["executions"][2]["metadata"]["request"][  # type: ignore[index]
-        "upstream"
-    ][0]["tool_receipts"] = worker_receipts
-    result = analysis._trajectory_control_plane(task_id, trajectory)  # noqa: SLF001
-    assert result["retrieval_artifact_routed_via_relation"] is True
-    assert result["output_inbox_receipt_lineage"] is True
-    assert result["output_inbox_canonical_receipt_count"] == 2
-    assert result["output_inbox_missing_canonical_receipt_signatures"] == []
+    assert assertions["output_inbox_receipt_lineage"] is True
 
 
 def _assert_bare_answer_collision_is_not_a_payload_exposure() -> None:
@@ -498,7 +531,9 @@ def _assert_failed_worker_receipts_count_without_claiming_artifact_route() -> No
             }
         ],
         "output_agent_id": "formatter",
+        "output_metadata": {},
     }
+    trajectory["turns"][-1]["runtime_summary"]["output_metadata"] = {}  # type: ignore[index]
 
     result = analysis._trajectory_control_plane(task_id, trajectory)  # noqa: SLF001
     assert result["retrieval_tool_call_count"] == 2
@@ -514,6 +549,136 @@ def _assert_failed_worker_receipts_count_without_claiming_artifact_route() -> No
     assert assertions["retrieval_tool_calls_by_worker_gt_0"] is True
     assert assertions["retrieval_artifact_tasks"] == 0
     assert assertions["retrieval_artifact_routed_via_relation"] is False
+
+
+def _assert_superseded_receipts_remain_telemetry_not_current_lineage() -> None:
+    task_id = "triviaqa:validation:superseded"
+    trajectory = _trajectory(task_id)
+    old_search = _receipt("search", 11)
+    old_read = _receipt("read", 12)
+    old_search["request"]["arguments"]["query"] = "superseded query"  # type: ignore[index]
+    old_read["request"]["arguments"]["memory_id"] = "memory-old"  # type: ignore[index]
+    old_read["result"]["value"]["memory_id"] = "memory-old"  # type: ignore[index]
+    old_read["result"]["value"]["memory"]["memory_id"] = "memory-old"  # type: ignore[index]
+    old_execution = {
+        "agent_id": "retriever",
+        "execution_id": "execution-retriever-superseded",
+        "output": "superseded evidence artifact",
+        "metadata": {
+            "request": {
+                "execution_role": "worker",
+                "agent": {
+                    "id": "retriever",
+                    "execution_mode": "react",
+                    "allowed_tools": [analysis.QA_MEMORY_TOOL_ID],
+                },
+                "upstream": [],
+            },
+            "response": {"tool_receipts": [old_search, old_read]},
+        },
+    }
+    trajectory["turns"][0]["executions"].insert(0, old_execution)  # type: ignore[index]
+
+    result = analysis._trajectory_control_plane(task_id, trajectory)  # noqa: SLF001
+
+    assert result["retrieval_tool_call_count"] == 4
+    assert result["historical_completed_retrieval_receipt_count"] == 4
+    assert result["retrieval_artifact_receipt_count"] == 2
+    assert result["retrieval_artifact_routed_via_relation"] is True
+    assert result["output_inbox_receipt_lineage"] is True
+    assert result["output_inbox_missing_canonical_receipt_signatures"] == []
+
+
+def _assert_missing_current_receipts_fail_lineage_even_if_stale_receipts_arrive() -> None:
+    task_id = "triviaqa:validation:missing-current"
+    trajectory = _trajectory(task_id)
+    stale_search = _receipt("search", 21)
+    stale_read = _receipt("read", 22)
+    output_metadata = trajectory["turns"][-1]["runtime_summary"][  # type: ignore[index]
+        "output_metadata"
+    ]
+    output_metadata["formatter"]["input_artifact_provenance"][0][
+        "tool_receipts"
+    ] = [stale_search, stale_read]
+
+    result = analysis._trajectory_control_plane(task_id, trajectory)  # noqa: SLF001
+
+    assert result["retrieval_tool_call_count"] == 2
+    assert result["retrieval_artifact_receipt_count"] == 2
+    assert result["retrieval_artifact_routed_via_relation"] is False
+    assert result["output_inbox_receipt_lineage"] is False
+    assert len(result["output_inbox_missing_canonical_receipt_signatures"]) == 2
+
+
+def _assert_two_current_workers_match_runtime_finish_lineage_boundary() -> None:
+    task_id = "triviaqa:validation:two-current-workers"
+    trajectory = _trajectory(task_id)
+    second_search = _receipt("search", 31)
+    second_read = _receipt("read", 32)
+    second_search["request"]["arguments"]["query"] = "second query"  # type: ignore[index]
+    second_read["request"]["arguments"]["memory_id"] = "memory-002"  # type: ignore[index]
+    second_read["result"]["value"]["memory_id"] = "memory-002"  # type: ignore[index]
+    second_read["result"]["value"]["memory"]["memory_id"] = "memory-002"  # type: ignore[index]
+    second_node = {
+        "id": "retriever_2",
+        "execution_mode": "react",
+        "allowed_tools": [analysis.QA_MEMORY_TOOL_ID],
+    }
+    second_relation = {
+        "source_id": "retriever_2",
+        "target_id": "formatter",
+        "source_to_target": True,
+        "target_to_source": False,
+    }
+    graph = trajectory["turns"][-1]["graph_snapshot"]  # type: ignore[index]
+    graph["nodes"].append(second_node)
+    graph["relations"].append(second_relation)
+    trajectory["turns"][0]["executions"].append(  # type: ignore[index]
+        {
+            "agent_id": "retriever_2",
+            "execution_id": "execution-retriever-2",
+            "output": "second current evidence",
+            "metadata": {
+                "request": {
+                    "execution_role": "worker",
+                    "agent": {
+                        "id": "retriever_2",
+                        "execution_mode": "react",
+                        "allowed_tools": [analysis.QA_MEMORY_TOOL_ID],
+                    },
+                    "upstream": [],
+                },
+                "response": {"tool_receipts": [second_search, second_read]},
+            },
+        }
+    )
+    output_metadata = trajectory["turns"][-1]["runtime_summary"][  # type: ignore[index]
+        "output_metadata"
+    ]
+    output_metadata["retriever_2"] = {
+        "artifact_version": "artifact-retriever-2-current",
+        "tool_receipts": [second_search, second_read],
+        "input_artifact_provenance": [],
+    }
+
+    stale = analysis._trajectory_control_plane(task_id, trajectory)  # noqa: SLF001
+    assert stale["retrieval_artifact_receipt_count"] == 4
+    assert stale["retrieval_artifact_routed_via_relation"] is False
+    assert stale["output_inbox_receipt_lineage"] is False
+
+    output_metadata["formatter"]["input_artifact_provenance"].append(
+        {
+            "source_agent_id": "retriever_2",
+            "target_agent_id": "formatter",
+            "artifact_version": "artifact-retriever-2-current",
+            "artifact_type": "evidence",
+            "tool_receipts": [second_search, second_read],
+        }
+    )
+    current = analysis._trajectory_control_plane(task_id, trajectory)  # noqa: SLF001
+    assert current["retrieval_artifact_routed_via_relation"] is True
+    assert current["output_inbox_receipt_lineage"] is True
+    assert current["output_inbox_missing_canonical_receipt_signatures"] == []
 
 
 def _assert_completed_route_gate_ignores_unfinished_retrieval_artifact_task() -> None:
@@ -586,6 +751,17 @@ class TriviaQAQAMemoryResultAnalysisTests(unittest.TestCase):
         self,
     ) -> None:
         _assert_completed_route_gate_ignores_unfinished_retrieval_artifact_task()
+
+    def test_superseded_receipts_remain_telemetry_not_current_lineage(self) -> None:
+        _assert_superseded_receipts_remain_telemetry_not_current_lineage()
+
+    def test_missing_current_receipts_fail_lineage_even_if_stale_receipts_arrive(
+        self,
+    ) -> None:
+        _assert_missing_current_receipts_fail_lineage_even_if_stale_receipts_arrive()
+
+    def test_two_current_workers_match_runtime_finish_lineage_boundary(self) -> None:
+        _assert_two_current_workers_match_runtime_finish_lineage_boundary()
 
     def test_post_hoc_retrieval_coverage_uses_official_normalization(self) -> None:
         _assert_post_hoc_retrieval_coverage_uses_official_normalization()

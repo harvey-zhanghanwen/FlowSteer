@@ -370,6 +370,116 @@ def _receipt_signature(receipt: Mapping[str, Any]) -> str:
     return base._receipt_signature(receipt)  # noqa: SLF001 - deliberate thin adapter
 
 
+def _successful_current_retrieval_receipt(
+    receipt: Mapping[str, Any], action: str
+) -> bool:
+    """Mirror the runtime's public TriviaQA QA-memory receipt boundary."""
+
+    if (
+        receipt.get("tool_id") != QA_MEMORY_TOOL_ID
+        or receipt.get("error_type") is not None
+    ):
+        return False
+    request = base._mapping(receipt.get("request"))
+    if request.get("action") != action:
+        return False
+    arguments = base._mapping(request.get("arguments"))
+    result = base._mapping(receipt.get("result"))
+    if result.get("completed") is not True:
+        return False
+    value = base._mapping(result.get("value", result))
+    if action == "search":
+        return (
+            isinstance(arguments.get("query"), str)
+            and bool(arguments["query"].strip())
+            and value.get("operation") == "search"
+        )
+    if action != "read" or set(arguments) != {"memory_id"}:
+        return False
+    memory_id = arguments.get("memory_id")
+    memory = base._mapping(value.get("memory"))
+    return (
+        isinstance(memory_id, str)
+        and bool(memory_id.strip())
+        and value.get("operation") == "read"
+        and value.get("memory_id") == memory_id
+        and memory.get("memory_id") == memory_id
+        and isinstance(memory.get("text"), str)
+        and bool(memory["text"].strip())
+    )
+
+
+def _final_current_retrieval_artifacts(
+    trajectory: Mapping[str, Any],
+) -> tuple[
+    Mapping[str, Any],
+    str | None,
+    Mapping[str, Any],
+    list[dict[str, Any]],
+]:
+    """Return current worker receipts from the final Runtime artifact state.
+
+    FlowSteer's progressive Runtime replaces an Agent's current artifact when
+    that Agent is re-executed.  Earlier execution records remain in the
+    trajectory for lossless Tool telemetry, but they are not dependencies of
+    the final Output artifact.  This follows the same boundary as
+    ``AgentWorkflowEnv._current_successful_evidence_worker_ids`` and
+    ``_role_conditional_semantic_issue`` without importing provider/runtime
+    modules into the offline analyzer.
+    """
+
+    turns = base._list(trajectory.get("turns"))
+    if not turns:
+        return {}, None, {}, []
+    final_turn = base._mapping(turns[-1])
+    snapshot = base._mapping(final_turn.get("graph_snapshot"))
+    runtime = base._mapping(final_turn.get("runtime_summary"))
+    output_metadata = base._mapping(runtime.get("output_metadata"))
+    output_id = runtime.get("output_agent_id", snapshot.get("output_agent_id"))
+    if not isinstance(output_id, str) or not output_id:
+        output_id = None
+
+    artifacts: list[dict[str, Any]] = []
+    for raw_node in base._list(snapshot.get("nodes")):
+        node = base._mapping(raw_node)
+        agent_id = node.get("id")
+        if (
+            not isinstance(agent_id, str)
+            or not agent_id
+            or agent_id == output_id
+            or QA_MEMORY_TOOL_ID not in base._list(node.get("allowed_tools"))
+        ):
+            continue
+        metadata = base._mapping(output_metadata.get(agent_id))
+        receipts = [
+            receipt
+            for receipt in base._list(metadata.get("tool_receipts"))
+            if isinstance(receipt, Mapping)
+        ]
+        successful = {
+            action: [
+                receipt
+                for receipt in receipts
+                if _successful_current_retrieval_receipt(receipt, action)
+            ]
+            for action in ("search", "read")
+        }
+        if not successful["search"] or not successful["read"]:
+            continue
+        for action in ("search", "read"):
+            for receipt in successful[action]:
+                artifacts.append(
+                    {
+                        "agent_id": agent_id,
+                        "artifact_version": metadata.get("artifact_version"),
+                        "action": action,
+                        "signature": _receipt_signature(receipt),
+                        "receipt": dict(receipt),
+                    }
+                )
+    return snapshot, output_id, output_metadata, artifacts
+
+
 def _iter_retrieval_receipts(
     trajectory: Mapping[str, Any],
 ) -> Iterable[dict[str, Any]]:
@@ -693,7 +803,6 @@ def _trajectory_control_plane(
     worker_ownership_violations: list[dict[str, Any]] = []
     owner_ids: set[str] = set()
     tool_call_counts_by_agent_id: dict[str, Counter[str]] = defaultdict(Counter)
-    canonical_worker_signatures: set[str] = set()
     canonical_worker_receipts: list[Mapping[str, Any]] = []
     for item in receipts:
         agent_id = item.get("agent_id")
@@ -723,7 +832,6 @@ def _trajectory_control_plane(
                 }
             )
         else:
-            canonical_worker_signatures.add(str(item["signature"]))
             canonical_worker_receipts.append(base._mapping(item.get("receipt")))
 
     director_text = _director_visible_text(trajectory)
@@ -741,7 +849,6 @@ def _trajectory_control_plane(
     )
 
     graph_edges_by_round: dict[int, set[tuple[str, str]]] = {}
-    final_output_id: str | None = None
     for fallback_index, raw_turn in enumerate(base._list(trajectory.get("turns"))):
         turn = base._mapping(raw_turn)
         round_index = turn.get("round_index", fallback_index)
@@ -749,14 +856,12 @@ def _trajectory_control_plane(
             round_index = fallback_index
         snapshot = base._mapping(turn.get("graph_snapshot"))
         graph_edges_by_round[round_index] = _directed_edges(snapshot)
-        output = snapshot.get("output_agent_id")
-        if isinstance(output, str) and output:
-            final_output_id = output
-        runtime_output = base._mapping(turn.get("runtime_summary")).get(
-            "output_agent_id"
-        )
-        if isinstance(runtime_output, str) and runtime_output:
-            final_output_id = runtime_output
+    (
+        final_snapshot,
+        final_output_id,
+        final_output_metadata,
+        artifact_receipts,
+    ) = _final_current_retrieval_artifacts(trajectory)
     output_ids = {final_output_id} if final_output_id is not None else set()
     _, raw_messages = _observed_communication(trajectory)
     messages = [
@@ -771,22 +876,46 @@ def _trajectory_control_plane(
         (message["source_agent_id"], message["target_agent_id"])
         for message in messages
     }
-    artifact_receipts = [
-        item for item in receipts if item.get("artifact_available") is True
+    final_edges = _directed_edges(final_snapshot)
+    output_metadata = base._mapping(final_output_metadata.get(final_output_id))
+    output_provenance_messages = [
+        {
+            "source_agent_id": message.get("source_agent_id"),
+            "target_agent_id": message.get("target_agent_id", final_output_id),
+            "receipt_signatures": [
+                _receipt_signature(receipt)
+                for receipt in base._list(message.get("tool_receipts"))
+                if isinstance(receipt, Mapping)
+                and receipt.get("tool_id") == QA_MEMORY_TOOL_ID
+            ],
+            "artifact_type": message.get("artifact_type"),
+            "artifact_version": message.get("artifact_version"),
+        }
+        for message in base._list(
+            output_metadata.get("input_artifact_provenance")
+        )
+        if isinstance(message, Mapping)
+        and isinstance(message.get("source_agent_id"), str)
+        and message.get("target_agent_id", final_output_id) == final_output_id
     ]
     immediate_routes: list[dict[str, Any]] = []
     for item in artifact_receipts:
         matching = [
             message
-            for message in messages
+            for message in output_provenance_messages
             if item["signature"] in message["receipt_signatures"]
-            and message["source_agent_id"] == item["agent_id"]
         ]
+        relation_path_present = bool(
+            final_output_id is not None
+            and _reachable(str(item["agent_id"]), final_output_id, final_edges)
+        )
         immediate_routes.append(
             {
                 "agent_id": item.get("agent_id"),
+                "artifact_version": item.get("artifact_version"),
                 "action": item.get("action"),
-                "routed": bool(matching),
+                "relation_path_present": relation_path_present,
+                "routed": bool(matching) and relation_path_present,
                 "routes": matching,
             }
         )
@@ -796,31 +925,26 @@ def _trajectory_control_plane(
         if isinstance(item.get("agent_id"), str)
     }
     output_lineage = all(
-        any(_reachable(owner, output, communication_edges) for output in output_ids)
+        any(_reachable(owner, output, final_edges) for output in output_ids)
         for owner in artifact_owner_ids
     ) if artifact_owner_ids and output_ids else False
     routed = bool(artifact_receipts) and all(
         route["routed"] for route in immediate_routes
     ) and output_lineage
-    output_inbox_messages = [
-        message for message in messages if message["target_agent_id"] in output_ids
-    ]
+    output_inbox_messages = output_provenance_messages
     output_inbox_signatures = {
         signature
         for message in output_inbox_messages
         for signature in message["receipt_signatures"]
     }
     canonical_artifact_signatures = {
-        str(item["signature"])
-        for item in artifact_receipts
-        if str(item["signature"]) in canonical_worker_signatures
+        str(item["signature"]) for item in artifact_receipts
     }
     missing_output_inbox_signatures = sorted(
         canonical_artifact_signatures - output_inbox_signatures
     )
     output_inbox_receipt_lineage = (
         bool(artifact_receipts)
-        and len(canonical_artifact_signatures) == len(artifact_receipts)
         and bool(output_inbox_messages)
         and not missing_output_inbox_signatures
     )
@@ -837,6 +961,9 @@ def _trajectory_control_plane(
         "director_retrieval_value_collisions": lexical_collisions,
         "director_exposed_memory_ids": exposed_memory_ids,
         "retrieval_tool_call_count": len(receipts),
+        "historical_completed_retrieval_receipt_count": sum(
+            item.get("artifact_available") is True for item in receipts
+        ),
         "retrieval_artifact_receipt_count": len(artifact_receipts),
         "search_count": sum(item["action"] == "search" for item in receipts),
         "read_count": sum(item["action"] == "read" for item in receipts),
