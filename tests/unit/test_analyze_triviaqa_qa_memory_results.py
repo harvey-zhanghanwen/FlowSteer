@@ -62,6 +62,99 @@ def _receipt(action: str, ordinal: int) -> dict[str, object]:
     }
 
 
+def _ordered_top_k_fixture(
+    top_k: int = 3,
+) -> tuple[dict[str, object], list[dict[str, object]], dict[str, object]]:
+    rows = [
+        {
+            "memory_id": f"memory-train-{index}",
+            "source_train_task_id": f"triviaqa:train:{index}",
+            "paraphrase_question": f"Equivalent train question {index}",
+            "paraphrase_answer_statement": f"The answer is train answer {index}",
+            "canonical_answer": f"train answer {index}",
+            "rank": index,
+            "similarity": round(0.95 - index * 0.05, 2),
+        }
+        for index in range(1, top_k + 1)
+    ]
+    memory_ids = [str(row["memory_id"]) for row in rows]
+    query = "rewritten public question"
+    search: dict[str, object] = {
+        "tool_id": analysis.QA_MEMORY_TOOL_ID,
+        "tool_version": "qa-memory-test-v2",
+        "request": {
+            "action": "search",
+            "arguments": {"query": query, "limit": top_k},
+        },
+        "result": {
+            "completed": True,
+            "value": {
+                "operation": "search",
+                "query": query,
+                "top_k": top_k,
+                "memory_ids": memory_ids,
+                "hits": [
+                    {
+                        "memory_id": row["memory_id"],
+                        "rank": row["rank"],
+                        "similarity": row["similarity"],
+                    }
+                    for row in rows
+                ],
+            },
+        },
+        "error_type": None,
+    }
+    reads: list[dict[str, object]] = []
+    candidates: list[dict[str, object]] = []
+    for row in rows:
+        memory = {
+            "memory_id": row["memory_id"],
+            "source_train_task_id": row["source_train_task_id"],
+            "paraphrase_question": row["paraphrase_question"],
+            "paraphrase_answer_statement": row[
+                "paraphrase_answer_statement"
+            ],
+            "canonical_answer": row["canonical_answer"],
+            "text": (
+                f"Question: {row['paraphrase_question']}\n"
+                f"Answer: {row['paraphrase_answer_statement']}"
+            ),
+        }
+        reads.append(
+            {
+                "tool_id": analysis.QA_MEMORY_TOOL_ID,
+                "tool_version": "qa-memory-test-v2",
+                "request": {
+                    "action": "read",
+                    "arguments": {"memory_id": row["memory_id"]},
+                },
+                "result": {
+                    "completed": True,
+                    "value": {
+                        "operation": "read",
+                        "memory_id": row["memory_id"],
+                        "memory": memory,
+                    },
+                },
+                "error_type": None,
+            }
+        )
+        candidates.append(
+            {
+                field: row[field]
+                for field in analysis.QA_MEMORY_BATCH_CANDIDATE_FIELDS
+            }
+        )
+    artifact = {
+        "question_scope": "public validation question",
+        "retrieval_query": query,
+        "top_k": top_k,
+        "candidates": candidates,
+    }
+    return search, reads, artifact
+
+
 def _director_prompt(
     *,
     allowed_tools: list[str] | None = None,
@@ -322,6 +415,47 @@ def _trajectory(task_id: str) -> dict[str, object]:
     }
 
 
+def _ordered_top_k_trajectory(
+    task_id: str, top_k: int = 3
+) -> dict[str, object]:
+    trajectory = _trajectory(task_id)
+    search, reads, artifact = _ordered_top_k_fixture(top_k)
+    receipts = [search, *reads]
+    artifact_text = json.dumps(
+        artifact,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    turn = trajectory["turns"][0]  # type: ignore[index]
+    retriever = turn["executions"][0]
+    retriever["output"] = artifact_text
+    retriever["metadata"]["response"] = {
+        "tool_receipts": receipts,
+        "react_trace": [
+            {
+                "structured_action": {
+                    "kind": "complete",
+                    "arguments": {
+                        "value": {
+                            "memory_ids": [
+                                candidate["memory_id"]
+                                for candidate in artifact["candidates"]
+                            ]
+                        }
+                    },
+                }
+            }
+        ],
+    }
+    reasoner_upstream = turn["executions"][1]["metadata"]["request"][
+        "upstream"
+    ][0]
+    reasoner_upstream["artifact"] = artifact_text
+    reasoner_upstream["tool_receipts"] = receipts
+    return trajectory
+
+
 def _paired(task_id: str, direct_correct: bool) -> dict[str, object]:
     def condition(score: float, answer: str) -> dict[str, object]:
         return {
@@ -542,6 +676,138 @@ def _assert_director_profile_and_reasoner_tool_assignment_fail_closed() -> None:
     assert assertions["reasoner_qamemory_tool_unassigned"] is False
 
 
+def _assert_ordered_top_k_projection_and_k_completeness() -> None:
+    task_id = "triviaqa:validation:ordered-top-k"
+    trajectory = _ordered_top_k_trajectory(task_id, top_k=3)
+
+    result = analysis._trajectory_control_plane(task_id, trajectory)  # noqa: SLF001
+    projections = result["native_artifact_receipt_projections"]
+    assert len(projections) == 1
+    projection = projections[0]
+    assert projection["projection_kind"] == "ordered_top_k_batch"
+    assert projection["expected_top_k"] == 3
+    assert projection["completion_memory_id_count"] == 3
+    assert projection["search_hit_count"] == 3
+    assert projection["artifact_candidate_count"] == 3
+    assert projection["successful_read_count"] == 3
+    assert projection["successful_search_count"] == 1
+    assert projection["qa_tool_action_count"] == 4
+    assert projection["one_search_plus_k_ordered_reads"] is True
+    assert projection["ordered_memory_ids_match"] is True
+    assert projection["rank_similarity_exact"] is True
+    assert projection["read_records_exact"] is True
+    assert projection["k_complete"] is True
+    assert projection["receipt_exact"] is True
+    assert all(
+        candidate["receipt_exact"] is True
+        for candidate in projection["candidate_receipt_diagnostics"]
+    )
+    assert result["native_top_k_batch_projection_count"] == 1
+    assert result["native_top_k_batch_complete_count"] == 1
+    assert result["native_top_k_batch_incomplete_count"] == 0
+
+    control, _ = analysis._aggregate_control_plane(  # noqa: SLF001
+        [task_id], {task_id: trajectory}
+    )
+    assertions = control["assertions"]
+    assert assertions["director_tool_calls_eq_0"] is True
+    assert assertions["retrieval_tool_calls_by_worker_gt_0"] is True
+    assert assertions["retrieval_artifact_routed_via_relation"] is True
+    assert assertions["native_top_k_batch_projection_count"] == 1
+    assert assertions["native_top_k_batch_complete_count"] == 1
+    assert assertions["native_top_k_batch_incomplete_count"] == 0
+    assert assertions["native_top_k_batch_expected_k_values"] == [3]
+    assert assertions["native_top_k_batches_complete"] is True
+
+
+def _assert_ordered_top_k_projection_fails_closed_on_receipt_mismatch() -> None:
+    task_id = "triviaqa:validation:ordered-top-k-mismatch"
+    trajectory = _ordered_top_k_trajectory(task_id, top_k=3)
+    turn = trajectory["turns"][0]  # type: ignore[index]
+    retriever = turn["executions"][0]
+    artifact = json.loads(retriever["output"])
+    artifact["candidates"][1]["similarity"] = 0.01
+    artifact["candidates"][2]["paraphrase_answer_statement"] = (
+        "tampered answer statement"
+    )
+    artifact_text = json.dumps(
+        artifact,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    retriever["output"] = artifact_text
+    response = retriever["metadata"]["response"]
+    response["tool_receipts"] = response["tool_receipts"][:-1]
+    reasoner_upstream = turn["executions"][1]["metadata"]["request"][
+        "upstream"
+    ][0]
+    reasoner_upstream["artifact"] = artifact_text
+    reasoner_upstream["tool_receipts"] = response["tool_receipts"]
+
+    result = analysis._trajectory_control_plane(task_id, trajectory)  # noqa: SLF001
+    projection = result["native_artifact_receipt_projections"][0]
+    assert projection["projection_kind"] == "ordered_top_k_batch"
+    assert projection["successful_read_count"] == 2
+    assert projection["one_search_plus_k_ordered_reads"] is False
+    assert projection["rank_similarity_exact"] is False
+    assert projection["read_records_exact"] is False
+    assert projection["k_complete"] is False
+    assert projection["receipt_exact"] is False
+    assert "search_hit.similarity" in projection[
+        "candidate_receipt_diagnostics"
+    ][1]["mismatched_receipt_fields"]
+    assert "read_request.memory_id" in projection[
+        "candidate_receipt_diagnostics"
+    ][2]["mismatched_receipt_fields"]
+
+    control, _ = analysis._aggregate_control_plane(  # noqa: SLF001
+        [task_id], {task_id: trajectory}
+    )
+    assertions = control["assertions"]
+    assert assertions["native_artifact_receipt_projection_violation_count"] == 1
+    assert assertions["native_top_k_batch_complete_count"] == 0
+    assert assertions["native_top_k_batch_incomplete_count"] == 1
+    assert assertions["native_top_k_batches_complete"] is False
+
+
+def _assert_legacy_singular_projection_remains_supported() -> None:
+    trajectory = _trajectory("triviaqa:validation:legacy-singular")
+    turn = trajectory["turns"][0]  # type: ignore[index]
+    retriever = turn["executions"][0]
+    response = retriever["metadata"]["response"]
+    search = response["tool_receipts"][0]
+    search["result"]["value"]["memory_ids"] = ["memory-train-1"]
+    artifact = {
+        "memory_id": "memory-train-1",
+        "canonical_answer": "train answer",
+        "paraphrase_question": "A semantically equivalent train question",
+        "paraphrase_answer_statement": "The answer is train answer",
+        "source_train_task_id": "triviaqa:train:1",
+    }
+    retriever["output"] = json.dumps(artifact, sort_keys=True)
+    response["react_trace"] = [
+        {
+            "structured_action": {
+                "kind": "complete",
+                "arguments": {"value": {"memory_id": "memory-train-1"}},
+            }
+        }
+    ]
+
+    projections = analysis._native_artifact_receipt_projections(  # noqa: SLF001
+        trajectory
+    )
+    assert len(projections) == 1
+    projection = projections[0]
+    assert projection["projection_kind"] == "legacy_singular"
+    assert projection["selection_matches_artifact"] is True
+    assert projection["exact_search_read_receipt_found"] is True
+    assert projection["k_completeness_applicable"] is False
+    assert projection["k_complete"] is None
+    assert projection["receipt_exact"] is True
+
+
 class TriviaQAQAMemoryResultAnalysisTests(unittest.TestCase):
     def test_formal_report_metrics_tool_ownership_isolation_routing_and_demos(
         self,
@@ -567,3 +833,14 @@ class TriviaQAQAMemoryResultAnalysisTests(unittest.TestCase):
         self,
     ) -> None:
         _assert_director_profile_and_reasoner_tool_assignment_fail_closed()
+
+    def test_ordered_top_k_projection_and_k_completeness(self) -> None:
+        _assert_ordered_top_k_projection_and_k_completeness()
+
+    def test_ordered_top_k_projection_fails_closed_on_receipt_mismatch(
+        self,
+    ) -> None:
+        _assert_ordered_top_k_projection_fails_closed_on_receipt_mismatch()
+
+    def test_legacy_singular_projection_remains_supported(self) -> None:
+        _assert_legacy_singular_projection_remains_supported()

@@ -56,6 +56,19 @@ SIMILARITY = "dot_product"
 EMBEDDING_TEXT_TEMPLATE = (
     "Question: {paraphrase_question}\nAnswer: {paraphrase_answer_statement}"
 )
+_STRICT_PARAPHRASE_PROMPT_VERSIONS = frozenset(
+    {
+        "triviaqa.qa_memory.qa_paraphrase.v4",
+        "triviaqa.qa_memory.qa_paraphrase.v5",
+        "triviaqa.qa_memory.qa_paraphrase.v6",
+        "triviaqa.qa_memory.qa_paraphrase.v7",
+        "triviaqa.qa_memory.qa_paraphrase.v8",
+        "triviaqa.qa_memory.qa_paraphrase.v9",
+        "triviaqa.qa_memory.qa_paraphrase.v10",
+        "triviaqa.qa_memory.qa_paraphrase.v11",
+        "triviaqa.qa_memory.qa_paraphrase.v12",
+    }
+)
 
 MANIFEST_FILENAME = "manifest.json"
 MEMORIES_FILENAME = "memories.jsonl"
@@ -165,6 +178,23 @@ _GENERIC_ANSWER_WRAPPER_TOKENS = frozenset(
 _STATEMENT_TOKEN = re.compile(r"[^\W_]+(?:['’-][^\W_]+)*", re.UNICODE)
 
 
+def exact_canonical_span_preserved(
+    text: object,
+    canonical_answer: object,
+) -> bool:
+    """Require the exact case-sensitive answer span at lexical boundaries."""
+
+    if not isinstance(text, str) or not text.strip():
+        return False
+    if not isinstance(canonical_answer, str) or not canonical_answer.strip():
+        return False
+    canonical = " ".join(canonical_answer.split())
+    return re.search(
+        rf"(?<!\w){re.escape(canonical)}(?!\w)",
+        " ".join(text.split()),
+    ) is not None
+
+
 def relation_bearing_answer_statement(
     statement: object,
     canonical_answer: object,
@@ -184,7 +214,7 @@ def relation_bearing_answer_statement(
         return False
     normalized_statement = " ".join(statement.split())
     canonical = " ".join(canonical_answer.split())
-    if canonical not in normalized_statement:
+    if not exact_canonical_span_preserved(normalized_statement, canonical):
         return False
     terminal_punctuation = " .,!?:;\"'`()[]{}"
     if (
@@ -192,7 +222,11 @@ def relation_bearing_answer_statement(
         == canonical.strip(terminal_punctuation).casefold()
     ):
         return False
-    relation_context = normalized_statement.replace(canonical, " ")
+    relation_context = re.sub(
+        rf"(?<!\w){re.escape(canonical)}(?!\w)",
+        " ",
+        normalized_statement,
+    )
     context_tokens = tuple(
         token.casefold() for token in _STATEMENT_TOKEN.findall(relation_context)
     )
@@ -203,7 +237,12 @@ def relation_bearing_answer_statement(
 
 @dataclass(frozen=True, slots=True)
 class TriviaQATrainSource:
-    """Minimal, alias-free projection of one frozen aligned train row."""
+    """Minimal projection of one frozen aligned train row.
+
+    ``accepted_answers_for_admission`` is train-only loader state used for
+    deterministic semantic admission.  It is never projected into a memory
+    record, embedding payload, Tool observation, or Agent request.
+    """
 
     source_train_task_id: str
     base_task_id: str
@@ -213,6 +252,7 @@ class TriviaQATrainSource:
     original_question: str
     canonical_answer: str
     native_split: str
+    accepted_answers_for_admission: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         task_id = _required_text(
@@ -252,6 +292,15 @@ class TriviaQATrainSource:
             "native_split",
             _required_text(self.native_split, field_name="native_split"),
         )
+        accepted = tuple(
+            _required_text(answer, field_name="accepted_answers_for_admission")
+            for answer in self.accepted_answers_for_admission
+        )
+        if accepted and accepted[0] != self.canonical_answer:
+            raise ValueError(
+                "accepted_answers_for_admission must begin with canonical_answer"
+            )
+        object.__setattr__(self, "accepted_answers_for_admission", accepted)
 
 
 def _sampling(metadata: Mapping[str, object], *, line_number: int) -> Mapping[str, object]:
@@ -328,13 +377,16 @@ def _train_sources(path: Path, *, expected_count: int) -> tuple[TriviaQATrainSou
                 if isinstance(payload, Mapping)
                 else None
             )
-            # FIELD BOUNDARY: access only accepted_answers[0].  Do not read the
-            # aligned row's ground_truth/answer or project remaining aliases.
+            # FIELD BOUNDARY: train accepted answers are loader-only admission
+            # state.  Only accepted_answers[0] becomes canonical_answer; no
+            # alias is projected into the materialized record or index.
             if (
                 not isinstance(accepted, list)
                 or not accepted
-                or not isinstance(accepted[0], str)
-                or not accepted[0].strip()
+                or any(
+                    not isinstance(answer, str) or not answer.strip()
+                    for answer in accepted
+                )
             ):
                 raise ValueError(
                     f"train row {line_number} has no canonical accepted_answers[0]"
@@ -361,6 +413,7 @@ def _train_sources(path: Path, *, expected_count: int) -> tuple[TriviaQATrainSou
                         metadata.get("native_split", SOURCE_PROJECT_SPLIT),
                         field_name="native_split",
                     ),
+                    accepted_answers_for_admission=tuple(accepted),
                 )
             )
     if len(sources) != expected_count:
@@ -492,10 +545,10 @@ class TriviaQAQAMemoryRecord:
         object.__setattr__(self, "canonical_answer", canonical)
         if type(self.canonical_span_preserved) is not bool or not self.canonical_span_preserved:
             raise ValueError("canonical_span_preserved must be true")
-        if canonical not in statement:
+        if not exact_canonical_span_preserved(statement, canonical):
             raise ValueError("paraphrase answer statement does not preserve canonical span")
         if (
-            self.prompt_template_version == "triviaqa.qa_memory.qa_paraphrase.v4"
+            self.prompt_template_version in _STRICT_PARAPHRASE_PROMPT_VERSIONS
             and not relation_bearing_answer_statement(statement, canonical)
         ):
             raise ValueError(
@@ -818,7 +871,7 @@ def validate_qa_memory_against_sources(
         canonical = source.canonical_answer
         if (
             record.prompt_template_version
-            == "triviaqa.qa_memory.qa_paraphrase.v4"
+            in _STRICT_PARAPHRASE_PROMPT_VERSIONS
             and canonical.casefold() not in source.original_question.casefold()
             and canonical.casefold() in record.paraphrase_question.casefold()
             and not canonical_is_original_spelling_variant(

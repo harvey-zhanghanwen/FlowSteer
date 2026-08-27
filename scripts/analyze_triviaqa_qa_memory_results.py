@@ -68,6 +68,22 @@ CANONICAL_RECEIPT_DATA_FIELDS = (
     "source_train_task_id",
     "base_task_id",
 )
+QA_MEMORY_BATCH_ARTIFACT_FIELDS = (
+    "question_scope",
+    "retrieval_query",
+    "top_k",
+    "candidates",
+)
+QA_MEMORY_BATCH_CANDIDATE_FIELDS = (
+    "rank",
+    "similarity",
+    "memory_id",
+    "source_train_task_id",
+    "paraphrase_question",
+    "paraphrase_answer_statement",
+    "canonical_answer",
+)
+QA_MEMORY_READ_RECORD_FIELDS = QA_MEMORY_BATCH_CANDIDATE_FIELDS[3:]
 
 
 def _resolve(value: str | Path) -> Path:
@@ -528,7 +544,13 @@ def _canonical_receipt_data_values(
 def _native_artifact_receipt_projections(
     trajectory: Mapping[str, Any],
 ) -> list[dict[str, Any]]:
-    """Verify worker artifacts against their selected exact read receipts."""
+    """Verify singular or ordered top-k worker artifacts against Tool receipts.
+
+    The legacy wire selects one ``memory_id``.  The current wire selects all
+    ``memory_ids`` from one embedding search and projects an ordered candidate
+    batch only after one matching read per rank.  This analyzer mirrors that
+    receipt boundary without importing runtime code or reconstructing content.
+    """
 
     results: list[dict[str, Any]] = []
     compared_fields = CANONICAL_RECEIPT_DATA_FIELDS[:5]
@@ -550,6 +572,322 @@ def _native_artifact_receipt_projections(
             continue
         if not isinstance(artifact, Mapping):
             continue
+
+        batch_wire = any(
+            field in artifact for field in ("retrieval_query", "top_k", "candidates")
+        )
+        if batch_wire:
+            selected_memory_ids: list[str] | None = None
+            for raw_trace in reversed(base._list(response.get("react_trace"))):
+                trace = base._mapping(raw_trace)
+                action = base._mapping(trace.get("structured_action"))
+                if action.get("kind") != "complete":
+                    continue
+                value = base._mapping(
+                    base._mapping(action.get("arguments")).get("value")
+                )
+                raw_selected = value.get("memory_ids")
+                if (
+                    isinstance(raw_selected, list)
+                    and raw_selected
+                    and all(
+                        isinstance(memory_id, str)
+                        and bool(memory_id.strip())
+                        and memory_id == memory_id.strip()
+                        for memory_id in raw_selected
+                    )
+                    and len(raw_selected) == len(set(raw_selected))
+                ):
+                    selected_memory_ids = list(raw_selected)
+                break
+
+            successful_searches: list[dict[str, Any]] = []
+            qa_tool_action_count = 0
+            raw_tool_receipts = base._list(response.get("tool_receipts"))
+            for receipt_position, raw_receipt in enumerate(raw_tool_receipts):
+                receipt = base._mapping(raw_receipt)
+                if receipt.get("tool_id") != QA_MEMORY_TOOL_ID:
+                    continue
+                receipt_request = base._mapping(receipt.get("request"))
+                action_name = receipt_request.get("action")
+                if action_name not in {"search", "read"}:
+                    continue
+                qa_tool_action_count += 1
+                if action_name != "search" or receipt.get("error_type") is not None:
+                    continue
+                receipt_result = base._mapping(receipt.get("result"))
+                value = base._mapping(receipt_result.get("value", receipt_result))
+                arguments = base._mapping(receipt_request.get("arguments"))
+                raw_memory_ids = value.get("memory_ids")
+                raw_hits = value.get("hits")
+                if (
+                    receipt_result.get("completed") is not True
+                    or value.get("operation") != "search"
+                    or set(arguments) != {"query", "limit"}
+                    or not isinstance(arguments.get("query"), str)
+                    or not arguments["query"].strip()
+                    or type(arguments.get("limit")) is not int
+                    or arguments["limit"] < 1
+                    or value.get("query") != arguments["query"]
+                    or value.get("top_k") != arguments["limit"]
+                    or not isinstance(raw_memory_ids, list)
+                    or not raw_memory_ids
+                    or len(raw_memory_ids) != len(set(raw_memory_ids))
+                    or not isinstance(raw_hits, list)
+                    or len(raw_hits) != len(raw_memory_ids)
+                ):
+                    continue
+                successful_searches.append(
+                    {
+                        "receipt_position": receipt_position,
+                        "query": arguments.get("query"),
+                        "limit": arguments.get("limit"),
+                        "result_query": value.get("query"),
+                        "result_top_k": value.get("top_k"),
+                        "memory_ids": list(raw_memory_ids),
+                        "hits": list(raw_hits),
+                    }
+                )
+
+            latest_search = successful_searches[-1] if successful_searches else None
+            search_memory_ids = (
+                list(latest_search["memory_ids"]) if latest_search is not None else []
+            )
+            search_hits = (
+                list(latest_search["hits"]) if latest_search is not None else []
+            )
+            ordered_reads: list[dict[str, Any]] = []
+            if latest_search is not None:
+                for receipt_position, raw_receipt in enumerate(raw_tool_receipts):
+                    if receipt_position <= latest_search["receipt_position"]:
+                        continue
+                    receipt = base._mapping(raw_receipt)
+                    receipt_request = base._mapping(receipt.get("request"))
+                    if (
+                        receipt.get("tool_id") != QA_MEMORY_TOOL_ID
+                        or receipt.get("error_type") is not None
+                        or receipt_request.get("action") != "read"
+                    ):
+                        continue
+                    receipt_result = base._mapping(receipt.get("result"))
+                    if receipt_result.get("completed") is not True:
+                        continue
+                    arguments = base._mapping(receipt_request.get("arguments"))
+                    value = base._mapping(
+                        receipt_result.get("value", receipt_result)
+                    )
+                    memory = base._mapping(value.get("memory"))
+                    memory_id = arguments.get("memory_id")
+                    if (
+                        set(arguments) != {"memory_id"}
+                        or not isinstance(memory_id, str)
+                        or not memory_id.strip()
+                        or memory_id != memory_id.strip()
+                        or value.get("operation") != "read"
+                        or value.get("memory_id") != memory_id
+                        or memory.get("memory_id") != memory_id
+                        or not isinstance(memory.get("text"), str)
+                        or not memory["text"].strip()
+                    ):
+                        continue
+                    ordered_reads.append(
+                        {
+                            "receipt_position": receipt_position,
+                            "memory_id": memory_id,
+                            "memory": memory,
+                        }
+                    )
+
+            raw_candidates = artifact.get("candidates")
+            candidates = list(raw_candidates) if isinstance(raw_candidates, list) else []
+            artifact_top_k = artifact.get("top_k")
+            valid_top_k = (
+                type(artifact_top_k) is int and artifact_top_k > 0
+            )
+            expected_top_k = artifact_top_k if valid_top_k else None
+            read_memory_ids = [item.get("memory_id") for item in ordered_reads]
+            candidate_memory_ids = [
+                candidate.get("memory_id") if isinstance(candidate, Mapping) else None
+                for candidate in candidates
+            ]
+            search_hit_memory_ids = [
+                hit.get("memory_id") if isinstance(hit, Mapping) else None
+                for hit in search_hits
+            ]
+
+            candidate_diagnostics: list[dict[str, Any]] = []
+            previous_hit_rank = 0
+            previous_candidate_rank = 0
+            for candidate_index, raw_candidate in enumerate(candidates):
+                candidate = base._mapping(raw_candidate)
+                hit = (
+                    base._mapping(search_hits[candidate_index])
+                    if candidate_index < len(search_hits)
+                    else {}
+                )
+                read = (
+                    ordered_reads[candidate_index]
+                    if candidate_index < len(ordered_reads)
+                    else {}
+                )
+                memory = base._mapping(read.get("memory"))
+                mismatched_fields: list[str] = []
+                if set(candidate) != set(QA_MEMORY_BATCH_CANDIDATE_FIELDS):
+                    mismatched_fields.append("candidate_schema")
+                hit_rank = hit.get("rank")
+                hit_similarity = hit.get("similarity")
+                if type(hit_rank) is not int or hit_rank <= previous_hit_rank:
+                    mismatched_fields.append("search_hit.rank_valid")
+                else:
+                    previous_hit_rank = hit_rank
+                if isinstance(hit_similarity, bool) or not isinstance(
+                    hit_similarity, (int, float)
+                ):
+                    mismatched_fields.append("search_hit.similarity_valid")
+                candidate_rank = candidate.get("rank")
+                candidate_similarity = candidate.get("similarity")
+                if (
+                    type(candidate_rank) is not int
+                    or candidate_rank <= previous_candidate_rank
+                ):
+                    mismatched_fields.append("candidate.rank_valid")
+                else:
+                    previous_candidate_rank = candidate_rank
+                if isinstance(candidate_similarity, bool) or not isinstance(
+                    candidate_similarity, (int, float)
+                ):
+                    mismatched_fields.append("candidate.similarity_valid")
+                for field_name in ("memory_id", "rank", "similarity"):
+                    if candidate.get(field_name) != hit.get(field_name):
+                        mismatched_fields.append(f"search_hit.{field_name}")
+                if read.get("memory_id") != candidate.get("memory_id"):
+                    mismatched_fields.append("read_request.memory_id")
+                if memory.get("memory_id") != candidate.get("memory_id"):
+                    mismatched_fields.append("read_record.memory_id")
+                for field_name in QA_MEMORY_READ_RECORD_FIELDS:
+                    if candidate.get(field_name) != memory.get(field_name):
+                        mismatched_fields.append(f"read_record.{field_name}")
+                candidate_diagnostics.append(
+                    {
+                        "candidate_index": candidate_index,
+                        "memory_id": candidate.get("memory_id"),
+                        "rank": candidate.get("rank"),
+                        "similarity": candidate.get("similarity"),
+                        "mismatched_receipt_fields": mismatched_fields,
+                        "receipt_exact": not mismatched_fields,
+                    }
+                )
+
+            question = base._mapping(trajectory.get("task")).get("question")
+            artifact_fields_exact = set(artifact) == set(
+                QA_MEMORY_BATCH_ARTIFACT_FIELDS
+            )
+            search_query_matches = bool(
+                latest_search is not None
+                and artifact.get("retrieval_query") == latest_search.get("query")
+                and latest_search.get("result_query") == latest_search.get("query")
+            )
+            search_top_k_matches = bool(
+                valid_top_k
+                and latest_search is not None
+                and latest_search.get("limit") == artifact_top_k
+                and latest_search.get("result_top_k") == artifact_top_k
+            )
+            ordered_ids_match = bool(
+                selected_memory_ids is not None
+                and selected_memory_ids == search_memory_ids
+                and search_memory_ids == search_hit_memory_ids
+                and search_hit_memory_ids == candidate_memory_ids
+                and candidate_memory_ids == read_memory_ids
+                and len(candidate_memory_ids) == len(set(candidate_memory_ids))
+            )
+            one_search_plus_k_reads = bool(
+                valid_top_k
+                and len(successful_searches) == 1
+                and len(ordered_reads) == artifact_top_k
+                and qa_tool_action_count == artifact_top_k + 1
+            )
+            k_complete = bool(
+                valid_top_k
+                and len(candidates) == artifact_top_k
+                and len(search_memory_ids) == artifact_top_k
+                and len(search_hits) == artifact_top_k
+                and len(ordered_reads) == artifact_top_k
+                and selected_memory_ids is not None
+                and len(selected_memory_ids) == artifact_top_k
+                and ordered_ids_match
+                and one_search_plus_k_reads
+            )
+            rank_similarity_exact = bool(candidate_diagnostics) and all(
+                not any(
+                    field in {
+                        "search_hit.rank",
+                        "search_hit.similarity",
+                        "search_hit.rank_valid",
+                        "search_hit.similarity_valid",
+                        "candidate.rank_valid",
+                        "candidate.similarity_valid",
+                    }
+                    for field in item["mismatched_receipt_fields"]
+                )
+                for item in candidate_diagnostics
+            )
+            read_records_exact = bool(candidate_diagnostics) and all(
+                not any(
+                    field.startswith("read_")
+                    for field in item["mismatched_receipt_fields"]
+                )
+                for item in candidate_diagnostics
+            )
+            receipt_exact = bool(
+                artifact_fields_exact
+                and (not isinstance(question, str) or artifact.get("question_scope") == question)
+                and search_query_matches
+                and search_top_k_matches
+                and k_complete
+                and candidate_diagnostics
+                and all(item["receipt_exact"] for item in candidate_diagnostics)
+            )
+            results.append(
+                {
+                    "round_index": round_index,
+                    "execution_position": execution_position,
+                    "agent_id": agent.get("id", execution.get("agent_id")),
+                    "projection_kind": "ordered_top_k_batch",
+                    "selected_memory_ids": selected_memory_ids,
+                    "search_memory_ids": search_memory_ids,
+                    "candidate_memory_ids": candidate_memory_ids,
+                    "read_memory_ids": read_memory_ids,
+                    "expected_top_k": expected_top_k,
+                    "completion_memory_id_count": (
+                        len(selected_memory_ids)
+                        if selected_memory_ids is not None
+                        else 0
+                    ),
+                    "search_hit_count": len(search_hits),
+                    "artifact_candidate_count": len(candidates),
+                    "successful_read_count": len(ordered_reads),
+                    "successful_search_count": len(successful_searches),
+                    "qa_tool_action_count": qa_tool_action_count,
+                    "artifact_fields_exact": artifact_fields_exact,
+                    "question_scope_matches_task": (
+                        not isinstance(question, str)
+                        or artifact.get("question_scope") == question
+                    ),
+                    "search_query_matches_artifact": search_query_matches,
+                    "search_top_k_matches_artifact": search_top_k_matches,
+                    "ordered_memory_ids_match": ordered_ids_match,
+                    "one_search_plus_k_ordered_reads": one_search_plus_k_reads,
+                    "candidate_receipt_diagnostics": candidate_diagnostics,
+                    "rank_similarity_exact": rank_similarity_exact,
+                    "read_records_exact": read_records_exact,
+                    "k_completeness_applicable": True,
+                    "k_complete": k_complete,
+                    "receipt_exact": receipt_exact,
+                }
+            )
+            continue
+
         memory_id = artifact.get("memory_id")
         if not isinstance(memory_id, str) or not memory_id:
             continue
@@ -608,11 +946,14 @@ def _native_artifact_receipt_projections(
                 "round_index": round_index,
                 "execution_position": execution_position,
                 "agent_id": agent.get("id", execution.get("agent_id")),
+                "projection_kind": "legacy_singular",
                 "memory_id": memory_id,
                 "selected_memory_id": selected_memory_id,
                 "selection_matches_artifact": selected_memory_id == memory_id,
                 "exact_search_read_receipt_found": exact_read is not None,
                 "mismatched_receipt_fields": mismatched_fields,
+                "k_completeness_applicable": False,
+                "k_complete": None,
                 "receipt_exact": bool(
                     selected_memory_id == memory_id
                     and exact_read is not None
@@ -630,6 +971,11 @@ def _trajectory_control_plane(
     native_artifact_projections = _native_artifact_receipt_projections(
         trajectory
     )
+    native_top_k_batch_projections = [
+        item
+        for item in native_artifact_projections
+        if item.get("projection_kind") == "ordered_top_k_batch"
+    ]
     director_profiles, director_profile_violations = (
         _director_execution_profiles(trajectory)
     )
@@ -825,6 +1171,17 @@ def _trajectory_control_plane(
             item["receipt_exact"] is not True
             for item in native_artifact_projections
         ),
+        "native_top_k_batch_projection_count": len(
+            native_top_k_batch_projections
+        ),
+        "native_top_k_batch_complete_count": sum(
+            item.get("k_complete") is True
+            for item in native_top_k_batch_projections
+        ),
+        "native_top_k_batch_incomplete_count": sum(
+            item.get("k_complete") is not True
+            for item in native_top_k_batch_projections
+        ),
         "immediate_receipt_routes": immediate_routes,
         "output_agent_ids": sorted(output_ids),
         "observed_communication_edges": [list(edge) for edge in sorted(communication_edges)],
@@ -883,6 +1240,26 @@ def _aggregate_control_plane(
     native_projection_violations = sum(
         value["native_artifact_receipt_projection_violation_count"]
         for value in per_task.values()
+    )
+    native_batch_projections = [
+        projection
+        for value in per_task.values()
+        for projection in value["native_artifact_receipt_projections"]
+        if projection.get("projection_kind") == "ordered_top_k_batch"
+    ]
+    native_batch_complete_count = sum(
+        projection.get("k_complete") is True
+        for projection in native_batch_projections
+    )
+    native_batch_incomplete_count = (
+        len(native_batch_projections) - native_batch_complete_count
+    )
+    native_batch_expected_k_values = sorted(
+        {
+            projection["expected_top_k"]
+            for projection in native_batch_projections
+            if type(projection.get("expected_top_k")) is int
+        }
     )
     payload_exposures = {
         task_id: {
@@ -951,6 +1328,15 @@ def _aggregate_control_plane(
         "native_artifacts_match_exact_read_receipts": bool(
             native_projection_count
         ) and native_projection_violations == 0,
+        "native_top_k_batch_projection_count": len(native_batch_projections),
+        "native_top_k_batch_complete_count": native_batch_complete_count,
+        "native_top_k_batch_incomplete_count": native_batch_incomplete_count,
+        "native_top_k_batch_expected_k_values": native_batch_expected_k_values,
+        "native_top_k_batches_complete": (
+            None
+            if not native_batch_projections
+            else native_batch_incomplete_count == 0
+        ),
         "retrieval_tasks": len(retrieval_tasks),
         "retrieval_artifact_tasks": len(artifact_tasks),
         "retrieval_tasks_with_relation_route": len(routed_tasks),
@@ -1244,6 +1630,7 @@ def _render_markdown(report: Mapping[str, Any]) -> str:
         f"- `retrieval_artifact_routed_via_relation=true`：**{assertions.get('retrieval_artifact_routed_via_relation')}**（{assertions.get('retrieval_tasks_with_relation_route')}/{assertions.get('retrieval_tasks')} retrieval tasks）。",
         f"- Director 数据面隔离：**{assertions.get('director_data_plane_isolated')}**（canonical receipt actual-value exposure={assertions.get('director_retrieval_payload_exposure_count')}；字段名仅作诊断）。",
         f"- Output inbox receipt lineage（独立强断言）：**{assertions.get('output_inbox_receipt_lineage')}**（{assertions.get('retrieval_tasks_with_output_inbox_receipt_lineage')}/{assertions.get('retrieval_tasks')} retrieval tasks）。",
+        f"- Ordered top-k batch 完整性：**{assertions.get('native_top_k_batches_complete')}**（complete={assertions.get('native_top_k_batch_complete_count')}/{assertions.get('native_top_k_batch_projection_count')}；incomplete={assertions.get('native_top_k_batch_incomplete_count')}；K={assertions.get('native_top_k_batch_expected_k_values')}）。",
         "",
         "### Worker Agent Tool ownership",
         "",

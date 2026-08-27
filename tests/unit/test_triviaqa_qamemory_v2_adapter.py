@@ -20,7 +20,7 @@ from src.interactive.qa_tool_adapter import (
     TRIVIAQA_QA_MEMORY_TOOL_ID,
     build_qa_tool_registry,
 )
-from src.interactive.tool_runtime import ToolRequest
+from src.interactive.tool_runtime import ActionKind, StructuredAction, ToolRequest
 
 
 @dataclass(frozen=True)
@@ -241,6 +241,141 @@ class TriviaQAQAMemoryV2AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([("author novel", 3)], index.search_calls)
         self.assertEqual(["memory-001"], index.read_calls)
 
+    async def test_semantic_react_execution_routes_complete_top_k_batch(self) -> None:
+        rows = (
+            ("memory-001", "triviaqa:tc_129", "Ada", 0.93),
+            ("memory-002", "triviaqa:tc_130", "Grace", 0.88),
+            ("memory-003", "triviaqa:tc_131", "Charles", 0.81),
+        )
+
+        class _TopKIndex:
+            manifest = _Manifest()
+
+            def __init__(self) -> None:
+                self.read_calls: list[str] = []
+
+            def search(self, query: str, *, limit: int) -> tuple[object, ...]:
+                self.assert_search(query, limit)
+                return tuple(
+                    SimpleNamespace(
+                        passage_id=memory_id,
+                        memory_id=memory_id,
+                        document_id=source_id,
+                        source_train_task_id=source_id,
+                        base_task_id=source_id,
+                        cycled_training_sample=False,
+                        cycle_index=None,
+                        paraphrase_question=f"Candidate question {rank}",
+                        paraphrase_answer_statement=f"The answer is {answer}",
+                        canonical_answer=answer,
+                        paraphrase_version="semantic-preserving-v1",
+                        paraphrase_provenance=None,
+                        title=f"Candidate question {rank}",
+                        snippet=f"Candidate question {rank}",
+                        rank=rank,
+                        similarity=similarity,
+                    )
+                    for rank, (
+                        memory_id,
+                        source_id,
+                        answer,
+                        similarity,
+                    ) in enumerate(rows, start=1)
+                )
+
+            @staticmethod
+            def assert_search(query: str, limit: int) -> None:
+                if (query, limit) != ("author novel", 3):
+                    raise AssertionError("unexpected embedding search")
+
+            def read(self, memory_id: str) -> object:
+                self.read_calls.append(memory_id)
+                rank, row = next(
+                    (rank, row)
+                    for rank, row in enumerate(rows, start=1)
+                    if row[0] == memory_id
+                )
+                _, source_id, answer, _ = row
+                return SimpleNamespace(
+                    passage_id=memory_id,
+                    memory_id=memory_id,
+                    document_id=source_id,
+                    source_train_task_id=source_id,
+                    base_task_id=source_id,
+                    cycled_training_sample=False,
+                    cycle_index=None,
+                    paraphrase_question=f"Candidate question {rank}",
+                    paraphrase_answer_statement=f"The answer is {answer}",
+                    canonical_answer=answer,
+                    paraphrase_version="semantic-preserving-v1",
+                    paraphrase_provenance=None,
+                    title=f"Candidate question {rank}",
+                    text=(
+                        f"Question: Candidate question {rank}\n"
+                        f"Answer: The answer is {answer}"
+                    ),
+                )
+
+        def action(name: str, arguments: object) -> str:
+            return json.dumps(
+                {
+                    "arguments": arguments,
+                    "kind": "complete" if name == "complete" else "tool",
+                    "name": name,
+                    "resource_id": (
+                        None
+                        if name == "complete"
+                        else TRIVIAQA_QA_MEMORY_TOOL_ID
+                    ),
+                    "skill_id": None,
+                }
+            )
+
+        class _Gateway:
+            def __init__(self) -> None:
+                self.outputs = [
+                    action("search", {"query": "author novel", "limit": 3}),
+                    *(
+                        action("read", {"memory_id": memory_id})
+                        for memory_id, _, _, _ in rows
+                    ),
+                    action(
+                        "complete",
+                        {"value": {"memory_ids": [row[0] for row in rows]}},
+                    ),
+                ]
+
+            async def generate(self, request: AgentRequest) -> AgentResponse:
+                if request.agent.allowed_tools != (
+                    TRIVIAQA_QA_MEMORY_TOOL_ID,
+                ):
+                    raise AssertionError("QA-memory Tool must remain worker-owned")
+                return AgentResponse(self.outputs.pop(0))
+
+        index = _TopKIndex()
+        response = await QARetrievalReactExecutionAdapter(
+            gateway=_Gateway(),
+            tool_registry=build_qa_tool_registry(index),
+            max_turns=5,
+            max_tool_calls=4,
+            task_type="factual_qa",
+            completion_policy="required_evidence",
+            retrieval_tool_id=TRIVIAQA_QA_MEMORY_TOOL_ID,
+        ).execute(
+            replace(
+                self._request(),
+                semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            )
+        )
+
+        artifact = json.loads(response.text)
+        self.assertEqual(
+            [row[0] for row in rows],
+            [candidate["memory_id"] for candidate in artifact["candidates"]],
+        )
+        self.assertEqual(4, len(response.metadata["tool_receipts"]))
+        self.assertEqual([row[0] for row in rows], index.read_calls)
+
     def test_v63_state_conditioned_search_read_complete_is_preserved(self) -> None:
         registry = build_qa_tool_registry(_Index())
         adapter = QARetrievalReactExecutionAdapter(
@@ -356,12 +491,12 @@ class TriviaQAQAMemoryV2AdapterTests(unittest.IsolatedAsyncioTestCase):
 
         contract = adapter._contract(request, [search_observation])
         self.assertIn("resource_id triviaqa.qa_memory", contract)
-        self.assertIn("exactly memory_id", contract)
-        self.assertIn("structured semantic artifact", contract)
+        self.assertIn("contains only memory_id", contract)
+        self.assertIn("structured evidence artifact", contract)
         self.assertNotIn("qa-retrieval", contract)
         self.assertNotIn("arguments object contains only passage_id", contract)
 
-    def test_semantic_completion_binds_provenance_to_successful_memory_id(
+    def test_semantic_completion_reads_complete_embedding_top_k_in_rank_order(
         self,
     ) -> None:
         adapter = QARetrievalReactExecutionAdapter(
@@ -377,6 +512,11 @@ class TriviaQAQAMemoryV2AdapterTests(unittest.IsolatedAsyncioTestCase):
             self._request(),
             semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
         )
+        ranked_memories = (
+            ("memory-001", "triviaqa:tc_129", "Ada", 0.93),
+            ("memory-002", "triviaqa:tc_130", "Grace", 0.88),
+            ("memory-003", "triviaqa:tc_131", "Charles", 0.81),
+        )
         search_observation = {
             "observation_status": "success",
             "executed_action": {
@@ -390,88 +530,144 @@ class TriviaQAQAMemoryV2AdapterTests(unittest.IsolatedAsyncioTestCase):
                 "operation": "search",
                 "query": "author novel",
                 "top_k": 3,
-                "memory_ids": ["memory-001"],
-                "passage_ids": ["memory-001"],
+                "memory_ids": [item[0] for item in ranked_memories],
+                "passage_ids": [item[0] for item in ranked_memories],
                 "hits": [
                     {
-                        "passage_id": "memory-001",
-                        "memory_id": "memory-001",
-                        "document_id": "triviaqa:tc_129",
-                        "title": "Which author wrote the novel?",
-                        "snippet": "The answer is Ada",
-                        "rank": 1,
+                        "passage_id": memory_id,
+                        "memory_id": memory_id,
+                        "document_id": source_id,
+                        "title": f"Candidate question {rank}",
+                        "snippet": f"Candidate question {rank}",
+                        "rank": rank,
+                        "similarity": similarity,
                     }
+                    for rank, (memory_id, source_id, _, similarity) in enumerate(
+                        ranked_memories,
+                        start=1,
+                    )
                 ],
             },
         }
-        read_observation = {
-            "observation_status": "success",
-            "executed_action": {
-                "kind": "tool",
-                "name": "read",
-                "resource_id": TRIVIAQA_QA_MEMORY_TOOL_ID,
-                "skill_id": None,
-                "arguments": {"memory_id": "memory-001"},
-            },
-            "result": {
-                "operation": "read",
-                "memory_id": "memory-001",
-                "passage_id": "memory-001",
-                "memory": {
-                    "memory_id": "memory-001",
-                    "passage_id": "memory-001",
-                    "title": "Which author wrote the novel?",
-                    "text": "Question: Which author wrote the novel?\n"
-                    "Answer: The answer is Ada",
-                },
-                "passage": {
-                    "memory_id": "memory-001",
-                    "passage_id": "memory-001",
-                    "title": "Which author wrote the novel?",
-                    "text": "Question: Which author wrote the novel?\n"
-                    "Answer: The answer is Ada",
-                },
-            },
-        }
+        observations = [search_observation]
+        for rank, (memory_id, source_id, answer, _) in enumerate(
+            ranked_memories,
+            start=1,
+        ):
+            actions, completion = adapter._state_conditioned_action_domain(
+                request,
+                observations,
+            )
+            self.assertEqual(
+                frozenset({(TRIVIAQA_QA_MEMORY_TOOL_ID, "read")}),
+                actions,
+            )
+            self.assertFalse(completion)
+            if rank == 1:
+                self.assertIn(
+                    "read_order_mismatch",
+                    adapter._tool_action_error(
+                        request=request,
+                        action=StructuredAction(
+                            ActionKind.TOOL,
+                            "read",
+                            {"memory_id": "memory-002"},
+                            resource_id=TRIVIAQA_QA_MEMORY_TOOL_ID,
+                        ),
+                        observations=observations,
+                    ),
+                )
+            read_schema = adapter._state_conditioned_response_schema(
+                request,
+                observations,
+            )
+            self.assertIsNotNone(read_schema)
+            assert read_schema is not None
+            self.assertEqual(
+                memory_id,
+                read_schema["properties"]["arguments"]["properties"][
+                    "memory_id"
+                ]["const"],
+            )
+            memory = {
+                "memory_id": memory_id,
+                "passage_id": memory_id,
+                "source_train_task_id": source_id,
+                "paraphrase_question": f"Candidate question {rank}",
+                "paraphrase_answer_statement": f"The answer is {answer}",
+                "canonical_answer": answer,
+                "title": f"Candidate question {rank}",
+                "text": f"Question: Candidate question {rank}\nAnswer: {answer}",
+            }
+            observations.append(
+                {
+                    "observation_status": "success",
+                    "executed_action": {
+                        "kind": "tool",
+                        "name": "read",
+                        "resource_id": TRIVIAQA_QA_MEMORY_TOOL_ID,
+                        "skill_id": None,
+                        "arguments": {"memory_id": memory_id},
+                    },
+                    "result": {
+                        "operation": "read",
+                        "memory_id": memory_id,
+                        "passage_id": memory_id,
+                        "memory": memory,
+                        "passage": memory,
+                    },
+                }
+            )
 
-        schema = adapter._state_conditioned_response_schema(
+        actions, completion = adapter._state_conditioned_action_domain(
             request,
-            [search_observation, read_observation],
+            observations,
         )
+        self.assertEqual(frozenset(), actions)
+        self.assertTrue(completion)
+        schema = adapter._state_conditioned_response_schema(request, observations)
         self.assertIsNotNone(schema)
         assert schema is not None
         value_schema = schema["properties"]["arguments"]["properties"]["value"]
-        self.assertEqual(["memory_id"], value_schema["required"])
-        self.assertEqual({"memory_id"}, set(value_schema["properties"]))
+        self.assertEqual(["memory_ids"], value_schema["required"])
+        self.assertEqual({"memory_ids"}, set(value_schema["properties"]))
         self.assertNotIn("entity_identity", value_schema["properties"])
         self.assertNotIn("evidence_proposition", value_schema["properties"])
-        memory_id_schema = value_schema["properties"]["memory_id"]
-        self.assertEqual(["memory-001"], memory_id_schema["enum"])
-        self.assertIn("successful triviaqa.qa_memory read", memory_id_schema["description"])
+        self.assertEqual(
+            [item[0] for item in ranked_memories],
+            value_schema["properties"]["memory_ids"]["const"],
+        )
 
         retrieval_state = adapter._required_evidence_state(
             request,
-            [search_observation, read_observation],
+            observations,
         )
         self.assertEqual(1, len(retrieval_state.retrieval_attempts))
         self.assertEqual(3, retrieval_state.retrieval_attempts[0].required_top_k)
         self.assertEqual(3, retrieval_state.retrieval_attempts[0].observed_top_k)
+        self.assertEqual(
+            tuple(item[0] for item in ranked_memories),
+            retrieval_state.read_passage_ids,
+        )
 
         contract = adapter._contract(
             request,
-            [search_observation, read_observation],
+            observations,
         )
         self.assertIn("read(memory_id)", contract)
-        self.assertIn("arguments.value must contain only memory_id", contract)
-        self.assertIn("runtime deterministically projects", contract)
-        self.assertIn("same successful read receipt", contract)
-        self.assertIn("do not synthesize a passage-style S-P-O proposition", contract)
+        self.assertIn("arguments.value must contain only memory_ids", contract)
+        self.assertIn("complete ordered candidates list", contract)
 
-    def test_native_memory_artifact_requires_preceding_search_and_exact_read_fields(
+    def test_native_top_k_artifact_requires_ordered_search_and_all_reads(
         self,
     ) -> None:
         question = "Which author wrote the novel?"
-        memory_id = "memory-001"
+        rows = (
+            ("memory-001", "triviaqa:tc_129", "Ada", 0.93),
+            ("memory-002", "triviaqa:tc_130", "Grace", 0.88),
+            ("memory-003", "triviaqa:tc_131", "Charles", 0.81),
+        )
+        memory_ids = [row[0] for row in rows]
         search_receipt = {
             "tool_id": TRIVIAQA_QA_MEMORY_TOOL_ID,
             "tool_version": "qa-memory-index-v1",
@@ -485,77 +681,102 @@ class TriviaQAQAMemoryV2AdapterTests(unittest.IsolatedAsyncioTestCase):
                     "operation": "search",
                     "query": "author novel",
                     "top_k": 3,
-                    "memory_ids": [memory_id],
-                    "passage_ids": [memory_id],
+                    "memory_ids": memory_ids,
+                    "passage_ids": memory_ids,
                     "hits": [
                         {
                             "memory_id": memory_id,
                             "passage_id": memory_id,
-                            "document_id": "triviaqa:tc_129",
-                            "source_train_task_id": "triviaqa:tc_129",
-                            "paraphrase_question": question,
-                            "title": question,
-                            "snippet": question,
-                            "rank": 1,
+                            "document_id": source_id,
+                            "source_train_task_id": source_id,
+                            "paraphrase_question": f"Candidate question {rank}",
+                            "title": f"Candidate question {rank}",
+                            "snippet": f"Candidate question {rank}",
+                            "rank": rank,
+                            "similarity": similarity,
                         }
+                        for rank, (
+                            memory_id,
+                            source_id,
+                            _,
+                            similarity,
+                        ) in enumerate(rows, start=1)
                     ],
                 },
             },
             "error_type": None,
         }
-        read_receipt = {
-            "tool_id": TRIVIAQA_QA_MEMORY_TOOL_ID,
-            "tool_version": "qa-memory-index-v1",
-            "request": {
-                "action": "read",
-                "arguments": {"memory_id": memory_id},
-            },
-            "result": {
-                "completed": True,
-                "value": {
-                    "operation": "read",
-                    "memory_id": memory_id,
-                    "memory": {
+        read_receipts = tuple(
+            {
+                "tool_id": TRIVIAQA_QA_MEMORY_TOOL_ID,
+                "tool_version": "qa-memory-index-v1",
+                "request": {
+                    "action": "read",
+                    "arguments": {"memory_id": memory_id},
+                },
+                "result": {
+                    "completed": True,
+                    "value": {
+                        "operation": "read",
                         "memory_id": memory_id,
-                        "source_train_task_id": "triviaqa:tc_129",
-                        "paraphrase_question": question,
-                        "paraphrase_answer_statement": "The answer is Ada",
-                        "canonical_answer": "Ada",
-                        "title": question,
-                        "text": "Question: Which author wrote the novel?\n"
-                        "Answer: The answer is Ada",
+                        "memory": {
+                            "memory_id": memory_id,
+                            "source_train_task_id": source_id,
+                            "paraphrase_question": f"Candidate question {rank}",
+                            "paraphrase_answer_statement": f"The answer is {answer}",
+                            "canonical_answer": answer,
+                            "title": f"Candidate question {rank}",
+                            "text": (
+                                f"Question: Candidate question {rank}\n"
+                                f"Answer: The answer is {answer}"
+                            ),
+                        },
                     },
                 },
-            },
-            "error_type": None,
-        }
-        artifact = {
-            "question_scope": question,
-            "memory_id": memory_id,
-            "source_train_task_id": "triviaqa:tc_129",
-            "paraphrase_question": question,
-            "paraphrase_answer_statement": "The answer is Ada",
-            "canonical_answer": "Ada",
-        }
+                "error_type": None,
+            }
+            for rank, (memory_id, source_id, answer, _) in enumerate(
+                rows,
+                start=1,
+            )
+        )
+        receipts = (search_receipt, *read_receipts)
 
         self.assertTrue(
             AgentWorkflowEnv._successful_read_receipt(
-                read_receipt,
+                read_receipts[0],
                 TRIVIAQA_QA_MEMORY_TOOL_ID,
             )
         )
         self.assertEqual(
-            "Question: Which author wrote the novel?\nAnswer: The answer is Ada",
+            "Question: Candidate question 1\nAnswer: The answer is Ada",
             AgentWorkflowEnv._successful_read_text(
-                read_receipt,
+                read_receipts[0],
                 TRIVIAQA_QA_MEMORY_TOOL_ID,
             ),
         )
+        projected, projection_issue = (
+            QARetrievalReactExecutionAdapter._qa_memory_completion_receipt_projection(
+                original_question=question,
+                selection_artifact=json.dumps({"memory_ids": memory_ids}),
+                tool_receipts=receipts,
+            )
+        )
+        self.assertIsNone(projection_issue)
+        self.assertIsNotNone(projected)
+        assert projected is not None
+        artifact = json.loads(projected)
+        self.assertEqual(question, artifact["question_scope"])
+        self.assertEqual("author novel", artifact["retrieval_query"])
+        self.assertEqual(3, artifact["top_k"])
+        self.assertEqual(memory_ids, [item["memory_id"] for item in artifact["candidates"]])
+        self.assertEqual([1, 2, 3], [item["rank"] for item in artifact["candidates"]])
+        self.assertEqual([0.93, 0.88, 0.81], [item["similarity"] for item in artifact["candidates"]])
         self.assertIsNone(
             QARetrievalReactExecutionAdapter._evidence_retriever_completion_issue(
                 original_question=question,
                 artifact=json.dumps(artifact),
-                tool_receipts=(search_receipt, read_receipt),
+                tool_receipts=receipts,
                 retrieval_tool_id=TRIVIAQA_QA_MEMORY_TOOL_ID,
             )
         )
@@ -583,61 +804,48 @@ class TriviaQAQAMemoryV2AdapterTests(unittest.IsolatedAsyncioTestCase):
                     source_agent_id="retriever",
                     target_agent_id="reasoner",
                     content=json.dumps(artifact),
-                    tool_receipts=(search_receipt, read_receipt),
+                    tool_receipts=receipts,
                 ),
             ),
         )
         self.assertEqual(
-            (search_receipt, read_receipt),
+            receipts,
             adapter._validated_upstream_evidence_receipts(reasoner_request),
         )
 
-        self.assertIn(
-            "no preceding successful search",
-            QARetrievalReactExecutionAdapter._evidence_retriever_completion_issue(
+        incomplete, incomplete_issue = (
+            QARetrievalReactExecutionAdapter._qa_memory_completion_receipt_projection(
                 original_question=question,
-                artifact=json.dumps(artifact),
-                tool_receipts=(read_receipt,),
-                retrieval_tool_id=TRIVIAQA_QA_MEMORY_TOOL_ID,
-            ),
+                selection_artifact=json.dumps({"memory_ids": memory_ids}),
+                tool_receipts=(search_receipt, *read_receipts[:2]),
+            )
         )
-        self.assertIn(
-            "no preceding successful search",
-            QARetrievalReactExecutionAdapter._evidence_retriever_completion_issue(
+        self.assertIsNone(incomplete)
+        self.assertIn("every embedding hit", incomplete_issue)
+
+        out_of_order, order_issue = (
+            QARetrievalReactExecutionAdapter._qa_memory_completion_receipt_projection(
                 original_question=question,
-                artifact=json.dumps(artifact),
-                tool_receipts=(read_receipt, search_receipt),
-                retrieval_tool_id=TRIVIAQA_QA_MEMORY_TOOL_ID,
-            ),
+                selection_artifact=json.dumps({"memory_ids": memory_ids}),
+                tool_receipts=(
+                    search_receipt,
+                    read_receipts[1],
+                    read_receipts[0],
+                    read_receipts[2],
+                ),
+            )
         )
+        self.assertIsNone(out_of_order)
+        self.assertIn("original rank order", order_issue)
 
-        for field_name, wrong_value in (
-            ("source_train_task_id", "triviaqa:tc_999"),
-            ("paraphrase_question", "A different question"),
-            ("paraphrase_answer_statement", "A different statement"),
-            ("canonical_answer", "Grace"),
-        ):
-            mismatched = dict(artifact)
-            mismatched[field_name] = wrong_value
-            with self.subTest(field_name=field_name):
-                self.assertIn(
-                    f"field {field_name!r}",
-                    QARetrievalReactExecutionAdapter._evidence_retriever_completion_issue(
-                        original_question=question,
-                        artifact=json.dumps(mismatched),
-                        tool_receipts=(search_receipt, read_receipt),
-                        retrieval_tool_id=TRIVIAQA_QA_MEMORY_TOOL_ID,
-                    ),
-                )
-
-        wrong_memory = dict(artifact)
-        wrong_memory["memory_id"] = "memory-999"
+        mismatched = json.loads(json.dumps(artifact))
+        mismatched["candidates"][1]["canonical_answer"] = "Wrong"
         self.assertIn(
-            "no preceding successful search",
+            "field 'candidates'",
             QARetrievalReactExecutionAdapter._evidence_retriever_completion_issue(
                 original_question=question,
-                artifact=json.dumps(wrong_memory),
-                tool_receipts=(search_receipt, read_receipt),
+                artifact=json.dumps(mismatched),
+                tool_receipts=receipts,
                 retrieval_tool_id=TRIVIAQA_QA_MEMORY_TOOL_ID,
             ),
         )

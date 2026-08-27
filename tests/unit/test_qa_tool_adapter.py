@@ -11223,6 +11223,88 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             gateway.requests[3].agent.contract,
         )
 
+    def test_passage_retrieval_keeps_single_read_completion_behavior(self) -> None:
+        adapter = QARetrievalReactExecutionAdapter(
+            gateway=SimpleNamespace(generate=lambda request: None),
+            tool_registry=build_qa_tool_registry(FakeIndex()),
+            max_turns=7,
+            max_tool_calls=4,
+            task_type="factual_qa",
+            completion_policy="required_evidence",
+            retrieval_tool_id=QA_RETRIEVAL_TOOL_ID,
+        )
+        request = AgentRequest(
+            request_id="qa:passage-regression",
+            run_id="qa",
+            graph_revision=1,
+            problem="Who wrote the first published algorithm?",
+            agent=AgentNode(
+                "retriever",
+                "model",
+                "retrieve evidence",
+                role_family="evidence_retriever",
+                allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                execution_mode="react",
+            ),
+            model=ModelSpec("model", "provider"),
+            provider=ProviderSpec("provider", kind="test"),
+            phase=ExecutionPhase.SINGLE,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+        )
+        observations = [
+            {
+                "observation_status": "success",
+                "executed_action": {
+                    "kind": "tool",
+                    "name": "search",
+                    "resource_id": QA_RETRIEVAL_TOOL_ID,
+                    "arguments": {
+                        "query": "Ada Lovelace published algorithm",
+                        "limit": 5,
+                    },
+                },
+                "result": {
+                    "operation": "search",
+                    "query": "Ada Lovelace published algorithm",
+                    "top_k": 5,
+                    "passage_ids": ["p1"],
+                    "hits": [
+                        {
+                            "passage_id": "p1",
+                            "title": "Ada Lovelace",
+                            "snippet": "Published the first algorithm.",
+                            "rank": 1,
+                        }
+                    ],
+                },
+            },
+            {
+                "observation_status": "success",
+                "executed_action": {
+                    "kind": "tool",
+                    "name": "read",
+                    "resource_id": QA_RETRIEVAL_TOOL_ID,
+                    "arguments": {"passage_id": "p1"},
+                },
+                "result": {
+                    "operation": "read",
+                    "passage_id": "p1",
+                    "passage": {
+                        "passage_id": "p1",
+                        "title": "Ada Lovelace",
+                        "text": "Ada Lovelace published the first algorithm.",
+                    },
+                },
+            },
+        ]
+
+        actions, completion = adapter._state_conditioned_action_domain(
+            request,
+            observations,
+        )
+        self.assertEqual(frozenset(), actions)
+        self.assertTrue(completion)
+
     async def test_react_direct_completion_remains_valid_when_dispatch_is_impossible(self) -> None:
         def complete(value: str) -> str:
             return json.dumps(

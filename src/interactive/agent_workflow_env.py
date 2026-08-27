@@ -6091,10 +6091,21 @@ class AgentWorkflowEnv:
                     f"{protocol_label} Evidence Retriever Agent {node.id!r} "
                     "must use execution_mode='react' with exactly "
                     f"allowed_tools=['{self.required_evidence_tool_id}']; its "
-                    "native evidence artifact is admitted only after memory_id, "
-                    "source_train_task_id, paraphrase_question, "
-                    "paraphrase_answer_statement, canonical_answer, and the "
-                    "preceding search -> read receipts agree"
+                    + (
+                        "native evidence artifact is admitted only after the "
+                        "complete embedding-ranked top-k candidate batch and "
+                        "one ordered read(memory_id) receipt per returned hit "
+                        "agree with the latest successful search receipt"
+                        if self.required_evidence_tool_id
+                        == _TRIVIAQA_QA_MEMORY_TOOL_ID
+                        else (
+                            "native evidence artifact is admitted only after "
+                            "memory_id, source_train_task_id, "
+                            "paraphrase_question, paraphrase_answer_statement, "
+                            "canonical_answer, and the preceding search -> read "
+                            "receipts agree"
+                        )
+                    )
                 )
             if role in {"verifier", "format"} and (
                 node.execution_mode.value != "reasoning" or node.allowed_tools
@@ -8232,6 +8243,154 @@ class AgentWorkflowEnv:
             )
         return None
 
+    def _triviaqa_qa_memory_ingress_issue(
+        self,
+        outputs: Mapping[str, str],
+        output_metadata: Mapping[str, Mapping[str, object]],
+        *,
+        retriever_id: str,
+        reasoner_id: str,
+    ) -> Optional[str]:
+        """Validate the exact QA-memory Retriever-to-Reasoner artifact wire.
+
+        FlowSteer routes an executed artifact only across an explicit Canvas
+        relation. SkillFlow binds the downstream request to the producer's
+        concrete artifact version and public Tool receipts. TriviaQA's
+        QA-memory adaptation additionally requires the worker's complete
+        embedding-ranked top-k batch, including one ordered read receipt for
+        every hit, to remain intact on that routed wire.
+        """
+
+        if (
+            self.semantic_protocol != _QA_SEMANTIC_PROTOCOL
+            or self.required_evidence_tool_id
+            != _TRIVIAQA_QA_MEMORY_TOOL_ID
+        ):
+            return None
+        if (
+            not self._graph.has_node(retriever_id)
+            or not self._graph.has_node(reasoner_id)
+            or not self._graph.relation_bits(
+                retriever_id,
+                reasoner_id,
+            ).source_to_target
+        ):
+            return (
+                "TriviaQA QA-memory evidence requires an explicit direct "
+                f"Evidence Retriever {retriever_id!r} -> Reasoner "
+                f"{reasoner_id!r} relation"
+            )
+
+        artifact = outputs.get(retriever_id)
+        retriever_metadata = output_metadata.get(retriever_id)
+        if (
+            not isinstance(artifact, str)
+            or not artifact.strip()
+            or not isinstance(retriever_metadata, Mapping)
+        ):
+            return (
+                f"Evidence Retriever {retriever_id!r} has no current "
+                "QA-memory top-k artifact and Tool receipt metadata"
+            )
+        raw_receipts = retriever_metadata.get("tool_receipts", ())
+        if not isinstance(raw_receipts, (list, tuple)):
+            return (
+                f"Evidence Retriever {retriever_id!r} Tool receipts must be "
+                "a sequence"
+            )
+        retriever_receipts = tuple(
+            receipt
+            for receipt in raw_receipts
+            if isinstance(receipt, Mapping)
+        )
+
+        from .qa_tool_adapter import QARetrievalReactExecutionAdapter
+
+        completion_issue = (
+            QARetrievalReactExecutionAdapter._evidence_retriever_completion_issue(
+                original_question=hotpotqa_question_scope(self._problem),
+                artifact=artifact,
+                tool_receipts=retriever_receipts,
+                retrieval_tool_id=_TRIVIAQA_QA_MEMORY_TOOL_ID,
+            )
+        )
+        if completion_issue is not None:
+            return completion_issue
+
+        version_issue = self._artifact_version_binding_issue(
+            output_metadata,
+            producer_id=retriever_id,
+            consumer_id=reasoner_id,
+            consumer_role="Reasoner",
+        )
+        if version_issue is not None:
+            return version_issue
+
+        artifact_version = retriever_metadata.get("artifact_version")
+        reasoner_metadata = output_metadata.get(reasoner_id)
+        provenance = (
+            reasoner_metadata.get("input_artifact_provenance")
+            if isinstance(reasoner_metadata, Mapping)
+            else None
+        )
+        if not isinstance(provenance, (list, tuple)):
+            return (
+                f"Reasoner {reasoner_id!r} has no "
+                "input_artifact_provenance for the direct QA-memory "
+                f"Evidence Retriever {retriever_id!r} relation"
+            )
+
+        matching_wire_issue: Optional[str] = None
+        for raw_message in provenance:
+            if (
+                not isinstance(raw_message, Mapping)
+                or raw_message.get("source_agent_id") != retriever_id
+                or raw_message.get("target_agent_id") != reasoner_id
+                or raw_message.get("artifact_version") != artifact_version
+            ):
+                continue
+            routed_artifact = raw_message.get("artifact")
+            if routed_artifact != artifact:
+                matching_wire_issue = (
+                    "the routed artifact does not equal the current complete "
+                    "QA-memory top-k artifact"
+                )
+                continue
+            routed_raw_receipts = raw_message.get("tool_receipts", ())
+            if not isinstance(routed_raw_receipts, (list, tuple)):
+                matching_wire_issue = (
+                    "the routed QA-memory artifact has no Tool receipt "
+                    "sequence"
+                )
+                continue
+            routed_receipts = tuple(
+                receipt
+                for receipt in routed_raw_receipts
+                if isinstance(receipt, Mapping)
+            )
+            routed_issue = (
+                QARetrievalReactExecutionAdapter._evidence_retriever_completion_issue(
+                    original_question=hotpotqa_question_scope(self._problem),
+                    artifact=routed_artifact,
+                    tool_receipts=routed_receipts,
+                    retrieval_tool_id=_TRIVIAQA_QA_MEMORY_TOOL_ID,
+                )
+            )
+            if routed_issue is None:
+                return None
+            matching_wire_issue = routed_issue
+
+        detail = (
+            "no current Retriever artifact/version message was routed"
+            if matching_wire_issue is None
+            else matching_wire_issue
+        )
+        return (
+            f"Reasoner {reasoner_id!r} did not consume the complete ordered "
+            f"QA-memory top-k artifact from {retriever_id!r} through its "
+            f"explicit direct relation: {detail}"
+        )
+
     def _semantic_protocol_issue(
         self,
         execution: AgentRuntimeResult,
@@ -8281,6 +8440,7 @@ class AgentWorkflowEnv:
             from .qa_tool_adapter import QARetrievalReactExecutionAdapter
 
             valid_retriever_ingress = False
+            retriever_ingress_issues: list[str] = []
             for predecessor_id in self._graph.directed_predecessors(
                 reasoner_id
             ):
@@ -8288,6 +8448,21 @@ class AgentWorkflowEnv:
                 if (
                     predecessor.role_family or ""
                 ).casefold() != "evidence_retriever":
+                    continue
+                if (
+                    self.required_evidence_tool_id
+                    == _TRIVIAQA_QA_MEMORY_TOOL_ID
+                ):
+                    ingress_issue = self._triviaqa_qa_memory_ingress_issue(
+                        execution.outputs,
+                        execution.output_metadata,
+                        retriever_id=predecessor_id,
+                        reasoner_id=reasoner_id,
+                    )
+                    if ingress_issue is None:
+                        valid_retriever_ingress = True
+                        break
+                    retriever_ingress_issues.append(ingress_issue)
                     continue
                 artifact = execution.outputs.get(predecessor_id)
                 metadata = execution.output_metadata.get(predecessor_id)
@@ -8327,6 +8502,24 @@ class AgentWorkflowEnv:
                 valid_retriever_ingress = True
                 break
             if not valid_retriever_ingress:
+                if (
+                    self.required_evidence_tool_id
+                    == _TRIVIAQA_QA_MEMORY_TOOL_ID
+                ):
+                    detail = (
+                        retriever_ingress_issues[0]
+                        if retriever_ingress_issues
+                        else "no direct Evidence Retriever predecessor exists"
+                    )
+                    return (
+                        "TriviaQA QA-memory Reasoner lineage has no current "
+                        "direct Evidence Retriever artifact containing the "
+                        "complete embedding-ranked top-k candidate batch, one "
+                        "successful read(memory_id) receipt per returned hit "
+                        "in original rank order, and matching routed artifact "
+                        f"version. {detail}. Preserve any valid Retriever "
+                        "artifact and route it into the Reasoner before FINISH"
+                    )
                 return (
                     "TriviaQA Reasoner lineage has no current direct "
                     "Evidence Retriever artifact whose memory_id, "
@@ -9216,6 +9409,28 @@ class AgentWorkflowEnv:
             )
             return completion_issue is None
         if role_family == "reasoner":
+            if (
+                self.semantic_protocol == _QA_SEMANTIC_PROTOCOL
+                and self.required_evidence_tool_id
+                == _TRIVIAQA_QA_MEMORY_TOOL_ID
+                and not any(
+                    (
+                        self._graph.get_node(predecessor_id).role_family or ""
+                    ).casefold()
+                    == "evidence_retriever"
+                    and self._triviaqa_qa_memory_ingress_issue(
+                        self._progressive_outputs,
+                        self._progressive_output_metadata,
+                        retriever_id=predecessor_id,
+                        reasoner_id=agent_id,
+                    )
+                    is None
+                    for predecessor_id in self._graph.directed_predecessors(
+                        agent_id
+                    )
+                )
+            ):
+                return False
             candidate, issue = self._reasoner_candidate_for_current_dataset(
                 artifact
             )

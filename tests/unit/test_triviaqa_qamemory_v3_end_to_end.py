@@ -40,49 +40,75 @@ V4_MANIFEST_PATH = PROJECT_ROOT / "data/triviaqa_qa_memory_v4/index/manifest.jso
 QUESTION = "Which British general died at Khartoum in 1885?"
 
 
-def _first_jsonl_row(path: Path) -> dict[str, object]:
+def _first_jsonl_rows(
+    path: Path,
+    *,
+    count: int,
+) -> tuple[dict[str, object], ...]:
+    rows: list[dict[str, object]] = []
     with path.open("r", encoding="utf-8") as handle:
-        value = json.loads(next(handle))
-    if not isinstance(value, dict):
-        raise AssertionError("expected a materialized v4 QA-memory record")
-    return value
+        for _ in range(count):
+            value = json.loads(next(handle))
+            if not isinstance(value, dict):
+                raise AssertionError(
+                    "expected a materialized v4 QA-memory record"
+                )
+            rows.append(value)
+    return tuple(rows)
 
 
 class _RealRowIndex:
-    """Fake embedding boundary backed by one real materialized v4 record."""
+    """Fake embedding boundary backed by three materialized v4 records."""
 
-    def __init__(self, row: dict[str, object]) -> None:
+    def __init__(self, rows: tuple[dict[str, object], ...]) -> None:
         manifest = json.loads(V4_MANIFEST_PATH.read_text(encoding="utf-8"))
         self.manifest = SimpleNamespace(**manifest)
-        self.row = dict(row)
+        self.rows = tuple(dict(row) for row in rows)
+        self.rows_by_memory_id = {
+            str(row["memory_id"]): row for row in self.rows
+        }
         self.search_calls: list[tuple[str, int]] = []
         self.read_calls: list[str] = []
 
-    def _record(self, *, rank: int | None = None) -> SimpleNamespace:
-        memory_id = str(self.row["memory_id"])
-        question = str(self.row["paraphrase_question"])
-        answer_statement = str(self.row["paraphrase_answer_statement"])
+    @staticmethod
+    def _record(
+        row: dict[str, object],
+        *,
+        rank: int | None = None,
+        similarity: float | None = None,
+    ) -> SimpleNamespace:
+        memory_id = str(row["memory_id"])
+        question = str(row["paraphrase_question"])
+        answer_statement = str(row["paraphrase_answer_statement"])
         values = {
-            **self.row,
+            **row,
             "passage_id": memory_id,
-            "document_id": str(self.row["source_train_task_id"]),
+            "document_id": str(row["source_train_task_id"]),
             "title": question,
             "snippet": question,
             "text": f"Question: {question}\nAnswer: {answer_statement}",
         }
         if rank is not None:
-            values.update({"rank": rank, "similarity": 0.99})
+            values.update({"rank": rank, "similarity": similarity})
         return SimpleNamespace(**values)
 
     def search(self, query: str, *, limit: int) -> tuple[SimpleNamespace, ...]:
         self.search_calls.append((query, limit))
-        return (self._record(rank=1),)
+        return tuple(
+            self._record(
+                row,
+                rank=rank,
+                similarity=1.0 - (rank / 100),
+            )
+            for rank, row in enumerate(self.rows[:limit], start=1)
+        )
 
     def read(self, memory_id: str) -> SimpleNamespace:
         self.read_calls.append(memory_id)
-        if memory_id != self.row["memory_id"]:
+        row = self.rows_by_memory_id.get(memory_id)
+        if row is None:
             raise KeyError(memory_id)
-        return self._record()
+        return self._record(row)
 
     def close(self) -> None:
         return None
@@ -108,30 +134,27 @@ def _action(
 
 
 class _ReactGateway:
-    def __init__(self, row: dict[str, object]) -> None:
-        # Reproduce the v3_r1 canary fault: the policy selects a genuinely-read
-        # handle but also hand-copies incompatible record fields.  Runtime must
-        # ignore every copied field and materialize the artifact from the exact
-        # read receipt.
-        artifact = {
-            "memory_id": row["memory_id"],
-            "source_train_task_id": "model-copied-wrong-source",
-            "paraphrase_question": "model-copied wrong question",
-            "paraphrase_answer_statement": "model-copied wrong answer",
-            "canonical_answer": "model-copied-wrong-answer",
-        }
+    def __init__(self, rows: tuple[dict[str, object], ...]) -> None:
+        memory_ids = [str(row["memory_id"]) for row in rows]
         self.outputs = [
             _action(
                 "search",
                 {"query": QUESTION, "limit": 3},
                 resource_id=TRIVIAQA_QA_MEMORY_TOOL_ID,
             ),
-            _action(
-                "read",
-                {"memory_id": row["memory_id"]},
-                resource_id=TRIVIAQA_QA_MEMORY_TOOL_ID,
+            *(
+                _action(
+                    "read",
+                    {"memory_id": memory_id},
+                    resource_id=TRIVIAQA_QA_MEMORY_TOOL_ID,
+                )
+                for memory_id in memory_ids
             ),
-            _action("complete", {"value": artifact}, resource_id=None),
+            _action(
+                "complete",
+                {"value": {"memory_ids": memory_ids}},
+                resource_id=None,
+            ),
         ]
         self.requests: list[AgentRequest] = []
 
@@ -145,14 +168,14 @@ class _ReactGateway:
 
 
 class _ReasoningGateway:
-    def __init__(self, row: dict[str, object]) -> None:
-        self.row = row
+    def __init__(self, rows: tuple[dict[str, object], ...]) -> None:
+        self.rows = rows
         self.requests: list[AgentRequest] = []
 
     async def generate(self, request: AgentRequest) -> AgentResponse:
         self.requests.append(request)
-        answer = str(self.row["canonical_answer"])
-        statement = str(self.row["paraphrase_answer_statement"])
+        answer = str(self.rows[0]["canonical_answer"])
+        statement = str(self.rows[0]["paraphrase_answer_statement"])
         if request.agent.id == "reasoner":
             return AgentResponse(
                 json.dumps(
@@ -328,11 +351,12 @@ evidence:
             config["agent_graph"]["required_evidence_tool_id"],
         )
 
-        row = _first_jsonl_row(V4_MEMORY_PATH)
-        index = _RealRowIndex(row)
+        rows = _first_jsonl_rows(V4_MEMORY_PATH, count=3)
+        memory_ids = [str(row["memory_id"]) for row in rows]
+        index = _RealRowIndex(rows)
         tool_registry = build_qa_tool_registry(index)
-        react_gateway = _ReactGateway(row)
-        reasoning_gateway = _ReasoningGateway(row)
+        react_gateway = _ReactGateway(rows)
+        reasoning_gateway = _ReasoningGateway(rows)
         react_adapter = QARetrievalReactExecutionAdapter(
             gateway=react_gateway,
             tool_registry=tool_registry,
@@ -385,13 +409,14 @@ evidence:
         ]["reasoner"]
         self.assertEqual(["reasoning"], reasoner_profile["execution_modes"])
         self.assertEqual([[]], reasoner_profile["allowed_tools"])
-        for private_value in (
-            str(row["memory_id"]),
-            str(row["source_train_task_id"]),
-            str(row["paraphrase_answer_statement"]),
-            str(row["canonical_answer"]),
-        ):
-            self.assertNotIn(private_value, director_prompt)
+        for row in rows:
+            for private_value in (
+                str(row["memory_id"]),
+                str(row["source_train_task_id"]),
+                str(row["paraphrase_answer_statement"]),
+                str(row["canonical_answer"]),
+            ):
+                self.assertNotIn(private_value, director_prompt)
 
         result = await runtime.execute(
             graph,
@@ -400,11 +425,11 @@ evidence:
             format_output_agent=True,
         )
         self.assertEqual(
-            f"<answer>{row['canonical_answer']}</answer>",
+            f"<answer>{rows[0]['canonical_answer']}</answer>",
             result.final_answer,
         )
         self.assertEqual([(QUESTION, 3)], index.search_calls)
-        self.assertEqual([row["memory_id"]], index.read_calls)
+        self.assertEqual(memory_ids, index.read_calls)
 
         calls = {call.request.agent.id: call for call in result.calls}
         retriever = calls["retriever"]
@@ -414,23 +439,38 @@ evidence:
         self.assertEqual("evidence_retriever", retriever.request.agent.role_family)
         projected_retriever_artifact = json.loads(retriever.response.text)
         self.assertEqual(QUESTION, projected_retriever_artifact["question_scope"])
-        for field in (
-            "memory_id",
-            "source_train_task_id",
-            "paraphrase_question",
-            "paraphrase_answer_statement",
-            "canonical_answer",
+        self.assertEqual(QUESTION, projected_retriever_artifact["retrieval_query"])
+        self.assertEqual(3, projected_retriever_artifact["top_k"])
+        self.assertEqual(
+            memory_ids,
+            [
+                candidate["memory_id"]
+                for candidate in projected_retriever_artifact["candidates"]
+            ],
+        )
+        for rank, (row, candidate) in enumerate(
+            zip(rows, projected_retriever_artifact["candidates"], strict=True),
+            start=1,
         ):
-            self.assertEqual(row[field], projected_retriever_artifact[field])
+            self.assertEqual(rank, candidate["rank"])
+            self.assertAlmostEqual(1.0 - (rank / 100), candidate["similarity"])
+            for field in (
+                "memory_id",
+                "source_train_task_id",
+                "paraphrase_question",
+                "paraphrase_answer_statement",
+                "canonical_answer",
+            ):
+                self.assertEqual(row[field], candidate[field])
         completion_schema = json.loads(
             react_gateway.requests[-1].model.metadata["response_json_schema"]
         )
         completion_value_schema = completion_schema["properties"]["arguments"][
             "properties"
         ]["value"]
-        self.assertEqual(["memory_id"], completion_value_schema["required"])
+        self.assertEqual(["memory_ids"], completion_value_schema["required"])
         self.assertEqual(
-            {"memory_id"}, set(completion_value_schema["properties"])
+            {"memory_ids"}, set(completion_value_schema["properties"])
         )
         self.assertEqual(
             (TRIVIAQA_QA_MEMORY_TOOL_ID,),
@@ -439,11 +479,18 @@ evidence:
         self.assertEqual("reasoning", reasoner.request.agent.execution_mode.value)
         self.assertEqual((), reasoner.request.agent.allowed_tools)
         self.assertEqual("retriever", reasoner.request.upstream[0].source_agent_id)
-        self.assertEqual(2, len(reasoner.request.upstream[0].tool_receipts))
+        self.assertTrue(
+            graph.relation_bits("retriever", "reasoner").source_to_target
+        )
+        self.assertEqual(4, len(reasoner.request.upstream[0].tool_receipts))
+        self.assertEqual(
+            projected_retriever_artifact,
+            json.loads(reasoner.request.upstream[0].artifact),
+        )
         self.assertIsNotNone(reasoner.request.upstream[0].artifact_version)
         self.assertEqual("reasoner", verifier.request.upstream[0].source_agent_id)
         self.assertEqual("verifier", formatter.request.upstream[0].source_agent_id)
-        self.assertEqual(2, len(formatter.request.upstream[0].tool_receipts))
+        self.assertEqual(4, len(formatter.request.upstream[0].tool_receipts))
         self.assertIsNotNone(formatter.request.upstream[0].artifact_version)
 
         trajectory = {
