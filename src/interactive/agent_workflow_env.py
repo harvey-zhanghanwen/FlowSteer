@@ -240,6 +240,10 @@ class AgentWorkflowEnv:
             str, dict[str, object]
         ] = {}
         self._failed_agent_ids: set[str] = set()
+        # A recovery cycle first repairs the failed node once.  If that does
+        # not produce a successful artifact, the Canvas may augment the graph
+        # on the next step rather than repeatedly modifying the same node.
+        self._repair_attempted_failed_agent_ids: set[str] = set()
         self._diagnosed_unusable_agent_ids: set[str] = set()
         self._failed_output_agent_ids: set[str] = set()
         self._unresolved_dirty_agent_ids: set[str] = set()
@@ -357,15 +361,18 @@ class AgentWorkflowEnv:
         """Project the live, state-conditioned Canvas action domain."""
 
         node_ids = tuple(node.id for node in self._graph.nodes)
+        repair_required_ids = (
+            self._failed_agent_ids - self._repair_attempted_failed_agent_ids
+        )
         if (
             self.recovery_policy == _PRESERVE_REPAIR_RECOVERY_POLICY
-            and self._failed_agent_ids
+            and repair_required_ids
             and AgentActionType.MODIFY_AGENT.value in self._allowed_action_type_set
         ):
             # DIRECT_REUSE + NECESSARY_ADAPTATION: FlowSteer's typed provider
             # recovery keeps the failed node and its artifacts in place, and
-            # admits repair before unrelated augmentation.  The live target
-            # domain below narrows MODIFY to the measured failed workers.
+            # admits one repair before augmentation.  The live target domain
+            # below narrows MODIFY to the measured failed workers.
             return (AgentActionType.MODIFY_AGENT.value,)
         can_add = self.max_agents is None or len(node_ids) < self.max_agents
         deletable_ids = {
@@ -374,6 +381,15 @@ class AgentWorkflowEnv:
             if self._delete_admission_issue(agent_id) is None
         }
         finish_admissible = self.finish_admissibility()["admissible"] is True
+        if (
+            finish_admissible
+            and AgentActionType.FINISH.value in self._allowed_action_type_set
+        ):
+            # FlowSteer's state-conditioned action mask still requires the
+            # Director to submit the explicit terminal action.  Once the
+            # current executed revision is admissible, later edits can only
+            # discard a valid routed artifact.
+            return (AgentActionType.FINISH.value,)
         admitted: list[str] = []
         for action_type in self.allowed_action_types:
             if action_type in {
@@ -384,6 +400,14 @@ class AgentWorkflowEnv:
             if action_type == AgentActionType.MODIFY_AGENT.value and not node_ids:
                 continue
             if action_type == AgentActionType.DELETE_AGENT.value and not deletable_ids:
+                continue
+            if (
+                action_type == AgentActionType.DELETE_AGENT.value
+                and self.recovery_policy == _PRESERVE_REPAIR_RECOVERY_POLICY
+                and self._failed_agent_ids
+            ):
+                # Failure recovery preserves existing lineage.  A failure
+                # never makes deletion an advertised repair action.
                 continue
             if action_type == AgentActionType.SET_RELATION.value and len(node_ids) < 2:
                 continue
@@ -432,10 +456,16 @@ class AgentWorkflowEnv:
         if AgentActionType.MODIFY_AGENT.value in admitted:
             result[AgentActionType.MODIFY_AGENT.value] = {
                 "agent_ids": (
-                    sorted(self._failed_agent_ids)
+                    sorted(
+                        self._failed_agent_ids
+                        - self._repair_attempted_failed_agent_ids
+                    )
                     if self.recovery_policy
                     == _PRESERVE_REPAIR_RECOVERY_POLICY
-                    and self._failed_agent_ids
+                    and (
+                        self._failed_agent_ids
+                        - self._repair_attempted_failed_agent_ids
+                    )
                     else node_ids
                 ),
                 "model_ids": model_ids,
@@ -455,7 +485,14 @@ class AgentWorkflowEnv:
             }
         if AgentActionType.SET_OUTPUT.value in admitted:
             result[AgentActionType.SET_OUTPUT.value] = {
-                "agent_ids": node_ids,
+                "agent_ids": [
+                    node.id
+                    for node in self._graph.nodes
+                    if not (
+                        self.require_evidence_relation
+                        and self.required_evidence_tool_id in node.allowed_tools
+                    )
+                ],
             }
         if AgentActionType.FINISH.value in admitted:
             result[AgentActionType.FINISH.value] = {"admissible": True}
@@ -578,11 +615,13 @@ class AgentWorkflowEnv:
     def _mark_agents_recovered(self, agent_ids: Sequence[str]) -> None:
         recovered = set(agent_ids)
         self._failed_agent_ids.difference_update(recovered)
+        self._repair_attempted_failed_agent_ids.difference_update(recovered)
         self._diagnosed_unusable_agent_ids.difference_update(recovered)
         self._failed_output_agent_ids.difference_update(recovered)
 
     def _clear_failure_state(self) -> None:
         self._failed_agent_ids.clear()
+        self._repair_attempted_failed_agent_ids.clear()
         self._diagnosed_unusable_agent_ids.clear()
         self._failed_output_agent_ids.clear()
         self._unresolved_dirty_agent_ids.clear()
@@ -604,6 +643,10 @@ class AgentWorkflowEnv:
             "strategy": "preserve -> diagnose -> repair -> augment",
             "phase": (
                 "augment"
+                if self._failed_agent_ids
+                and self._failed_agent_ids
+                <= self._repair_attempted_failed_agent_ids
+                else "augment"
                 if any(replacements.values())
                 else "repair"
                 if self._diagnosed_unusable_agent_ids
@@ -612,6 +655,9 @@ class AgentWorkflowEnv:
                 else "preserve"
             ),
             "failed_agent_ids": sorted(self._failed_agent_ids),
+            "repair_attempted_failed_agent_ids": sorted(
+                self._repair_attempted_failed_agent_ids
+            ),
             "diagnosed_unusable_agent_ids": sorted(
                 self._diagnosed_unusable_agent_ids
             ),
@@ -693,6 +739,9 @@ class AgentWorkflowEnv:
         result._last_feedback = state.last_feedback
         result._history = list(state.history)
         result._failed_agent_ids = set(self._failed_agent_ids)
+        result._repair_attempted_failed_agent_ids = set(
+            self._repair_attempted_failed_agent_ids
+        )
         result._diagnosed_unusable_agent_ids = set(
             self._diagnosed_unusable_agent_ids
         )
@@ -954,6 +1003,11 @@ class AgentWorkflowEnv:
             feedback=self._last_feedback,
             execution_reused=execution_reused,
         )
+        if (
+            action.action_type is AgentActionType.MODIFY_AGENT
+            and action.agent_id in self._failed_agent_ids
+        ):
+            self._repair_attempted_failed_agent_ids.add(action.agent_id)
         return AgentWorkflowStepResult(
             accepted=True,
             done=False,
@@ -1181,6 +1235,15 @@ class AgentWorkflowEnv:
         if tool_id is None:
             return None
         output_id = execution.output_agent_id
+        if output_id is None or not self._graph.has_node(output_id):
+            return "the current Canvas has no selected Output Agent"
+        output_node = self._graph.get_node(output_id)
+        if tool_id in output_node.allowed_tools:
+            return (
+                f"Output Agent {output_id!r} must consume a provenance-bearing "
+                "upstream artifact and cannot hold the worker retrieval Tool "
+                f"{tool_id!r}"
+            )
         routed_ids = {output_id}
         pending = list(self._graph.directed_predecessors(output_id))
         while pending:

@@ -473,8 +473,53 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             },
         )
         routed_env._progressive_execution_revision = routed.revision
-        self.assertIn("finish", routed_env.model_admissible_action_types())
+        self.assertEqual(("finish",), routed_env.model_admissible_action_types())
         self.assertTrue(routed_env.finish_admissibility()["admissible"])
+
+        tool_output = AgentGraph(
+            [
+                routed.get_node("worker"),
+                AgentNode(
+                    "tool_output",
+                    "balanced",
+                    "answer",
+                    execution_mode="react",
+                    allowed_tools=("qa-retrieval",),
+                ),
+            ],
+            [AgentRelation("worker", "tool_output", True, False)],
+            output_agent_id="tool_output",
+        )
+        tool_output_env = AgentWorkflowEnv(
+            registry,
+            runtime=_ProfileRuntime(registry),  # type: ignore[arg-type]
+            problem="question",
+            graph=tool_output,
+            execute_on_edit=True,
+            required_evidence_tool_id="qa-retrieval",
+            require_evidence_relation=True,
+        )
+        tool_output_env._progressive_execution = AgentRuntimeResult(
+            run_id="tool-output",
+            graph_revision=tool_output.revision,
+            output_agent_id="tool_output",
+            final_answer="answer",
+            outputs={"worker": "evidence", "tool_output": "answer"},
+            calls=(),
+            block_completion_order=(("worker",), ("tool_output",)),
+            output_metadata={
+                "worker": {"tool_receipts": (receipt, read_receipt)},
+                "tool_output": {"tool_receipts": (receipt, read_receipt)},
+            },
+        )
+        tool_output_env._progressive_execution_revision = tool_output.revision
+        self.assertFalse(tool_output_env.finish_admissibility()["admissible"])
+        self.assertNotIn(
+            "tool_output",
+            tool_output_env.model_admissible_action_targets()["set_output"][
+                "agent_ids"
+            ],
+        )
 
     async def test_runtime_profiles_authorize_add_subgraph_and_modify(self) -> None:
         registry = make_registry()
@@ -518,6 +563,39 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(coding_subgraph.accepted)
         self.assertEqual(["a"], [node.id for node in env.graph.nodes])
+
+    async def test_failure_recovery_repairs_once_then_opens_augmentation(self) -> None:
+        registry = make_registry()
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_ProfileRuntime(registry),  # type: ignore[arg-type]
+            problem="question",
+            execute_on_edit=False,
+            max_agents=4,
+            recovery_policy="preserve_diagnose_repair_augment",
+        )
+        self.assertTrue(
+            (
+                await env.step(
+                    '{"action":"add_agent","agent_id":"a",'
+                    '"model_id":"balanced","contract":"work"}'
+                )
+            ).accepted
+        )
+        env._record_failure_state((SimpleNamespace(agent_id="a", metadata={}),))
+        self.assertEqual(("modify_agent",), env.model_admissible_action_types())
+
+        repaired = await env.step(
+            '{"action":"modify_agent","agent_id":"a",'
+            '"contract":"repair the current artifact"}'
+        )
+        self.assertTrue(repaired.accepted)
+        admitted = env.model_admissible_action_types()
+        self.assertIn("add_agent", admitted)
+        self.assertIn("add_subgraph", admitted)
+        self.assertIn("set_output", admitted)
+        self.assertNotIn("delete_agent", admitted)
+        self.assertEqual("augment", env.recovery_state()["phase"])
 
     async def test_delete_requires_typed_unusable_and_complete_takeover(self) -> None:
         registry = make_registry()

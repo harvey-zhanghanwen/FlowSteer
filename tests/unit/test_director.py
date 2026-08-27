@@ -102,6 +102,13 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(initial_state["max_agents"], 10)
         self.assertEqual(initial_state["recent_canvas_history"], [])
         self.assertFalse(initial_state["complete_validation"]["valid"])
+        self.assertEqual(0, initial_state["construction_progress"]["atomic_edits_applied"])
+        self.assertEqual(
+            1,
+            initial_state["construction_progress"]["minimum_remaining_breakdown"][
+                "add_agent"
+            ],
+        )
         self.assertIn("add_agent", initial_state["admissible_actions"])
         self.assertNotIn("finish", initial_state["admissible_actions"])
         self.assertEqual(

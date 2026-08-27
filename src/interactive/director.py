@@ -82,6 +82,7 @@ _MUTABLE_AGENT_PROPERTIES = {
     "artifact_type": _NON_EMPTY_STRING_SCHEMA,
     "completion_condition": _NON_EMPTY_STRING_SCHEMA,
 }
+_EXECUTION_PROFILE_MUTABLE_FIELD = "execution_profile"
 DIRECTOR_ACTION_JSON_SCHEMA = {
     "type": "object",
     "oneOf": [
@@ -596,7 +597,12 @@ def director_live_execution_profile_from_text(
 
 
 def director_live_modify_agent_field_selector_json_schema_text() -> str:
-    """Render the existing FlowSteer MODIFY-field discriminator."""
+    """Render the FlowSteer MODIFY-field discriminator.
+
+    Runtime execution mode and Tool capability form one registered profile.
+    They therefore appear as one selector branch and are decoded through the
+    same profile binder that ADD uses, never as independently sampled fields.
+    """
 
     return json.dumps(
         {
@@ -605,7 +611,16 @@ def director_live_modify_agent_field_selector_json_schema_text() -> str:
             "required": ["action", "field"],
             "properties": {
                 "action": {"const": "modify_agent"},
-                "field": {"enum": list(_MUTABLE_AGENT_PROPERTIES)},
+                "field": {
+                    "enum": [
+                        *(
+                            field
+                            for field in _MUTABLE_AGENT_PROPERTIES
+                            if field not in {"execution_mode", "allowed_tools"}
+                        ),
+                        _EXECUTION_PROFILE_MUTABLE_FIELD,
+                    ]
+                },
             },
         },
         sort_keys=True,
@@ -683,7 +698,10 @@ def director_live_action_parameter_json_schema_text(
             },
         }
     elif action == "modify_agent":
-        if modify_field not in _MUTABLE_AGENT_PROPERTIES:
+        if modify_field not in {
+            *_MUTABLE_AGENT_PROPERTIES,
+            _EXECUTION_PROFILE_MUTABLE_FIELD,
+        }:
             raise ValueError("modify_agent parameters require one mutable field")
         agent_ids = [
             str(value)
@@ -692,7 +710,20 @@ def director_live_action_parameter_json_schema_text(
         ]
         if not agent_ids:
             raise ValueError("modify_agent has no live Agent target")
-        if modify_field == "model_id":
+        if modify_field == _EXECUTION_PROFILE_MUTABLE_FIELD:
+            if execution_profile is None:
+                raise ValueError(
+                    "modify_agent execution-profile parameters require a profile"
+                )
+            execution_mode, allowed_tools = execution_profile
+            required = ["action", "agent_id", "execution_mode", "allowed_tools"]
+            properties = {
+                "action": {"const": "modify_agent"},
+                "agent_id": {"enum": agent_ids},
+                "execution_mode": {"const": execution_mode},
+                "allowed_tools": {"const": list(allowed_tools)},
+            }
+        elif modify_field == "model_id":
             values = [
                 str(value)
                 for value in domain.get("model_ids", ())
@@ -713,15 +744,18 @@ def director_live_action_parameter_json_schema_text(
             )
         else:
             field_schema = _NON_EMPTY_STRING_SCHEMA
-        schema = {
-            "type": "object",
-            "additionalProperties": False,
-            "required": ["action", "agent_id", modify_field],
-            "properties": {
+        if modify_field != _EXECUTION_PROFILE_MUTABLE_FIELD:
+            required = ["action", "agent_id", modify_field]
+            properties = {
                 "action": {"const": "modify_agent"},
                 "agent_id": {"enum": agent_ids},
                 modify_field: field_schema,
-            },
+            }
+        schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "required": required,
+            "properties": properties,
         }
     elif action in {"delete_agent", "set_output"}:
         agent_ids = [
@@ -1116,6 +1150,10 @@ class AgentGraphOrchestrator:
             "admissible_actions": list(admissible_actions),
             "action_target_domains": action_target_domains,
             "recovery_state": env.recovery_state(),
+            # Existing FlowSteer Canvas state, deliberately content-free and
+            # topology-neutral.  It communicates progress without injecting a
+            # role recipe or a preferred graph shape.
+            "construction_progress": env.graph.construction_progress(),
         }
         if env.max_agents is not None:
             payload["max_agents"] = env.max_agents

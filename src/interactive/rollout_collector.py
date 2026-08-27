@@ -39,6 +39,7 @@ from .director import (
     DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION,
     DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3,
     DIRECTOR_SYSTEM_PROMPT,
+    _EXECUTION_PROFILE_MUTABLE_FIELD,
     DirectorError,
     DirectorResponse,
     director_actions_from_admissible_schema_branch,
@@ -896,8 +897,7 @@ class SGLangReceiptDirectorClient:
                     "model_id",
                     "contract",
                     "role_family",
-                    "allowed_tools",
-                    "execution_mode",
+                    _EXECUTION_PROFILE_MUTABLE_FIELD,
                     "artifact_type",
                     "completion_condition",
                 }
@@ -909,10 +909,55 @@ class SGLangReceiptDirectorClient:
             phase_receipts["modify_field_selection"] = (
                 self._hierarchical_phase_receipt(field_response)
             )
+            if selected_modify_field == _EXECUTION_PROFILE_MUTABLE_FIELD:
+                profile_schema = (
+                    director_live_execution_mode_selector_json_schema_text(
+                        selected_action,
+                        action_target_domains,
+                    )
+                )
+                profile_payload = self._request_payload(
+                    prompt,
+                    adapter_name,
+                    seed,
+                    action_json_schema=profile_schema,
+                )
+                value, latency_ms, attempt_count = await self._post_with_retries(
+                    profile_payload
+                )
+                total_latency_ms += latency_ms
+                total_attempt_count += attempt_count
+                profile_response = self._parse_response(
+                    prompt,
+                    profile_payload,
+                    value,
+                    policy_version=policy_version,
+                    adapter_name=adapter_name,
+                    expected_server_weight_version=expected_server_weight_version,
+                    latency_ms=latency_ms,
+                    attempt_count=attempt_count,
+                    generation_seed=seed,
+                )
+                try:
+                    selected_execution_profile = (
+                        director_live_execution_profile_from_text(
+                            profile_response.text,
+                            selected_action,
+                            action_target_domains,
+                        )
+                    )
+                except ValueError as exc:
+                    raise ReceiptValidationError(
+                        "v3 modify execution-profile phase is invalid"
+                    ) from exc
+                phase_receipts["modify_execution_profile_selection"] = (
+                    self._hierarchical_phase_receipt(profile_response)
+                )
             parameter_schema = director_live_action_parameter_json_schema_text(
                 selected_action,
                 action_target_domains,
                 modify_field=selected_modify_field,
+                execution_profile=selected_execution_profile,
             )
         elif action_target_domains is not None:
             parameter_schema = director_live_action_parameter_json_schema_text(

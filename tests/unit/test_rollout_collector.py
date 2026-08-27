@@ -16,8 +16,10 @@ from src.interactive.director import (
     DIRECTOR_MODEL_ADMISSIBLE_ACTION_MASK_PROFILE,
     DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION,
     DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3,
+    director_live_action_parameter_json_schema_text,
     director_live_action_target_domains_json,
     director_live_add_subgraph_agent_declarations_json_schema_text,
+    director_live_modify_agent_field_selector_json_schema_text,
     director_model_admissible_sampling_json_schema_text,
     director_model_admissible_schema_branch,
     director_model_admissible_schema_branch_v3,
@@ -424,6 +426,108 @@ def test_sglang_client_v3_binds_add_subgraph_to_live_domains():
     parsed = AgentActionParser().parse(response.text)
     assert parsed.relations[0].source_id == "searcher"
     assert parsed.relations[0].target_id == "answerer"
+
+
+def test_modify_execution_profile_is_selected_and_bound_atomically():
+    domains = {
+        "modify_agent": {
+            "agent_ids": ["worker"],
+            "model_ids": ["cheap-model"],
+            "execution_profiles": [
+                {"execution_mode": "reasoning", "allowed_tools": []},
+                {
+                    "execution_mode": "react",
+                    "allowed_tools": ["hotpotqa.qa_memory"],
+                },
+            ],
+        }
+    }
+    selector = json.loads(director_live_modify_agent_field_selector_json_schema_text())
+    fields = selector["properties"]["field"]["enum"]
+    assert "execution_profile" in fields
+    assert "execution_mode" not in fields
+    assert "allowed_tools" not in fields
+
+    schema = json.loads(
+        director_live_action_parameter_json_schema_text(
+            "modify_agent",
+            domains,
+            modify_field="execution_profile",
+            execution_profile=("react", ("hotpotqa.qa_memory",)),
+        )
+    )
+    assert schema["required"] == [
+        "action",
+        "agent_id",
+        "execution_mode",
+        "allowed_tools",
+    ]
+    assert schema["properties"]["execution_mode"] == {"const": "react"}
+    assert schema["properties"]["allowed_tools"] == {
+        "const": ["hotpotqa.qa_memory"]
+    }
+
+
+def test_sglang_client_v3_binds_modify_profile_to_mode_and_tools():
+    actions = ("modify_agent",)
+    domains = {
+        "registered_execution_profiles": [
+            {"execution_mode": "reasoning", "allowed_tools": []},
+            {
+                "execution_mode": "react",
+                "allowed_tools": ["hotpotqa.qa_memory"],
+            },
+        ],
+        "finish_admissibility": {"admissible": False, "reason": "pending"},
+        "modify_agent": {
+            "agent_ids": ["worker"],
+            "model_ids": ["cheap-model"],
+            "execution_profiles": [
+                {"execution_mode": "reasoning", "allowed_tools": []},
+                {
+                    "execution_mode": "react",
+                    "allowed_tools": ["hotpotqa.qa_memory"],
+                },
+            ],
+        },
+    }
+    client = ScriptedSGLangClient(
+        [
+            '{"action":"modify_agent","field":"execution_profile"}',
+            '{"action":"modify_agent","execution_mode":"react"}',
+            '{"action":"modify_agent","agent_id":"worker",'
+            '"execution_mode":"react",'
+            '"allowed_tools":["hotpotqa.qa_memory"]}',
+        ],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+    )
+    response = asyncio.run(
+        client.propose(
+            "prompt",
+            seed=29,
+            action_json_schema=director_model_admissible_sampling_json_schema_text(
+                actions
+            ),
+            action_json_schema_version=(
+                DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3
+            ),
+            action_schema_branch=director_model_admissible_schema_branch_v3(actions),
+            action_target_domains_json=director_live_action_target_domains_json(
+                actions,
+                domains,
+            ),
+            action_target_domain_version=(
+                DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION
+            ),
+        )
+    )
+    parsed = AgentActionParser().parse(response.text)
+    assert parsed.execution_mode == "react"
+    assert parsed.allowed_tools == ("hotpotqa.qa_memory",)
+    assert response.metadata["selected_modify_field"] == "execution_profile"
+    assert response.metadata["selected_execution_mode"] == "react"
+    assert response.metadata["selected_allowed_tools"] == ["hotpotqa.qa_memory"]
 
 
 def test_collector_forwards_v3_live_action_schema_and_persists_receipt():
