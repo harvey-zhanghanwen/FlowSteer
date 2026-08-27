@@ -1390,3 +1390,9 @@ The v17 condition changes only the versioned reporting and terminal-admission
 semantics above. Its frozen sampling schedule purpose, seed, selected 128
 tasks, Director and Agent models, QA-memory index, embedding model, top-k, Tool
 budget and official TriviaQA evaluator remain identical to v16.
+
+`evaluation_triviaqa_qa_memory_free_topology_v18.yaml` versions the subsequent
+Output-only terminal-protocol repair in a new condition and artifact directory.
+It deliberately retains the v16 sampling schedule purpose and catalog-order
+namespace, so the frozen task/seed/model coordinates remain comparable while
+v17's failed canary trajectories are never resumed into the repaired condition.
