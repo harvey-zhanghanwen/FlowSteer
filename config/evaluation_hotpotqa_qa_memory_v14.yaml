@@ -81,6 +81,9 @@ storage:
   retrieval_profile_selection_path: "artifacts/hotpotqa_qa_memory_v1/profile_selection.json"
   retrieval_index_manifest_path: "artifacts/hotpotqa_qa_memory_source_freeze_v2/index/manifest.json"
   retrieval_index_smoke_path: "artifacts/hotpotqa_qa_memory_source_freeze_v2/index_smoke_receipt.json"
+  # The source-freeze smoke receipt includes deterministic_rebuild=true and
+  # the repeated-query ranking check, so it is also the rebuild evidence.
+  retrieval_index_rebuild_smoke_path: "artifacts/hotpotqa_qa_memory_source_freeze_v2/index_smoke_receipt.json"
   paraphrase_manifest_path: "artifacts/hotpotqa_qa_memory_v1/paraphrase_manifest.json"
   manifest_path: "artifacts/hotpotqa_qa_memory_v14/run_manifest.json"
   preflight_receipt_path: "artifacts/hotpotqa_qa_memory_v14/preflight_receipt.json"
