@@ -71,6 +71,7 @@ def build_from_config(config_path: Path) -> Mapping[str, object]:
         embedding_model_id=str(retrieval["embedding_model_id"]),
         embedding_device=str(retrieval["embedding_device"]),
         frozen_top_k=int(retrieval["search_top_k"]),
+        index_version=int(retrieval.get("index_version", 1)),
         expected_train_count=int(retrieval["train_sample_count"]),
         expected_validation_count=int(retrieval["validation_sample_count"]),
     )

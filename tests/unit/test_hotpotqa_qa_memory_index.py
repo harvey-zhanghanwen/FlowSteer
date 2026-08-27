@@ -73,13 +73,19 @@ def _aligned_record(
     }
 
 
-def _paraphrase(source_id: str, question: str, answer: str) -> dict[str, object]:
+def _paraphrase(
+    source_id: str,
+    question: str,
+    answer: str,
+    *,
+    version: str = "fixture-v1",
+) -> dict[str, object]:
     return {
         "source_train_task_id": source_id,
         "paraphrase_question": question,
         "paraphrase_answer_statement": f"The answer is {answer}.",
         "paraphrase_provenance": "offline-reviewed-fixture",
-        "paraphrase_version": "fixture-v1",
+        "paraphrase_version": version,
         "semantic_preservation_attested": True,
     }
 
@@ -175,6 +181,32 @@ class HotpotQAQAMemoryIndexTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "attestation"):
             materialize_hotpotqa_qa_memories([source], [unattested])
 
+    def test_v2_requires_exact_answer_span_and_no_new_answer_in_question(self) -> None:
+        source = HotpotQATrainQASource(
+            source_train_task_id="hotpotqa:train",
+            base_task_id="hotpotqa:train",
+            cycled=False,
+            question="Who is Alpha?",
+            canonical_answer="Ada Lovelace",
+        )
+        case_changed = _paraphrase(
+            "hotpotqa:train",
+            "Identify the person called Alpha.",
+            "ada lovelace",
+            version="fixture-v2",
+        )
+        with self.assertRaisesRegex(ValueError, "canonical answer span"):
+            materialize_hotpotqa_qa_memories([source], [case_changed])
+
+        leaked = _paraphrase(
+            "hotpotqa:train",
+            "Is the person Ada Lovelace?",
+            "Ada Lovelace",
+            version="fixture-v2",
+        )
+        with self.assertRaisesRegex(ValueError, "introduced the canonical answer"):
+            materialize_hotpotqa_qa_memories([source], [leaked])
+
     def test_build_open_search_and_read_are_deterministic(self) -> None:
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -219,6 +251,7 @@ class HotpotQAQAMemoryIndexTests(unittest.TestCase):
                     embedding_model_id="fake",
                     embedding_device="cpu",
                     frozen_top_k=1,
+                    index_version=2,
                     expected_train_count=2,
                     expected_validation_count=1,
                 )
@@ -226,6 +259,15 @@ class HotpotQAQAMemoryIndexTests(unittest.TestCase):
 
             self.assertEqual(2, manifest.unique_source_count)
             self.assertEqual(0, manifest.cycled_record_count)
+            self.assertEqual(
+                "flowsteer.hotpotqa.qa_memory_index.v2",
+                manifest.schema_version,
+            )
+            self.assertEqual(
+                "flowsteer.hotpotqa.train_qa_memory.v2",
+                manifest.corpus_version,
+            )
+            self.assertTrue(manifest.index_id.endswith("-v2"))
             self.assertEqual(2, manifest.paraphrase_count)
             self.assertTrue(
                 all(text.startswith("Question:") and "\nAnswer:" in text for text in fake_model.encoded_texts[:2])

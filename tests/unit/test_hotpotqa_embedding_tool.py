@@ -19,6 +19,7 @@ from src.interactive.hotpotqa_embedding_tool import (
     build_hotpotqa_embedding_tool_registry,
 )
 from src.interactive.model_registry import ModelSpec, ProviderSpec
+from src.interactive.react_execution import ReactExecutionError
 from src.interactive.tool_runtime import ToolRequest
 
 
@@ -256,6 +257,19 @@ def _qa_memory_worker_request() -> AgentRequest:
         provider=ProviderSpec("fake", kind="test"),
         phase=ExecutionPhase.SINGLE,
     )
+
+
+def _qa_memory_evidence_artifact() -> dict[str, str]:
+    return {
+        "question_scope": "Who wrote Alpha?",
+        "memory_id": "memory-1",
+        "source_train_task_id": "hotpotqa:train-a",
+        "paraphrase_question": "Which person wrote Alpha?",
+        "paraphrase_answer_statement": (
+            "The writer of Alpha is Ada Lovelace."
+        ),
+        "canonical_answer": "Ada Lovelace",
+    }
 
 
 def _contains_forbidden_key(value: Any) -> bool:
@@ -656,12 +670,16 @@ class HotpotQAEmbeddingToolTests(unittest.TestCase):
                 "memory_id",
                 "source_train_task_id",
                 "paraphrase_question",
-                "paraphrase_answer_statement",
                 "similarity",
                 "rank",
             },
             set(search_result.value["hits"][0]),
         )
+        self.assertNotIn(
+            "paraphrase_answer_statement",
+            search_result.value["hits"][0],
+        )
+        self.assertNotIn("canonical_answer", search_result.value["hits"][0])
         self.assertEqual(HOTPOTQA_QA_MEMORY_TOOL_ID, search_receipt.tool_id)
 
         read_result, read_receipt = asyncio.run(
@@ -725,6 +743,12 @@ class HotpotQAEmbeddingToolTests(unittest.TestCase):
                     arguments={"value": "Ada Lovelace"},
                     resource_id=None,
                 ),
+                _action(
+                    "complete",
+                    name="complete",
+                    arguments={"value": {"memory_id": "memory-1"}},
+                    resource_id=None,
+                ),
             ]
         )
         adapter = HotpotQAEmbeddingReactExecutionAdapter(
@@ -734,15 +758,27 @@ class HotpotQAEmbeddingToolTests(unittest.TestCase):
                 task_id="hotpotqa:heldout-validation-001",
                 tool_id=HOTPOTQA_QA_MEMORY_TOOL_ID,
             ),
-            max_turns=3,
+            max_turns=4,
             max_tool_calls=2,
         )
 
         response = asyncio.run(adapter.execute(_qa_memory_worker_request()))
 
-        self.assertEqual("Ada Lovelace", response.text)
+        self.assertEqual(
+            json.dumps(
+                _qa_memory_evidence_artifact(),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            response.text,
+        )
         self.assertEqual([("Alpha author", 2)], index.search_calls)
         self.assertEqual(["memory-1"], index.read_calls)
+        self.assertEqual(
+            "hotpotqa_qa_memory_completion_selection_invalid",
+            response.metadata["react_trace"][2]["public_error_code"],
+        )
         self.assertTrue(
             all(
                 request.agent.id == "qa-memory-worker"
@@ -764,6 +800,159 @@ class HotpotQAEmbeddingToolTests(unittest.TestCase):
         serialized = json.dumps(dict(response.metadata), ensure_ascii=False).casefold()
         self.assertNotIn("web search", serialized)
         self.assertNotIn("web_search", serialized)
+
+    def test_qa_memory_completion_binds_question_and_exact_read_record(self) -> None:
+        index = _QAMemoryIndex()
+        gateway = _SequenceGateway(
+            [
+                _action(
+                    "tool",
+                    name="search",
+                    arguments={"query": "Alpha author", "k": 2},
+                    resource_id=HOTPOTQA_QA_MEMORY_TOOL_ID,
+                ),
+                _action(
+                    "tool",
+                    name="read",
+                    arguments={"memory_id": "memory-1"},
+                    resource_id=HOTPOTQA_QA_MEMORY_TOOL_ID,
+                ),
+                _action(
+                    "complete",
+                    name="complete",
+                    arguments={"value": {"memory_id": "memory-2"}},
+                    resource_id=None,
+                ),
+                _action(
+                    "complete",
+                    name="complete",
+                    arguments={"value": {"memory_id": "memory-1"}},
+                    resource_id=None,
+                ),
+            ]
+        )
+        adapter = HotpotQAEmbeddingReactExecutionAdapter(
+            gateway=gateway,
+            tool_registry=build_hotpotqa_embedding_tool_registry(
+                index,
+                task_id="hotpotqa:heldout-validation-001",
+                tool_id=HOTPOTQA_QA_MEMORY_TOOL_ID,
+            ),
+            max_turns=4,
+            max_tool_calls=2,
+        )
+
+        response = asyncio.run(adapter.execute(_qa_memory_worker_request()))
+
+        self.assertEqual(
+            "hotpotqa_qa_memory_artifact_has_no_exact_search_read_lineage",
+            response.metadata["react_trace"][2]["public_error_code"],
+        )
+        completion_schema = json.loads(
+            gateway.requests[-1].model.metadata["response_json_schema"]
+        )["properties"]["arguments"]["properties"]["value"]
+        self.assertEqual(["memory_id"], completion_schema["required"])
+        self.assertEqual(
+            {"memory_id"}, set(completion_schema["properties"])
+        )
+        self.assertEqual(
+            json.dumps(
+                _qa_memory_evidence_artifact(),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            response.text,
+        )
+
+    def test_qa_memory_empty_bounded_search_has_typed_coverage_failure(self) -> None:
+        class _EmptyQAMemoryIndex(_QAMemoryIndex):
+            def search(self, query: str, k: int) -> tuple[_QAMemoryHit, ...]:
+                self.search_calls.append((query, k))
+                return ()
+
+        gateway = _SequenceGateway(
+            [
+                _action(
+                    "tool",
+                    name="search",
+                    arguments={"query": "Alpha author", "k": 2},
+                    resource_id=HOTPOTQA_QA_MEMORY_TOOL_ID,
+                ),
+                _action(
+                    "tool",
+                    name="search",
+                    arguments={"query": "Alpha writer", "k": 2},
+                    resource_id=HOTPOTQA_QA_MEMORY_TOOL_ID,
+                ),
+            ]
+        )
+        adapter = HotpotQAEmbeddingReactExecutionAdapter(
+            gateway=gateway,
+            tool_registry=build_hotpotqa_embedding_tool_registry(
+                _EmptyQAMemoryIndex(),
+                task_id="hotpotqa:heldout-validation-001",
+                tool_id=HOTPOTQA_QA_MEMORY_TOOL_ID,
+            ),
+            max_turns=2,
+            max_tool_calls=2,
+        )
+
+        with self.assertRaises(ReactExecutionError) as caught:
+            asyncio.run(adapter.execute(_qa_memory_worker_request()))
+        self.assertEqual(
+            "knowledge_base_coverage_failure",
+            caught.exception.metadata["retrieval_failure_type"],
+        )
+        self.assertEqual(
+            "knowledge_base_coverage_failure",
+            caught.exception.metadata["react_trace"][-1]["public_error_code"],
+        )
+
+    def test_qa_memory_low_confidence_hits_require_rewrite_then_coverage_failure(
+        self,
+    ) -> None:
+        gateway = _SequenceGateway(
+            [
+                _action(
+                    "tool",
+                    name="search",
+                    arguments={"query": "Alpha author", "k": 2},
+                    resource_id=HOTPOTQA_QA_MEMORY_TOOL_ID,
+                ),
+                _action(
+                    "tool",
+                    name="search",
+                    arguments={"query": "Alpha writer", "k": 2},
+                    resource_id=HOTPOTQA_QA_MEMORY_TOOL_ID,
+                ),
+            ]
+        )
+        adapter = HotpotQAEmbeddingReactExecutionAdapter(
+            gateway=gateway,
+            tool_registry=build_hotpotqa_embedding_tool_registry(
+                _QAMemoryIndex(),
+                task_id="hotpotqa:heldout-validation-001",
+                tool_id=HOTPOTQA_QA_MEMORY_TOOL_ID,
+            ),
+            max_turns=2,
+            max_tool_calls=2,
+            qa_memory_min_similarity=0.95,
+        )
+
+        with self.assertRaises(ReactExecutionError) as caught:
+            asyncio.run(adapter.execute(_qa_memory_worker_request()))
+        self.assertEqual(
+            "knowledge_base_coverage_failure",
+            caught.exception.metadata["retrieval_failure_type"],
+        )
+        self.assertIn("confidence threshold", gateway.requests[1].agent.contract)
+        response_schema = json.loads(
+            gateway.requests[1].model.metadata["response_json_schema"]
+        )
+        self.assertEqual(
+            "search", response_schema["properties"]["name"]["const"]
+        )
 
     def test_manifest_and_search_signature_mismatch_fails_closed(self) -> None:
         class _MismatchedIndex(_Index):

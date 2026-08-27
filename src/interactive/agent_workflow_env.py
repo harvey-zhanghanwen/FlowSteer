@@ -29,6 +29,8 @@ from .agent_runtime import (
     AgentRuntimeResult,
 )
 from .model_registry import ModelRegistry
+from .task_dataset import qa_question_scope
+from .task_evaluator import _normalize_answer as _official_qa_normalize_answer
 
 
 class AgentWorkflowStateError(RuntimeError):
@@ -40,6 +42,19 @@ _SUPPORTED_RECOVERY_POLICIES = frozenset(
     {"default", _PRESERVE_REPAIR_RECOVERY_POLICY}
 )
 _SUPPORTED_DIRECTOR_FEEDBACK_MODES = frozenset({"content", "control_plane"})
+_HOTPOTQA_QA_MEMORY_TOOL_ID = "hotpotqa.qa_memory"
+_HOTPOTQA_QA_MEMORY_REQUIRED_ROLE_FAMILIES = (
+    "evidence_retriever",
+    "reasoner",
+    "verifier",
+    "format",
+)
+_HOTPOTQA_QA_MEMORY_TOOL_ROLE_FAMILIES = frozenset(
+    {"evidence_retriever", "repair"}
+)
+_HOTPOTQA_QA_MEMORY_REASONING_ROLE_FAMILIES = frozenset(
+    {"reasoner", "verifier", "format"}
+)
 
 
 def _answer_protocol_state(answer: str) -> tuple[int, bool, bool]:
@@ -215,11 +230,19 @@ class AgentWorkflowEnv:
         self.max_agents = max_agents
         self.max_agents_per_subgraph = max_agents_per_subgraph
         self.require_exact_answer_tag = require_exact_answer_tag
-        self.require_format_agent = require_format_agent
         self.required_evidence_tool_id = (
             None
             if required_evidence_tool_id is None
             else required_evidence_tool_id.strip()
+        )
+        # DIRECT_REUSE + NECESSARY_ADAPTATION: the unified QA Canvas enables
+        # its distinct Format boundary from the task protocol rather than
+        # relying on a second caller flag.  The Hotpot runner already selects
+        # the QA-memory protocol through its required Tool ID, so make that
+        # existing boundary authoritative here as well.
+        self.require_format_agent = bool(
+            require_format_agent
+            or self.required_evidence_tool_id == _HOTPOTQA_QA_MEMORY_TOOL_ID
         )
         self.require_evidence_relation = require_evidence_relation
         self.allowed_action_types = resolved_allowed_actions
@@ -242,6 +265,11 @@ class AgentWorkflowEnv:
         self._failed_agent_ids: set[str] = set()
         self._diagnosed_unusable_agent_ids: set[str] = set()
         self._failed_output_agent_ids: set[str] = set()
+        self._react_exhausted_agent_ids: set[str] = set()
+        self._repair_exhausted_agent_ids: set[str] = set()
+        self._knowledge_base_coverage_failure_agent_ids: set[str] = set()
+        self._latest_failure_receipt_count_by_agent: dict[str, int] = {}
+        self._pending_repair_receipt_count_by_agent: dict[str, int] = {}
         self._unresolved_dirty_agent_ids: set[str] = set()
         self._validate_agent_limit(self._graph)
         self._validate_graph_execution_profiles(self._graph)
@@ -353,13 +381,149 @@ class AgentWorkflowEnv:
             for execution_mode, allowed_tools in profiles
         ]
 
+    def _uses_hotpotqa_qa_memory_role_protocol(self) -> bool:
+        """Return whether the typed train-QA-memory Canvas is active."""
+
+        return self.required_evidence_tool_id == _HOTPOTQA_QA_MEMORY_TOOL_ID
+
+    def _role_execution_profiles_for(
+        self,
+        role_family: str,
+    ) -> Tuple[Tuple[str, Tuple[str, ...]], ...]:
+        """Project unified QA role capabilities onto registered Runtime pairs."""
+
+        if not self._uses_hotpotqa_qa_memory_role_protocol():
+            return self.registered_execution_profiles()
+        role = role_family.casefold()
+        if role in _HOTPOTQA_QA_MEMORY_TOOL_ROLE_FAMILIES:
+            required = ("react", (_HOTPOTQA_QA_MEMORY_TOOL_ID,))
+        elif role in _HOTPOTQA_QA_MEMORY_REASONING_ROLE_FAMILIES:
+            required = ("reasoning", ())
+        else:
+            return ()
+        return tuple(
+            profile
+            for profile in self.registered_execution_profiles()
+            if profile == required
+        )
+
+    def _role_execution_constraint(self, role_family: str) -> dict[str, object]:
+        profiles = self._role_execution_profiles_for(role_family)
+        return {
+            "execution_modes": list(dict.fromkeys(mode for mode, _ in profiles)),
+            "allowed_tools": [
+                list(tool_ids)
+                for tool_ids in dict.fromkeys(tool_ids for _, tool_ids in profiles)
+            ],
+            "execution_profiles": self._serialized_execution_profiles(profiles),
+        }
+
+    def _role_profile_issue(
+        self,
+        role_family: Optional[str],
+        execution_mode: str,
+        allowed_tools: Sequence[str],
+    ) -> Optional[str]:
+        if not self._uses_hotpotqa_qa_memory_role_protocol():
+            return None
+        role = (role_family or "").casefold()
+        if not role:
+            return "HotpotQA QA-memory Agent requires a non-empty role_family"
+        profiles = self._role_execution_profiles_for(role)
+        if not profiles:
+            return (
+                "HotpotQA QA-memory role_family is outside the typed live "
+                f"domain: {role!r}"
+            )
+        profile = (execution_mode, tuple(allowed_tools))
+        if profile not in profiles:
+            return (
+                f"HotpotQA QA-memory {role!r} Agent uses an execution profile "
+                f"outside its role capability: {profile!r}; "
+                f"admitted_profiles={list(profiles)!r}"
+            )
+        return None
+
+    def _missing_qa_memory_role_families(self) -> Tuple[str, ...]:
+        if not self._uses_hotpotqa_qa_memory_role_protocol():
+            return ()
+        existing = {
+            (node.role_family or "").casefold()
+            for node in self._graph.nodes
+            if node.id not in self._diagnosed_unusable_agent_ids
+        }
+        return tuple(
+            role
+            for role in _HOTPOTQA_QA_MEMORY_REQUIRED_ROLE_FAMILIES
+            if role not in existing
+        )
+
+    def _admitted_new_qa_memory_role_families(self) -> Tuple[str, ...]:
+        """Return state-conditioned roles without prescribing graph topology."""
+
+        if not self._uses_hotpotqa_qa_memory_role_protocol():
+            return ()
+        exhausted = tuple(
+            node
+            for node in self._graph.nodes
+            if node.id in self._repair_exhausted_agent_ids
+        )
+        if exhausted:
+            roles: list[str] = []
+            for node in exhausted:
+                role = (node.role_family or "").casefold()
+                if role and role not in roles:
+                    roles.append(role)
+                if (
+                    role in _HOTPOTQA_QA_MEMORY_TOOL_ROLE_FAMILIES
+                    and "repair" not in roles
+                ):
+                    roles.append("repair")
+            return tuple(roles)
+        missing = self._missing_qa_memory_role_families()
+        return missing or ("repair",)
+
+    def _qa_memory_role_constraints(
+        self,
+        role_families: Sequence[str],
+    ) -> dict[str, object]:
+        return {
+            role_family: self._role_execution_constraint(role_family)
+            for role_family in role_families
+        }
+
     def model_admissible_action_types(self) -> Tuple[str, ...]:
         """Project the live, state-conditioned Canvas action domain."""
 
         node_ids = tuple(node.id for node in self._graph.nodes)
+        output_agent_ids = self._model_admissible_output_agent_ids()
+        finish_admissible = self.finish_admissibility()["admissible"] is True
+        if (
+            self._uses_hotpotqa_qa_memory_role_protocol()
+            and finish_admissible
+            and AgentActionType.FINISH.value in self._allowed_action_type_set
+        ):
+            # DIRECT_REUSE: unified QA freezes a verified terminal lineage and
+            # asks FlowSteer for the explicit FINISH action before any further
+            # Canvas edit can invalidate it.
+            return (AgentActionType.FINISH.value,)
+        if (
+            self._uses_hotpotqa_qa_memory_role_protocol()
+            and self._knowledge_base_coverage_failure_agent_ids
+        ):
+            # DIRECT_REUSE + NECESSARY ADAPTATION: unified QA treats a typed
+            # knowledge-base coverage failure as terminal for the frozen
+            # corpus/Tool condition.  The ReAct worker has already exhausted
+            # its bounded query-rewrite schedule; another Canvas repair or
+            # replacement cannot add corpus coverage and would only repeat the
+            # same Tool plan.
+            return ()
+        repairable_failed_ids = (
+            self._failed_agent_ids - self._repair_exhausted_agent_ids
+        )
         if (
             self.recovery_policy == _PRESERVE_REPAIR_RECOVERY_POLICY
-            and self._failed_agent_ids
+            and repairable_failed_ids
             and AgentActionType.MODIFY_AGENT.value in self._allowed_action_type_set
         ):
             # DIRECT_REUSE + NECESSARY_ADAPTATION: FlowSteer's typed provider
@@ -368,14 +532,73 @@ class AgentWorkflowEnv:
             # domain below narrows MODIFY to the measured failed workers.
             return (AgentActionType.MODIFY_AGENT.value,)
         can_add = self.max_agents is None or len(node_ids) < self.max_agents
+        if (
+            self.recovery_policy == _PRESERVE_REPAIR_RECOVERY_POLICY
+            and self._repair_exhausted_agent_ids
+        ):
+            if not can_add:
+                return ()
+            return tuple(
+                action_type
+                for action_type in self.allowed_action_types
+                if action_type == AgentActionType.ADD_SUBGRAPH.value
+            )
+        if (
+            self._uses_hotpotqa_qa_memory_role_protocol()
+            and self._missing_qa_memory_role_families()
+        ):
+            if not can_add:
+                # A relation or parameter edit cannot materialize a missing
+                # semantic responsibility.  Match the unified QA Canvas and
+                # expose the natural empty action domain at full capacity.
+                return ()
+            # Complete missing semantic responsibilities before unrelated
+            # edits.  The sampled ADD may still contain one or several Agents;
+            # no relation ordering or topology is prescribed here.
+            return tuple(
+                action_type
+                for action_type in self.allowed_action_types
+                if action_type == AgentActionType.ADD_SUBGRAPH.value
+            )
+        required_relation_candidates = (
+            self._model_admissible_relation_candidates()
+            if self._uses_hotpotqa_qa_memory_role_protocol()
+            else []
+        )
+        if (
+            required_relation_candidates
+            and AgentActionType.SET_RELATION.value
+            in self._allowed_action_type_set
+        ):
+            # DIRECT_REUSE: the unified QA action mask exposes the exact
+            # missing semantic data dependency before unrelated edits.
+            return (AgentActionType.SET_RELATION.value,)
+        if (
+            self._uses_hotpotqa_qa_memory_role_protocol()
+            and self._graph.output_agent_id is None
+            and output_agent_ids
+            and AgentActionType.SET_OUTPUT.value in self._allowed_action_type_set
+        ):
+            # A Format target is advertised only after the prospective graph
+            # passes the same complete semantic-lineage check as admission.
+            return (AgentActionType.SET_OUTPUT.value,)
         deletable_ids = {
             agent_id
             for agent_id in node_ids
             if self._delete_admission_issue(agent_id) is None
         }
-        finish_admissible = self.finish_admissibility()["admissible"] is True
         admitted: list[str] = []
         for action_type in self.allowed_action_types:
+            if (
+                self._uses_hotpotqa_qa_memory_role_protocol()
+                and action_type == AgentActionType.ADD_AGENT.value
+            ):
+                # The typed ADD_SUBGRAPH domain admits one to three Agents and
+                # therefore includes the single-Agent execution unit while
+                # preserving positional node IDs and role/profile constraints.
+                # The legacy open ADD_AGENT wire cannot express those exact
+                # cross-field constraints and is not model-admissible here.
+                continue
             if action_type in {
                 AgentActionType.ADD_AGENT.value,
                 AgentActionType.ADD_SUBGRAPH.value,
@@ -385,9 +608,15 @@ class AgentWorkflowEnv:
                 continue
             if action_type == AgentActionType.DELETE_AGENT.value and not deletable_ids:
                 continue
-            if action_type == AgentActionType.SET_RELATION.value and len(node_ids) < 2:
+            if (
+                action_type == AgentActionType.SET_RELATION.value
+                and not self._model_admissible_relation_candidates()
+            ):
                 continue
-            if action_type == AgentActionType.SET_OUTPUT.value and not node_ids:
+            if (
+                action_type == AgentActionType.SET_OUTPUT.value
+                and not output_agent_ids
+            ):
                 continue
             if (
                 action_type == AgentActionType.FINISH.value
@@ -397,14 +626,97 @@ class AgentWorkflowEnv:
             admitted.append(action_type)
         return tuple(admitted)
 
+    def _model_admissible_output_agent_ids(self) -> tuple[str, ...]:
+        """Return Output targets compatible with the evidence relation gate.
+
+        FlowSteer's action mask exposes only edits that can satisfy the active
+        Canvas contract.  When a distinct evidence relation is required, the
+        QA-memory Tool owner cannot also be the Output Agent; excluding that
+        target keeps the Director search space free-form without prescribing
+        a role sequence or graph topology.
+        """
+
+        admitted: list[str] = []
+        for node in self._graph.nodes:
+            if self._uses_hotpotqa_qa_memory_role_protocol():
+                if node.id == self._graph.output_agent_id:
+                    continue
+                if (
+                    (node.role_family or "").casefold() != "format"
+                    or node.execution_mode.value != "reasoning"
+                    or node.allowed_tools
+                ):
+                    continue
+                candidate = self._graph.fork()
+                candidate.set_output(node.id)
+                if self._qa_memory_semantic_lineage_issue_for(
+                    candidate,
+                    require_complete=True,
+                ) is not None:
+                    continue
+            elif (
+                self.require_evidence_relation
+                and self.required_evidence_tool_id is not None
+                and self.required_evidence_tool_id in node.allowed_tools
+            ):
+                continue
+            admitted.append(node.id)
+        return tuple(admitted)
+
     def model_admissible_action_targets(self) -> dict[str, object]:
         """Return the live domains that correspond to admissible actions."""
 
         admitted = set(self.model_admissible_action_types())
         node_ids = [node.id for node in self._graph.nodes]
+        output_agent_ids = list(self._model_admissible_output_agent_ids())
         model_ids = list(self.model_registry.model_ids)
         profiles = self.registered_execution_profiles()
         serialized_profiles = self._serialized_execution_profiles(profiles)
+        role_constraints: dict[str, object] = {}
+        admitted_new_roles: Tuple[str, ...] = ()
+        admitted_profiles = profiles
+        if self._uses_hotpotqa_qa_memory_role_protocol():
+            all_roles = (
+                *_HOTPOTQA_QA_MEMORY_REQUIRED_ROLE_FAMILIES,
+                "repair",
+            )
+            role_constraints = self._qa_memory_role_constraints(all_roles)
+            admitted_new_roles = self._admitted_new_qa_memory_role_families()
+            admitted_profiles = tuple(
+                dict.fromkeys(
+                    profile
+                    for role_family in admitted_new_roles
+                    for profile in self._role_execution_profiles_for(role_family)
+                )
+            )
+        serialized_admitted_profiles = self._serialized_execution_profiles(
+            admitted_profiles
+        )
+
+        def typed_add_domain() -> dict[str, object]:
+            if not self._uses_hotpotqa_qa_memory_role_protocol():
+                return {}
+            return {
+                "semantic_protocol": "hotpotqa.qa_memory.worker_lineage.v1",
+                "required_agent_fields": [
+                    "agent_id",
+                    "model_id",
+                    "contract",
+                    "role_family",
+                    "execution_mode",
+                    "allowed_tools",
+                ],
+                "existing_agents": [
+                    {
+                        "agent_id": node.id,
+                        "role_family": node.role_family,
+                    }
+                    for node in self._graph.nodes
+                ],
+                "output_role_family": "format",
+                "role_constraints": role_constraints,
+                "admitted_new_role_families": list(admitted_new_roles),
+            }
         result: dict[str, object] = {
             "registered_execution_profiles": serialized_profiles,
             "finish_admissibility": self.finish_admissibility(),
@@ -412,7 +724,8 @@ class AgentWorkflowEnv:
         if AgentActionType.ADD_AGENT.value in admitted:
             result[AgentActionType.ADD_AGENT.value] = {
                 "model_ids": model_ids,
-                "execution_profiles": serialized_profiles,
+                "execution_profiles": serialized_admitted_profiles,
+                **typed_add_domain(),
             }
         if AgentActionType.ADD_SUBGRAPH.value in admitted:
             remaining = (
@@ -423,23 +736,106 @@ class AgentWorkflowEnv:
                     self.max_agents - len(node_ids),
                 )
             )
+            if self._repair_exhausted_agent_ids:
+                remaining = min(remaining, 1)
+            elif admitted_new_roles:
+                remaining = min(remaining, len(admitted_new_roles))
             result[AgentActionType.ADD_SUBGRAPH.value] = {
                 "model_ids": model_ids,
-                "execution_profiles": serialized_profiles,
+                "execution_profiles": serialized_admitted_profiles,
                 "existing_agent_ids": node_ids,
+                "min_new_agents": 1,
                 "max_new_agents": remaining,
+                **typed_add_domain(),
             }
         if AgentActionType.MODIFY_AGENT.value in admitted:
+            modifiable_ids = (
+                sorted(
+                    self._failed_agent_ids
+                    - self._repair_exhausted_agent_ids
+                )
+                if self.recovery_policy
+                == _PRESERVE_REPAIR_RECOVERY_POLICY
+                and self._failed_agent_ids
+                else node_ids
+            )
+            base_mutable_fields = [
+                "model_id",
+                "contract",
+                "artifact_type",
+                "completion_condition",
+            ]
+            if not self._uses_hotpotqa_qa_memory_role_protocol():
+                base_mutable_fields[2:2] = [
+                    "role_family",
+                    "allowed_tools",
+                    "execution_mode",
+                ]
+            per_agent_candidates: list[dict[str, object]] = []
+            for agent_id in modifiable_ids:
+                node = self._graph.get_node(agent_id)
+                alternate_models = [
+                    model_id
+                    for model_id in model_ids
+                    if model_id != node.model_id
+                ]
+                mutable_fields = [
+                    field
+                    for field in base_mutable_fields
+                    if field != "model_id" or alternate_models
+                ]
+                current_values: dict[str, object] = {}
+                for field in mutable_fields:
+                    value = getattr(node, field)
+                    current_values[field] = (
+                        list(value) if isinstance(value, tuple) else value
+                    )
+                discrete_domains: dict[str, list[object]] = {}
+                if "model_id" in mutable_fields:
+                    # DIRECT_REUSE: unified QA excludes the current model from
+                    # the finite replacement domain.  Free-text fields expose
+                    # their current value and remain subject to Env no-op
+                    # rejection.
+                    discrete_domains["model_id"] = list(alternate_models)
+                per_agent_candidates.append(
+                    {
+                        "agent_id": agent_id,
+                        "mutable_fields": mutable_fields,
+                        "role_family": node.role_family or "",
+                        "current_values": current_values,
+                        "discrete_value_domains": discrete_domains,
+                    }
+                )
+            mutable_fields = [
+                field
+                for field in base_mutable_fields
+                if any(
+                    field in candidate["mutable_fields"]
+                    for candidate in per_agent_candidates
+                )
+            ]
             result[AgentActionType.MODIFY_AGENT.value] = {
-                "agent_ids": (
-                    sorted(self._failed_agent_ids)
-                    if self.recovery_policy
-                    == _PRESERVE_REPAIR_RECOVERY_POLICY
-                    and self._failed_agent_ids
-                    else node_ids
-                ),
+                "agent_ids": modifiable_ids,
                 "model_ids": model_ids,
                 "execution_profiles": serialized_profiles,
+                "mutable_fields": mutable_fields,
+                "per_agent_candidates": per_agent_candidates,
+                **(
+                    {
+                        "role_constraints": role_constraints,
+                        "existing_agents": [
+                            {
+                                "agent_id": node.id,
+                                "role_family": node.role_family,
+                                "execution_mode": node.execution_mode.value,
+                                "allowed_tools": list(node.allowed_tools),
+                            }
+                            for node in self._graph.nodes
+                        ],
+                    }
+                    if role_constraints
+                    else {}
+                ),
             }
         if AgentActionType.DELETE_AGENT.value in admitted:
             result[AgentActionType.DELETE_AGENT.value] = {
@@ -451,11 +847,14 @@ class AgentWorkflowEnv:
             }
         if AgentActionType.SET_RELATION.value in admitted:
             result[AgentActionType.SET_RELATION.value] = {
-                "agent_ids": node_ids,
+                "source_agent_ids": node_ids,
+                "target_agent_ids": node_ids,
+                "endpoints_must_differ": True,
+                "candidates": self._model_admissible_relation_candidates(),
             }
         if AgentActionType.SET_OUTPUT.value in admitted:
             result[AgentActionType.SET_OUTPUT.value] = {
-                "agent_ids": node_ids,
+                "agent_ids": output_agent_ids,
             }
         if AgentActionType.FINISH.value in admitted:
             result[AgentActionType.FINISH.value] = {"admissible": True}
@@ -509,6 +908,257 @@ class AgentWorkflowEnv:
             if source_id == agent_id
         }
 
+    def _all_model_admissible_relation_candidates(
+        self,
+    ) -> list[dict[str, object]]:
+        """Return every non-self, non-no-op relation edit accepted by Canvas.
+
+        DIRECT_REUSE: this is the unified QA read-only legality projection.
+        The Canvas remains authoritative; the projection only prevents the
+        constrained Director schema from advertising edits that the same
+        graph and semantic validators will reject.
+        """
+
+        node_ids = [node.id for node in self._graph.nodes]
+        candidates: list[dict[str, object]] = []
+        for source_index, source_id in enumerate(node_ids):
+            for target_id in node_ids[source_index + 1 :]:
+                previous = self._graph.relation_bits(source_id, target_id)
+                for source_to_target, target_to_source in (
+                    (False, False),
+                    (True, False),
+                    (False, True),
+                    (True, True),
+                ):
+                    if (
+                        previous.source_to_target == source_to_target
+                        and previous.target_to_source == target_to_source
+                    ):
+                        continue
+                    candidate = self._graph.fork()
+                    candidate.set_relation(
+                        source_id,
+                        target_id,
+                        source_to_target,
+                        target_to_source,
+                    )
+                    validation = candidate.validate(
+                        self.model_registry,
+                        require_complete=False,
+                    )
+                    if not validation.valid:
+                        continue
+                    if self._qa_memory_semantic_lineage_issue_for(
+                        candidate,
+                        require_complete=candidate.output_agent_id is not None,
+                    ) is not None:
+                        continue
+                    encoded_source_id = source_id
+                    encoded_target_id = target_id
+                    encoded_source_to_target = source_to_target
+                    encoded_target_to_source = target_to_source
+                    if not source_to_target and target_to_source:
+                        # Serialize a one-way edge as its actual sender to
+                        # receiver with (true,false), matching the ADD domain.
+                        encoded_source_id = target_id
+                        encoded_target_id = source_id
+                        encoded_source_to_target = True
+                        encoded_target_to_source = False
+                    candidates.append(
+                        {
+                            "source_id": encoded_source_id,
+                            "target_id": encoded_target_id,
+                            "source_to_target": encoded_source_to_target,
+                            "target_to_source": encoded_target_to_source,
+                        }
+                    )
+        return candidates
+
+    @staticmethod
+    def _relation_action_matches_candidate(
+        action: AgentAction,
+        candidate: Mapping[str, object],
+    ) -> bool:
+        return (
+            action.action_type is AgentActionType.SET_RELATION
+            and action.source_id == candidate.get("source_id")
+            and action.target_id == candidate.get("target_id")
+            and action.source_to_target is candidate.get("source_to_target")
+            and action.target_to_source is candidate.get("target_to_source")
+        )
+
+    def _model_admissible_relation_candidates(self) -> list[dict[str, object]]:
+        """Return exact state-conditioned relation progress candidates."""
+
+        all_candidates = self._all_model_admissible_relation_candidates()
+        if not self._uses_hotpotqa_qa_memory_role_protocol():
+            return all_candidates
+        role_ids = {
+            role: tuple(
+                node.id
+                for node in self._graph.nodes
+                if (node.role_family or "").casefold() == role
+            )
+            for role in _HOTPOTQA_QA_MEMORY_REQUIRED_ROLE_FAMILIES
+        }
+        role_ids["repair"] = tuple(
+            node.id
+            for node in self._graph.nodes
+            if (node.role_family or "").casefold() == "repair"
+        )
+        by_signature = {
+            (
+                item["source_id"],
+                item["target_id"],
+                item["source_to_target"],
+                item["target_to_source"],
+            ): item
+            for item in all_candidates
+        }
+
+        def missing_edge_candidates(
+            source_ids: Sequence[str],
+            target_ids: Sequence[str],
+        ) -> list[dict[str, object]]:
+            if any(
+                target_id in self._directed_successors(self._graph, source_id)
+                for source_id in source_ids
+                for target_id in target_ids
+            ):
+                return []
+            return [
+                by_signature[key]
+                for source_id in source_ids
+                for target_id in target_ids
+                if (
+                    key := (source_id, target_id, True, False)
+                ) in by_signature
+            ]
+
+        for sources, targets in (
+            (
+                (*role_ids["evidence_retriever"], *role_ids["repair"]),
+                role_ids["reasoner"],
+            ),
+            (role_ids["reasoner"], role_ids["verifier"]),
+            (role_ids["verifier"], role_ids["format"]),
+        ):
+            required = missing_edge_candidates(sources, targets)
+            if required:
+                return required
+        # Once the semantic data dependencies exist, SET_OUTPUT or FINISH owns
+        # the next boundary.  Do not fall through to arbitrary peer rewrites.
+        return []
+
+    def _qa_memory_semantic_lineage_issue_for(
+        self,
+        graph: AgentGraph,
+        *,
+        require_complete: bool,
+    ) -> Optional[str]:
+        """Validate the unified QA responsibility boundary on one Canvas.
+
+        This is the thin Hotpot adaptation of the unified Trivia semantic edit
+        and Format admission checks.  It constrains responsibility and evidence
+        flow, while leaving Agent count, auxiliary branches, reciprocal
+        communication among non-Format Agents, and edit order model-authored.
+        """
+
+        if not self._uses_hotpotqa_qa_memory_role_protocol():
+            return None
+        for node in graph.nodes:
+            issue = self._role_profile_issue(
+                node.role_family,
+                node.execution_mode.value,
+                node.allowed_tools,
+            )
+            if issue is not None:
+                return f"Agent {node.id!r}: {issue}"
+
+        format_ids = tuple(
+            node.id
+            for node in graph.nodes
+            if (node.role_family or "").casefold() == "format"
+        )
+        if len(format_ids) > 1:
+            return "HotpotQA QA-memory Canvas permits one distinct Format Agent"
+        for relation in graph.relations:
+            for source_id, target_id in relation.directed_edges():
+                source_role = (
+                    graph.get_node(source_id).role_family or ""
+                ).casefold()
+                target_role = (
+                    graph.get_node(target_id).role_family or ""
+                ).casefold()
+                if source_role == "format":
+                    return "Format Agent must be a terminal sink"
+                if target_role == "format" and source_role != "verifier":
+                    return (
+                        "Format Agent accepts only a verified semantic artifact "
+                        "from a Verifier"
+                    )
+                if target_role == "verifier" and source_role != "reasoner":
+                    return (
+                        "Verifier accepts only a semantic-candidate artifact "
+                        "from a Reasoner; raw retrieval evidence must route "
+                        "through reasoning first"
+                    )
+
+        if not require_complete:
+            return None
+        missing = tuple(
+            role
+            for role in _HOTPOTQA_QA_MEMORY_REQUIRED_ROLE_FAMILIES
+            if not any(
+                (node.role_family or "").casefold() == role
+                for node in graph.nodes
+            )
+        )
+        if missing:
+            return (
+                "HotpotQA QA-memory terminal lineage is missing role families "
+                f"{list(missing)!r}"
+            )
+        output_id = graph.output_agent_id
+        if output_id is None:
+            return "Format Agent is not selected as the Output Agent"
+        output_node = graph.get_node(output_id)
+        if (output_node.role_family or "").casefold() != "format":
+            return "the selected Output Agent must have role_family='format'"
+        if format_ids != (output_id,):
+            return "the unique Format Agent must be the selected Output Agent"
+        verifier_ids = graph.directed_predecessors(output_id)
+        if len(verifier_ids) != 1 or (
+            graph.get_node(verifier_ids[0]).role_family or ""
+        ).casefold() != "verifier":
+            return (
+                "Format Agent must consume exactly one direct Verifier artifact"
+            )
+        verifier_id = verifier_ids[0]
+        reasoner_ids = graph.directed_predecessors(verifier_id)
+        if len(reasoner_ids) != 1 or (
+            graph.get_node(reasoner_ids[0]).role_family or ""
+        ).casefold() != "reasoner":
+            return (
+                "Verifier must consume exactly one direct Reasoner "
+                "semantic-candidate artifact"
+            )
+        reasoner_id = reasoner_ids[0]
+        evidence_ids = tuple(
+            predecessor_id
+            for predecessor_id in graph.directed_predecessors(reasoner_id)
+            if (
+                graph.get_node(predecessor_id).role_family or ""
+            ).casefold()
+            in _HOTPOTQA_QA_MEMORY_TOOL_ROLE_FAMILIES
+        )
+        if not evidence_ids:
+            return (
+                "Reasoner must receive QA-memory evidence from an explicit "
+                "evidence_retriever or repair relation"
+            )
+        return None
+
     def _replacement_takeover_agent_ids(self, agent_id: str) -> Tuple[str, ...]:
         if not self._graph.has_node(agent_id):
             return ()
@@ -557,6 +1207,28 @@ class AgentWorkflowEnv:
             "taken over every downstream edge and any previous Output identity"
         )
 
+    @staticmethod
+    def _failure_tool_receipt_count(metadata: Mapping[str, object]) -> int:
+        receipts = metadata.get("tool_receipts", ())
+        if not isinstance(receipts, (list, tuple)):
+            return 0
+        return sum(1 for receipt in receipts if isinstance(receipt, Mapping))
+
+    @staticmethod
+    def _is_bounded_react_failure(record: object) -> bool:
+        error_type = getattr(record, "error_type", "")
+        message = getattr(record, "message", "")
+        metadata = getattr(record, "metadata", None)
+        return bool(
+            error_type == "ReactExecutionError"
+            or (
+                isinstance(metadata, Mapping)
+                and isinstance(metadata.get("react_trace"), (list, tuple))
+                and isinstance(message, str)
+                and "exhausted" in message.casefold()
+            )
+        )
+
     def _record_failure_state(self, records: Sequence[object]) -> None:
         """Record typed Runtime failures without inferring node unusability."""
 
@@ -568,6 +1240,42 @@ class AgentWorkflowEnv:
                 continue
             self._failed_agent_ids.add(agent_id)
             self._unresolved_dirty_agent_ids.add(agent_id)
+            bounded_react_failure = self._is_bounded_react_failure(record)
+            receipt_count = self._failure_tool_receipt_count(metadata)
+            previous_receipt_count = (
+                self._latest_failure_receipt_count_by_agent.get(agent_id, 0)
+            )
+            repair_baseline = self._pending_repair_receipt_count_by_agent.pop(
+                agent_id,
+                None,
+            )
+            if bounded_react_failure:
+                self._react_exhausted_agent_ids.add(agent_id)
+                if (
+                    metadata.get("retrieval_failure_type")
+                    == "knowledge_base_coverage_failure"
+                ):
+                    self._knowledge_base_coverage_failure_agent_ids.add(agent_id)
+                else:
+                    self._knowledge_base_coverage_failure_agent_ids.discard(agent_id)
+                if (
+                    repair_baseline is not None
+                    and receipt_count <= repair_baseline
+                ) or (
+                    agent_id in self._repair_exhausted_agent_ids
+                    and receipt_count <= previous_receipt_count
+                ):
+                    # DIRECT_REUSE: unified QA opens augmentation after one
+                    # accepted repair re-executes the bounded ReAct worker
+                    # without advancing its public Tool receipt prefix.
+                    self._repair_exhausted_agent_ids.add(agent_id)
+                else:
+                    self._repair_exhausted_agent_ids.discard(agent_id)
+            else:
+                self._react_exhausted_agent_ids.discard(agent_id)
+                self._repair_exhausted_agent_ids.discard(agent_id)
+                self._knowledge_base_coverage_failure_agent_ids.discard(agent_id)
+            self._latest_failure_receipt_count_by_agent[agent_id] = receipt_count
             if metadata.get("node_unusable") is True:
                 self._diagnosed_unusable_agent_ids.add(agent_id)
                 if self._graph.output_agent_id == agent_id:
@@ -580,11 +1288,22 @@ class AgentWorkflowEnv:
         self._failed_agent_ids.difference_update(recovered)
         self._diagnosed_unusable_agent_ids.difference_update(recovered)
         self._failed_output_agent_ids.difference_update(recovered)
+        self._react_exhausted_agent_ids.difference_update(recovered)
+        self._repair_exhausted_agent_ids.difference_update(recovered)
+        self._knowledge_base_coverage_failure_agent_ids.difference_update(recovered)
+        for agent_id in recovered:
+            self._latest_failure_receipt_count_by_agent.pop(agent_id, None)
+            self._pending_repair_receipt_count_by_agent.pop(agent_id, None)
 
     def _clear_failure_state(self) -> None:
         self._failed_agent_ids.clear()
         self._diagnosed_unusable_agent_ids.clear()
         self._failed_output_agent_ids.clear()
+        self._react_exhausted_agent_ids.clear()
+        self._repair_exhausted_agent_ids.clear()
+        self._knowledge_base_coverage_failure_agent_ids.clear()
+        self._latest_failure_receipt_count_by_agent.clear()
+        self._pending_repair_receipt_count_by_agent.clear()
         self._unresolved_dirty_agent_ids.clear()
 
     def recovery_state(self) -> dict[str, object]:
@@ -599,12 +1318,13 @@ class AgentWorkflowEnv:
             agent_id: list(self._replacement_takeover_agent_ids(agent_id))
             for agent_id in sorted(self._diagnosed_unusable_agent_ids)
         }
+        repair_exhausted = sorted(self._repair_exhausted_agent_ids)
         return {
             "policy": self.recovery_policy,
             "strategy": "preserve -> diagnose -> repair -> augment",
             "phase": (
                 "augment"
-                if any(replacements.values())
+                if repair_exhausted or any(replacements.values())
                 else "repair"
                 if self._diagnosed_unusable_agent_ids
                 else "diagnose"
@@ -612,6 +1332,13 @@ class AgentWorkflowEnv:
                 else "preserve"
             ),
             "failed_agent_ids": sorted(self._failed_agent_ids),
+            "react_exhausted_agent_ids": sorted(
+                self._react_exhausted_agent_ids
+            ),
+            "repair_exhausted_agent_ids": repair_exhausted,
+            "knowledge_base_coverage_failure_agent_ids": sorted(
+                self._knowledge_base_coverage_failure_agent_ids
+            ),
             "diagnosed_unusable_agent_ids": sorted(
                 self._diagnosed_unusable_agent_ids
             ),
@@ -620,6 +1347,13 @@ class AgentWorkflowEnv:
             ),
             "replacement_takeover_agent_ids": replacements,
             "deletable_agent_ids": deletable,
+            "preferred_actions": (
+                ["add_agent", "add_subgraph"]
+                if repair_exhausted
+                else ["modify_agent"]
+                if self._failed_agent_ids
+                else []
+            ),
         }
 
     def reset(self, problem: str, graph: Optional[AgentGraph] = None) -> AgentWorkflowSnapshot:
@@ -697,6 +1431,21 @@ class AgentWorkflowEnv:
             self._diagnosed_unusable_agent_ids
         )
         result._failed_output_agent_ids = set(self._failed_output_agent_ids)
+        result._react_exhausted_agent_ids = set(
+            self._react_exhausted_agent_ids
+        )
+        result._repair_exhausted_agent_ids = set(
+            self._repair_exhausted_agent_ids
+        )
+        result._knowledge_base_coverage_failure_agent_ids = set(
+            self._knowledge_base_coverage_failure_agent_ids
+        )
+        result._latest_failure_receipt_count_by_agent = dict(
+            self._latest_failure_receipt_count_by_agent
+        )
+        result._pending_repair_receipt_count_by_agent = dict(
+            self._pending_repair_receipt_count_by_agent
+        )
         result._unresolved_dirty_agent_ids = set(
             self._unresolved_dirty_agent_ids
         )
@@ -730,6 +1479,76 @@ class AgentWorkflowEnv:
                 "action rejected: action type is outside the configured Canvas "
                 f"action set {list(self.allowed_action_types)!r}",
             )
+        if (
+            self._uses_hotpotqa_qa_memory_role_protocol()
+            and action.action_type is AgentActionType.SET_RELATION
+            and not any(
+                self._relation_action_matches_candidate(action, candidate)
+                for candidate in self._model_admissible_relation_candidates()
+            )
+        ):
+            return self._reject_after_count(
+                action,
+                "edit rejected: relation is outside the exact current "
+                "model-admissible Canvas candidate domain",
+            )
+        if (
+            self._uses_hotpotqa_qa_memory_role_protocol()
+            and action.action_type is AgentActionType.MODIFY_AGENT
+        ):
+            domain = self.model_admissible_action_targets().get(
+                AgentActionType.MODIFY_AGENT.value
+            )
+            candidates = (
+                domain.get("per_agent_candidates", ())
+                if isinstance(domain, Mapping)
+                else ()
+            )
+            candidate = next(
+                (
+                    value
+                    for value in candidates
+                    if isinstance(value, Mapping)
+                    and value.get("agent_id") == action.agent_id
+                ),
+                None,
+            )
+            changed_fields = tuple(
+                field
+                for field in (
+                    "model_id",
+                    "contract",
+                    "role_family",
+                    "allowed_tools",
+                    "execution_mode",
+                    "artifact_type",
+                    "completion_condition",
+                )
+                if getattr(action, field) is not None
+            )
+            if (
+                not isinstance(candidate, Mapping)
+                or len(changed_fields) != 1
+                or changed_fields[0]
+                not in candidate.get("mutable_fields", ())
+            ):
+                return self._reject_after_count(
+                    action,
+                    "edit rejected: modify_agent is outside the exact current "
+                    "per-Agent delta domain",
+                )
+            field = changed_fields[0]
+            discrete_domains = candidate.get("discrete_value_domains", {})
+            if isinstance(discrete_domains, Mapping) and field in discrete_domains:
+                proposed = getattr(action, field)
+                if isinstance(proposed, tuple):
+                    proposed = list(proposed)
+                if proposed not in discrete_domains[field]:
+                    return self._reject_after_count(
+                        action,
+                        "edit rejected: modify_agent value is outside the exact "
+                        "current per-Agent delta domain",
+                    )
         if action.action_type is AgentActionType.DELETE_AGENT:
             delete_issue = self._delete_admission_issue(action.agent_id)
             if delete_issue is not None:
@@ -827,29 +1646,9 @@ class AgentWorkflowEnv:
         except (GraphMutationError, TypeError, ValueError) as exc:
             return self._reject_after_count(action, f"edit rejected: {exc}")
         if candidate.revision == previous_revision:
-            cached_execution = self._cached_progressive_execution()
-            if cached_execution is not None:
-                self._last_feedback = (
-                    f"accepted {action.action_type.value} at revision "
-                    f"{self._graph.revision}; execution_result_reused=true"
-                )
-                self._record_history(
-                    accepted=True,
-                    done=False,
-                    action=action,
-                    feedback=self._last_feedback,
-                    execution_reused=True,
-                )
-                return AgentWorkflowStepResult(
-                    accepted=True,
-                    done=False,
-                    action=action,
-                    revision=self._graph.revision,
-                    feedback=self._last_feedback,
-                    snapshot=self.snapshot(),
-                    execution=cached_execution,
-                    execution_reused=True,
-                )
+            # DIRECT_REUSE: a Canvas edit must be a real delta.  Reusing the
+            # cached execution for a repeated relation/parameter value made a
+            # no-op look like policy progress and consumed the round budget.
             return self._reject_after_count(
                 action,
                 "edit rejected: action made no graph change; modify an Agent "
@@ -861,6 +1660,15 @@ class AgentWorkflowEnv:
                 action,
                 f"edit rejected: {self._format_issues(validation)}",
                 validation.issues,
+            )
+        semantic_issue = self._qa_memory_semantic_lineage_issue_for(
+            candidate,
+            require_complete=candidate.output_agent_id is not None,
+        )
+        if semantic_issue is not None:
+            return self._reject_after_count(
+                action,
+                "edit rejected: " + semantic_issue,
             )
         if (
             action.action_type in {
@@ -877,6 +1685,18 @@ class AgentWorkflowEnv:
                     "edit rejected: " + format_issue,
                 )
 
+        if (
+            action.action_type is AgentActionType.MODIFY_AGENT
+            and action.agent_id is not None
+            and action.agent_id in self._failed_agent_ids
+            and action.agent_id in self._react_exhausted_agent_ids
+        ):
+            self._pending_repair_receipt_count_by_agent[action.agent_id] = (
+                self._latest_failure_receipt_count_by_agent.get(
+                    action.agent_id,
+                    0,
+                )
+            )
         self._graph = candidate
         execution = None
         execution_reused = False
@@ -1180,6 +2000,8 @@ class AgentWorkflowEnv:
         tool_id = self.required_evidence_tool_id
         if tool_id is None:
             return None
+        if tool_id == _HOTPOTQA_QA_MEMORY_TOOL_ID:
+            return self._required_qa_memory_evidence_issue(execution)
         output_id = execution.output_agent_id
         routed_ids = {output_id}
         pending = list(self._graph.directed_predecessors(output_id))
@@ -1230,6 +2052,204 @@ class AgentWorkflowEnv:
             "repair or augment it with a Tool-capable ReAct Agent"
         )
 
+    def _required_qa_memory_evidence_issue(
+        self,
+        execution: AgentRuntimeResult,
+    ) -> Optional[str]:
+        """Admit FINISH only for read-grounded QA-memory answer lineage.
+
+        DIRECT_REUSE + NECESSARY_ADAPTATION: FlowSteer's explicit directed
+        predecessor gate establishes the routed AgentGraph lineage. SkillFlow's
+        canonical search/read receipts establish the worker-owned Tool
+        lineage. The QA-memory adapter then binds the structured worker
+        artifact and terminal answer to one exact train-memory record.
+        """
+
+        from .hotpotqa_embedding_tool import (
+            _validate_qa_memory_evidence_artifact,
+        )
+
+        output_id = execution.output_agent_id
+        output_calls = tuple(
+            call
+            for call in execution.calls
+            if call.request.agent.id == output_id and call.request.is_output_agent
+        )
+        if not output_calls:
+            return "the selected Output Agent has no executed request receipt"
+        final_output_request = output_calls[-1].request
+        actual_inbox = list(final_output_request.upstream)
+        if final_output_request.peer_draft is not None:
+            actual_inbox.append(final_output_request.peer_draft)
+
+        question = qa_question_scope(self._problem)
+        routed_ids = {output_id}
+        pending = list(self._graph.directed_predecessors(output_id))
+        while pending:
+            agent_id = pending.pop(0)
+            if agent_id in routed_ids:
+                continue
+            routed_ids.add(agent_id)
+            pending.extend(self._graph.directed_predecessors(agent_id))
+
+        worker_artifacts: list[tuple[str, str]] = []
+        invalid_artifact_issues: list[str] = []
+        tool_worker_count = 0
+        for agent_id in sorted(routed_ids - {output_id}):
+            node = self._graph.get_node(agent_id)
+            if (
+                node.execution_mode.value != "react"
+                or _HOTPOTQA_QA_MEMORY_TOOL_ID not in node.allowed_tools
+            ):
+                continue
+            tool_worker_count += 1
+            artifact = execution.outputs.get(agent_id)
+            metadata = execution.output_metadata.get(agent_id)
+            if not isinstance(artifact, str) or not isinstance(metadata, Mapping):
+                invalid_artifact_issues.append(
+                    "routed Tool worker has no persisted artifact metadata"
+                )
+                continue
+            raw_receipts = metadata.get("tool_receipts", ())
+            receipts = (
+                tuple(
+                    receipt
+                    for receipt in raw_receipts
+                    if isinstance(receipt, Mapping)
+                )
+                if isinstance(raw_receipts, (list, tuple))
+                else ()
+            )
+            fields, issue = _validate_qa_memory_evidence_artifact(
+                artifact,
+                receipts,
+                question_scope=question,
+                tool_id=_HOTPOTQA_QA_MEMORY_TOOL_ID,
+            )
+            if fields is None:
+                invalid_artifact_issues.append(
+                    issue or "QA-memory evidence artifact is invalid"
+                )
+                continue
+            worker_artifacts.append((artifact, fields["canonical_answer"]))
+
+        if tool_worker_count == 0:
+            return (
+                "the routed Output path requires a distinct upstream ReAct "
+                "Agent with hotpotqa.qa_memory connected by explicit "
+                "AgentGraph relations"
+            )
+        if not worker_artifacts:
+            suffix = (
+                ""
+                if not invalid_artifact_issues
+                else f"; first_issue={invalid_artifact_issues[0]}"
+            )
+            return (
+                "the routed Output path requires a structured QA-memory evidence "
+                "artifact with exact search/read receipt lineage" + suffix
+            )
+
+        verifier_id = self._graph.directed_predecessors(output_id)[0]
+        reasoner_id = self._graph.directed_predecessors(verifier_id)[0]
+        evidence_ids = tuple(
+            predecessor_id
+            for predecessor_id in self._graph.directed_predecessors(reasoner_id)
+            if (
+                self._graph.get_node(predecessor_id).role_family or ""
+            ).casefold()
+            in _HOTPOTQA_QA_MEMORY_TOOL_ROLE_FAMILIES
+        )
+        request_by_agent = {
+            call.request.agent.id: call.request
+            for call in execution.calls
+            if call.request.graph_revision == execution.graph_revision
+        }
+        lineage_stages = (
+            (reasoner_id, set(evidence_ids), "Reasoner"),
+            (verifier_id, {reasoner_id}, "Verifier"),
+            (output_id, {verifier_id}, "Format Agent"),
+        )
+        for target_id, expected_sources, label in lineage_stages:
+            request = request_by_agent.get(target_id)
+            if request is None:
+                return (
+                    f"{label} {target_id!r} has no executed request receipt "
+                    "for the current Canvas revision"
+                )
+            messages = list(request.upstream)
+            if request.peer_draft is not None:
+                messages.append(request.peer_draft)
+            has_exact_lineage = any(
+                message.source_agent_id in expected_sources
+                and message.target_agent_id == target_id
+                and message.graph_revision == execution.graph_revision
+                and any(
+                    _validate_qa_memory_evidence_artifact(
+                        artifact,
+                        message.tool_receipts,
+                        question_scope=question,
+                        tool_id=_HOTPOTQA_QA_MEMORY_TOOL_ID,
+                    )[0]
+                    is not None
+                    for artifact, _ in worker_artifacts
+                )
+                for message in messages
+            )
+            if not has_exact_lineage:
+                return (
+                    f"{label} {target_id!r} did not receive the exact "
+                    "QA-memory search/read receipt lineage from its explicit "
+                    "AgentGraph predecessor"
+                )
+
+        propagated_canonical_answers: list[str] = []
+        for message in actual_inbox:
+            if (
+                message.target_agent_id != output_id
+                or message.graph_revision != execution.graph_revision
+            ):
+                continue
+            for artifact, canonical_answer in worker_artifacts:
+                propagated_fields, _ = _validate_qa_memory_evidence_artifact(
+                    artifact,
+                    message.tool_receipts,
+                    question_scope=question,
+                    tool_id=_HOTPOTQA_QA_MEMORY_TOOL_ID,
+                )
+                if propagated_fields is not None:
+                    propagated_canonical_answers.append(canonical_answer)
+        if not propagated_canonical_answers:
+            return (
+                "the actual Output Agent inbox has no exact HotpotQA "
+                "QA-memory search/read receipt lineage propagated through "
+                "the explicit AgentGraph relations"
+            )
+
+        match = re.fullmatch(
+            r"\s*<answer>(.*?)</answer>\s*",
+            execution.final_answer or "",
+            flags=re.DOTALL,
+        )
+        if match is None or not match.group(1).strip():
+            return (
+                "the QA-memory terminal answer must be exactly one non-empty "
+                "<answer>...</answer> wrapper"
+            )
+        answer = match.group(1).strip()
+        for canonical_answer in propagated_canonical_answers:
+            if (
+                answer == canonical_answer
+                or _official_qa_normalize_answer(answer)
+                == _official_qa_normalize_answer(canonical_answer)
+            ):
+                return None
+        return (
+            "the terminal <answer> content does not match the canonical_answer "
+            "of any routed, exact-read QA-memory evidence artifact under the "
+            "official HotpotQA normalization"
+        )
+
     def _cached_progressive_execution(self) -> Optional[AgentRuntimeResult]:
         if self._progressive_execution_revision != self._graph.revision:
             return None
@@ -1260,6 +2280,11 @@ class AgentWorkflowEnv:
     def _format_agent_issue_for(self, graph: AgentGraph) -> Optional[str]:
         if not self.require_format_agent:
             return None
+        if self._uses_hotpotqa_qa_memory_role_protocol():
+            return self._qa_memory_semantic_lineage_issue_for(
+                graph,
+                require_complete=True,
+            )
         output_agent_id = graph.output_agent_id
         if output_agent_id is None:
             return "Format Agent is not selected as the Output Agent"
@@ -1326,6 +2351,16 @@ class AgentWorkflowEnv:
                     f"max_agents_per_subgraph={self.max_agents_per_subgraph}"
                 )
             new_ids = {item.agent_id for item in action.agents}
+            if self._uses_hotpotqa_qa_memory_role_protocol():
+                declared_roles = [
+                    (item.role_family or "").casefold()
+                    for item in action.agents
+                ]
+                if len(declared_roles) != len(set(declared_roles)):
+                    raise GraphMutationError(
+                        "one HotpotQA QA-memory Canvas unit cannot declare "
+                        "duplicate role_family responsibilities"
+                    )
             existing_ids = {item.id for item in graph.nodes}
             if new_ids & existing_ids:
                 duplicate = sorted(new_ids & existing_ids)[0]
@@ -1389,6 +2424,22 @@ class AgentWorkflowEnv:
             )
             if profile_issue is not None:
                 raise GraphMutationError(profile_issue)
+            role_family = action.role_family
+            if self._uses_hotpotqa_qa_memory_role_protocol() and (
+                (role_family or "").casefold()
+                not in self._admitted_new_qa_memory_role_families()
+            ):
+                raise GraphMutationError(
+                    "HotpotQA QA-memory role_family is outside the current "
+                    "admitted_new_role_families"
+                )
+            role_issue = self._role_profile_issue(
+                role_family,
+                action.execution_mode or "reasoning",
+                action.allowed_tools or (),
+            )
+            if role_issue is not None:
+                raise GraphMutationError(role_issue)
             if (
                 self.max_agents is not None
                 and len(graph.nodes) >= self.max_agents
@@ -1430,6 +2481,15 @@ class AgentWorkflowEnv:
             )
             if profile_issue is not None:
                 raise GraphMutationError(profile_issue)
+            role_issue = self._role_profile_issue(
+                current.role_family
+                if action.role_family is None
+                else action.role_family,
+                mode_value,
+                allowed_tools,
+            )
+            if role_issue is not None:
+                raise GraphMutationError(role_issue)
             graph.modify_agent(
                 action.agent_id,
                 model_id=action.model_id,
@@ -1574,6 +2634,16 @@ class AgentWorkflowEnv:
             if issue is not None:
                 raise AgentWorkflowStateError(
                     f"Agent {node.id!r} has an invalid execution profile: {issue}"
+                )
+            role_issue = self._role_profile_issue(
+                node.role_family,
+                node.execution_mode.value,
+                node.allowed_tools,
+            )
+            if role_issue is not None:
+                raise AgentWorkflowStateError(
+                    f"Agent {node.id!r} has an invalid role capability: "
+                    f"{role_issue}"
                 )
 
     @staticmethod

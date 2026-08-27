@@ -33,6 +33,18 @@ from .task_dataset import qa_question_scope
 
 QA_MEMORY_SCHEMA_VERSION = "flowsteer.hotpotqa.qa_memory_index.v1"
 QA_MEMORY_CORPUS_VERSION = "flowsteer.hotpotqa.train_qa_memory.v1"
+QA_MEMORY_SCHEMA_VERSIONS = frozenset(
+    {
+        QA_MEMORY_SCHEMA_VERSION,
+        "flowsteer.hotpotqa.qa_memory_index.v2",
+    }
+)
+QA_MEMORY_CORPUS_VERSIONS = frozenset(
+    {
+        QA_MEMORY_CORPUS_VERSION,
+        "flowsteer.hotpotqa.train_qa_memory.v2",
+    }
+)
 QA_MEMORY_DOCUMENT_TEMPLATE = "Question: {question}\nAnswer: {answer_statement}"
 
 _PARAPHRASE_FIELDS = frozenset(
@@ -165,7 +177,12 @@ class HotpotQAQAMemory:
             raise ValueError("QA-memory cycle provenance is inconsistent")
         canonical = _normalized_text(self.canonical_answer)
         statement = _normalized_text(self.paraphrase_answer_statement)
-        if canonical not in statement:
+        exact_span_required = self.paraphrase_version.endswith("-v2")
+        if (
+            self.canonical_answer not in self.paraphrase_answer_statement
+            if exact_span_required
+            else canonical not in statement
+        ):
             raise ValueError("QA-memory answer statement lost the canonical answer span")
         if statement == canonical:
             raise ValueError("QA-memory answer must be a declarative answer statement")
@@ -231,9 +248,9 @@ class HotpotQAQAMemoryIndexManifest:
     embeddings_path: str
 
     def __post_init__(self) -> None:
-        if self.schema_version != QA_MEMORY_SCHEMA_VERSION:
+        if self.schema_version not in QA_MEMORY_SCHEMA_VERSIONS:
             raise ValueError("unsupported HotpotQA QA-memory index schema")
-        if self.corpus_version != QA_MEMORY_CORPUS_VERSION:
+        if self.corpus_version not in QA_MEMORY_CORPUS_VERSIONS:
             raise ValueError("unsupported HotpotQA QA-memory corpus schema")
         if not self.index_id or self.source_split != "train":
             raise ValueError("QA-memory identity/split is invalid")
@@ -411,9 +428,22 @@ def materialize_hotpotqa_qa_memories(
         if _normalized_text(question) == _normalized_text(source.question):
             raise ValueError("paraphrase_question is identical to the training question")
         canonical = _normalized_text(source.canonical_answer)
-        if canonical not in _normalized_text(answer_statement):
+        exact_span_required = version.endswith("-v2")
+        if (
+            source.canonical_answer not in answer_statement
+            if exact_span_required
+            else canonical not in _normalized_text(answer_statement)
+        ):
             raise ValueError(
                 "paraphrase answer statement does not preserve canonical answer span"
+            )
+        if (
+            exact_span_required
+            and source.canonical_answer.casefold() not in source.question.casefold()
+            and source.canonical_answer.casefold() in question.casefold()
+        ):
+            raise ValueError(
+                "paraphrase_question introduced the canonical answer"
             )
         if _normalized_text(answer_statement) == canonical:
             raise ValueError("paraphrase answer must be a declarative answer statement")
@@ -461,6 +491,7 @@ def build_hotpotqa_qa_memory_index(
     embedding_model_id: str,
     embedding_device: str,
     frozen_top_k: int,
+    index_version: int = 1,
     expected_train_count: int = 512,
     expected_validation_count: int = 128,
 ) -> HotpotQAQAMemoryIndexManifest:
@@ -468,6 +499,8 @@ def build_hotpotqa_qa_memory_index(
 
     if frozen_top_k < 1:
         raise ValueError("frozen_top_k must be positive")
+    if index_version not in {1, 2}:
+        raise ValueError("index_version must be 1 or 2")
     sources = load_hotpotqa_train_qa_sources(
         train_jsonl,
         validation_task_ids=validation_task_ids,
@@ -498,12 +531,12 @@ def build_hotpotqa_qa_memory_index(
     cycled_count = sum(memory.cycled for memory in memories)
     unique_source_count = len({memory.base_task_id for memory in memories})
     manifest = HotpotQAQAMemoryIndexManifest(
-        schema_version=QA_MEMORY_SCHEMA_VERSION,
+        schema_version=f"flowsteer.hotpotqa.qa_memory_index.v{index_version}",
         index_id=(
             "hotpotqa-train-qa-memory-"
-            f"d{vectors.shape[1]}-n{len(memories)}-topk{frozen_top_k}-v1"
+            f"d{vectors.shape[1]}-n{len(memories)}-topk{frozen_top_k}-v{index_version}"
         ),
-        corpus_version=QA_MEMORY_CORPUS_VERSION,
+        corpus_version=f"flowsteer.hotpotqa.train_qa_memory.v{index_version}",
         source="HotpotQA aligned frozen train",
         source_split="train",
         embedding_model=embedding_model_id,
@@ -629,8 +662,10 @@ class HotpotQAQAMemoryIndex:
 
 __all__ = [
     "QA_MEMORY_CORPUS_VERSION",
+    "QA_MEMORY_CORPUS_VERSIONS",
     "QA_MEMORY_DOCUMENT_TEMPLATE",
     "QA_MEMORY_SCHEMA_VERSION",
+    "QA_MEMORY_SCHEMA_VERSIONS",
     "HotpotQAQAMemory",
     "HotpotQAQAMemoryIndex",
     "HotpotQAQAMemoryIndexManifest",

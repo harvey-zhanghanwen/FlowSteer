@@ -17,7 +17,13 @@ from src.interactive.director import (
     DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION,
     DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3,
     director_live_action_target_domains_json,
+    director_live_action_parameter_json_schema_text,
+    director_live_add_subgraph_agent_declarations_from_text,
     director_live_add_subgraph_agent_declarations_json_schema_text,
+    director_live_add_subgraph_relation_candidates,
+    director_live_add_subgraph_role_selection_from_text,
+    director_live_add_subgraph_role_selection_json_schema_text,
+    director_live_modify_agent_field_selector_json_schema_text,
     director_model_admissible_sampling_json_schema_text,
     director_model_admissible_schema_branch,
     director_model_admissible_schema_branch_v3,
@@ -424,6 +430,322 @@ def test_sglang_client_v3_binds_add_subgraph_to_live_domains():
     parsed = AgentActionParser().parse(response.text)
     assert parsed.relations[0].source_id == "searcher"
     assert parsed.relations[0].target_id == "answerer"
+
+
+def test_hotpotqa_v3_parameter_schemas_use_exact_relation_and_modify_deltas():
+    profiles = [
+        {"execution_mode": "reasoning", "allowed_tools": []},
+        {
+            "execution_mode": "react",
+            "allowed_tools": ["hotpotqa.qa_memory"],
+        },
+    ]
+    role_constraints = {
+        "evidence_retriever": {
+            "execution_profiles": [profiles[1]],
+        },
+        "reasoner": {"execution_profiles": [profiles[0]]},
+        "verifier": {"execution_profiles": [profiles[0]]},
+        "format": {"execution_profiles": [profiles[0]]},
+        "repair": {"execution_profiles": [profiles[1]]},
+    }
+    add_domain = {
+        "semantic_protocol": "hotpotqa.qa_memory.worker_lineage.v1",
+        "model_ids": ["cheap-model"],
+        "execution_profiles": profiles,
+        "existing_agent_ids": [],
+        "existing_agents": [],
+        "min_new_agents": 1,
+        "max_new_agents": 3,
+        "required_agent_fields": [
+            "agent_id",
+            "model_id",
+            "contract",
+            "role_family",
+            "execution_mode",
+            "allowed_tools",
+        ],
+        "output_role_family": "format",
+        "role_constraints": role_constraints,
+        "admitted_new_role_families": [
+            "evidence_retriever",
+            "reasoner",
+            "verifier",
+            "format",
+        ],
+    }
+    add_agents = [
+        {
+            "agent_id": "node_1",
+            "model_id": "cheap-model",
+            "contract": "retrieve evidence",
+            "role_family": "evidence_retriever",
+            "execution_mode": "react",
+            "allowed_tools": ["hotpotqa.qa_memory"],
+        },
+        {
+            "agent_id": "node_2",
+            "model_id": "cheap-model",
+            "contract": "derive answer",
+            "role_family": "reasoner",
+            "execution_mode": "reasoning",
+            "allowed_tools": [],
+        },
+        {
+            "agent_id": "node_3",
+            "model_id": "cheap-model",
+            "contract": "format answer",
+            "role_family": "format",
+            "execution_mode": "reasoning",
+            "allowed_tools": [],
+        },
+    ]
+    domains = {
+        "add_subgraph": add_domain,
+        "set_relation": {
+            "source_agent_ids": ["verifier", "formatter"],
+            "target_agent_ids": ["verifier", "formatter"],
+            "endpoints_must_differ": True,
+            "candidates": [
+                {
+                    "source_id": "verifier",
+                    "target_id": "formatter",
+                    "source_to_target": True,
+                    "target_to_source": False,
+                }
+            ],
+        },
+        "modify_agent": {
+            "mutable_fields": [
+                "model_id",
+                "contract",
+                "artifact_type",
+                "completion_condition",
+            ],
+            "per_agent_candidates": [
+                {
+                    "agent_id": "retriever",
+                    "mutable_fields": ["model_id", "contract"],
+                    "current_values": {
+                        "model_id": "cheap-model",
+                        "contract": "retrieve evidence",
+                    },
+                    "discrete_value_domains": {
+                        "model_id": ["alternate-model"],
+                    },
+                }
+            ],
+        },
+    }
+
+    role_schema = json.loads(
+        director_live_add_subgraph_role_selection_json_schema_text(domains)
+    )
+    first_role_branch = role_schema["properties"]["agents"]["oneOf"][0]
+    assert first_role_branch["prefixItems"][0]["properties"]["agent_id"] == {
+        "const": "node_1"
+    }
+    selected_roles = director_live_add_subgraph_role_selection_from_text(
+        '{"action":"add_subgraph","agents":['
+        '{"agent_id":"node_1","role_family":"evidence_retriever"},'
+        '{"agent_id":"node_2","role_family":"reasoner"},'
+        '{"agent_id":"node_3","role_family":"format"}]}<|endoftext|>',
+        domains,
+    )
+    declaration_schema = json.loads(
+        director_live_add_subgraph_agent_declarations_json_schema_text(
+            domains,
+            selected_agent_roles=selected_roles,
+        )
+    )
+    declaration_agents = declaration_schema["properties"]["agents"]["oneOf"][0]
+    assert declaration_agents["prefixItems"][0]["anyOf"][0]["properties"][
+        "agent_id"
+    ] == {"const": "node_1"}
+    domains_with_existing = json.loads(json.dumps(domains))
+    domains_with_existing["add_subgraph"]["existing_agent_ids"] = ["node_1"]
+    domains_with_existing["add_subgraph"]["existing_agents"] = [
+        {"agent_id": "node_1", "role_family": "evidence_retriever"}
+    ]
+    with pytest.raises(ValueError, match="reused or changed"):
+        director_live_add_subgraph_role_selection_from_text(
+            '{"action":"add_subgraph","agents":['
+            '{"agent_id":"node_1","role_family":"reasoner"}]}',
+            domains_with_existing,
+        )
+    with pytest.raises(ValueError, match="outside the live domain"):
+        director_live_add_subgraph_agent_declarations_from_text(
+            '{"action":"add_subgraph","agents":['
+            '{"agent_id":"node_1","model_id":"cheap-model",'
+            '"contract":"retrieve","role_family":"evidence_retriever",'
+            '"execution_mode":"react","allowed_tools":["hotpotqa.qa_memory"]},'
+            '{"agent_id":"node_1","model_id":"cheap-model",'
+            '"contract":"reason","role_family":"reasoner",'
+            '"execution_mode":"reasoning","allowed_tools":[]}]}',
+            domains,
+        )
+
+    candidates = director_live_add_subgraph_relation_candidates(
+        domains,
+        add_agents,
+    )
+    assert candidates
+    assert all(candidate["source_id"] != "node_3" for candidate in candidates)
+    assert not any(candidate["target_id"] == "node_3" for candidate in candidates)
+    add_schema = json.loads(
+        director_live_action_parameter_json_schema_text(
+            "add_subgraph",
+            domains,
+            add_agents=add_agents,
+        )
+    )
+    assert add_schema["properties"]["relations"]["maxItems"] == 1
+    assert add_schema["properties"]["output_agent_id"] == {"const": None}
+    relation_branches = add_schema["properties"]["relations"]["items"]["anyOf"]
+    assert all(
+        branch["properties"]["source_to_target"].get("const") is not None
+        for branch in relation_branches
+    )
+
+    relation_schema = json.loads(
+        director_live_action_parameter_json_schema_text(
+            "set_relation",
+            domains,
+        )
+    )
+    assert relation_schema["oneOf"][0]["properties"] == {
+        "action": {"const": "set_relation"},
+        "source_id": {"const": "verifier"},
+        "target_id": {"const": "formatter"},
+        "source_to_target": {"const": True},
+        "target_to_source": {"const": False},
+    }
+
+    field_schema = json.loads(
+        director_live_modify_agent_field_selector_json_schema_text(domains)
+    )
+    fields = field_schema["properties"]["field"]["enum"]
+    assert "role_family" not in fields
+    assert "execution_mode" not in fields
+    assert "allowed_tools" not in fields
+    modify_schema = json.loads(
+        director_live_action_parameter_json_schema_text(
+            "modify_agent",
+            domains,
+            modify_field="model_id",
+        )
+    )
+    assert modify_schema["oneOf"][0]["properties"]["agent_id"] == {
+        "const": "retriever"
+    }
+    assert modify_schema["oneOf"][0]["properties"]["model_id"] == {
+        "enum": ["alternate-model"]
+    }
+
+
+def test_sglang_client_hotpotqa_add_uses_role_first_canvas_assigned_ids():
+    actions = ("add_subgraph",)
+    domains = {
+        "add_subgraph": {
+            "semantic_protocol": "hotpotqa.qa_memory.worker_lineage.v1",
+            "model_ids": ["cheap-model"],
+            "execution_profiles": [
+                {"execution_mode": "reasoning", "allowed_tools": []},
+                {
+                    "execution_mode": "react",
+                    "allowed_tools": ["hotpotqa.qa_memory"],
+                },
+            ],
+            "existing_agent_ids": [],
+            "existing_agents": [],
+            "min_new_agents": 1,
+            "max_new_agents": 1,
+            "required_agent_fields": [
+                "agent_id",
+                "model_id",
+                "contract",
+                "role_family",
+                "execution_mode",
+                "allowed_tools",
+            ],
+            "output_role_family": "format",
+            "role_constraints": {
+                "evidence_retriever": {
+                    "execution_profiles": [
+                        {
+                            "execution_mode": "react",
+                            "allowed_tools": ["hotpotqa.qa_memory"],
+                        }
+                    ]
+                },
+                "format": {
+                    "execution_profiles": [
+                        {"execution_mode": "reasoning", "allowed_tools": []}
+                    ]
+                },
+            },
+            "admitted_new_role_families": ["evidence_retriever"],
+        }
+    }
+    client = ScriptedSGLangClient(
+        [
+            '{"action":"add_subgraph","agents":['
+            '{"agent_id":"node_1","role_family":"evidence_retriever"}]}',
+            '{"action":"add_subgraph","agents":['
+            '{"agent_id":"node_1","model_id":"cheap-model",'
+            '"contract":"retrieve evidence","role_family":"evidence_retriever",'
+            '"execution_mode":"react","allowed_tools":["hotpotqa.qa_memory"]}]}',
+            '{"action":"add_subgraph","agents":['
+            '{"agent_id":"node_1","model_id":"cheap-model",'
+            '"contract":"retrieve evidence","role_family":"evidence_retriever",'
+            '"execution_mode":"react","allowed_tools":["hotpotqa.qa_memory"]}],'
+            '"relations":[],"output_agent_id":null}',
+        ],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+    )
+
+    response = asyncio.run(
+        client.propose(
+            "prompt",
+            seed=23,
+            action_json_schema=(
+                director_model_admissible_sampling_json_schema_text(actions)
+            ),
+            action_json_schema_version=(
+                DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3
+            ),
+            action_schema_branch=director_model_admissible_schema_branch_v3(
+                actions
+            ),
+            action_target_domains_json=director_live_action_target_domains_json(
+                actions,
+                domains,
+            ),
+            action_target_domain_version=(
+                DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION
+            ),
+        )
+    )
+
+    assert len(client.payloads) == 3
+    role_schema = json.loads(client.payloads[0]["sampling_params"]["json_schema"])
+    assert role_schema["properties"]["agents"]["oneOf"][0]["prefixItems"][0][
+        "properties"
+    ]["agent_id"] == {"const": "node_1"}
+    declaration_schema = json.loads(
+        client.payloads[1]["sampling_params"]["json_schema"]
+    )
+    assert declaration_schema["properties"]["agents"]["oneOf"][0][
+        "prefixItems"
+    ][0]["anyOf"][0]["properties"]["agent_id"] == {"const": "node_1"}
+    assert response.metadata["selected_add_agent_ids"] == ["node_1"]
+    assert response.metadata["selected_add_agent_roles"] == [
+        {"agent_id": "node_1", "role_family": "evidence_retriever"}
+    ]
+    assert response.metadata["action_decoding_strategy"] == (
+        "hierarchical_json_schema_role_first_add_v1"
+    )
 
 
 def test_collector_forwards_v3_live_action_schema_and_persists_receipt():

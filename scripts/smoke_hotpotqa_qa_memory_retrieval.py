@@ -226,6 +226,7 @@ async def smoke(
         "embedding_model_id": str(section["embedding_model_id"]),
         "embedding_device": str(section.get("embedding_device", "cpu")),
         "frozen_top_k": frozen_top_k,
+        "index_version": int(section.get("index_version", 1)),
         "expected_train_count": expected_train_count,
         "expected_validation_count": expected_validation_count,
     }

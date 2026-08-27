@@ -29,6 +29,70 @@ def registry() -> ModelRegistry:
     )
 
 
+def hotpotqa_qa_memory_tools() -> ToolRegistry:
+    return ToolRegistry(
+        (
+            ToolRegistration(
+                "hotpotqa.qa_memory",
+                FakeTool(
+                    {
+                        "search": lambda arguments: arguments,
+                        "read": lambda arguments: arguments,
+                    }
+                ),
+                ToolCapability(
+                    tool_id="hotpotqa.qa_memory",
+                    dataset_scope=("hotpotqa",),
+                    action_schemas={
+                        "search": {
+                            "type": "object",
+                            "additionalProperties": True,
+                        },
+                        "read": {
+                            "type": "object",
+                            "additionalProperties": True,
+                        },
+                    },
+                    input_schema={"type": "object"},
+                    output_schema={"type": "object"},
+                    side_effect="none",
+                    timeout_seconds=1.0,
+                    version="hotpotqa-qa-memory-test-v1",
+                ),
+            ),
+        )
+    )
+
+
+def hotpotqa_search_read_receipts() -> list[dict[str, object]]:
+    return [
+        {
+            "tool_id": "hotpotqa.qa_memory",
+            "request": {
+                "action": "search",
+                "arguments": {"query": "Alpha author", "k": 2},
+            },
+            "result": {
+                "completed": True,
+                "value": {"memory_ids": ["memory-1"]},
+            },
+            "error_type": None,
+        },
+        {
+            "tool_id": "hotpotqa.qa_memory",
+            "request": {
+                "action": "read",
+                "arguments": {"memory_id": "memory-1"},
+            },
+            "result": {
+                "completed": True,
+                "value": {"memory_id": "memory-1"},
+            },
+            "error_type": None,
+        },
+    ]
+
+
 class RecordingGateway:
     def __init__(self) -> None:
         self.requests: list[AgentRequest] = []
@@ -82,6 +146,132 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
         request_c = next(request for request in gateway.requests if request.agent.id == "c")
         self.assertEqual(["a", "b"], [message.source_agent_id for message in request_c.upstream])
         self.assertEqual("c[a:a[],b:b[]]", result.final_answer)
+
+    async def test_hotpotqa_receipts_follow_multihop_artifact_to_output(self) -> None:
+        catalog = registry()
+        receipts = hotpotqa_search_read_receipts()
+
+        class LineageGateway:
+            def __init__(self) -> None:
+                self.output_request: AgentRequest | None = None
+
+            async def generate(self, request: AgentRequest) -> AgentResponse:
+                if request.agent.id == "memory-worker":
+                    return AgentResponse(
+                        "grounded evidence",
+                        {"tool_receipts": receipts},
+                    )
+                if request.agent.id == "reasoner":
+                    if list(request.upstream[0].tool_receipts) != receipts:
+                        raise AssertionError("Reasoner lost worker Tool receipts")
+                    return AgentResponse("grounded candidate")
+                if request.agent.id == "output":
+                    self.output_request = request
+                    return AgentResponse("<answer>Ada Lovelace</answer>")
+                raise AssertionError("unexpected Agent")
+
+        gateway = LineageGateway()
+        graph = AgentGraph(
+            [
+                AgentNode(
+                    "memory-worker",
+                    "m1",
+                    "retrieve evidence",
+                    execution_mode="react",
+                    allowed_tools=("hotpotqa.qa_memory",),
+                ),
+                AgentNode("reasoner", "m1", "bind the answer"),
+                AgentNode("output", "m2", "emit the answer"),
+            ],
+            [
+                AgentRelation("memory-worker", "reasoner", True, False),
+                AgentRelation("reasoner", "output", True, False),
+            ],
+            output_agent_id="output",
+        )
+        result = await AgentRuntime(
+            catalog,
+            gateway,
+            execution_adapters={"react": ReasoningExecutionAdapter(gateway)},
+            tool_registry=hotpotqa_qa_memory_tools(),
+            dataset_id="hotpotqa",
+        ).execute(graph, "Who wrote Alpha?", run_id="qa-memory-multihop")
+
+        self.assertIsNotNone(gateway.output_request)
+        assert gateway.output_request is not None
+        self.assertEqual("reasoner", gateway.output_request.upstream[0].source_agent_id)
+        self.assertEqual(
+            receipts,
+            list(gateway.output_request.upstream[0].tool_receipts),
+        )
+        self.assertEqual(
+            receipts,
+            list(result.output_metadata["reasoner"]["tool_receipts"]),
+        )
+        self.assertEqual(
+            result.output_metadata["reasoner"]["artifact_version"],
+            gateway.output_request.upstream[0].artifact_version,
+        )
+
+    async def test_hotpotqa_receipts_cross_bidirectional_relation(self) -> None:
+        catalog = registry()
+        receipts = hotpotqa_search_read_receipts()
+
+        class ReciprocalLineageGateway:
+            def __init__(self) -> None:
+                self.output_revision: AgentRequest | None = None
+
+            async def generate(self, request: AgentRequest) -> AgentResponse:
+                if request.agent.id == "memory-worker":
+                    return AgentResponse(
+                        "grounded evidence",
+                        {"tool_receipts": receipts},
+                    )
+                if request.phase is ExecutionPhase.DRAFT:
+                    return AgentResponse("output draft")
+                self.output_revision = request
+                return AgentResponse("<answer>Ada Lovelace</answer>")
+
+        gateway = ReciprocalLineageGateway()
+        graph = AgentGraph(
+            [
+                AgentNode(
+                    "memory-worker",
+                    "m1",
+                    "retrieve and revise evidence",
+                    execution_mode="react",
+                    allowed_tools=("hotpotqa.qa_memory",),
+                ),
+                AgentNode("output", "m2", "verify and emit the answer"),
+            ],
+            [AgentRelation("memory-worker", "output", True, True)],
+            output_agent_id="output",
+        )
+        result = await AgentRuntime(
+            catalog,
+            gateway,
+            execution_adapters={"react": ReasoningExecutionAdapter(gateway)},
+            tool_registry=hotpotqa_qa_memory_tools(),
+            dataset_id="hotpotqa",
+        ).execute(graph, "Who wrote Alpha?", run_id="qa-memory-reciprocal")
+
+        self.assertIsNotNone(gateway.output_revision)
+        assert gateway.output_revision is not None
+        self.assertEqual(ExecutionPhase.REVISION, gateway.output_revision.phase)
+        self.assertIsNotNone(gateway.output_revision.peer_draft)
+        assert gateway.output_revision.peer_draft is not None
+        self.assertEqual(
+            "memory-worker",
+            gateway.output_revision.peer_draft.source_agent_id,
+        )
+        self.assertEqual(
+            receipts,
+            list(gateway.output_revision.peer_draft.tool_receipts),
+        )
+        self.assertEqual(
+            receipts,
+            list(result.output_metadata["output"]["tool_receipts"]),
+        )
 
     async def test_event_driven_successor_starts_while_unrelated_branch_is_slow(self) -> None:
         catalog = registry()

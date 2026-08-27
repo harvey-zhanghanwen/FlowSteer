@@ -16,6 +16,7 @@ explicit corpus-specific allowlist.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 import inspect
 import json
@@ -24,9 +25,10 @@ import re
 from typing import Protocol
 import unicodedata
 
-from .agent_runtime import AgentRequest
-from .hotpotqa_qa_memory_index import QA_MEMORY_CORPUS_VERSION
-from .react_execution import ToolReactExecutionAdapter
+from .agent_runtime import AgentRequest, GatewayResponse
+from .hotpotqa_qa_memory_index import QA_MEMORY_CORPUS_VERSIONS
+from .react_execution import ReactExecutionError, ToolReactExecutionAdapter
+from .task_dataset import qa_question_scope
 from .tool_runtime import (
     ToolCapability,
     ToolRegistration,
@@ -42,6 +44,18 @@ HOTPOTQA_DATASET_SCOPE = ("hotpotqa",)
 
 _PASSAGE_INDEX_KIND = "public_passage"
 _QA_MEMORY_INDEX_KIND = "train_qa_memory"
+_QA_MEMORY_EVIDENCE_FIELDS = (
+    "question_scope",
+    "memory_id",
+    "source_train_task_id",
+    "paraphrase_question",
+    "paraphrase_answer_statement",
+    "canonical_answer",
+)
+_ACTIVE_QA_MEMORY_QUESTION_SCOPE: ContextVar[str | None] = ContextVar(
+    "hotpotqa_qa_memory_question_scope",
+    default=None,
+)
 
 
 def _normalized_retrieval_query(query: str) -> str:
@@ -78,6 +92,7 @@ def _public_retrieval_state(
     observations: Sequence[Mapping[str, object]],
     *,
     tool_id: str = HOTPOTQA_RETRIEVAL_TOOL_ID,
+    minimum_similarity: float | None = None,
 ) -> _HotpotRetrievalState:
     search_queries: list[str] = []
     latest_search_doc_ids: list[str] = []
@@ -102,6 +117,24 @@ def _public_retrieval_state(
             if isinstance(query, str) and query.strip():
                 search_queries.append(query.strip())
             raw_doc_ids = result.get("memory_ids", result.get("doc_ids", ()))
+            if (
+                tool_id == HOTPOTQA_QA_MEMORY_TOOL_ID
+                and minimum_similarity is not None
+            ):
+                raw_hits = result.get("hits", ())
+                raw_doc_ids = (
+                    tuple(
+                        hit.get("memory_id")
+                        for hit in raw_hits
+                        if isinstance(hit, Mapping)
+                        and isinstance(hit.get("memory_id"), str)
+                        and isinstance(hit.get("similarity"), (int, float))
+                        and not isinstance(hit.get("similarity"), bool)
+                        and float(hit["similarity"]) >= minimum_similarity
+                    )
+                    if isinstance(raw_hits, (list, tuple))
+                    else ()
+                )
             if isinstance(raw_doc_ids, (list, tuple)):
                 latest_search_doc_ids.extend(
                     str(item)
@@ -243,7 +276,7 @@ def _index_kind(index: _EmbeddingIndex) -> str:
     )
     search_parameters = _call_parameter_names(index.search, name="search")
     read_parameters = _call_parameter_names(index.read, name="read")
-    if corpus_version == QA_MEMORY_CORPUS_VERSION:
+    if corpus_version in QA_MEMORY_CORPUS_VERSIONS:
         if _optional_manifest_field(manifest, "source_split", "split") != "train":
             raise ValueError("QA-memory retrieval index must use the train split")
         if _optional_manifest_field(manifest, "validation_overlap_count") != 0:
@@ -321,10 +354,6 @@ def _public_memory_hit(
             _field(raw_hit, "paraphrase_question"),
             field_name="search hit paraphrase_question",
         ),
-        "paraphrase_answer_statement": _required_text(
-            _field(raw_hit, "paraphrase_answer_statement"),
-            field_name="search hit paraphrase_answer_statement",
-        ),
         "similarity": float(similarity),
         "rank": rank,
     }
@@ -371,6 +400,178 @@ def _public_memory(raw_memory: object, *, expected_memory_id: str) -> dict[str, 
             field_name="read memory paraphrase_provenance",
         ),
     }
+
+
+def _successful_qa_memory_receipt_value(
+    receipt: Mapping[str, object],
+    *,
+    tool_id: str,
+    action: str,
+) -> tuple[Mapping[str, object], Mapping[str, object]] | None:
+    """Return one successful canonical Tool request/result pair.
+
+    DIRECT_REUSE: SkillFlow's Tool receipt is the authoritative boundary for
+    an Action--Observation transition.  This helper accepts the persisted
+    ``ToolReceipt.to_value`` shape and does not infer evidence from model text.
+    """
+
+    request = receipt.get("request")
+    result = receipt.get("result")
+    if (
+        receipt.get("tool_id") != tool_id
+        or receipt.get("error_type") is not None
+        or not isinstance(request, Mapping)
+        or request.get("action") != action
+        or not isinstance(result, Mapping)
+    ):
+        return None
+    if "completed" in result and result.get("completed") is not True:
+        return None
+    value = result.get("value", result)
+    if not isinstance(value, Mapping) or value.get("operation") != action:
+        return None
+    return request, value
+
+
+def _strict_artifact_text(value: object) -> str | None:
+    if not isinstance(value, str) or not value or value != value.strip():
+        return None
+    return value
+
+
+def _project_qa_memory_evidence_artifact(
+    memory_id: object,
+    tool_receipts: Sequence[Mapping[str, object]],
+    *,
+    question_scope: str,
+    tool_id: str = HOTPOTQA_QA_MEMORY_TOOL_ID,
+) -> tuple[dict[str, str] | None, str | None]:
+    """Project one selected read handle into the native evidence artifact.
+
+    DIRECT_REUSE: SkillFlow treats the successful Tool Observation as the
+    authoritative environment value.  The worker policy selects an opaque
+    ``memory_id`` through search/read; this adapter then copies the record from
+    that exact persisted read receipt instead of asking the model to reproduce
+    answer-bearing fields token by token.
+    """
+
+    selected_memory_id = _strict_artifact_text(memory_id)
+    if selected_memory_id is None:
+        return None, "hotpotqa_qa_memory_completion_memory_id_invalid"
+    searched_memory_ids: set[str] = set()
+    for receipt in tool_receipts:
+        if not isinstance(receipt, Mapping):
+            continue
+        successful_search = _successful_qa_memory_receipt_value(
+            receipt,
+            tool_id=tool_id,
+            action="search",
+        )
+        if successful_search is not None:
+            request, value = successful_search
+            arguments = request.get("arguments")
+            memory_ids = value.get("memory_ids")
+            hits = value.get("hits")
+            if (
+                isinstance(arguments, Mapping)
+                and set(arguments) == {"query", "k"}
+                and isinstance(memory_ids, list)
+                and isinstance(hits, list)
+            ):
+                returned_ids = {
+                    item
+                    for item in memory_ids
+                    if isinstance(item, str) and item
+                }
+                hit_ids = {
+                    item.get("memory_id")
+                    for item in hits
+                    if isinstance(item, Mapping)
+                    and isinstance(item.get("memory_id"), str)
+                    and item.get("memory_id")
+                }
+                searched_memory_ids.update(returned_ids & hit_ids)
+            continue
+
+        successful_read = _successful_qa_memory_receipt_value(
+            receipt,
+            tool_id=tool_id,
+            action="read",
+        )
+        if successful_read is None:
+            continue
+        request, value = successful_read
+        arguments = request.get("arguments")
+        memory = value.get("memory")
+        if (
+            not isinstance(arguments, Mapping)
+            or set(arguments) != {"memory_id"}
+            or arguments.get("memory_id") != selected_memory_id
+            or selected_memory_id not in searched_memory_ids
+            or value.get("memory_id") != selected_memory_id
+            or not isinstance(memory, Mapping)
+            or memory.get("memory_id") != selected_memory_id
+        ):
+            continue
+        projected: dict[str, str] = {"question_scope": question_scope}
+        for field_name in _QA_MEMORY_EVIDENCE_FIELDS:
+            if field_name == "question_scope":
+                continue
+            field_value = _strict_artifact_text(memory.get(field_name))
+            if field_value is None:
+                return (
+                    None,
+                    f"hotpotqa_qa_memory_read_{field_name}_invalid",
+                )
+            projected[field_name] = field_value
+        return projected, None
+    return None, "hotpotqa_qa_memory_artifact_has_no_exact_search_read_lineage"
+
+
+def _validate_qa_memory_evidence_artifact(
+    artifact: str,
+    tool_receipts: Sequence[Mapping[str, object]],
+    *,
+    question_scope: str,
+    tool_id: str = HOTPOTQA_QA_MEMORY_TOOL_ID,
+) -> tuple[dict[str, str] | None, str | None]:
+    """Bind one worker artifact to a prior exact QA-memory search/read pair.
+
+    NECESSARY_ADAPTATION: SkillFlow supplies the canonical search/read receipt
+    boundary, while FlowSteer's progressive Canvas transports the resulting
+    artifact over explicit AgentGraph relations.  QA-memory records carry a
+    structured question/answer payload rather than a public passage, so the
+    compatibility gate binds every admitted field to the exact read record.
+    """
+
+    try:
+        raw_artifact = json.loads(artifact)
+    except (TypeError, ValueError):
+        return None, "hotpotqa_qa_memory_artifact_not_json_object"
+    if not isinstance(raw_artifact, dict):
+        return None, "hotpotqa_qa_memory_artifact_not_json_object"
+    if set(raw_artifact) != set(_QA_MEMORY_EVIDENCE_FIELDS):
+        return None, "hotpotqa_qa_memory_artifact_field_set_invalid"
+    fields: dict[str, str] = {}
+    for field_name in _QA_MEMORY_EVIDENCE_FIELDS:
+        value = _strict_artifact_text(raw_artifact.get(field_name))
+        if value is None:
+            return None, f"hotpotqa_qa_memory_artifact_{field_name}_invalid"
+        fields[field_name] = value
+    if fields["question_scope"] != question_scope:
+        return None, "hotpotqa_qa_memory_question_scope_mismatch"
+
+    projected, issue = _project_qa_memory_evidence_artifact(
+        fields["memory_id"],
+        tool_receipts,
+        question_scope=question_scope,
+        tool_id=tool_id,
+    )
+    if issue is not None or projected is None:
+        return None, issue
+    if fields != projected:
+        return None, "hotpotqa_qa_memory_artifact_has_no_exact_search_read_lineage"
+    return fields, None
 
 
 @dataclass(slots=True)
@@ -522,6 +723,127 @@ class HotpotQAEmbeddingReactExecutionAdapter(ToolReactExecutionAdapter):
     progressive Canvas search space.
     """
 
+    def __init__(
+        self,
+        *,
+        qa_memory_min_similarity: float | None = None,
+        **kwargs: object,
+    ) -> None:
+        if qa_memory_min_similarity is not None and (
+            isinstance(qa_memory_min_similarity, bool)
+            or not isinstance(qa_memory_min_similarity, (int, float))
+            or not math.isfinite(float(qa_memory_min_similarity))
+            or not 0.0 <= float(qa_memory_min_similarity) <= 1.0
+        ):
+            raise ValueError(
+                "qa_memory_min_similarity must be a finite value in [0, 1]"
+            )
+        super().__init__(**kwargs)
+        self._qa_memory_min_similarity = (
+            None
+            if qa_memory_min_similarity is None
+            else float(qa_memory_min_similarity)
+        )
+
+    async def execute(self, request: AgentRequest) -> GatewayResponse:
+        """Keep the request-scoped question available to completion admission.
+
+        DIRECT_REUSE: the context-local protocol follows the existing
+        SkillFlow-derived request-scoped execution state used by the unified QA
+        adapter.  It remains safe when multiple worker executions overlap.
+        """
+
+        if self._active_retrieval_tool_id() != HOTPOTQA_QA_MEMORY_TOOL_ID:
+            return await super().execute(request)
+        token = _ACTIVE_QA_MEMORY_QUESTION_SCOPE.set(
+            qa_question_scope(request.problem)
+        )
+        try:
+            try:
+                return await super().execute(request)
+            except ReactExecutionError as exc:
+                metadata = dict(exc.metadata)
+                failure_type = self._qa_memory_exhaustion_failure_type(
+                    metadata.get("tool_receipts", ()),
+                    minimum_similarity=self._qa_memory_min_similarity,
+                )
+                metadata["retrieval_failure_type"] = failure_type
+                trace = list(metadata.get("react_trace", ()))
+                trace.append(
+                    {
+                        "observation_status": "terminal_failure",
+                        "public_error_code": failure_type,
+                    }
+                )
+                metadata["react_trace"] = trace
+                raise ReactExecutionError(str(exc), metadata=metadata) from exc
+        finally:
+            _ACTIVE_QA_MEMORY_QUESTION_SCOPE.reset(token)
+
+    @staticmethod
+    def _qa_memory_exhaustion_failure_type(
+        receipts: object,
+        *,
+        minimum_similarity: float | None = None,
+    ) -> str:
+        """Classify a bounded no-answer Tool plan from public receipts only."""
+
+        if not isinstance(receipts, (list, tuple)):
+            return "retrieval_strategy_failure"
+        successful_searches = 0
+        returned_memory_count = 0
+        successful_reads = 0
+        tool_errors = 0
+        for receipt in receipts:
+            if not isinstance(receipt, Mapping):
+                continue
+            if receipt.get("error_type") is not None:
+                tool_errors += 1
+                continue
+            search = _successful_qa_memory_receipt_value(
+                receipt,
+                tool_id=HOTPOTQA_QA_MEMORY_TOOL_ID,
+                action="search",
+            )
+            if search is not None:
+                successful_searches += 1
+                value = search[1]
+                memory_ids = value.get("memory_ids")
+                if isinstance(memory_ids, list):
+                    if minimum_similarity is None:
+                        returned_memory_count += len(memory_ids)
+                    else:
+                        hits = value.get("hits", ())
+                        if isinstance(hits, list):
+                            returned_memory_count += sum(
+                                isinstance(hit, Mapping)
+                                and isinstance(
+                                    hit.get("similarity"), (int, float)
+                                )
+                                and not isinstance(
+                                    hit.get("similarity"), bool
+                                )
+                                and float(hit["similarity"])
+                                >= minimum_similarity
+                                for hit in hits
+                            )
+                continue
+            read = _successful_qa_memory_receipt_value(
+                receipt,
+                tool_id=HOTPOTQA_QA_MEMORY_TOOL_ID,
+                action="read",
+            )
+            if read is not None:
+                successful_reads += 1
+        if (
+            successful_searches > 0
+            and returned_memory_count == 0
+            and successful_reads == 0
+            and tool_errors == 0
+        ):
+            return "knowledge_base_coverage_failure"
+        return "retrieval_strategy_failure"
+
     def _active_retrieval_tool_id(self) -> str:
         resource_ids = self._tool_registry.resource_ids
         if len(resource_ids) != 1:
@@ -535,6 +857,37 @@ class HotpotQAEmbeddingReactExecutionAdapter(ToolReactExecutionAdapter):
         schema = capability.action_schemas.get("read", {})
         required = schema.get("required", ()) if isinstance(schema, Mapping) else ()
         return "memory_id" if tuple(required) == ("memory_id",) else "doc_id"
+
+    def _completion_arguments_schema(
+        self,
+        request: AgentRequest,
+    ) -> Mapping[str, object]:
+        if self._active_retrieval_tool_id() != HOTPOTQA_QA_MEMORY_TOOL_ID:
+            return super()._completion_arguments_schema(request)
+        del request
+        return {
+            "type": "object",
+            "required": ["value"],
+            "additionalProperties": False,
+            "properties": {
+                "value": {
+                    "type": "object",
+                    "required": ["memory_id"],
+                    "additionalProperties": False,
+                    "properties": {
+                        "memory_id": {
+                            "type": "string",
+                            "minLength": 1,
+                            "description": (
+                                "Select one exact memory_id already read in this "
+                                "worker execution; the runtime projects the native "
+                                "evidence artifact from that Tool receipt."
+                            ),
+                        }
+                    },
+                }
+            },
+        }
 
     def _allowed_tools_for_turn(
         self,
@@ -564,7 +917,15 @@ class HotpotQAEmbeddingReactExecutionAdapter(ToolReactExecutionAdapter):
 
         del request
         tool_id = self._active_retrieval_tool_id()
-        state = _public_retrieval_state(observations, tool_id=tool_id)
+        state = _public_retrieval_state(
+            observations,
+            tool_id=tool_id,
+            minimum_similarity=(
+                self._qa_memory_min_similarity
+                if tool_id == HOTPOTQA_QA_MEMORY_TOOL_ID
+                else None
+            ),
+        )
         remaining_tool_calls = max(
             0,
             self._max_tool_calls - state.dispatched_tool_calls,
@@ -618,7 +979,15 @@ class HotpotQAEmbeddingReactExecutionAdapter(ToolReactExecutionAdapter):
         )
         k_schema = properties.get("k", {}) if isinstance(properties, Mapping) else {}
         frozen_k = k_schema.get("const") if isinstance(k_schema, Mapping) else None
-        state = _public_retrieval_state(observations, tool_id=tool_id)
+        state = _public_retrieval_state(
+            observations,
+            tool_id=tool_id,
+            minimum_similarity=(
+                self._qa_memory_min_similarity
+                if tool_id == HOTPOTQA_QA_MEMORY_TOOL_ID
+                else None
+            ),
+        )
         read_identifier = self._read_identifier_name()
         actions, completion_admitted = self._state_conditioned_action_domain(
             request,
@@ -637,13 +1006,15 @@ class HotpotQAEmbeddingReactExecutionAdapter(ToolReactExecutionAdapter):
                 )
                 + "."
             )
-        elif action_names == {"search"} and state.read_doc_ids:
+        elif action_names == {"search"} and state.search_queries:
             next_action = (
                 "Current action mask: search only; read and complete are not "
-                "admitted. Form a distinct focused query for the missing "
-                "entity, relation, or hop. A missing mention in one passage "
-                "is not evidence that another named entity lacks the requested "
-                "fact. Prior successful queries: "
+                "admitted. No unread QA-memory candidate met the frozen "
+                "embedding confidence threshold for the current entity and "
+                "relation, or a prior read left a missing hop. Form a distinct "
+                "focused query. A missing mention in one memory is not evidence "
+                "that another named entity lacks the requested fact. Prior "
+                "successful queries: "
                 + json.dumps(
                     list(state.search_queries),
                     ensure_ascii=False,
@@ -660,6 +1031,21 @@ class HotpotQAEmbeddingReactExecutionAdapter(ToolReactExecutionAdapter):
             next_action = (
                 "Current action mask: search only; read and complete are not "
                 "admitted. Supply all required search arguments."
+            )
+        qa_memory_completion = ""
+        completion_example = '{"value":"evidence-supported artifact"}'
+        if tool_id == HOTPOTQA_QA_MEMORY_TOOL_ID:
+            completion_example = json.dumps(
+                {"value": {"memory_id": "exact read memory_id"}},
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            qa_memory_completion = (
+                " For train QA-memory, completion value contains only the exact "
+                "memory_id selected by a successful read in this worker execution. "
+                "The runtime deterministically projects the native evidence "
+                "artifact from that persisted Tool receipt; do not copy or invent "
+                "answer-bearing record fields."
             )
         return (
             base
@@ -681,9 +1067,12 @@ class HotpotQAEmbeddingReactExecutionAdapter(ToolReactExecutionAdapter):
             "repeat a normalized successful query. After the first successful "
             "read, use the next search/read transition for the missing entity, "
             "relation, or hop while the frozen Tool budget remains. Complete "
-            "only on the admitted terminal state, with exactly "
-            "{\"value\":\"evidence-supported artifact\"}. "
+            "only on the admitted terminal state, with exactly the declared "
+            "completion shape "
+            + completion_example
+            + ". "
             + next_action
+            + qa_memory_completion
         )
 
     def _tool_action_error(
@@ -697,6 +1086,12 @@ class HotpotQAEmbeddingReactExecutionAdapter(ToolReactExecutionAdapter):
         state = _public_retrieval_state(
             observations,
             tool_id=self._active_retrieval_tool_id(),
+            minimum_similarity=(
+                self._qa_memory_min_similarity
+                if self._active_retrieval_tool_id()
+                == HOTPOTQA_QA_MEMORY_TOOL_ID
+                else None
+            ),
         )
         name = getattr(action, "name", None)
         arguments = getattr(action, "arguments", None)
@@ -723,7 +1118,7 @@ class HotpotQAEmbeddingReactExecutionAdapter(ToolReactExecutionAdapter):
         artifact: str,
         tool_receipts: list[dict[str, object]],
     ) -> str | None:
-        del action, artifact
+        del action
         tool_id = (
             self._active_retrieval_tool_id()
             if hasattr(self, "_tool_registry")
@@ -742,7 +1137,56 @@ class HotpotQAEmbeddingReactExecutionAdapter(ToolReactExecutionAdapter):
             return "hotpotqa_dynamic_search_required"
         if "read" not in successful_actions:
             return "hotpotqa_dynamic_read_required"
+        if tool_id == HOTPOTQA_QA_MEMORY_TOOL_ID:
+            question_scope = _ACTIVE_QA_MEMORY_QUESTION_SCOPE.get()
+            if question_scope is None:
+                return "hotpotqa_qa_memory_question_scope_unavailable"
+            try:
+                selection = json.loads(artifact)
+            except (TypeError, ValueError):
+                return "hotpotqa_qa_memory_completion_selection_invalid"
+            if not isinstance(selection, dict) or set(selection) != {"memory_id"}:
+                return "hotpotqa_qa_memory_completion_selection_invalid"
+            _, issue = _project_qa_memory_evidence_artifact(
+                selection.get("memory_id"),
+                tool_receipts,
+                question_scope=question_scope,
+                tool_id=tool_id,
+            )
+            return issue
         return None
+
+    def _completion_artifact(
+        self,
+        *,
+        action: object,
+        artifact: str,
+        tool_receipts: list[dict[str, object]],
+    ) -> str:
+        if self._active_retrieval_tool_id() != HOTPOTQA_QA_MEMORY_TOOL_ID:
+            return super()._completion_artifact(
+                action=action,
+                artifact=artifact,
+                tool_receipts=tool_receipts,
+            )
+        question_scope = _ACTIVE_QA_MEMORY_QUESTION_SCOPE.get()
+        selection = json.loads(artifact)
+        projected, issue = _project_qa_memory_evidence_artifact(
+            selection.get("memory_id") if isinstance(selection, Mapping) else None,
+            tool_receipts,
+            question_scope=question_scope or "",
+            tool_id=HOTPOTQA_QA_MEMORY_TOOL_ID,
+        )
+        if issue is not None or projected is None:
+            # ``_completion_error`` runs immediately before this hook.  Keep a
+            # fail-closed guard in case a future caller bypasses that boundary.
+            return ""
+        return json.dumps(
+            projected,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
 
 
 def build_hotpotqa_embedding_tool_registry(
@@ -855,7 +1299,6 @@ def build_hotpotqa_embedding_tool_registry(
             "memory_id",
             "source_train_task_id",
             "paraphrase_question",
-            "paraphrase_answer_statement",
             "similarity",
             "rank",
         ],
@@ -863,7 +1306,6 @@ def build_hotpotqa_embedding_tool_registry(
             "memory_id": {"type": "string"},
             "source_train_task_id": {"type": "string"},
             "paraphrase_question": {"type": "string"},
-            "paraphrase_answer_statement": {"type": "string"},
             "similarity": {"type": "number"},
             "rank": {"type": "integer", "minimum": 1},
         },

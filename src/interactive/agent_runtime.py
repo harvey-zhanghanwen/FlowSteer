@@ -66,6 +66,7 @@ class UpstreamMessage:
     artifact_type: str = "text"
     environment_revision: Optional[int] = None
     tool_receipts: Tuple[Mapping[str, object], ...] = ()
+    artifact_version: Optional[str] = None
 
     def __post_init__(self) -> None:
         for value, name in (
@@ -96,6 +97,11 @@ class UpstreamMessage:
             or self.environment_revision < 0
         ):
             raise ValueError("environment_revision must be non-negative when supplied")
+        if self.artifact_version is not None and (
+            not isinstance(self.artifact_version, str)
+            or not self.artifact_version.strip()
+        ):
+            raise ValueError("artifact_version must be non-empty when supplied")
         if not isinstance(self.tool_receipts, tuple) or any(
             not isinstance(item, Mapping) for item in self.tool_receipts
         ):
@@ -129,6 +135,7 @@ class UpstreamMessage:
             "content": self.content,
             "graph_revision": self.graph_revision,
             "environment_revision": self.environment_revision,
+            "artifact_version": self.artifact_version,
             "request_or_dependency": self.request_or_dependency,
             "dependency": self.request_or_dependency,
             "tool_receipts": [dict(item) for item in self.tool_receipts],
@@ -900,7 +907,10 @@ class AgentRuntime:
                 communication_condition=communication_condition,
             )
             response = await self._invoke(request, calls)
-            output_metadata[agent_id] = response.metadata
+            output_metadata[agent_id] = self._response_output_metadata(
+                request,
+                response,
+            )
             return {agent_id: response.text}
 
         if len(component) != 2:
@@ -966,6 +976,7 @@ class AgentRuntime:
                     right_draft.metadata
                 ),
                 tool_receipts=_tool_receipts_from_metadata(right_draft.metadata),
+                artifact_version=right_draft_request.request_id,
             ),
             problem=problem,
             run_id=run_id,
@@ -991,6 +1002,7 @@ class AgentRuntime:
                     left_draft.metadata
                 ),
                 tool_receipts=_tool_receipts_from_metadata(left_draft.metadata),
+                artifact_version=left_draft_request.request_id,
             ),
             problem=problem,
             run_id=run_id,
@@ -1003,8 +1015,14 @@ class AgentRuntime:
             self._invoke(left_revision_request, calls),
             self._invoke(right_revision_request, calls),
         )
-        output_metadata[left_id] = left_revision.metadata
-        output_metadata[right_id] = right_revision.metadata
+        output_metadata[left_id] = self._response_output_metadata(
+            left_revision_request,
+            left_revision,
+        )
+        output_metadata[right_id] = self._response_output_metadata(
+            right_revision_request,
+            right_revision,
+        )
         return {left_id: left_revision.text, right_id: right_revision.text}
 
     def _upstream(
@@ -1049,6 +1067,25 @@ class AgentRuntime:
                         tool_receipts=_tool_receipts_from_metadata(
                             output_metadata.get(source_id, {})
                         ),
+                        artifact_version=(
+                            str(
+                                output_metadata.get(source_id, {}).get(
+                                    "artifact_version"
+                                )
+                            )
+                            if isinstance(
+                                output_metadata.get(source_id, {}).get(
+                                    "artifact_version"
+                                ),
+                                str,
+                            )
+                            and str(
+                                output_metadata.get(source_id, {}).get(
+                                    "artifact_version"
+                                )
+                            ).strip()
+                            else None
+                        ),
                     )
                 )
         return tuple(
@@ -1091,6 +1128,62 @@ class AgentRuntime:
             own_draft=own_draft,
             peer_draft=peer_draft,
         )
+
+    def _response_output_metadata(
+        self,
+        request: AgentRequest,
+        response: AgentResponse,
+    ) -> Mapping[str, object]:
+        """Bind an artifact to its consumed inputs and QA-memory receipts.
+
+        DIRECT_REUSE: this is the FlowSteer v63 artifact-version and
+        ``input_artifact_provenance`` boundary.  When the registered resource
+        is HotpotQA QA-memory, SkillFlow Tool receipts are carried across each
+        explicit relation so non-chain AgentGraph topologies retain the exact
+        search/read lineage seen by downstream Agents.
+        """
+
+        metadata = dict(response.metadata)
+        metadata["artifact_version"] = request.request_id
+        inputs = list(request.upstream)
+        if request.peer_draft is not None:
+            inputs.append(request.peer_draft)
+        input_artifact_versions: dict[str, str] = {}
+        input_artifact_provenance: list[dict[str, object]] = []
+        for message in inputs:
+            if message.artifact_version is not None:
+                previous = input_artifact_versions.get(message.source_agent_id)
+                if previous is not None and previous != message.artifact_version:
+                    raise AgentRuntimeError(
+                        "one Agent request consumed conflicting artifact versions "
+                        f"from {message.source_agent_id!r}"
+                    )
+                input_artifact_versions[message.source_agent_id] = (
+                    message.artifact_version
+                )
+            input_artifact_provenance.append(message.to_dict())
+        metadata["input_artifact_versions"] = input_artifact_versions
+        metadata["input_artifact_provenance"] = input_artifact_provenance
+
+        propagates_qa_memory = bool(
+            self.dataset_id is not None
+            and self.dataset_id.casefold() == "hotpotqa"
+            and self.tool_registry is not None
+            and "hotpotqa.qa_memory" in self.tool_registry.resource_ids
+        )
+        if propagates_qa_memory:
+            lineage_tool_receipts: list[dict[str, object]] = []
+            for message in inputs:
+                for receipt in message.tool_receipts:
+                    serialized = dict(receipt)
+                    if serialized not in lineage_tool_receipts:
+                        lineage_tool_receipts.append(serialized)
+            for receipt in _tool_receipts_from_metadata(metadata):
+                serialized = dict(receipt)
+                if serialized not in lineage_tool_receipts:
+                    lineage_tool_receipts.append(serialized)
+            metadata["tool_receipts"] = lineage_tool_receipts
+        return MappingProxyType(metadata)
 
     async def _invoke(
         self,

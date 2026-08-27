@@ -708,6 +708,11 @@ class LiveSmokeBackend:
                 max_action_tokens=int(director["max_action_tokens"]),
                 sampling_base_seed=base_seed,
                 sampling_coordinate=sampling_coordinate,
+                qa_memory_min_similarity=(
+                    float(retrieval["search_min_similarity"])
+                    if retrieval.get("corpus_kind") == "train_qa_memory"
+                    else None
+                ),
             )
             task_runtime = AgentRuntime(
                 self.registry,

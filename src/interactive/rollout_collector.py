@@ -20,6 +20,7 @@ for those downstream boundaries.
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 import inspect
 import json
 import math
@@ -46,6 +47,8 @@ from .director import (
     director_live_action_target_domains_json,
     director_live_add_subgraph_agent_declarations_from_text,
     director_live_add_subgraph_agent_declarations_json_schema_text,
+    director_live_add_subgraph_role_selection_from_text,
+    director_live_add_subgraph_role_selection_json_schema_text,
     director_live_execution_mode_selector_json_schema_text,
     director_live_execution_profile_from_text,
     director_live_modify_agent_field_selector_json_schema_text,
@@ -79,6 +82,41 @@ AGENTGRAPH_SMOKE_SOURCES: Tuple[str, ...] = (
 # Directly reused from the current FlowSteer collector.  The receipt names the
 # actual two-stage constrained-decoding procedure rather than a prompt variant.
 HIERARCHICAL_JSON_SCHEMA_STRATEGY = "hierarchical_json_schema"
+ROLE_FIRST_ADD_DECODING_STRATEGY = (
+    "hierarchical_json_schema_role_first_add_v1"
+)
+
+_ADD_DECLARATION_CONTINUATION = (
+    "Complete the Agent declarations for the selected positions and "
+    "role_family values. Keep agent_id and role_family unchanged. Return only "
+    "the JSON object required by the current schema."
+)
+_ADD_ACTION_CONTINUATION = (
+    "Complete the add_subgraph action for these Agent declarations. Keep "
+    "agents unchanged. Select only relations and output_agent_id allowed by "
+    "the current schema. Return only the JSON object."
+)
+
+
+def _hierarchical_continuation_prompt(
+    prompt: str,
+    *,
+    committed_json: str,
+    instruction: str,
+) -> str:
+    """Expose one sampled phase before the next schema-bound phase."""
+
+    if not committed_json or not instruction:
+        raise ReceiptValidationError(
+            "hierarchical continuation requires a committed receipt"
+        )
+    return (
+        prompt
+        + "\n\nCommitted constrained decision:\n"
+        + committed_json
+        + "\n"
+        + instruction
+    )
 
 
 class ReceiptValidationError(DirectorError):
@@ -740,18 +778,88 @@ class SGLangReceiptDirectorClient:
                 self._hierarchical_phase_receipt(selector_response)
             )
 
+        selected_add_agent_roles: Optional[Tuple[Mapping[str, str], ...]] = None
         selected_add_agents: Optional[Tuple[Mapping[str, Any], ...]] = None
         selected_execution_profile: Optional[tuple[str, tuple[str, ...]]] = None
         selected_modify_field: Optional[str] = None
         parameter_prompt = prompt
         if selected_action == "add_subgraph" and action_target_domains is not None:
+            add_domain = action_target_domains.get("add_subgraph")
+            if not isinstance(add_domain, Mapping):
+                raise ReceiptValidationError(
+                    "v3 add_subgraph action has no live target domain"
+                )
+            declaration_prompt = prompt
+            if (
+                add_domain.get("semantic_protocol")
+                == "hotpotqa.qa_memory.worker_lineage.v1"
+            ):
+                role_schema = (
+                    director_live_add_subgraph_role_selection_json_schema_text(
+                        action_target_domains
+                    )
+                )
+                role_payload = self._request_payload(
+                    prompt,
+                    adapter_name,
+                    seed,
+                    action_json_schema=role_schema,
+                )
+                value, latency_ms, attempt_count = await self._post_with_retries(
+                    role_payload
+                )
+                total_latency_ms += latency_ms
+                total_attempt_count += attempt_count
+                role_response = self._parse_response(
+                    prompt,
+                    role_payload,
+                    value,
+                    policy_version=policy_version,
+                    adapter_name=adapter_name,
+                    expected_server_weight_version=expected_server_weight_version,
+                    latency_ms=latency_ms,
+                    attempt_count=attempt_count,
+                    generation_seed=seed,
+                )
+                try:
+                    selected_add_agent_roles = (
+                        director_live_add_subgraph_role_selection_from_text(
+                            role_response.text,
+                            action_target_domains,
+                        )
+                    )
+                except ValueError as exc:
+                    raise ReceiptValidationError(
+                        "v3 add_subgraph role-selection phase is invalid: "
+                        f"{exc}"
+                    ) from exc
+                phase_receipts["add_agent_role_selection"] = (
+                    self._hierarchical_phase_receipt(role_response)
+                )
+                selected_roles_json = json.dumps(
+                    {
+                        "action": "add_subgraph",
+                        "agents": [
+                            dict(agent) for agent in selected_add_agent_roles
+                        ],
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                declaration_prompt = _hierarchical_continuation_prompt(
+                    prompt,
+                    committed_json=selected_roles_json,
+                    instruction=_ADD_DECLARATION_CONTINUATION,
+                )
             declaration_schema = (
                 director_live_add_subgraph_agent_declarations_json_schema_text(
-                    action_target_domains
+                    action_target_domains,
+                    selected_agent_roles=selected_add_agent_roles,
                 )
             )
             declaration_payload = self._request_payload(
-                prompt,
+                declaration_prompt,
                 adapter_name,
                 seed,
                 action_json_schema=declaration_schema,
@@ -762,7 +870,7 @@ class SGLangReceiptDirectorClient:
             total_latency_ms += latency_ms
             total_attempt_count += attempt_count
             declaration_response = self._parse_response(
-                prompt,
+                declaration_prompt,
                 declaration_payload,
                 value,
                 policy_version=policy_version,
@@ -777,6 +885,7 @@ class SGLangReceiptDirectorClient:
                     director_live_add_subgraph_agent_declarations_from_text(
                         declaration_response.text,
                         action_target_domains,
+                        selected_agent_roles=selected_add_agent_roles,
                     )
                 )
             except ValueError as exc:
@@ -795,12 +904,10 @@ class SGLangReceiptDirectorClient:
                 sort_keys=True,
                 separators=(",", ":"),
             )
-            parameter_prompt = (
-                prompt
-                + "\n\nCommitted constrained ADD declarations:\n"
-                + committed
-                + "\nReturn the complete add_subgraph action using exactly "
-                "these Agent declarations and only valid relations/output."
+            parameter_prompt = _hierarchical_continuation_prompt(
+                declaration_prompt,
+                committed_json=committed,
+                instruction=_ADD_ACTION_CONTINUATION,
             )
             parameter_schema = director_live_action_parameter_json_schema_text(
                 selected_action,
@@ -857,7 +964,9 @@ class SGLangReceiptDirectorClient:
                 execution_profile=selected_execution_profile,
             )
         elif selected_action == "modify_agent" and action_target_domains is not None:
-            field_schema = director_live_modify_agent_field_selector_json_schema_text()
+            field_schema = director_live_modify_agent_field_selector_json_schema_text(
+                action_target_domains
+            )
             field_payload = self._request_payload(
                 prompt,
                 adapter_name,
@@ -948,7 +1057,11 @@ class SGLangReceiptDirectorClient:
         metadata = dict(response.metadata)
         metadata.update(
             {
-                "action_decoding_strategy": HIERARCHICAL_JSON_SCHEMA_STRATEGY,
+                "action_decoding_strategy": (
+                    ROLE_FIRST_ADD_DECODING_STRATEGY
+                    if selected_add_agent_roles is not None
+                    else HIERARCHICAL_JSON_SCHEMA_STRATEGY
+                ),
                 "base_prompt_text": prompt,
                 "action_json_schema_version": action_schema_version,
                 "action_schema_branch": action_schema_branch,
@@ -969,6 +1082,13 @@ class SGLangReceiptDirectorClient:
                     None
                     if selected_add_agents is None
                     else [str(agent["agent_id"]) for agent in selected_add_agents]
+                ),
+                "selected_add_agent_roles": (
+                    None
+                    if selected_add_agent_roles is None
+                    else [
+                        dict(agent) for agent in selected_add_agent_roles
+                    ]
                 ),
                 "hierarchical_phase_receipts": phase_receipts,
                 "request_count": len(phase_receipts) + 1,
@@ -1666,6 +1786,7 @@ class AgentGraphRolloutCollector:
         final_answer: Optional[str] = None
         final_runtime: Optional[AgentRuntimeResult] = None
         explicit_finish = False
+        natural_terminal_reason: Optional[str] = None
 
         group_id = f"{task.task_id}:{self.condition_id}:{self.versions.policy}"
         rollout_id = f"{group_id}:rollout:{rollout_index:04d}"
@@ -1680,6 +1801,24 @@ class AgentGraphRolloutCollector:
         )
 
         for round_index in range(self.orchestrator.max_rounds):
+            terminal_diagnosis = self.orchestrator.terminal_canvas_diagnosis(env)
+            if terminal_diagnosis is not None:
+                natural_terminal_reason = str(
+                    terminal_diagnosis.get(
+                        "public_error_code",
+                        "canvas_action_domain_exhausted",
+                    )
+                )
+                if turns:
+                    runtime_summary = dict(turns[-1].runtime_summary)
+                    runtime_summary["terminal_canvas_diagnosis"] = dict(
+                        terminal_diagnosis
+                    )
+                    turns[-1] = replace(
+                        turns[-1],
+                        runtime_summary=runtime_summary,
+                    )
+                break
             prompt = self.orchestrator.build_prompt(env, round_index, self.skills)
             schema_request = self.orchestrator.action_schema_request(env)
             response = await self.orchestrator.client.propose(
@@ -1888,8 +2027,30 @@ class AgentGraphRolloutCollector:
                 final_runtime = canvas.execution
                 break
 
-        termination_reason = "finish" if explicit_finish else "max_rounds"
-        if termination_reason == "max_rounds":
+            terminal_diagnosis = self.orchestrator.terminal_canvas_diagnosis(env)
+            if terminal_diagnosis is not None:
+                natural_terminal_reason = str(
+                    terminal_diagnosis.get(
+                        "public_error_code",
+                        "canvas_action_domain_exhausted",
+                    )
+                )
+                runtime_summary = dict(turns[-1].runtime_summary)
+                runtime_summary["terminal_canvas_diagnosis"] = dict(
+                    terminal_diagnosis
+                )
+                turns[-1] = replace(
+                    turns[-1],
+                    runtime_summary=runtime_summary,
+                )
+                break
+
+        termination_reason = (
+            "finish"
+            if explicit_finish
+            else natural_terminal_reason or "max_rounds"
+        )
+        if termination_reason != "finish":
             # A progressive execute-on-edit result is Canvas feedback, not an
             # implicit finish.  Preserve the natural truncation as a terminal
             # task failure and let the real evaluator judge the empty answer.

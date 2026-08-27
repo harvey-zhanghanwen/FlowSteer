@@ -180,6 +180,33 @@ def select_profile(config_path: Path) -> Mapping[str, object]:
             candidate,
         ),
     )
+    positive_scores: list[float] = []
+    negative_scores: list[float] = []
+    for source, query_vector in zip(development, query_vectors, strict=True):
+        scored = [
+            (
+                float(np.dot(memory_vectors[index], query_vector)),
+                memories[index].base_task_id,
+            )
+            for index in range(len(memories))
+        ]
+        positive_scores.append(
+            max(score for score, base_task_id in scored if base_task_id == source.base_task_id)
+        )
+        negative_scores.append(
+            max(score for score, base_task_id in scored if base_task_id != source.base_task_id)
+        )
+    # DIRECT_REUSE + NECESSARY ADAPTATION: the QA-memory read gate follows
+    # unified QA's evidence-grounding rule that embedding rank alone is not
+    # evidence.  Freeze the smallest threshold that rejects every non-source
+    # neighbour on the train-only architecture-development subset; validation
+    # content is never consulted.
+    selected_min_similarity = float(
+        np.nextafter(max(negative_scores), np.float64(np.inf))
+    )
+    positive_recall = sum(
+        score >= selected_min_similarity for score in positive_scores
+    ) / len(positive_scores)
     return {
         "schema_version": "flowsteer.hotpotqa.qa_memory_profile_selection.v1",
         "selection_split": "train/architecture-development",
@@ -207,6 +234,19 @@ def select_profile(config_path: Path) -> Mapping[str, object]:
             for candidate in CANDIDATE_TOP_K
         },
         "selected_top_k": selected,
+        "selected_min_similarity": selected_min_similarity,
+        "similarity_threshold_selection": {
+            "selection_rule": (
+                "smallest threshold strictly above the maximum non-source "
+                "similarity on the frozen train architecture-development subset"
+            ),
+            "negative_rejection": 1.0,
+            "positive_recall": positive_recall,
+            "positive_score_min": min(positive_scores),
+            "positive_score_mean": sum(positive_scores) / len(positive_scores),
+            "negative_score_max": max(negative_scores),
+            "negative_score_mean": sum(negative_scores) / len(negative_scores),
+        },
         "selection_rule": (
             "maximize train-development base_task_hit@k, then truncated MRR@k, "
             "then choose the smallest top-k"

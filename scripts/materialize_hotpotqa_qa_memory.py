@@ -34,9 +34,9 @@ from src.interactive.hotpotqa_qa_memory_index import (
 from src.interactive.openai_gateway import OpenAICompatibleGateway
 
 
-PROMPT_VERSION = "hotpotqa.train_qa_paraphrase.qwen35.generate_verify.v1"
-PARAPHRASE_VERSION = "hotpotqa-train-qa-paraphrase-v1"
-PARAPHRASE_PROVENANCE = "local-qwen3.5-9b-generate-and-verify"
+PROMPT_VERSION = "hotpotqa.train_qa_paraphrase.qwen35.generate_verify.v2"
+PARAPHRASE_VERSION = "hotpotqa-train-qa-paraphrase-v2"
+PARAPHRASE_PROVENANCE = "local-qwen3.5-9b-generate-and-verify-v2"
 
 
 def _utc_now() -> str:
@@ -172,9 +172,7 @@ def _candidate(source: HotpotQATrainQASource, generated: Mapping[str, object]) -
     # to survive verbatim.  Preserve the model's declarative statement while
     # adding the known *training* answer span when its attempted equivalent
     # wording omitted it; the semantic verifier still rejects contradictions.
-    if " ".join(source.canonical_answer.casefold().split()) not in " ".join(
-        answer_statement.casefold().split()
-    ):
+    if source.canonical_answer not in answer_statement:
         answer_statement = (
             f"The canonical answer is {source.canonical_answer}. "
             f"{answer_statement.strip()}"
@@ -209,7 +207,9 @@ async def _materialize_one(
                 contract=(
                     "Paraphrase one HotpotQA training question without changing its "
                     "scope, entities, relations, constraints, or answer. Change wording "
-                    "and sentence structure. Produce a declarative answer statement "
+                    "and sentence structure. Do not insert the canonical answer into "
+                    "the paraphrased question unless it was already present in the "
+                    "original question. Produce a declarative answer statement "
                     "that contains the canonical answer span exactly. Return only the "
                     "requested JSON fields and invent no aliases. Treat the supplied "
                     "training answer as an immutable dataset string even when it is "
@@ -307,6 +307,33 @@ async def materialize(args: argparse.Namespace) -> dict[str, object]:
         for value in _read_jsonl(receipt_path)
         if value.get("source_train_task_id") in source_by_id
     }
+    if not accepted and args.seed_from_output:
+        seed_rows = _read_jsonl(Path(args.seed_from_output).expanduser().resolve())
+        seed_receipts = {
+            str(value["source_train_task_id"]): value
+            for value in _read_jsonl(
+                Path(args.seed_from_receipts).expanduser().resolve()
+            )
+            if value.get("source_train_task_id") in source_by_id
+        }
+        for value in seed_rows:
+            source_id = str(value.get("source_train_task_id", ""))
+            source = source_by_id.get(source_id)
+            if source is None:
+                continue
+            candidate = dict(value)
+            candidate["paraphrase_version"] = PARAPHRASE_VERSION
+            candidate["paraphrase_provenance"] = PARAPHRASE_PROVENANCE
+            try:
+                materialize_hotpotqa_qa_memories((source,), (candidate,))
+            except (TypeError, ValueError):
+                continue
+            accepted[source_id] = candidate
+            if source_id in seed_receipts:
+                receipts[source_id] = {
+                    **seed_receipts[source_id],
+                    "status": "accepted_after_v2_revalidation",
+                }
     for source_id, value in accepted.items():
         materialize_hotpotqa_qa_memories((source_by_id[source_id],), (value,))
 
@@ -403,16 +430,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--model-id", default="qwen3.5-9b-local")
     parser.add_argument(
         "--output",
-        default="artifacts/hotpotqa_qa_memory_v1/paraphrases.jsonl",
+        default="artifacts/hotpotqa_qa_memory_v2/paraphrases.jsonl",
     )
     parser.add_argument(
         "--receipts",
-        default="artifacts/hotpotqa_qa_memory_v1/paraphrase_receipts.jsonl",
+        default="artifacts/hotpotqa_qa_memory_v2/paraphrase_receipts.jsonl",
     )
     parser.add_argument(
         "--manifest",
-        default="artifacts/hotpotqa_qa_memory_v1/paraphrase_manifest.json",
+        default="artifacts/hotpotqa_qa_memory_v2/paraphrase_manifest.json",
     )
+    parser.add_argument("--seed-from-output")
+    parser.add_argument("--seed-from-receipts")
     parser.add_argument("--seed", type=int, default=20260826)
     parser.add_argument("--concurrency", type=int, default=8)
     parser.add_argument("--max-attempts", type=int, default=3)
@@ -420,6 +449,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.concurrency < 1 or args.max_attempts < 1:
         parser.error("concurrency and max-attempts must be positive")
+    if bool(args.seed_from_output) != bool(args.seed_from_receipts):
+        parser.error(
+            "seed-from-output and seed-from-receipts must be supplied together"
+        )
     try:
         result = asyncio.run(materialize(args))
     except Exception as exc:

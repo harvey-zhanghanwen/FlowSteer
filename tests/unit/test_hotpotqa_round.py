@@ -64,51 +64,128 @@ def test_strict_aggregate_keeps_failed_task_in_denominator():
     assert result["completed_only_exact_match"] == 1.0
 
 
-def test_retrieval_boundary_requires_worker_receipt_and_relation_path():
-    trajectories = {
-        "task-1": {
-            "explicit_finish": True,
-            "turns": [
-                {
-                    "action": {"action": "add_agent"},
-                    "graph_snapshot": {
-                        "output_agent_id": "output",
-                        "relations": [
+def _search_and_read_receipts():
+    search = {
+        "tool_id": "hotpotqa.qa_memory",
+        "tool_version": "qa-memory-test-v1",
+        "started_at_monotonic": 1.0,
+        "ended_at_monotonic": 2.0,
+        "request": {
+            "action": "search",
+            "arguments": {"query": "Alpha author", "k": 2},
+        },
+        "result": {
+            "completed": True,
+            "value": {
+                "memory_ids": ["memory-1"],
+                "hits": [
+                    {
+                        "memory_id": "memory-1",
+                        "source_train_task_id": "train-1",
+                    }
+                ],
+            },
+        },
+        "error_type": None,
+    }
+    read = {
+        "tool_id": "hotpotqa.qa_memory",
+        "tool_version": "qa-memory-test-v1",
+        "started_at_monotonic": 3.0,
+        "ended_at_monotonic": 4.0,
+        "request": {
+            "action": "read",
+            "arguments": {"memory_id": "memory-1"},
+        },
+        "result": {
+            "completed": True,
+            "value": {"memory_id": "memory-1"},
+        },
+        "error_type": None,
+    }
+    return search, read
+
+
+def _retrieval_trajectory(*, include_output_inbox: bool):
+    search, read = _search_and_read_receipts()
+    worker_request = {
+        "request_id": "run:1:worker:single",
+        "graph_revision": 1,
+        "is_output_agent": False,
+        "execution_role": "worker",
+        "agent": {
+            "id": "worker",
+            "execution_mode": "react",
+            "allowed_tools": ["hotpotqa.qa_memory"],
+        },
+        "upstream": [],
+        "peer_draft": None,
+    }
+    executions = [
+        {
+            "agent_id": "worker",
+            "output": "grounded evidence artifact",
+            "metadata": {
+                "request": worker_request,
+                "response": {"tool_receipts": [search, read]},
+            },
+        }
+    ]
+    if include_output_inbox:
+        executions.append(
+            {
+                "agent_id": "output",
+                "output": "<answer>Ada Lovelace</answer>",
+                "metadata": {
+                    "request": {
+                        "request_id": "run:1:output:single",
+                        "graph_revision": 1,
+                        "is_output_agent": True,
+                        "execution_role": "worker",
+                        "agent": {
+                            "id": "output",
+                            "execution_mode": "reasoning",
+                            "allowed_tools": [],
+                        },
+                        "upstream": [
                             {
-                                "source_id": "worker",
-                                "target_id": "output",
-                                "source_to_target": True,
-                                "target_to_source": False,
+                                "source_agent_id": "worker",
+                                "target_agent_id": "output",
+                                "graph_revision": 1,
+                                "tool_receipts": [search, read],
                             }
                         ],
+                        "peer_draft": None,
                     },
-                    "executions": [
+                    "response": {"tool_receipts": [search, read]},
+                },
+            }
+        )
+    return {
+        "explicit_finish": True,
+        "turns": [
+            {
+                "action": {"action": "add_agent"},
+                "graph_snapshot": {
+                    "output_agent_id": "output",
+                    "relations": [
                         {
-                            "agent_id": "worker",
-                            "metadata": {
-                                "response": {
-                                    "tool_receipts": [
-                                        {
-                                            "tool_id": "hotpotqa.qa_memory",
-                                            "result": {
-                                                "value": {
-                                                    "memory_ids": ["memory-1"],
-                                                    "hits": [
-                                                        {
-                                                            "source_train_task_id": "train-1"
-                                                        }
-                                                    ],
-                                                }
-                                            },
-                                        }
-                                    ]
-                                }
-                            },
+                            "source_id": "worker",
+                            "target_id": "output",
+                            "source_to_target": True,
+                            "target_to_source": False,
                         }
                     ],
-                }
-            ],
-        }
+                },
+                "executions": executions,
+            }
+        ],
+    }
+
+
+def test_retrieval_boundary_requires_worker_search_read_in_actual_output_inbox():
+    trajectories = {
+        "task-1": _retrieval_trajectory(include_output_inbox=True),
     }
 
     result = _MODULE._retrieval_boundary_statistics(
@@ -117,6 +194,41 @@ def test_retrieval_boundary_requires_worker_receipt_and_relation_path():
     )
 
     assert result["director_tool_calls"] == 0
-    assert result["retrieval_tool_calls_by_worker"] == 1
+    assert result["retrieval_tool_calls_by_worker"] == 2
     assert result["retrieval_artifact_routed_via_relation"] is True
+    assert result["retrieval_output_inbox_lineage_tasks"] == 1
     assert result["unique_train_base_task_ids_retrieved"] == 1
+
+
+def test_graph_reachability_without_output_inbox_receipts_is_not_routed():
+    result = _MODULE._retrieval_boundary_statistics(
+        {"task-1": _retrieval_trajectory(include_output_inbox=False)},
+        tool_id="hotpotqa.qa_memory",
+    )
+
+    assert result["retrieval_tool_calls_by_worker"] == 2
+    assert result["finished_retrieval_invoked_tasks"] == 1
+    assert result["retrieval_output_inbox_lineage_tasks"] == 0
+    assert result["retrieval_artifact_routed_via_relation"] is False
+
+
+def test_output_inbox_search_without_matching_read_is_not_lineage():
+    trajectory = _retrieval_trajectory(include_output_inbox=True)
+    executions = trajectory["turns"][0]["executions"]
+    executions[0]["metadata"]["response"]["tool_receipts"] = executions[0][
+        "metadata"
+    ]["response"]["tool_receipts"][:1]
+    executions[1]["metadata"]["request"]["upstream"][0][
+        "tool_receipts"
+    ] = executions[1]["metadata"]["request"]["upstream"][0][
+        "tool_receipts"
+    ][:1]
+
+    result = _MODULE._retrieval_boundary_statistics(
+        {"task-1": trajectory},
+        tool_id="hotpotqa.qa_memory",
+    )
+
+    assert result["retrieval_tool_calls_by_worker"] == 1
+    assert result["retrieval_output_inbox_lineage_tasks"] == 0
+    assert result["retrieval_artifact_routed_via_relation"] is False
