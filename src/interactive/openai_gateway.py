@@ -132,7 +132,7 @@ def _visible_message_content(
 def _artifact_receipt_references(
     artifact: str,
 ) -> tuple[frozenset[str], tuple[str, ...]]:
-    """Return public passage IDs and evidence spans cited by one artifact."""
+    """Return public read-record IDs and evidence spans cited by one artifact."""
 
     try:
         value = json.loads(artifact)
@@ -152,7 +152,7 @@ def _artifact_receipt_references(
             return
         if not isinstance(item, str) or not item.strip():
             return
-        if field_name == "passage_id":
+        if field_name in {"passage_id", "memory_id"}:
             passage_ids.add(item.strip())
         elif field_name in {"evidence", "evidence_span"}:
             evidence_spans.append(item.strip())
@@ -189,14 +189,22 @@ def _successful_read_receipt_projection(
         value = result.get("value", result)
         if not isinstance(value, Mapping) or value.get("operation") != "read":
             continue
-        passage = value.get("passage")
+        passage = value.get("memory", value.get("passage"))
         if not isinstance(passage, Mapping):
             continue
-        passage_id = value.get("passage_id", passage.get("passage_id"))
+        passage_id = value.get(
+            "memory_id",
+            value.get(
+                "passage_id",
+                passage.get("memory_id", passage.get("passage_id")),
+            ),
+        )
         if not isinstance(passage_id, str):
             arguments = request.get("arguments")
             if isinstance(arguments, Mapping):
-                passage_id = arguments.get("passage_id")
+                passage_id = arguments.get(
+                    "memory_id", arguments.get("passage_id")
+                )
         passage_text = passage.get("text")
         successful_reads.append(
             (

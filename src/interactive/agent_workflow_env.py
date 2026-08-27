@@ -9,6 +9,8 @@ import re
 import unicodedata
 from typing import Collection, Mapping, Optional, Sequence, Tuple, Union
 
+import yaml
+
 from .agent_action_parser import (
     AgentAction,
     AgentActionParseError,
@@ -792,12 +794,11 @@ class AgentWorkflowEnv:
                 if profile
                 == ("react", (self.required_evidence_tool_id,))
             )
-        if role == "reasoner" and self.require_format_agent:
+        if role == "reasoner":
             return tuple(
                 profile
                 for profile in registered
-                if profile
-                == ("react", (self.required_evidence_tool_id,))
+                if profile == ("reasoning", ())
             )
         if role == "verifier" and self.require_format_agent:
             return tuple(
@@ -1574,7 +1575,29 @@ class AgentWorkflowEnv:
             return True
         record = self._latest_failure_record_by_agent.get(reasoner_id)
         if record is None:
-            return False
+            # v3_r1 canary boundary: the Reasoner executed successfully but
+            # preserved an explicit null candidate because its only routed
+            # QA-memory receipt was semantically incompatible.  FlowSteer's
+            # execute-on-edit loop records this as a revision-local semantic
+            # repair exhaustion rather than an AgentRuntime failure record.
+            # Admit exactly one isolated Evidence Retriever augmentation; the
+            # existing two-ingress bound below prevents unbounded fan-in.
+            artifact = self._progressive_outputs.get(reasoner_id)
+            candidate, issue = (
+                self._reasoner_candidate_for_current_dataset(artifact)
+                if isinstance(artifact, str)
+                else (None, None)
+            )
+            return bool(
+                isinstance(self.runtime.dataset_id, str)
+                and self.runtime.dataset_id.casefold() == "triviaqa"
+                and self.required_evidence_tool_id
+                == _TRIVIAQA_QA_MEMORY_TOOL_ID
+                and len(valid_ingress_ids) == 1
+                and candidate is None
+                and isinstance(issue, str)
+                and "candidate_answer" in issue
+            )
         public_summary = self._react_public_error_summary(record)
         last_public_error = public_summary.get("last_public_error", {})
         public_error_code = (
@@ -3397,7 +3420,8 @@ class AgentWorkflowEnv:
                                     self._role_conditional_execution_constraint(
                                         "reasoner"
                                     )
-                                    if role_conditional_capabilities
+                                    if self.semantic_protocol
+                                    == _QA_SEMANTIC_PROTOCOL
                                     else {
                                         "execution_modes": ["react"],
                                         "allowed_tools": [
@@ -6029,17 +6053,31 @@ class AgentWorkflowEnv:
                     "checks evidence/binding/hops/scope without changing it, and only "
                     "role_family='format' copies it into the answer wrapper"
                 )
-            if role == "reasoner" and (
-                node.execution_mode.value != "react"
-                or node.allowed_tools != (self.required_evidence_tool_id,)
-            ):
-                return (
-                    f"{protocol_label} Reasoner Agent {node.id!r} must use "
-                    "execution_mode='react' with exactly "
-                    f"allowed_tools=['{self.required_evidence_tool_id}']; ReAct is "
-                    "the Thought -> Action(tool) -> Observation -> Thought -> Final "
-                    "execution schedule, while role_family remains 'reasoner'"
-                )
+            if role == "reasoner":
+                if self.semantic_protocol == _QA_SEMANTIC_PROTOCOL:
+                    if (
+                        node.execution_mode.value != "reasoning"
+                        or node.allowed_tools
+                    ):
+                        return (
+                            f"{protocol_label} Reasoner Agent {node.id!r} must "
+                            "use execution_mode='reasoning' without Tools; it "
+                            "consumes the QA-memory artifact routed by a direct "
+                            "Evidence Retriever predecessor and must not repeat "
+                            "search/read"
+                        )
+                elif (
+                    node.execution_mode.value != "react"
+                    or node.allowed_tools
+                    != (self.required_evidence_tool_id,)
+                ):
+                    return (
+                        f"{protocol_label} Reasoner Agent {node.id!r} must use "
+                        "execution_mode='react' with exactly "
+                        f"allowed_tools=['{self.required_evidence_tool_id}']; ReAct is "
+                        "the Thought -> Action(tool) -> Observation -> Thought -> Final "
+                        "execution schedule, while role_family remains 'reasoner'"
+                    )
             if (
                 self.semantic_protocol == _QA_SEMANTIC_PROTOCOL
                 and role == "evidence_retriever"
@@ -6053,9 +6091,10 @@ class AgentWorkflowEnv:
                     f"{protocol_label} Evidence Retriever Agent {node.id!r} "
                     "must use execution_mode='react' with exactly "
                     f"allowed_tools=['{self.required_evidence_tool_id}']; its "
-                    "answer-free completion is admitted only after entity "
-                    "identity, requested relation, evidence span, passage_id, "
-                    "and successful read receipt agree"
+                    "native evidence artifact is admitted only after memory_id, "
+                    "source_train_task_id, paraphrase_question, "
+                    "paraphrase_answer_statement, canonical_answer, and the "
+                    "preceding search -> read receipts agree"
                 )
             if role in {"verifier", "format"} and (
                 node.execution_mode.value != "reasoning" or node.allowed_tools
@@ -6748,7 +6787,16 @@ class AgentWorkflowEnv:
         try:
             parsed = json.loads(text)
         except (TypeError, ValueError, json.JSONDecodeError):
-            parsed = None
+            # PROJECT_NECESSARY_ADAPTATION: Qwen3.5 sometimes serializes the
+            # same nested semantic contract as YAML even when the requested
+            # wire format is JSON.  Preserve the exact field/value tree before
+            # falling back to the legacy flat labelled parser; all normal
+            # semantic and evidence-lineage validation still runs below.
+            try:
+                yaml_value = yaml.safe_load(text)
+            except yaml.YAMLError:
+                yaml_value = None
+            parsed = yaml_value if isinstance(yaml_value, Mapping) else None
         aliases = {"fact_propositions": "evidence_propositions"}
         optional_fields = (
             {"evidence", "repair_diagnosis", "reasoning"}
@@ -8281,11 +8329,12 @@ class AgentWorkflowEnv:
             if not valid_retriever_ingress:
                 return (
                     "TriviaQA Reasoner lineage has no current direct "
-                    "Evidence Retriever artifact whose entity identity, "
-                    "requested relation, evidence span, passage_id, successful "
-                    "read receipt, and artifact version all match. Preserve any "
-                    "valid Retriever artifact and route it into the Reasoner "
-                    "before FINISH"
+                    "Evidence Retriever artifact whose memory_id, "
+                    "source_train_task_id, paraphrase_question, "
+                    "paraphrase_answer_statement, canonical_answer, ordered "
+                    "search -> read receipts, and artifact version all match. "
+                    "Preserve any valid Retriever artifact and route it into "
+                    "the Reasoner before FINISH"
                 )
         verifier_binding_issue = self._artifact_version_binding_issue(
             execution.output_metadata,

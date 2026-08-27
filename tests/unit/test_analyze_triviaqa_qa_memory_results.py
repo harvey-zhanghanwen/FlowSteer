@@ -62,6 +62,74 @@ def _receipt(action: str, ordinal: int) -> dict[str, object]:
     }
 
 
+def _director_prompt(
+    *,
+    allowed_tools: list[str] | None = None,
+    tool_calls_enabled: bool = False,
+    diagnostic: str = "public control-plane state",
+    staged_completion: bool = False,
+) -> str:
+    observation = {
+        "director_execution_profile": {
+            "allowed_tools": list(allowed_tools or []),
+            "tool_calls_enabled": tool_calls_enabled,
+        },
+        "diagnostic": diagnostic,
+    }
+    messages = [
+        {"role": "system", "content": "test Flow-Director policy"},
+        {"role": "user", "content": "Canvas observation\n\n" + json.dumps(observation)},
+    ]
+    if staged_completion:
+        messages.extend(
+            [
+                {"role": "assistant", "content": '{"action":"add_subgraph"}'},
+                {
+                    "role": "user",
+                    "content": (
+                        "Complete the add_subgraph action for these Agent "
+                        "declarations. Return only the JSON object."
+                    ),
+                },
+            ]
+        )
+    return analysis.DIRECTOR_TRANSCRIPT_HEADER + "\n\n" + json.dumps(
+        {
+            "schema_version": analysis.DIRECTOR_TRANSCRIPT_SCHEMA,
+            "messages": messages,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+class DirectorExecutionProfileParsingTest(unittest.TestCase):
+    def test_staged_structured_action_keeps_canvas_profile(self) -> None:
+        trajectory = {
+            "turns": [
+                {
+                    "round_index": 0,
+                    "prompt": _director_prompt(staged_completion=True),
+                }
+            ]
+        }
+
+        profiles, violations = analysis._director_execution_profiles(trajectory)
+
+        self.assertEqual([], violations)
+        self.assertEqual(
+            [
+                {
+                    "round_index": 0,
+                    "allowed_tools": [],
+                    "tool_calls_enabled": False,
+                }
+            ],
+            profiles,
+        )
+
+
 def _trajectory(task_id: str) -> dict[str, object]:
     search = _receipt("search", 1)
     read = _receipt("read", 2)
@@ -83,11 +151,22 @@ def _trajectory(task_id: str) -> dict[str, object]:
         "nodes": [
             {
                 "id": "retriever",
+                "role_family": "evidence_retriever",
                 "execution_mode": "react",
                 "allowed_tools": [analysis.QA_MEMORY_TOOL_ID],
             },
-            {"id": "reasoner", "execution_mode": "reasoning", "allowed_tools": []},
-            {"id": "formatter", "execution_mode": "reasoning", "allowed_tools": []},
+            {
+                "id": "reasoner",
+                "role_family": "reasoner",
+                "execution_mode": "reasoning",
+                "allowed_tools": [],
+            },
+            {
+                "id": "formatter",
+                "role_family": "format",
+                "execution_mode": "reasoning",
+                "allowed_tools": [],
+            },
         ],
         "relations": relations,
         "output_agent_id": "formatter",
@@ -111,7 +190,7 @@ def _trajectory(task_id: str) -> dict[str, object]:
             {
                 "round_index": 0,
                 "director_request_id": "director-1",
-                "prompt": "Public task and control-plane Canvas state only.",
+                "prompt": _director_prompt(),
                 "policy_response": '{"action":"add_subgraph"}',
                 "action": {
                     "action": "add_subgraph",
@@ -141,6 +220,7 @@ def _trajectory(task_id: str) -> dict[str, object]:
                                 **common_request,
                                 "agent": {
                                     "id": "retriever",
+                                    "role_family": "evidence_retriever",
                                     "execution_mode": "react",
                                     "allowed_tools": [analysis.QA_MEMORY_TOOL_ID],
                                 },
@@ -161,6 +241,7 @@ def _trajectory(task_id: str) -> dict[str, object]:
                                 **common_request,
                                 "agent": {
                                     "id": "reasoner",
+                                    "role_family": "reasoner",
                                     "execution_mode": "reasoning",
                                     "allowed_tools": [],
                                 },
@@ -186,6 +267,7 @@ def _trajectory(task_id: str) -> dict[str, object]:
                                 **common_request,
                                 "agent": {
                                     "id": "formatter",
+                                    "role_family": "format",
                                     "execution_mode": "reasoning",
                                     "allowed_tools": [],
                                 },
@@ -211,7 +293,9 @@ def _trajectory(task_id: str) -> dict[str, object]:
             {
                 "round_index": 1,
                 "director_request_id": "director-2",
-                "prompt": "Public task and typed execution receipt only.",
+                "prompt": _director_prompt(
+                    diagnostic="public terminal control-plane state"
+                ),
                 "policy_response": '{"action":"finish"}',
                 "action": {"action": "finish"},
                 "canvas_feedback": "workflow finished",
@@ -326,10 +410,13 @@ def _assert_formal_report_metrics_tool_ownership_isolation_routing_and_demos() -
     assert report["metrics"]["agentgraph"]["strict_exact_match"] == 0.0
     assertions = report["control_plane_and_tool_routing"]["assertions"]
     assert assertions["director_tool_calls"] == 0
+    assert assertions["director_request_allowed_tools"] == []
+    assert assertions["director_requests_toolless"] is True
     assert assertions["director_data_plane_isolated"] is True
     assert assertions["retrieval_tool_calls_by_worker"] == 6
     assert assertions["retrieval_tool_calls_by_worker_gt_0"] is True
     assert assertions["worker_ownership_violation_count"] == 0
+    assert assertions["reasoner_qamemory_tool_unassigned"] is True
     assert assertions["retrieval_artifact_routed_via_relation"] is True
     assert assertions["output_inbox_receipt_lineage"] is False
     assert assertions["retrieval_tasks_with_output_inbox_receipt_lineage"] == 0
@@ -340,8 +427,8 @@ def _assert_formal_report_metrics_tool_ownership_isolation_routing_and_demos() -
 
 def _assert_control_plane_assertions_fail_closed_on_payload_leak_and_missing_relation() -> None:
     trajectory = _trajectory("triviaqa:validation:leak")
-    trajectory["turns"][0]["prompt"] = (  # type: ignore[index]
-        "Leaked paraphrase_answer_statement and memory-train-1"
+    trajectory["turns"][0]["prompt"] = _director_prompt(  # type: ignore[index]
+        diagnostic="Leaked paraphrase_answer_statement and memory-train-1"
     )
     trajectory["turns"][0]["graph_snapshot"]["relations"] = []  # type: ignore[index]
 
@@ -362,10 +449,12 @@ def _assert_control_plane_assertions_fail_closed_on_payload_leak_and_missing_rel
 def _assert_field_names_are_diagnostic_only_and_output_inbox_lineage_is_independent() -> None:
     task_id = "triviaqa:validation:field-only"
     trajectory = _trajectory(task_id)
-    trajectory["turns"][0]["prompt"] = (  # type: ignore[index]
-        "The ordinary worker contract may name memory_id, canonical_answer, "
-        "paraphrase_question, paraphrase_answer_statement, and source_train_task_id "
-        "without containing any retrieved value."
+    trajectory["turns"][0]["prompt"] = _director_prompt(  # type: ignore[index]
+        diagnostic=(
+            "The ordinary worker contract may name memory_id, canonical_answer, "
+            "paraphrase_question, paraphrase_answer_statement, and "
+            "source_train_task_id without containing any retrieved value."
+        )
     )
     control, _ = analysis._aggregate_control_plane(  # noqa: SLF001
         [task_id], {task_id: trajectory}
@@ -424,6 +513,35 @@ def _assert_failed_worker_receipts_count_without_claiming_artifact_route() -> No
     assert assertions["retrieval_artifact_routed_via_relation"] is False
 
 
+def _assert_director_profile_and_reasoner_tool_assignment_fail_closed() -> None:
+    task_id = "triviaqa:validation:ownership"
+    trajectory = _trajectory(task_id)
+    trajectory["turns"][0]["prompt"] = _director_prompt(  # type: ignore[index]
+        allowed_tools=[analysis.QA_MEMORY_TOOL_ID],
+        tool_calls_enabled=True,
+    )
+    reasoner_node = trajectory["turns"][0]["graph_snapshot"]["nodes"][1]  # type: ignore[index]
+    reasoner_node["allowed_tools"] = [analysis.QA_MEMORY_TOOL_ID]
+    reasoner_request = trajectory["turns"][0]["executions"][1]["metadata"][  # type: ignore[index]
+        "request"
+    ]["agent"]
+    reasoner_request["allowed_tools"] = [analysis.QA_MEMORY_TOOL_ID]
+
+    result = analysis._trajectory_control_plane(task_id, trajectory)  # noqa: SLF001
+    assert result["director_allowed_tools"] == [analysis.QA_MEMORY_TOOL_ID]
+    assert result["director_tool_calls_enabled_count"] == 1
+    assert len(result["reasoner_qamemory_tool_assignment_violations"]) == 2
+
+    control, _ = analysis._aggregate_control_plane(  # noqa: SLF001
+        [task_id], {task_id: trajectory}
+    )
+    assertions = control["assertions"]
+    assert assertions["director_requests_toolless"] is False
+    assert assertions["director_data_plane_isolated"] is False
+    assert assertions["reasoner_qamemory_tool_assignment_violation_count"] == 2
+    assert assertions["reasoner_qamemory_tool_unassigned"] is False
+
+
 class TriviaQAQAMemoryResultAnalysisTests(unittest.TestCase):
     def test_formal_report_metrics_tool_ownership_isolation_routing_and_demos(
         self,
@@ -444,3 +562,8 @@ class TriviaQAQAMemoryResultAnalysisTests(unittest.TestCase):
         self,
     ) -> None:
         _assert_failed_worker_receipts_count_without_claiming_artifact_route()
+
+    def test_director_profile_and_reasoner_tool_assignment_fail_closed(
+        self,
+    ) -> None:
+        _assert_director_profile_and_reasoner_tool_assignment_fail_closed()

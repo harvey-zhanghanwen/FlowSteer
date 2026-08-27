@@ -43,6 +43,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_ARTIFACT_DIR = PROJECT_ROOT / "artifacts/triviaqa_qa_memory_v1"
 DEFAULT_REPORT_DIR = PROJECT_ROOT / "reports/triviaqa_qa_memory_v1"
 QA_MEMORY_TOOL_ID = "triviaqa.qa_memory"
+DIRECTOR_TRANSCRIPT_HEADER = "Flow-Director chat transcript"
+DIRECTOR_TRANSCRIPT_SCHEMA = "flowsteer.director.transcript.v1"
 FINAL_MANIFEST_STATUSES = {
     "completed",
     "completed_with_terminal_failures",
@@ -191,6 +193,7 @@ def _iter_retrieval_receipts(
                 "action": action,
                 "agent_id": execution.get("agent_id"),
                 "request_agent_id": request_agent.get("id"),
+                "request_agent_role_family": request_agent.get("role_family"),
                 "request_execution_role": request.get("execution_role"),
                 "request_execution_mode": request_agent.get("execution_mode"),
                 "request_allowed_tools": base._list(request_agent.get("allowed_tools")),
@@ -240,6 +243,7 @@ def _iter_retrieval_receipts(
                     "action": action,
                     "agent_id": agent_id,
                     "request_agent_id": agent_id,
+                    "request_agent_role_family": agent.get("role_family"),
                     "request_execution_role": "worker",
                     "request_execution_mode": agent.get("execution_mode"),
                     "request_allowed_tools": base._list(
@@ -331,6 +335,168 @@ def _director_visible_text(trajectory: Mapping[str, Any]) -> str:
     return json.dumps(values, ensure_ascii=False, sort_keys=True, default=str)
 
 
+def _director_execution_profiles(
+    trajectory: Mapping[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Read each Director Tool profile from its persisted canonical request.
+
+    The analyzer intentionally does not import Director/runtime code.  A
+    missing, legacy, or malformed prompt is therefore an assertion failure,
+    not evidence that the Director request was Tool-free.
+    """
+
+    profiles: list[dict[str, Any]] = []
+    violations: list[dict[str, Any]] = []
+    for fallback_index, raw_turn in enumerate(base._list(trajectory.get("turns"))):
+        turn = base._mapping(raw_turn)
+        round_index = turn.get("round_index", fallback_index)
+        if not isinstance(round_index, int):
+            round_index = fallback_index
+        prompt = turn.get("prompt")
+        reason: str | None = None
+        profile: Mapping[str, Any] | None = None
+        if not isinstance(prompt, str) or not prompt.startswith(
+            DIRECTOR_TRANSCRIPT_HEADER + "\n\n"
+        ):
+            reason = "missing_canonical_director_transcript"
+        else:
+            try:
+                payload = json.loads(prompt.partition("\n\n")[2])
+            except (TypeError, ValueError):
+                payload = None
+                reason = "malformed_director_transcript_json"
+            if reason is None and (
+                not isinstance(payload, Mapping)
+                or payload.get("schema_version") != DIRECTOR_TRANSCRIPT_SCHEMA
+            ):
+                reason = "unsupported_director_transcript_schema"
+            messages = (
+                payload.get("messages") if isinstance(payload, Mapping) else None
+            )
+            if reason is None and (
+                not isinstance(messages, list) or not messages
+            ):
+                reason = "missing_current_director_observation"
+            if reason is None:
+                # FlowSteer's staged structured actions append a second user
+                # message asking the Director to complete ADD_SUBGRAPH fields.
+                # That message is part of the same Director request, but is not
+                # a new Canvas observation.  Read the most recent canonical
+                # Canvas observation instead of assuming messages[-1].
+                observation_message = next(
+                    (
+                        message
+                        for message in reversed(messages)
+                        if isinstance(message, Mapping)
+                        and message.get("role") == "user"
+                        and isinstance(message.get("content"), str)
+                        and str(message["content"]).lstrip().startswith(
+                            "Canvas observation"
+                        )
+                    ),
+                    None,
+                )
+                if observation_message is None:
+                    reason = "missing_current_director_observation"
+                    content = ""
+                else:
+                    content = str(observation_message["content"])
+                _, separator, encoded = content.partition("\n\n")
+                if reason is None and not separator:
+                    reason = "missing_director_observation_payload"
+                elif reason is None:
+                    try:
+                        observation = json.loads(encoded)
+                    except (TypeError, ValueError):
+                        observation = None
+                        reason = "malformed_director_observation_json"
+                    if isinstance(observation, Mapping):
+                        raw_profile = observation.get(
+                            "director_execution_profile"
+                        )
+                        if isinstance(raw_profile, Mapping):
+                            profile = raw_profile
+                        else:
+                            reason = "missing_director_execution_profile"
+            if reason is None and profile is not None:
+                allowed_tools = profile.get("allowed_tools")
+                tool_calls_enabled = profile.get("tool_calls_enabled")
+                if (
+                    not isinstance(allowed_tools, list)
+                    or any(not isinstance(tool_id, str) for tool_id in allowed_tools)
+                    or type(tool_calls_enabled) is not bool
+                ):
+                    reason = "invalid_director_execution_profile"
+                else:
+                    profiles.append(
+                        {
+                            "round_index": round_index,
+                            "allowed_tools": list(allowed_tools),
+                            "tool_calls_enabled": tool_calls_enabled,
+                        }
+                    )
+        if reason is not None:
+            violations.append(
+                {"round_index": round_index, "reason": reason}
+            )
+    return profiles, violations
+
+
+def _reasoner_qamemory_assignment_violations(
+    trajectory: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Report actual Canvas/request assignments of QA-memory to a Reasoner."""
+
+    assignments: dict[tuple[int, str], dict[str, Any]] = {}
+    for fallback_index, raw_turn in enumerate(base._list(trajectory.get("turns"))):
+        turn = base._mapping(raw_turn)
+        round_index = turn.get("round_index", fallback_index)
+        if not isinstance(round_index, int):
+            round_index = fallback_index
+        snapshot = base._mapping(turn.get("graph_snapshot"))
+        for raw_node in base._list(snapshot.get("nodes")):
+            node = base._mapping(raw_node)
+            agent_id = node.get("id")
+            if (
+                isinstance(agent_id, str)
+                and str(node.get("role_family", "")).casefold() == "reasoner"
+                and QA_MEMORY_TOOL_ID in base._list(node.get("allowed_tools"))
+            ):
+                assignments.setdefault(
+                    (round_index, agent_id),
+                    {
+                        "round_index": round_index,
+                        "agent_id": agent_id,
+                        "execution_mode": node.get("execution_mode"),
+                        "allowed_tools": base._list(node.get("allowed_tools")),
+                        "observed_in": [],
+                    },
+                )["observed_in"].append("graph_snapshot")
+        for raw_execution in base._list(turn.get("executions")):
+            execution = base._mapping(raw_execution)
+            request = base._mapping(
+                base._mapping(execution.get("metadata")).get("request")
+            )
+            agent = base._mapping(request.get("agent"))
+            agent_id = agent.get("id", execution.get("agent_id"))
+            if (
+                isinstance(agent_id, str)
+                and str(agent.get("role_family", "")).casefold() == "reasoner"
+                and QA_MEMORY_TOOL_ID in base._list(agent.get("allowed_tools"))
+            ):
+                assignments.setdefault(
+                    (round_index, agent_id),
+                    {
+                        "round_index": round_index,
+                        "agent_id": agent_id,
+                        "execution_mode": agent.get("execution_mode"),
+                        "allowed_tools": base._list(agent.get("allowed_tools")),
+                        "observed_in": [],
+                    },
+                )["observed_in"].append("execution_request")
+    return [assignments[key] for key in sorted(assignments)]
+
+
 def _canonical_receipt_data_values(
     receipts: Sequence[Mapping[str, Any]],
 ) -> dict[str, list[str]]:
@@ -359,10 +525,127 @@ def _canonical_receipt_data_values(
     }
 
 
+def _native_artifact_receipt_projections(
+    trajectory: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Verify worker artifacts against their selected exact read receipts."""
+
+    results: list[dict[str, Any]] = []
+    compared_fields = CANONICAL_RECEIPT_DATA_FIELDS[:5]
+    for round_index, execution_position, execution in base._iter_executions(
+        trajectory
+    ):
+        metadata = base._mapping(execution.get("metadata"))
+        request = base._mapping(metadata.get("request"))
+        response = base._mapping(metadata.get("response"))
+        agent = base._mapping(request.get("agent"))
+        if agent.get("role_family") != "evidence_retriever":
+            continue
+        output = execution.get("output", response.get("text"))
+        if not isinstance(output, str):
+            continue
+        try:
+            artifact = json.loads(output)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if not isinstance(artifact, Mapping):
+            continue
+        memory_id = artifact.get("memory_id")
+        if not isinstance(memory_id, str) or not memory_id:
+            continue
+
+        selected_memory_id: str | None = None
+        for raw_trace in reversed(base._list(response.get("react_trace"))):
+            trace = base._mapping(raw_trace)
+            action = base._mapping(trace.get("structured_action"))
+            if action.get("kind") != "complete":
+                continue
+            value = base._mapping(base._mapping(action.get("arguments")).get("value"))
+            selected = value.get("memory_id")
+            if isinstance(selected, str) and selected:
+                selected_memory_id = selected
+            break
+
+        searched_ids: set[str] = set()
+        exact_read: Mapping[str, Any] | None = None
+        for raw_receipt in base._list(response.get("tool_receipts")):
+            receipt = base._mapping(raw_receipt)
+            if (
+                receipt.get("tool_id") != QA_MEMORY_TOOL_ID
+                or receipt.get("error_type") is not None
+            ):
+                continue
+            receipt_request = base._mapping(receipt.get("request"))
+            receipt_result = base._mapping(receipt.get("result"))
+            value = base._mapping(receipt_result.get("value", receipt_result))
+            if receipt_request.get("action") == "search":
+                if receipt_result.get("completed") is True:
+                    searched_ids.update(
+                        item
+                        for item in base._list(value.get("memory_ids"))
+                        if isinstance(item, str) and item
+                    )
+                continue
+            arguments = base._mapping(receipt_request.get("arguments"))
+            if (
+                receipt_request.get("action") == "read"
+                and memory_id in searched_ids
+                and arguments.get("memory_id") == memory_id
+                and receipt_result.get("completed") is True
+            ):
+                memory = base._mapping(value.get("memory"))
+                if memory.get("memory_id") == memory_id:
+                    exact_read = memory
+                    break
+
+        mismatched_fields = [
+            field
+            for field in compared_fields
+            if exact_read is None or artifact.get(field) != exact_read.get(field)
+        ]
+        results.append(
+            {
+                "round_index": round_index,
+                "execution_position": execution_position,
+                "agent_id": agent.get("id", execution.get("agent_id")),
+                "memory_id": memory_id,
+                "selected_memory_id": selected_memory_id,
+                "selection_matches_artifact": selected_memory_id == memory_id,
+                "exact_search_read_receipt_found": exact_read is not None,
+                "mismatched_receipt_fields": mismatched_fields,
+                "receipt_exact": bool(
+                    selected_memory_id == memory_id
+                    and exact_read is not None
+                    and not mismatched_fields
+                ),
+            }
+        )
+    return results
+
+
 def _trajectory_control_plane(
     task_id: str, trajectory: Mapping[str, Any]
 ) -> dict[str, Any]:
     receipts = list(_iter_retrieval_receipts(trajectory))
+    native_artifact_projections = _native_artifact_receipt_projections(
+        trajectory
+    )
+    director_profiles, director_profile_violations = (
+        _director_execution_profiles(trajectory)
+    )
+    director_allowed_tools = sorted(
+        {
+            tool_id
+            for profile in director_profiles
+            for tool_id in profile["allowed_tools"]
+        }
+    )
+    director_tool_enabled_count = sum(
+        profile["tool_calls_enabled"] is True for profile in director_profiles
+    )
+    reasoner_tool_violations = _reasoner_qamemory_assignment_violations(
+        trajectory
+    )
     director_calls = 0
     for raw_turn in base._list(trajectory.get("turns")):
         action = base._mapping(base._mapping(raw_turn).get("action"))
@@ -382,6 +665,7 @@ def _trajectory_control_plane(
             isinstance(agent_id, str)
             and agent_id
             and item.get("request_agent_id") == agent_id
+            and item.get("request_agent_role_family") == "evidence_retriever"
             and item.get("request_execution_role") == "worker"
             and item.get("request_execution_mode") == "react"
             and QA_MEMORY_TOOL_ID in item.get("request_allowed_tools", [])
@@ -394,6 +678,7 @@ def _trajectory_control_plane(
                         "round_index",
                         "agent_id",
                         "request_agent_id",
+                        "request_agent_role_family",
                         "request_execution_role",
                         "request_execution_mode",
                         "request_allowed_tools",
@@ -510,7 +795,10 @@ def _trajectory_control_plane(
     return {
         "task_id": task_id,
         "director_tool_calls": director_calls,
-        "director_allowed_tools": [],
+        "director_execution_profiles": director_profiles,
+        "director_execution_profile_violations": director_profile_violations,
+        "director_allowed_tools": director_allowed_tools,
+        "director_tool_calls_enabled_count": director_tool_enabled_count,
         "director_retrieval_payload_markers": payload_markers,
         "director_retrieval_payload_markers_are_diagnostic_only": True,
         "canonical_worker_receipt_data_values": receipt_data_values,
@@ -526,6 +814,17 @@ def _trajectory_control_plane(
             for agent_id, counts in sorted(tool_call_counts_by_agent_id.items())
         },
         "worker_ownership_violations": worker_ownership_violations,
+        "reasoner_qamemory_tool_assignment_violations": (
+            reasoner_tool_violations
+        ),
+        "native_artifact_receipt_projections": native_artifact_projections,
+        "native_artifact_receipt_projection_count": len(
+            native_artifact_projections
+        ),
+        "native_artifact_receipt_projection_violation_count": sum(
+            item["receipt_exact"] is not True
+            for item in native_artifact_projections
+        ),
         "immediate_receipt_routes": immediate_routes,
         "output_agent_ids": sorted(output_ids),
         "observed_communication_edges": [list(edge) for edge in sorted(communication_edges)],
@@ -557,6 +856,33 @@ def _aggregate_control_plane(
     retrieval_calls = sum(value["retrieval_tool_call_count"] for value in per_task.values())
     ownership_violations = sum(
         len(value["worker_ownership_violations"]) for value in per_task.values()
+    )
+    director_profile_violations = sum(
+        len(value["director_execution_profile_violations"])
+        for value in per_task.values()
+    )
+    director_allowed_tools = sorted(
+        {
+            tool_id
+            for value in per_task.values()
+            for tool_id in value["director_allowed_tools"]
+        }
+    )
+    director_tool_enabled_count = sum(
+        value["director_tool_calls_enabled_count"]
+        for value in per_task.values()
+    )
+    reasoner_tool_assignment_violations = sum(
+        len(value["reasoner_qamemory_tool_assignment_violations"])
+        for value in per_task.values()
+    )
+    native_projection_count = sum(
+        value["native_artifact_receipt_projection_count"]
+        for value in per_task.values()
+    )
+    native_projection_violations = sum(
+        value["native_artifact_receipt_projection_violation_count"]
+        for value in per_task.values()
     )
     payload_exposures = {
         task_id: {
@@ -592,14 +918,39 @@ def _aggregate_control_plane(
     assertions = {
         "director_tool_calls": director_tool_calls,
         "director_tool_calls_eq_0": director_tool_calls == 0,
-        "director_request_allowed_tools": [],
+        "director_request_allowed_tools": director_allowed_tools,
+        "director_execution_profile_violation_count": (
+            director_profile_violations
+        ),
+        "director_tool_calls_enabled_count": director_tool_enabled_count,
+        "director_requests_toolless": bool(per_task)
+        and director_profile_violations == 0
+        and not director_allowed_tools
+        and director_tool_enabled_count == 0,
         "director_retrieval_payload_exposure_count": len(payload_exposures),
         "director_data_plane_isolated": director_tool_calls == 0
+        and bool(per_task)
+        and director_profile_violations == 0
+        and not director_allowed_tools
+        and director_tool_enabled_count == 0
         and not payload_exposures,
         "retrieval_tool_calls_by_worker": retrieval_calls,
         "retrieval_tool_calls_by_worker_gt_0": retrieval_calls > 0
         and ownership_violations == 0,
         "worker_ownership_violation_count": ownership_violations,
+        "reasoner_qamemory_tool_assignment_violation_count": (
+            reasoner_tool_assignment_violations
+        ),
+        "reasoner_qamemory_tool_unassigned": (
+            reasoner_tool_assignment_violations == 0
+        ),
+        "native_artifact_receipt_projection_count": native_projection_count,
+        "native_artifact_receipt_projection_violation_count": (
+            native_projection_violations
+        ),
+        "native_artifacts_match_exact_read_receipts": bool(
+            native_projection_count
+        ) and native_projection_violations == 0,
         "retrieval_tasks": len(retrieval_tasks),
         "retrieval_artifact_tasks": len(artifact_tasks),
         "retrieval_tasks_with_relation_route": len(routed_tasks),

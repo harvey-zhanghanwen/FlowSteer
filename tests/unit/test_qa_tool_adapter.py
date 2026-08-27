@@ -4497,6 +4497,65 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(subtype[0])
         self.assertFalse(regional[0])
 
+    def test_nonordinal_qa_memory_candidate_requires_entity_relation_unit(
+        self,
+    ) -> None:
+        question = (
+            "Which American-born Sinclair won the Nobel Prize for Literature "
+            "in 1930?"
+        )
+        supported = _public_search_candidate_compatibility(
+            original_question=question,
+            title="Sinclair Lewis",
+            snippet=(
+                "Sinclair Lewis was an American-born author who won the Nobel "
+                "Prize for Literature in 1930."
+            ),
+            require_entity_relation_compatibility=True,
+        )
+        unrelated = _public_search_candidate_compatibility(
+            original_question=question,
+            title="Ralph Johnson Bunche",
+            snippet=(
+                "Ralph Johnson Bunche was the first black man to receive the "
+                "Nobel Peace Prize."
+            ),
+            require_entity_relation_compatibility=True,
+        )
+
+        self.assertTrue(supported[0])
+        self.assertFalse(unrelated[0])
+
+        observations = [
+            {
+                "observation_status": "success",
+                "result": {
+                    "operation": "search",
+                    "hits": [
+                        {
+                            "passage_id": "unrelated",
+                            "rank": 1,
+                            "title": "Ralph Johnson Bunche",
+                            "snippet": (
+                                "Ralph Johnson Bunche was the first black man "
+                                "to receive the Nobel Peace Prize."
+                            ),
+                        }
+                    ],
+                },
+            }
+        ]
+        candidates = (
+            QARetrievalReactExecutionAdapter._latest_public_search_candidates(
+                observations,
+                unread_passage_ids=("unrelated",),
+                original_question=question,
+                enable_title_entity_topic_priority=True,
+                require_entity_relation_compatibility=True,
+            )
+        )
+        self.assertEqual((), candidates)
+
     def test_ordinal_read_domain_keeps_entity_title_when_snippet_is_truncated(
         self,
     ) -> None:

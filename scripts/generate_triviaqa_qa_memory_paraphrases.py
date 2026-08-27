@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
-"""Materialize semantic-preserving TriviaQA train-question paraphrases.
+"""Materialize semantic-preserving TriviaQA train QA paraphrases.
 
 Split consistency is checked before the local Qwen3.5 OpenAI-compatible
-endpoint is contacted.  The model generates only ``paraphrase_question``.
-The answer statement is rendered deterministically from the frozen train
-``accepted_answers[0]`` canonical span by :mod:`triviaqa_qa_memory`.
+endpoint is contacted.  The model generates a reworded question and a
+relation-bearing declarative answer statement from the frozen train-only
+``accepted_answers[0]`` canonical span.
 """
 
 from __future__ import annotations
 
 import argparse
-from difflib import SequenceMatcher
 import json
 import os
 from pathlib import Path
@@ -30,21 +29,22 @@ if str(PROJECT_ROOT) not in sys.path:
 from src.interactive.triviaqa_qa_memory import (  # noqa: E402
     TriviaQAQAMemoryRecord,
     TriviaQATrainSource,
-    load_materialized_qa_memory,
+    canonical_is_original_spelling_variant,
     load_triviaqa_qa_memory_sources,
+    relation_bearing_answer_statement,
     validate_qa_memory_against_sources,
     write_materialized_qa_memory,
 )
 
 
-PROMPT_TEMPLATE_VERSION = "triviaqa.qa_memory.question_paraphrase.v3"
-PARAPHRASE_METHOD = "semantic-preserving-question-paraphrase"
+PROMPT_TEMPLATE_VERSION = "triviaqa.qa_memory.qa_paraphrase.v4"
+PARAPHRASE_METHOD = "semantic-preserving-question-and-answer-paraphrase"
 GENERATOR_PROVIDER = "local-openai-compatible"
 
-SYSTEM_PROMPT = """Paraphrase one TriviaQA training question.
-Preserve the exact entity identity, requested relation, answer type, temporal or geographic scope, and every constraint. Do not answer the question, add facts, broaden or narrow its meaning. Change the wording or syntax; do not copy the original question unchanged.
+SYSTEM_PROMPT = """Paraphrase one TriviaQA training question and its training answer.
+Preserve the exact entity identity, requested relation, answer type, temporal or geographic scope, and every constraint. Change the question wording or syntax without putting the answer into the question. Write one complete declarative answer statement with a subject and predicate that restates the original question relation and contains the supplied canonical answer span character-for-character. The answer statement must not be only the canonical span or a generic wrapper such as 'The answer is ...'. Do not add facts, broaden or narrow the meaning, or invent aliases.
 Return exactly one JSON object with this schema and no other text:
-{"paraphrase_question":"..."}"""
+{"paraphrase_question":"...","paraphrase_answer_statement":"..."}"""
 
 
 def _positive_integer(value: str) -> int:
@@ -70,10 +70,12 @@ def _nonnegative_integer(value: str) -> int:
 def build_paraphrase_messages(source: TriviaQATrainSource) -> list[dict[str, str]]:
     """Build the bounded model request without accepted aliases."""
 
-    # The canonical span is intentionally absent from the model request.  It
-    # is used only by the local validator and by deterministic answer-statement
-    # rendering after the question paraphrase has been accepted.
-    user_payload = {"original_question": source.original_question}
+    # Only the frozen training projection is model-visible. Held-out validation
+    # content and accepted-answer aliases are never included.
+    user_payload = {
+        "original_question": source.original_question,
+        "canonical_training_answer": source.canonical_answer,
+    }
     return [
         {"role": "system", "content": SYSTEM_PROMPT},
         {
@@ -88,35 +90,20 @@ def build_paraphrase_messages(source: TriviaQATrainSource) -> list[dict[str, str
     ]
 
 
-def _canonical_is_original_spelling_variant(
-    original_question: str,
-    canonical_answer: str,
-) -> bool:
-    canonical_tokens = canonical_answer.casefold().split()
-    original_tokens = original_question.casefold().split()
-    width = len(canonical_tokens)
-    if width < 1 or len(original_tokens) < width:
-        return False
-    canonical = " ".join(canonical_tokens)
-    return any(
-        SequenceMatcher(
-            None,
-            canonical,
-            " ".join(original_tokens[start : start + width]),
-        ).ratio()
-        >= 0.9
-        for start in range(len(original_tokens) - width + 1)
-    )
-
-
-def parse_paraphrase_response(text: str, source: TriviaQATrainSource) -> str:
-    """Accept only the declared one-field JSON response."""
+def parse_paraphrase_response(
+    text: str,
+    source: TriviaQATrainSource,
+) -> tuple[str, str]:
+    """Accept only the declared question-and-statement JSON response."""
 
     try:
         value = json.loads(str(text).strip())
     except json.JSONDecodeError as exc:
         raise ValueError("paraphrase response is not strict JSON") from exc
-    if not isinstance(value, Mapping) or set(value) != {"paraphrase_question"}:
+    if not isinstance(value, Mapping) or set(value) != {
+        "paraphrase_question",
+        "paraphrase_answer_statement",
+    }:
         raise ValueError("paraphrase response fields are incompatible")
     question = value["paraphrase_question"]
     if not isinstance(question, str) or not question.strip():
@@ -124,17 +111,74 @@ def parse_paraphrase_response(text: str, source: TriviaQATrainSource) -> str:
     question = " ".join(question.split())
     if question.casefold() == " ".join(source.original_question.split()).casefold():
         raise ValueError("model returned the original question unchanged")
-    canonical = source.canonical_answer.casefold()
+    canonical = source.canonical_answer
     if (
-        canonical not in source.original_question.casefold()
-        and canonical in question.casefold()
-        and not _canonical_is_original_spelling_variant(
+        canonical.casefold() not in source.original_question.casefold()
+        and canonical.casefold() in question.casefold()
+        and not canonical_is_original_spelling_variant(
             source.original_question,
             source.canonical_answer,
         )
     ):
         raise ValueError("paraphrase_question introduced the canonical answer")
-    return question
+    statement = value["paraphrase_answer_statement"]
+    if not isinstance(statement, str) or not statement.strip():
+        raise ValueError("paraphrase_answer_statement must be non-empty text")
+    statement = " ".join(statement.split())
+    if canonical not in statement:
+        raise ValueError(
+            "paraphrase_answer_statement does not preserve the exact canonical span"
+        )
+    if not relation_bearing_answer_statement(statement, canonical):
+        raise ValueError(
+            "paraphrase_answer_statement must be declarative and express the "
+            "question relation beyond the canonical answer span"
+        )
+    return question, statement
+
+
+def load_resume_records(
+    path: Path,
+) -> tuple[tuple[TriviaQAQAMemoryRecord, ...], tuple[str, ...]]:
+    """Load a checkpoint while dropping only v4 answer-only records.
+
+    This preserves every already-valid local generation.  Any unrelated row
+    corruption still fails closed instead of being silently regenerated.
+    """
+
+    if not path.is_file():
+        return (), ()
+    records: list[TriviaQAQAMemoryRecord] = []
+    rejected_source_ids: list[str] = []
+    with path.open(encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            if not line.strip():
+                continue
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"existing paraphrase JSON is invalid at line {line_number}"
+                ) from exc
+            if not isinstance(value, Mapping):
+                raise ValueError(
+                    f"existing paraphrase row {line_number} is not an object"
+                )
+            if value.get("prompt_template_version") == PROMPT_TEMPLATE_VERSION:
+                statement = value.get("paraphrase_answer_statement")
+                canonical = value.get("canonical_answer")
+                if not relation_bearing_answer_statement(statement, canonical):
+                    source_id = value.get("source_train_task_id")
+                    if not isinstance(source_id, str) or not source_id.strip():
+                        raise ValueError(
+                            "answer-only checkpoint row has no source_train_task_id"
+                        )
+                    rejected_source_ids.append(source_id)
+                    continue
+            records.append(TriviaQAQAMemoryRecord.from_value(value))
+    if len(set(rejected_source_ids)) != len(rejected_source_ids):
+        raise ValueError("answer-only checkpoint source IDs are not unique")
+    return tuple(records), tuple(rejected_source_ids)
 
 
 class LocalQwen35Paraphraser:
@@ -168,13 +212,18 @@ class LocalQwen35Paraphraser:
         self.timeout_seconds = float(timeout_seconds)
         self.max_retries = int(max_retries)
 
-    def generate(self, source: TriviaQATrainSource, *, seed: int) -> tuple[str, int]:
+    def generate(
+        self,
+        source: TriviaQATrainSource,
+        *,
+        seed: int,
+    ) -> tuple[str, str, int]:
         payload = {
             "model": self.model_id,
             "messages": build_paraphrase_messages(source),
             "temperature": 0.0,
             "top_p": 1.0,
-            "max_tokens": 128,
+            "max_tokens": 256,
             "seed": seed,
             "chat_template_kwargs": {"enable_thinking": False},
             "response_format": {"type": "json_object"},
@@ -189,10 +238,15 @@ class LocalQwen35Paraphraser:
                     retry_instruction = (
                         "Use a different grammatical construction, such as an "
                         "indirect request beginning with Identify, Name, or State, "
-                        "while preserving the question exactly."
+                        "while preserving the question exactly. The answer field "
+                        "must be a complete declarative sentence with relation "
+                        "words from the original question; never return only the "
+                        "canonical span or an answer-only wrapper."
                         if attempt == 1
                         else "Reorder the clauses and replace at least one non-entity "
-                        "verb or phrase with an equivalent expression."
+                        "verb or phrase with an equivalent expression. The answer "
+                        "field must state who or what has the requested relation to "
+                        "the canonical span in a complete declarative sentence."
                     )
                     attempt_payload["messages"] = payload["messages"] + [
                         {
@@ -203,6 +257,13 @@ class LocalQwen35Paraphraser:
                                 "different surface form now, with the same entity, "
                                 "relation, scope, constraints, and answer type. "
                                 + retry_instruction
+                                + " Write paraphrase_answer_statement in this "
+                                "grammatical structure: '<canonical_training_answer> "
+                                "is/was the <answer type or relation complement from "
+                                "the original question>.' Replace both angle-bracket "
+                                "fields, begin with the following exact case-sensitive "
+                                "span, and do not inflect or lowercase it: "
+                                + json.dumps(source.canonical_answer, ensure_ascii=False)
                             ),
                         }
                     ]
@@ -234,7 +295,8 @@ class LocalQwen35Paraphraser:
                 content = message.get("content") if isinstance(message, Mapping) else None
                 if not isinstance(content, str):
                     raise ValueError("local Qwen response has no text content")
-                return parse_paraphrase_response(content, source), seed + attempt
+                question, statement = parse_paraphrase_response(content, source)
+                return question, statement, seed + attempt
             except HTTPError as exc:
                 last_error = exc
                 retryable = exc.code in {408, 409, 425, 429} or exc.code >= 500
@@ -289,11 +351,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             expected_validation_count=args.expected_validation_count,
         )
         output_path = Path(args.output)
-        existing = (
-            load_materialized_qa_memory(output_path)
-            if output_path.is_file()
-            else ()
-        )
+        existing, _rejected_source_ids = load_resume_records(output_path)
         validate_qa_memory_against_sources(
             existing,
             sources,
@@ -334,10 +392,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             if source.source_train_task_id in records:
                 continue
             seed = args.base_seed + source.selection_index
-            paraphrase, accepted_seed = client.generate(source, seed=seed)
+            paraphrase, answer_statement, accepted_seed = client.generate(
+                source,
+                seed=seed,
+            )
             records[source.source_train_task_id] = TriviaQAQAMemoryRecord.create(
                 source=source,
                 paraphrase_question=paraphrase,
+                paraphrase_answer_statement=answer_statement,
                 paraphrase_version=args.paraphrase_version,
                 paraphrase_method=PARAPHRASE_METHOD,
                 generator_provider=GENERATOR_PROVIDER,

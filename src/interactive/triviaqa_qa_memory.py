@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 import json
 import math
 from pathlib import Path
@@ -88,6 +89,29 @@ _MEMORY_FIELDS = frozenset(
         "canonical_span_preserved",
     }
 )
+
+
+def canonical_is_original_spelling_variant(
+    original_question: str,
+    canonical_answer: str,
+) -> bool:
+    """Recognize an answer surface already present with a minor misspelling."""
+
+    canonical_tokens = canonical_answer.casefold().split()
+    original_tokens = original_question.casefold().split()
+    width = len(canonical_tokens)
+    if width < 1 or len(original_tokens) < width:
+        return False
+    canonical = " ".join(canonical_tokens)
+    return any(
+        SequenceMatcher(
+            None,
+            canonical,
+            " ".join(original_tokens[start : start + width]),
+        ).ratio()
+        >= 0.9
+        for start in range(len(original_tokens) - width + 1)
+    )
 _TOOL_BUDGET_FIELDS = frozenset(
     {"max_tool_calls_per_agent_call", "max_turns_per_agent_call"}
 )
@@ -113,6 +137,68 @@ def deterministic_answer_statement(canonical_answer: str) -> str:
 
     canonical = _required_text(canonical_answer, field_name="canonical_answer")
     return f"The answer is {canonical}"
+
+
+_GENERIC_ANSWER_WRAPPER_TOKENS = frozenset(
+    {
+        "a",
+        "an",
+        "answer",
+        "are",
+        "be",
+        "been",
+        "being",
+        "canonical",
+        "is",
+        "it",
+        "question",
+        "result",
+        "that",
+        "the",
+        "this",
+        "to",
+        "value",
+        "was",
+        "were",
+    }
+)
+_STATEMENT_TOKEN = re.compile(r"[^\W_]+(?:['’-][^\W_]+)*", re.UNICODE)
+
+
+def relation_bearing_answer_statement(
+    statement: object,
+    canonical_answer: object,
+) -> bool:
+    """Check that an answer is a relation-bearing statement, not a bare span.
+
+    Semantic equivalence remains the paraphraser's generation contract.  This
+    deterministic materialization boundary enforces the properties that can be
+    checked without another model call: the exact canonical span is retained,
+    and the remaining text contains non-generic relation context rather than an
+    answer-only wrapper.
+    """
+
+    if not isinstance(statement, str) or not statement.strip():
+        return False
+    if not isinstance(canonical_answer, str) or not canonical_answer.strip():
+        return False
+    normalized_statement = " ".join(statement.split())
+    canonical = " ".join(canonical_answer.split())
+    if canonical not in normalized_statement:
+        return False
+    terminal_punctuation = " .,!?:;\"'`()[]{}"
+    if (
+        normalized_statement.strip(terminal_punctuation).casefold()
+        == canonical.strip(terminal_punctuation).casefold()
+    ):
+        return False
+    relation_context = normalized_statement.replace(canonical, " ")
+    context_tokens = tuple(
+        token.casefold() for token in _STATEMENT_TOKEN.findall(relation_context)
+    )
+    return len(context_tokens) >= 2 and any(
+        token not in _GENERIC_ANSWER_WRAPPER_TOKENS for token in context_tokens
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -408,8 +494,14 @@ class TriviaQAQAMemoryRecord:
             raise ValueError("canonical_span_preserved must be true")
         if canonical not in statement:
             raise ValueError("paraphrase answer statement does not preserve canonical span")
-        if statement != deterministic_answer_statement(canonical):
-            raise ValueError("paraphrase answer statement must use deterministic rendering")
+        if (
+            self.prompt_template_version == "triviaqa.qa_memory.qa_paraphrase.v4"
+            and not relation_bearing_answer_statement(statement, canonical)
+        ):
+            raise ValueError(
+                "paraphrase answer statement must be declarative and express "
+                "the question relation beyond the canonical answer span"
+            )
         for field_name in (
             "paraphrase_version",
             "paraphrase_method",
@@ -434,6 +526,7 @@ class TriviaQAQAMemoryRecord:
         *,
         source: TriviaQATrainSource,
         paraphrase_question: str,
+        paraphrase_answer_statement: str,
         paraphrase_version: str,
         paraphrase_method: str,
         generator_provider: str,
@@ -457,8 +550,9 @@ class TriviaQAQAMemoryRecord:
                 paraphrase_question,
                 field_name="paraphrase_question",
             ),
-            "paraphrase_answer_statement": deterministic_answer_statement(
-                source.canonical_answer
+            "paraphrase_answer_statement": _required_text(
+                paraphrase_answer_statement,
+                field_name="paraphrase_answer_statement",
             ),
             "canonical_answer": source.canonical_answer,
             "paraphrase_version": paraphrase_version,
@@ -721,6 +815,20 @@ def validate_qa_memory_against_sources(
                 raise ValueError(
                     f"QA-memory {field_name} differs from frozen train source"
                 )
+        canonical = source.canonical_answer
+        if (
+            record.prompt_template_version
+            == "triviaqa.qa_memory.qa_paraphrase.v4"
+            and canonical.casefold() not in source.original_question.casefold()
+            and canonical.casefold() in record.paraphrase_question.casefold()
+            and not canonical_is_original_spelling_variant(
+                source.original_question,
+                source.canonical_answer,
+            )
+        ):
+            raise ValueError(
+                "QA-memory paraphrase_question introduced the canonical answer"
+            )
     if require_complete and record_ids != set(source_by_id):
         raise ValueError("QA-memory rows do not exactly cover the frozen train split")
 
@@ -1295,6 +1403,7 @@ __all__ = [
     "TriviaQATrainSource",
     "build_triviaqa_qa_memory_index",
     "deterministic_answer_statement",
+    "relation_bearing_answer_statement",
     "load_materialized_qa_memory",
     "load_triviaqa_qa_memory_sources",
     "validate_qa_memory_against_sources",

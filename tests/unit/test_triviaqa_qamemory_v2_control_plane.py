@@ -416,6 +416,19 @@ class TriviaQAQAMemoryV2ControlPlaneTests(unittest.IsolatedAsyncioTestCase):
             "add_subgraph", {}
         )
         self.assertIn(QA_MEMORY_TOOL_ID, json.dumps(add_domains))
+        role_constraints = add_domains["role_constraints"]
+        self.assertEqual(
+            [{"execution_mode": "reasoning", "allowed_tools": []}],
+            role_constraints["reasoner"]["execution_profiles"],
+        )
+        self.assertEqual(
+            ["react"],
+            role_constraints["evidence_retriever"]["execution_modes"],
+        )
+        self.assertEqual(
+            [[QA_MEMORY_TOOL_ID]],
+            role_constraints["evidence_retriever"]["allowed_tools"],
+        )
 
     def test_config_requires_control_plane_for_triviaqa_qamemory(self) -> None:
         config = load_yaml(

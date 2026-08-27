@@ -73,6 +73,24 @@ _QA_MEMORY_OPTIONAL_FIELDS = (
     "paraphrase_version",
     "paraphrase_provenance",
 )
+_QA_MEMORY_SEARCH_FIELDS = (
+    "memory_id",
+    "source_train_task_id",
+    "base_task_id",
+    "cycled_training_sample",
+    "cycle_index",
+    "paraphrase_question",
+    "paraphrase_version",
+    "paraphrase_provenance",
+)
+_QA_MEMORY_EVIDENCE_ARTIFACT_FIELDS = (
+    "question_scope",
+    "memory_id",
+    "source_train_task_id",
+    "paraphrase_question",
+    "paraphrase_answer_statement",
+    "canonical_answer",
+)
 _SUPPORTED_QA_RETRIEVAL_TOOL_IDS = frozenset(
     {QA_RETRIEVAL_TOOL_ID, TRIVIAQA_QA_MEMORY_TOOL_ID}
 )
@@ -2905,8 +2923,14 @@ def _public_search_transition_mirror(
         "snippet",
         "title",
     }
-    admitted_hit_fields = required_hit_fields | set(_QA_MEMORY_OPTIONAL_FIELDS) | {
-        "similarity"
+    resource_id = executed_action.get("resource_id")
+    admitted_hit_fields = required_hit_fields | {
+        "similarity",
+        *(
+            _QA_MEMORY_SEARCH_FIELDS
+            if resource_id == TRIVIAQA_QA_MEMORY_TOOL_ID
+            else _QA_MEMORY_OPTIONAL_FIELDS
+        ),
     }
     for expected_rank, (passage_id, hit) in enumerate(
         zip(raw_passage_ids, raw_hits),
@@ -3091,6 +3115,7 @@ def _factual_retrieval_attempt_records(
     *,
     original_question: str,
     search_observations: Sequence[Mapping[str, object]],
+    frozen_top_k: int | None = None,
 ) -> tuple[_FactualRetrievalAttemptRecord, ...]:
     """Project every successful search Action--Observation transition.
 
@@ -3150,9 +3175,13 @@ def _factual_retrieval_attempt_records(
         # Replay the same monotonic search-attempt schedule admitted live.  A
         # same-query recall expansion consumes the next top-k (5 -> 10 -> 15)
         # without consuming or fabricating a distinct strategy label.
-        required_top_k = _FACTUAL_QA_SEARCH_LIMITS[
-            min(attempt_index - 1, len(_FACTUAL_QA_SEARCH_LIMITS) - 1)
-        ]
+        required_top_k = (
+            frozen_top_k
+            if frozen_top_k is not None
+            else _FACTUAL_QA_SEARCH_LIMITS[
+                min(attempt_index - 1, len(_FACTUAL_QA_SEARCH_LIMITS) - 1)
+            ]
+        )
         query_transition_advanced = bool(
             query_variant and signature not in distinct_signatures
         )
@@ -3637,6 +3666,7 @@ def _public_search_candidate_compatibility(
     original_question: str,
     title: str,
     snippet: str,
+    require_entity_relation_compatibility: bool = False,
 ) -> tuple[bool, int, int, int]:
     """Rank public search hits by entity/relation/qualifier compatibility.
 
@@ -3647,8 +3677,10 @@ def _public_search_candidate_compatibility(
     the same ``title + one snippet clause`` unit.  This prevents a song or
     performer's local ``first hit`` from masquerading as an entity-global
     publication fact merely because other query words occur elsewhere in the
-    passage snippet.  Non-ordinal questions are ordered by overlap but never
-    narrowed here.
+    passage snippet.  For the QA-memory worker, non-ordinal questions use the
+    same answer-free entity/relation gate before ``read``; embedding rank alone
+    is not evidence that the retrieved training question has the same subject
+    and target relation.
     """
 
     question_tokens = _candidate_question_content_tokens(original_question)
@@ -3661,6 +3693,7 @@ def _public_search_candidate_compatibility(
     )
     best_clause_matches = 0
     qualifier_clause_compatible = False
+    entity_relation_clause_compatible = False
     for clause in _evidence_proposition_clauses(snippet):
         clause_tokens = _scope_tokens(clause)
         title_and_clause = f"{title} {clause}"
@@ -3672,6 +3705,24 @@ def _public_search_candidate_compatibility(
         candidate_relation_classes = frozenset(
             _relation_alias_surfaces_in(title_and_clause)
         )
+        entity_compatible = bool(
+            not entity_anchor_tokens
+            or _surface_binds_entity_anchor(
+                title_and_clause,
+                entity_anchor_tokens,
+            )
+        )
+        relation_compatible = bool(
+            not required_relation_classes
+            or required_relation_classes <= candidate_relation_classes
+        )
+        minimum_content_overlap = min(2, len(set(question_tokens)))
+        if (
+            entity_compatible
+            and relation_compatible
+            and len(clause_matches) >= minimum_content_overlap
+        ):
+            entity_relation_clause_compatible = True
         if (
             ordinal_classes
             and entity_anchor_tokens
@@ -3691,6 +3742,8 @@ def _public_search_candidate_compatibility(
         ):
             qualifier_clause_compatible = True
     strong = bool(ordinal_classes) and qualifier_clause_compatible
+    if require_entity_relation_compatibility and not ordinal_classes:
+        strong = entity_relation_clause_compatible
     return (
         strong,
         best_clause_matches,
@@ -3954,11 +4007,15 @@ def _index_identity(index: _RetrievalIndex) -> dict[str, object]:
     }
 
 
-def _qa_memory_projection(value: object) -> dict[str, object]:
-    """Project only versioned train-memory fields admitted to worker Agents."""
+def _qa_memory_projection(
+    value: object,
+    *,
+    fields: Sequence[str] = _QA_MEMORY_OPTIONAL_FIELDS,
+) -> dict[str, object]:
+    """Project an explicit allowlist of versioned train-memory fields."""
 
     result: dict[str, object] = {}
-    for field_name in _QA_MEMORY_OPTIONAL_FIELDS:
+    for field_name in fields:
         field_value = getattr(value, field_name, None)
         if field_value is None:
             continue
@@ -4052,18 +4109,42 @@ class QASearchToolBackend:
                 "search limit differs from the frozen embedding-index top-k"
             )
 
+        qa_memory = _is_qa_memory_index(self.index)
         raw_hits = self.index.search(query, limit=limit)
         hits = await raw_hits if inspect.isawaitable(raw_hits) else raw_hits
         public_hits: list[dict[str, object]] = []
         for hit in hits:
+            qa_memory_fields = (
+                _qa_memory_projection(hit, fields=_QA_MEMORY_SEARCH_FIELDS)
+                if qa_memory
+                else {}
+            )
+            raw_title = str(getattr(hit, "title"))
+            raw_snippet = str(getattr(hit, "snippet"))
+            if qa_memory:
+                # QA-memory search is candidate discovery only.  The answer
+                # statement and canonical answer become observable exclusively
+                # through a subsequent read(memory_id) Tool receipt.
+                paraphrase_question = qa_memory_fields.get(
+                    "paraphrase_question"
+                )
+                if not isinstance(paraphrase_question, str) or not (
+                    paraphrase_question.strip()
+                ):
+                    raise ValueError(
+                        "QA-memory search hit paraphrase_question must be "
+                        "non-empty text"
+                    )
+                raw_title = paraphrase_question.strip()
+                raw_snippet = paraphrase_question.strip()
             public_hit: dict[str, object] = {
                 "passage_id": str(getattr(hit, "passage_id")),
                 "document_id": str(getattr(hit, "document_id")),
-                "title": str(getattr(hit, "title")),
-                "snippet": str(getattr(hit, "snippet")),
+                "title": raw_title,
+                "snippet": raw_snippet,
                 "rank": int(getattr(hit, "rank")),
             }
-            public_hit.update(_qa_memory_projection(hit))
+            public_hit.update(qa_memory_fields)
             similarity = getattr(hit, "similarity", None)
             if similarity is not None:
                 public_hit["similarity"] = float(similarity)
@@ -4076,7 +4157,7 @@ class QASearchToolBackend:
             "passage_ids": [hit["passage_id"] for hit in public_hits],
             "hits": public_hits,
         }
-        if _is_qa_memory_index(self.index):
+        if qa_memory:
             result["memory_ids"] = [hit["memory_id"] for hit in public_hits]
         return ToolResult(result)
 
@@ -5739,6 +5820,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         retrieval_attempts = _factual_retrieval_attempt_records(
             original_question=qa_question_scope(request.problem),
             search_observations=successful_search_observations,
+            frozen_top_k=self._frozen_search_limit,
         )
         completed_location_evidence_repair = bool(
             location_containment_repair_read_count > 0
@@ -6066,6 +6148,10 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     unread_passage_ids=state.latest_unread_passage_ids,
                     original_question=qa_question_scope(request.problem),
                     enable_title_entity_topic_priority=True,
+                    require_entity_relation_compatibility=(
+                        self._retrieval_tool_id
+                        == TRIVIAQA_QA_MEMORY_TOOL_ID
+                    ),
                     candidate_limit=(
                         1
                         if _question_ordinal_classes(
@@ -6176,6 +6262,44 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
     ) -> Mapping[str, object]:
         semantic_protocol = request.semantic_protocol
         semantic_role = (request.agent.role_family or "").casefold()
+        if (
+            semantic_role == "evidence_retriever"
+            and semantic_protocol == QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL
+            and self._retrieval_tool_id == TRIVIAQA_QA_MEMORY_TOOL_ID
+        ):
+            # PROJECT_NECESSARY_ADAPTATION: SkillFlow owns the ordered
+            # search(query, top-k) -> read(memory_id) Tool transitions.  A
+            # train QA-memory record is already a semantic QA artifact, not a
+            # public passage from which the Retriever should synthesize or
+            # transcribe fields.  The model selects only one successfully-read
+            # opaque handle; ``_completion_artifact`` projects the native
+            # record deterministically from that exact read receipt.  This is
+            # the same Tool Observation -> artifact boundary used by
+            # SkillFlow, while FlowSteer's receipt lineage remains unchanged.
+            return {
+                "type": "object",
+                "required": ["value"],
+                "properties": {
+                    "value": {
+                        "type": "object",
+                        "required": ["memory_id"],
+                        "properties": {
+                            "memory_id": {
+                                "type": "string",
+                                "minLength": 1,
+                                "description": (
+                                    "Select exactly one memory_id from a successful "
+                                    "triviaqa.qa_memory read receipt in this "
+                                    "execution. The runtime, not the model, projects "
+                                    "the record fields from that receipt."
+                                ),
+                            },
+                        },
+                        "additionalProperties": False,
+                    }
+                },
+                "additionalProperties": False,
+            }
         if semantic_role == "evidence_retriever" and semantic_protocol in {
             "hotpotqa_verified_answer_slot_v1",
             QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
@@ -6577,6 +6701,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         unread_passage_ids: Sequence[str],
         original_question: str | None = None,
         enable_title_entity_topic_priority: bool = False,
+        require_entity_relation_compatibility: bool = False,
         candidate_limit: int | None = None,
     ) -> tuple[dict[str, object], ...]:
         """Return public title/snippet metadata for the latest search only.
@@ -6631,6 +6756,9 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                         original_question=original_question,
                         title=title,
                         snippet=snippet,
+                        require_entity_relation_compatibility=(
+                            require_entity_relation_compatibility
+                        ),
                     )
                     if isinstance(original_question, str)
                     and original_question.strip()
@@ -6695,6 +6823,17 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     item
                     for item in ranked_candidates
                     if item[0][0] or item[1] or item[2]
+                ]
+            elif (
+                enable_title_entity_topic_priority
+                and require_entity_relation_compatibility
+            ):
+                # TriviaQA QA-memory reads require a question-compatible
+                # entity/relation unit. Incompatible embedding neighbours
+                # remain visible in the Search Observation for query rewrite,
+                # but are not admitted as evidence reads.
+                ranked_candidates = [
+                    item for item in ranked_candidates if item[0][0]
                 ]
             if candidate_limit is not None:
                 ranked_candidates = ranked_candidates[:candidate_limit]
@@ -6923,20 +7062,18 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     else None
                 )
                 if isinstance(value_properties, dict):
-                    # PROJECT_NECESSARY_ADAPTATION: the unchanged v63 semantic
-                    # lineage artifact calls this compatibility field
-                    # ``passage_id``.  A QA-memory worker, however, performs the
-                    # canonical SkillFlow Tool transition ``read(memory_id)``.
-                    # Bind the compatibility field to the exact successfully
-                    # read opaque IDs so a document/source ID or placeholder
-                    # cannot be substituted for Tool provenance.
-                    value_properties["passage_id"] = {
+                    # Bind the native artifact to an exact successfully-read
+                    # memory handle.  The completion validator additionally
+                    # requires a preceding successful search for that handle
+                    # and exact equality of every record field to one read
+                    # receipt, preventing cross-memory field mixing.
+                    value_properties["memory_id"] = {
                         "type": "string",
                         "enum": list(state.read_passage_ids),
                         "description": (
                             "Copy exactly one memory_id from a successful "
                             "triviaqa.qa_memory read receipt in this execution. "
-                            "This compatibility field must never contain a "
+                            "This field must never contain a "
                             "source_train_task_id, document_id, title, or "
                             "placeholder."
                         ),
@@ -7202,6 +7339,10 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             original_question=candidate_selection_scope,
             enable_title_entity_topic_priority=(
                 self._unified_factual_protocol(request)
+                and not location_containment_repair
+            ),
+            require_entity_relation_compatibility=(
+                self._retrieval_tool_id == TRIVIAQA_QA_MEMORY_TOOL_ID
                 and not location_containment_repair
             ),
             candidate_limit=(
@@ -7960,6 +8101,10 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 self._unified_factual_protocol(request)
                 and not location_containment_repair
             ),
+            require_entity_relation_compatibility=(
+                self._retrieval_tool_id == TRIVIAQA_QA_MEMORY_TOOL_ID
+                and not location_containment_repair
+            ),
             candidate_limit=(
                 1
                 if self._unified_factual_protocol(request)
@@ -8055,7 +8200,33 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             "hotpotqa_verified_answer_slot_v1",
             QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
         } and semantic_role == "evidence_retriever":
-            if completion_admitted:
+            if (
+                completion_admitted
+                and self._retrieval_tool_id
+                == TRIVIAQA_QA_MEMORY_TOOL_ID
+                and request.semantic_protocol
+                == QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL
+            ):
+                terminal_wire += (
+                    " As the Evidence Retriever for triviaqa.qa_memory, "
+                    "arguments.value must contain only memory_id. Select one "
+                    "memory_id from a successful read(memory_id) receipt that "
+                    "was returned by a preceding successful embedding search "
+                    "in this Agent execution. The runtime deterministically "
+                    "projects question_scope, source_train_task_id, "
+                    "paraphrase_question, paraphrase_answer_statement, and "
+                    "canonical_answer from that exact read receipt; do not copy "
+                    "or guess those fields. Search observations expose candidate "
+                    "questions and opaque IDs only; answer fields become "
+                    "available only after read(memory_id). A train QA-memory "
+                    "record is the native evidence artifact: do not synthesize a "
+                    "passage-style S-P-O proposition, entity_identity, "
+                    "target_relation, evidence_span, or passage_id. The "
+                    "Reasoner owns semantic answer selection, and the "
+                    "Verifier and Format Agent retain their existing lineage "
+                    "responsibilities."
+                )
+            elif completion_admitted:
                 terminal_wire += (
                     " As the Evidence Retriever, arguments.value must contain "
                     "exactly question_scope, entity_identity, target_relation, "
@@ -8104,13 +8275,6 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     "predicate, and object_or_attribute_value surfaces. Do not select "
                     "or emit candidate_answer, answer_slot, or final_answer."
                 )
-                if self._retrieval_tool_id == TRIVIAQA_QA_MEMORY_TOOL_ID:
-                    terminal_wire += (
-                        " For triviaqa.qa_memory, copy the exact opaque memory_id "
-                        "from the successful read(memory_id) receipt into the "
-                        "artifact's passage_id compatibility field; never copy "
-                        "source_train_task_id, document_id, title, or a placeholder."
-                    )
             else:
                 terminal_wire += (
                     " The Evidence Retriever owns only receipt-grounded entity, "
@@ -8368,13 +8532,11 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         )
         qa_memory_wire = ""
         if self._retrieval_tool_id == TRIVIAQA_QA_MEMORY_TOOL_ID:
-            # NECESSARY_ADAPTATION: v63's state machine and semantic artifact
-            # deliberately retain their internal ``passage_id`` compatibility
-            # projection.  The worker-facing Tool wire must nevertheless be
-            # unambiguous: the registered resource is ``triviaqa.qa_memory``
-            # and its read action accepts only ``memory_id``.  Rewrite only
-            # execution-policy prose, never the semantic artifact contract or
-            # persisted canonical receipt.
+            # NECESSARY_ADAPTATION: v63's state machine retains internal
+            # retrieval-record compatibility names, while the worker-facing
+            # Tool wire and completion artifact are native QA-memory records.
+            # Rewrite only execution-policy prose; persisted Tool receipts
+            # remain canonical ``search(query, limit)``/``read(memory_id)``.
             guidance = guidance.replace(
                 "qa-retrieval", TRIVIAQA_QA_MEMORY_TOOL_ID
             )
@@ -8403,9 +8565,11 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 "resource_id triviaqa.qa_memory. Search arguments contain exactly "
                 "query and limit, with the schema-frozen limit. Read arguments "
                 "contain exactly memory_id copied from the latest successful search "
-                "observation. The structured semantic artifact continues to use its "
-                "existing passage_id provenance field, set to that same memory_id; "
-                "this does not rename the Tool or its canonical receipt."
+                "observation. The structured semantic artifact is the native "
+                "evidence artifact and contains exactly "
+                "question_scope, memory_id, source_train_task_id, "
+                "paraphrase_question, paraphrase_answer_statement, and "
+                "canonical_answer copied from that same successful read receipt."
             )
         return (
             contract
@@ -8779,6 +8943,243 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         return False
 
     @staticmethod
+    def _qa_memory_evidence_retriever_completion_issue(
+        *,
+        original_question: str,
+        artifact: str,
+        tool_receipts: Sequence[Mapping[str, object]],
+    ) -> str | None:
+        """Validate a native QA-memory artifact against ordered Tool receipts.
+
+        DIRECT_REUSE: SkillFlow admits ``read(memory_id)`` only after a
+        successful embedding ``search`` returns that opaque handle.  This
+        project adapter preserves FlowSteer's v63 semantic lineage while
+        projecting the train QA-memory record itself instead of inventing a
+        passage-style subject-predicate-object representation.
+        """
+
+        from .agent_workflow_env import AgentWorkflowEnv
+
+        fields, issue = AgentWorkflowEnv._structured_semantic_fields(
+            artifact,
+            _QA_MEMORY_EVIDENCE_ARTIFACT_FIELDS,
+        )
+        if issue is not None or fields is None:
+            return issue or "TriviaQA QA-memory Evidence Retriever artifact is missing"
+        if fields.get("question_scope") != original_question:
+            return (
+                "TriviaQA QA-memory Evidence Retriever question_scope must "
+                "equal the original question"
+            )
+        for field_name in _QA_MEMORY_EVIDENCE_ARTIFACT_FIELDS[1:]:
+            field_value = fields.get(field_name)
+            if (
+                not isinstance(field_value, str)
+                or not field_value.strip()
+                or field_value != field_value.strip()
+            ):
+                return (
+                    "TriviaQA QA-memory Evidence Retriever field "
+                    f"{field_name!r} must be non-empty trimmed text"
+                )
+
+        memory_id = fields["memory_id"]
+        assert isinstance(memory_id, str)
+        search_returned_memory = False
+        candidate_read_memories: list[Mapping[str, object]] = []
+        for receipt in tool_receipts:
+            if (
+                not isinstance(receipt, Mapping)
+                or receipt.get("tool_id") != TRIVIAQA_QA_MEMORY_TOOL_ID
+                or receipt.get("error_type") is not None
+            ):
+                continue
+            request = receipt.get("request")
+            result = receipt.get("result")
+            if not isinstance(request, Mapping) or not isinstance(
+                result,
+                Mapping,
+            ):
+                continue
+            arguments = request.get("arguments")
+            value = result.get("value", result)
+            if not isinstance(arguments, Mapping) or not isinstance(
+                value,
+                Mapping,
+            ):
+                continue
+            action_name = request.get("action")
+            if action_name == "search":
+                memory_ids = value.get("memory_ids")
+                hits = value.get("hits")
+                search_returned_memory = search_returned_memory or bool(
+                    result.get("completed") is True
+                    and value.get("operation") == "search"
+                    and set(arguments) == {"query", "limit"}
+                    and isinstance(arguments.get("query"), str)
+                    and bool(arguments["query"].strip())
+                    and type(arguments.get("limit")) is int
+                    and arguments["limit"] > 0
+                    and isinstance(memory_ids, list)
+                    and memory_id in memory_ids
+                    and isinstance(hits, list)
+                    and any(
+                        isinstance(hit, Mapping)
+                        and hit.get("memory_id") == memory_id
+                        for hit in hits
+                    )
+                )
+                continue
+            if action_name != "read" or not search_returned_memory:
+                continue
+            if not AgentWorkflowEnv._successful_read_receipt(
+                receipt,
+                TRIVIAQA_QA_MEMORY_TOOL_ID,
+            ):
+                continue
+            if arguments.get("memory_id") != memory_id:
+                continue
+            memory = value.get("memory")
+            if isinstance(memory, Mapping):
+                candidate_read_memories.append(memory)
+
+        if not candidate_read_memories:
+            return (
+                "TriviaQA QA-memory Evidence Retriever memory_id has no "
+                "preceding successful search returning it followed by an "
+                "exact successful read(memory_id) receipt"
+            )
+
+        compared_fields = _QA_MEMORY_EVIDENCE_ARTIFACT_FIELDS[1:]
+        for memory in candidate_read_memories:
+            if all(
+                fields.get(field_name) == memory.get(field_name)
+                for field_name in compared_fields
+            ):
+                return None
+        for field_name in compared_fields:
+            if all(
+                fields.get(field_name) != memory.get(field_name)
+                for memory in candidate_read_memories
+            ):
+                return (
+                    "TriviaQA QA-memory Evidence Retriever field "
+                    f"{field_name!r} must equal the same successful "
+                    "read(memory_id) receipt"
+                )
+        return (
+            "TriviaQA QA-memory Evidence Retriever fields must all equal one "
+            "same successful read(memory_id) receipt"
+        )
+
+    @staticmethod
+    def _qa_memory_completion_receipt_projection(
+        *,
+        original_question: str,
+        selection_artifact: str,
+        tool_receipts: Sequence[Mapping[str, object]],
+    ) -> tuple[str | None, str | None]:
+        """Project one model-selected handle from its exact read receipt.
+
+        SkillFlow's Tool Observation is authoritative.  The Retriever policy
+        chooses only an opaque ``memory_id`` after ``search -> read``; record
+        fields are materialized from that same successful read receipt and are
+        never accepted from model-authored copies.  Extra legacy completion
+        fields are deliberately ignored so they cannot override the receipt.
+        """
+
+        from .agent_workflow_env import AgentWorkflowEnv
+
+        try:
+            selection = json.loads(selection_artifact)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None, (
+                "TriviaQA QA-memory completion must select one read memory_id"
+            )
+        if not isinstance(selection, Mapping):
+            return None, (
+                "TriviaQA QA-memory completion must select one read memory_id"
+            )
+        memory_id = selection.get("memory_id")
+        if (
+            not isinstance(memory_id, str)
+            or not memory_id.strip()
+            or memory_id != memory_id.strip()
+        ):
+            return None, (
+                "TriviaQA QA-memory completion memory_id must be non-empty "
+                "trimmed text"
+            )
+
+        searched_memory_ids: set[str] = set()
+        for receipt in tool_receipts:
+            if (
+                not isinstance(receipt, Mapping)
+                or receipt.get("tool_id") != TRIVIAQA_QA_MEMORY_TOOL_ID
+                or receipt.get("error_type") is not None
+            ):
+                continue
+            request = receipt.get("request")
+            result = receipt.get("result")
+            if not isinstance(request, Mapping) or not isinstance(
+                result,
+                Mapping,
+            ):
+                continue
+            arguments = request.get("arguments")
+            value = result.get("value", result)
+            if not isinstance(arguments, Mapping) or not isinstance(
+                value,
+                Mapping,
+            ):
+                continue
+            if request.get("action") == "search":
+                if (
+                    result.get("completed") is True
+                    and value.get("operation") == "search"
+                ):
+                    raw_ids = value.get("memory_ids")
+                    if isinstance(raw_ids, list):
+                        searched_memory_ids.update(
+                            item
+                            for item in raw_ids
+                            if isinstance(item, str) and item.strip()
+                        )
+                continue
+            if (
+                request.get("action") != "read"
+                or memory_id not in searched_memory_ids
+                or arguments.get("memory_id") != memory_id
+                or not AgentWorkflowEnv._successful_read_receipt(
+                    receipt,
+                    TRIVIAQA_QA_MEMORY_TOOL_ID,
+                )
+            ):
+                continue
+            memory = value.get("memory")
+            if not isinstance(memory, Mapping):
+                continue
+            projected: dict[str, object] = {
+                "question_scope": original_question,
+            }
+            for field_name in _QA_MEMORY_EVIDENCE_ARTIFACT_FIELDS[1:]:
+                projected[field_name] = memory.get(field_name)
+            return (
+                json.dumps(
+                    projected,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                None,
+            )
+        return None, (
+            "TriviaQA QA-memory completion memory_id has no preceding "
+            "successful search returning it followed by an exact successful "
+            "read(memory_id) receipt"
+        )
+
+    @staticmethod
     def _evidence_retriever_completion_issue(
         *,
         original_question: str,
@@ -8791,6 +9192,13 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         An exact same-receipt title binding can ground a distinct question and
         evidence entity surface without weakening the contextual-anchor path.
         """
+
+        if retrieval_tool_id == TRIVIAQA_QA_MEMORY_TOOL_ID:
+            return QARetrievalReactExecutionAdapter._qa_memory_evidence_retriever_completion_issue(
+                original_question=original_question,
+                artifact=artifact,
+                tool_receipts=tool_receipts,
+            )
 
         from .agent_workflow_env import (
             AgentWorkflowEnv,
@@ -9296,6 +9704,33 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 )
         return None
 
+    def _completion_artifact(
+        self,
+        *,
+        action: StructuredAction,
+        artifact: str,
+        tool_receipts: list[dict[str, object]],
+    ) -> str:
+        original_question = self._semantic_evidence_retriever_question.get()
+        if (
+            original_question is not None
+            and self._semantic_evidence_retriever_protocol.get()
+            == QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL
+            and self._retrieval_tool_id == TRIVIAQA_QA_MEMORY_TOOL_ID
+        ):
+            projected, _ = self._qa_memory_completion_receipt_projection(
+                original_question=original_question,
+                selection_artifact=artifact,
+                tool_receipts=tool_receipts,
+            )
+            if projected is not None:
+                return projected
+        return super()._completion_artifact(
+            action=action,
+            artifact=artifact,
+            tool_receipts=tool_receipts,
+        )
+
     def _completion_error(
         self,
         *,
@@ -9303,6 +9738,32 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         artifact: str,
         tool_receipts: list[dict[str, object]],
     ) -> str | None:
+        evidence_retriever_question = (
+            self._semantic_evidence_retriever_question.get()
+        )
+        if (
+            evidence_retriever_question is not None
+            and self._semantic_evidence_retriever_protocol.get()
+            == QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL
+            and self._retrieval_tool_id == TRIVIAQA_QA_MEMORY_TOOL_ID
+        ):
+            projected, projection_issue = (
+                self._qa_memory_completion_receipt_projection(
+                    original_question=evidence_retriever_question,
+                    selection_artifact=artifact,
+                    tool_receipts=tool_receipts,
+                )
+            )
+            if projection_issue is not None or projected is None:
+                return (
+                    _QA_SEMANTIC_STRUCTURE_ERROR_PREFIX
+                    + " "
+                    + (
+                        projection_issue
+                        or "TriviaQA QA-memory receipt projection failed"
+                    )
+                )
+            artifact = projected
         semantic_protocol = self._semantic_reasoner_protocol.get()
         unified_factual = (
             semantic_protocol == QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL
@@ -9449,9 +9910,6 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     return retrieval_failure_code
                 return "qa_completion_requires_successful_read_evidence"
 
-        evidence_retriever_question = (
-            self._semantic_evidence_retriever_question.get()
-        )
         if evidence_retriever_question is not None:
             issue = self._evidence_retriever_completion_issue(
                 original_question=evidence_retriever_question,
@@ -9474,6 +9932,15 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     "labelled artifact",
                     "artifact must",
                     "field ",
+                    (
+                        "TriviaQA QA-memory Evidence Retriever "
+                        "question_scope"
+                    ),
+                    "TriviaQA QA-memory Evidence Retriever field ",
+                    (
+                        "TriviaQA QA-memory Evidence Retriever fields must "
+                        "all equal"
+                    ),
                     "Evidence Retriever question_scope",
                     "Evidence Retriever passage_id must be non-empty trimmed text",
                     "Evidence Retriever entity_identity must contain",
@@ -10294,6 +10761,10 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     original_question=qa_question_scope(request.problem),
                     enable_title_entity_topic_priority=(
                         self._unified_factual_protocol(request)
+                    ),
+                    require_entity_relation_compatibility=(
+                        self._retrieval_tool_id
+                        == TRIVIAQA_QA_MEMORY_TOOL_ID
                     ),
                     candidate_limit=(
                         1

@@ -50,8 +50,8 @@ def _semantic_graph() -> AgentGraph:
                 "reasoner-model",
                 "bind retrieved evidence to the question answer slot",
                 role_family="reasoner",
-                allowed_tools=("qa-retrieval",),
-                execution_mode="react",
+                allowed_tools=(),
+                execution_mode="reasoning",
                 artifact_type="semantic_candidate",
             ),
             AgentNode(
