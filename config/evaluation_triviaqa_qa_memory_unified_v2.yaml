@@ -1,24 +1,24 @@
 # TriviaQA fixed128 inference-only QA-memory condition on the existing
-# unified_architecture_v2 v63 Canvas/runtime.  The Flow-Director receives only
-# control-plane receipts.  Dynamic search/read is owned exclusively by a
-# Tool-capable worker Agent and all retrieved artifacts must follow explicit
-# AgentGraph relations into the verified-answer lineage.
+# unified_architecture_v2 Canvas/runtime. The Flow-Director receives only
+# control-plane receipts. Dynamic search/read is owned exclusively by an
+# upstream Tool-capable worker; its evidence artifact reaches Output through
+# an explicit AgentGraph relation. No role sequence or topology is required.
 
 schema_version: "flowsteer.agentgraph.config.v1"
 execution_timeout: 600.0
 experiment:
-  name: "triviaqa_qa_memory_unified_v2"
+  name: "triviaqa_qa_memory_free_topology_v3"
   phase: "triviaqa_evaluation"
   baseline_id: "triviaqa_round_01_stable_zero"
-  step_id: "unified_v2_v63_dynamic_train_qa_memory_worker_provenance_v2"
+  step_id: "unified_v2_v64_dynamic_train_qa_memory_worker_relation_v3"
   training_enabled: false
   seed: 20260826
-  condition_id: "triviaqa_qa_memory_unified_v2_worker_provenance_v2"
-  sampling_schedule_purpose: "triviaqa_fixed128_qa_memory_unified_v2"
-  catalog_order_namespace: "triviaqa_qa_memory_unified_v2"
+  condition_id: "triviaqa_qa_memory_free_topology_v3_worker_relation"
+  sampling_schedule_purpose: "triviaqa_fixed128_qa_memory_free_topology_v3"
+  catalog_order_namespace: "triviaqa_qa_memory_free_topology_v3"
   prompt_version: "agentgraph.director.qa-semantic-recovery.v6"
   tool_version: "skillflow.search-read+flowsteer.v63+triviaqa-train-qa-memory-bge.v3"
-  output_dir: "artifacts/triviaqa_qa_memory_unified_v2"
+  output_dir: "artifacts/triviaqa_qa_memory_free_topology_v3"
 
 data:
   catalog_path: "config/joint_qa_partitions_v2.yaml"
@@ -48,12 +48,12 @@ triviaqa_evaluation:
   direct_context_mode: "question_only"
   direct_reused_from: "reports/triviaqa_qa_memory_v1_baseline/direct_question_only_predictions.jsonl"
   legacy_deterministic_prefetch_enabled: false
-  agentgraph_protocol: "question_plus_worker_dynamic_train_qa_memory_verified_answer_lineage_v2"
+  agentgraph_protocol: "question_plus_worker_dynamic_train_qa_memory_free_topology_v3"
   protocol_equivalent_to_direct: false
 
 qa_tool_runtime:
   enabled: true
-  condition_id: "triviaqa_qa_memory_unified_v2_worker_provenance_v2"
+  condition_id: "triviaqa_qa_memory_free_topology_v3_worker_relation"
   mode: "model_driven_search_read"
   passage_source: "external_corpus"
   dataset_scope: ["triviaqa"]
@@ -66,17 +66,17 @@ qa_tool_runtime:
 
 storage:
   schema_version: "flowsteer.completion_benchmark.round.v1"
-  root: "artifacts/triviaqa_qa_memory_unified_v2/evidence"
-  selected_tasks_path: "artifacts/triviaqa_qa_memory_unified_v2/selected_tasks.jsonl"
-  direct_predictions_path: "artifacts/triviaqa_qa_memory_unified_v2/direct_question_only_predictions.jsonl"
-  trajectories_path: "artifacts/triviaqa_qa_memory_unified_v2/agentgraph_trajectories.jsonl"
-  failures_path: "artifacts/triviaqa_qa_memory_unified_v2/collection_failures.jsonl"
-  paired_results_path: "artifacts/triviaqa_qa_memory_unified_v2/paired_results.jsonl"
-  wrong_demos_path: "artifacts/triviaqa_qa_memory_unified_v2/wrong_demos.jsonl"
-  manifest_path: "artifacts/triviaqa_qa_memory_unified_v2/run_manifest.json"
-  preflight_receipt_path: "artifacts/triviaqa_qa_memory_unified_v2/preflight_receipt.json"
-  report_json_path: "reports/triviaqa_qa_memory_unified_v2/report.json"
-  report_markdown_path: "reports/triviaqa_qa_memory_unified_v2/report.md"
+  root: "artifacts/triviaqa_qa_memory_free_topology_v3/evidence"
+  selected_tasks_path: "artifacts/triviaqa_qa_memory_free_topology_v3/selected_tasks.jsonl"
+  direct_predictions_path: "artifacts/triviaqa_qa_memory_free_topology_v3/direct_question_only_predictions.jsonl"
+  trajectories_path: "artifacts/triviaqa_qa_memory_free_topology_v3/agentgraph_trajectories.jsonl"
+  failures_path: "artifacts/triviaqa_qa_memory_free_topology_v3/collection_failures.jsonl"
+  paired_results_path: "artifacts/triviaqa_qa_memory_free_topology_v3/paired_results.jsonl"
+  wrong_demos_path: "artifacts/triviaqa_qa_memory_free_topology_v3/wrong_demos.jsonl"
+  manifest_path: "artifacts/triviaqa_qa_memory_free_topology_v3/run_manifest.json"
+  preflight_receipt_path: "artifacts/triviaqa_qa_memory_free_topology_v3/preflight_receipt.json"
+  report_json_path: "reports/triviaqa_qa_memory_free_topology_v3/report.json"
+  report_markdown_path: "reports/triviaqa_qa_memory_free_topology_v3/report.md"
 
 director:
   base_model: "${QWEN35_9B_MODEL_PATH:-/ssd1/iclr/gpf/models/Qwen3.5-9B}"
@@ -84,7 +84,7 @@ director:
   backend: "sglang"
   api_base: "http://127.0.0.1:${FLOWSTEER_SUPERVISOR_PORT:-8015}/v1"
   served_model_name: "supervisor_theta"
-  behavior_policy_version: "qwen35-9b-base-triviaqa-qa-memory-unified-v2"
+  behavior_policy_version: "qwen35-9b-base-triviaqa-qa-memory-free-topology-v3"
   behavior_adapter_name: null
   behavior_adapter_checkpoint: null
   updated_policy_version: "unused-evaluation-only"
@@ -119,7 +119,11 @@ agent_graph:
   executor_selection: "director_catalog_choice"
   max_bidirectional_block_size: 2
   require_unique_output: true
-  require_format_agent: true
+  # Keep Format optional: it is one possible Output capability, not a
+  # required stage or a fixed Retriever -> Reasoner -> Verifier -> Formatter
+  # topology.  The FINISH gate requires only an upstream ReAct QA-memory
+  # worker artifact routed to Output through an explicit relation.
+  require_format_agent: false
   require_all_agents_reach_output: true
   director_feedback_mode: "control_plane"
   semantic_protocol_by_source:
@@ -161,7 +165,7 @@ grpo:
 policy_sync:
   enabled: false
   api_base: "http://127.0.0.1:${FLOWSTEER_SUPERVISOR_PORT:-8015}"
-  adapter_name_prefix: "theta_triviaqa_qa_memory_unified_v2_unused_"
+  adapter_name_prefix: "theta_triviaqa_qa_memory_free_topology_v3_unused_"
   request_timeout_seconds: 120
   max_retries: 0
   retry_backoff_seconds: 1

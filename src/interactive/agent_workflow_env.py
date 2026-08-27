@@ -785,6 +785,15 @@ class AgentWorkflowEnv:
                 for profile in registered
                 if profile == ("reasoning", ())
             )
+        if role == "output":
+            # Output is a terminal consumer.  A QA-memory Tool principal must
+            # be an upstream worker whose receipt-bearing artifact arrives via
+            # an explicit AgentGraph relation.
+            return tuple(
+                profile
+                for profile in registered
+                if profile == ("reasoning", ())
+            )
         if role == "evidence_retriever":
             return tuple(
                 profile
@@ -7351,6 +7360,40 @@ class AgentWorkflowEnv:
         )
 
     @staticmethod
+    def _successful_search_receipt(
+        receipt: Mapping[str, object],
+        required_tool_id: str,
+    ) -> bool:
+        """Recognize one completed local QA-memory search receipt.
+
+        This is the same Tool receipt boundary used by the QA-memory adapter:
+        an Agent must first issue a query and then read one returned memory.
+        It deliberately inspects only the executing worker's public receipt;
+        the Director never owns a Tool request or retrieval payload.
+        """
+
+        if (
+            receipt.get("tool_id") != required_tool_id
+            or receipt.get("error_type") is not None
+        ):
+            return False
+        request = receipt.get("request")
+        if not isinstance(request, Mapping) or request.get("action") != "search":
+            return False
+        arguments = request.get("arguments")
+        if (
+            not isinstance(arguments, Mapping)
+            or not isinstance(arguments.get("query"), str)
+            or not arguments["query"].strip()
+        ):
+            return False
+        result = receipt.get("result")
+        if not isinstance(result, Mapping) or result.get("completed") is not True:
+            return False
+        value = result.get("value", result)
+        return isinstance(value, Mapping) and value.get("operation") == "search"
+
+    @staticmethod
     def _successful_read_text(
         receipt: Mapping[str, object],
         required_tool_id: str,
@@ -7966,223 +8009,61 @@ class AgentWorkflowEnv:
         self,
         execution: AgentRuntimeResult,
     ) -> Optional[str]:
-        """Validate only the semantic capabilities selected by the Canvas."""
+        """Validate free QA topology at the worker Tool/route boundary.
+
+        The role-conditional protocol intentionally does not impose a
+        Retriever -> Reasoner -> Verifier -> Formatter spine.  FINISH requires
+        only one non-Output ReAct worker with a completed QA-memory search and
+        read, a non-empty evidence artifact, and an explicit directed path from
+        that worker into the selected Output Agent.  Any further reasoning,
+        verification, formatting, fan-out, or reciprocal exchange remains a
+        Director-selected Canvas capability rather than a terminal template.
+        """
 
         output_id = self._graph.output_agent_id
         if output_id is None or not self._graph.has_node(output_id):
             return "Evidence-grounded QA has no selected Output Agent"
-        routed_ids = (
-            *self._directed_ancestor_ids(self._graph, output_id),
-            output_id,
-        )
-        if not self._successful_read_texts_for_agents(execution, routed_ids):
-            return (
-                "The routed Output path has no successful qa-retrieval read "
-                "receipt containing a non-empty passage"
-            )
-        coverage_failure_agent_ids = tuple(
-            agent_id
-            for agent_id in routed_ids
-            if self._reports_knowledge_base_coverage_failure(
-                execution.outputs.get(agent_id)
-            )
-            or self._reports_knowledge_base_coverage_failure(
-                execution.output_metadata.get(agent_id)
-            )
-        )
-        if coverage_failure_agent_ids:
-            return (
-                "Routed QA lineage reported knowledge_base_coverage_failure "
-                f"from Agents {list(coverage_failure_agent_ids)!r}; preserve "
-                "valid receipts and repair or augment retrieval before FINISH"
-            )
+        if self.required_evidence_tool_id is None:
+            return "Evidence-grounded QA has no configured retrieval Tool"
 
-        routed_candidates: dict[str, str] = {}
-        for agent_id in routed_ids:
-            node = self._graph.get_node(agent_id)
-            role = (node.role_family or "").casefold()
-            artifact = execution.outputs.get(agent_id, "")
-            if role == "reasoner" and agent_id != output_id:
-                candidate, issue = self._reasoner_candidate_for_current_dataset(
-                    artifact
-                )
-                if issue is not None or candidate is None:
-                    return (
-                        f"Reasoner {agent_id!r} semantic artifact is invalid: "
-                        f"{issue}"
-                    )
-                evidence_owner_ids = (
-                    *self._directed_ancestor_ids(self._graph, agent_id),
-                    agent_id,
-                )
-                owner_texts = self._successful_read_texts_for_agents(
-                    execution,
-                    evidence_owner_ids,
-                )
-                if not owner_texts:
-                    return (
-                        f"Reasoner {agent_id!r} has no routed successful "
-                        "qa-retrieval read receipt"
-                    )
-                provenance_issue = self._reasoner_evidence_provenance_issue(
-                    artifact,
-                    owner_texts,
-                    require_answer_binding=True,
-                    original_question=hotpotqa_question_scope(self._problem),
-                )
-                if provenance_issue is not None:
-                    return (
-                        f"Reasoner {agent_id!r} evidence provenance is invalid: "
-                        f"{provenance_issue}"
-                    )
-                routed_candidates[agent_id] = candidate
+        routed_worker_ids = self._directed_ancestor_ids(self._graph, output_id)
+        for worker_id in routed_worker_ids:
+            worker = self._graph.get_node(worker_id)
+            if (
+                worker.execution_mode.value != "react"
+                or self.required_evidence_tool_id not in worker.allowed_tools
+            ):
                 continue
-
-            if role == "verifier" and agent_id != output_id:
-                candidate, issue = self._verifier_candidate(artifact)
-                if issue is not None or candidate is None:
-                    return (
-                        f"Verifier {agent_id!r} semantic artifact is invalid: "
-                        f"{issue}"
-                    )
-                ancestor_ids = self._directed_ancestor_ids(
-                    self._graph,
-                    agent_id,
-                )
-                upstream_candidates = tuple(
-                    upstream_candidate
-                    for upstream_id in ancestor_ids
-                    for upstream_candidate, upstream_issue in (
-                        self._semantic_candidate_from_artifact(
-                            execution.outputs.get(upstream_id, "")
-                        ),
-                    )
-                    if upstream_issue is None and upstream_candidate is not None
-                )
-                producer_candidates = tuple(
-                    upstream_candidate
-                    for upstream_id in ancestor_ids
-                    if (
-                        self._graph.get_node(upstream_id).role_family or ""
-                    ).casefold()
-                    != "verifier"
-                    for upstream_candidate, upstream_issue in (
-                        self._semantic_candidate_from_artifact(
-                            execution.outputs.get(upstream_id, "")
-                        ),
-                    )
-                    if upstream_issue is None and upstream_candidate is not None
-                )
-                if not producer_candidates:
-                    return (
-                        f"Verifier {agent_id!r} has no routed semantic candidate "
-                        "from a non-Verifier producer"
-                    )
-                if upstream_candidates and any(
-                    item != candidate for item in upstream_candidates
-                ):
-                    return (
-                        "Verifier changed a routed semantic candidate_answer: "
-                        f"verifier={candidate!r}, "
-                        f"upstream_candidates={list(upstream_candidates)!r}"
-                    )
-                if not self._successful_read_texts_for_agents(
-                    execution,
-                    (*ancestor_ids, agent_id),
-                ):
-                    return (
-                        f"Verifier {agent_id!r} has no routed successful "
-                        "qa-retrieval read receipt"
-                    )
-                routed_candidates[agent_id] = candidate
+            artifact = execution.outputs.get(worker_id)
+            if not isinstance(artifact, str) or not artifact.strip():
                 continue
-
-            if role not in {"evidence_retriever", "format", "output"}:
-                candidate, issue = self._semantic_candidate_from_artifact(
-                    artifact
+            metadata = execution.output_metadata.get(worker_id)
+            if not isinstance(metadata, Mapping):
+                continue
+            receipts = metadata.get("tool_receipts", ())
+            if not isinstance(receipts, (list, tuple)):
+                continue
+            public_receipts = tuple(
+                receipt for receipt in receipts if isinstance(receipt, Mapping)
+            )
+            if any(
+                self._successful_search_receipt(
+                    receipt, self.required_evidence_tool_id
                 )
-                if issue is not None:
-                    return (
-                        f"Semantic producer {agent_id!r} artifact is invalid: "
-                        f"{issue}"
-                    )
-                if candidate is not None:
-                    evidence_owner_ids = (
-                        *self._directed_ancestor_ids(self._graph, agent_id),
-                        agent_id,
-                    )
-                    if not self._successful_read_texts_for_agents(
-                        execution,
-                        evidence_owner_ids,
-                    ):
-                        return (
-                            f"Semantic producer {agent_id!r} has no routed "
-                            "successful qa-retrieval read receipt"
-                        )
-                    routed_candidates[agent_id] = candidate
-
-        output_role = (
-            self._graph.get_node(output_id).role_family or ""
-        ).casefold()
-        if output_role != "format":
-            candidates = tuple(routed_candidates.values())
-            if not candidates:
+                for receipt in public_receipts
+            ) and any(
+                self._successful_read_receipt(
+                    receipt, self.required_evidence_tool_id
+                )
+                for receipt in public_receipts
+            ):
                 return None
-            candidate = candidates[0]
-            if any(item != candidate for item in candidates):
-                return (
-                    "Generic Output Agent received disagreeing routed semantic "
-                    f"candidates: {list(dict.fromkeys(candidates))!r}"
-                )
-            wrapper = re.fullmatch(
-                r"\s*<answer>(.*?)</answer>\s*",
-                execution.final_answer or "",
-                flags=re.DOTALL,
-            )
-            if wrapper is None or wrapper.group(1) != candidate:
-                output_value = None if wrapper is None else wrapper.group(1)
-                return (
-                    "Generic Output Agent must preserve the routed semantic "
-                    "candidate character-for-character: "
-                    f"candidate_answer={candidate!r}, "
-                    f"wrapper_content={output_value!r}"
-                )
-            return None
 
-        direct_candidates: list[str] = []
-        for predecessor_id in self._graph.directed_predecessors(output_id):
-            candidate, issue = self._semantic_candidate_from_artifact(
-                execution.outputs.get(predecessor_id)
-            )
-            if issue is not None:
-                return issue
-            if candidate is not None:
-                direct_candidates.append(candidate)
-        if not direct_candidates:
-            return (
-                "Format Agent has no routed upstream artifact with one explicit "
-                "semantic candidate"
-            )
-        candidate = direct_candidates[0]
-        if any(item != candidate for item in direct_candidates):
-            return (
-                "Format Agent received disagreeing routed semantic candidates: "
-                f"{list(dict.fromkeys(direct_candidates))!r}"
-            )
-        wrapper = re.fullmatch(
-            r"\s*<answer>(.*?)</answer>\s*",
-            execution.final_answer or "",
-            flags=re.DOTALL,
+        return (
+            "The selected Output Agent has no explicitly routed upstream ReAct "
+            "worker artifact with completed "
+            f"{self.required_evidence_tool_id!r} search and read receipts"
         )
-        if wrapper is None or wrapper.group(1) != candidate:
-            formatter_value = None if wrapper is None else wrapper.group(1)
-            return (
-                "Format Agent must only wrap the routed semantic candidate "
-                "character-for-character: "
-                f"candidate_answer={candidate!r}, "
-                f"wrapper_content={formatter_value!r}"
-            )
-        return None
 
     def _semantic_protocol_issue(
         self,

@@ -136,6 +136,25 @@ class _TriviaSemanticGateway:
                             "tool_id": "qa-retrieval",
                             "tool_version": "test-v1",
                             "request": {
+                                "action": "search",
+                                "arguments": {
+                                    "query": "capital of France",
+                                    "top_k": 1,
+                                },
+                            },
+                            "result": {
+                                "value": {
+                                    "operation": "search",
+                                    "hits": [{"passage_id": "p1"}],
+                                },
+                                "completed": True,
+                            },
+                            "error_type": None,
+                        },
+                        {
+                            "tool_id": "qa-retrieval",
+                            "tool_version": "test-v1",
+                            "request": {
                                 "action": "read",
                                 "arguments": {"passage_id": "p1"},
                             },
@@ -280,23 +299,65 @@ def _env(
 
 
 class SharedQASemanticLineageTests(unittest.IsolatedAsyncioTestCase):
-    async def test_role_conditional_generic_output_finishes_without_named_spine(
+    async def test_role_conditional_requires_upstream_retrieval_worker(
         self,
     ) -> None:
         registry = _registry()
         gateway = _TriviaSemanticGateway()
-        graph = AgentGraph(
+        output_only_graph = AgentGraph(
             [
                 AgentNode(
                     "output",
                     "reader-model",
                     "answer from successful public retrieval evidence",
                     role_family="output",
-                    allowed_tools=("qa-retrieval",),
-                    execution_mode="react",
                     artifact_type="answer_wrapper",
                 )
             ],
+            output_agent_id="output",
+        )
+        output_only_env = AgentWorkflowEnv(
+            registry,
+            runtime=_runtime(registry, gateway, dataset_id="triviaqa"),
+            graph=output_only_graph,
+            problem="What is the capital of France?",
+            execute_on_edit=True,
+            require_exact_answer_tag=True,
+            require_format_agent=False,
+            semantic_protocol="qa_verified_answer_lineage_v2",
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id="qa-retrieval",
+        )
+
+        executed_output_only = await output_only_env.step(
+            '{"action":"modify_agent","agent_id":"output",'
+            '"contract":"return the short answer grounded in a successful read"}'
+        )
+        self.assertTrue(executed_output_only.accepted)
+        output_only_admission = output_only_env.finish_admissibility()
+        self.assertFalse(output_only_admission["admissible"])
+        self.assertIn("upstream ReAct worker", output_only_admission["reason"])
+
+        graph = AgentGraph(
+            [
+                AgentNode(
+                    "reader",
+                    "reader-model",
+                    "retrieve public evidence",
+                    role_family="evidence_retriever",
+                    allowed_tools=("qa-retrieval",),
+                    execution_mode="react",
+                    artifact_type="retrieval_evidence",
+                ),
+                AgentNode(
+                    "output",
+                    "reader-model",
+                    "answer from routed evidence",
+                    role_family="output",
+                    artifact_type="answer_wrapper",
+                ),
+            ],
+            [AgentRelation("reader", "output", True, False)],
             output_agent_id="output",
         )
         env = AgentWorkflowEnv(
@@ -311,12 +372,10 @@ class SharedQASemanticLineageTests(unittest.IsolatedAsyncioTestCase):
             recovery_policy="preserve_diagnose_repair_augment",
             required_evidence_tool_id="qa-retrieval",
         )
-
         executed = await env.step(
-            '{"action":"modify_agent","agent_id":"output",'
-            '"contract":"return the short answer grounded in a successful read"}'
+            '{"action":"modify_agent","agent_id":"reader",'
+            '"contract":"retrieve and preserve public evidence"}'
         )
-
         self.assertTrue(executed.accepted)
         self.assertEqual((), env._missing_semantic_role_families())
         self.assertEqual((), env._required_semantic_edges())

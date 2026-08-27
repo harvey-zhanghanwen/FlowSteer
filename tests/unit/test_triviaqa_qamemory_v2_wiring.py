@@ -50,6 +50,7 @@ def test_v2_config_is_inference_only_and_control_plane_isolated() -> None:
     assert bounded["legacy_deterministic_prefetch_enabled"] is False
     assert graph["required_evidence_tool_id"] == QA_MEMORY_TOOL_ID
     assert graph["director_feedback_mode"] == "control_plane"
+    assert graph["require_format_agent"] is False
     assert graph["semantic_protocol_by_source"] == {
         "triviaqa": "qa_verified_answer_lineage_v2"
     }
