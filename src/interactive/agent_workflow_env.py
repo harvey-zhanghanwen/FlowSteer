@@ -1443,6 +1443,20 @@ class AgentWorkflowEnv:
                 metadata, Mapping
             ):
                 continue
+            node = self._graph.get_node(agent_id)
+            execution_profile = (
+                node.execution_mode.value,
+                tuple(node.allowed_tools),
+            )
+            if (
+                tool_id not in node.allowed_tools
+                or execution_profile not in self.registered_execution_profiles()
+            ):
+                # Tool receipts are propagated through downstream artifact
+                # provenance.  Capability ownership remains a property of the
+                # executing Agent, so a reasoning consumer carrying lineage
+                # receipts is not itself a successful Tool worker.
+                continue
             receipts = metadata.get("tool_receipts", ())
             if not isinstance(receipts, (list, tuple)):
                 continue

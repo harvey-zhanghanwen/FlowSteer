@@ -569,7 +569,7 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             runtime=_ProfileRuntime(registry),  # type: ignore[arg-type]
             problem="question",
             graph=graph,
-            execute_on_edit=True,
+            execute_on_edit=False,
             required_evidence_tool_id="qa-retrieval",
             require_evidence_relation=True,
         )
@@ -583,10 +583,23 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             block_completion_order=(("worker",), ("output",)),
             output_metadata={
                 "worker": {"tool_receipts": (receipt, read_receipt)},
-                "output": {},
+                "output": {
+                    # AgentRuntime propagates Tool receipt lineage to every
+                    # downstream artifact.  This does not transfer Tool
+                    # capability ownership to the reasoning consumer.
+                    "tool_receipts": (receipt, read_receipt),
+                    "input_artifact_provenance": (
+                        {
+                            "source_agent_id": "worker",
+                            "target_agent_id": "output",
+                            "tool_receipts": (receipt, read_receipt),
+                        },
+                    ),
+                },
             },
         )
         env._progressive_execution_revision = graph.revision
+        self.assertEqual(("worker",), env._current_successful_evidence_agent_ids())
 
         output_tool = await env.step(
             '{"action":"modify_agent","agent_id":"output",'
@@ -604,6 +617,15 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(incoming.accepted)
         self.assertIn("cannot receive a new upstream edge", incoming.feedback)
+
+        downstream_fan_in = await env.step(
+            '{"action":"add_subgraph","agents":[{"agent_id":"helper",'
+            '"model_id":"balanced","contract":"independent public evidence",'
+            '"execution_mode":"reasoning","allowed_tools":[]}],'
+            '"relations":[{"source_id":"helper","target_id":"output",'
+            '"source_to_target":true,"target_to_source":false}]}'
+        )
+        self.assertTrue(downstream_fan_in.accepted)
 
         empty = AgentWorkflowEnv(
             registry,
