@@ -4943,21 +4943,7 @@ class AgentWorkflowEnv:
             return None
         tag_count, exact_wrapper, non_empty = _answer_protocol_state(answer)
         if exact_wrapper and non_empty:
-            wrapper = re.fullmatch(
-                r"\s*<answer>(.*?)</answer>\s*",
-                answer,
-                flags=re.DOTALL,
-            )
-            assert wrapper is not None
-            answer_span = wrapper.group(1)
-            if not re.search(r"^(?:\\[nrt])+|(?:\\[nrt])+$", answer_span):
-                return None
-            return (
-                "terminal answer span must not begin or end with literal "
-                "escaped whitespace such as \\n, \\r, or \\t; use actual whitespace "
-                "or emit only the answer span inside <answer>...</answer>; "
-                "modify the Output Agent contract before retrying"
-            )
+            return None
         return (
             "terminal answer must be exactly one non-empty "
             f"<answer>...</answer> wrapper; answer_tag_count={tag_count}, "

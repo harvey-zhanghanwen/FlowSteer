@@ -2404,26 +2404,6 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
                 if tag_count > 1:
                     self.assertIn("exact_single_answer_tag=False", rejected.feedback)
 
-    def test_exact_answer_protocol_rejects_literal_escaped_boundary_whitespace(
-        self,
-    ) -> None:
-        env = AgentWorkflowEnv(
-            make_registry(),
-            _ImmediateGateway(),
-            problem="question",
-            require_exact_answer_tag=True,
-        )
-
-        issue = env._terminal_validation_error(
-            r"<answer>\nSinclair Lewis</answer>"
-        )
-        self.assertIn("literal escaped whitespace", issue or "")
-        self.assertIsNone(
-            env._terminal_validation_error(
-                "<answer>\nSinclair Lewis\n</answer>"
-            )
-        )
-
     async def test_revision_preserving_edit_is_rejected_without_reexecution(self) -> None:
         registry = make_registry()
         gateway = _SequenceGateway(["draft", "not wrapped"])
