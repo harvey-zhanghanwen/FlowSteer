@@ -1,0 +1,29 @@
+{
+  "corpus_version": "flowsteer.hotpotqa.train_qa_memory.v1",
+  "cycled_record_count": 0,
+  "document_template": "Question: {question}\nAnswer: {answer_statement}",
+  "embedding_dimension": 768,
+  "embedding_model": "BAAI/bge-base-en-v1.5",
+  "embedding_model_path": "/ssd1/iclr/.private/skillflow-resources/bge-base-en-v1.5",
+  "embeddings_path": "embeddings.npy",
+  "frozen_top_k": 2,
+  "heldout_validation_count": 128,
+  "index_id": "hotpotqa-train-qa-memory-d768-n512-topk2-v1",
+  "memories_path": "memories.jsonl",
+  "normalized": true,
+  "paraphrase_count": 512,
+  "paraphrase_provenances": [
+    "local-qwen3.5-9b-generate-and-verify"
+  ],
+  "paraphrase_versions": [
+    "hotpotqa-train-qa-paraphrase-v1"
+  ],
+  "schema_version": "flowsteer.hotpotqa.qa_memory_index.v1",
+  "similarity": "cosine",
+  "source": "HotpotQA aligned frozen train",
+  "source_split": "train",
+  "source_train_path": "/ssd1/iclr/1/.tmp/FlowSteer-hotpotqa-qa-memory-v11/artifacts/hotpotqa_qa_memory_source_freeze_v2/aligned/train.jsonl",
+  "train_record_count": 512,
+  "unique_source_count": 512,
+  "validation_overlap_count": 0
+}

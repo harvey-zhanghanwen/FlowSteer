@@ -1,0 +1,15 @@
+# Build-only configuration for the isolated HotpotQA train-QA-memory source.
+# It preserves official source answers exactly, including any upstream source
+# annotation anomalies, and starts no model service or evaluation process.
+qa_embedding_retrieval:
+  corpus_kind: "train_qa_memory"
+  train_tasks: "artifacts/hotpotqa_qa_memory_source_freeze_v2/aligned/train.jsonl"
+  train_sample_count: 512
+  frozen_validation_tasks: "artifacts/hotpotqa_qa_memory_source_freeze_v2/aligned/validation.jsonl"
+  validation_sample_count: 128
+  paraphrase_materialization_path: "artifacts/hotpotqa_qa_memory_v1/paraphrases.jsonl"
+  index_dir: "artifacts/hotpotqa_qa_memory_source_freeze_v2/index"
+  embedding_model: "/ssd1/iclr/.private/skillflow-resources/bge-base-en-v1.5"
+  embedding_model_id: "BAAI/bge-base-en-v1.5"
+  embedding_device: "cpu"
+  search_top_k: 2

@@ -30,6 +30,7 @@ sources:
   hotpotqa:
     enabled: true
     display_name: "HotpotQA"
+    canonical_source_url: "https://curtis.ml.cmu.edu/datasets/hotpot/hotpot_train_v1.1.json"
     path: "${FLOWSTEER_DATASETS_ROOT:-/home/test/datasets}/HotpotQA_HF/distractor"
     files:
       train: "train-*.parquet"

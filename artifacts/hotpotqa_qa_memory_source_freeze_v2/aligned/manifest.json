@@ -1,0 +1,42 @@
+{
+  "alignment_recipe": {
+    "cycle_training_only": true,
+    "heldout_count_per_dataset": 128,
+    "heldout_split": "validation",
+    "selection": "sequential",
+    "train_count_per_dataset": 512
+  },
+  "catalog": "/ssd1/iclr/1/.tmp/FlowSteer-hotpotqa-qa-memory-v11/config/datasets_agentgraph.yaml",
+  "counts_by_source": {
+    "HotpotQA": {
+      "test": 0,
+      "train": 512,
+      "validation": 128
+    }
+  },
+  "counts_by_split": {
+    "test": 0,
+    "train": 512,
+    "validation": 128
+  },
+  "created_at": "2026-08-27T20:19:50.248907+00:00",
+  "files": {
+    "test": "test.jsonl",
+    "train": "train.jsonl",
+    "validation": "validation.jsonl"
+  },
+  "schema_version": "flowsteer.agentgraph.datasets.v1",
+  "sources": {
+    "hotpotqa": {
+      "canonical_source_url": "https://curtis.ml.cmu.edu/datasets/hotpot/hotpot_train_v1.1.json",
+      "cycled_train_records": 0,
+      "heldout_count": 128,
+      "heldout_split": "validation",
+      "source_answer_annotation_anomalies": 1,
+      "train_count": 512,
+      "unique_train_candidates": 512
+    }
+  },
+  "task_schema_version": "flowsteer.agentgraph.task.v1",
+  "training_started": false
+}

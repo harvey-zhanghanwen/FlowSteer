@@ -14,6 +14,10 @@ TASK_SCHEMA_VERSION = _MODULE.TASK_SCHEMA_VERSION
 _compat_record = _MODULE._compat_record
 _conversation_prompt = _MODULE._conversation_prompt
 _hotpot_records = _MODULE._hotpot_records
+_annotate_hotpotqa_training_source_anomaly = (
+    _MODULE._annotate_hotpotqa_training_source_anomaly
+)
+_uniform_sample = _MODULE._uniform_sample
 
 
 def test_compat_record_exposes_both_upstream_field_sets():
@@ -74,3 +78,66 @@ def test_hotpot_alignment_keeps_evidence_after_300_characters(monkeypatch, tmp_p
 
     assert tail in record["question"]
     assert tail in record["context"][0]
+
+
+def _malformed_binary_hotpot_record(task_id: str):
+    return _compat_record(
+        dataset_key="hotpotqa",
+        source="HotpotQA",
+        task_id=task_id,
+        question=(
+            "Based on the following passages, answer the question.\n\n"
+            "[[Alpha] Alpha is a record producer.]\n\n"
+            "[[Beta] Beta is a professional wrestler.]\n\n"
+            "Question: Are Alpha and Beta both record producers?"
+        ),
+        ground_truth="Beta is a professional wrestler",
+        split="train",
+        task_type="multi_hop_qa",
+        metric="token_f1",
+        context=(
+            "[Alpha] Alpha is a record producer.",
+            "[Beta] Beta is a professional wrestler.",
+        ),
+        extra={"type": "comparison", "level": "hard"},
+        evaluator_payload={
+            "supporting_facts": {"title": ["Alpha", "Beta"], "sent_id": [0, 0]}
+        },
+    )
+
+
+def test_hotpot_training_binary_source_anomaly_is_generic_and_does_not_relabel():
+    annotated = _annotate_hotpotqa_training_source_anomaly(
+        _malformed_binary_hotpot_record("hotpotqa:source-defect")
+    )
+
+    assert annotated["ground_truth"] == "Beta is a professional wrestler"
+    assert annotated["answer"] == "Beta is a professional wrestler"
+    annotation = annotated["metadata"]["source_answer_annotation"]
+    assert annotation["status"] == "official_source_annotation_anomaly"
+    assert (
+        annotation["rule"]
+        == "hotpotqa.training.binary_both_nonbinary_source_answer.v1"
+    )
+
+
+def test_hotpot_source_alignment_transform_never_changes_heldout_record():
+    heldout_source = _malformed_binary_hotpot_record("hotpotqa:heldout")
+    training_source = _malformed_binary_hotpot_record("hotpotqa:train")
+
+    heldout, train, unique_count = _uniform_sample(
+        [heldout_source, training_source],
+        heldout_split="validation",
+        heldout_count=1,
+        train_count=1,
+        train_transform=_annotate_hotpotqa_training_source_anomaly,
+    )
+
+    assert unique_count == 1
+    assert heldout[0]["ground_truth"] == "Beta is a professional wrestler"
+    assert "source_answer_annotation" not in heldout[0]["metadata"]
+    assert train[0]["ground_truth"] == "Beta is a professional wrestler"
+    assert (
+        train[0]["metadata"]["source_answer_annotation"]["status"]
+        == "official_source_annotation_anomaly"
+    )

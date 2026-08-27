@@ -138,6 +138,7 @@ Round-01 best profile.
 | `select_hotpotqa_qa_memory_profile.py` | Existing project development-profile selection boundary | Necessary compatibility adapter that freezes BGE-base-en-v1.5, cosine/L2 normalization, `top_k=2`, and the Tool budget using only training/architecture-development tasks.  Validation answers are never used for profile selection. |
 | `evaluate_hotpotqa_round.py` durable failure collection | Existing FlowSteer-style atomic per-record checkpoint/recovery boundary | Minimal reliability fix: a collection failure is checkpointed when observed, so a restart does not repeat a failed attempt merely because the final aggregate write has not run. |
 | `scientific_sampling.py`, `openai_gateway.py`, task-coordinate generation seeds | SkillFlow `runtime/openai_provider.py`, `rollout/types.py`, and its per-turn sampling semantics | Direct port of request-level generation-seed handling for the local Qwen3.5-9B deployment.  This affects sampling reproducibility, not the evaluator or answer recovery. |
+| `prepare_agentgraph_datasets.py::{_uniform_sample,_annotate_hotpotqa_training_source_anomaly}`; `config/hotpotqa_qa_memory_source_freeze_v2.yaml` | Existing project dataset adapter and QA-memory fail-closed join | Necessary source-freeze adaptation. The shared multi-dataset `train.jsonl` is replaced by an isolated HotpotQA freeze built through the same `first 128 held-out, next 512 train, cycle train only` adapter. A narrow training-only, task-ID-independent check records malformed binary-comparison answer shapes but preserves the official source answer exactly. The already tracked model-verified question/answer paraphrases are reused without another model call; validation fields never enter the index. |
 
 The formal v7 receipt demonstrates the intended control/data-plane separation:
 `director_tool_calls=0`, `retrieval_tool_calls_by_worker=1764`, and
@@ -147,3 +148,17 @@ EM 4.69 / F1 6.40, against paired local Direct EM 72.66 / F1 81.75 and the
 saved Round-01 AgentGraph rescore EM 75.00 / F1 83.95.  v7 is preserved as
 reproducible regression evidence only and must not replace
 `hotpotqa_round_01_stable_zero` as the best profile or default next run.
+
+The source-alignment v2 investigation found no cross-record indexing defect in
+the adapter: all frozen held-out and training IDs followed the raw parquet order
+and each aligned question/answer pair came from the same row.  The observed
+`Are George Avakian and Bobby Managoff both record producers?` mismatch already
+exists in both the upstream local parquet/Arrow row and the Hugging Face
+`hotpotqa/hotpot_qa` distractor training stream; its answer field contains a
+supporting-sentence prefix instead of a binary label.  Source-freeze v2 does
+not add an ID override, infer a replacement answer, or consult held-out
+answers.  It preserves that official annotation and records one training-only
+source anomaly in the aligned manifest.  A future formal run must use a
+separately versioned evaluation condition that points to the isolated freeze;
+the previously recorded metrics remain historical results of their original
+source condition.

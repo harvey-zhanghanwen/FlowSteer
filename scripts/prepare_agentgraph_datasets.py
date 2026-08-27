@@ -26,7 +26,7 @@ import os
 from pathlib import Path
 import re
 import tempfile
-from typing import Any, Dict, Iterable, Iterator, Mapping, Sequence
+from typing import Any, Callable, Dict, Iterable, Iterator, Mapping, Sequence
 
 import pandas as pd
 import yaml
@@ -35,6 +35,15 @@ import yaml
 TASK_SCHEMA_VERSION = "flowsteer.agentgraph.task.v1"
 CATALOG_SCHEMA_VERSION = "flowsteer.agentgraph.datasets.v1"
 SPLITS = ("train", "validation", "test")
+
+_HOTPOTQA_BINARY_BOTH_QUESTION = re.compile(
+    r"^(?:are|were)\s+.+\s+and\s+.+\s+both\s+(?P<predicate>.+?)\?\s*$",
+    flags=re.IGNORECASE,
+)
+_HOTPOTQA_BINARY_ANSWERS = frozenset({"yes", "no"})
+_HOTPOTQA_SOURCE_ANOMALY_RULE = (
+    "hotpotqa.training.binary_both_nonbinary_source_answer.v1"
+)
 
 
 def _expand_env_defaults(value: str) -> str:
@@ -251,11 +260,69 @@ def _hotpot_records(config: Mapping[str, Any]) -> Iterator[dict[str, Any]]:
                 task_type=str(config["task_type"]),
                 metric=str(config["metric"]),
                 context=passages[:10],
-                extra={"type": row.get("type", ""), "level": row.get("level", "")},
+                extra={
+                    "type": row.get("type", ""),
+                    "level": row.get("level", ""),
+                    "native_source_record_id": str(row["id"]),
+                    "canonical_source_url": str(
+                        config.get("canonical_source_url", "")
+                    ),
+                },
                 evaluator_payload={
                     "supporting_facts": row.get("supporting_facts", {}),
                 },
             )
+
+
+def _annotate_hotpotqa_training_source_anomaly(
+    record: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Annotate a narrow upstream label anomaly without rewriting the answer.
+
+    HotpotQA contains at least one binary ``Are A and B both P?`` training
+    record whose ``answer`` is a supporting-sentence prefix instead of the
+    expected binary-label shape.  The same value is present in the official
+    Hugging Face source, so this adapter must not infer a replacement label.
+    It records the anomaly only on the training copy, never consults held-out
+    data, never keys on a task ID, and always preserves the upstream answer.
+    """
+
+    result = copy.deepcopy(dict(record))
+    question = str(result.get("question", ""))
+    if "\n\nQuestion:" in question:
+        question = question.rsplit("\n\nQuestion:", 1)[1].strip()
+    match = _HOTPOTQA_BINARY_BOTH_QUESTION.fullmatch(question)
+    answer = str(result.get("ground_truth", "")).strip()
+    if match is None or answer.casefold() in _HOTPOTQA_BINARY_ANSWERS:
+        return result
+
+    metadata = result.get("metadata")
+    if not isinstance(metadata, Mapping):
+        return result
+    evaluator_payload = metadata.get("evaluator_payload")
+    if not isinstance(evaluator_payload, Mapping):
+        return result
+    supporting = evaluator_payload.get("supporting_facts")
+    if not isinstance(supporting, Mapping):
+        return result
+    titles = [str(item).strip() for item in _as_list(supporting.get("title"))]
+    titles = list(dict.fromkeys(item for item in titles if item))
+    if len(titles) != 2:
+        return result
+
+    annotation = {
+        "status": "official_source_annotation_anomaly",
+        "rule": _HOTPOTQA_SOURCE_ANOMALY_RULE,
+        "official_source_answer_preserved": answer,
+        "supporting_titles": titles,
+    }
+    annotated_metadata = dict(metadata)
+    annotated_metadata["source_answer_annotation"] = annotation
+    result["metadata"] = annotated_metadata
+    extra = dict(result.get("extra", {}))
+    extra["source_answer_annotation"] = annotation
+    result["extra"] = extra
+    return result
 
 
 def _trivia_records(config: Mapping[str, Any]) -> Iterator[dict[str, Any]]:
@@ -595,6 +662,7 @@ def _uniform_sample(
     heldout_split: str,
     heldout_count: int,
     train_count: int,
+    train_transform: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int]:
     """Apply the user-specified held-out-first sequential sampling rule."""
 
@@ -629,14 +697,20 @@ def _uniform_sample(
         _retag_record(item, split=heldout_split, selection_index=index)
         for index, item in enumerate(heldout_base)
     ]
+    transformed_train_base = [
+        train_transform(item) if train_transform is not None else item
+        for item in train_base
+    ]
     train = [
         _retag_record(item, split="train", selection_index=index)
-        for index, item in enumerate(train_base)
+        for index, item in enumerate(transformed_train_base)
     ]
     unique_train_count = len(train)
     cycle_index = 1
     while len(train) < train_count:
-        source = train_base[(len(train) - unique_train_count) % unique_train_count]
+        source = transformed_train_base[
+            (len(train) - unique_train_count) % unique_train_count
+        ]
         train.append(
             _retag_record(
                 source,
@@ -660,14 +734,23 @@ CONVERTERS = {
 }
 
 
-def prepare(catalog_path: Path, *, selected: set[str] | None = None) -> Path:
+def prepare(
+    catalog_path: Path,
+    *,
+    selected: set[str] | None = None,
+    output_dir_override: Path | None = None,
+) -> Path:
     repo_root = catalog_path.resolve().parent.parent
     with catalog_path.open("r", encoding="utf-8") as handle:
         catalog = yaml.safe_load(handle)
     if catalog.get("schema_version") != CATALOG_SCHEMA_VERSION:
         raise ValueError("unsupported dataset catalog schema")
 
-    output_dir = _path(str(catalog["aligned_dir"]), base=repo_root)
+    output_dir = (
+        output_dir_override.expanduser().resolve()
+        if output_dir_override is not None
+        else _path(str(catalog["aligned_dir"]), base=repo_root)
+    )
     writers = SplitWriters(output_dir)
     recipe = catalog.get("alignment_recipe", {})
     heldout_split = str(recipe.get("heldout_split", "validation"))
@@ -696,6 +779,11 @@ def prepare(catalog_path: Path, *, selected: set[str] | None = None) -> Path:
             heldout_split=heldout_split,
             heldout_count=heldout_count,
             train_count=train_count,
+            train_transform=(
+                _annotate_hotpotqa_training_source_anomaly
+                if dataset_key == "hotpotqa"
+                else None
+            ),
         )
         for record in [*heldout, *train]:
             writers.write(record)
@@ -705,7 +793,23 @@ def prepare(catalog_path: Path, *, selected: set[str] | None = None) -> Path:
             "train_count": len(train),
             "unique_train_candidates": unique_train_count,
             "cycled_train_records": len(train) - unique_train_count,
+            "source_answer_annotation_anomalies": len(
+                {
+                    str(record["metadata"]["sampling"]["base_task_id"])
+                    for record in train
+                    if isinstance(record.get("metadata"), Mapping)
+                    and isinstance(
+                        record["metadata"].get("source_answer_annotation"), Mapping
+                    )
+                    and record["metadata"]["source_answer_annotation"].get("status")
+                    == "official_source_annotation_anomaly"
+                }
+            ),
         }
+        if config.get("canonical_source_url"):
+            source_status[dataset_key]["canonical_source_url"] = str(
+                config["canonical_source_url"]
+            )
         print(f"aligned {dataset_key}: {source_status[dataset_key]}", flush=True)
 
     counts_by_split = {
@@ -756,6 +860,13 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="optional comma-separated converter keys",
     )
+    parser.add_argument(
+        "--output-dir",
+        help=(
+            "optional isolated output directory; keeps a dataset-specific "
+            "freeze from depending on another worktree's shared aligned files"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -764,7 +875,11 @@ def main() -> None:
     selected = {
         item.strip() for item in args.datasets.split(",") if item.strip()
     } or None
-    prepare(Path(args.catalog), selected=selected)
+    prepare(
+        Path(args.catalog),
+        selected=selected,
+        output_dir_override=Path(args.output_dir) if args.output_dir else None,
+    )
 
 
 if __name__ == "__main__":
