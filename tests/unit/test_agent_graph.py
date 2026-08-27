@@ -1230,6 +1230,16 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         )
         add_domain = initial_targets["add_subgraph"]
         self.assertTrue(add_domain["topology_neutral"])
+        self.assertEqual(1, add_domain["max_new_agents"])
+        self.assertEqual(
+            [
+                {
+                    "execution_mode": "react",
+                    "allowed_tools": ["triviaqa.qa_memory"],
+                }
+            ],
+            add_domain["registered_execution_profiles"],
+        )
         declarations = [
             {
                 "agent_id": "node_1",
@@ -1239,21 +1249,12 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
                 "allowed_tools": ["triviaqa.qa_memory"],
                 "execution_mode": "react",
             },
-            {
-                "agent_id": "node_2",
-                "model_id": "balanced",
-                "contract": "answer from routed evidence",
-                "role_family": "answerer",
-                "allowed_tools": [],
-                "execution_mode": "reasoning",
-            },
         ]
         declaration_schema = json.loads(
             director_live_add_subgraph_agent_declarations_json_schema_text(
                 initial_targets,
                 selected_agent_roles=[
                     {"agent_id": "node_1", "role_family": "retriever"},
-                    {"agent_id": "node_2", "role_family": "answerer"},
                 ],
             )
         )
@@ -1271,9 +1272,63 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             profile_pairs,
         )
         self.assertNotIn(("reasoning", ("triviaqa.qa_memory",)), profile_pairs)
+        worker = AgentNode(
+            "worker",
+            "balanced",
+            "retrieve evidence",
+            execution_mode="react",
+            allowed_tools=("triviaqa.qa_memory",),
+        )
+        worker_only = AgentGraph([worker])
+        worker_env = AgentWorkflowEnv(
+            registry,
+            runtime=_TriviaMemoryProfileRuntime(registry),  # type: ignore[arg-type]
+            problem="Which author wrote the novel?",
+            graph=worker_only,
+            execute_on_edit=True,
+            require_exact_answer_tag=True,
+            required_evidence_tool_id="triviaqa.qa_memory",
+            require_evidence_relation=True,
+            recovery_policy="preserve_diagnose_repair_augment",
+            director_feedback_mode="control_plane",
+        )
+        worker_env._progressive_execution = AgentRuntimeResult(
+            run_id="worker-only",
+            graph_revision=worker_only.revision,
+            output_agent_id=None,
+            final_answer=None,
+            outputs={"worker": "receipt-grounded evidence"},
+            calls=(),
+            block_completion_order=(("worker",),),
+            output_metadata={
+                "worker": {"tool_receipts": _trivia_memory_receipts()}
+            },
+        )
+        worker_env._progressive_execution_revision = worker_only.revision
+        worker_targets = worker_env.model_admissible_action_targets()
+        self.assertNotIn(
+            "worker",
+            worker_targets.get("modify_agent", {}).get("agent_ids", []),
+        )
+        self.assertEqual(
+            [
+                {"execution_mode": "reasoning", "allowed_tools": []},
+            ],
+            worker_targets["add_subgraph"]["registered_execution_profiles"],
+        )
+        downstream_declarations = [
+            {
+                "agent_id": "node_1",
+                "model_id": "balanced",
+                "contract": "answer from routed evidence",
+                "role_family": "answerer",
+                "allowed_tools": [],
+                "execution_mode": "reasoning",
+            }
+        ]
         relation_candidates = director_live_add_subgraph_relation_candidates(
-            initial_targets,
-            declarations,
+            worker_targets,
+            downstream_declarations,
         )
         self.assertTrue(relation_candidates)
         self.assertTrue(
@@ -1285,21 +1340,13 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         action_schema = json.loads(
             director_live_action_parameter_json_schema_text(
                 "add_subgraph",
-                initial_targets,
-                add_agents=declarations,
+                worker_targets,
+                add_agents=downstream_declarations,
             )
         )
         self.assertEqual(
             {"type": "null"},
             action_schema["properties"]["output_agent_id"],
-        )
-
-        worker = AgentNode(
-            "worker",
-            "balanced",
-            "retrieve evidence",
-            execution_mode="react",
-            allowed_tools=("triviaqa.qa_memory",),
         )
         output = AgentNode("output", "balanced", "answer")
         routed = AgentGraph(

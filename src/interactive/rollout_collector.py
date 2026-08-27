@@ -103,6 +103,9 @@ _ADD_ROLE_SELECTION_PARSE_FAILURE_PHASE = "add_agent_role_selection"
 _ADD_ROLE_SELECTION_SERIALIZATION_FAILURE_PHASE = (
     "add_agent_role_selection_serialization_failure"
 )
+_ACTION_SELECTION_SERIALIZATION_FAILURE_PHASE = (
+    "action_selection_serialization_failure"
+)
 _PARAMETER_SERIALIZATION_FAILURE_PHASE = "parameter_serialization_failure"
 _RELATION_CANDIDATE_SERIALIZATION_FAILURE_PHASE = (
     "relation_candidate_serialization_failure"
@@ -1069,6 +1072,8 @@ class SGLangReceiptDirectorClient:
         role_selection_regeneration_succeeded = False
         relation_candidate_regeneration_attempted = False
         relation_candidate_regeneration_succeeded = False
+        action_selection_regeneration_attempted = False
+        action_selection_regeneration_succeeded = False
 
         if len(actions) == 1:
             selected_action = actions[0]
@@ -1093,11 +1098,65 @@ class SGLangReceiptDirectorClient:
                 attempt_count=attempt_count,
                 generation_seed=seed,
             )
-            selected_action = self._hierarchical_choice(
-                selector_response.text,
-                field_name="action",
-                admitted=actions,
-            )
+            try:
+                selected_action = self._hierarchical_choice(
+                    selector_response.text,
+                    field_name="action",
+                    admitted=actions,
+                )
+            except ReceiptValidationError:
+                if not _hierarchical_selector_serialization_failed(
+                    selector_response.text
+                ):
+                    raise
+                # Reuse the existing bounded structured regeneration used by
+                # role/relation selectors.  Preserve the exact failed sample,
+                # keep the same strict schema/route/seed, and infer no action.
+                action_selection_regeneration_attempted = True
+                phase_receipts[
+                    _ACTION_SELECTION_SERIALIZATION_FAILURE_PHASE
+                ] = self._hierarchical_phase_receipt(selector_response)
+                regeneration_prompt = _hierarchical_continuation_prompt(
+                    prompt,
+                    committed_json=selector_response.text,
+                    instruction=_PARAMETER_REGENERATION_CONTINUATION,
+                )
+                regeneration_payload = dict(
+                    self._request_payload(regeneration_prompt, adapter_name, seed)
+                )
+                regeneration_sampling = dict(
+                    regeneration_payload["sampling_params"]
+                )
+                regeneration_sampling["json_schema"] = selector_payload[
+                    "sampling_params"
+                ]["json_schema"]
+                regeneration_payload["sampling_params"] = regeneration_sampling
+                value, latency_ms, attempt_count = await self._post_with_retries(
+                    regeneration_payload
+                )
+                total_latency_ms += latency_ms
+                total_attempt_count += attempt_count
+                selector_response = self._parse_response(
+                    regeneration_prompt,
+                    regeneration_payload,
+                    value,
+                    policy_version=policy_version,
+                    adapter_name=adapter_name,
+                    expected_server_weight_version=expected_server_weight_version,
+                    action_json_schema_version=action_schema_version,
+                    action_schema_branch=action_schema_branch,
+                    action_target_domains_json=action_target_domains_json,
+                    action_target_domain_version=action_target_domain_version,
+                    latency_ms=latency_ms,
+                    attempt_count=attempt_count,
+                    generation_seed=seed,
+                )
+                selected_action = self._hierarchical_choice(
+                    selector_response.text,
+                    field_name="action",
+                    admitted=actions,
+                )
+                action_selection_regeneration_succeeded = True
             phase_receipts["action_selection"] = self._hierarchical_phase_receipt(
                 selector_response
             )
@@ -1725,6 +1784,11 @@ class SGLangReceiptDirectorClient:
             metadata["relation_candidate_regeneration_succeeded"] = (
                 relation_candidate_regeneration_succeeded
             )
+        if action_selection_regeneration_attempted:
+            metadata["action_selection_regeneration_attempted"] = True
+            metadata["action_selection_regeneration_succeeded"] = (
+                action_selection_regeneration_succeeded
+            )
         if action_target_domains is not None:
             metadata["selected_add_agent_ids"] = (
                 None
@@ -1973,6 +2037,21 @@ def _validate_v3_hierarchical_action_receipt(
         if isinstance(phase_receipts, Mapping)
         else None
     )
+    action_selection_regeneration_attempted = metadata.get(
+        "action_selection_regeneration_attempted"
+    )
+    if (
+        action_selection_regeneration_attempted is not None
+        and action_selection_regeneration_attempted is not True
+    ):
+        raise ReceiptValidationError(
+            "v3 action-selection regeneration attempt flag is invalid"
+        )
+    action_selection_failure_receipt = (
+        phase_receipts.get(_ACTION_SELECTION_SERIALIZATION_FAILURE_PHASE)
+        if isinstance(phase_receipts, Mapping)
+        else None
+    )
     if parse_failure_phase is not None and parameter_regeneration_attempted:
         raise ReceiptValidationError(
             "v3 declaration parse failure cannot carry parameter regeneration"
@@ -2014,6 +2093,70 @@ def _validate_v3_hierarchical_action_receipt(
     expected_phases: set[str] = set()
     if len(actions) > 1:
         expected_phases.add("action_selection")
+        action_selection_receipt = (
+            phase_receipts.get("action_selection")
+            if isinstance(phase_receipts, Mapping)
+            else None
+        )
+        if action_selection_regeneration_attempted:
+            if metadata.get("action_selection_regeneration_succeeded") is not True:
+                raise ReceiptValidationError(
+                    "v3 action-selection regeneration did not report success"
+                )
+            if not isinstance(action_selection_failure_receipt, Mapping):
+                raise ReceiptValidationError(
+                    "v3 action-selection regeneration has no initial failure receipt"
+                )
+            if not isinstance(action_selection_receipt, Mapping):
+                raise ReceiptValidationError(
+                    "v3 action-selection regeneration has no completed selector receipt"
+                )
+            failed_text = action_selection_failure_receipt.get("text")
+            failed_prompt = action_selection_failure_receipt.get("prompt_text")
+            if (
+                not isinstance(failed_text, str)
+                or not failed_text
+                or not isinstance(failed_prompt, str)
+                or not failed_prompt
+                or not _hierarchical_selector_serialization_failed(failed_text)
+            ):
+                raise ReceiptValidationError(
+                    "v3 action-selection initial receipt is not a serialization failure"
+                )
+            expected_regeneration_prompt = _hierarchical_continuation_prompt(
+                failed_prompt,
+                committed_json=failed_text,
+                instruction=_PARAMETER_REGENERATION_CONTINUATION,
+            )
+            if (
+                action_selection_receipt.get("prompt_text")
+                != expected_regeneration_prompt
+            ):
+                raise ReceiptValidationError(
+                    "v3 action-selection regeneration is not bound to its failed sample"
+                )
+            if action_selection_failure_receipt.get(
+                "generation_seed"
+            ) != action_selection_receipt.get("generation_seed"):
+                raise ReceiptValidationError(
+                    "v3 action-selection regeneration changed its generation seed"
+                )
+            expected_phases.add(_ACTION_SELECTION_SERIALIZATION_FAILURE_PHASE)
+        elif (
+            metadata.get("action_selection_regeneration_succeeded") is not None
+            or action_selection_failure_receipt is not None
+        ):
+            raise ReceiptValidationError(
+                "v3 action-selection regeneration receipt has no attempt flag"
+            )
+    elif (
+        action_selection_regeneration_attempted is not None
+        or metadata.get("action_selection_regeneration_succeeded") is not None
+        or action_selection_failure_receipt is not None
+    ):
+        raise ReceiptValidationError(
+            "v3 singleton action branch carries action-selection regeneration"
+        )
     expected_parameter_branch = selected_action
     if selected_action != "set_relation" and (
         relation_candidate_regeneration_attempted is not None

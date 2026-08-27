@@ -740,6 +740,74 @@ def test_native_sglang_v3_regenerates_malformed_relation_candidate_selector_once
     }
 
 
+def test_native_sglang_v3_regenerates_malformed_action_selector_once():
+    actions = ("delete_agent", "finish")
+    domains = {
+        "delete_agent": {"agent_ids": ["worker"]},
+        "finish": {"admissible": True},
+    }
+    domains_json = director_live_action_target_domains_json(actions, domains)
+    malformed = '{\n  "action": "finish"\n\t\t\t'
+    selected = '{"action":"finish"}'
+    final_text = '{"action":"finish"}'
+    client = ScriptedSGLangClient(
+        [malformed, selected, final_text],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+    )
+
+    response = asyncio.run(
+        client.propose(
+            "current Canvas",
+            seed=19,
+            action_json_schema=(
+                director_model_admissible_sampling_json_schema_text_v3(actions)
+            ),
+            action_json_schema_version=(
+                DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3
+            ),
+            action_schema_branch=director_model_admissible_schema_branch_v3(actions),
+            action_target_domains_json=domains_json,
+            action_target_domain_version=(
+                DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION
+            ),
+        )
+    )
+
+    assert len(client.payloads) == 3
+    assert response.metadata["action_selection_regeneration_attempted"] is True
+    assert response.metadata["action_selection_regeneration_succeeded"] is True
+    assert response.metadata["request_count"] == 3
+    phases = response.metadata["hierarchical_phase_receipts"]
+    assert set(phases) == {
+        "action_selection_serialization_failure",
+        "action_selection",
+    }
+    assert phases["action_selection_serialization_failure"]["text"] == malformed
+    assert phases["action_selection"]["text"] == selected
+    schema_request = {
+        "action_json_schema": (
+            director_model_admissible_sampling_json_schema_text_v3(actions)
+        ),
+        "action_json_schema_version": (
+            DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3
+        ),
+        "action_schema_branch": director_model_admissible_schema_branch_v3(actions),
+        "action_target_domains_json": domains_json,
+        "action_target_domain_version": (
+            DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION
+        ),
+    }
+    assert _validate_v3_hierarchical_action_receipt(
+        AgentActionParser().parse(final_text),
+        response.metadata,
+        schema_request,
+    ) == {
+        "action_selection_serialization_failure",
+        "action_selection",
+    }
+
+
 def test_native_sglang_v3_samples_add_declarations_then_complete_exact_action():
     domains = {
         "add_subgraph": {

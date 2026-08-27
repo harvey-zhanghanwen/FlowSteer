@@ -791,7 +791,7 @@ class AgentWorkflowEnv:
         """
 
         required_tool_id = self.required_evidence_tool_id
-        return tuple(
+        profiles = tuple(
             (execution_mode, allowed_tools)
             for execution_mode, allowed_tools in (
                 self.runtime.registered_execution_profiles()
@@ -802,6 +802,18 @@ class AgentWorkflowEnv:
                 and allowed_tools == (required_tool_id,)
             )
         )
+        if not self.require_evidence_relation:
+            return profiles
+        successful_workers = self._current_successful_evidence_worker_ids()
+        if not self._graph.nodes and not successful_workers:
+            # The first execute-after-edit unit must materialize one measured
+            # retrieval artifact before downstream communication is useful.
+            return tuple(profile for profile in profiles if profile[1])
+        if successful_workers:
+            # Preserve the current Tool artifact and let the Director author
+            # any number of no-Tool downstream responsibilities/relations.
+            return tuple(profile for profile in profiles if not profile[1])
+        return profiles
 
     def _role_conditional_execution_profiles_for(
         self,
@@ -2105,6 +2117,8 @@ class AgentWorkflowEnv:
             # must use a legal routing, replacement, or fail-closed boundary.
             return ()
         protected = set(self._active_semantic_lineage_ids())
+        if self.require_evidence_relation:
+            protected.update(self._current_successful_evidence_worker_ids())
         responsible = (
             set(self._unresolved_dirty_agents)
             - self._repair_exhausted_agent_ids
@@ -3390,6 +3404,15 @@ class AgentWorkflowEnv:
             elif self._repair_exhausted_reasoner_ids():
                 # Recovery augmentation is one executable unit.  Keep the live
                 # schema on the same one-Agent boundary enforced by admission.
+                remaining = min(remaining, 1)
+            elif (
+                self.require_evidence_relation
+                and not self._graph.nodes
+                and not self._current_successful_evidence_worker_ids()
+            ):
+                # One worker is the first executable functional unit.  Later
+                # topology-neutral ADDs may again contain up to the configured
+                # number of cooperating no-Tool Agents.
                 remaining = min(remaining, 1)
             targets[AgentActionType.ADD_SUBGRAPH.value] = {
                 "min_new_agents": 1,
@@ -8188,6 +8211,44 @@ class AgentWorkflowEnv:
                 f"Tool {self.required_evidence_tool_id!r}"
             )
         return self._role_conditional_semantic_issue(execution)
+
+    def _current_successful_evidence_worker_ids(self) -> Tuple[str, ...]:
+        """Return current workers with one successful search/read pair."""
+
+        required_tool_id = self.required_evidence_tool_id
+        if required_tool_id is None:
+            return ()
+        metadata_by_agent: Mapping[str, Mapping[str, object]] = (
+            self._progressive_output_metadata
+        )
+        if (
+            not metadata_by_agent
+            and self._progressive_execution is not None
+            and self._progressive_execution_revision == self._graph.revision
+        ):
+            metadata_by_agent = self._progressive_execution.output_metadata
+        successful: list[str] = []
+        for node in self._graph.nodes:
+            if node.id in self._failed_agent_ids:
+                continue
+            metadata = metadata_by_agent.get(node.id)
+            if not isinstance(metadata, Mapping):
+                continue
+            receipts = metadata.get("tool_receipts", ())
+            if not isinstance(receipts, (list, tuple)):
+                continue
+            public_receipts = tuple(
+                receipt for receipt in receipts if isinstance(receipt, Mapping)
+            )
+            if any(
+                self._successful_search_receipt(receipt, required_tool_id)
+                for receipt in public_receipts
+            ) and any(
+                self._successful_read_receipt(receipt, required_tool_id)
+                for receipt in public_receipts
+            ):
+                successful.append(node.id)
+        return tuple(successful)
 
     def _semantic_protocol_issue(
         self,
