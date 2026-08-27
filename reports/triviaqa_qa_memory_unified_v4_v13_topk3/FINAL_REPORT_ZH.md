@@ -38,7 +38,7 @@ AgentGraph terminal failure 为 128/128，其中 `canvas_action_domain_exhausted
 
 ## 验证
 
-- 定向单元与端到端测试：204 passed，39 subtests passed。
+- 定向单元与端到端测试：205 passed，39 subtests passed。
 - 关键断言：`director_tool_calls=0`、`director_requests_toolless=true`、`director_data_plane_isolated=true`、`retrieval_tool_calls_by_worker>0`、`worker_ownership_violation_count=0`、`reasoner_qamemory_tool_unassigned=true`。
 - 失败断言按真实结果保留：`native_top_k_batches_complete=false`、`retrieval_artifact_routed_via_relation=false`（124/125，唯一真实失败为 `tc_26`）、`output_inbox_receipt_lineage=false`（119/125 的 all-historical 强断言）。
 - 本轮为 inference-only：没有 GRPO、LoRA、backward、optimizer update、MACE 或 Skill 训练。
