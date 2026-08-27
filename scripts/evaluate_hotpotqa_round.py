@@ -1163,9 +1163,13 @@ def _input_context(config: Mapping[str, Any]) -> str:
     retrieval = config.get("qa_embedding_retrieval")
     if not isinstance(retrieval, Mapping):
         return "full_10_passages"
+    task_scope, _ = qa_retrieval_scopes(retrieval)
+    scope_prefix = (
+        "public_task" if task_scope == "public_task" else "question_only"
+    )
     if retrieval.get("corpus_kind") == "train_qa_memory":
-        return "question_only_dynamic_train_qa_memory_search_read"
-    return "question_only_dynamic_embedding_search_read"
+        return f"{scope_prefix}_dynamic_train_qa_memory_search_read"
+    return f"{scope_prefix}_dynamic_embedding_search_read"
 
 
 def _report(rows: Sequence[Mapping[str, Any]], config: Mapping[str, Any]) -> Mapping[str, Any]:

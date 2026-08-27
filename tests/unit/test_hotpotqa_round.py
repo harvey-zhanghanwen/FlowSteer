@@ -80,6 +80,10 @@ def test_qa_memory_v13_keeps_public_task_and_question_only_worker_query():
     assert retrieval["search_top_k"] == 2
     assert retrieval["max_tool_calls_per_agent_call"] == 4
     assert retrieval["web_search_enabled"] is False
+    assert (
+        _MODULE._input_context(config)
+        == "public_task_dynamic_train_qa_memory_search_read"
+    )
     assert retrieval["index_dir"].endswith(
         "hotpotqa_qa_memory_source_freeze_v2/index"
     )
