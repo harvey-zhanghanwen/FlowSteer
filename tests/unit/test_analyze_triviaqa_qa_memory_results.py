@@ -324,6 +324,11 @@ def _assert_formal_report_metrics_tool_ownership_isolation_routing_and_demos() -
     assert report["run"]["status"] == "complete"
     assert report["metrics"]["direct"]["strict_exact_match"] == 1 / 3
     assert report["metrics"]["agentgraph"]["strict_exact_match"] == 0.0
+    retrieval = report["retrieval_diagnostics"]
+    assert retrieval["tool_call_count"] == 6
+    assert retrieval["search_call_count"] == 3
+    assert retrieval["read_call_count"] == 3
+    assert retrieval["search_candidate_accepted_answer_match_count"] == 0
     assertions = report["control_plane_and_tool_routing"]["assertions"]
     assert assertions["director_tool_calls"] == 0
     assert assertions["director_data_plane_isolated"] is True
@@ -390,6 +395,83 @@ def _assert_field_names_are_diagnostic_only_and_output_inbox_lineage_is_independ
     assert result["output_inbox_missing_canonical_receipt_signatures"] == []
 
 
+def _assert_bare_answer_collision_is_not_a_payload_exposure() -> None:
+    task_id = "triviaqa:validation:answer-collision"
+    trajectory = _trajectory(task_id)
+    trajectory["turns"][0]["prompt"] = (  # type: ignore[index]
+        "The public question contains train answer as ordinary text."
+    )
+
+    result = analysis._trajectory_control_plane(task_id, trajectory)  # noqa: SLF001
+
+    assert result["director_exposed_retrieval_values"] == []
+    assert result["director_retrieval_value_collisions"] == [
+        {"field": "canonical_answer", "value": "train answer"}
+    ]
+
+    trajectory["turns"][0]["prompt"] = (  # type: ignore[index]
+        'Leaked record: {"canonical_answer":"train answer"}'
+    )
+    result = analysis._trajectory_control_plane(task_id, trajectory)  # noqa: SLF001
+    assert result["director_exposed_retrieval_values"] == [
+        {"field": "canonical_answer", "value": "train answer"}
+    ]
+
+    trajectory["turns"][0]["prompt"] = (  # type: ignore[index]
+        "Flow-Director chat transcript\n\n"
+        + json.dumps(
+            {
+                "messages": [
+                    {"role": "user", "content": "Public Canvas state only."},
+                    {
+                        "role": "assistant",
+                        "content": '{"canonical_answer":"train answer"}',
+                    },
+                ]
+            }
+        )
+    )
+    result = analysis._trajectory_control_plane(task_id, trajectory)  # noqa: SLF001
+    assert result["director_exposed_retrieval_values"] == []
+    assert result["director_retrieval_value_collisions"] == [
+        {"field": "canonical_answer", "value": "train answer"}
+    ]
+
+    short_receipt = trajectory["turns"][0]["executions"][0]["metadata"][  # type: ignore[index]
+        "response"
+    ]["tool_receipts"][0]
+    short_receipt["result"]["value"]["hits"][0]["canonical_answer"] = "H"
+    trajectory["turns"][0]["prompt"] = '{"canonical_answer":"H"}'  # type: ignore[index]
+    result = analysis._trajectory_control_plane(task_id, trajectory)  # noqa: SLF001
+    assert result["director_exposed_retrieval_values"] == [
+        {"field": "canonical_answer", "value": "H"}
+    ]
+
+
+def _assert_post_hoc_retrieval_coverage_uses_official_normalization() -> None:
+    task_id = "triviaqa:validation:coverage"
+    selected = {
+        task_id: {
+            "task_id": task_id,
+            "ground_truth": "The Train Answer",
+            "metadata": {
+                "evaluator_payload": {"accepted_answers": ["The Train Answer"]}
+            },
+        }
+    }
+    report = analysis._retrieval_coverage(  # noqa: SLF001
+        selected,
+        {task_id: _trajectory(task_id)},
+        [{"canonical_answer": "train answer"}],
+    )
+
+    assert report["analysis_scope"] == "post_hoc_offline_only_not_model_visible"
+    assert report["corpus_accepted_answer_match_count"] == 1
+    assert report["search_top1_accepted_answer_match_count"] == 1
+    assert report["search_candidate_accepted_answer_match_count"] == 1
+    assert report["read_candidate_accepted_answer_match_count"] == 1
+
+
 def _assert_failed_worker_receipts_count_without_claiming_artifact_route() -> None:
     task_id = "triviaqa:validation:failed-worker"
     trajectory = _trajectory(task_id)
@@ -444,3 +526,9 @@ class TriviaQAQAMemoryResultAnalysisTests(unittest.TestCase):
         self,
     ) -> None:
         _assert_failed_worker_receipts_count_without_claiming_artifact_route()
+
+    def test_bare_answer_collision_is_not_a_payload_exposure(self) -> None:
+        _assert_bare_answer_collision_is_not_a_payload_exposure()
+
+    def test_post_hoc_retrieval_coverage_uses_official_normalization(self) -> None:
+        _assert_post_hoc_retrieval_coverage_uses_official_normalization()

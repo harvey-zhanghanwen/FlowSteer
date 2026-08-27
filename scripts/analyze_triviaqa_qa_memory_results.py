@@ -20,6 +20,8 @@ from datetime import datetime, timezone
 import importlib.util
 import json
 from pathlib import Path
+import re
+import string
 import sys
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -66,6 +68,12 @@ CANONICAL_RECEIPT_DATA_FIELDS = (
     "source_train_task_id",
     "base_task_id",
 )
+PROVENANCE_IDENTIFIER_FIELDS = frozenset(
+    {"memory_id", "source_train_task_id", "base_task_id"}
+)
+SEMANTIC_PAYLOAD_FIELDS = frozenset(
+    {"canonical_answer", "paraphrase_question", "paraphrase_answer_statement"}
+)
 
 
 def _resolve(value: str | Path) -> Path:
@@ -77,6 +85,18 @@ def _number(value: object) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
     return float(value)
+
+
+# Direct reuse of the normalization used by
+# ``src.interactive.task_evaluator._normalize_triviaqa_answer``.  This helper
+# is kept local so the offline analyzer does not import runtime/provider code.
+def _normalize_triviaqa_answer(text: str) -> str:
+    lowered = text.lower()
+    without_punctuation = "".join(
+        character for character in lowered if character not in string.punctuation
+    )
+    without_articles = re.sub(r"\b(a|an|the)\b", " ", without_punctuation)
+    return " ".join(without_articles.split())
 
 
 def _task_id(row: Mapping[str, Any]) -> str | None:
@@ -139,6 +159,210 @@ def _condition_metrics(
         "strict_token_f1": f1_sum / denominator if denominator else None,
         "completed_only_exact_match": em_sum / valid if valid else None,
         "completed_only_token_f1": f1_sum / valid if valid else None,
+    }
+
+
+def _accepted_answers(task: Mapping[str, Any]) -> list[str]:
+    metadata = base._mapping(task.get("metadata"))
+    evaluator_payload = base._mapping(metadata.get("evaluator_payload"))
+    answers = [
+        value.strip()
+        for value in base._list(evaluator_payload.get("accepted_answers"))
+        if isinstance(value, str) and value.strip()
+    ]
+    if answers:
+        return answers
+    ground_truth = task.get("ground_truth")
+    if not isinstance(ground_truth, str):
+        return []
+    return [value.strip() for value in ground_truth.split("|") if value.strip()]
+
+
+def _receipt_canonical_answers(item: Mapping[str, Any]) -> list[str]:
+    receipt = base._mapping(item.get("receipt"))
+    result = base._mapping(receipt.get("result"))
+    if result.get("completed") is not True:
+        return []
+    value = base._mapping(result.get("value"))
+    candidates: list[str] = []
+    if item.get("action") == "search":
+        records = base._list(value.get("hits"))
+    elif item.get("action") == "read":
+        memory = value.get("memory")
+        records = [memory] if isinstance(memory, Mapping) else []
+    else:
+        records = []
+    for raw_record in records:
+        record = base._mapping(raw_record)
+        answer = record.get("canonical_answer")
+        if isinstance(answer, str) and answer.strip():
+            candidates.append(answer.strip())
+    return candidates
+
+
+def _normalized_receipt_query(item: Mapping[str, Any]) -> str | None:
+    receipt = base._mapping(item.get("receipt"))
+    request = base._mapping(receipt.get("request"))
+    arguments = base._mapping(request.get("arguments"))
+    return base._normalize_query(  # noqa: SLF001 - upstream analyzer reuse
+        arguments.get("query")
+    )
+
+
+def _retrieval_coverage(
+    selected_by_id: Mapping[str, Mapping[str, Any]],
+    trajectories: Mapping[str, Mapping[str, Any]],
+    corpus_memories: Sequence[Mapping[str, Any]] = (),
+) -> dict[str, Any]:
+    """Compute post-hoc accepted-answer coverage from persisted Tool receipts.
+
+    Accepted answers are used only after the frozen run for diagnosis.  They
+    never enter a query, Tool request, Agent observation, or Director input.
+    A match is lexical under the same TriviaQA normalization as the evaluator;
+    it does not by itself prove that the retrieved QA record binds the target
+    relation of the held-out question.
+    """
+
+    search_calls = read_calls = 0
+    successful_search_calls = successful_read_calls = 0
+    nonempty_search_calls = search_candidate_count = 0
+    tasks_with_search: list[str] = []
+    tasks_with_read: list[str] = []
+    tasks_with_multiple_queries: list[str] = []
+    search_match_tasks: list[str] = []
+    search_top1_match_tasks: list[str] = []
+    read_match_tasks: list[str] = []
+    corpus_answers = {
+        normalized
+        for memory in corpus_memories
+        if isinstance(memory, Mapping)
+        and isinstance(memory.get("canonical_answer"), str)
+        and (
+            normalized := _normalize_triviaqa_answer(
+                str(memory.get("canonical_answer"))
+            )
+        )
+    }
+    corpus_match_tasks: list[str] = []
+    for task_id, task in selected_by_id.items():
+        trajectory = trajectories.get(task_id)
+        if trajectory is None:
+            continue
+        accepted = {
+            normalized
+            for answer in _accepted_answers(task)
+            if (normalized := _normalize_triviaqa_answer(answer))
+        }
+        if accepted & corpus_answers:
+            corpus_match_tasks.append(task_id)
+        receipts = list(_iter_retrieval_receipts(trajectory))
+        search_receipts = [item for item in receipts if item.get("action") == "search"]
+        read_receipts = [item for item in receipts if item.get("action") == "read"]
+        search_calls += len(search_receipts)
+        read_calls += len(read_receipts)
+        for item in search_receipts:
+            receipt = base._mapping(item.get("receipt"))
+            result = base._mapping(receipt.get("result"))
+            if result.get("completed") is not True:
+                continue
+            successful_search_calls += 1
+            hits = base._list(base._mapping(result.get("value")).get("hits"))
+            search_candidate_count += len(hits)
+            if hits:
+                nonempty_search_calls += 1
+        successful_read_calls += sum(
+            base._mapping(
+                base._mapping(item.get("receipt")).get("result")
+            ).get("completed")
+            is True
+            for item in read_receipts
+        )
+        if search_receipts:
+            tasks_with_search.append(task_id)
+        if read_receipts:
+            tasks_with_read.append(task_id)
+        normalized_queries = {
+            query
+            for item in search_receipts
+            if (query := _normalized_receipt_query(item))
+        }
+        if len(normalized_queries) > 1:
+            tasks_with_multiple_queries.append(task_id)
+        search_candidates = {
+            _normalize_triviaqa_answer(answer)
+            for item in search_receipts
+            for answer in _receipt_canonical_answers(item)
+        }
+        top1_candidates: set[str] = set()
+        for item in search_receipts:
+            receipt = base._mapping(item.get("receipt"))
+            result = base._mapping(receipt.get("result"))
+            value = base._mapping(result.get("value"))
+            hits = base._list(value.get("hits"))
+            if not hits:
+                continue
+            top_hit = base._mapping(hits[0])
+            answer = top_hit.get("canonical_answer")
+            if isinstance(answer, str) and answer.strip():
+                top1_candidates.add(_normalize_triviaqa_answer(answer))
+        read_candidates = {
+            _normalize_triviaqa_answer(answer)
+            for item in read_receipts
+            for answer in _receipt_canonical_answers(item)
+        }
+        if accepted & search_candidates:
+            search_match_tasks.append(task_id)
+        if accepted & top1_candidates:
+            search_top1_match_tasks.append(task_id)
+        if accepted & read_candidates:
+            read_match_tasks.append(task_id)
+
+    denominator = len(selected_by_id)
+    return {
+        "analysis_scope": "post_hoc_offline_only_not_model_visible",
+        "match_protocol": "triviaqa_normalized_exact_match_against_accepted_answers",
+        "semantic_relation_binding_guaranteed": False,
+        "sample_count": denominator,
+        "tool_call_count": search_calls + read_calls,
+        "search_call_count": search_calls,
+        "read_call_count": read_calls,
+        "successful_search_call_count": successful_search_calls,
+        "successful_read_call_count": successful_read_calls,
+        "nonempty_search_call_count": nonempty_search_calls,
+        "search_candidate_count": search_candidate_count,
+        "mean_tool_calls_per_task": (
+            (search_calls + read_calls) / denominator if denominator else None
+        ),
+        "tasks_with_search_count": len(tasks_with_search),
+        "tasks_with_read_count": len(tasks_with_read),
+        "tasks_with_multiple_successful_queries_count": len(
+            tasks_with_multiple_queries
+        ),
+        "tasks_with_multiple_successful_queries": tasks_with_multiple_queries,
+        "corpus_accepted_answer_match_count": len(corpus_match_tasks),
+        "corpus_accepted_answer_match_rate": (
+            len(corpus_match_tasks) / denominator if denominator else None
+        ),
+        "corpus_accepted_answer_match_task_ids": corpus_match_tasks,
+        "search_top1_accepted_answer_match_count": len(search_top1_match_tasks),
+        "search_top1_accepted_answer_match_rate": (
+            len(search_top1_match_tasks) / denominator if denominator else None
+        ),
+        "search_candidate_accepted_answer_match_count": len(search_match_tasks),
+        "search_candidate_accepted_answer_match_rate": (
+            len(search_match_tasks) / denominator if denominator else None
+        ),
+        "search_candidate_accepted_answer_match_task_ids": search_match_tasks,
+        "search_candidate_recall_within_corpus_covered": (
+            len(search_match_tasks) / len(corpus_match_tasks)
+            if corpus_match_tasks
+            else None
+        ),
+        "read_candidate_accepted_answer_match_count": len(read_match_tasks),
+        "read_candidate_accepted_answer_match_rate": (
+            len(read_match_tasks) / denominator if denominator else None
+        ),
+        "read_candidate_accepted_answer_match_task_ids": read_match_tasks,
     }
 
 
@@ -359,6 +583,111 @@ def _canonical_receipt_data_values(
     }
 
 
+def _director_input_texts(trajectory: Mapping[str, Any]) -> list[str]:
+    """Extract Director-visible inputs without counting staged assistant output.
+
+    The hierarchical Director stores a full provider transcript in ``prompt``.
+    Its assistant messages are outputs produced while constructing the current
+    Canvas action, not retrieval payload received by the Director.  User
+    messages carry the live Canvas observation; static system instructions are
+    excluded from retrieval-ingress checks.  Plain prompts remain supported
+    for historical trajectories and unit fixtures.
+    """
+
+    inputs: list[str] = []
+    for raw_turn in base._list(trajectory.get("turns")):
+        turn = base._mapping(raw_turn)
+        prompt = turn.get("prompt")
+        parsed_transcript = False
+        if isinstance(prompt, str):
+            json_start = prompt.find("{")
+            if json_start >= 0:
+                try:
+                    transcript = json.loads(prompt[json_start:])
+                except json.JSONDecodeError:
+                    transcript = None
+                if isinstance(transcript, Mapping):
+                    messages = base._list(transcript.get("messages"))
+                    if messages:
+                        parsed_transcript = True
+                        for raw_message in messages:
+                            message = base._mapping(raw_message)
+                            if message.get("role") != "user":
+                                continue
+                            content = message.get("content")
+                            if isinstance(content, str):
+                                inputs.append(content)
+            if not parsed_transcript:
+                inputs.append(prompt)
+        if prompt is None:
+            reconstructed = turn.get("reconstructed_context")
+            if reconstructed is not None:
+                inputs.append(
+                    json.dumps(
+                        reconstructed,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        default=str,
+                    )
+                )
+    return inputs
+
+
+def _labeled_payload_value_present(text: str, field: str, value: str) -> bool:
+    """Detect an exact serialized JSON field/value pair, including short values."""
+
+    return re.search(
+        rf"{re.escape(json.dumps(field, ensure_ascii=False))}\s*:\s*"
+        rf"{re.escape(json.dumps(value, ensure_ascii=False))}",
+        text,
+    ) is not None
+
+
+def _director_payload_diagnostics(
+    trajectory: Mapping[str, Any],
+    receipt_data_values: Mapping[str, Sequence[str]],
+) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+    """Return structural exposures and non-causal lexical coincidences.
+
+    Structural exposure is fail-closed for canonical QA-memory identifiers and
+    for labeled semantic payload pairs.  Unlabeled semantic overlaps are kept
+    as diagnostics because public questions and the Director's own generated
+    contracts can legitimately contain the same short answer text.
+    """
+
+    director_text = _director_visible_text(trajectory)
+    director_input_text = "\n".join(_director_input_texts(trajectory))
+    task = base._mapping(trajectory.get("task"))
+    public_question = str(task.get("question", ""))
+    exposures: list[dict[str, str]] = []
+    collisions: list[dict[str, str]] = []
+    for field, values in receipt_data_values.items():
+        for value in values:
+            if value not in director_text:
+                continue
+            item = {"field": field, "value": value}
+            appears_in_input = value in director_input_text
+            structurally_exposed = appears_in_input and (
+                (
+                    field in PROVENANCE_IDENTIFIER_FIELDS
+                    and value not in public_question
+                )
+                or (
+                    field in SEMANTIC_PAYLOAD_FIELDS
+                    and _labeled_payload_value_present(
+                        director_input_text, field, value
+                    )
+                )
+                or (
+                    field in {"paraphrase_question", "paraphrase_answer_statement"}
+                    and len(value.strip()) >= 20
+                    and value not in public_question
+                )
+            )
+            (exposures if structurally_exposed else collisions).append(item)
+    return exposures, collisions
+
+
 def _trajectory_control_plane(
     task_id: str, trajectory: Mapping[str, Any]
 ) -> dict[str, Any]:
@@ -412,12 +741,9 @@ def _trajectory_control_plane(
         marker for marker in RETRIEVAL_PAYLOAD_MARKERS if marker in director_text
     )
     receipt_data_values = _canonical_receipt_data_values(canonical_worker_receipts)
-    exposed_values = [
-        {"field": field, "value": value}
-        for field, values in receipt_data_values.items()
-        for value in values
-        if value in director_text
-    ]
+    exposed_values, lexical_collisions = _director_payload_diagnostics(
+        trajectory, receipt_data_values
+    )
     exposed_memory_ids = sorted(
         item["value"] for item in exposed_values if item["field"] == "memory_id"
     )
@@ -515,6 +841,7 @@ def _trajectory_control_plane(
         "director_retrieval_payload_markers_are_diagnostic_only": True,
         "canonical_worker_receipt_data_values": receipt_data_values,
         "director_exposed_retrieval_values": exposed_values,
+        "director_retrieval_value_collisions": lexical_collisions,
         "director_exposed_memory_ids": exposed_memory_ids,
         "retrieval_tool_call_count": len(receipts),
         "retrieval_artifact_receipt_count": len(artifact_receipts),
@@ -571,6 +898,11 @@ def _aggregate_control_plane(
         for task_id, value in per_task.items()
         if value["director_retrieval_payload_markers"]
     }
+    lexical_collision_diagnostics = {
+        task_id: value["director_retrieval_value_collisions"]
+        for task_id, value in per_task.items()
+        if value["director_retrieval_value_collisions"]
+    }
     retrieval_tasks = [
         value for value in per_task.values() if value["retrieval_tool_call_count"] > 0
     ]
@@ -620,6 +952,7 @@ def _aggregate_control_plane(
             },
             "director_payload_exposures": payload_exposures,
             "director_field_name_diagnostics": field_name_diagnostics,
+            "director_lexical_collision_diagnostics": lexical_collision_diagnostics,
         },
         per_task,
     )
@@ -727,6 +1060,10 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
     paired, paired_dedup = _deduplicate_rows(paired_rows)
     manifest, manifest_error = base._read_json(manifest_path)
     index_manifest, index_manifest_error = base._read_json(index_manifest_path)
+    index_memories_path = index_manifest_path.parent / "memories.jsonl"
+    index_memories, index_memories_diag = base._read_jsonl_snapshot(
+        index_memories_path
+    )
 
     selected_by_id = {
         task_id: task
@@ -737,6 +1074,9 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
     direct = _condition_metrics(selected_ids, paired, "direct")
     agentgraph = _condition_metrics(selected_ids, paired, "agentgraph")
     control, per_control = _aggregate_control_plane(selected_ids, trajectories)
+    retrieval_diagnostics = _retrieval_coverage(
+        selected_by_id, trajectories, index_memories
+    )
     demos, taxonomy = _wrong_demos_and_taxonomy(
         selected_by_id, trajectories, per_control, max(args.demo_count, 0)
     )
@@ -835,6 +1175,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             "termination_reason_counts": dict(sorted(terminal_status.items())),
         },
         "qa_memory_index": index_summary,
+        "retrieval_diagnostics": retrieval_diagnostics,
         "control_plane_and_tool_routing": control,
         "failure_taxonomy": taxonomy,
         "wrong_demo_selection": {
@@ -851,6 +1192,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             "paired_results": paired_diag,
             "run_manifest": base._display_path(manifest_path),
             "index_manifest": base._display_path(index_manifest_path),
+            "index_memories": index_memories_diag,
             "trajectory_deduplication": trajectory_dedup,
             "paired_deduplication": paired_dedup,
         },
@@ -868,6 +1210,7 @@ def _render_markdown(report: Mapping[str, Any]) -> str:
     direct = base._mapping(metrics.get("direct"))
     graph = base._mapping(metrics.get("agentgraph"))
     delta = base._mapping(metrics.get("agentgraph_minus_direct"))
+    retrieval = base._mapping(report.get("retrieval_diagnostics"))
     terminal = base._mapping(report.get("terminal"))
     control = base._mapping(report.get("control_plane_and_tool_routing"))
     assertions = base._mapping(control.get("assertions"))
@@ -884,6 +1227,17 @@ def _render_markdown(report: Mapping[str, Any]) -> str:
         f"| AgentGraph | {graph.get('denominator')} | {graph.get('completed')} | {graph.get('evaluator_valid')} | {_percentage(graph.get('strict_exact_match'))} | {_percentage(graph.get('strict_token_f1'))} |",
         "",
         f"AgentGraph − Direct：**{_percentage(delta.get('exact_match'))} EM**，**{_percentage(delta.get('token_f1'))} F1**。partial 状态下该值仅是固定分母 fail-closed snapshot，不是完整 128 条正式结果。",
+        "",
+        "## Worker QA-memory Tool 与 Answer Recall",
+        "",
+        f"- 唯一物理 Tool receipts：**{retrieval.get('tool_call_count')}**（search={retrieval.get('search_call_count')}，read={retrieval.get('read_call_count')}；每题均值={retrieval.get('mean_tool_calls_per_task')}）。",
+        f"- 成功 search/read：**{retrieval.get('successful_search_call_count')}/{retrieval.get('successful_read_call_count')}**；非空 search：**{retrieval.get('nonempty_search_call_count')}**；返回候选：**{retrieval.get('search_candidate_count')}**。",
+        f"- 发生 search/read 的任务：**{retrieval.get('tasks_with_search_count')} / {retrieval.get('tasks_with_read_count')}**；有多条成功规范化 query 的任务：**{retrieval.get('tasks_with_multiple_successful_queries_count')}**。",
+        f"- 512 条 corpus accepted-answer match：**{retrieval.get('corpus_accepted_answer_match_count')}/{retrieval.get('sample_count')} = {_percentage(retrieval.get('corpus_accepted_answer_match_rate'))}**。",
+        f"- 实际 search Recall@1：**{retrieval.get('search_top1_accepted_answer_match_count')}/{retrieval.get('sample_count')} = {_percentage(retrieval.get('search_top1_accepted_answer_match_rate'))}**。",
+        f"- 实际 search Recall@3：**{retrieval.get('search_candidate_accepted_answer_match_count')}/{retrieval.get('sample_count')} = {_percentage(retrieval.get('search_candidate_accepted_answer_match_rate'))}**；在 corpus 可覆盖任务内为 **{_percentage(retrieval.get('search_candidate_recall_within_corpus_covered'))}**。",
+        f"- 实际 read accepted-answer match：**{retrieval.get('read_candidate_accepted_answer_match_count')}/{retrieval.get('sample_count')} = {_percentage(retrieval.get('read_candidate_accepted_answer_match_rate'))}**。",
+        "- 上述 accepted answers 仅在冻结运行完成后用于离线 Answer Recall；它们未进入 query、Tool observation、Agent request 或 Director request。规范化命中不保证 target relation 绑定正确。",
         "",
         "## Terminal 与三项边界断言",
         "",

@@ -88,3 +88,15 @@ GRPO, backward, optimizer updates, LoRA publication and policy synchronization
 remain disabled. No result should be described as an ACTIVE-Skill or training
 gain. Formal EM/F1, terminal failures and Tool/provenance statistics belong in
 the completed version-bound report, not in this source/recovery document.
+
+## Completed diagnostic run
+
+The user-requested fixed-128 diagnostic run completed on 2026-08-27 with all
+128 evaluator receipts valid, after retrying only one operationally missing
+trajectory under the unchanged frozen condition. It did **not** pass Stable
+Zero: all 128 AgentGraph trajectories ended in
+`canvas_action_domain_exhausted`, so this condition is not a best-profile
+candidate. Metrics, worker Tool ownership, post-hoc Answer Recall, failed
+relation routing and reproducible wrong demos are recorded in
+`reports/triviaqa_qa_memory_unified_v2/FINAL_REPORT_ZH.md` and
+`formal_result_analysis.json`.
