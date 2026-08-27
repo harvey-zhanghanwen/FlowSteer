@@ -1385,6 +1385,7 @@ inference-only and preserves the worker-only retrieval boundary.
 | `analyze_triviaqa_qa_memory_results.py::_aggregate_control_plane` | DIRECT_REUSE from `evaluate_hotpotqa_round.py::_retrieval_boundary_statistics` | HotpotQA's completed retrieval-task denominator: an explicit-FINISH retrieval artifact must have a directed path to Output | Apply relation-route and Output-inbox lineage strong assertions only to explicit-FINISH retrieval artifact tasks. Preserve all retrieval and unfinished counts as diagnostics; unfinished trajectories remain terminal failures and receive strict zero task metrics rather than weakening the completion gate. |
 | `agent_workflow_env.py::{_role_conditional_semantic_issue,_current_successful_evidence_worker_ids}` | Necessary terminal-admission correction | Existing FlowSteer progressive Output provenance and SkillFlow lossless Tool receipts | Before explicit `FINISH`, require every current non-Output worker that owns the dataset Tool and has a successful search/read pair to have those exact current receipts in the selected Output artifact provenance. This closes a stale-artifact case after worker re-execution without imposing roles, Agent count, relation direction or a fixed topology. |
 | `agent_workflow_env.py::{model_admissible_action_types,_model_admissible_modify_agent_ids,_terminal_protocol_repair_agent_id}` | Necessary state-conditioned action-mask correction | FlowSteer's next-legal-edit action mask and explicit terminal validation | When evidence routing and the semantic artifact are valid but the selected Output violates only the exact terminal protocol, expose one measured repair boundary: MODIFY the current Output's contract or completion condition. Tool capability, role, model and topology edits remain unavailable until that serialization repair executes. |
+| `agent_workflow_env.py::_terminal_validation_error` | Necessary official-evaluator serialization correction | Existing exact-single-answer terminal protocol and unchanged TriviaQA official answer normalizer | Reject a literal escaped whitespace token (`\\n`, `\\r`, `\\t`) only when it appears at an answer-span boundary. Actual whitespace remains valid. This prevents a JSON-escaped surface artifact from becoming a scored answer token without changing or canonicalizing the semantic answer. |
 
 The v17 condition changes only the versioned reporting and terminal-admission
 semantics above. Its frozen sampling schedule purpose, seed, selected 128
@@ -1396,3 +1397,8 @@ Output-only terminal-protocol repair in a new condition and artifact directory.
 It deliberately retains the v16 sampling schedule purpose and catalog-order
 namespace, so the frozen task/seed/model coordinates remain comparable while
 v17's failed canary trajectories are never resumed into the repaired condition.
+
+`evaluation_triviaqa_qa_memory_free_topology_v19.yaml` versions the literal
+escape terminal correction in another isolated condition/artifact directory.
+All frozen task, sampling, model, retrieval and evaluator coordinates remain
+unchanged, and v18 canary receipts remain immutable comparison evidence.
