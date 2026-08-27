@@ -6,8 +6,9 @@ import json
 from typing import Any
 import unittest
 
-from src.interactive.agent_graph import AgentNode
+from src.interactive.agent_graph import AgentGraph, AgentNode, AgentRelation
 from src.interactive.agent_runtime import (
+    AgentRuntime,
     AgentRequest,
     AgentResponse,
     ExecutionPhase,
@@ -18,7 +19,14 @@ from src.interactive.hotpotqa_embedding_tool import (
     HotpotQAEmbeddingReactExecutionAdapter,
     build_hotpotqa_embedding_tool_registry,
 )
-from src.interactive.model_registry import ModelSpec, ProviderSpec
+from src.interactive.agent_workflow_env import AgentWorkflowEnv
+from src.interactive.director import AgentGraphOrchestrator
+from src.interactive.model_registry import (
+    ModelRegistry,
+    ModelSpec,
+    ProviderSpec,
+)
+from src.interactive.rollout_collector import SGLangReceiptDirectorClient
 from src.interactive.tool_runtime import ToolRequest
 
 
@@ -216,6 +224,19 @@ class _SequenceGateway:
         return AgentResponse(self.outputs.pop(0), {})
 
 
+class _UnusedDirectorClient:
+    async def propose(self, prompt: str, *, seed: int | None = None):
+        raise AssertionError("the no-model dataflow test does not call the Director")
+
+
+class _DirectorTokenizer:
+    def apply_chat_template(self, messages: object, **kwargs: object) -> list[int]:
+        return [101, 102]
+
+    def decode(self, token_ids: object, **kwargs: object) -> str:
+        return ""
+
+
 def _react_request() -> AgentRequest:
     return AgentRequest(
         request_id="run:1:retriever:single",
@@ -278,6 +299,147 @@ def _contains_forbidden_key(value: Any) -> bool:
 
 
 class HotpotQAEmbeddingToolTests(unittest.TestCase):
+    def test_public_task_reaches_director_and_worker_while_query_receipt_is_question_only(
+        self,
+    ) -> None:
+        question_scope = "Which city is the capital of India?"
+        public_task = (
+            "Based on the following passages, answer the question.\n\n"
+            "[[Delhi] Delhi is the capital of India.]\n\n"
+            "[[Mumbai] Mumbai is a city in Maharashtra.]\n\n"
+            f"Question: {question_scope}"
+        )
+        index = _QAMemoryIndex()
+        tool_registry = build_hotpotqa_embedding_tool_registry(
+            index,
+            task_id="hotpotqa:public-task",
+            tool_id=HOTPOTQA_QA_MEMORY_TOOL_ID,
+            frozen_top_k=2,
+        )
+        gateway = _SequenceGateway(
+            [
+                _action(
+                    "tool",
+                    name="search",
+                    arguments={"query": question_scope, "k": 2},
+                    resource_id=HOTPOTQA_QA_MEMORY_TOOL_ID,
+                ),
+                _action(
+                    "tool",
+                    name="read",
+                    arguments={"memory_id": "memory-1"},
+                    resource_id=HOTPOTQA_QA_MEMORY_TOOL_ID,
+                ),
+                _action(
+                    "complete",
+                    name="complete",
+                    arguments={"value": "retrieved evidence"},
+                    resource_id=None,
+                ),
+                "<answer>Delhi</answer>",
+            ]
+        )
+        registry = ModelRegistry(
+            [ProviderSpec("fake", kind="test")],
+            [ModelSpec("m", "fake")],
+        )
+        adapter = HotpotQAEmbeddingReactExecutionAdapter(
+            gateway=gateway,
+            tool_registry=tool_registry,
+            retrieval_query_scope=question_scope,
+            max_turns=4,
+            max_tool_calls=2,
+        )
+        runtime = AgentRuntime(
+            registry,
+            gateway,
+            execution_adapters={"react": adapter},
+            tool_registry=tool_registry,
+            dataset_id="hotpotqa",
+        )
+        graph = AgentGraph(
+            [
+                AgentNode(
+                    "worker",
+                    "m",
+                    "Retrieve a relevant training QA-memory record.",
+                    execution_mode="react",
+                    allowed_tools=(HOTPOTQA_QA_MEMORY_TOOL_ID,),
+                ),
+                AgentNode("output", "m", "Answer from public evidence and upstream artifacts."),
+            ],
+            [AgentRelation("worker", "output", True, False)],
+            output_agent_id="output",
+        )
+
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=runtime,
+            problem=public_task,
+            graph=graph,
+            execute_on_edit=True,
+            director_feedback_mode="control_plane",
+        )
+        director = AgentGraphOrchestrator(
+            registry,
+            _UnusedDirectorClient(),
+            tool_registry=tool_registry,
+        )
+        step = asyncio.run(
+            env.step(
+                json.dumps(
+                    {
+                        "action": "modify_agent",
+                        "agent_id": "output",
+                        "contract": (
+                            "Answer from public evidence and routed upstream artifacts."
+                        ),
+                    }
+                )
+            )
+        )
+        self.assertTrue(step.accepted)
+        self.assertIsNotNone(step.execution)
+        assert step.execution is not None
+        result = step.execution
+        director_prompt = director.build_prompt(env, 1, ())
+        director_payload = SGLangReceiptDirectorClient(
+            _DirectorTokenizer(),
+            policy_version="test-policy",
+        ).request_payload(director_prompt, seed=1)
+
+        self.assertIn("[[Delhi] Delhi is the capital of India.", director_prompt)
+        self.assertNotIn("memory-1", director_prompt)
+        self.assertNotIn("Ada Lovelace", director_prompt)
+        self.assertNotIn("paraphrase_answer_statement", env.snapshot().last_feedback)
+        self.assertFalse(
+            {"tools", "tool_choice", "allowed_tools", "retrieval", "documents"}
+            & set(director_payload)
+        )
+        self.assertEqual([(question_scope, 2)], index.search_calls)
+        self.assertTrue(all(request.problem == public_task for request in gateway.requests))
+        self.assertIn(question_scope, gateway.requests[0].agent.contract)
+        self.assertIn("[[Delhi]", gateway.requests[0].problem)
+        worker_call = next(
+            call for call in result.calls if call.request.agent.id == "worker"
+        )
+        output_call = next(
+            call for call in result.calls if call.request.agent.id == "output"
+        )
+        self.assertEqual(
+            ["search", "read"],
+            [
+                receipt["request"]["action"]
+                for receipt in worker_call.response.metadata["tool_receipts"]
+            ],
+        )
+        self.assertEqual("worker", output_call.request.upstream[0].source_agent_id)
+        self.assertEqual("output", output_call.request.upstream[0].target_agent_id)
+        self.assertEqual(
+            2,
+            len(output_call.request.upstream[0].tool_receipts),
+        )
+
     def test_react_completes_after_one_search_read_pair(self) -> None:
         index = _Index()
         gateway = _SequenceGateway(

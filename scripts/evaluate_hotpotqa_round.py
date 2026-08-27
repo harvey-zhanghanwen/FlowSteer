@@ -32,6 +32,7 @@ from train_agentgraph_smoke import (
     _safe_error,
     _write_json,
     _write_jsonl,
+    qa_retrieval_scopes,
     version_bundle_for,
 )
 from src.interactive.agent_graph import AgentNode
@@ -152,12 +153,21 @@ def validate_hotpot_config(config: Mapping[str, Any]) -> None:
     raw_retrieval = config.get("qa_embedding_retrieval")
     if raw_retrieval is not None:
         retrieval = _mapping(raw_retrieval, "qa_embedding_retrieval")
+        task_scope, retrieval_query_scope = qa_retrieval_scopes(retrieval)
+        explicit_scope_split = (
+            "task_scope" in retrieval or "retrieval_query_scope" in retrieval
+        )
         retrieval_checks = {
             "enabled": retrieval.get("enabled") is True,
             "condition_id": retrieval.get("condition_id") == experiment.get("condition_id"),
             "mode": retrieval.get("mode") == "model_driven_search_read",
             "dataset_scope": retrieval.get("dataset_scope") == ["hotpotqa"],
-            "question_scope": retrieval.get("question_scope") == "question_only",
+            "task_scope": (
+                task_scope == "public_task"
+                if explicit_scope_split
+                else task_scope == "question_only"
+            ),
+            "retrieval_query_scope": retrieval_query_scope == "question_only",
             "normalize_embeddings": retrieval.get("normalize_embeddings") is True,
             "similarity": retrieval.get("similarity") == "cosine",
             "web_search_enabled": retrieval.get("web_search_enabled") is False,

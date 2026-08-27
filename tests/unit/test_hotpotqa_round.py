@@ -4,6 +4,7 @@ import importlib.util
 from pathlib import Path
 
 from src.interactive.config_loader import load_yaml
+from src.interactive.task_dataset import iter_task_records
 
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -64,6 +65,43 @@ def test_qa_memory_v11_freezes_worker_only_local_retrieval_dataflow():
     assert graph["terminal_protocol"] == "exact_single_answer_tag"
     assert graph["require_format_agent"] is False
     assert "add_agent" not in graph["actions"]
+
+
+def test_qa_memory_v13_keeps_public_task_and_question_only_worker_query():
+    config = load_yaml(
+        _ROOT / "config" / "evaluation_hotpotqa_qa_memory_v13.yaml"
+    )
+
+    _MODULE.validate_hotpot_config(config)
+
+    retrieval = config["qa_embedding_retrieval"]
+    assert retrieval["task_scope"] == "public_task"
+    assert retrieval["retrieval_query_scope"] == "question_only"
+    assert retrieval["search_top_k"] == 2
+    assert retrieval["max_tool_calls_per_agent_call"] == 4
+    assert retrieval["web_search_enabled"] is False
+    assert retrieval["index_dir"].endswith(
+        "hotpotqa_qa_memory_source_freeze_v2/index"
+    )
+    assert config["hotpotqa_evaluation"]["sample_count"] == 128
+
+    source_freeze = list(
+        iter_task_records(
+            _ROOT / config["data"]["validation_path"],
+            expected_split="validation",
+        )
+    )
+    round01 = list(
+        iter_task_records(
+            _ROOT / "artifacts/hotpotqa_round_01/selected_tasks.jsonl",
+            expected_split="validation",
+        )
+    )
+    assert len(source_freeze) == 128
+    assert [task.task_id for task in source_freeze] == [
+        task.task_id for task in round01
+    ]
+    assert all("\n\nQuestion:" in task.question for task in source_freeze)
 
 
 def test_strict_aggregate_keeps_failed_task_in_denominator():

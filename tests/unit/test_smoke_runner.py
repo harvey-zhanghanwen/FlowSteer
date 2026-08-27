@@ -31,6 +31,8 @@ evaluator_version_for = _MODULE.evaluator_version_for
 run_smoke = _MODULE.run_smoke
 select_smoke_tasks = _MODULE.select_smoke_tasks
 validate_smoke_bounds = _MODULE.validate_smoke_bounds
+qa_retrieval_runtime_task = _MODULE.qa_retrieval_runtime_task
+qa_retrieval_scopes = _MODULE.qa_retrieval_scopes
 
 
 SOURCE_NAMES = {
@@ -208,6 +210,44 @@ def read_jsonl(path: Path) -> list[dict]:
 
 
 class SelectionTests(unittest.TestCase):
+    def test_explicit_public_task_and_question_only_retrieval_scopes_are_separate(self) -> None:
+        public_question = (
+            "Based on the following passages, answer the question.\n\n"
+            "[[Delhi] Delhi is the capital of India.]\n\n"
+            "Question: Which city is the capital of India?"
+        )
+        task = TaskRecord(
+            task_id="hotpotqa:public-task",
+            question=public_question,
+            ground_truth="Delhi",
+            split="validation",
+            metadata={"dataset_key": "hotpotqa"},
+        )
+        retrieval = {
+            "task_scope": "public_task",
+            "retrieval_query_scope": "question_only",
+        }
+
+        runtime_task = qa_retrieval_runtime_task(task, retrieval)
+
+        self.assertIs(runtime_task, task)
+        self.assertIn("[[Delhi]", runtime_task.question)
+        self.assertEqual(
+            ("public_task", "question_only"),
+            qa_retrieval_scopes(retrieval),
+        )
+
+    def test_explicit_retrieval_scope_split_fails_closed(self) -> None:
+        with self.assertRaisesRegex(Exception, "retrieval_query_scope"):
+            qa_retrieval_scopes({"task_scope": "public_task"})
+        with self.assertRaisesRegex(Exception, "task_scope"):
+            qa_retrieval_scopes(
+                {
+                    "task_scope": "question_only",
+                    "retrieval_query_scope": "question_only",
+                }
+            )
+
     def test_bounds_require_raw_on_policy_sampling_and_fixed_oom_schedule(self) -> None:
         config = yaml.safe_load(
             Path("config/training_agentgraph_smoke.yaml").read_text(encoding="utf-8")

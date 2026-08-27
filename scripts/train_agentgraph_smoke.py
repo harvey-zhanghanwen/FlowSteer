@@ -102,6 +102,60 @@ def _mapping(value: Any, name: str) -> Mapping[str, Any]:
     return value
 
 
+def qa_retrieval_scopes(
+    retrieval: Mapping[str, Any],
+) -> tuple[str, str]:
+    """Resolve the public task and worker retrieval-query scopes.
+
+    Older frozen retrieval conditions used one ``question_scope`` field and
+    consequently supplied the question-only rendering to the whole Canvas.
+    New conditions must declare the two planes independently: the Director
+    and every worker keep the public task, while only a Tool-capable worker
+    receives the question-only query scope used to formulate embedding
+    searches.
+    """
+
+    has_explicit_split = (
+        "task_scope" in retrieval or "retrieval_query_scope" in retrieval
+    )
+    if has_explicit_split:
+        task_scope = retrieval.get("task_scope")
+        query_scope = retrieval.get("retrieval_query_scope")
+        if task_scope != "public_task":
+            raise ConfigurationError(
+                "qa_embedding_retrieval.task_scope must be public_task"
+            )
+        if query_scope != "question_only":
+            raise ConfigurationError(
+                "qa_embedding_retrieval.retrieval_query_scope must be question_only"
+            )
+        return "public_task", "question_only"
+
+    if retrieval.get("question_scope") != "question_only":
+        raise ConfigurationError(
+            "legacy qa_embedding_retrieval.question_scope must be question_only"
+        )
+    return "question_only", "question_only"
+
+
+def qa_retrieval_runtime_task(
+    task: TaskRecord,
+    retrieval: Mapping[str, Any],
+) -> TaskRecord:
+    """Apply only the declared Canvas task scope to one QA task."""
+
+    task_scope, _ = qa_retrieval_scopes(retrieval)
+    if task_scope == "public_task":
+        return task
+    return TaskRecord(
+        task_id=task.task_id,
+        question=hotpotqa_question_scope(task.question),
+        ground_truth=task.ground_truth,
+        split=task.split,
+        metadata=task.metadata,
+    )
+
+
 def validate_smoke_bounds(config: Mapping[str, Any]) -> None:
     """Reject any config that silently expands this one-update smoke run."""
 
@@ -495,6 +549,7 @@ class LiveSmokeBackend:
                 raw_embedding_retrieval,
                 "qa_embedding_retrieval",
             )
+            qa_retrieval_scopes(retrieval)
             index_dir = _resolve(root, str(retrieval["index_dir"]))
             corpus_kind = str(retrieval.get("corpus_kind", "public_context"))
             if corpus_kind == "train_qa_memory":
@@ -703,6 +758,7 @@ class LiveSmokeBackend:
             react_adapter = HotpotQAEmbeddingReactExecutionAdapter(
                 gateway=self.runtime.gateway,
                 tool_registry=task_tool_registry,
+                retrieval_query_scope=hotpotqa_question_scope(task.question),
                 max_turns=int(retrieval["max_turns_per_agent_call"]),
                 max_tool_calls=int(retrieval["max_tool_calls_per_agent_call"]),
                 max_action_tokens=int(
@@ -721,13 +777,7 @@ class LiveSmokeBackend:
                 tool_registry=task_tool_registry,
                 dataset_id="hotpotqa",
             )
-            runtime_task = TaskRecord(
-                task_id=task.task_id,
-                question=hotpotqa_question_scope(task.question),
-                ground_truth=task.ground_truth,
-                split=task.split,
-                metadata=task.metadata,
-            )
+            runtime_task = qa_retrieval_runtime_task(task, retrieval)
         orchestrator = AgentGraphOrchestrator(
             self.registry,
             self.director_client,

@@ -522,6 +522,22 @@ class HotpotQAEmbeddingReactExecutionAdapter(ToolReactExecutionAdapter):
     progressive Canvas search space.
     """
 
+    def __init__(
+        self,
+        *,
+        retrieval_query_scope: str | None = None,
+        **kwargs: object,
+    ) -> None:
+        self._retrieval_query_scope = (
+            None
+            if retrieval_query_scope is None
+            else _required_text(
+                retrieval_query_scope,
+                field_name="retrieval_query_scope",
+            )
+        )
+        super().__init__(**kwargs)
+
     def _active_retrieval_tool_id(self) -> str:
         resource_ids = self._tool_registry.resource_ids
         if len(resource_ids) != 1:
@@ -662,8 +678,13 @@ class HotpotQAEmbeddingReactExecutionAdapter(ToolReactExecutionAdapter):
                 "Current action mask: search only; read and complete are not "
                 "admitted. Supply all required search arguments."
             )
+        query_scope = self._retrieval_query_scope or request.problem
         return (
             base
+            + "\nEmbedding retrieval query scope: "
+            + json.dumps(query_scope, ensure_ascii=False)
+            + ". Form search queries only from this question scope; the public "
+            "passages remain task evidence and are not a static retrieval payload. "
             + "\nHotpotQA retrieval protocol: search arguments must be exactly "
             + json.dumps(
                 {"query": "focused evidence query", "k": frozen_k},
