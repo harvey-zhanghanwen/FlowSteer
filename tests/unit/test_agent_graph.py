@@ -716,6 +716,57 @@ class _CountingRuntime(AgentRuntime):
         return await super().execute(*args, **kwargs)  # type: ignore[arg-type]
 
 
+class _TriviaMemoryProfileRuntime:
+    """Static Runtime capability view for FINISH-gate unit tests."""
+
+    def __init__(self, model_registry: ModelRegistry) -> None:
+        self.model_registry = model_registry
+        self.dataset_id = "triviaqa"
+        self.semantic_protocol = "none"
+
+    def registered_execution_profiles(self):
+        return (
+            ("reasoning", ()),
+            ("react", ("triviaqa.qa_memory",)),
+        )
+
+
+def _trivia_memory_receipts() -> tuple[dict[str, object], dict[str, object]]:
+    return (
+        {
+            "tool_id": "triviaqa.qa_memory",
+            "request": {
+                "action": "search",
+                "arguments": {"query": "author novel"},
+            },
+            "result": {
+                "completed": True,
+                "value": {"operation": "search", "hits": []},
+            },
+            "error_type": None,
+        },
+        {
+            "tool_id": "triviaqa.qa_memory",
+            "request": {
+                "action": "read",
+                "arguments": {"memory_id": "memory-001"},
+            },
+            "result": {
+                "completed": True,
+                "value": {
+                    "operation": "read",
+                    "memory_id": "memory-001",
+                    "memory": {
+                        "memory_id": "memory-001",
+                        "text": "The answer is Ada.",
+                    },
+                },
+            },
+            "error_type": None,
+        },
+    )
+
+
 def _hotpot_semantic_graph(*, format_predecessor: str = "verifier") -> AgentGraph:
     return AgentGraph(
         [
@@ -1154,6 +1205,114 @@ class _HotpotSemanticGateway(_ImmediateGateway):
 
 
 class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
+    async def test_triviaqa_free_topology_evidence_gate_requires_routed_worker(self) -> None:
+        registry = make_registry()
+        worker = AgentNode(
+            "worker",
+            "balanced",
+            "retrieve evidence",
+            execution_mode="react",
+            allowed_tools=("triviaqa.qa_memory",),
+        )
+        output = AgentNode("output", "balanced", "answer")
+        routed = AgentGraph(
+            [worker, output],
+            [AgentRelation("worker", "output", True, False)],
+            output_agent_id="output",
+        )
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_TriviaMemoryProfileRuntime(registry),  # type: ignore[arg-type]
+            problem="Which author wrote the novel?",
+            graph=routed,
+            execute_on_edit=True,
+            require_exact_answer_tag=True,
+            required_evidence_tool_id="triviaqa.qa_memory",
+            require_evidence_relation=True,
+            director_feedback_mode="control_plane",
+        )
+        env._progressive_execution = AgentRuntimeResult(
+            run_id="routed",
+            graph_revision=routed.revision,
+            output_agent_id="output",
+            final_answer="<answer>Ada</answer>",
+            outputs={"worker": "receipt-grounded evidence", "output": "Ada"},
+            calls=(),
+            block_completion_order=(("worker",), ("output",)),
+            output_metadata={"worker": {"tool_receipts": _trivia_memory_receipts()}},
+        )
+        env._progressive_execution_revision = routed.revision
+
+        self.assertTrue(env.finish_admissibility()["admissible"])
+        self.assertIn("finish", env.model_admissible_action_types())
+
+        output_only = AgentGraph(
+            [
+                AgentNode(
+                    "output",
+                    "balanced",
+                    "answer with a Tool",
+                    execution_mode="react",
+                    allowed_tools=("triviaqa.qa_memory",),
+                )
+            ],
+            output_agent_id="output",
+        )
+        output_env = AgentWorkflowEnv(
+            registry,
+            runtime=_TriviaMemoryProfileRuntime(registry),  # type: ignore[arg-type]
+            problem="Which author wrote the novel?",
+            graph=output_only,
+            execute_on_edit=True,
+            require_exact_answer_tag=True,
+            required_evidence_tool_id="triviaqa.qa_memory",
+            require_evidence_relation=True,
+            director_feedback_mode="control_plane",
+        )
+        output_env._progressive_execution = AgentRuntimeResult(
+            run_id="output-only",
+            graph_revision=output_only.revision,
+            output_agent_id="output",
+            final_answer="<answer>Ada</answer>",
+            outputs={"output": "Ada"},
+            calls=(),
+            block_completion_order=(("output",),),
+            output_metadata={"output": {"tool_receipts": _trivia_memory_receipts()}},
+        )
+        output_env._progressive_execution_revision = output_only.revision
+        self.assertEqual(
+            "evidence_relation",
+            output_env.finish_admissibility()["stage"],
+        )
+
+        unrouted = AgentGraph([worker, output], output_agent_id="output")
+        unrouted_env = AgentWorkflowEnv(
+            registry,
+            runtime=_TriviaMemoryProfileRuntime(registry),  # type: ignore[arg-type]
+            problem="Which author wrote the novel?",
+            graph=unrouted,
+            execute_on_edit=True,
+            require_exact_answer_tag=True,
+            required_evidence_tool_id="triviaqa.qa_memory",
+            require_evidence_relation=True,
+            director_feedback_mode="control_plane",
+        )
+        unrouted_env._progressive_execution = AgentRuntimeResult(
+            run_id="unrouted",
+            graph_revision=unrouted.revision,
+            output_agent_id="output",
+            final_answer="<answer>Ada</answer>",
+            outputs={"worker": "receipt-grounded evidence", "output": "Ada"},
+            calls=(),
+            block_completion_order=(("worker",), ("output",)),
+            output_metadata={"worker": {"tool_receipts": _trivia_memory_receipts()}},
+        )
+        unrouted_env._progressive_execution_revision = unrouted.revision
+        self.assertIsNotNone(
+            unrouted_env._required_evidence_issue(unrouted_env._progressive_execution)
+        )
+        self.assertNotIn("finish", unrouted_env.model_admissible_action_types())
+
     async def test_execution_contract_is_rejected_before_canvas_commit(self) -> None:
         registry = make_registry()
         gateway = _ImmediateGateway()

@@ -374,6 +374,7 @@ class AgentWorkflowEnv:
         semantic_protocol: str = "none",
         recovery_policy: str = "default",
         required_evidence_tool_id: Optional[str] = None,
+        require_evidence_relation: bool = False,
         director_feedback_mode: str = "artifact_preview",
     ) -> None:
         if runtime is None and gateway is None:
@@ -424,6 +425,12 @@ class AgentWorkflowEnv:
         ):
             raise AgentWorkflowStateError(
                 "required_evidence_tool_id must be non-empty text or None"
+            )
+        if type(require_evidence_relation) is not bool:
+            raise AgentWorkflowStateError("require_evidence_relation must be bool")
+        if require_evidence_relation and required_evidence_tool_id is None:
+            raise AgentWorkflowStateError(
+                "require_evidence_relation requires required_evidence_tool_id"
             )
         if director_feedback_mode not in {"artifact_preview", "control_plane"}:
             raise AgentWorkflowStateError(
@@ -505,6 +512,7 @@ class AgentWorkflowEnv:
             if required_evidence_tool_id is None
             else required_evidence_tool_id.strip()
         )
+        self.require_evidence_relation = require_evidence_relation
         self.director_feedback_mode = director_feedback_mode
         self.allowed_action_types = resolved_allowed_actions
         self._allowed_action_type_set = frozenset(resolved_allowed_actions)
@@ -3869,6 +3877,7 @@ class AgentWorkflowEnv:
             semantic_protocol=self.semantic_protocol,
             recovery_policy=self.recovery_policy,
             required_evidence_tool_id=self.required_evidence_tool_id,
+            require_evidence_relation=self.require_evidence_relation,
             director_feedback_mode=self.director_feedback_mode,
         )
         result._turn_count = state.turn_count
@@ -4024,6 +4033,14 @@ class AgentWorkflowEnv:
                 return self._reject_after_count(
                     action,
                     "cannot finish: " + semantic_issue,
+                    execution=execution,
+                    execution_reused=execution_reused,
+                )
+            evidence_issue = self._required_evidence_issue(execution)
+            if evidence_issue is not None:
+                return self._reject_after_count(
+                    action,
+                    "cannot finish: " + evidence_issue,
                     execution=execution,
                     execution_reused=execution_reused,
                 )
@@ -4778,6 +4795,7 @@ class AgentWorkflowEnv:
         return bool(
             self._environment_terminal_issue(execution) is None
             and self._semantic_protocol_issue(execution) is None
+            and self._required_evidence_issue(execution) is None
             and self._terminal_validation_error(execution.final_answer) is None
         )
 
@@ -4893,6 +4911,13 @@ class AgentWorkflowEnv:
             if repair is not None:
                 result["failure_attribution"] = repair
             return result
+        evidence_issue = self._required_evidence_issue(execution)
+        if evidence_issue is not None:
+            return {
+                "admissible": False,
+                "stage": "evidence_relation",
+                "reason": evidence_issue,
+            }
         terminal_issue = self._terminal_validation_error(execution.final_answer)
         if terminal_issue is not None:
             return {
@@ -8064,6 +8089,24 @@ class AgentWorkflowEnv:
             "worker artifact with completed "
             f"{self.required_evidence_tool_id!r} search and read receipts"
         )
+
+    def _required_evidence_issue(
+        self,
+        execution: AgentRuntimeResult,
+    ) -> Optional[str]:
+        """Apply the topology-neutral dynamic evidence FINISH gate.
+
+        This is the direct thin adaptation of FlowSteer's existing
+        ``require_evidence_relation`` boundary: it observes only executed Tool
+        receipts and explicit Canvas relations.  It neither assigns a role nor
+        requires a particular worker chain.  The selected Output Agent cannot
+        satisfy this requirement with its own Tool receipt because only strict
+        directed ancestors are considered.
+        """
+
+        if not self.require_evidence_relation:
+            return None
+        return self._role_conditional_semantic_issue(execution)
 
     def _semantic_protocol_issue(
         self,

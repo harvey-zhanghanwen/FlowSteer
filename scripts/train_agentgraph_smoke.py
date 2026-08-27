@@ -3191,6 +3191,14 @@ class LiveSmokeBackend:
             if required_evidence_tool_id_value is None
             else str(required_evidence_tool_id_value).strip()
         )
+        require_evidence_relation = bool(
+            graph_config.get("require_evidence_relation", False)
+        )
+        if require_evidence_relation and required_evidence_tool_id is None:
+            raise ConfigurationError(
+                "agent_graph.require_evidence_relation requires "
+                "required_evidence_tool_id"
+            )
         prompt_version = str(
             experiment.get("prompt_version", PROMPT_VERSION)
         ).strip()
@@ -3321,6 +3329,7 @@ class LiveSmokeBackend:
                 semantic_protocol=semantic_protocol,
                 recovery_policy=recovery_policy,
                 required_evidence_tool_id=required_evidence_tool_id,
+                require_evidence_relation=require_evidence_relation,
                 director_feedback_mode=str(
                     graph_config.get(
                         "director_feedback_mode", "artifact_preview"
