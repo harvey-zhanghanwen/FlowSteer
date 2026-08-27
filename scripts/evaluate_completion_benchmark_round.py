@@ -33,6 +33,7 @@ if str(SCRIPTS_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_ROOT))
 
 import evaluate_hotpotqa_round as hotpot_round
+import analyze_triviaqa_qa_memory_results as triviaqa_qa_memory_analysis
 from train_agentgraph_smoke import (
     LiveSmokeBackend,
     _dataset_key,
@@ -2131,6 +2132,88 @@ def _report(
     }
 
 
+def _triviaqa_qa_memory_control_plane_gate(
+    config: Mapping[str, Any],
+    trajectories: Mapping[str, Mapping[str, Any]],
+) -> Optional[Mapping[str, Any]]:
+    """Reuse the persisted-trajectory QA-memory boundary analysis fail-closed."""
+
+    _, bounded = _evaluation_section(config)
+    required_tool_id = _mapping(config["agent_graph"], "agent_graph").get(
+        "required_evidence_tool_id"
+    )
+    if (
+        bounded.get("dataset_key") != "triviaqa"
+        or required_tool_id != triviaqa_qa_memory_analysis.QA_MEMORY_TOOL_ID
+    ):
+        return None
+    selected_ids = [
+        task_id
+        for task_id, trajectory in trajectories.items()
+        if isinstance(task_id, str) and isinstance(trajectory, Mapping)
+    ]
+    summary, per_task = triviaqa_qa_memory_analysis._aggregate_control_plane(
+        selected_ids,
+        trajectories,
+    )
+    assertions = _mapping(summary.get("assertions"), "QA-memory assertions")
+    passed = all(
+        assertions.get(name) is True
+        for name in (
+            "director_tool_calls_eq_0",
+            "director_data_plane_isolated",
+            "retrieval_tool_calls_by_worker_gt_0",
+            "retrieval_artifact_routed_via_relation",
+            "output_inbox_receipt_lineage",
+        )
+    )
+    return {
+        **dict(summary),
+        "passed": passed,
+        "trajectory_count": len(per_task),
+        "tool_id": required_tool_id,
+    }
+
+
+def _triviaqa_qa_memory_index_summary(
+    config: Mapping[str, Any], root: Path
+) -> Optional[Mapping[str, Any]]:
+    _, bounded = _evaluation_section(config)
+    if bounded.get("dataset_key") != "triviaqa":
+        return None
+    runtime = config.get("qa_tool_runtime")
+    if not isinstance(runtime, Mapping):
+        return None
+    index_value = runtime.get("index_path")
+    if not isinstance(index_value, str) or not index_value:
+        return None
+    manifest_path = _resolve(root, index_value) / "manifest.json"
+    if not manifest_path.is_file():
+        raise CompletionBenchmarkRoundError(
+            f"TriviaQA QA-memory manifest is missing: {manifest_path}"
+        )
+    value = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if not isinstance(value, Mapping):
+        raise CompletionBenchmarkRoundError(
+            "TriviaQA QA-memory manifest must contain an object"
+        )
+    return {
+        "manifest_path": str(manifest_path),
+        "train_record_count": value.get("train_count"),
+        "unique_source_count": value.get("unique_source_count"),
+        "cycled_record_count": value.get("cycled_count"),
+        "paraphrase_count": value.get("paraphrase_count"),
+        "heldout_validation_count": value.get("validation_isolation_count"),
+        "validation_content_indexed": value.get("validation_content_indexed"),
+        "embedding_model": value.get("embedding_model"),
+        "embedding_dimension": value.get("embedding_dimension"),
+        "normalization": value.get("normalization"),
+        "similarity": value.get("similarity"),
+        "frozen_top_k": value.get("frozen_top_k"),
+        "tool_budget": value.get("tool_budget"),
+    }
+
+
 def _report_markdown(report: Mapping[str, Any]) -> str:
     metric_name = str(report["primary_metric"])
     strict_key = f"strict_{metric_name}"
@@ -2520,10 +2603,38 @@ async def run_completion_benchmark_round(
             root,
             dataset_key,
         )
+        director_request_boundary = None
+        required_evidence_tool_id = _mapping(
+            config["agent_graph"], "agent_graph"
+        ).get("required_evidence_tool_id")
+        if (
+            dataset_key == "triviaqa"
+            and required_evidence_tool_id
+            == triviaqa_qa_memory_analysis.QA_MEMORY_TOOL_ID
+        ):
+            director_payload = backend.director_client.request_payload(
+                "Canvas control-plane preflight",
+                seed=int(_mapping(config["experiment"], "experiment")["seed"]),
+            )
+            forbidden_director_fields = sorted(
+                set(director_payload)
+                & {"tools", "tool_choice", "allowed_tools", "retrieval", "documents"}
+            )
+            if forbidden_director_fields:
+                raise CompletionBenchmarkRoundError(
+                    "Director request unexpectedly exposes Tool/retrieval fields"
+                )
+            director_request_boundary = {
+                "director_tool_calls": 0,
+                "allowed_tools": [],
+                "retrieval_payload_present": False,
+                "forbidden_fields_present": forbidden_director_fields,
+            }
         preflight = {
             **dict(adapter_preflight),
             "sglang_server_runtime": sglang_server_runtime,
             "evaluator_preflight": evaluator_preflight,
+            "director_request_boundary": director_request_boundary,
             "healthbench_judge_model": (
                 backend.judge_model
                 if dataset_key == "healthbench_professional"
@@ -2596,6 +2707,17 @@ async def run_completion_benchmark_round(
         dataset_key=dataset_key,
         judge_model=backend.judge_model,
     )
+    qa_memory_control_plane = _triviaqa_qa_memory_control_plane_gate(
+        config,
+        trajectories,
+    )
+    if qa_memory_control_plane is not None:
+        stable_zero = {
+            **dict(stable_zero),
+            "qa_memory_control_plane_and_tool_routing": qa_memory_control_plane,
+            "passed": bool(stable_zero.get("passed"))
+            and qa_memory_control_plane.get("passed") is True,
+        }
     manifest["stable_zero"] = stable_zero
     if canary_only:
         manifest.update(
@@ -2614,7 +2736,23 @@ async def run_completion_benchmark_round(
             )
         return manifest
 
+    if (
+        qa_memory_control_plane is not None
+        and qa_memory_control_plane.get("passed") is not True
+    ):
+        manifest.update(status="failed_qa_memory_boundary", completed_at=_utc_now())
+        _write_json(paths["manifest"], manifest)
+        raise CompletionBenchmarkRoundError(
+            "TriviaQA QA-memory Director/worker/relation assertions failed"
+        )
     report = _report(rows, config, tuple(trajectories.values()))
+    qa_memory_index = _triviaqa_qa_memory_index_summary(config, root)
+    if qa_memory_control_plane is not None:
+        report = {
+            **dict(report),
+            "control_plane_and_tool_routing": qa_memory_control_plane,
+            "qa_memory": qa_memory_index,
+        }
     _write_json(paths["report_json"], report)
     paths["report_markdown"].parent.mkdir(parents=True, exist_ok=True)
     paths["report_markdown"].write_text(

@@ -84,6 +84,65 @@ def test_runner_reuses_hotpot_graph_and_stable_zero_boundaries():
     )
 
 
+def test_triviaqa_qa_memory_control_plane_gate_reuses_existing_analyzer():
+    config = load_yaml(
+        _ROOT / "config" / "evaluation_triviaqa_qa_memory_free_topology_v11.yaml"
+    )
+    passing = {
+        "assertions": {
+            "director_tool_calls_eq_0": True,
+            "director_data_plane_isolated": True,
+            "retrieval_tool_calls_by_worker_gt_0": True,
+            "retrieval_artifact_routed_via_relation": True,
+            "output_inbox_receipt_lineage": True,
+        }
+    }
+    with patch.object(
+        _MODULE.triviaqa_qa_memory_analysis,
+        "_aggregate_control_plane",
+        return_value=(passing, {"triviaqa:1": {}}),
+    ):
+        result = _MODULE._triviaqa_qa_memory_control_plane_gate(
+            config,
+            {"triviaqa:1": {"task": {"task_id": "triviaqa:1"}}},
+        )
+    assert result is not None
+    assert result["passed"] is True
+    assert result["trajectory_count"] == 1
+    assert result["tool_id"] == "triviaqa.qa_memory"
+
+    failing = deepcopy(passing)
+    failing["assertions"]["output_inbox_receipt_lineage"] = False
+    with patch.object(
+        _MODULE.triviaqa_qa_memory_analysis,
+        "_aggregate_control_plane",
+        return_value=(failing, {"triviaqa:1": {}}),
+    ):
+        result = _MODULE._triviaqa_qa_memory_control_plane_gate(
+            config,
+            {"triviaqa:1": {"task": {"task_id": "triviaqa:1"}}},
+        )
+    assert result is not None
+    assert result["passed"] is False
+
+
+def test_triviaqa_qa_memory_index_summary_records_frozen_split_and_embedding():
+    config = load_yaml(
+        _ROOT / "config" / "evaluation_triviaqa_qa_memory_free_topology_v11.yaml"
+    )
+    summary = _MODULE._triviaqa_qa_memory_index_summary(config, _ROOT)
+
+    assert summary is not None
+    assert summary["train_record_count"] == 512
+    assert summary["unique_source_count"] == 512
+    assert summary["cycled_record_count"] == 0
+    assert summary["paraphrase_count"] == 512
+    assert summary["heldout_validation_count"] == 128
+    assert summary["validation_content_indexed"] is False
+    assert summary["embedding_dimension"] == 768
+    assert summary["frozen_top_k"] == 3
+
+
 def test_supported_configs_are_evaluation_only():
     for dataset_key in (
         "hotpotqa",

@@ -396,6 +396,32 @@ class ConfigLoaderTests(unittest.TestCase):
         self.assertFalse(config["grpo"]["enabled"])
         self.assertFalse(config["skills"]["enabled"])
 
+    def test_trivia_qa_memory_free_topology_v12_keeps_frozen_retrieval(self) -> None:
+        config = load_yaml(
+            "config/evaluation_triviaqa_qa_memory_free_topology_v12.yaml"
+        )
+        validate_agent_graph_config(config)
+
+        self.assertEqual(
+            "triviaqa_qa_memory_free_topology_v12_worker_relation",
+            config["experiment"]["condition_id"],
+        )
+        self.assertEqual(
+            "control_plane", config["agent_graph"]["director_feedback_mode"]
+        )
+        self.assertEqual(
+            "triviaqa.qa_memory",
+            config["agent_graph"]["required_evidence_tool_id"],
+        )
+        self.assertTrue(config["agent_graph"]["require_evidence_relation"])
+        index_manifest = load_yaml(
+            "data/triviaqa_qa_memory_v1/index/manifest.json"
+        )
+        self.assertEqual(3, index_manifest["frozen_top_k"])
+        self.assertFalse(config["experiment"]["training_enabled"])
+        self.assertFalse(config["grpo"]["enabled"])
+        self.assertFalse(config["skills"]["enabled"])
+
     def test_shared_qa_semantic_protocol_combination_is_fail_closed(self) -> None:
         mutations = (
             ("prompt_version", "agentgraph.director.minimal-neutral.v10"),
