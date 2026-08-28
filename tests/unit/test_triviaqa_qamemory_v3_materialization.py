@@ -36,6 +36,7 @@ from scripts.generate_triviaqa_qa_memory_paraphrases import (
     _answer_statement_has_lexical_relation_lineage,
     _quoted_scope_preserved,
     _quoted_attribution_qa,
+    _restore_immutable_quoted_slots,
     _original_interrogative_head_omitted,
     _participation_marker_preserved,
     _restore_authoritative_source_transpositions,
@@ -596,6 +597,53 @@ def test_response_parser_normalizes_known_typos_one_to_one(
     assert statement.endswith("Zambezi river.")
 
 
+def test_structured_output_error_reports_missing_and_unknown_fields() -> None:
+    with pytest.raises(ValueError) as captured:
+        parse_paraphrase_response(
+            json.dumps(
+                {
+                    "paraphrased_question": (
+                        "Name the river holding the Kariba Dam."
+                    )
+                }
+            ),
+            _source(),
+        )
+
+    message = str(captured.value)
+    assert "observed_fields=['paraphrased_question']" in message
+    assert (
+        "missing_fields=['paraphrase_answer_statement', "
+        "'paraphrase_question']" in message
+    )
+    assert "unexpected_fields=['paraphrased_question']" in message
+    assert "collision_fields=[]" in message
+
+
+def test_structured_output_error_reports_alias_collision() -> None:
+    with pytest.raises(ValueError) as captured:
+        parse_paraphrase_response(
+            json.dumps(
+                {
+                    "paraphrase_question": (
+                        "Name the river holding the Kariba Dam."
+                    ),
+                    ".paraphrase_question": (
+                        "Identify the waterway holding the Kariba Dam."
+                    ),
+                    "paraphrase_answer_statement": (
+                        "The Kariba Dam was built on the Zambezi river."
+                    ),
+                }
+            ),
+            _source(),
+        )
+
+    message = str(captured.value)
+    assert "collision_fields=['paraphrase_question']" in message
+    assert "unexpected_fields=[]" in message
+
+
 @pytest.mark.parametrize(
     "fields",
     (
@@ -933,6 +981,138 @@ def test_parser_enforces_exact_curly_quoted_content() -> None:
                     **accepted,
                     "paraphrase_question": (
                         "Name the performer who released 'Blue moon'."
+                    ),
+                }
+            ),
+            source,
+        )
+
+
+def test_quote_slot_recovery_restores_one_slot_without_rewriting_its_frame() -> None:
+    source = 'Which singer recorded “Blue Moon”?'
+    candidate = 'Name the performer who released "Blue Moon!".'
+
+    assert _restore_immutable_quoted_slots(source, candidate) == (
+        'Name the performer who released "Blue Moon".'
+    )
+
+
+def test_quote_slot_recovery_restores_multiple_ordered_unicode_slots() -> None:
+    source = 'Who recorded "Blue Moon" and ‘Red Sun’?'
+    candidate = 'Name who released “Blue Moon!” and ‘Red Sun?’.'
+
+    assert _restore_immutable_quoted_slots(source, candidate) == (
+        'Name who released “Blue Moon” and ‘Red Sun’.'
+    )
+
+
+def test_generate_routes_quote_only_failure_through_slot_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = TriviaQATrainSource(
+        source_train_task_id="triviaqa:quote_repair_generate",
+        base_task_id="triviaqa:quote_repair_generate",
+        selection_index=0,
+        cycled_training_sample=False,
+        cycle_index=None,
+        original_question='Which singer recorded “Blue Moon”?',
+        canonical_answer="Example Singer",
+        native_split="train",
+    )
+    client = object.__new__(LocalQwen35Paraphraser)
+    client.max_retries = 0
+    responses = iter(
+        (
+            json.dumps(
+                {
+                    "paraphrase_question": (
+                        'Name the performer who released "Blue Moon!".'
+                    ),
+                    "paraphrase_answer_statement": (
+                        "Example Singer recorded Blue Moon."
+                    ),
+                }
+            ),
+            json.dumps(
+                {
+                    "semantic_preserved": True,
+                    "entity_identity_preserved": True,
+                    "relation_and_scope_preserved": True,
+                    "answer_cardinality_preserved": True,
+                    "answer_not_revealed": True,
+                    "question_changed": True,
+                }
+            ),
+        )
+    )
+    monkeypatch.setattr(client, "_complete", lambda **_: next(responses))
+    monkeypatch.setattr(
+        client,
+        "_answer_statement_verified",
+        lambda *_, **__: True,
+    )
+
+    assert client.generate(source, seed=17) == (
+        'Name the performer who released "Blue Moon".',
+        "Example Singer recorded Blue Moon.",
+        17,
+    )
+
+
+@pytest.mark.parametrize(
+    ("source", "candidate"),
+    [
+        (
+            'Who recorded "Blue Moon" and "Red Sun"?',
+            'Name who released "Blue Moon!".',
+        ),
+        (
+            'Who recorded "Blue Moon"?',
+            'Name who released "Blue Moon!" and "Red Sun".',
+        ),
+        (
+            'Who recorded "Blue Moon" and "Red Sun"?',
+            'Name who released "Red Sun" and "Blue Moon".',
+        ),
+        (
+            'Who recorded "Blue Moon" and "Red Sun"?',
+            'Name who released "Green Hill" and "Black Lake".',
+        ),
+    ],
+    ids=("deleted-slot", "added-slot", "reordered-slots", "unalignable-slots"),
+)
+def test_quote_slot_recovery_fails_closed_for_ambiguous_slot_layouts(
+    source: str,
+    candidate: str,
+) -> None:
+    assert _restore_immutable_quoted_slots(source, candidate) is None
+
+
+def test_quote_slot_recovery_still_runs_all_later_admission_gates() -> None:
+    source = TriviaQATrainSource(
+        source_train_task_id="triviaqa:quote_repair_other_gate",
+        base_task_id="triviaqa:quote_repair_other_gate",
+        selection_index=0,
+        cycled_training_sample=False,
+        cycle_index=None,
+        original_question='Who recorded "Blue Moon"?',
+        canonical_answer="Example Singer",
+        native_split="train",
+    )
+    candidate_question = 'Who performed "Blue Moon!" and who produced it?'
+    repaired_question = _restore_immutable_quoted_slots(
+        source.original_question,
+        candidate_question,
+    )
+
+    assert repaired_question == 'Who performed "Blue Moon" and who produced it?'
+    with pytest.raises(ValueError, match="requested answer cardinality"):
+        parse_paraphrase_response(
+            json.dumps(
+                {
+                    "paraphrase_question": repaired_question,
+                    "paraphrase_answer_statement": (
+                        "Example Singer recorded Blue Moon."
                     ),
                 }
             ),

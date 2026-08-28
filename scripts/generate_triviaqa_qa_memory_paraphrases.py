@@ -121,6 +121,10 @@ _DOUBLE_QUOTED_SPAN = re.compile(r'"([^\"]+)"|“([^”]+)”')
 _SINGLE_QUOTED_SPAN = re.compile(
     r"(?<!\w)'([^']+)'(?!\w)|(?<!\w)‘([^’]+)’(?!\w)"
 )
+_ORDERED_QUOTED_SLOT = re.compile(
+    r'"([^\"]+)"|“([^”]+)”|'
+    r"(?<!\w)'([^']+)'(?!\w)|(?<!\w)‘([^’]+)’(?!\w)"
+)
 _LEADING_DOT_LITERAL = re.compile(
     r"(?<!\w)\.([^\W_]+(?:['’-][^\W_]+)*)",
     re.UNICODE,
@@ -1183,6 +1187,152 @@ def _quoted_spans(text: str) -> frozenset[str]:
     return frozenset(span for span in spans if span)
 
 
+def _ordered_quoted_slots(
+    text: str,
+    *,
+    decode_csv_transport: bool = False,
+) -> tuple[str, tuple[tuple[int, int, str], ...]]:
+    """Locate semantic quote slots without normalizing their content.
+
+    ``decode_csv_transport`` is used only for the authoritative source text,
+    whose native TriviaQA representation may retain an outer CSV quote and
+    doubled inner delimiters.  Candidate text is never decoded here, so a
+    recovery cannot silently rewrite any of its non-slot text.
+    """
+
+    located_text = text
+    stripped = text.strip()
+    if (
+        decode_csv_transport
+        and len(stripped) >= 2
+        and stripped.startswith('"')
+        and stripped.endswith('"')
+        and '""' in stripped
+    ):
+        located_text = stripped[1:-1].replace('""', '"')
+    slots: list[tuple[int, int, str]] = []
+    for match in _ORDERED_QUOTED_SLOT.finditer(located_text):
+        content_group = next(
+            index
+            for index, value in enumerate(match.groups(), start=1)
+            if value is not None
+        )
+        slots.append(
+            (
+                match.start(content_group),
+                match.end(content_group),
+                match.group(content_group),
+            )
+        )
+    return located_text, tuple(slots)
+
+
+def _quote_slot_identity_tokens(content: str) -> frozenset[str]:
+    tokens = frozenset(
+        token.casefold() for token in _LEXICAL_TOKEN.findall(content)
+    )
+    content_tokens = tokens - _FUNCTION_WORDS
+    return content_tokens or tokens
+
+
+def _quote_slots_have_unambiguous_ordered_identity(
+    source_contents: Sequence[str],
+    candidate_contents: Sequence[str],
+) -> bool:
+    """Reject multi-slot repair unless every slot has a unique ordered match."""
+
+    if len(source_contents) != len(candidate_contents) or not source_contents:
+        return False
+    if len(source_contents) == 1:
+        return True
+
+    source_tokens = tuple(
+        _quote_slot_identity_tokens(content) for content in source_contents
+    )
+    candidate_tokens = tuple(
+        _quote_slot_identity_tokens(content) for content in candidate_contents
+    )
+
+    def score(source_index: int, candidate_index: int) -> tuple[int, int]:
+        source = " ".join(source_contents[source_index].split()).casefold()
+        candidate = " ".join(
+            candidate_contents[candidate_index].split()
+        ).casefold()
+        return (
+            int(source == candidate),
+            len(source_tokens[source_index] & candidate_tokens[candidate_index]),
+        )
+
+    matrix = tuple(
+        tuple(
+            score(source_index, candidate_index)
+            for candidate_index in range(len(candidate_contents))
+        )
+        for source_index in range(len(source_contents))
+    )
+    for position in range(len(source_contents)):
+        candidate_column = tuple(
+            matrix[source_index][position]
+            for source_index in range(len(source_contents))
+        )
+        best_source_score = max(candidate_column)
+        if best_source_score == (0, 0):
+            return False
+        if candidate_column.count(best_source_score) != 1:
+            return False
+        if candidate_column.index(best_source_score) != position:
+            return False
+
+        source_row = matrix[position]
+        best_candidate_score = max(source_row)
+        if best_candidate_score == (0, 0):
+            return False
+        if source_row.count(best_candidate_score) != 1:
+            return False
+        if source_row.index(best_candidate_score) != position:
+            return False
+    return True
+
+
+def _restore_immutable_quoted_slots(
+    source_text: str,
+    candidate_text: str,
+) -> str | None:
+    """Restore quote contents only when slot cardinality and order are clear.
+
+    Delimiters remain those emitted by the candidate, so ASCII and Unicode
+    curly quotes are interchangeable representations while the authoritative
+    source content is copied character-for-character.  No text outside a
+    located quote content span is changed.  ``None`` is a fail-closed result.
+    """
+
+    _, source_slots = _ordered_quoted_slots(
+        source_text,
+        decode_csv_transport=True,
+    )
+    located_candidate, candidate_slots = _ordered_quoted_slots(candidate_text)
+    source_contents = tuple(content for _, _, content in source_slots)
+    candidate_contents = tuple(content for _, _, content in candidate_slots)
+    if not _quote_slots_have_unambiguous_ordered_identity(
+        source_contents,
+        candidate_contents,
+    ):
+        return None
+
+    pieces: list[str] = []
+    cursor = 0
+    for (_, _, source_content), (start, end, _) in zip(
+        source_slots,
+        candidate_slots,
+        strict=True,
+    ):
+        pieces.append(located_candidate[cursor:start])
+        pieces.append(source_content)
+        cursor = end
+    pieces.append(located_candidate[cursor:])
+    return "".join(pieces)
+
+
 def _lexical_replacement_source_tokens(
     source: TriviaQATrainSource,
 ) -> frozenset[str]:
@@ -1466,23 +1616,46 @@ def _normalize_observed_response_keys(
     """Normalize only known structured-output typos without key collisions."""
 
     if not isinstance(value, Mapping):
-        raise ValueError(f"{response_name} fields are incompatible")
+        raise ValueError(
+            f"{response_name} fields are incompatible; "
+            f"observed_type={type(value).__name__}"
+        )
     normalized: dict[str, object] = {}
+    observed_fields: list[str] = []
+    unexpected_fields: list[str] = []
+    collision_fields: list[str] = []
+    non_text_key_types: list[str] = []
     for raw_field, field_value in value.items():
         if not isinstance(raw_field, str):
-            raise ValueError(f"{response_name} fields are incompatible")
+            non_text_key_types.append(type(raw_field).__name__)
+            continue
+        observed_fields.append(raw_field)
         normalized_field = _OBSERVED_RESPONSE_KEY_TYPOS.get(
             raw_field,
             raw_field,
         )
-        if (
-            normalized_field not in expected_fields
-            or normalized_field in normalized
-        ):
-            raise ValueError(f"{response_name} fields are incompatible")
+        if normalized_field not in expected_fields:
+            unexpected_fields.append(raw_field)
+            continue
+        if normalized_field in normalized:
+            collision_fields.append(normalized_field)
+            continue
         normalized[normalized_field] = field_value
-    if frozenset(normalized) != expected_fields:
-        raise ValueError(f"{response_name} fields are incompatible")
+    missing_fields = sorted(expected_fields - frozenset(normalized))
+    if (
+        missing_fields
+        or unexpected_fields
+        or collision_fields
+        or non_text_key_types
+    ):
+        raise ValueError(
+            f"{response_name} fields are incompatible; "
+            f"observed_fields={sorted(observed_fields)!r}; "
+            f"missing_fields={missing_fields!r}; "
+            f"unexpected_fields={sorted(unexpected_fields)!r}; "
+            f"collision_fields={sorted(collision_fields)!r}; "
+            f"non_text_key_types={sorted(non_text_key_types)!r}"
+        )
     return normalized
 
 
@@ -2745,10 +2918,13 @@ class LocalQwen35Paraphraser:
                             source,
                         )
                     elif quoted_question_error:
-                        quoted_repair = _quoted_attribution_qa(source)
-                        if quoted_repair is None:
+                        restored_question = _restore_immutable_quoted_slots(
+                            source.original_question,
+                            raw_question,
+                        )
+                        if restored_question is None:
                             raise
-                        question, statement = quoted_repair
+                        question = restored_question
                         question, statement = parse_paraphrase_response(
                             json.dumps(
                                 {
