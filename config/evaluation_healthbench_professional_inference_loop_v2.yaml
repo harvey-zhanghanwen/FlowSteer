@@ -109,6 +109,7 @@ agent_graph:
   model_catalog_path: "config/model_catalog_healthbench_professional_qwen35_inference_v2.yaml"
 
 evaluation:
+  allow_sglang_backend_default_max_running_requests: true
   healthbench_grader_mode: "openai_simple_evals_healthbench_professional_reference"
   healthbench_judge_model: "healthbench-professional-reference-grader"
   healthbench_judge_catalog_path: "config/model_catalog_healthbench_professional_grader_v1.yaml"

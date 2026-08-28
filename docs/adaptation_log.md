@@ -661,6 +661,10 @@ change was made during profile selection.
 - Forwarded SGLang `repetition_penalty=1.05` only behind an explicit local
   backend capability and persisted the requested decoding value. No training
   reward, retry generation, or weight update was added.
+- The deployed SGLang reports an unset `max_running_requests` as JSON `null`,
+  which is an upstream-supported backend-default state. The new evaluation
+  condition explicitly admits and records that state as `backend_default`;
+  historical conditions keep the prior strict positive-integer preflight.
 - Training, GRPO, backward, optimizer update, LoRA publication, MACE,
   Bayesian update, Skill evolution, and Tool use remain disabled.
 - Evaluation status at this log entry: implementation and directed tests are

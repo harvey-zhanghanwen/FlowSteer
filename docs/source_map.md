@@ -363,6 +363,7 @@ and pinned HealthBench reference evaluator as official-v1.
 | Task-scoped component reuse for an identical effective input | **Necessary AgentGraph adaptation** of FlowSteer's legacy per-environment node-cache boundary (`workflow_builder.py` / `vllm_workflow_generator.py`). It is not claimed as an upstream heterogeneous component cache. ReAct, coding, Tool use, failure continuation, empty output, and `finish_reason=length` are excluded. |
 | Plain-language free-text contract admission | **Project-specific Canvas admission guard**. It rejects opaque labels and exact duplicate execution declarations without defining Doctor, Reviewer, or any other role class. |
 | Current-revision rejected-relation exclusion and finish-only action mask after full terminal admission | **Necessary state-conditioned action-mask wiring** over existing Canvas candidates and `finish_admissibility`; graph validation and explicit `FINISH` remain authoritative. |
+| SGLang `max_running_requests=null` server receipt | **Necessary version-compatible preflight adaptation** for SGLang's supported backend-default server argument. It is opt-in for this condition and records `backend_default`; it does not change the running service. |
 
 This condition does not enable GRPO, backward, optimizer update, LoRA, MACE,
 Bayesian inference, Skill retrieval/evolution, medical retrieval, or any new

@@ -3351,8 +3351,21 @@ async def run_completion_benchmark_round(
                 "training_performed": False,
                 "policy_published": False,
             }
+        evaluation_config = _mapping(config["evaluation"], "evaluation")
+        allow_backend_default_max_running_requests = evaluation_config.get(
+            "allow_sglang_backend_default_max_running_requests",
+            False,
+        )
+        if type(allow_backend_default_max_running_requests) is not bool:
+            raise CompletionBenchmarkRoundError(
+                "evaluation.allow_sglang_backend_default_max_running_requests "
+                "must be boolean"
+            )
         sglang_server_runtime = await asyncio.to_thread(
-            backend.publisher.server_runtime_receipt
+            backend.publisher.server_runtime_receipt,
+            allow_backend_default_max_running_requests=(
+                allow_backend_default_max_running_requests
+            ),
         )
         evaluator_preflight = await _run_evaluator_preflight(
             backend,
