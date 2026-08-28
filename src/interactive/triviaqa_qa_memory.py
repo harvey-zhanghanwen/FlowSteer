@@ -74,8 +74,15 @@ MANIFEST_FILENAME = "manifest.json"
 MEMORIES_FILENAME = "memories.jsonl"
 EMBEDDINGS_FILENAME = "embeddings.npy"
 
-_BASE_TASK_ID = re.compile(r"triviaqa:tc_[0-9]+\Z")
-_CYCLED_TASK_ID = re.compile(r"triviaqa:tc_[0-9]+:cycle-[0-9]{4,}\Z")
+# PROJECT_NECESSARY_ADAPTATION: the earlier 512-row slice happened to contain
+# only ``tc_*`` IDs.  The canonical TriviaQA train split also contains qz_,
+# qw_, sfq_, odql_, and other public question-ID namespaces.  Keep the native
+# opaque ID after the dataset prefix instead of narrowing the full dataset back
+# to the first namespace.
+_BASE_TASK_ID = re.compile(r"triviaqa:[A-Za-z0-9_.-]+\Z")
+_CYCLED_TASK_ID = re.compile(
+    r"triviaqa:[A-Za-z0-9_.-]+:cycle-[0-9]{4,}\Z"
+)
 _MEMORY_ID = re.compile(r"triviaqa-qa-memory-[0-9a-f]{64}\Z")
 _MEMORY_FIELDS = frozenset(
     {
@@ -135,7 +142,7 @@ _FILE_ENTRY_FIELDS = frozenset({"name", "sha256"})
 def _base_task_id(value: object) -> str:
     text = _required_text(value, field_name="base_task_id")
     if _BASE_TASK_ID.fullmatch(text) is None:
-        raise ValueError("TriviaQA base_task_id must use triviaqa:tc_<integer>")
+        raise ValueError("TriviaQA base_task_id must preserve a native question_id")
     return text
 
 
@@ -444,8 +451,16 @@ def load_triviaqa_qa_memory_sources(
     *,
     expected_train_count: int = 512,
     expected_validation_count: int = 128,
+    allow_validation_overlap: bool = False,
 ) -> tuple[tuple[TriviaQATrainSource, ...], frozenset[str]]:
-    """Load train QA fields and prove train/validation base-ID isolation."""
+    """Load paired Q-A sources and enforce the declared evaluation scope.
+
+    The default remains the held-out training protocol.  An explicit overlap
+    flag is reserved for an in-database/transductive retrieval condition where
+    the evaluated Q-A memories are intentionally present in the index.  This
+    keeps that condition visible instead of bypassing split checks with a
+    different validation file.
+    """
 
     expected_train_count = _positive_integer(
         expected_train_count,
@@ -455,6 +470,8 @@ def load_triviaqa_qa_memory_sources(
         expected_validation_count,
         field_name="expected_validation_count",
     )
+    if type(allow_validation_overlap) is not bool:
+        raise TypeError("allow_validation_overlap must be boolean")
     train_path = Path(train_tasks_path)
     validation_path = Path(validation_tasks_path)
     if not train_path.is_file():
@@ -469,7 +486,7 @@ def load_triviaqa_qa_memory_sources(
     overlap = sorted(
         {source.base_task_id for source in sources}.intersection(validation_ids)
     )
-    if overlap:
+    if overlap and not allow_validation_overlap:
         preview = ", ".join(overlap[:8])
         raise ValueError(
             "TriviaQA train and validation base_task_id values overlap: " + preview
@@ -993,14 +1010,17 @@ class TriviaQAQAMemoryManifest:
         for field_name, expected in constants.items():
             if getattr(self, field_name) != expected:
                 raise ValueError(f"QA-memory manifest {field_name} is unsupported")
-        if type(self.validation_content_indexed) is not bool or self.validation_content_indexed:
-            raise ValueError("validation_content_indexed must be false")
+        if type(self.validation_content_indexed) is not bool:
+            raise ValueError("validation_content_indexed must be boolean")
         train_count = _positive_integer(self.train_count, field_name="train_count")
-        validation_count = _positive_integer(
+        validation_count = _nonnegative_integer(
             self.validation_isolation_count,
             field_name="validation_isolation_count",
         )
-        del validation_count
+        if not self.validation_content_indexed and validation_count < 1:
+            raise ValueError(
+                "held-out QA-memory requires positive validation isolation"
+            )
         unique_count = _positive_integer(
             self.unique_source_count,
             field_name="unique_source_count",
@@ -1094,6 +1114,7 @@ class TriviaQAQAMemoryManifest:
         *,
         train_count: int,
         validation_isolation_count: int,
+        validation_content_indexed: bool = False,
         unique_source_count: int,
         cycled_count: int,
         paraphrase_version: str,
@@ -1120,7 +1141,7 @@ class TriviaQAQAMemoryManifest:
             "source_split": SOURCE_PROJECT_SPLIT,
             "train_count": train_count,
             "validation_isolation_count": validation_isolation_count,
-            "validation_content_indexed": False,
+            "validation_content_indexed": validation_content_indexed,
             "unique_source_count": unique_source_count,
             "cycled_count": cycled_count,
             "paraphrase_count": train_count,
@@ -1179,6 +1200,7 @@ def build_triviaqa_qa_memory_index(
     snippet_characters: int = 512,
     expected_train_count: int = 512,
     expected_validation_count: int = 128,
+    validation_content_indexed: bool = False,
 ) -> TriviaQAQAMemoryManifest:
     """Build an immutable dense index from already-materialized paraphrases."""
 
@@ -1203,19 +1225,29 @@ def build_triviaqa_qa_memory_index(
     )
     if max_turns_per_agent_call <= max_tool_calls_per_agent_call:
         raise ValueError("ReAct turn budget must leave one completion turn")
+    if type(validation_content_indexed) is not bool:
+        raise TypeError("validation_content_indexed must be boolean")
     sources, validation_ids = load_triviaqa_qa_memory_sources(
         train_tasks_path,
         validation_tasks_path,
         expected_train_count=expected_train_count,
         expected_validation_count=expected_validation_count,
+        allow_validation_overlap=validation_content_indexed,
     )
     records = load_materialized_qa_memory(
         paraphrases_path,
         expected_count=expected_train_count,
     )
     validate_qa_memory_against_sources(records, sources, require_complete=True)
-    if any(record.base_task_id in validation_ids for record in records):
+    indexed_validation_ids = {
+        record.base_task_id for record in records if record.base_task_id in validation_ids
+    }
+    if indexed_validation_ids and not validation_content_indexed:
         raise ValueError("QA-memory contains a held-out validation base_task_id")
+    if validation_content_indexed and indexed_validation_ids != validation_ids:
+        raise ValueError(
+            "transductive QA-memory must index every declared evaluation base_task_id"
+        )
     paraphrase_versions = {record.paraphrase_version for record in records}
     if len(paraphrase_versions) != 1:
         raise ValueError("QA-memory build requires one frozen paraphrase_version")
@@ -1249,7 +1281,8 @@ def build_triviaqa_qa_memory_index(
     cycled_count = sum(source.cycled_training_sample for source in sources)
     manifest = TriviaQAQAMemoryManifest.create(
         train_count=len(sources),
-        validation_isolation_count=len(validation_ids),
+        validation_isolation_count=len(validation_ids - indexed_validation_ids),
+        validation_content_indexed=validation_content_indexed,
         unique_source_count=len({source.base_task_id for source in sources}),
         cycled_count=cycled_count,
         paraphrase_version=next(iter(paraphrase_versions)),

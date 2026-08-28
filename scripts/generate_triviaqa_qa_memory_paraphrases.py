@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from itertools import islice
 import json
 import os
@@ -43,7 +44,11 @@ from src.interactive.triviaqa_qa_memory import (  # noqa: E402
 )
 from scripts.prepare_agentgraph_datasets import (  # noqa: E402
     CONVERTERS,
+    _trivia_records,
     _path as resolve_dataset_path,
+)
+from scripts.materialize_triviaqa_full_train_qa_memory import (  # noqa: E402
+    project_unique_nonheldout_train,
 )
 
 
@@ -503,6 +508,38 @@ def _semantic_relation_and_scope_preserved(
         if _FIELD_HOCKEY_SCOPE.search(paraphrase_question) is None:
             raise SemanticPreservationError(
                 "paraphrase removed the field-hockey discipline"
+            )
+    if re.search(r"\bstar sign\b", original_question, re.IGNORECASE) is not None:
+        if re.search(
+            r"\b(?:star|zodiac) sign\b",
+            paraphrase_question,
+            re.IGNORECASE,
+        ) is None:
+            raise SemanticPreservationError(
+                "paraphrase changed the zodiac star-sign scope"
+            )
+    if re.search(
+        r"\btype of what\s*\?\s*$",
+        original_question,
+        re.IGNORECASE,
+    ) is not None:
+        introduced_kind = re.search(
+            r"\b(?:what|which)\s+(?:kind|type|category)\s+of\s+"
+            r"([A-Za-z][A-Za-z'-]*)",
+            paraphrase_question,
+            re.IGNORECASE,
+        )
+        if (
+            introduced_kind is not None
+            and re.search(
+                rf"\b{re.escape(introduced_kind.group(1))}\b",
+                original_question,
+                re.IGNORECASE,
+            )
+            is None
+        ):
+            raise SemanticPreservationError(
+                "paraphrase narrowed a generic type-of-what answer slot"
             )
     if (
         re.search(r"\b(?:what|which)\s+date\b", original_question, re.IGNORECASE)
@@ -1539,6 +1576,111 @@ def verify_original_dataset_binding(
     }
 
 
+def verify_full_native_unique_dataset_binding(
+    *,
+    dataset_catalog_path: Path,
+    sources: Sequence[TriviaQATrainSource],
+    validation_ids: frozenset[str],
+    expected_train_count: int,
+    expected_validation_count: int,
+    include_validation_qa: bool,
+) -> Mapping[str, object]:
+    """Bind a full unique native-train projection to the existing converter.
+
+    This is the scale-only counterpart of ``verify_original_dataset_binding``.
+    It reuses the same TriviaQA converter and the full-train de-duplication
+    adapter instead of assuming the historical 128+512 prefix layout.
+    """
+
+    with dataset_catalog_path.resolve().open(encoding="utf-8") as handle:
+        catalog = yaml.safe_load(handle)
+    raw_sources = catalog.get("sources") if isinstance(catalog, Mapping) else None
+    trivia_config = (
+        raw_sources.get("triviaqa")
+        if isinstance(raw_sources, Mapping)
+        else None
+    )
+    if not isinstance(trivia_config, Mapping):
+        raise ValueError("dataset catalog has no TriviaQA converter configuration")
+    projected, stats = project_unique_nonheldout_train(
+        _trivia_records(trivia_config),
+        heldout_base_ids=tuple(sorted(validation_ids)),
+        include_heldout=include_validation_qa,
+    )
+    if len(projected) != expected_train_count or len(sources) != expected_train_count:
+        raise ValueError("full native TriviaQA projection count is incompatible")
+    if len(validation_ids) != expected_validation_count:
+        raise ValueError("full native TriviaQA validation identity count is incompatible")
+    for source, record in zip(sources, projected):
+        metadata = record.get("metadata")
+        sampling = metadata.get("sampling") if isinstance(metadata, Mapping) else None
+        payload = (
+            metadata.get("evaluator_payload")
+            if isinstance(metadata, Mapping)
+            else None
+        )
+        answers = payload.get("accepted_answers") if isinstance(payload, Mapping) else None
+        canonical = answers[0] if isinstance(answers, list) and answers else None
+        comparisons = {
+            "base_task_id": (
+                source.base_task_id,
+                sampling.get("base_task_id") if isinstance(sampling, Mapping) else None,
+            ),
+            "selection_index": (
+                source.selection_index,
+                sampling.get("selection_index") if isinstance(sampling, Mapping) else None,
+            ),
+            "question": (source.original_question, record.get("question")),
+            "canonical_answer": (source.canonical_answer, canonical),
+        }
+        for field_name, (frozen, original) in comparisons.items():
+            if frozen != original:
+                raise ValueError(
+                    "full native TriviaQA field differs from original dataset at "
+                    f"selection_index={source.selection_index}: {field_name}"
+                )
+    overlap_count = len(
+        {source.base_task_id for source in sources}.intersection(validation_ids)
+    )
+    expected_overlap = expected_validation_count if include_validation_qa else 0
+    if overlap_count != expected_overlap:
+        raise ValueError("full native TriviaQA evaluation overlap is incompatible")
+    return {
+        "dataset": "TriviaQA",
+        "configuration": "rc.nocontext",
+        "projection": "full_native_train_unique_question_id",
+        "original_source_path": str(
+            resolve_dataset_path(str(trivia_config.get("path", "")))
+        ),
+        "raw_train_row_count": stats["raw_train_row_count"],
+        "raw_unique_question_id_count": stats[
+            "raw_unique_question_id_count"
+        ],
+        "duplicate_raw_row_count": stats["duplicate_raw_row_count"],
+        "train_record_count": expected_train_count,
+        "validation_overlap_count": overlap_count,
+        "validation_content_indexed": include_validation_qa,
+        "canonical_answer_field": "answer.value/accepted_answers[0]",
+    }
+
+
+def reject_exact_question_identity_shortcut(
+    source: TriviaQATrainSource,
+    *,
+    paraphrase_question: str,
+    paraphrase_answer_statement: str,
+) -> None:
+    """Reject a stored QA record that contains the complete evaluation query."""
+
+    original = " ".join(source.original_question.split()).casefold()
+    question = " ".join(paraphrase_question.split()).casefold()
+    statement = " ".join(paraphrase_answer_statement.split()).casefold()
+    if original in question or original in statement:
+        raise ValueError(
+            "semantic paraphrase retained the complete original question substring"
+        )
+
+
 def _decode_paraphrase_object(text: str) -> Mapping[str, object]:
     """Decode the exact Qwen paraphrase object and one observed key typo."""
 
@@ -2104,6 +2246,9 @@ class LocalQwen35Paraphraser:
                 if _has_lexical_or_phrase_replacement(
                     source.original_question,
                     candidate,
+                ) and _who_answer_slot_family_preserved(
+                    source.original_question,
+                    candidate,
                 ):
                     return candidate
                 last_error = ValueError(
@@ -2137,6 +2282,9 @@ class LocalQwen35Paraphraser:
                 )
                 candidate = pattern.sub(replacement, base_question, count=1)
                 if _has_lexical_or_phrase_replacement(
+                    source.original_question,
+                    candidate,
+                ) and _who_answer_slot_family_preserved(
                     source.original_question,
                     candidate,
                 ):
@@ -2176,6 +2324,16 @@ class LocalQwen35Paraphraser:
                         if "answer-slot/relation verifier" in prior_rejection
                         else ""
                     )
+                    answer_slot_family_repair = (
+                        " The original answer slot is a person/entity slot. If "
+                        "you replace Who with Which or What, begin that slot with "
+                        "an explicit person head such as 'Which person' or 'Which "
+                        "member'; keep the original named group or entity wording "
+                        "later in the same clause. Do not use the named entity "
+                        "itself as the answer-type head."
+                        if "answer-slot family" in prior_rejection
+                        else ""
+                    )
                     retry_instruction = (
                         "Use a different grammatical construction, such as an "
                         "indirect request beginning with Identify, Name, or State, "
@@ -2205,6 +2363,7 @@ class LocalQwen35Paraphraser:
                                 "or enrich the dataset question, and do not add another "
                                 "coordinated interrogative clause. "
                                 + retry_instruction
+                                + answer_slot_family_repair
                                 + " Build paraphrase_answer_statement by replacing "
                                 "the original wh-dependency with this exact case-"
                                 "sensitive canonical span, without reversing subject "
@@ -2304,11 +2463,16 @@ class LocalQwen35Paraphraser:
                         isinstance(parse_error, SemanticPreservationError)
                         and "authoritative source token" in str(parse_error)
                     )
+                    answer_slot_family_error = (
+                        isinstance(parse_error, SemanticPreservationError)
+                        and "answer-slot family" in str(parse_error)
+                    )
                     if (
                         not answer_error
                         and not question_lexical_error
                         and not quoted_question_error
                         and not source_transposition_error
+                        and not answer_slot_family_error
                     ):
                         raise
                     raw_candidate = _decode_paraphrase_object(content)
@@ -2323,7 +2487,23 @@ class LocalQwen35Paraphraser:
                         raise
                     question = " ".join(raw_question.split())
                     statement = " ".join(raw_statement.split())
-                    if source_transposition_error:
+                    if answer_slot_family_error:
+                        question = self._repair_paraphrase_question(
+                            source,
+                            rejected_question=source.original_question,
+                            seed=seed + 4_500_000 + attempt,
+                        )
+                        question, statement = parse_paraphrase_response(
+                            json.dumps(
+                                {
+                                    "paraphrase_question": question,
+                                    "paraphrase_answer_statement": statement,
+                                },
+                                ensure_ascii=False,
+                            ),
+                            source,
+                        )
+                    elif source_transposition_error:
                         question = _restore_authoritative_source_transpositions(
                             source.original_question,
                             question,
@@ -2432,6 +2612,11 @@ class LocalQwen35Paraphraser:
                         rejected_statement=statement,
                         seed=seed + 3_000_000 + attempt,
                     )
+                reject_exact_question_identity_shortcut(
+                    source,
+                    paraphrase_question=question,
+                    paraphrase_answer_statement=statement,
+                )
                 return question, statement, seed + attempt
             except HTTPError as exc:
                 last_error = exc
@@ -2463,6 +2648,14 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--validation-tasks", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument(
+        "--seed-paraphrases",
+        default=None,
+        help=(
+            "Optional earlier admitted QA-memory rows reused by source ID; each "
+            "row is revalidated and rebound to the current full projection."
+        ),
+    )
+    parser.add_argument(
         "--predecessor-paraphrases",
         default=None,
         help=(
@@ -2483,6 +2676,31 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--base-seed", type=_nonnegative_integer, default=20260827)
     parser.add_argument("--timeout-seconds", type=float, default=180.0)
     parser.add_argument("--max-retries", type=_nonnegative_integer, default=2)
+    parser.add_argument(
+        "--concurrency",
+        type=_positive_integer,
+        default=1,
+        help="Bounded local-Qwen request concurrency; seeds remain source-index based.",
+    )
+    parser.add_argument(
+        "--checkpoint-every",
+        type=_positive_integer,
+        default=1,
+        help="Atomically rewrite the ordered resume checkpoint after this many rows.",
+    )
+    parser.add_argument(
+        "--source-binding-mode",
+        choices=("prefix_512", "full_native_unique"),
+        default="prefix_512",
+    )
+    parser.add_argument(
+        "--include-validation-qa",
+        action="store_true",
+        help=(
+            "Explicit in-database/transductive condition: include every declared "
+            "evaluation Q-A in the local QA-memory."
+        ),
+    )
     parser.add_argument("--expected-train-count", type=_positive_integer, default=512)
     parser.add_argument(
         "--expected-validation-count",
@@ -2506,14 +2724,29 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.validation_tasks,
             expected_train_count=args.expected_train_count,
             expected_validation_count=args.expected_validation_count,
+            allow_validation_overlap=args.include_validation_qa,
         )
-        original_dataset_binding = verify_original_dataset_binding(
-            dataset_catalog_path=Path(args.dataset_catalog),
-            sources=sources,
-            validation_ids=validation_ids,
-            expected_train_count=args.expected_train_count,
-            expected_validation_count=args.expected_validation_count,
-        )
+        if args.source_binding_mode == "full_native_unique":
+            original_dataset_binding = verify_full_native_unique_dataset_binding(
+                dataset_catalog_path=Path(args.dataset_catalog),
+                sources=sources,
+                validation_ids=validation_ids,
+                expected_train_count=args.expected_train_count,
+                expected_validation_count=args.expected_validation_count,
+                include_validation_qa=args.include_validation_qa,
+            )
+        else:
+            if args.include_validation_qa:
+                raise ValueError(
+                    "include-validation-qa requires full_native_unique source binding"
+                )
+            original_dataset_binding = verify_original_dataset_binding(
+                dataset_catalog_path=Path(args.dataset_catalog),
+                sources=sources,
+                validation_ids=validation_ids,
+                expected_train_count=args.expected_train_count,
+                expected_validation_count=args.expected_validation_count,
+            )
         output_path = Path(args.output)
         predecessor_path = (
             Path(args.predecessor_paraphrases)
@@ -2533,6 +2766,72 @@ def main(argv: Sequence[str] | None = None) -> int:
             sources,
             require_complete=False,
         )
+        source_by_id = {
+            source.source_train_task_id: source for source in sources
+        }
+        seed_reused_count = 0
+        seed_rejected_by_current_admission_count = 0
+        if args.seed_paraphrases:
+            seeded_rows, seeded_rejected_ids = load_resume_records(
+                Path(args.seed_paraphrases)
+            )
+            if seeded_rejected_ids:
+                raise ValueError("seed paraphrases contain rejected legacy rows")
+            existing_by_id = {
+                record.source_train_task_id: record for record in existing
+            }
+            for seeded in seeded_rows:
+                if seeded.source_train_task_id in existing_by_id:
+                    continue
+                source = source_by_id.get(seeded.source_train_task_id)
+                if source is None:
+                    continue
+                if seeded.canonical_answer != source.canonical_answer:
+                    raise ValueError(
+                        "seed paraphrase canonical answer differs from full source"
+                    )
+                try:
+                    question, statement = parse_paraphrase_response(
+                        json.dumps(
+                            {
+                                "paraphrase_question": seeded.paraphrase_question,
+                                "paraphrase_answer_statement": (
+                                    seeded.paraphrase_answer_statement
+                                ),
+                            },
+                            ensure_ascii=False,
+                        ),
+                        source,
+                    )
+                    reject_exact_question_identity_shortcut(
+                        source,
+                        paraphrase_question=question,
+                        paraphrase_answer_statement=statement,
+                    )
+                except ValueError:
+                    seed_rejected_by_current_admission_count += 1
+                    continue
+                existing_by_id[source.source_train_task_id] = (
+                    TriviaQAQAMemoryRecord.create(
+                        source=source,
+                        paraphrase_question=question,
+                        paraphrase_answer_statement=statement,
+                        paraphrase_version=args.paraphrase_version,
+                        paraphrase_method=PARAPHRASE_METHOD,
+                        generator_provider=GENERATOR_PROVIDER,
+                        model_id=args.model_id,
+                        model_revision=args.model_revision,
+                        prompt_template_version=PROMPT_TEMPLATE_VERSION,
+                        generation_seed=args.base_seed + source.selection_index,
+                    )
+                )
+                seed_reused_count += 1
+            existing = tuple(existing_by_id.values())
+            validate_qa_memory_against_sources(
+                existing,
+                sources,
+                require_complete=False,
+            )
         for record in existing:
             admitted_seeds = range(
                 args.base_seed + record.selection_index,
@@ -2553,6 +2852,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         existing, _semantic_repair_source_ids = (
             partition_resume_records_for_semantic_repair(existing, sources)
         )
+        for record in existing:
+            source = source_by_id[record.source_train_task_id]
+            reject_exact_question_identity_shortcut(
+                source,
+                paraphrase_question=record.paraphrase_question,
+                paraphrase_answer_statement=record.paraphrase_answer_statement,
+            )
     except (FileNotFoundError, TypeError, ValueError) as exc:
         print(f"TriviaQA QA-memory split/materialization check failed: {exc}", file=sys.stderr)
         return 1
@@ -2567,15 +2873,25 @@ def main(argv: Sequence[str] | None = None) -> int:
             max_retries=args.max_retries,
         )
         records = {record.source_train_task_id: record for record in existing}
-        for source in sources:
-            if source.source_train_task_id in records:
-                continue
-            seed = args.base_seed + source.selection_index
+        pending_sources = [
+            source
+            for source in sources
+            if source.source_train_task_id not in records
+        ]
+
+        def generate_one(
+            source: TriviaQATrainSource,
+        ) -> TriviaQAQAMemoryRecord:
             paraphrase, answer_statement, accepted_seed = client.generate(
                 source,
-                seed=seed,
+                seed=args.base_seed + source.selection_index,
             )
-            records[source.source_train_task_id] = TriviaQAQAMemoryRecord.create(
+            reject_exact_question_identity_shortcut(
+                source,
+                paraphrase_question=paraphrase,
+                paraphrase_answer_statement=answer_statement,
+            )
+            return TriviaQAQAMemoryRecord.create(
                 source=source,
                 paraphrase_question=paraphrase,
                 paraphrase_answer_statement=answer_statement,
@@ -2587,9 +2903,56 @@ def main(argv: Sequence[str] | None = None) -> int:
                 prompt_template_version=PROMPT_TEMPLATE_VERSION,
                 generation_seed=accepted_seed,
             )
-            # Atomic incremental checkpointing prevents repeated local model
-            # calls when materialization is resumed after an interruption.
-            write_materialized_qa_memory(output_path, tuple(records.values()))
+
+        checkpoint_every = max(args.checkpoint_every, args.concurrency)
+        generation_errors: list[tuple[str, Exception]] = []
+        processed_since_checkpoint = 0
+        pending_iterator = iter(pending_sources)
+        with ThreadPoolExecutor(max_workers=args.concurrency) as executor:
+            futures = {}
+            for source in islice(pending_iterator, args.concurrency):
+                futures[executor.submit(generate_one, source)] = source
+            while futures:
+                done, _pending = wait(
+                    tuple(futures),
+                    return_when=FIRST_COMPLETED,
+                )
+                for future in done:
+                    source = futures.pop(future)
+                    try:
+                        record = future.result()
+                    except Exception as exc:
+                        generation_errors.append(
+                            (source.source_train_task_id, exc)
+                        )
+                    else:
+                        records[record.source_train_task_id] = record
+                    processed_since_checkpoint += 1
+                    next_source = next(pending_iterator, None)
+                    if next_source is not None:
+                        futures[
+                            executor.submit(generate_one, next_source)
+                        ] = next_source
+                if processed_since_checkpoint >= checkpoint_every:
+                    # Preserve the upstream atomic, frozen-order resume format
+                    # without batch-tail stalls or per-row O(N^2) rewrites.
+                    write_materialized_qa_memory(
+                        output_path,
+                        tuple(records.values()),
+                    )
+                    processed_since_checkpoint = 0
+        if processed_since_checkpoint or generation_errors:
+            write_materialized_qa_memory(
+                output_path,
+                tuple(records.values()),
+            )
+        if generation_errors:
+            source_id, error = generation_errors[0]
+            raise RuntimeError(
+                "bounded paraphrase generation retained all successful rows but "
+                f"rejected {len(generation_errors)} source(s); first={source_id}: "
+                f"{type(error).__name__}: {error}"
+            ) from error
         completed = tuple(records.values())
         validate_qa_memory_against_sources(
             completed,
@@ -2692,7 +3055,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             "exact_literal_slot_substitution_record_count": (
                 literal_slot_substitution_count
             ),
-            "validation_content_indexed": False,
+            "evaluation_scope": (
+                "in_database_transductive"
+                if args.include_validation_qa
+                else "held_out_generalization"
+            ),
+            "validation_content_indexed": args.include_validation_qa,
+            "exact_original_question_substring_count": 0,
+            "generation_concurrency": args.concurrency,
+            "checkpoint_every": checkpoint_every,
+            "seed_paraphrase_reused_count": seed_reused_count,
+            "seed_paraphrase_rejected_by_current_admission_count": (
+                seed_rejected_by_current_admission_count
+            ),
             "original_dataset_binding": dict(original_dataset_binding),
         }
         manifest_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2726,7 +3101,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     record.cycled_training_sample for record in completed
                 ),
                 "paraphrase_version": args.paraphrase_version,
-                "validation_content_used": False,
+                "validation_content_used": args.include_validation_qa,
                 "original_dataset_binding": original_dataset_binding,
                 "materialization_manifest": str(manifest_path.resolve()),
             },

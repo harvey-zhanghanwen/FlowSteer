@@ -88,3 +88,33 @@ GRPO, backward, optimizer updates, LoRA publication and policy synchronization
 remain disabled. No result should be described as an ACTIVE-Skill or training
 gain. Formal EM/F1, terminal failures and Tool/provenance statistics belong in
 the completed version-bound report, not in this source/recovery document.
+
+## v15 full-native in-database variant
+
+The v15 profile keeps the same Director, Canvas, AgentGraph Runtime, worker
+ReAct boundary and evaluator. Its corpus projection is every unique public
+TriviaQA native-train Q-A, with the configured fixed128 Q-A identities included
+explicitly. Each Q-A remains paired while the existing local-Qwen paraphrase
+and semantic-admission path rewrites the question and produces a
+relation-bearing answer statement. The complete original question is rejected
+as a substring of either stored field before indexing.
+
+Evaluation retrieval is still a child-Agent operation. The Director has
+`allowed_tools=[]`, receives no QA-memory payload and performs no retrieval. A
+Tool-capable worker first executes `search`, then reads the ordered top-k
+memories; its artifact can reach reasoning, verification and Output only over
+an explicit AgentGraph relation. A Tool-less child Reasoner is permitted only
+after the complete top-k worker receipt declares
+`knowledge_base_coverage_failure`. Web Search and static prefetch are absent.
+
+The required runtime assertions remain:
+
+1. `director_tool_calls=0`;
+2. `retrieval_tool_calls_by_worker>0`;
+3. `retrieval_artifact_routed_via_relation=true`.
+
+The fixed128 result uses the unchanged official-style TriviaQA EM/F1 evaluator
+but is named **in-database QA-memory EM/F1**. Its index manifest must report
+`validation_content_indexed=true` and `validation_isolation_count=0`; it is not
+a held-out generalization result. Training, Skill injection, MACE, GRPO,
+backward, optimizer updates and LoRA publication remain disabled.

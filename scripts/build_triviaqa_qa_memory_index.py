@@ -74,6 +74,15 @@ def _parser() -> argparse.ArgumentParser:
         type=_positive_integer,
         default=128,
     )
+    parser.add_argument(
+        "--validation-content-indexed",
+        action="store_true",
+        help=(
+            "Explicitly build an in-database/transductive evaluation index "
+            "containing every declared evaluation Q-A. The resulting metric "
+            "must not be reported as held-out generalization."
+        ),
+    )
     return parser
 
 
@@ -94,6 +103,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             snippet_characters=args.snippet_characters,
             expected_train_count=args.expected_train_count,
             expected_validation_count=args.expected_validation_count,
+            validation_content_indexed=args.validation_content_indexed,
         )
     except (FileNotFoundError, RuntimeError, TypeError, ValueError) as exc:
         print(f"TriviaQA QA-memory index build failed: {exc}", file=sys.stderr)
