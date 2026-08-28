@@ -2930,6 +2930,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         checkpoint_every = max(args.checkpoint_every, args.concurrency)
         generation_errors: list[tuple[str, Exception]] = []
+        reported_error_count = 0
         processed_since_checkpoint = 0
         pending_iterator = iter(pending_sources)
         with ThreadPoolExecutor(max_workers=args.concurrency) as executor:
@@ -2964,17 +2965,28 @@ def main(argv: Sequence[str] | None = None) -> int:
                         output_path,
                         tuple(records.values()),
                     )
+                    new_errors = generation_errors[reported_error_count:]
                     print(
                         json.dumps(
                             {
                                 "checkpoint_record_count": len(records),
                                 "rejected_source_count": len(generation_errors),
+                                "checkpoint_rejected_source_count": len(new_errors),
+                                "rejection_samples": [
+                                    {
+                                        "source_train_task_id": source_id,
+                                        "error_type": type(error).__name__,
+                                        "message": str(error)[:320],
+                                    }
+                                    for source_id, error in new_errors[:3]
+                                ],
                             },
                             sort_keys=True,
                         ),
                         file=sys.stderr,
                         flush=True,
                     )
+                    reported_error_count = len(generation_errors)
                     processed_since_checkpoint = 0
         if processed_since_checkpoint or generation_errors:
             write_materialized_qa_memory(
