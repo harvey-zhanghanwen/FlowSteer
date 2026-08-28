@@ -47,6 +47,7 @@ from scripts.generate_triviaqa_qa_memory_paraphrases import (
     _called_relation_substitution_preserved,
     _clausal_canonical_relation_statement,
     _capitalized_identity_tokens,
+    _deterministic_answer_slot_statement,
     _deterministic_question_paraphrase,
     SemanticPreservationError,
     LocalQwen35Paraphraser,
@@ -2294,6 +2295,212 @@ def test_v8_called_relation_has_deterministic_answer_binding_fallback() -> None:
         canonical_answer="Lenin",
         answer_statement="Lenin powered the world's first atomic ship.",
     )
+
+
+@pytest.mark.parametrize(
+    ("original", "canonical", "paraphrase_question", "expected"),
+    (
+        (
+            "What is the name of Mickey Mouse's pet dog?",
+            "Pluto",
+            "Identify Mickey Mouse's pet dog by name.",
+            "The name of Mickey Mouse's pet dog is Pluto.",
+        ),
+        (
+            "What is the young of a koala called?",
+            "Joey",
+            "Identify the term used for a young koala.",
+            "The young of a koala is called Joey.",
+        ),
+        (
+            "The singer Mary O’Brien was better known by what name?",
+            "Dusty Springfield",
+            "Under which name was the singer Mary O’Brien better recognized?",
+            (
+                "The singer Mary O’Brien was better known by the name "
+                "Dusty Springfield."
+            ),
+        ),
+        (
+            "Which English king was known as Longshanks?",
+            "Edward I",
+            "Identify the English king who was known as Longshanks.",
+            "Edward I was known as Longshanks.",
+        ),
+        (
+            "How many red stripes are there on the national flag of Puerto Rico?",
+            "Three",
+            "State the number of red stripes there are on the national flag of Puerto Rico.",
+            "There are Three red stripes on the national flag of Puerto Rico.",
+        ),
+        (
+            "How many Madison Square Gardens have there been before the existing one?",
+            "Three",
+            (
+                "State the number of Madison Square Gardens there have been "
+                "before the existing one."
+            ),
+            "There have been Three Madison Square Gardens before the existing one.",
+        ),
+        (
+            "How many players are on a baseball team?",
+            "Nine",
+            "State the number of players that are on a baseball team.",
+            "Nine players are on a baseball team.",
+        ),
+        (
+            "The Internet TLD for Albania is what?",
+            ".AL",
+            "State the value of Albania's Internet TLD.",
+            "The Internet TLD for Albania is .AL.",
+        ),
+        (
+            (
+                "Glenmorangie whisky is produced by 16 men known as the "
+                "Sixteen Men of where?"
+            ),
+            "TAIN",
+            (
+                "At what place is Glenmorangie whisky produced by 16 men known "
+                "as the Sixteen Men?"
+            ),
+            (
+                "Glenmorangie whisky is produced by 16 men known as the "
+                "Sixteen Men of TAIN."
+            ),
+        ),
+        (
+            (
+                "Complete the title of the debut novel by Marina Lewycka "
+                "'A Short History of … in Ukrainian'."
+            ),
+            "TRACTORS",
+            (
+                "Supply the missing completion for the title of the debut novel "
+                "by Marina Lewycka 'A Short History of … in Ukrainian'."
+            ),
+            (
+                "The completion of the title of the debut novel by Marina "
+                "Lewycka 'A Short History of … in Ukrainian' is TRACTORS."
+            ),
+        ),
+        (
+            "Which country has the internet domain .ch?",
+            "Switzerland",
+            "Identify the country that has the internet domain .ch.",
+            "Switzerland is the country that has the internet domain .ch.",
+        ),
+    ),
+)
+def test_deterministic_answer_slot_statement_passes_existing_admission(
+    original: str,
+    canonical: str,
+    paraphrase_question: str,
+    expected: str,
+) -> None:
+    source = _semantic_source(original, canonical)
+
+    candidate = _deterministic_answer_slot_statement(source)
+
+    assert candidate == expected
+    assert parse_paraphrase_response(
+        json.dumps(
+            {
+                "paraphrase_question": paraphrase_question,
+                "paraphrase_answer_statement": candidate,
+            }
+        ),
+        source,
+    ) == (paraphrase_question, expected)
+
+
+@pytest.mark.parametrize(
+    ("original", "canonical"),
+    (
+        ("What is the capital of Hong Kong?", "Victoria"),
+        (
+            "How many are gold; how many are silver?",
+            "One gold and three silver",
+        ),
+        (
+            "How many coins in one turn does each player use?",
+            "Five",
+        ),
+        (
+            "How many trophies are there: two, three, or four?",
+            "Three",
+        ),
+        ("Complete this sentence.", "the missing words"),
+        (
+            "What colour Cat’s-Eyes mark the nearside of a motorway?",
+            "Red",
+        ),
+        (
+            "On which street was a shop named Walter Roberts located?",
+            "Hope Street",
+        ),
+        (
+            "What US politician's 1996 autobiography was called 'Dreams From my Father'?",
+            "Barack Obama",
+        ),
+        (
+            "Which King created the George Cross medal? George V or George VI?",
+            "George VI",
+        ),
+        (
+            (
+                "Which Iain Banks novel has the name of a bird in the title? "
+                "The book was also made into a television series."
+            ),
+            "The Crow Road",
+        ),
+        (
+            (
+                "Complete the title of the novel 'A Short History of\u0085.in "
+                "Ukrainian'."
+            ),
+            "TRACTORS",
+        ),
+    ),
+)
+def test_deterministic_answer_slot_statement_fails_closed_for_unsafe_shapes(
+    original: str,
+    canonical: str,
+) -> None:
+    assert _deterministic_answer_slot_statement(
+        _semantic_source(original, canonical)
+    ) is None
+
+
+def test_answer_repair_uses_verified_deterministic_answer_slot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _semantic_source(
+        "What is the name of Mickey Mouse's pet dog?",
+        "Pluto",
+    )
+    client = object.__new__(LocalQwen35Paraphraser)
+    verified: list[str] = []
+    monkeypatch.setattr(
+        client,
+        "_answer_statement_verified",
+        lambda source, *, statement, seed: verified.append(statement) or True,
+    )
+    monkeypatch.setattr(
+        client,
+        "_complete",
+        lambda **_: pytest.fail("deterministic repair must precede model repair"),
+    )
+
+    repaired = client._repair_answer_statement(
+        source,
+        question="Identify Mickey Mouse's pet dog by name.",
+        rejected_statement="No accepted relation statement was produced.",
+        seed=47,
+    )
+
+    assert repaired == "The name of Mickey Mouse's pet dog is Pluto."
+    assert verified == [repaired]
 
 
 def test_v7_listed_choice_repair_keeps_exact_canonical_option_label() -> None:

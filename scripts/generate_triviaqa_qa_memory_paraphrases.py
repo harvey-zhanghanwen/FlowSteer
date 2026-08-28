@@ -899,6 +899,354 @@ def _possessive_name_answer_statement(
     return subject, statement
 
 
+_ATOMIC_COUNT_WORDS = frozenset(
+    {
+        "zero",
+        "one",
+        "two",
+        "three",
+        "four",
+        "five",
+        "six",
+        "seven",
+        "eight",
+        "nine",
+        "ten",
+        "eleven",
+        "twelve",
+        "thirteen",
+        "fourteen",
+        "fifteen",
+        "sixteen",
+        "seventeen",
+        "eighteen",
+        "nineteen",
+        "twenty",
+        "thirty",
+        "forty",
+        "fifty",
+        "sixty",
+        "seventy",
+        "eighty",
+        "ninety",
+        "hundred",
+        "thousand",
+        "million",
+        "billion",
+        "dozen",
+        "score",
+        "and",
+    }
+)
+_DETERMINISTIC_SUBJECT_WH_ANSWER_HEADS = frozenset(
+    {
+        *_ENTITY_ANSWER_HEADS,
+        *_LOCATION_SLOT_HEADS,
+        "album",
+        "animal",
+        "book",
+        "club",
+        "film",
+        "language",
+        "movie",
+        "novel",
+        "play",
+        "rank",
+        "river",
+        "score",
+        "song",
+        "species",
+        "station",
+        "term",
+        "title",
+        "word",
+    }
+)
+
+
+def _atomic_count_canonical(canonical_answer: str) -> bool:
+    """Admit only a short numeric or number-word answer to a count slot."""
+
+    if re.search(r"[;?!]", canonical_answer) is not None:
+        return False
+    tokens = tuple(
+        token.casefold() for token in _LEXICAL_TOKEN.findall(canonical_answer)
+    )
+    if not tokens or len(tokens) > 5:
+        return False
+    if any(character.isdigit() for character in canonical_answer):
+        return re.fullmatch(
+            r"\s*[+-]?(?:\d[\d,.]*)(?:\s+(?:hundred|thousand|million|"
+            r"billion))?\s*",
+            canonical_answer,
+            re.IGNORECASE,
+        ) is not None
+    return all(
+        part in _ATOMIC_COUNT_WORDS
+        for token in tokens
+        for part in token.replace("-", " ").split()
+    )
+
+
+def _declarative_statement(text: str) -> str:
+    """Terminate a copied declarative without altering canonical punctuation."""
+
+    normalized = " ".join(text.split()).rstrip()
+    if re.match(r"(?i:a|an|the)\b", normalized) is not None:
+        normalized = normalized[0].upper() + normalized[1:]
+    if re.search(r"[.!?][\"'”’]?\Z", normalized) is not None:
+        return normalized
+    return normalized + "."
+
+
+def _simple_subject_wh_head(head: str) -> bool:
+    """Require one short answer-type noun phrase, not a hidden possessor slot."""
+
+    tokens = tuple(
+        token.casefold() for token in _LEXICAL_TOKEN.findall(head)
+    )
+    if not tokens or len(tokens) > 12:
+        return False
+    if any(token.endswith(("'s", "’s")) for token in tokens):
+        return False
+    return tokens[-1] in _DETERMINISTIC_SUBJECT_WH_ANSWER_HEADS
+
+
+def _deterministic_answer_slot_statement(
+    source: TriviaQATrainSource,
+) -> str | None:
+    """Fill one structurally unambiguous TriviaQA answer slot.
+
+    These templates are a bounded repair inside the existing materialization
+    path.  They copy the authoritative relation and scope from the source,
+    insert the exact canonical span once, and fail closed for coordinated or
+    dependency-ambiguous questions.  The returned candidate is still parsed
+    by :func:`parse_paraphrase_response` and checked by the existing answer
+    verifier before admission.
+    """
+
+    original = " ".join(source.original_question.split())
+    if not original or _answer_slot_count(original) != 1:
+        return None
+    body = original[:-1].rstrip() if original.endswith(("?", ".")) else original
+    canonical = source.canonical_answer
+    candidate: str | None = None
+    internal_question_mark = "?" in body
+    if _is_explicit_listed_choice_question(
+        original_question=original,
+        canonical_answer=canonical,
+    ):
+        return None
+
+    name_of = re.fullmatch(
+        r"(?i:what)\s+(?P<copula>is|was)\s+the\s+name\s+of\s+"
+        r"(?P<referent>.+)",
+        body,
+    )
+    if name_of is not None and not internal_question_mark:
+        candidate = _declarative_statement(
+            f"The name of {name_of.group('referent')} "
+            f"{name_of.group('copula')} {canonical}"
+        )
+
+    if candidate is None:
+        leading_called = re.fullmatch(
+            r"(?i:what)\s+(?P<copula>is|was|are|were)\s+"
+            r"(?P<subject>.+?)\s+"
+            r"(?P<predicate>(?:(?:better|commonly|formerly|popularly)\s+)?"
+            r"(?:called|named|known\s+as))",
+            body,
+        )
+        if leading_called is not None and not internal_question_mark:
+            candidate = _declarative_statement(
+                f"{leading_called.group('subject')} "
+                f"{leading_called.group('copula')} "
+                f"{leading_called.group('predicate')} {canonical}"
+            )
+
+    if candidate is None:
+        trailing_known_name = re.fullmatch(
+            r"(?P<subject>.+?)\s+(?P<copula>(?i:is|was|are|were))\s+"
+            r"(?P<predicate>(?i:(?:(?:better|commonly|formerly|popularly)\s+)?"
+            r"known))\s+(?P<preposition>(?i:by|under))\s+"
+            r"(?i:what)\s+(?i:name)",
+            body,
+        )
+        if trailing_known_name is not None and not internal_question_mark:
+            candidate = _declarative_statement(
+                f"{trailing_known_name.group('subject')} "
+                f"{trailing_known_name.group('copula')} "
+                f"{trailing_known_name.group('predicate')} "
+                f"{trailing_known_name.group('preposition')} the name "
+                f"{canonical}"
+            )
+
+    if candidate is None:
+        fronted_known_name = re.fullmatch(
+            r"(?i:what)\s+(?i:name)\s+"
+            r"(?P<copula>(?i:is|was|are|were))\s+"
+            r"(?P<subject>.+?)\s+"
+            r"(?P<predicate>(?i:(?:(?:better|commonly|formerly|popularly)\s+)?"
+            r"known))\s+(?P<preposition>(?i:by|under))",
+            body,
+        )
+        if fronted_known_name is not None and not internal_question_mark:
+            candidate = _declarative_statement(
+                f"{fronted_known_name.group('subject')} "
+                f"{fronted_known_name.group('copula')} "
+                f"{fronted_known_name.group('predicate')} "
+                f"{fronted_known_name.group('preposition')} the name "
+                f"{canonical}"
+            )
+
+    if candidate is None:
+        subject_called = re.fullmatch(
+            r"(?i:what|which)\s+(?P<head>.+?)\s+"
+            r"(?P<copula>is|was|are|were)\s+"
+            r"(?P<predicate>(?:(?:better|commonly|formerly|popularly)\s+)?"
+            r"(?:called|named|known\s+as))\s+"
+            r"(?P<complement>.+)",
+            body,
+        )
+        if (
+            subject_called is not None
+            and not internal_question_mark
+            and _simple_subject_wh_head(subject_called.group("head"))
+        ):
+            candidate = _declarative_statement(
+                f"{canonical} {subject_called.group('copula')} "
+                f"{subject_called.group('predicate')} "
+                f"{subject_called.group('complement')}"
+            )
+
+    if candidate is None and len(_QUESTION_SLOT_TOKEN.findall(original)) == 1:
+        how_many = re.fullmatch(r"(?i:how\s+many)\s+(?P<tail>.+)", body)
+        if (
+            how_many is not None
+            and not internal_question_mark
+            and _atomic_count_canonical(canonical)
+        ):
+            tail = how_many.group("tail")
+            perfect_existential = re.fullmatch(
+                r"(?P<head>.+?)\s+(?P<aux>have|has|had)\s+there\s+been"
+                r"(?P<rest>.*)",
+                tail,
+                re.IGNORECASE,
+            )
+            existential = re.fullmatch(
+                r"(?P<head>.+?)\s+(?P<aux>are|were|is|was)\s+there"
+                r"(?P<rest>.*)",
+                tail,
+                re.IGNORECASE,
+            )
+            predicative = re.fullmatch(
+                r"(?P<head>.+?)\s+(?P<aux>are|were|is|was)\s+"
+                r"(?P<rest>.+)",
+                tail,
+                re.IGNORECASE,
+            )
+            if perfect_existential is not None:
+                candidate = _declarative_statement(
+                    f"There {perfect_existential.group('aux')} been {canonical} "
+                    f"{perfect_existential.group('head')}"
+                    f"{perfect_existential.group('rest')}"
+                )
+            elif existential is not None:
+                candidate = _declarative_statement(
+                    f"There {existential.group('aux')} {canonical} "
+                    f"{existential.group('head')}{existential.group('rest')}"
+                )
+            elif predicative is not None:
+                candidate = _declarative_statement(
+                    f"{canonical} {predicative.group('head')} "
+                    f"{predicative.group('aux')} {predicative.group('rest')}"
+                )
+
+    if candidate is None and len(_QUESTION_SLOT_TOKEN.findall(original)) == 1:
+        trailing_slot = re.fullmatch(
+            r"(?P<prefix>.+?)\s+(?P<slot>(?i:what|where))",
+            body,
+        )
+        if trailing_slot is not None and not internal_question_mark:
+            literal_candidate = _declarative_statement(
+                f"{trailing_slot.group('prefix')} {canonical}"
+            )
+            if _literal_slot_substitution_preserved(
+                original_question=original,
+                canonical_answer=canonical,
+                answer_statement=literal_candidate,
+            ):
+                candidate = literal_candidate
+
+    if candidate is None:
+        completion = re.fullmatch(
+            r"(?P<operator>(?i:complete|finish))\s+(?P<object>.+)",
+            body,
+        )
+        if (
+            completion is not None
+            and _quoted_spans(original)
+            and re.search(
+                r"\b(?:title|quote|quotation|proverb|lyric|line|phrase|"
+                r"saying|sentence)\b",
+                completion.group("object"),
+                re.IGNORECASE,
+            )
+            is not None
+            and _COORDINATED_QUESTION_SLOT.search(original) is None
+        ):
+            completion_object = re.sub(
+                r"\s+(?:what|who|where)\s*\Z",
+                "",
+                completion.group("object"),
+                flags=re.IGNORECASE,
+            ).rstrip()
+            if completion_object:
+                if completion.group("operator").casefold() == "complete":
+                    candidate = _declarative_statement(
+                        f"The completion of {completion_object} is {canonical}"
+                    )
+                else:
+                    candidate = _declarative_statement(
+                        f"The ending of {completion_object} is {canonical}"
+                    )
+
+    if candidate is None and len(_QUESTION_SLOT_TOKEN.findall(original)) == 1:
+        subject_wh = re.fullmatch(
+            r"(?i:what|which)\s+(?P<head>.+?)\s+"
+            rf"(?P<verb>{_DETERMINISTIC_SUBJECT_RELATIVE_VERB.pattern}|"
+            r"is|was|are|were)\s+(?P<tail>.+)",
+            body,
+            re.IGNORECASE,
+        )
+        if subject_wh is not None:
+            if (
+                not internal_question_mark
+                and _simple_subject_wh_head(subject_wh.group("head"))
+            ):
+                candidate = _declarative_statement(
+                    f"{canonical} is the {subject_wh.group('head')} that "
+                    f"{subject_wh.group('verb')} {subject_wh.group('tail')}"
+                )
+
+    if candidate is None:
+        return None
+    source_quotes = _quoted_spans(source.original_question)
+    if source_quotes and not source_quotes.issubset(_quoted_spans(candidate)):
+        return None
+    if not exact_canonical_span_preserved(candidate, canonical):
+        return None
+    if not relation_bearing_answer_statement(candidate, canonical):
+        return None
+    if not _answer_statement_has_lexical_relation_lineage(
+        original_question=original,
+        canonical_answer=canonical,
+        answer_statement=candidate,
+    ):
+        return None
+    return candidate
+
+
 def _clausal_canonical_relation_statement(
     source: TriviaQATrainSource,
 ) -> str | None:
@@ -2925,6 +3273,27 @@ class LocalQwen35Paraphraser:
                 source,
             )
             return literal_subject_statement
+        deterministic_statement = _deterministic_answer_slot_statement(source)
+        if deterministic_statement is not None:
+            try:
+                _, deterministic_statement = parse_paraphrase_response(
+                    json.dumps(
+                        {
+                            "paraphrase_question": question,
+                            "paraphrase_answer_statement": deterministic_statement,
+                        },
+                        ensure_ascii=False,
+                    ),
+                    source,
+                )
+                if self._answer_statement_verified(
+                    source,
+                    statement=deterministic_statement,
+                    seed=seed + 750_000,
+                ):
+                    return deterministic_statement
+            except ValueError:
+                pass
         augmented_statement = _augment_listed_choice_answer_statement(
             original_question=source.original_question,
             canonical_answer=source.canonical_answer,
