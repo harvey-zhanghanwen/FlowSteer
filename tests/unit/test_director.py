@@ -54,6 +54,8 @@ from src.interactive.director import (
     LEGACY_DIRECTOR_SYSTEM_PROMPT_V8,
     LEGACY_DIRECTOR_SYSTEM_PROMPT_V9,
     PRESERVE_DIAGNOSE_REPAIR_AUGMENT_POLICY,
+    TRIVIAQA_ROUND01_DIRECTOR_PROMPT_VERSION,
+    TRIVIAQA_ROUND01_DIRECTOR_SYSTEM_PROMPT,
     DirectorResponse,
     OpenAIDirectorClient,
     decode_director_transcript,
@@ -127,6 +129,22 @@ class FakeGateway:
     async def generate(self, request):
         self.requests.append(request)
         return AgentResponse(f"answer from {request.agent.id}")
+
+
+class TriviaMemoryProfileRuntime:
+    def __init__(self, model_registry: ModelRegistry) -> None:
+        self.model_registry = model_registry
+        self.dataset_id = "triviaqa"
+        self.semantic_protocol = "none"
+
+    def registered_execution_profiles(self):
+        return (
+            ("reasoning", ()),
+            ("react", ("triviaqa.qa_memory",)),
+        )
+
+    def validate_execution_contracts(self, nodes) -> None:
+        del nodes
 
 
 def registry() -> ModelRegistry:
@@ -216,9 +234,24 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
             director_system_prompt_for_version("prompt-v1"),
         )
         self.assertIs(
+            TRIVIAQA_ROUND01_DIRECTOR_SYSTEM_PROMPT,
+            director_system_prompt_for_version(
+                TRIVIAQA_ROUND01_DIRECTOR_PROMPT_VERSION
+            ),
+        )
+        self.assertIn('"action":"add_agent"', TRIVIAQA_ROUND01_DIRECTOR_SYSTEM_PROMPT)
+        self.assertNotIn('"action":"add_subgraph"', TRIVIAQA_ROUND01_DIRECTOR_SYSTEM_PROMPT)
+        self.assertIn("allowed_tools", TRIVIAQA_ROUND01_DIRECTOR_SYSTEM_PROMPT)
+        self.assertIn("execution_mode", TRIVIAQA_ROUND01_DIRECTOR_SYSTEM_PROMPT)
+        self.assertNotIn("distinct terminal Agent", TRIVIAQA_ROUND01_DIRECTOR_SYSTEM_PROMPT)
+        self.assertNotIn("Reasoner", TRIVIAQA_ROUND01_DIRECTOR_SYSTEM_PROMPT)
+        self.assertNotIn("Verifier", TRIVIAQA_ROUND01_DIRECTOR_SYSTEM_PROMPT)
+        self.assertNotIn("Formatter", TRIVIAQA_ROUND01_DIRECTOR_SYSTEM_PROMPT)
+        self.assertIs(
             HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V22,
             director_system_prompt_for_version(HOTPOTQA_DIRECTOR_PROMPT_VERSION),
         )
+
         self.assertIs(
             QA_DIRECTOR_SYSTEM_PROMPT_V6,
             director_system_prompt_for_version(QA_DIRECTOR_PROMPT_VERSION),
@@ -309,6 +342,55 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         )
         with self.assertRaises(ValueError):
             director_system_prompt_for_version(" ")
+
+    async def test_scalar_qa_memory_control_plane_exposes_live_worker_domain(self) -> None:
+        model_registry = registry()
+        env = AgentWorkflowEnv(
+            model_registry,
+            runtime=TriviaMemoryProfileRuntime(model_registry),  # type: ignore[arg-type]
+            problem="Who wrote the novel?",
+            max_agents=8,
+            allowed_actions=(
+                "add_agent",
+                "modify_agent",
+                "delete_agent",
+                "set_relation",
+                "set_output",
+                "finish",
+            ),
+            require_exact_answer_tag=True,
+            required_evidence_tool_id="triviaqa.qa_memory",
+            require_evidence_relation=True,
+            director_feedback_mode="control_plane",
+        )
+        orchestrator = AgentGraphOrchestrator(
+            model_registry,
+            ScriptedDirector([]),
+            prompt_version=TRIVIAQA_ROUND01_DIRECTOR_PROMPT_VERSION,
+        )
+
+        observation = orchestrator._canvas_observation(
+            env,
+            include_task_context=True,
+            skills=(),
+        )
+
+        self.assertEqual(["add_agent"], observation["admissible_action_types"])
+        self.assertEqual(
+            [
+                {
+                    "execution_mode": "react",
+                    "allowed_tools": ["triviaqa.qa_memory"],
+                }
+            ],
+            observation["action_target_domains"]["add_agent"][
+                "registered_execution_profiles"
+            ],
+        )
+        self.assertEqual(
+            {"allowed_tools": [], "tool_calls_enabled": False},
+            observation["director_execution_profile"],
+        )
 
     async def test_hotpot_v22_prompt_encodes_semantic_and_recovery_policy(self) -> None:
         model_registry = registry()

@@ -27,6 +27,26 @@ from .scientific_sampling import (
 )
 
 
+# NECESSARY_ADAPTATION: keep the scalar ADD_AGENT wire grammar used by the
+# verified TriviaQA Round-01 trajectory while applying the same compact,
+# topology-neutral policy boundary as the current SkillFlow/FlowSteer prompt.
+# Exact legal targets and worker execution profiles remain live Canvas state.
+TRIVIAQA_ROUND01_DIRECTOR_PROMPT_VERSION = "agentgraph.director.minimal.v2"
+TRIVIAQA_ROUND01_DIRECTOR_SYSTEM_PROMPT = """You are the Flow-Director. Incrementally edit the executable AgentGraph from the latest Canvas observation. Return exactly one valid JSON action each turn and no other text.
+
+Actions:
+{"action":"add_agent","agent_id":"...","model_id":"...","contract":"...","role_family":"...","allowed_tools":[],"execution_mode":"reasoning|react|coding"}
+{"action":"modify_agent","agent_id":"...","model_id":"...","contract":"...","role_family":"...","allowed_tools":[],"execution_mode":"reasoning|react|coding"}
+{"action":"delete_agent","agent_id":"..."}
+{"action":"set_relation","source_id":"...","target_id":"...","source_to_target":true,"target_to_source":false}
+{"action":"set_output","agent_id":"..."}
+{"action":"finish"}
+
+Use only action types, targets and parameters in admissible_action_types and action_target_domains, model_id values in model_catalog, and exact tool_id values in tool_catalog. execution_mode is reasoning, react, or coding; ReAct is a Tool-execution mode, not an Agent role.
+
+A directed relation routes the source artifact to the target. A bidirectional relation performs one bounded two-Agent exchange. Each accepted edit is executed once, and its Canvas validation and execution feedback appear in the next observation; inspect that state before choosing the next action. Use finish only when finish_admissibility is present and admissible. Do not assume a fixed Agent count, role inventory or order, edge, topology, communication pattern, benchmark workflow, retrieval recipe, terminal role, or unlisted Skill."""
+
+
 LEGACY_DIRECTOR_SYSTEM_PROMPT_V8 = """You are the Flow-Director. Incrementally build an executable AgentGraph. Follow the latest Canvas observation and return exactly one JSON object each turn.
 
 Actions:
@@ -489,6 +509,9 @@ def director_system_prompt_for_version(prompt_version: str) -> str:
         DIRECTOR_PROMPT_VERSION: DIRECTOR_SYSTEM_PROMPT,
         LEGACY_DIRECTOR_PROMPT_VERSION_V9: LEGACY_DIRECTOR_SYSTEM_PROMPT_V9,
         LEGACY_DIRECTOR_PROMPT_VERSION_V8: LEGACY_DIRECTOR_SYSTEM_PROMPT_V8,
+        TRIVIAQA_ROUND01_DIRECTOR_PROMPT_VERSION: (
+            TRIVIAQA_ROUND01_DIRECTOR_SYSTEM_PROMPT
+        ),
         # These are the two historical v8 experiment labels still present in
         # checked-in evaluation configs.  Their exact transcript policy is the
         # canonical v8 prompt above.
@@ -569,6 +592,7 @@ _SUPPORTED_DIRECTOR_SYSTEM_PROMPTS = frozenset(
         QA_DIRECTOR_SYSTEM_PROMPT_V6,
         LEGACY_DIRECTOR_SYSTEM_PROMPT_V9,
         LEGACY_DIRECTOR_SYSTEM_PROMPT_V8,
+        TRIVIAQA_ROUND01_DIRECTOR_SYSTEM_PROMPT,
     }
 )
 
@@ -2679,7 +2703,63 @@ def director_live_action_parameter_json_schema_text(
     if not isinstance(domain, Mapping):
         raise ValueError(f"missing live target domain for {action}")
 
-    if action == "add_subgraph":
+    if action == "add_agent":
+        required_fields = domain.get("required_agent_fields")
+        required_minimum = {
+            "agent_id",
+            "model_id",
+            "contract",
+            "allowed_tools",
+            "execution_mode",
+        }
+        if (
+            not isinstance(required_fields, (list, tuple))
+            or set(required_fields) != required_minimum
+        ):
+            raise ValueError("add_agent required Agent fields are incomplete")
+        model_ids = _live_string_domain(
+            domain.get("model_ids"),
+            label="add_agent.model_ids",
+        )
+        existing_agent_ids = domain.get("existing_agent_ids")
+        if not isinstance(existing_agent_ids, (list, tuple)) or any(
+            not isinstance(agent_id, str) or not agent_id
+            for agent_id in existing_agent_ids
+        ):
+            raise ValueError("add_agent existing Agent IDs are invalid")
+        if len(existing_agent_ids) != len(set(existing_agent_ids)):
+            raise ValueError("add_agent existing Agent IDs contain duplicates")
+        profiles = _live_execution_profiles(
+            domain.get("registered_execution_profiles"),
+            label="add_agent.registered_execution_profiles",
+        )
+        schema = json.loads(
+            director_state_conditioned_sampling_json_schema_text("add_agent")
+        )
+        schema["required"] = ["action", *required_fields]
+        schema["properties"]["model_id"] = {"enum": list(model_ids)}
+        if existing_agent_ids:
+            schema["properties"]["agent_id"] = {
+                "allOf": [
+                    _NON_EMPTY_STRING_SCHEMA,
+                    {"not": {"enum": list(existing_agent_ids)}},
+                ]
+            }
+        schema["allOf"] = [
+            {
+                "anyOf": [
+                    {
+                        "required": ["execution_mode", "allowed_tools"],
+                        "properties": {
+                            "execution_mode": {"const": execution_mode},
+                            "allowed_tools": {"const": list(allowed_tools)},
+                        },
+                    }
+                    for execution_mode, allowed_tools in profiles
+                ]
+            }
+        ]
+    elif action == "add_subgraph":
         if add_agents is None:
             raise ValueError(
                 "add_subgraph v3 parameter phase requires sampled Agent declarations"
@@ -3670,6 +3750,10 @@ class AgentGraphOrchestrator:
             for source_id, target_id in relation.directed_edges()
         ]
         control_plane = env.director_feedback_mode == "control_plane"
+        uses_live_action_domain = bool(
+            verified_qa_semantic_protocol(self.semantic_protocol)
+            or env.require_evidence_relation
+        )
         payload: dict[str, Any] = {
             "current_graph": env.graph.to_dict(),
             "topology_statistics": env.graph.topology_statistics(),
@@ -3682,7 +3766,7 @@ class AgentGraphOrchestrator:
             ),
             "admissible_action_types": list(
                 env.model_admissible_action_types()
-                if verified_qa_semantic_protocol(self.semantic_protocol)
+                if uses_live_action_domain
                 else env.allowed_action_types
             ),
             # These are existing admission constraints enforced by
@@ -3704,7 +3788,7 @@ class AgentGraphOrchestrator:
                 "allowed_tools": [],
                 "tool_calls_enabled": False,
             }
-        if verified_qa_semantic_protocol(self.semantic_protocol):
+        if uses_live_action_domain:
             payload["action_target_domains"] = (
                 env.model_admissible_action_targets()
             )

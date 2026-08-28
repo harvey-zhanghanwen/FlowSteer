@@ -1633,6 +1633,7 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             "worker",
             worker_targets.get("modify_agent", {}).get("agent_ids", []),
         )
+
         self.assertEqual(
             [
                 {"execution_mode": "reasoning", "allowed_tools": []},
@@ -1843,6 +1844,88 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             unrouted_env._required_evidence_issue(unrouted_env._progressive_execution)
         )
         self.assertNotIn("finish", unrouted_env.model_admissible_action_types())
+
+    def test_triviaqa_scalar_add_agent_profiles_follow_retrieval_boundary(self) -> None:
+        registry = make_registry()
+        scalar_actions = (
+            "add_agent",
+            "modify_agent",
+            "delete_agent",
+            "set_relation",
+            "set_output",
+            "finish",
+        )
+        empty_env = AgentWorkflowEnv(
+            registry,
+            runtime=_TriviaMemoryProfileRuntime(registry),  # type: ignore[arg-type]
+            problem="Which author wrote the novel?",
+            execute_on_edit=True,
+            max_agents=8,
+            allowed_actions=scalar_actions,
+            require_exact_answer_tag=True,
+            required_evidence_tool_id="triviaqa.qa_memory",
+            require_evidence_relation=True,
+            director_feedback_mode="control_plane",
+        )
+
+        empty_actions = empty_env.model_admissible_action_types()
+        empty_targets = empty_env.model_admissible_action_targets()
+        self.assertEqual(("add_agent",), empty_actions)
+        director_validate_live_action_target_domains(empty_actions, empty_targets)
+        self.assertEqual(
+            [
+                {
+                    "execution_mode": "react",
+                    "allowed_tools": ["triviaqa.qa_memory"],
+                }
+            ],
+            empty_targets["add_agent"][
+                "registered_execution_profiles"
+            ],
+        )
+
+        worker = AgentNode(
+            "worker",
+            "balanced",
+            "retrieve one relevant QA memory",
+            execution_mode="react",
+            allowed_tools=("triviaqa.qa_memory",),
+        )
+        worker_graph = AgentGraph([worker])
+        worker_env = AgentWorkflowEnv(
+            registry,
+            runtime=_TriviaMemoryProfileRuntime(registry),  # type: ignore[arg-type]
+            problem="Which author wrote the novel?",
+            graph=worker_graph,
+            execute_on_edit=True,
+            max_agents=8,
+            allowed_actions=scalar_actions,
+            require_exact_answer_tag=True,
+            required_evidence_tool_id="triviaqa.qa_memory",
+            require_evidence_relation=True,
+            director_feedback_mode="control_plane",
+        )
+        worker_env._progressive_execution = AgentRuntimeResult(
+            run_id="worker-complete",
+            graph_revision=worker_graph.revision,
+            output_agent_id=None,
+            final_answer=None,
+            outputs={"worker": "receipt-grounded evidence"},
+            calls=(),
+            block_completion_order=(("worker",),),
+            output_metadata={
+                "worker": {"tool_receipts": _trivia_memory_receipts()}
+            },
+        )
+        worker_env._progressive_execution_revision = worker_graph.revision
+
+        self.assertIn("add_agent", worker_env.model_admissible_action_types())
+        self.assertEqual(
+            [{"execution_mode": "reasoning", "allowed_tools": []}],
+            worker_env.model_admissible_action_targets()["add_agent"][
+                "registered_execution_profiles"
+            ],
+        )
 
     async def test_execution_contract_is_rejected_before_canvas_commit(self) -> None:
         registry = make_registry()

@@ -1241,7 +1241,14 @@ class AgentWorkflowEnv:
         admitted: list[str] = []
         for action_type in self.allowed_action_types:
             if (
-                action_type == AgentActionType.ADD_SUBGRAPH.value
+                (
+                    action_type == AgentActionType.ADD_SUBGRAPH.value
+                    or (
+                        action_type == AgentActionType.ADD_AGENT.value
+                        and AgentActionType.ADD_SUBGRAPH.value
+                        not in self._allowed_action_type_set
+                    )
+                )
                 and can_add
                 and (
                     not self._uses_semantic_lineage_protocol()
@@ -3460,6 +3467,34 @@ class AgentWorkflowEnv:
             or "evidence_retriever" in replacement_domains
         )
         targets: dict[str, object] = {}
+        if AgentActionType.ADD_AGENT.value in admitted:
+            registered_profiles = (
+                self._topology_neutral_registered_execution_profiles()
+                if (
+                    self.require_evidence_relation
+                    and not self._uses_semantic_lineage_protocol()
+                )
+                else tuple(self.runtime.registered_execution_profiles())
+            )
+            targets[AgentActionType.ADD_AGENT.value] = {
+                "topology_neutral": True,
+                "required_agent_fields": [
+                    "agent_id",
+                    "model_id",
+                    "contract",
+                    "allowed_tools",
+                    "execution_mode",
+                ],
+                "model_ids": list(self._available_model_ids()),
+                "existing_agent_ids": node_ids,
+                "registered_execution_profiles": [
+                    {
+                        "execution_mode": execution_mode,
+                        "allowed_tools": list(allowed_tools),
+                    }
+                    for execution_mode, allowed_tools in registered_profiles
+                ],
+            }
         if AgentActionType.ADD_SUBGRAPH.value in admitted:
             remaining = (
                 self.max_agents_per_subgraph
