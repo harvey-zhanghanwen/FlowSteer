@@ -661,6 +661,101 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("top_k", remote_payload)
 
+    def test_repetition_penalty_is_forwarded_only_for_declared_local_sglang(
+        self,
+    ) -> None:
+        item = request()
+        declared_provider = replace(
+            item.provider,
+            metadata={
+                "sampling_backend": "sglang",
+                "deployment_locality": "local",
+            },
+        )
+        declared_model = replace(
+            item.model,
+            metadata={
+                **dict(item.model.metadata),
+                "supports_repetition_penalty": "true",
+                "repetition_penalty": "1.05",
+            },
+        )
+        local_payload = OpenAICompatibleGateway().request_payload(
+            replace(item, provider=declared_provider, model=declared_model)
+        )
+        self.assertEqual(1.05, local_payload["repetition_penalty"])
+
+        remote_payload = OpenAICompatibleGateway().request_payload(
+            replace(item, model=declared_model)
+        )
+        self.assertNotIn("repetition_penalty", remote_payload)
+
+    def test_declared_repetition_penalty_requires_supported_range(self) -> None:
+        item = request()
+        provider = replace(
+            item.provider,
+            metadata={
+                "sampling_backend": "sglang",
+                "deployment_locality": "local",
+            },
+        )
+        for invalid_value in ("0", "-0.1", "2.01", "not-a-number"):
+            with self.subTest(invalid_value=invalid_value):
+                model = replace(
+                    item.model,
+                    metadata={
+                        **dict(item.model.metadata),
+                        "supports_repetition_penalty": "true",
+                        "repetition_penalty": invalid_value,
+                    },
+                )
+                with self.assertRaisesRegex(
+                    OpenAICompatibleGatewayError,
+                    "repetition_penalty",
+                ):
+                    OpenAICompatibleGateway().request_payload(
+                        replace(item, provider=provider, model=model)
+                    )
+
+    async def test_repetition_penalty_is_persisted_in_requested_sampling(
+        self,
+    ) -> None:
+        item = request()
+        item = replace(
+            item,
+            provider=replace(
+                item.provider,
+                metadata={
+                    "sampling_backend": "sglang",
+                    "deployment_locality": "local",
+                },
+            ),
+            model=replace(
+                item.model,
+                metadata={
+                    **dict(item.model.metadata),
+                    "supports_repetition_penalty": "true",
+                    "repetition_penalty": "1.05",
+                },
+            ),
+        )
+        gateway = OpenAICompatibleGateway(max_retries=0)
+        gateway._post_json = lambda *_: {  # type: ignore[method-assign]
+            "id": "req-repeat",
+            "model": "supervisor_theta",
+            "choices": [
+                {"message": {"content": "answer"}, "finish_reason": "stop"}
+            ],
+            "usage": {},
+        }
+
+        response = await gateway.generate(item)
+
+        self.assertEqual(
+            1.05,
+            response.metadata["requested_sampling"]["repetition_penalty"],
+        )
+
     async def test_request_and_response_mapping(self) -> None:
         gateway = OpenAICompatibleGateway(max_retries=0, default_seed=17)
         captured = {}
@@ -693,6 +788,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
                 "temperature": 0.2,
                 "top_p": 1.0,
                 "top_k": None,
+                "repetition_penalty": None,
                 "max_tokens": 512,
                 "seed": 17,
             },

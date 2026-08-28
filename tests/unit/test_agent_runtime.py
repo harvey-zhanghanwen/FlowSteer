@@ -627,6 +627,290 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
             [message.source_agent_id for message in request_c.upstream],
         )
 
+    async def test_dirty_singleton_reuses_task_scoped_component_cache(self) -> None:
+        catalog = registry()
+        gateway = RecordingGateway()
+        runtime = AgentRuntime(catalog, gateway)
+        graph = AgentGraph(
+            [AgentNode("a", "m1", "answer the task")],
+            output_agent_id="a",
+        )
+        cache = {}
+
+        initial = await runtime.execute(
+            graph,
+            "question",
+            run_id="cache-initial",
+            execution_cache=cache,
+        )
+        initial_artifact_version = initial.output_metadata["a"][
+            "artifact_version"
+        ]
+        gateway.requests.clear()
+
+        reused = await runtime.execute(
+            graph,
+            "question",
+            run_id="cache-reused",
+            prior_outputs=initial.outputs,
+            prior_output_metadata=initial.output_metadata,
+            dirty_agents={"a"},
+            execution_cache=cache,
+        )
+
+        self.assertEqual([], gateway.requests)
+        self.assertEqual((), reused.calls)
+        self.assertEqual((), reused.executed_agent_ids)
+        self.assertEqual(("a",), reused.reused_agent_ids)
+        self.assertEqual(initial.outputs, reused.outputs)
+        self.assertEqual(
+            initial_artifact_version,
+            reused.output_metadata["a"]["artifact_version"],
+        )
+        self.assertEqual(1, len(reused.execution_reuse_receipts))
+        receipt = reused.execution_reuse_receipts[0]
+        self.assertTrue(receipt["execution_reused"])
+        self.assertEqual(["a"], receipt["component_agent_ids"])
+        self.assertEqual(
+            {"a": initial_artifact_version},
+            receipt["source_artifact_versions"],
+        )
+
+    async def test_component_cache_ignores_upstream_transport_version_only(self) -> None:
+        catalog = registry()
+        gateway = RecordingGateway()
+        runtime = AgentRuntime(catalog, gateway)
+        graph = AgentGraph(
+            [
+                AgentNode("a", "m1", "produce evidence"),
+                AgentNode("b", "m2", "consume evidence"),
+            ],
+            [AgentRelation("a", "b", True, False)],
+            output_agent_id="b",
+        )
+        cache = {}
+        initial = await runtime.execute(
+            graph,
+            "question",
+            run_id="transport-initial",
+            execution_cache=cache,
+        )
+        prior_metadata = {
+            agent_id: dict(metadata)
+            for agent_id, metadata in initial.output_metadata.items()
+        }
+        prior_metadata["a"]["artifact_version"] = "transport-only:new"
+        gateway.requests.clear()
+
+        reused = await runtime.execute(
+            graph,
+            "question",
+            run_id="transport-reused",
+            prior_outputs=initial.outputs,
+            prior_output_metadata=prior_metadata,
+            dirty_agents={"b"},
+            execution_cache=cache,
+        )
+
+        self.assertEqual([], gateway.requests)
+        self.assertEqual(("a", "b"), reused.reused_agent_ids)
+        self.assertEqual((), reused.executed_agent_ids)
+        self.assertEqual(
+            initial.output_metadata["b"]["artifact_version"],
+            reused.output_metadata["b"]["artifact_version"],
+        )
+
+    async def test_component_cache_misses_when_upstream_artifact_changes(self) -> None:
+        catalog = registry()
+        gateway = RecordingGateway()
+        runtime = AgentRuntime(catalog, gateway)
+        graph = AgentGraph(
+            [
+                AgentNode("a", "m1", "produce evidence"),
+                AgentNode("b", "m2", "consume evidence"),
+            ],
+            [AgentRelation("a", "b", True, False)],
+            output_agent_id="b",
+        )
+        cache = {}
+        initial = await runtime.execute(
+            graph,
+            "question",
+            execution_cache=cache,
+        )
+        gateway.requests.clear()
+
+        updated = await runtime.execute(
+            graph,
+            "question",
+            prior_outputs={**dict(initial.outputs), "a": "changed evidence"},
+            prior_output_metadata=initial.output_metadata,
+            dirty_agents={"b"},
+            execution_cache=cache,
+        )
+
+        self.assertEqual(["b"], [request.agent.id for request in gateway.requests])
+        self.assertEqual(("b",), updated.executed_agent_ids)
+        self.assertEqual(("a",), updated.reused_agent_ids)
+        self.assertEqual(
+            "changed evidence",
+            gateway.requests[0].upstream[0].content,
+        )
+
+    async def test_component_cache_misses_when_agent_contract_changes(self) -> None:
+        catalog = registry()
+        gateway = RecordingGateway()
+        runtime = AgentRuntime(catalog, gateway)
+        graph = AgentGraph(
+            [AgentNode("a", "m1", "first contract")],
+            output_agent_id="a",
+        )
+        cache = {}
+        initial = await runtime.execute(
+            graph,
+            "question",
+            execution_cache=cache,
+        )
+        graph.modify_agent("a", contract="revised contract")
+        gateway.requests.clear()
+
+        updated = await runtime.execute(
+            graph,
+            "question",
+            prior_outputs=initial.outputs,
+            prior_output_metadata=initial.output_metadata,
+            dirty_agents={"a"},
+            execution_cache=cache,
+        )
+
+        self.assertEqual(["a"], [request.agent.id for request in gateway.requests])
+        self.assertEqual("revised contract", gateway.requests[0].agent.contract)
+        self.assertEqual(("a",), updated.executed_agent_ids)
+        self.assertEqual((), updated.reused_agent_ids)
+
+    async def test_length_terminated_component_is_not_cached(self) -> None:
+        catalog = registry()
+
+        class LengthThenStopGateway:
+            def __init__(self) -> None:
+                self.requests: list[AgentRequest] = []
+
+            async def generate(self, request: AgentRequest) -> AgentResponse:
+                self.requests.append(request)
+                if len(self.requests) == 1:
+                    return AgentResponse(
+                        "partial artifact",
+                        {"finish_reason": "length"},
+                    )
+                return AgentResponse(
+                    "complete artifact",
+                    {"finish_reason": "stop"},
+                )
+
+        gateway = LengthThenStopGateway()
+        runtime = AgentRuntime(catalog, gateway)
+        graph = AgentGraph(
+            [AgentNode("a", "m1", "answer the task")],
+            output_agent_id="a",
+        )
+        cache = {}
+
+        first = await runtime.execute(graph, "question", execution_cache=cache)
+        second = await runtime.execute(
+            graph,
+            "question",
+            prior_outputs=first.outputs,
+            prior_output_metadata=first.output_metadata,
+            dirty_agents={"a"},
+            execution_cache=cache,
+        )
+        third = await runtime.execute(
+            graph,
+            "question",
+            prior_outputs=second.outputs,
+            prior_output_metadata=second.output_metadata,
+            dirty_agents={"a"},
+            execution_cache=cache,
+        )
+
+        self.assertEqual(2, len(gateway.requests))
+        self.assertEqual(("a",), second.executed_agent_ids)
+        self.assertEqual(("a",), third.reused_agent_ids)
+        self.assertEqual("complete artifact", third.final_answer)
+
+    async def test_reciprocal_component_is_reused_only_as_a_complete_block(self) -> None:
+        catalog = registry()
+        gateway = RecordingGateway()
+        runtime = AgentRuntime(catalog, gateway)
+        graph = AgentGraph(
+            [
+                AgentNode("a", "m1", "produce a draft"),
+                AgentNode("b", "m2", "review the draft"),
+            ],
+            [AgentRelation("a", "b", True, True)],
+            output_agent_id="b",
+        )
+        cache = {}
+        initial = await runtime.execute(
+            graph,
+            "question",
+            run_id="reciprocal-initial",
+            execution_cache=cache,
+        )
+        self.assertEqual(4, len(gateway.requests))
+        gateway.requests.clear()
+
+        reused = await runtime.execute(
+            graph,
+            "question",
+            run_id="reciprocal-reused",
+            prior_outputs=initial.outputs,
+            prior_output_metadata=initial.output_metadata,
+            dirty_agents={"a", "b"},
+            execution_cache=cache,
+        )
+
+        self.assertEqual([], gateway.requests)
+        self.assertEqual((), reused.executed_agent_ids)
+        self.assertEqual(("a", "b"), reused.reused_agent_ids)
+        self.assertEqual(initial.outputs, reused.outputs)
+        self.assertEqual(1, len(reused.execution_reuse_receipts))
+
+    async def test_non_reasoning_component_is_never_cached(self) -> None:
+        catalog = registry()
+        gateway = RecordingGateway()
+        runtime = AgentRuntime(
+            catalog,
+            gateway,
+            execution_adapters={"react": ReasoningExecutionAdapter(gateway)},
+        )
+        graph = AgentGraph(
+            [
+                AgentNode(
+                    "a",
+                    "m1",
+                    "act once",
+                    execution_mode="react",
+                )
+            ],
+            output_agent_id="a",
+        )
+        cache = {}
+        initial = await runtime.execute(graph, "question", execution_cache=cache)
+        repeated = await runtime.execute(
+            graph,
+            "question",
+            prior_outputs=initial.outputs,
+            prior_output_metadata=initial.output_metadata,
+            dirty_agents={"a"},
+            execution_cache=cache,
+        )
+
+        self.assertEqual(2, len(gateway.requests))
+        self.assertEqual({}, cache)
+        self.assertEqual(("a",), repeated.executed_agent_ids)
+        self.assertEqual((), repeated.reused_agent_ids)
+
     async def test_missing_upstream_invalidates_cached_downstream(self) -> None:
         catalog = registry()
         gateway = RecordingGateway()

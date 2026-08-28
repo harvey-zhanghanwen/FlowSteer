@@ -47,6 +47,8 @@ from src.interactive.director import (
     QA_DIRECTOR_SYSTEM_PROMPT_V5,
     QA_DIRECTOR_SYSTEM_PROMPT_V6,
     QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+    LEGACY_SCALAR_DIRECTOR_PROMPT_VERSION_V1,
+    LEGACY_SCALAR_DIRECTOR_SYSTEM_PROMPT_V1,
     SCALAR_DIRECTOR_PROMPT_VERSION,
     SCALAR_DIRECTOR_SYSTEM_PROMPT,
     LEGACY_QA_DIRECTOR_PROMPT_VERSION_V4,
@@ -216,6 +218,16 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(
             DIRECTOR_SYSTEM_PROMPT,
             director_system_prompt_for_version("prompt-v1"),
+        )
+        self.assertIs(
+            SCALAR_DIRECTOR_SYSTEM_PROMPT,
+            director_system_prompt_for_version(SCALAR_DIRECTOR_PROMPT_VERSION),
+        )
+        self.assertIs(
+            LEGACY_SCALAR_DIRECTOR_SYSTEM_PROMPT_V1,
+            director_system_prompt_for_version(
+                LEGACY_SCALAR_DIRECTOR_PROMPT_VERSION_V1
+            ),
         )
         self.assertIs(
             HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V22,
@@ -1713,6 +1725,10 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
             director_system_prompt_for_version(SCALAR_DIRECTOR_PROMPT_VERSION),
         )
         self.assertEqual(
+            "agentgraph.director.minimal-neutral-scalar.v2",
+            SCALAR_DIRECTOR_PROMPT_VERSION,
+        )
+        self.assertEqual(
             ("add_agent",),
             director_actions_from_admissible_schema_branch(
                 client.schema_requests[0]["action_schema_branch"]
@@ -1726,6 +1742,130 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("plan", SCALAR_DIRECTOR_SYSTEM_PROMPT.casefold())
         self.assertNotIn("solver", SCALAR_DIRECTOR_SYSTEM_PROMPT.casefold())
         self.assertNotIn("verify", SCALAR_DIRECTOR_SYSTEM_PROMPT.casefold())
+        self.assertIn("responsibility", SCALAR_DIRECTOR_SYSTEM_PROMPT.casefold())
+        self.assertIn("inputs", SCALAR_DIRECTOR_SYSTEM_PROMPT.casefold())
+        self.assertIn("expected artifact", SCALAR_DIRECTOR_SYSTEM_PROMPT.casefold())
+
+    async def test_generic_scalar_v3_exposes_live_domains_and_isolates_rejection(
+        self,
+    ) -> None:
+        model_registry = registry()
+
+        class ScalarV3Env(AgentWorkflowEnv):
+            def model_admissible_action_targets(self):
+                targets = super().model_admissible_action_targets()
+                if "add_agent" in self.model_admissible_action_types():
+                    targets["add_agent"] = {
+                        "existing_agent_ids": [node.id for node in self.graph.nodes],
+                        "model_ids": list(self.model_registry.model_ids),
+                        "contract_min_length": 12,
+                        "contract_requirements": [
+                            "plain_language_responsibility",
+                            "inputs_consumed",
+                            "expected_artifact",
+                        ],
+                    }
+                return targets
+
+        env = ScalarV3Env(
+            model_registry,
+            gateway=FakeGateway(),
+            allowed_actions=(
+                "add_agent",
+                "modify_agent",
+                "delete_agent",
+                "set_relation",
+                "set_output",
+                "finish",
+            ),
+        )
+        orchestrator = AgentGraphOrchestrator(
+            model_registry,
+            ScriptedDirector([]),
+            prompt_version=SCALAR_DIRECTOR_PROMPT_VERSION,
+            sampling_action_profile=DIRECTOR_MODEL_ADMISSIBLE_ACTION_MASK_PROFILE,
+            sampling_action_schema_version=(
+                DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3
+            ),
+        )
+
+        initial_prompt = orchestrator.build_prompt(env, 0, ())
+        initial_state = observation_payload(
+            transcript_messages(initial_prompt)[-1]
+        )
+        self.assertEqual(
+            env.model_admissible_action_targets(),
+            initial_state["action_target_domains"],
+        )
+
+        sampled_action = (
+            '{"action":"add_agent","agent_id":"bad","model_id":"qwen",'
+            '"contract":"DO_NOT_REPLAY","unsupported":true}'
+        )
+        rejected = await env.step(sampled_action)
+        self.assertFalse(rejected.accepted)
+        continued = orchestrator.continue_prompt(
+            initial_prompt,
+            sampled_action,
+            env,
+            (),
+        )
+
+        self.assertNotIn("DO_NOT_REPLAY", continued)
+        messages = transcript_messages(continued)
+        self.assertEqual(2, len(messages))
+        continued_state = observation_payload(messages[-1])
+        self.assertIn("action_target_domains", continued_state)
+        self.assertEqual(1, len(continued_state["recent_rejected_actions"]))
+
+    def test_generic_scalar_v3_binds_neutral_id_model_and_contract(self) -> None:
+        domains = {
+            "add_agent": {
+                "existing_agent_ids": ["node_1", "named_agent"],
+                "model_ids": ["qwen", "other"],
+                "contract_min_length": 12,
+                "contract_requirements": [
+                    "plain_language_responsibility",
+                    "inputs_consumed",
+                    "expected_artifact",
+                ],
+            }
+        }
+
+        schema = json.loads(
+            director_live_action_parameter_json_schema_text(
+                "add_agent",
+                domains,
+            )
+        )
+        self.assertEqual({"const": "node_2"}, schema["properties"]["agent_id"])
+        self.assertEqual(
+            {"enum": ["qwen", "other"]},
+            schema["properties"]["model_id"],
+        )
+        self.assertEqual(
+            {"type": "string", "minLength": 12},
+            schema["properties"]["contract"],
+        )
+        self.assertEqual(
+            domains,
+            json.loads(
+                director_live_action_target_domains_json(
+                    ("add_agent",),
+                    domains,
+                )
+            ),
+        )
+        with self.assertRaisesRegex(ValueError, "contract requirements"):
+            director_live_action_parameter_json_schema_text(
+                "add_agent",
+                {
+                    "add_agent": {
+                        **domains["add_agent"],
+                        "contract_requirements": ["plain_language_responsibility"],
+                    }
+                },
+            )
 
     def test_model_admissible_schema_branch_round_trip_is_exact(self) -> None:
         actions = (

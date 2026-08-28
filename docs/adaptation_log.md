@@ -636,3 +636,33 @@ The selected strict full-denominator Professional length-adjusted score is
 trajectories and 22 reportable `max_rounds` terminal failures. No rollout,
 grader call, training, Tool, Skill, policy, model weight, or orchestration-core
 change was made during profile selection.
+
+## 2026-08-28: HealthBench Professional inference-loop v2
+
+- Preserved official-v1 and created the recoverable branch
+  `feature/healthbench-professional-inference-loop-v2-20260828` plus the
+  pre-change backup ref `backup/pre-healthbench-inference-loop-fix-20260828`.
+- Added a new inference-only paired-evaluation config and model catalog; old
+  artifacts and reports are not resumed into the new condition.
+- Connected generic scalar Canvas actions to the existing v3 live target
+  domains so no-op, self-loop, cycle, oversized reciprocal block, and other
+  validator-invalid relations are excluded before parameter generation.
+- Added revision-local memory for rejected relation actions. The exclusion is
+  automatically recomputed after an accepted edit changes the graph revision.
+- Added an opt-in finish-only action mask after the existing complete graph,
+  current Output artifact, terminal protocol, and environment gates all admit
+  explicit `FINISH`; terminal validation itself was not weakened.
+- Added opt-in admission for informative free-text contracts. Opaque labels
+  and exact duplicate declarations are rejected transactionally; no medical
+  role inventory or workflow template was introduced.
+- Added task-local, Tool-free reasoning component reuse for exact semantic
+  input identities and persisted explicit reuse receipts. No model call,
+  token, latency, or artifact version is fabricated on a cache hit.
+- Forwarded SGLang `repetition_penalty=1.05` only behind an explicit local
+  backend capability and persisted the requested decoding value. No training
+  reward, retry generation, or weight update was added.
+- Training, GRPO, backward, optimizer update, LoRA publication, MACE,
+  Bayesian update, Skill evolution, and Tool use remain disabled.
+- Evaluation status at this log entry: implementation and directed tests are
+  complete; formal 525-case metrics must be appended only after the new
+  condition finishes under the pinned evaluator.

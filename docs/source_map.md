@@ -347,3 +347,23 @@ Among the 503 valid AgentGraph grades, the valid-only length-adjusted score is
 the 22 non-submissions are not fabricated as valid grades. Consequently, the
 two-case Stable Zero canary is confirmed, but the formal 525-case manifest's
 all-task Stable Zero criterion is false because 22 workflows did not finish.
+
+### HealthBench inference-loop v2 source classification
+
+The versioned condition
+`config/evaluation_healthbench_professional_inference_loop_v2.yaml` changes
+only inference-time control and decoding. It preserves the same 525 public-test
+tasks, full-conversation adapter, empty Tool condition, local Qwen3.5-9B arm,
+and pinned HealthBench reference evaluator as official-v1.
+
+| v2 boundary | Source and classification |
+| --- | --- |
+| Exact state-conditioned `SET_RELATION` candidates, one accepted Canvas edit followed by execution/feedback, and explicit `FINISH` | **Direct reuse** of the current FlowSteer-derived Canvas validation and progressive execution boundaries. Generic scalar `ADD_AGENT` binding to the existing v3 live domain is a **minimal compatibility adaptation**; it adds no medical role or topology. |
+| Local SGLang `repetition_penalty` request field and receipt | **Thin SkillFlow compatibility adaptation** of the upstream Qwen3.5/SGLang request boundary. The configured `1.05` value is a project inference condition, not a claimed upstream optimum and not a training reward. |
+| Task-scoped component reuse for an identical effective input | **Necessary AgentGraph adaptation** of FlowSteer's legacy per-environment node-cache boundary (`workflow_builder.py` / `vllm_workflow_generator.py`). It is not claimed as an upstream heterogeneous component cache. ReAct, coding, Tool use, failure continuation, empty output, and `finish_reason=length` are excluded. |
+| Plain-language free-text contract admission | **Project-specific Canvas admission guard**. It rejects opaque labels and exact duplicate execution declarations without defining Doctor, Reviewer, or any other role class. |
+| Current-revision rejected-relation exclusion and finish-only action mask after full terminal admission | **Necessary state-conditioned action-mask wiring** over existing Canvas candidates and `finish_admissibility`; graph validation and explicit `FINISH` remain authoritative. |
+
+This condition does not enable GRPO, backward, optimizer update, LoRA, MACE,
+Bayesian inference, Skill retrieval/evolution, medical retrieval, or any new
+model-visible evaluator field.

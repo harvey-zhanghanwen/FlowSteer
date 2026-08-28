@@ -373,6 +373,9 @@ class AgentWorkflowEnv:
         semantic_protocol: str = "none",
         recovery_policy: str = "default",
         required_evidence_tool_id: Optional[str] = None,
+        finish_only_when_admissible: bool = False,
+        require_informative_contracts: bool = False,
+        reuse_unchanged_agent_inputs: bool = False,
     ) -> None:
         if runtime is None and gateway is None:
             raise AgentWorkflowStateError("gateway or runtime is required")
@@ -394,6 +397,13 @@ class AgentWorkflowEnv:
             raise AgentWorkflowStateError("require_exact_answer_tag must be bool")
         if type(require_format_agent) is not bool:
             raise AgentWorkflowStateError("require_format_agent must be bool")
+        for option_name, option_value in (
+            ("finish_only_when_admissible", finish_only_when_admissible),
+            ("require_informative_contracts", require_informative_contracts),
+            ("reuse_unchanged_agent_inputs", reuse_unchanged_agent_inputs),
+        ):
+            if type(option_value) is not bool:
+                raise AgentWorkflowStateError(f"{option_name} must be bool")
         if required_tool_id is not None and (
             not isinstance(required_tool_id, str) or not required_tool_id.strip()
         ):
@@ -480,6 +490,9 @@ class AgentWorkflowEnv:
         self.max_agents_per_subgraph = max_agents_per_subgraph
         self.require_exact_answer_tag = require_exact_answer_tag
         self.require_format_agent = require_format_agent
+        self.finish_only_when_admissible = finish_only_when_admissible
+        self.require_informative_contracts = require_informative_contracts
+        self.reuse_unchanged_agent_inputs = reuse_unchanged_agent_inputs
         self.required_tool_id = (
             None if required_tool_id is None else required_tool_id.strip()
         )
@@ -530,6 +543,12 @@ class AgentWorkflowEnv:
         self._last_valid_evidence_lineage: Optional[
             AgentWorkflowEvidenceLineageSnapshot
         ] = None
+        # FlowSteer's legacy execution boundary caches a node only within one
+        # environment.  The AgentGraph adaptation keeps the same task-local
+        # lifetime and lets AgentRuntime decide whether an exact component
+        # input is eligible for reuse.  It is never serialized or shared
+        # across tasks/trajectories.
+        self._component_execution_cache: dict[str, object] = {}
         self._validate_agent_limit(self._graph)
         partial = self._graph.validate(self.model_registry, require_complete=False)
         if not partial.valid:
@@ -746,8 +765,13 @@ class AgentWorkflowEnv:
 
         finish_admitted = self.finish_admissibility().get("admissible") is True
         if (
-            self._uses_semantic_lineage_protocol()
-            and self.recovery_policy == _PRESERVE_REPAIR_RECOVERY_POLICY
+            (
+                self.finish_only_when_admissible
+                or (
+                    self._uses_semantic_lineage_protocol()
+                    and self.recovery_policy == _PRESERVE_REPAIR_RECOVERY_POLICY
+                )
+            )
             and finish_admitted
             and AgentActionType.FINISH.value in self._allowed_action_type_set
         ):
@@ -1076,6 +1100,41 @@ class AgentWorkflowEnv:
         """Return every non-self, non-no-op relation edit accepted by Canvas."""
 
         node_ids = [node.id for node in self._graph.nodes]
+        node_positions = {
+            agent_id: position for position, agent_id in enumerate(node_ids)
+        }
+        rejected_relation_keys: set[tuple[str, str, bool, bool]] = set()
+        for entry in self._history:
+            action = entry.action
+            if (
+                entry.accepted
+                or entry.revision != self._graph.revision
+                or action is None
+                or action.action_type is not AgentActionType.SET_RELATION
+                or action.source_id not in node_positions
+                or action.target_id not in node_positions
+                or action.source_to_target is None
+                or action.target_to_source is None
+            ):
+                continue
+            if node_positions[action.source_id] < node_positions[action.target_id]:
+                rejected_relation_keys.add(
+                    (
+                        action.source_id,
+                        action.target_id,
+                        action.source_to_target,
+                        action.target_to_source,
+                    )
+                )
+            else:
+                rejected_relation_keys.add(
+                    (
+                        action.target_id,
+                        action.source_id,
+                        action.target_to_source,
+                        action.source_to_target,
+                    )
+                )
         active_lineage = self._active_semantic_lineage_ids()
         declared_edges = tuple(
             edge
@@ -1130,6 +1189,16 @@ class AgentWorkflowEnv:
                         not in self._directed_successors(candidate, source_id)
                         for source_id, target_id in protected_edges
                     ):
+                        continue
+                    if (
+                        source_id,
+                        target_id,
+                        source_to_target,
+                        target_to_source,
+                    ) in rejected_relation_keys:
+                        # A rejected relation remains masked for this exact
+                        # Canvas revision.  Any accepted edit advances the
+                        # revision and recomputes the legal domain from state.
                         continue
                     encoded_source_id = source_id
                     encoded_target_id = target_id
@@ -3195,6 +3264,17 @@ class AgentWorkflowEnv:
             or "evidence_retriever" in replacement_domains
         )
         targets: dict[str, object] = {}
+        if AgentActionType.ADD_AGENT.value in admitted:
+            targets[AgentActionType.ADD_AGENT.value] = {
+                "existing_agent_ids": node_ids,
+                "model_ids": list(self._available_model_ids()),
+                "contract_min_length": 12,
+                "contract_requirements": [
+                    "plain_language_responsibility",
+                    "inputs_consumed",
+                    "expected_artifact",
+                ],
+            }
         if AgentActionType.ADD_SUBGRAPH.value in admitted:
             remaining = (
                 self.max_agents_per_subgraph
@@ -3690,6 +3770,7 @@ class AgentWorkflowEnv:
         # frozen model catalog or leave a stale failure receipt.
         self._unavailable_model_ids.clear()
         self._model_availability_receipts.clear()
+        self._component_execution_cache.clear()
         self._clear_progressive_execution()
         return self.snapshot()
 
@@ -3719,6 +3800,7 @@ class AgentWorkflowEnv:
         self._last_feedback = snapshot.last_feedback
         self._history = list(snapshot.history)
         self._last_valid_evidence_lineage = None
+        self._component_execution_cache.clear()
         # Runtime results are deliberately not serialized in Canvas snapshots.
         # A restored environment must therefore execute its current graph once
         # before it can establish a revision-local progressive result again.
@@ -3741,6 +3823,9 @@ class AgentWorkflowEnv:
             semantic_protocol=self.semantic_protocol,
             recovery_policy=self.recovery_policy,
             required_evidence_tool_id=self.required_evidence_tool_id,
+            finish_only_when_admissible=self.finish_only_when_admissible,
+            require_informative_contracts=self.require_informative_contracts,
+            reuse_unchanged_agent_inputs=self.reuse_unchanged_agent_inputs,
         )
         result._turn_count = state.turn_count
         result._finished = state.finished
@@ -3787,6 +3872,14 @@ class AgentWorkflowEnv:
                 action,
                 "edit rejected: " + preservation_issue,
             )
+        informative_contract_issue = self._informative_contract_admission_issue(
+            action
+        )
+        if informative_contract_issue is not None:
+            return self._reject_after_count(
+                action,
+                "edit rejected: " + informative_contract_issue,
+            )
         if action.action_type is AgentActionType.DELETE_AGENT:
             delete_issue = self._delete_admission_issue(action.agent_id)
             if delete_issue is not None:
@@ -3832,6 +3925,11 @@ class AgentWorkflowEnv:
                         prior_output_metadata=self._progressive_output_metadata,
                         prior_failure_metadata=self._failure_continuations,
                         unavailable_model_ids=self._unavailable_model_ids,
+                        execution_cache=(
+                            self._component_execution_cache
+                            if self.reuse_unchanged_agent_inputs
+                            else None
+                        ),
                         format_output_agent=self._uses_format_agent_protocol(),
                     )
                 except AgentRuntimeError as exc:
@@ -4098,6 +4196,11 @@ class AgentWorkflowEnv:
                         prior_failure_metadata=prior_failure_metadata,
                         unavailable_model_ids=self._unavailable_model_ids,
                         dirty_agents=execution_dirty_agents,
+                        execution_cache=(
+                            self._component_execution_cache
+                            if self.reuse_unchanged_agent_inputs
+                            else None
+                        ),
                         format_output_agent=(
                             False
                             if isolated_execution_scope
@@ -4161,6 +4264,10 @@ class AgentWorkflowEnv:
                         current_agent_ids=current_agent_ids,
                     )
                 else:
+                    execution_reused = bool(
+                        not execution.calls
+                        and execution.execution_reuse_receipts
+                    )
                     execution_outputs = dict(execution.outputs)
                     execution_metadata = {
                         agent_id: dict(metadata)
@@ -5963,6 +6070,140 @@ class AgentWorkflowEnv:
         normalized = normalized.replace("’", "'").strip()
         normalized = re.sub(r"(?<=\d),(?=\d)", "", normalized)
         return normalized.removeprefix("+")
+
+    @staticmethod
+    def _plain_language_contract_issue(contract: str) -> Optional[str]:
+        """Return why one Director-authored free-text contract is opaque.
+
+        The check is deliberately language-neutral: it rejects short labels
+        and identifier-like codes, but it does not require an English verb or
+        any medical role name.  The Director remains free to define the actual
+        responsibility and topology.
+        """
+
+        normalized = " ".join(unicodedata.normalize("NFKC", contract).split())
+        compact = re.sub(r"\s+", "", normalized)
+        lexical_tokens = re.findall(r"[^\W_]+", normalized, flags=re.UNICODE)
+        cjk_characters = re.findall(r"[\u3400-\u9fff]", normalized)
+        if re.fullmatch(r"[A-Za-z0-9_.:/-]+", normalized):
+            return "contract is an opaque identifier or label"
+        if len(compact) < 12:
+            return "contract is too short to state a responsibility and artifact"
+        if len(lexical_tokens) < 3 and len(cjk_characters) < 8:
+            return "contract is not a plain-language responsibility statement"
+        return None
+
+    def _informative_contract_admission_issue(
+        self,
+        action: AgentAction,
+    ) -> Optional[str]:
+        """Validate only newly authored contracts at the Canvas transaction.
+
+        Existing snapshots remain loadable.  Exact duplicate declarations are
+        rejected only when model, execution mode, and Tool boundary are also
+        identical, preserving intentional heterogeneous or Tool-specialized
+        parallel branches.
+        """
+
+        if not self.require_informative_contracts:
+            return None
+
+        declarations: list[
+            tuple[str, str, str, str, tuple[str, ...]]
+        ] = []
+        if action.action_type is AgentActionType.ADD_AGENT:
+            if (
+                action.agent_id is not None
+                and action.model_id is not None
+                and action.contract is not None
+            ):
+                declarations.append(
+                    (
+                        action.agent_id,
+                        action.model_id,
+                        action.contract,
+                        action.execution_mode or "reasoning",
+                        tuple(action.allowed_tools or ()),
+                    )
+                )
+        elif action.action_type is AgentActionType.ADD_SUBGRAPH:
+            declarations.extend(
+                (
+                    spec.agent_id,
+                    spec.model_id,
+                    spec.contract,
+                    spec.execution_mode or "reasoning",
+                    tuple(spec.allowed_tools or ()),
+                )
+                for spec in action.agents
+            )
+        elif (
+            action.action_type is AgentActionType.MODIFY_AGENT
+            and action.agent_id is not None
+            and action.contract is not None
+            and self._graph.has_node(action.agent_id)
+        ):
+            current = self._graph.get_node(action.agent_id)
+            declarations.append(
+                (
+                    action.agent_id,
+                    action.model_id or current.model_id,
+                    action.contract,
+                    action.execution_mode or current.execution_mode.value,
+                    tuple(
+                        current.allowed_tools
+                        if action.allowed_tools is None
+                        else action.allowed_tools
+                    ),
+                )
+            )
+        else:
+            return None
+
+        existing_signatures = {
+            (
+                " ".join(
+                    unicodedata.normalize("NFKC", node.contract).split()
+                ).casefold(),
+                node.model_id,
+                node.execution_mode.value,
+                tuple(node.allowed_tools),
+            ): node.id
+            for node in self._graph.nodes
+            if all(node.id != declaration[0] for declaration in declarations)
+        }
+        proposed_signatures: dict[tuple[object, ...], str] = {}
+        for agent_id, model_id, contract, execution_mode, allowed_tools in declarations:
+            issue = self._plain_language_contract_issue(contract)
+            if issue is not None:
+                return (
+                    f"Agent {agent_id!r} {issue}; use concise plain language "
+                    "to state its task-specific responsibility, consumed "
+                    "inputs, and expected output artifact"
+                )
+            signature: tuple[object, ...] = (
+                " ".join(
+                    unicodedata.normalize("NFKC", contract).split()
+                ).casefold(),
+                model_id,
+                (
+                    execution_mode.value
+                    if hasattr(execution_mode, "value")
+                    else str(execution_mode)
+                ),
+                allowed_tools,
+            )
+            duplicate_id = existing_signatures.get(signature)
+            if duplicate_id is None:
+                duplicate_id = proposed_signatures.get(signature)
+            if duplicate_id is not None:
+                return (
+                    f"Agent {agent_id!r} duplicates Agent {duplicate_id!r} "
+                    "with the same contract, model, execution mode, and Tool "
+                    "boundary; give each Agent a distinct responsibility"
+                )
+            proposed_signatures[signature] = agent_id
+        return None
 
     def _contract_obligation_issue(
         self,
@@ -10010,6 +10251,11 @@ class AgentWorkflowEnv:
             run_id=run_id,
             prior_failure_metadata=self._failure_continuations,
             unavailable_model_ids=self._unavailable_model_ids,
+            execution_cache=(
+                self._component_execution_cache
+                if self.reuse_unchanged_agent_inputs
+                else None
+            ),
             format_output_agent=self._uses_format_agent_protocol(),
         )
 

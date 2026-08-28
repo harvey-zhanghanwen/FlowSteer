@@ -3337,6 +3337,15 @@ class LiveSmokeBackend:
                 semantic_protocol=semantic_protocol,
                 recovery_policy=recovery_policy,
                 required_evidence_tool_id=required_evidence_tool_id,
+                finish_only_when_admissible=bool(
+                    graph_config.get("finish_only_when_admissible", False)
+                ),
+                require_informative_contracts=bool(
+                    graph_config.get("require_informative_contracts", False)
+                ),
+                reuse_unchanged_agent_inputs=bool(
+                    graph_config.get("reuse_unchanged_agent_inputs", False)
+                ),
                 allowed_actions=(
                     tuple(str(value) for value in graph_config["actions"])
                     if graph_config.get("actions") is not None

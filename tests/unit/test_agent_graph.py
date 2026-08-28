@@ -1877,6 +1877,163 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("action made no graph change", repeated.feedback)
         self.assertEqual(2, len(gateway.requests))
 
+    async def test_informative_contract_gate_rejects_labels_and_duplicates(
+        self,
+    ) -> None:
+        registry = make_registry()
+        env = AgentWorkflowEnv(
+            registry,
+            _ImmediateGateway(),
+            problem="patient conversation",
+            require_informative_contracts=True,
+        )
+
+        opaque = await env.step(
+            '{"action":"add_agent","agent_id":"a","model_id":"balanced",'
+            '"contract":"roavc-2k"}'
+        )
+        self.assertFalse(opaque.accepted)
+        self.assertEqual(0, env.revision)
+        self.assertIn("opaque identifier", opaque.feedback)
+
+        meaningful = (
+            "Read the supplied conversation and produce a complete grounded "
+            "assistant response."
+        )
+        accepted = await env.step(
+            json.dumps(
+                {
+                    "action": "add_agent",
+                    "agent_id": "a",
+                    "model_id": "balanced",
+                    "contract": meaningful,
+                }
+            )
+        )
+        self.assertTrue(accepted.accepted, accepted.feedback)
+        revision = env.revision
+        duplicate = await env.step(
+            json.dumps(
+                {
+                    "action": "add_agent",
+                    "agent_id": "b",
+                    "model_id": "balanced",
+                    "contract": meaningful,
+                }
+            )
+        )
+        self.assertFalse(duplicate.accepted)
+        self.assertEqual(revision, env.revision)
+        self.assertIn("distinct responsibility", duplicate.feedback)
+
+        multilingual = await env.step(
+            json.dumps(
+                {
+                    "action": "add_agent",
+                    "agent_id": "c",
+                    "model_id": "fast",
+                    "contract": "读取上游对话并输出完整且有依据的助理回复。",
+                },
+                ensure_ascii=False,
+            )
+        )
+        self.assertTrue(multilingual.accepted, multilingual.feedback)
+
+    async def test_scalar_add_agent_domain_exposes_live_models_and_contract_boundary(
+        self,
+    ) -> None:
+        env = AgentWorkflowEnv(
+            make_registry(),
+            _ImmediateGateway(),
+            problem="question",
+            require_informative_contracts=True,
+            allowed_actions=(
+                "add_agent",
+                "modify_agent",
+                "delete_agent",
+                "set_relation",
+                "set_output",
+                "finish",
+            ),
+        )
+
+        domain = env.model_admissible_action_targets()["add_agent"]
+
+        self.assertEqual([], domain["existing_agent_ids"])
+        self.assertEqual(12, domain["contract_min_length"])
+        self.assertIn("balanced", domain["model_ids"])
+        self.assertEqual(
+            [
+                "plain_language_responsibility",
+                "inputs_consumed",
+                "expected_artifact",
+            ],
+            domain["contract_requirements"],
+        )
+
+    async def test_finish_only_mask_submits_an_admissible_progressive_output(
+        self,
+    ) -> None:
+        env = AgentWorkflowEnv(
+            make_registry(),
+            _ImmediateGateway(),
+            problem="question",
+            execute_on_edit=True,
+            finish_only_when_admissible=True,
+        )
+        await env.step(
+            '{"action":"add_agent","agent_id":"a","model_id":"balanced",'
+            '"contract":"produce the complete assistant response"}'
+        )
+        selected = await env.step('{"action":"set_output","agent_id":"a"}')
+        self.assertTrue(selected.accepted, selected.feedback)
+        self.assertTrue(env.finish_admissibility()["admissible"])
+
+        self.assertEqual(("finish",), env.model_admissible_action_types())
+
+    async def test_rejected_relation_is_masked_only_for_current_revision(self) -> None:
+        env = AgentWorkflowEnv(
+            make_registry(),
+            _ImmediateGateway(),
+            problem="question",
+        )
+        for agent_id in ("a", "b"):
+            result = await env.step(
+                json.dumps(
+                    {
+                        "action": "add_agent",
+                        "agent_id": agent_id,
+                        "model_id": "balanced",
+                        "contract": f"Produce a distinct response artifact for branch {agent_id}.",
+                    }
+                )
+            )
+            self.assertTrue(result.accepted, result.feedback)
+        candidate = {
+            "source_id": "a",
+            "target_id": "b",
+            "source_to_target": True,
+            "target_to_source": False,
+        }
+        self.assertIn(candidate, env._all_model_admissible_relation_candidates())
+        rejected_action = env.parser.parse(
+            json.dumps({"action": "set_relation", **candidate})
+        )
+        env._record_history(
+            accepted=False,
+            done=False,
+            action=rejected_action,
+            feedback="relation rejected by the current execution boundary",
+        )
+        self.assertNotIn(candidate, env._all_model_admissible_relation_candidates())
+
+        modified = await env.step(
+            '{"action":"modify_agent","agent_id":"b",'
+            '"contract":"Produce a revised and distinct response artifact for branch b."}'
+        )
+        self.assertTrue(modified.accepted, modified.feedback)
+        self.assertIn(candidate, env._all_model_admissible_relation_candidates())
+
     async def test_each_edit_executes_only_dirty_topological_blocks(self) -> None:
         registry = make_registry()
         gateway = _ImmediateGateway()
@@ -1905,6 +2062,50 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(("b",), related.execution.executed_agent_ids)
         self.assertEqual(("a",), related.execution.reused_agent_ids)
         self.assertEqual(["a", "b", "b"], [item.agent.id for item in gateway.requests])
+
+    async def test_task_scoped_cache_reuses_restored_component_input(self) -> None:
+        registry = make_registry()
+        gateway = _ImmediateGateway()
+        env = AgentWorkflowEnv(
+            registry,
+            gateway,
+            problem="question",
+            execute_on_edit=True,
+            reuse_unchanged_agent_inputs=True,
+        )
+        await env.step(
+            '{"action":"add_agent","agent_id":"a","model_id":"balanced",'
+            '"contract":"produce source artifact"}'
+        )
+        await env.step(
+            '{"action":"add_agent","agent_id":"b","model_id":"fast",'
+            '"contract":"produce downstream artifact"}'
+        )
+        related = await env.step(
+            '{"action":"set_relation","source_id":"a","target_id":"b",'
+            '"source_to_target":true,"target_to_source":false}'
+        )
+        self.assertEqual(("b",), related.execution.executed_agent_ids)
+        request_count = len(gateway.requests)
+
+        restored_independent = await env.step(
+            '{"action":"set_relation","source_id":"a","target_id":"b",'
+            '"source_to_target":false,"target_to_source":false}'
+        )
+        self.assertTrue(restored_independent.execution_reused)
+        self.assertEqual((), restored_independent.execution.executed_agent_ids)
+        self.assertIn("b", restored_independent.execution.reused_agent_ids)
+        self.assertEqual(request_count, len(gateway.requests))
+        self.assertTrue(
+            restored_independent.execution.execution_reuse_receipts
+        )
+
+        restored_related = await env.step(
+            '{"action":"set_relation","source_id":"a","target_id":"b",'
+            '"source_to_target":true,"target_to_source":false}'
+        )
+        self.assertTrue(restored_related.execution_reused)
+        self.assertEqual(request_count, len(gateway.requests))
 
     async def test_reciprocal_edit_executes_one_bounded_two_agent_block(self) -> None:
         registry = make_registry()

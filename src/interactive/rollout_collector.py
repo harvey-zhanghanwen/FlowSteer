@@ -3144,6 +3144,9 @@ def _runtime_summary(runtime: Optional[AgentRuntimeResult]) -> Mapping[str, Any]
         ],
         "executed_agent_ids": list(runtime.executed_agent_ids),
         "reused_agent_ids": list(runtime.reused_agent_ids),
+        "execution_reuse_receipts": [
+            dict(receipt) for receipt in runtime.execution_reuse_receipts
+        ],
         "deferred_agent_ids": list(runtime.deferred_agent_ids),
         "output_metadata": output_metadata,
     }

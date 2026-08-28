@@ -158,6 +158,16 @@ def validate_agent_graph_config(value: Mapping[str, Any]) -> None:
         raise ConfigurationError(
             "agent_graph.require_format_agent must be boolean when configured"
         )
+    for option_name in (
+        "finish_only_when_admissible",
+        "require_informative_contracts",
+        "reuse_unchanged_agent_inputs",
+    ):
+        option_value = graph.get(option_name)
+        if option_value is not None and type(option_value) is not bool:
+            raise ConfigurationError(
+                f"agent_graph.{option_name} must be boolean when configured"
+            )
     max_agents = graph.get("max_agents")
     if isinstance(max_agents, bool) or not isinstance(max_agents, int) or max_agents < 1:
         raise ConfigurationError("agent_graph.max_agents must be a positive integer")

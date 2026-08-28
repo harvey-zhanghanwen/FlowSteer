@@ -54,14 +54,26 @@ Use only action types listed in admissible_action_types, model_id values from mo
 
 A directed relation routes the source artifact to the target. A bidirectional relation performs one bounded two-Agent exchange. Each accepted edit is executed once, and its Canvas validation and execution feedback appear in the next observation. Inspect that state before choosing the next action. Use finish only when finish_admissibility is present and admissible. Do not assume a fixed workflow topology or an unlisted Skill."""
 
-SCALAR_DIRECTOR_SYSTEM_PROMPT = """You are the Flow-Director. Incrementally edit the executable AgentGraph from the latest Canvas observation. Return exactly one valid JSON action each turn and no other text.
+LEGACY_SCALAR_DIRECTOR_SYSTEM_PROMPT_V1 = """You are the Flow-Director. Incrementally edit the executable AgentGraph from the latest Canvas observation. Return exactly one valid JSON action each turn and no other text.
 
 Use only action types listed in admissible_action_types, model_id values from model_catalog, and exact tool_id values from tool_catalog. add_agent adds one Agent with a free-text contract. A directed relation routes the source artifact to the target. A bidirectional relation performs one bounded two-Agent exchange.
 
 Each accepted edit is executed once, and its Canvas validation and execution feedback appear in the next observation. Inspect that state before choosing the next action. Use finish only when finish_admissibility is present and admissible. Do not assume a fixed workflow topology or an unlisted Skill."""
 
+# The scalar Canvas keeps FlowSteer's one-edit/one-execution boundary.  V2 adds
+# only the generic contract interface needed by SkillFlow-style free-form
+# Agents; it supplies no benchmark role inventory or topology template.
+SCALAR_DIRECTOR_SYSTEM_PROMPT = """You are the Flow-Director. Incrementally edit the executable AgentGraph from the latest Canvas observation. Return exactly one valid JSON action each turn and no other text.
+
+Use only action types, targets and parameters in the current admissible_action_types and action_target_domains, model_id values from model_catalog, and exact tool_id values from tool_catalog. add_agent adds one Agent. Write its free-text contract in plain language and state the Agent's responsibility, the inputs it should use, and the expected artifact it should produce. A directed relation routes the source artifact to the target. A bidirectional relation performs one bounded two-Agent exchange.
+
+Each accepted edit is executed once, and its Canvas validation and execution feedback appear in the next observation. Inspect that state before choosing the next action. Use finish only when finish_admissibility is present and admissible. Do not assume a fixed Agent role, Agent count, workflow topology, or unlisted Skill."""
+
 DIRECTOR_PROMPT_VERSION = "agentgraph.director.minimal-neutral.v10"
-SCALAR_DIRECTOR_PROMPT_VERSION = "agentgraph.director.minimal-neutral-scalar.v1"
+SCALAR_DIRECTOR_PROMPT_VERSION = "agentgraph.director.minimal-neutral-scalar.v2"
+LEGACY_SCALAR_DIRECTOR_PROMPT_VERSION_V1 = (
+    "agentgraph.director.minimal-neutral-scalar.v1"
+)
 LEGACY_DIRECTOR_PROMPT_VERSION_V9 = "agentgraph.director.minimal-neutral.v9"
 LEGACY_DIRECTOR_PROMPT_VERSION_V8 = "agentgraph.director.minimal-neutral.v8"
 HOTPOTQA_DIRECTOR_PROMPT_VERSION = (
@@ -493,6 +505,9 @@ def director_system_prompt_for_version(prompt_version: str) -> str:
     by_version = {
         DIRECTOR_PROMPT_VERSION: DIRECTOR_SYSTEM_PROMPT,
         SCALAR_DIRECTOR_PROMPT_VERSION: SCALAR_DIRECTOR_SYSTEM_PROMPT,
+        LEGACY_SCALAR_DIRECTOR_PROMPT_VERSION_V1: (
+            LEGACY_SCALAR_DIRECTOR_SYSTEM_PROMPT_V1
+        ),
         LEGACY_DIRECTOR_PROMPT_VERSION_V9: LEGACY_DIRECTOR_SYSTEM_PROMPT_V9,
         LEGACY_DIRECTOR_PROMPT_VERSION_V8: LEGACY_DIRECTOR_SYSTEM_PROMPT_V8,
         # These are the two historical v8 experiment labels still present in
@@ -557,6 +572,7 @@ _SUPPORTED_DIRECTOR_SYSTEM_PROMPTS = frozenset(
     {
         DIRECTOR_SYSTEM_PROMPT,
         SCALAR_DIRECTOR_SYSTEM_PROMPT,
+        LEGACY_SCALAR_DIRECTOR_SYSTEM_PROMPT_V1,
         HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V11,
         HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V13,
         HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V14,
@@ -1232,6 +1248,47 @@ def _live_new_agent_ids(
         used.add(candidate)
         result.append(candidate)
     return tuple(result)
+
+
+_SCALAR_CONTRACT_REQUIREMENTS = (
+    "plain_language_responsibility",
+    "inputs_consumed",
+    "expected_artifact",
+)
+
+
+def _live_scalar_add_agent_domain(
+    domain: Mapping[str, Any],
+) -> tuple[tuple[str, ...], tuple[str, ...], int]:
+    """Validate the generic scalar ADD domain without inventing a role."""
+
+    raw_existing_ids = domain.get("existing_agent_ids")
+    if (
+        not isinstance(raw_existing_ids, (list, tuple))
+        or any(
+            not isinstance(agent_id, str) or not agent_id
+            for agent_id in raw_existing_ids
+        )
+        or len(raw_existing_ids) != len(set(raw_existing_ids))
+    ):
+        raise ValueError("add_agent existing Agent ID domain is invalid")
+    model_ids = _live_string_domain(
+        domain.get("model_ids"),
+        label="add_agent.model_ids",
+    )
+    contract_min_length = domain.get("contract_min_length")
+    if type(contract_min_length) is not int or contract_min_length < 1:
+        raise ValueError("add_agent contract minimum length is invalid")
+    contract_requirements = _live_string_domain(
+        domain.get("contract_requirements"),
+        label="add_agent.contract_requirements",
+    )
+    if (
+        len(contract_requirements) != len(_SCALAR_CONTRACT_REQUIREMENTS)
+        or set(contract_requirements) != set(_SCALAR_CONTRACT_REQUIREMENTS)
+    ):
+        raise ValueError("add_agent contract requirements are invalid")
+    return tuple(raw_existing_ids), model_ids, contract_min_length
 
 
 def _live_existing_agent_roles(
@@ -2246,7 +2303,22 @@ def director_live_action_parameter_json_schema_text(
     if not isinstance(domain, Mapping):
         raise ValueError(f"missing live target domain for {action}")
 
-    if action == "add_subgraph":
+    if action == "add_agent":
+        existing_agent_ids, model_ids, contract_min_length = (
+            _live_scalar_add_agent_domain(domain)
+        )
+        schema = json.loads(
+            director_state_conditioned_sampling_json_schema_text("add_agent")
+        )
+        schema["properties"]["agent_id"] = {
+            "const": _live_new_agent_ids(existing_agent_ids, 1)[0]
+        }
+        schema["properties"]["model_id"] = {"enum": list(model_ids)}
+        schema["properties"]["contract"] = {
+            "type": "string",
+            "minLength": contract_min_length,
+        }
+    elif action == "add_subgraph":
         if add_agents is None:
             raise ValueError(
                 "add_subgraph v3 parameter phase requires sampled Agent declarations"
@@ -2998,6 +3070,24 @@ class AgentGraphOrchestrator:
         ):
             raise ValueError("unsupported model-admissible action schema version")
 
+    def _uses_live_v3_action_domains(self) -> bool:
+        """Return whether this condition samples from exact live v3 domains."""
+
+        return bool(
+            self.sampling_action_profile
+            == DIRECTOR_MODEL_ADMISSIBLE_ACTION_MASK_PROFILE
+            and self.sampling_action_schema_version
+            == DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3
+        )
+
+    def _exposes_live_action_domains(self) -> bool:
+        """Preserve verified-QA behavior and expose generic v3 domains."""
+
+        return bool(
+            verified_qa_semantic_protocol(self.semantic_protocol)
+            or self._uses_live_v3_action_domains()
+        )
+
     def action_schema_request(
         self,
         env: AgentWorkflowEnv,
@@ -3219,7 +3309,7 @@ class AgentGraphOrchestrator:
                 "required_tool_id": env.required_tool_id,
             },
         }
-        if verified_qa_semantic_protocol(self.semantic_protocol):
+        if self._exposes_live_action_domains():
             payload["action_target_domains"] = (
                 env.model_admissible_action_targets()
             )
@@ -3499,7 +3589,7 @@ class AgentGraphOrchestrator:
             skills=skills,
         )
         if (
-            verified_qa_semantic_protocol(self.semantic_protocol)
+            self._exposes_live_action_domains()
             and env.history
             and env.history[-1].accepted is False
         ):
@@ -3635,6 +3725,10 @@ __all__ = [
     "DIRECTOR_STATE_CONDITIONED_ACTION_SCHEMA_VERSION",
     "DIRECTOR_SYSTEM_PROMPT",
     "DIRECTOR_PROMPT_VERSION",
+    "SCALAR_DIRECTOR_SYSTEM_PROMPT",
+    "SCALAR_DIRECTOR_PROMPT_VERSION",
+    "LEGACY_SCALAR_DIRECTOR_SYSTEM_PROMPT_V1",
+    "LEGACY_SCALAR_DIRECTOR_PROMPT_VERSION_V1",
     "HOTPOTQA_DIRECTOR_PROMPT_VERSION",
     "HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V14",
     "HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V15",

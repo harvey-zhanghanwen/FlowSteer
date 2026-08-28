@@ -5,8 +5,9 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from enum import Enum
+import json
 from types import MappingProxyType
-from typing import Awaitable, Collection, Dict, List, Mapping, Optional, Protocol, Set, Tuple, Union
+from typing import Awaitable, Collection, Dict, List, Mapping, MutableMapping, Optional, Protocol, Set, Tuple, Union
 import uuid
 
 from .agent_graph import (
@@ -305,6 +306,10 @@ class AgentRuntimeResult:
         default_factory=dict,
         compare=False,
     )
+    execution_reuse_receipts: Tuple[Mapping[str, object], ...] = field(
+        default_factory=tuple,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "outputs", MappingProxyType(dict(self.outputs)))
@@ -323,6 +328,91 @@ class AgentRuntimeResult:
                 }
             ),
         )
+        object.__setattr__(
+            self,
+            "execution_reuse_receipts",
+            tuple(
+                MappingProxyType(dict(receipt))
+                for receipt in self.execution_reuse_receipts
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ComponentExecutionCacheEntry:
+    """One complete, task-local quotient-component execution artifact.
+
+    The cache key is the canonical semantic input identity constructed by
+    :class:`AgentRuntime`.  Transport identifiers are deliberately absent from
+    that identity, while the original artifact versions and provenance remain
+    attached to the cached outputs.  A caller must scope the mutable cache to
+    one task/trajectory and clear it on reset.
+    """
+
+    source_graph_revision: int
+    outputs: Mapping[str, str]
+    output_metadata: Mapping[str, Mapping[str, object]]
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.source_graph_revision, bool)
+            or not isinstance(self.source_graph_revision, int)
+            or self.source_graph_revision < 0
+        ):
+            raise ValueError("source_graph_revision must be non-negative")
+        frozen_outputs: Dict[str, str] = {}
+        for agent_id, artifact in self.outputs.items():
+            if not isinstance(agent_id, str) or not isinstance(artifact, str):
+                raise TypeError("cached component outputs must map strings to strings")
+            if not artifact.strip():
+                raise ValueError("cached component outputs must be non-empty")
+            frozen_outputs[agent_id] = artifact
+        frozen_metadata: Dict[str, Mapping[str, object]] = {}
+        for agent_id, metadata in self.output_metadata.items():
+            if not isinstance(agent_id, str) or not isinstance(metadata, Mapping):
+                raise TypeError(
+                    "cached component output metadata must map strings to mappings"
+                )
+            frozen_metadata[agent_id] = MappingProxyType(dict(metadata))
+        if set(frozen_outputs) != set(frozen_metadata):
+            raise ValueError(
+                "cached component outputs and output metadata must have identical agents"
+            )
+        object.__setattr__(self, "outputs", MappingProxyType(frozen_outputs))
+        object.__setattr__(
+            self,
+            "output_metadata",
+            MappingProxyType(frozen_metadata),
+        )
+
+
+ComponentExecutionCache = MutableMapping[str, ComponentExecutionCacheEntry]
+
+_COMPONENT_EXECUTION_INPUT_IDENTITY_VERSION = "agentgraph.component-input.v1"
+_TOOL_RECEIPT_TRANSPORT_FIELDS = frozenset(
+    {
+        "ended_at_monotonic",
+        "latency_ms",
+        "provider_request_id",
+        "started_at_monotonic",
+    }
+)
+
+
+def _semantic_tool_receipt_value(value: object) -> object:
+    """Remove measurement-only fields from one public Tool receipt value."""
+
+    if isinstance(value, Mapping):
+        return {
+            str(key): _semantic_tool_receipt_value(item)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+            if str(key) not in _TOOL_RECEIPT_TRANSPORT_FIELDS
+        }
+    if isinstance(value, (list, tuple)):
+        return [_semantic_tool_receipt_value(item) for item in value]
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    raise TypeError("Tool receipt identity values must be JSON-compatible")
 
 
 @dataclass(frozen=True, slots=True)
@@ -544,6 +634,201 @@ class AgentRuntime:
                 profiles.append((mode_value, (tool_id,)))
         return tuple(profiles)
 
+    @staticmethod
+    def _component_cache_eligible(
+        component: Tuple[str, ...],
+        nodes: Mapping[str, AgentNode],
+        failure_metadata: Mapping[str, Mapping[str, object]],
+    ) -> bool:
+        """Admit only complete Tool-free reasoning execution units.
+
+        ReAct and coding adapters may own state outside the model request, so
+        equal rendered inputs do not prove that replay is side-effect free.
+        Failure continuation likewise represents a new bounded execution state
+        and must never be bypassed by a successful historical artifact.
+        """
+
+        return bool(component) and all(
+            nodes[agent_id].execution_mode.value == "reasoning"
+            and not nodes[agent_id].allowed_tools
+            and not failure_metadata.get(agent_id)
+            for agent_id in component
+        )
+
+    def _component_execution_input_identity(
+        self,
+        component: Tuple[str, ...],
+        nodes: Mapping[str, AgentNode],
+        plan: _ExecutionPlan,
+        outputs: Mapping[str, str],
+        output_metadata: Mapping[str, Mapping[str, object]],
+        problem: str,
+        *,
+        output_agent_id: Optional[str],
+        format_output_agent: bool,
+        communication_condition: CommunicationCondition,
+    ) -> Optional[str]:
+        """Return a canonical semantic identity for one executable component.
+
+        The identity mirrors FlowSteer's node-cache ``operator + inputs``
+        boundary for the heterogeneous AgentGraph scheduler.  It contains every
+        field that changes the model-visible task, contract, model, execution
+        semantics, or routed public artifact.  Run IDs, graph revisions, and
+        artifact-version IDs remain provenance coordinates and intentionally do
+        not force a semantically identical model call to run again.
+        """
+
+        format_predecessor_ids = {
+            source_id
+            for relation in plan.relations
+            for source_id, target_id in relation.directed_edges()
+            if format_output_agent
+            and output_agent_id is not None
+            and target_id == output_agent_id
+        }
+        component_ids = set(component)
+        agents = []
+        external_inputs = []
+        try:
+            for agent_id in component:
+                node = nodes[agent_id]
+                model = self.model_registry.require_model(node.model_id)
+                provider = self.model_registry.provider_for(node.model_id)
+                agents.append(
+                    {
+                        "agent": node.to_dict(),
+                        "model": model.to_dict(),
+                        "provider": provider.to_dict(),
+                        "is_output_agent": agent_id == output_agent_id,
+                        "is_format_agent": (
+                            format_output_agent and agent_id == output_agent_id
+                        ),
+                        "is_format_predecessor": (
+                            agent_id in format_predecessor_ids
+                        ),
+                    }
+                )
+                for message in self._upstream(
+                    agent_id,
+                    plan,
+                    outputs,
+                    nodes=nodes,
+                    graph_revision=0,
+                    output_metadata=output_metadata,
+                ):
+                    external_inputs.append(
+                        {
+                            "source_agent_id": message.source_agent_id,
+                            "target_agent_id": message.target_agent_id,
+                            "message_type": message.message_type,
+                            "artifact_type": message.artifact_type,
+                            "request_or_dependency": (
+                                message.request_or_dependency
+                            ),
+                            "environment_revision": message.environment_revision,
+                            "content": message.content,
+                            "tool_receipts": [
+                                _semantic_tool_receipt_value(receipt)
+                                for receipt in message.tool_receipts
+                            ],
+                        }
+                    )
+            identity = {
+                "identity_version": (
+                    _COMPONENT_EXECUTION_INPUT_IDENTITY_VERSION
+                ),
+                "problem": problem,
+                "semantic_protocol": self.semantic_protocol,
+                "communication_condition": communication_condition.value,
+                "component_agent_ids": list(component),
+                "agents": agents,
+                "internal_relations": sorted(
+                    (
+                        relation.to_dict()
+                        for relation in plan.relations
+                        if relation.source_id in component_ids
+                        and relation.target_id in component_ids
+                    ),
+                    key=lambda relation: (
+                        str(relation["source_id"]),
+                        str(relation["target_id"]),
+                    ),
+                ),
+                "external_inputs": sorted(
+                    external_inputs,
+                    key=lambda message: (
+                        str(message["target_agent_id"]),
+                        str(message["source_agent_id"]),
+                    ),
+                ),
+            }
+            return json.dumps(
+                identity,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+        except (KeyError, TypeError, ValueError):
+            # An opaque/non-JSON receipt cannot establish input equality.  The
+            # ordinary execution path remains authoritative in that case.
+            return None
+
+    @staticmethod
+    def _component_result_cacheable(
+        component: Tuple[str, ...],
+        block_outputs: Mapping[str, str],
+        calls: Collection[AgentCallRecord],
+        *,
+        run_id: str,
+        graph_revision: int,
+    ) -> bool:
+        """Return whether one completed component is safe to materialize."""
+
+        if set(block_outputs) != set(component) or any(
+            not isinstance(artifact, str) or not artifact.strip()
+            for artifact in block_outputs.values()
+        ):
+            return False
+        component_calls = tuple(
+            call
+            for call in calls
+            if call.request.run_id == run_id
+            and call.request.graph_revision == graph_revision
+            and call.request.agent.id in component
+        )
+        if not component_calls:
+            return False
+        return all(
+            call.response.text.strip()
+            and str(call.response.metadata.get("finish_reason", "")).casefold()
+            != "length"
+            for call in component_calls
+        )
+
+    @staticmethod
+    def _component_reuse_receipt(
+        component: Tuple[str, ...],
+        entry: ComponentExecutionCacheEntry,
+        *,
+        current_graph_revision: int,
+    ) -> Mapping[str, object]:
+        return MappingProxyType(
+            {
+                "execution_reused": True,
+                "input_identity_version": (
+                    _COMPONENT_EXECUTION_INPUT_IDENTITY_VERSION
+                ),
+                "component_agent_ids": list(component),
+                "source_graph_revision": entry.source_graph_revision,
+                "current_graph_revision": current_graph_revision,
+                "source_artifact_versions": {
+                    agent_id: metadata.get("artifact_version")
+                    for agent_id, metadata in entry.output_metadata.items()
+                },
+            }
+        )
+
     async def execute(
         self,
         graph: AgentGraph,
@@ -560,6 +845,7 @@ class AgentRuntime:
         ] = None,
         dirty_agents: Optional[Collection[str]] = None,
         unavailable_model_ids: Optional[Collection[str]] = None,
+        execution_cache: Optional[ComponentExecutionCache] = None,
         format_output_agent: bool = False,
         communication_condition: Union[
             CommunicationCondition, str
@@ -689,6 +975,7 @@ class AgentRuntime:
         )
         calls: List[AgentCallRecord] = []
         cancelled_failure_records: List[AgentFailureRecord] = []
+        execution_reuse_receipts: List[Mapping[str, object]] = []
         completion_order: List[Tuple[str, ...]] = []
         executed_agents: Set[str] = set()
         reused_agents: Set[str] = set()
@@ -710,25 +997,86 @@ class AgentRuntime:
                 agent_id in outputs for agent_id in component
             ):
                 return ({agent_id: outputs[agent_id] for agent_id in component}, True)
-            return (
-                await self._execute_block(
+            cache_key: Optional[str] = None
+            cache_eligible = (
+                execution_cache is not None
+                and self._component_cache_eligible(
+                    component,
+                    nodes,
+                    failure_metadata,
+                )
+            )
+            if cache_eligible:
+                cache_key = self._component_execution_input_identity(
                     component,
                     nodes,
                     plan,
                     outputs,
-                    problem.strip(),
-                    resolved_run_id,
-                    snapshot.revision,
-                    calls,
                     output_metadata,
-                    cancelled_failure_records,
-                    failure_metadata,
+                    problem.strip(),
                     output_agent_id=execution_graph.output_agent_id,
                     format_output_agent=format_output_agent,
                     communication_condition=resolved_condition,
-                ),
-                False,
+                )
+                cached = (
+                    None
+                    if cache_key is None or execution_cache is None
+                    else execution_cache.get(cache_key)
+                )
+                if (
+                    isinstance(cached, ComponentExecutionCacheEntry)
+                    and set(cached.outputs) == set(component)
+                ):
+                    for agent_id in component:
+                        output_metadata[agent_id] = MappingProxyType(
+                            dict(cached.output_metadata[agent_id])
+                        )
+                    execution_reuse_receipts.append(
+                        self._component_reuse_receipt(
+                            component,
+                            cached,
+                            current_graph_revision=snapshot.revision,
+                        )
+                    )
+                    return (dict(cached.outputs), True)
+
+            block_outputs = await self._execute_block(
+                component,
+                nodes,
+                plan,
+                outputs,
+                problem.strip(),
+                resolved_run_id,
+                snapshot.revision,
+                calls,
+                output_metadata,
+                cancelled_failure_records,
+                failure_metadata,
+                output_agent_id=execution_graph.output_agent_id,
+                format_output_agent=format_output_agent,
+                communication_condition=resolved_condition,
             )
+            if (
+                cache_eligible
+                and cache_key is not None
+                and execution_cache is not None
+                and self._component_result_cacheable(
+                    component,
+                    block_outputs,
+                    calls,
+                    run_id=resolved_run_id,
+                    graph_revision=snapshot.revision,
+                )
+            ):
+                execution_cache[cache_key] = ComponentExecutionCacheEntry(
+                    source_graph_revision=snapshot.revision,
+                    outputs=block_outputs,
+                    output_metadata={
+                        agent_id: output_metadata[agent_id]
+                        for agent_id in component
+                    },
+                )
+            return (block_outputs, False)
 
         def start_ready() -> None:
             while ready:
@@ -795,6 +1143,9 @@ class AgentRuntime:
                         deferred_agent_ids=deferred_agent_ids,
                         communication_condition=resolved_condition,
                         output_metadata=output_metadata,
+                        execution_reuse_receipts=tuple(
+                            execution_reuse_receipts
+                        ),
                     )
                     pending_agent_ids = tuple(
                         sorted(set(nodes) - set(partial_result.outputs))
@@ -873,6 +1224,7 @@ class AgentRuntime:
             deferred_agent_ids=deferred_agent_ids,
             communication_condition=resolved_condition,
             output_metadata=output_metadata,
+            execution_reuse_receipts=tuple(execution_reuse_receipts),
         )
 
     def _semantic_input_deferred_components(
@@ -2092,6 +2444,8 @@ __all__ = [
     "AgentRuntimeResult",
     "CommunicationCondition",
     "CommunicationEnvelope",
+    "ComponentExecutionCache",
+    "ComponentExecutionCacheEntry",
     "ExecutionPhase",
     "GatewayResponse",
     "ReasoningExecutionAdapter",

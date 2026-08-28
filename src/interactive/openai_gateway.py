@@ -105,6 +105,30 @@ def supports_local_sglang_top_k(request: AgentRequest) -> bool:
     )
 
 
+def supports_local_sglang_repetition_penalty(request: AgentRequest) -> bool:
+    """Return whether this model arm admits SGLang ``repetition_penalty``.
+
+    SkillFlow's Qwen3.5 direct client sends this native SGLang decoding field,
+    but it is not part of the portable OpenAI Chat Completions contract.  Keep
+    the same explicit capability boundary used by ``top_k``: neither an
+    endpoint name nor a supplied value is sufficient without a declared local
+    SGLang deployment and capability.
+    """
+
+    provider_metadata = request.provider.metadata
+    model_metadata = request.model.metadata
+
+    def declared_value(key: str) -> str:
+        value = model_metadata.get(key, provider_metadata.get(key, ""))
+        return value.strip().casefold() if isinstance(value, str) else ""
+
+    return bool(
+        declared_value("sampling_backend") == "sglang"
+        and declared_value("deployment_locality") == "local"
+        and declared_value("supports_repetition_penalty") == "true"
+    )
+
+
 def _requested_sampling(payload: Mapping[str, Any]) -> Dict[str, Any]:
     """Project only the decoding fields placed on the provider request."""
 
@@ -112,6 +136,7 @@ def _requested_sampling(payload: Mapping[str, Any]) -> Dict[str, Any]:
         "temperature": payload.get("temperature"),
         "top_p": payload.get("top_p"),
         "top_k": payload.get("top_k"),
+        "repetition_penalty": payload.get("repetition_penalty"),
         "max_tokens": payload.get("max_tokens"),
         "seed": payload.get("seed"),
     }
@@ -850,6 +875,19 @@ class OpenAICompatibleGateway:
                         "model metadata top_k must be -1 or a positive integer"
                     )
                 payload["top_k"] = top_k
+        if supports_local_sglang_repetition_penalty(request):
+            raw_repetition_penalty = metadata.get("repetition_penalty")
+            if raw_repetition_penalty is not None:
+                repetition_penalty = _number(
+                    metadata,
+                    "repetition_penalty",
+                    1.0,
+                )
+                if not 0 < repetition_penalty <= 2:
+                    raise OpenAICompatibleGatewayError(
+                        "model metadata repetition_penalty must be in (0, 2]"
+                    )
+                payload["repetition_penalty"] = repetition_penalty
         thinking = metadata.get("chat_template_enable_thinking")
         if thinking is not None:
             normalized = thinking.strip().lower()
