@@ -2842,6 +2842,9 @@ class LocalQwen35Paraphraser:
                         source,
                     )
                 except ValueError as parse_error:
+                    schema_error = str(parse_error).startswith(
+                        "paraphrase response fields are incompatible"
+                    )
                     answer_error = str(parse_error).startswith(
                         "paraphrase_answer_statement"
                     )
@@ -2863,83 +2866,25 @@ class LocalQwen35Paraphraser:
                         and "answer-slot family" in str(parse_error)
                     )
                     if (
-                        not answer_error
+                        not schema_error
+                        and not answer_error
                         and not question_lexical_error
                         and not quoted_question_error
                         and not source_transposition_error
                         and not answer_slot_family_error
                     ):
                         raise
-                    raw_candidate = _decode_paraphrase_object(content)
-                    raw_question = raw_candidate.get("paraphrase_question")
-                    raw_statement = raw_candidate.get(
-                        "paraphrase_answer_statement"
-                    )
-                    if not isinstance(raw_question, str) or not isinstance(
-                        raw_statement,
-                        str,
-                    ):
-                        raise
-                    question = " ".join(raw_question.split())
-                    statement = " ".join(raw_statement.split())
-                    if answer_slot_family_error:
+                    if schema_error:
                         question = self._repair_paraphrase_question(
                             source,
                             rejected_question=source.original_question,
-                            seed=seed + 4_500_000 + attempt,
+                            seed=seed + 2_500_000 + attempt,
                         )
-                        question, statement = parse_paraphrase_response(
-                            json.dumps(
-                                {
-                                    "paraphrase_question": question,
-                                    "paraphrase_answer_statement": statement,
-                                },
-                                ensure_ascii=False,
-                            ),
+                        statement = self._repair_answer_statement(
                             source,
-                        )
-                    elif source_transposition_error:
-                        question = _restore_authoritative_source_transpositions(
-                            source.original_question,
-                            question,
-                        )
-                        statement = _restore_authoritative_source_transpositions(
-                            source.original_question,
-                            statement,
-                        )
-                        question, statement = parse_paraphrase_response(
-                            json.dumps(
-                                {
-                                    "paraphrase_question": question,
-                                    "paraphrase_answer_statement": statement,
-                                },
-                                ensure_ascii=False,
-                            ),
-                            source,
-                        )
-                    elif quoted_question_error:
-                        restored_question = _restore_immutable_quoted_slots(
-                            source.original_question,
-                            raw_question,
-                        )
-                        if restored_question is None:
-                            raise
-                        question = restored_question
-                        question, statement = parse_paraphrase_response(
-                            json.dumps(
-                                {
-                                    "paraphrase_question": question,
-                                    "paraphrase_answer_statement": statement,
-                                },
-                                ensure_ascii=False,
-                            ),
-                            source,
-                        )
-                    elif question_lexical_error:
-                        question = self._repair_paraphrase_question(
-                            source,
-                            rejected_question=question,
-                            seed=seed + 4_000_000 + attempt,
+                            question=question,
+                            rejected_statement=source.canonical_answer,
+                            seed=seed + 2_750_000 + attempt,
                         )
                         question, statement = parse_paraphrase_response(
                             json.dumps(
@@ -2952,12 +2897,94 @@ class LocalQwen35Paraphraser:
                             source,
                         )
                     else:
-                        statement = self._repair_answer_statement(
-                            source,
-                            question=question,
-                            rejected_statement=statement,
-                            seed=seed + 3_000_000 + attempt,
+                        raw_candidate = _decode_paraphrase_object(content)
+                        raw_question = raw_candidate.get("paraphrase_question")
+                        raw_statement = raw_candidate.get(
+                            "paraphrase_answer_statement"
                         )
+                        if not isinstance(raw_question, str) or not isinstance(
+                            raw_statement,
+                            str,
+                        ):
+                            raise
+                        question = " ".join(raw_question.split())
+                        statement = " ".join(raw_statement.split())
+                        if answer_slot_family_error:
+                            question = self._repair_paraphrase_question(
+                                source,
+                                rejected_question=source.original_question,
+                                seed=seed + 4_500_000 + attempt,
+                            )
+                            question, statement = parse_paraphrase_response(
+                                json.dumps(
+                                    {
+                                        "paraphrase_question": question,
+                                        "paraphrase_answer_statement": statement,
+                                    },
+                                    ensure_ascii=False,
+                                ),
+                                source,
+                            )
+                        elif source_transposition_error:
+                            question = _restore_authoritative_source_transpositions(
+                                source.original_question,
+                                question,
+                            )
+                            statement = _restore_authoritative_source_transpositions(
+                                source.original_question,
+                                statement,
+                            )
+                            question, statement = parse_paraphrase_response(
+                                json.dumps(
+                                    {
+                                        "paraphrase_question": question,
+                                        "paraphrase_answer_statement": statement,
+                                    },
+                                    ensure_ascii=False,
+                                ),
+                                source,
+                            )
+                        elif quoted_question_error:
+                            restored_question = _restore_immutable_quoted_slots(
+                                source.original_question,
+                                raw_question,
+                            )
+                            if restored_question is None:
+                                raise
+                            question = restored_question
+                            question, statement = parse_paraphrase_response(
+                                json.dumps(
+                                    {
+                                        "paraphrase_question": question,
+                                        "paraphrase_answer_statement": statement,
+                                    },
+                                    ensure_ascii=False,
+                                ),
+                                source,
+                            )
+                        elif question_lexical_error:
+                            question = self._repair_paraphrase_question(
+                                source,
+                                rejected_question=question,
+                                seed=seed + 4_000_000 + attempt,
+                            )
+                            question, statement = parse_paraphrase_response(
+                                json.dumps(
+                                    {
+                                        "paraphrase_question": question,
+                                        "paraphrase_answer_statement": statement,
+                                    },
+                                    ensure_ascii=False,
+                                ),
+                                source,
+                            )
+                        else:
+                            statement = self._repair_answer_statement(
+                                source,
+                                question=question,
+                                rejected_statement=statement,
+                                seed=seed + 3_000_000 + attempt,
+                            )
                 verification = parse_verification_response(
                     self._complete(
                         messages=build_verification_messages(

@@ -644,6 +644,61 @@ def test_structured_output_error_reports_alias_collision() -> None:
     assert "unexpected_fields=[]" in message
 
 
+def test_generate_repairs_schema_failure_with_existing_repair_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _source()
+    client = object.__new__(LocalQwen35Paraphraser)
+    client.max_retries = 0
+    calls: list[str] = []
+    responses = iter(
+        (
+            json.dumps(
+                {
+                    source.original_question: "invalid question-key payload",
+                    "paraphrase_answer_statement": (
+                        "The Kariba Dam was built on the Zambezi river."
+                    ),
+                }
+            ),
+            json.dumps(
+                {
+                    "semantic_preserved": True,
+                    "entity_identity_preserved": True,
+                    "relation_and_scope_preserved": True,
+                    "answer_cardinality_preserved": True,
+                    "answer_not_revealed": True,
+                    "question_changed": True,
+                }
+            ),
+        )
+    )
+    monkeypatch.setattr(client, "_complete", lambda **_: next(responses))
+
+    def repair_question(*args: object, **kwargs: object) -> str:
+        calls.append("question")
+        return "Name the river holding the Kariba Dam."
+
+    def repair_statement(*args: object, **kwargs: object) -> str:
+        calls.append("statement")
+        return "The Kariba Dam was built on the Zambezi river."
+
+    monkeypatch.setattr(client, "_repair_paraphrase_question", repair_question)
+    monkeypatch.setattr(client, "_repair_answer_statement", repair_statement)
+    monkeypatch.setattr(
+        client,
+        "_answer_statement_verified",
+        lambda *_, **__: True,
+    )
+
+    assert client.generate(source, seed=31) == (
+        "Name the river holding the Kariba Dam.",
+        "The Kariba Dam was built on the Zambezi river.",
+        31,
+    )
+    assert calls == ["question", "statement"]
+
+
 @pytest.mark.parametrize(
     "fields",
     (
