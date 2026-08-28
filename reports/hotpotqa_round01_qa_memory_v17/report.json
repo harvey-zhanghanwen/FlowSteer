@@ -1,0 +1,843 @@
+{
+  "agentgraph": {
+    "completed": 127,
+    "completed_only_exact_match": 0.6929133858267716,
+    "completed_only_token_f1": 0.7923765211166787,
+    "denominator": 128,
+    "evaluator_valid": 127,
+    "strict_exact_match": 0.6875,
+    "strict_token_f1": 0.7861860795454546
+  },
+  "agentgraph_minus_direct": {
+    "exact_match": -0.0390625,
+    "token_f1": -0.0313346006016042
+  },
+  "agentgraph_minus_round01_official_rescore": {
+    "exact_match": -0.0625,
+    "token_f1": -0.053267045454545414
+  },
+  "completed_at": "2026-08-28T07:18:18.828185+00:00",
+  "dataset": "HotpotQA",
+  "direct_local_baseline": {
+    "completed": 128,
+    "completed_only_exact_match": 0.7265625,
+    "completed_only_token_f1": 0.8175206801470588,
+    "denominator": 128,
+    "evaluator_valid": 128,
+    "strict_exact_match": 0.7265625,
+    "strict_token_f1": 0.8175206801470588
+  },
+  "failure_types": {
+    "agentgraph_operational_failure": 1,
+    "architecture_gain": 4,
+    "architecture_regression_candidate": 9,
+    "correct": 70,
+    "director_max_rounds": 1,
+    "executor_or_provider_failure": 23,
+    "partial_or_overlong_answer": 9,
+    "shared_reasoning_or_model_failure_candidate": 11
+  },
+  "input_context": "public_task_dynamic_train_qa_memory_search_read",
+  "known_limitations": [
+    "A Director/API exception before terminal collection may not preserve partial turns.",
+    "Paper references use a different published evaluation setup and are not a paired baseline."
+  ],
+  "method_level_changes_performed": false,
+  "model_catalog_path": "config/model_catalog_hotpotqa_qa_memory_v10.yaml",
+  "native_source_split": "train",
+  "paper_references_percent": {
+    "comparability_note": "Reference numbers are contextual only; the paired Local Direct baseline on these fixed project-held-out samples is primary.",
+    "flowsteer": {
+      "exact_match": 89.84,
+      "token_f1": 91.2
+    },
+    "qwen3.5_9b_direct": {
+      "exact_match": 60.94,
+      "token_f1": 75.7
+    },
+    "skillflow": {
+      "exact_match": 92.19,
+      "token_f1": 93.95
+    }
+  },
+  "policy_adapter": "theta_smoke_step_000001",
+  "policy_version": "qwen35-9b-smoke-step-0001",
+  "project_split": "validation",
+  "qa_memory": {
+    "cycled_record_count": 0,
+    "embedding_dimension": 768,
+    "embedding_model": "BAAI/bge-base-en-v1.5",
+    "frozen_top_k": 2,
+    "heldout_validation_count": 128,
+    "materialization": {
+      "accepted_count": 512,
+      "completed_at": "2026-08-27T00:27:21.159939Z",
+      "cycled_record_count": 0,
+      "generation_receipts_path": "/ssd1/iclr/1/.tmp/FlowSteer-hotpotqa-embedding-retrieval-v1/artifacts/hotpotqa_qa_memory_v1/paraphrase_receipts.jsonl",
+      "generator_model_id": "qwen3.5-9b-local",
+      "heldout_validation_count": 128,
+      "materialization_path": "/ssd1/iclr/1/.tmp/FlowSteer-hotpotqa-embedding-retrieval-v1/artifacts/hotpotqa_qa_memory_v1/paraphrases.jsonl",
+      "max_attempts": 5,
+      "paraphrase_provenance": "local-qwen3.5-9b-generate-and-verify",
+      "paraphrase_version": "hotpotqa-train-qa-paraphrase-v1",
+      "prompt_version": "hotpotqa.train_qa_paraphrase.qwen35.generate_verify.v1",
+      "provider_id": "local-director",
+      "provider_model": "supervisor_theta",
+      "recorded_generation_seed_count": 512,
+      "recorded_generation_seed_max": 20313982,
+      "recorded_generation_seed_min": 20260826,
+      "rejected_count": 0,
+      "schema_version": "flowsteer.hotpotqa.qa_memory_paraphrase_manifest.v1",
+      "seed": 20310826,
+      "seed_semantics": "seed is the last resume invocation; each accepted record stores its actual generation_seed and verification_seed in the receipt JSONL",
+      "train_record_count": 512,
+      "unique_base_task_count": 512,
+      "validation_overlap_count": 0
+    },
+    "normalized": true,
+    "paraphrase_count": 512,
+    "paraphrase_provenances": [
+      "local-qwen3.5-9b-generate-and-verify"
+    ],
+    "paraphrase_versions": [
+      "hotpotqa-train-qa-paraphrase-v1"
+    ],
+    "similarity": "cosine",
+    "train_record_count": 512,
+    "unique_source_count": 512,
+    "validation_overlap_count": 0
+  },
+  "retrieval_evidence": {
+    "paraphrase_manifest": {
+      "path": "/ssd1/iclr/1/.tmp/FlowSteer-hotpotqa-best-qamemory-v16/artifacts/hotpotqa_qa_memory_v1/paraphrase_manifest.json",
+      "value": {
+        "accepted_count": 512,
+        "completed_at": "2026-08-27T00:27:21.159939Z",
+        "cycled_record_count": 0,
+        "generation_receipts_path": "/ssd1/iclr/1/.tmp/FlowSteer-hotpotqa-embedding-retrieval-v1/artifacts/hotpotqa_qa_memory_v1/paraphrase_receipts.jsonl",
+        "generator_model_id": "qwen3.5-9b-local",
+        "heldout_validation_count": 128,
+        "materialization_path": "/ssd1/iclr/1/.tmp/FlowSteer-hotpotqa-embedding-retrieval-v1/artifacts/hotpotqa_qa_memory_v1/paraphrases.jsonl",
+        "max_attempts": 5,
+        "paraphrase_provenance": "local-qwen3.5-9b-generate-and-verify",
+        "paraphrase_version": "hotpotqa-train-qa-paraphrase-v1",
+        "prompt_version": "hotpotqa.train_qa_paraphrase.qwen35.generate_verify.v1",
+        "provider_id": "local-director",
+        "provider_model": "supervisor_theta",
+        "recorded_generation_seed_count": 512,
+        "recorded_generation_seed_max": 20313982,
+        "recorded_generation_seed_min": 20260826,
+        "rejected_count": 0,
+        "schema_version": "flowsteer.hotpotqa.qa_memory_paraphrase_manifest.v1",
+        "seed": 20310826,
+        "seed_semantics": "seed is the last resume invocation; each accepted record stores its actual generation_seed and verification_seed in the receipt JSONL",
+        "train_record_count": 512,
+        "unique_base_task_count": 512,
+        "validation_overlap_count": 0
+      }
+    },
+    "retrieval_index_manifest": {
+      "path": "/ssd1/iclr/1/.tmp/FlowSteer-hotpotqa-best-qamemory-v16/artifacts/hotpotqa_qa_memory_source_freeze_v2/index/manifest.json",
+      "value": {
+        "corpus_version": "flowsteer.hotpotqa.train_qa_memory.v1",
+        "cycled_record_count": 0,
+        "document_template": "Question: {question}\nAnswer: {answer_statement}",
+        "embedding_dimension": 768,
+        "embedding_model": "BAAI/bge-base-en-v1.5",
+        "embedding_model_path": "/ssd1/iclr/.private/skillflow-resources/bge-base-en-v1.5",
+        "embeddings_path": "embeddings.npy",
+        "frozen_top_k": 2,
+        "heldout_validation_count": 128,
+        "index_id": "hotpotqa-train-qa-memory-d768-n512-topk2-v1",
+        "memories_path": "memories.jsonl",
+        "normalized": true,
+        "paraphrase_count": 512,
+        "paraphrase_provenances": [
+          "local-qwen3.5-9b-generate-and-verify"
+        ],
+        "paraphrase_versions": [
+          "hotpotqa-train-qa-paraphrase-v1"
+        ],
+        "schema_version": "flowsteer.hotpotqa.qa_memory_index.v1",
+        "similarity": "cosine",
+        "source": "HotpotQA aligned frozen train",
+        "source_split": "train",
+        "source_train_path": "/ssd1/iclr/1/.tmp/FlowSteer-hotpotqa-qa-memory-v11/artifacts/hotpotqa_qa_memory_source_freeze_v2/aligned/train.jsonl",
+        "train_record_count": 512,
+        "unique_source_count": 512,
+        "validation_overlap_count": 0
+      }
+    },
+    "retrieval_index_rebuild_smoke": {
+      "path": "/ssd1/iclr/1/.tmp/FlowSteer-hotpotqa-best-qamemory-v16/artifacts/hotpotqa_qa_memory_source_freeze_v2/index_smoke_receipt.json",
+      "value": {
+        "completed_at": "2026-08-27T20:22:11.724452+00:00",
+        "cycled_record_count": 0,
+        "deterministic_rebuild": true,
+        "dynamic_search_read_receipt_fields_present": true,
+        "frozen_split_counts_valid": true,
+        "heldout_validation_count": 128,
+        "index_manifest": {
+          "corpus_version": "flowsteer.hotpotqa.train_qa_memory.v1",
+          "cycled_record_count": 0,
+          "document_template": "Question: {question}\nAnswer: {answer_statement}",
+          "embedding_dimension": 768,
+          "embedding_model": "BAAI/bge-base-en-v1.5",
+          "embedding_model_path": "/ssd1/iclr/.private/skillflow-resources/bge-base-en-v1.5",
+          "embeddings_path": "embeddings.npy",
+          "frozen_top_k": 2,
+          "heldout_validation_count": 128,
+          "index_id": "hotpotqa-train-qa-memory-d768-n512-topk2-v1",
+          "memories_path": "memories.jsonl",
+          "normalized": true,
+          "paraphrase_count": 512,
+          "paraphrase_provenances": [
+            "local-qwen3.5-9b-generate-and-verify"
+          ],
+          "paraphrase_versions": [
+            "hotpotqa-train-qa-paraphrase-v1"
+          ],
+          "schema_version": "flowsteer.hotpotqa.qa_memory_index.v1",
+          "similarity": "cosine",
+          "source": "HotpotQA aligned frozen train",
+          "source_split": "train",
+          "source_train_path": "/ssd1/iclr/1/.tmp/FlowSteer-hotpotqa-qa-memory-v11/artifacts/hotpotqa_qa_memory_source_freeze_v2/aligned/train.jsonl",
+          "train_record_count": 512,
+          "unique_source_count": 512,
+          "validation_overlap_count": 0
+        },
+        "paraphrase_count": 512,
+        "passed": true,
+        "private_validation_or_evaluator_fields_absent": true,
+        "query": "Are Manhattan West and Singer Building both projects in New York?",
+        "query_source_train_task_id": "hotpotqa:5a80d30655429938b61421fe",
+        "ranked_memory_ids": [
+          "hotpotqa-qa-memory-000000",
+          "hotpotqa-qa-memory-000218"
+        ],
+        "same_query_top_k_deterministic": true,
+        "schema_version": "flowsteer.hotpotqa.qa_memory_retrieval_smoke.v1",
+        "tool_id": "hotpotqa.qa_memory",
+        "tool_receipts": [
+          {
+            "ended_at_monotonic": 7385955.908479624,
+            "error_type": null,
+            "latency_ms": 74.39034711569548,
+            "request": {
+              "action": "search",
+              "arguments": {
+                "k": 2,
+                "query": "Are Manhattan West and Singer Building both projects in New York?"
+              }
+            },
+            "result": {
+              "completed": true,
+              "value": {
+                "hits": [
+                  {
+                    "memory_id": "hotpotqa-qa-memory-000000",
+                    "paraphrase_answer_statement": "The canonical answer is yes. Manhattan West and the Singer Building are both projects located in New York.",
+                    "paraphrase_question": "Are Manhattan West and the Singer Building both projects in New York?",
+                    "rank": 1,
+                    "similarity": 0.7937610149383545,
+                    "source_train_task_id": "hotpotqa:5a80d30655429938b61421fe"
+                  },
+                  {
+                    "memory_id": "hotpotqa-qa-memory-000218",
+                    "paraphrase_answer_statement": "The record company co-founded by the frontman of Minor Threat and Fugazi is based in Washington, D.C.",
+                    "paraphrase_question": "In which city is the record label established by the lead singer of Minor Threat and Fugazi located?",
+                    "rank": 2,
+                    "similarity": 0.4627859890460968,
+                    "source_train_task_id": "hotpotqa:5ae8256355429952e35eaa59"
+                  }
+                ],
+                "k": 2,
+                "memory_ids": [
+                  "hotpotqa-qa-memory-000000",
+                  "hotpotqa-qa-memory-000218"
+                ],
+                "operation": "search",
+                "query": "Are Manhattan West and Singer Building both projects in New York?",
+                "retrieval_index": {
+                  "corpus_kind": "train_qa_memory",
+                  "corpus_version": "flowsteer.hotpotqa.train_qa_memory.v1",
+                  "cycled_record_count": 0,
+                  "embedding_dimension": 768,
+                  "embedding_model": "BAAI/bge-base-en-v1.5",
+                  "frozen_top_k": 2,
+                  "heldout_validation_count": 128,
+                  "index_id": "hotpotqa-train-qa-memory-d768-n512-topk2-v1",
+                  "normalized": true,
+                  "paraphrase_count": 512,
+                  "paraphrase_provenances": [
+                    "local-qwen3.5-9b-generate-and-verify"
+                  ],
+                  "paraphrase_versions": [
+                    "hotpotqa-train-qa-paraphrase-v1"
+                  ],
+                  "schema_version": "flowsteer.hotpotqa.qa_memory_index.v1",
+                  "similarity": "cosine",
+                  "source": "HotpotQA aligned frozen train",
+                  "split": "train",
+                  "train_record_count": 512,
+                  "unique_source_count": 512,
+                  "validation_overlap_count": 0
+                },
+                "task_id": "hotpotqa:qa-memory-smoke-worker"
+              }
+            },
+            "started_at_monotonic": 7385955.834089277,
+            "tool_id": "hotpotqa.qa_memory",
+            "tool_version": "hotpotqa-train-qa-memory-d768-n512-topk2-v1"
+          },
+          {
+            "ended_at_monotonic": 7385955.908887392,
+            "error_type": null,
+            "latency_ms": 0.3246031701564789,
+            "request": {
+              "action": "read",
+              "arguments": {
+                "memory_id": "hotpotqa-qa-memory-000000"
+              }
+            },
+            "result": {
+              "completed": true,
+              "value": {
+                "memory": {
+                  "base_task_id": "hotpotqa:5a80d30655429938b61421fe",
+                  "canonical_answer": "yes",
+                  "cycled": false,
+                  "memory_id": "hotpotqa-qa-memory-000000",
+                  "paraphrase_answer_statement": "The canonical answer is yes. Manhattan West and the Singer Building are both projects located in New York.",
+                  "paraphrase_provenance": "local-qwen3.5-9b-generate-and-verify",
+                  "paraphrase_question": "Are Manhattan West and the Singer Building both projects in New York?",
+                  "paraphrase_version": "hotpotqa-train-qa-paraphrase-v1",
+                  "source_train_task_id": "hotpotqa:5a80d30655429938b61421fe"
+                },
+                "memory_id": "hotpotqa-qa-memory-000000",
+                "operation": "read",
+                "retrieval_index": {
+                  "corpus_kind": "train_qa_memory",
+                  "corpus_version": "flowsteer.hotpotqa.train_qa_memory.v1",
+                  "cycled_record_count": 0,
+                  "embedding_dimension": 768,
+                  "embedding_model": "BAAI/bge-base-en-v1.5",
+                  "frozen_top_k": 2,
+                  "heldout_validation_count": 128,
+                  "index_id": "hotpotqa-train-qa-memory-d768-n512-topk2-v1",
+                  "normalized": true,
+                  "paraphrase_count": 512,
+                  "paraphrase_provenances": [
+                    "local-qwen3.5-9b-generate-and-verify"
+                  ],
+                  "paraphrase_versions": [
+                    "hotpotqa-train-qa-paraphrase-v1"
+                  ],
+                  "schema_version": "flowsteer.hotpotqa.qa_memory_index.v1",
+                  "similarity": "cosine",
+                  "source": "HotpotQA aligned frozen train",
+                  "split": "train",
+                  "train_record_count": 512,
+                  "unique_source_count": 512,
+                  "validation_overlap_count": 0
+                },
+                "task_id": "hotpotqa:qa-memory-smoke-worker"
+              }
+            },
+            "started_at_monotonic": 7385955.908562789,
+            "tool_id": "hotpotqa.qa_memory",
+            "tool_version": "hotpotqa-train-qa-memory-d768-n512-topk2-v1"
+          }
+        ],
+        "train_record_count": 512,
+        "unique_source_count": 512,
+        "validation_overlap_count": 0,
+        "web_search_used": false
+      }
+    },
+    "retrieval_index_smoke": {
+      "path": "/ssd1/iclr/1/.tmp/FlowSteer-hotpotqa-best-qamemory-v16/artifacts/hotpotqa_qa_memory_source_freeze_v2/index_smoke_receipt.json",
+      "value": {
+        "completed_at": "2026-08-27T20:22:11.724452+00:00",
+        "cycled_record_count": 0,
+        "deterministic_rebuild": true,
+        "dynamic_search_read_receipt_fields_present": true,
+        "frozen_split_counts_valid": true,
+        "heldout_validation_count": 128,
+        "index_manifest": {
+          "corpus_version": "flowsteer.hotpotqa.train_qa_memory.v1",
+          "cycled_record_count": 0,
+          "document_template": "Question: {question}\nAnswer: {answer_statement}",
+          "embedding_dimension": 768,
+          "embedding_model": "BAAI/bge-base-en-v1.5",
+          "embedding_model_path": "/ssd1/iclr/.private/skillflow-resources/bge-base-en-v1.5",
+          "embeddings_path": "embeddings.npy",
+          "frozen_top_k": 2,
+          "heldout_validation_count": 128,
+          "index_id": "hotpotqa-train-qa-memory-d768-n512-topk2-v1",
+          "memories_path": "memories.jsonl",
+          "normalized": true,
+          "paraphrase_count": 512,
+          "paraphrase_provenances": [
+            "local-qwen3.5-9b-generate-and-verify"
+          ],
+          "paraphrase_versions": [
+            "hotpotqa-train-qa-paraphrase-v1"
+          ],
+          "schema_version": "flowsteer.hotpotqa.qa_memory_index.v1",
+          "similarity": "cosine",
+          "source": "HotpotQA aligned frozen train",
+          "source_split": "train",
+          "source_train_path": "/ssd1/iclr/1/.tmp/FlowSteer-hotpotqa-qa-memory-v11/artifacts/hotpotqa_qa_memory_source_freeze_v2/aligned/train.jsonl",
+          "train_record_count": 512,
+          "unique_source_count": 512,
+          "validation_overlap_count": 0
+        },
+        "paraphrase_count": 512,
+        "passed": true,
+        "private_validation_or_evaluator_fields_absent": true,
+        "query": "Are Manhattan West and Singer Building both projects in New York?",
+        "query_source_train_task_id": "hotpotqa:5a80d30655429938b61421fe",
+        "ranked_memory_ids": [
+          "hotpotqa-qa-memory-000000",
+          "hotpotqa-qa-memory-000218"
+        ],
+        "same_query_top_k_deterministic": true,
+        "schema_version": "flowsteer.hotpotqa.qa_memory_retrieval_smoke.v1",
+        "tool_id": "hotpotqa.qa_memory",
+        "tool_receipts": [
+          {
+            "ended_at_monotonic": 7385955.908479624,
+            "error_type": null,
+            "latency_ms": 74.39034711569548,
+            "request": {
+              "action": "search",
+              "arguments": {
+                "k": 2,
+                "query": "Are Manhattan West and Singer Building both projects in New York?"
+              }
+            },
+            "result": {
+              "completed": true,
+              "value": {
+                "hits": [
+                  {
+                    "memory_id": "hotpotqa-qa-memory-000000",
+                    "paraphrase_answer_statement": "The canonical answer is yes. Manhattan West and the Singer Building are both projects located in New York.",
+                    "paraphrase_question": "Are Manhattan West and the Singer Building both projects in New York?",
+                    "rank": 1,
+                    "similarity": 0.7937610149383545,
+                    "source_train_task_id": "hotpotqa:5a80d30655429938b61421fe"
+                  },
+                  {
+                    "memory_id": "hotpotqa-qa-memory-000218",
+                    "paraphrase_answer_statement": "The record company co-founded by the frontman of Minor Threat and Fugazi is based in Washington, D.C.",
+                    "paraphrase_question": "In which city is the record label established by the lead singer of Minor Threat and Fugazi located?",
+                    "rank": 2,
+                    "similarity": 0.4627859890460968,
+                    "source_train_task_id": "hotpotqa:5ae8256355429952e35eaa59"
+                  }
+                ],
+                "k": 2,
+                "memory_ids": [
+                  "hotpotqa-qa-memory-000000",
+                  "hotpotqa-qa-memory-000218"
+                ],
+                "operation": "search",
+                "query": "Are Manhattan West and Singer Building both projects in New York?",
+                "retrieval_index": {
+                  "corpus_kind": "train_qa_memory",
+                  "corpus_version": "flowsteer.hotpotqa.train_qa_memory.v1",
+                  "cycled_record_count": 0,
+                  "embedding_dimension": 768,
+                  "embedding_model": "BAAI/bge-base-en-v1.5",
+                  "frozen_top_k": 2,
+                  "heldout_validation_count": 128,
+                  "index_id": "hotpotqa-train-qa-memory-d768-n512-topk2-v1",
+                  "normalized": true,
+                  "paraphrase_count": 512,
+                  "paraphrase_provenances": [
+                    "local-qwen3.5-9b-generate-and-verify"
+                  ],
+                  "paraphrase_versions": [
+                    "hotpotqa-train-qa-paraphrase-v1"
+                  ],
+                  "schema_version": "flowsteer.hotpotqa.qa_memory_index.v1",
+                  "similarity": "cosine",
+                  "source": "HotpotQA aligned frozen train",
+                  "split": "train",
+                  "train_record_count": 512,
+                  "unique_source_count": 512,
+                  "validation_overlap_count": 0
+                },
+                "task_id": "hotpotqa:qa-memory-smoke-worker"
+              }
+            },
+            "started_at_monotonic": 7385955.834089277,
+            "tool_id": "hotpotqa.qa_memory",
+            "tool_version": "hotpotqa-train-qa-memory-d768-n512-topk2-v1"
+          },
+          {
+            "ended_at_monotonic": 7385955.908887392,
+            "error_type": null,
+            "latency_ms": 0.3246031701564789,
+            "request": {
+              "action": "read",
+              "arguments": {
+                "memory_id": "hotpotqa-qa-memory-000000"
+              }
+            },
+            "result": {
+              "completed": true,
+              "value": {
+                "memory": {
+                  "base_task_id": "hotpotqa:5a80d30655429938b61421fe",
+                  "canonical_answer": "yes",
+                  "cycled": false,
+                  "memory_id": "hotpotqa-qa-memory-000000",
+                  "paraphrase_answer_statement": "The canonical answer is yes. Manhattan West and the Singer Building are both projects located in New York.",
+                  "paraphrase_provenance": "local-qwen3.5-9b-generate-and-verify",
+                  "paraphrase_question": "Are Manhattan West and the Singer Building both projects in New York?",
+                  "paraphrase_version": "hotpotqa-train-qa-paraphrase-v1",
+                  "source_train_task_id": "hotpotqa:5a80d30655429938b61421fe"
+                },
+                "memory_id": "hotpotqa-qa-memory-000000",
+                "operation": "read",
+                "retrieval_index": {
+                  "corpus_kind": "train_qa_memory",
+                  "corpus_version": "flowsteer.hotpotqa.train_qa_memory.v1",
+                  "cycled_record_count": 0,
+                  "embedding_dimension": 768,
+                  "embedding_model": "BAAI/bge-base-en-v1.5",
+                  "frozen_top_k": 2,
+                  "heldout_validation_count": 128,
+                  "index_id": "hotpotqa-train-qa-memory-d768-n512-topk2-v1",
+                  "normalized": true,
+                  "paraphrase_count": 512,
+                  "paraphrase_provenances": [
+                    "local-qwen3.5-9b-generate-and-verify"
+                  ],
+                  "paraphrase_versions": [
+                    "hotpotqa-train-qa-paraphrase-v1"
+                  ],
+                  "schema_version": "flowsteer.hotpotqa.qa_memory_index.v1",
+                  "similarity": "cosine",
+                  "source": "HotpotQA aligned frozen train",
+                  "split": "train",
+                  "train_record_count": 512,
+                  "unique_source_count": 512,
+                  "validation_overlap_count": 0
+                },
+                "task_id": "hotpotqa:qa-memory-smoke-worker"
+              }
+            },
+            "started_at_monotonic": 7385955.908562789,
+            "tool_id": "hotpotqa.qa_memory",
+            "tool_version": "hotpotqa-train-qa-memory-d768-n512-topk2-v1"
+          }
+        ],
+        "train_record_count": 512,
+        "unique_source_count": 512,
+        "validation_overlap_count": 0,
+        "web_search_used": false
+      }
+    },
+    "retrieval_profile_selection": {
+      "path": "/ssd1/iclr/1/.tmp/FlowSteer-hotpotqa-best-qamemory-v16/artifacts/hotpotqa_qa_memory_v1/profile_selection.json",
+      "value": {
+        "base_task_hit_rate_by_top_k": {
+          "2": 1.0,
+          "3": 1.0,
+          "4": 1.0,
+          "5": 1.0
+        },
+        "candidate_top_k": [
+          2,
+          3,
+          4,
+          5
+        ],
+        "cycled_record_count": 0,
+        "development_base_task_ids": [
+          "hotpotqa:5a80d30655429938b61421fe",
+          "hotpotqa:5a7e567b55429949594199a0",
+          "hotpotqa:5a77bd595542995d83181291",
+          "hotpotqa:5abffc58554299012d1db552",
+          "hotpotqa:5ab3dad4554299753aec59cb",
+          "hotpotqa:5ac12fda5542994d76dccdb0",
+          "hotpotqa:5a8e171b554299068b959e5a",
+          "hotpotqa:5a79c7f95542994bb9457099",
+          "hotpotqa:5a731dee5542992359bc3238",
+          "hotpotqa:5ae377a35542994393b9e6db",
+          "hotpotqa:5ae655c855429908198fa599",
+          "hotpotqa:5a7906f55542990784727792",
+          "hotpotqa:5ab74412554299110f219ae8",
+          "hotpotqa:5ac4bfd05542997ea680caab",
+          "hotpotqa:5ab72adb5542993667793f5d",
+          "hotpotqa:5abb06bc554299232ef4a3bb",
+          "hotpotqa:5ab51d295542996a3a96a01f",
+          "hotpotqa:5ae3cf7e5542990afbd1e1e2",
+          "hotpotqa:5adffc93554299025d62a39f",
+          "hotpotqa:5a7315015542994cef4bc448",
+          "hotpotqa:5a75e7215542992db947370a",
+          "hotpotqa:5ab1ce395542997061209579",
+          "hotpotqa:5a8afba155429949d91db458",
+          "hotpotqa:5ae3dde35542992f92d823a4",
+          "hotpotqa:5ade5a245542997c77adee0c",
+          "hotpotqa:5ae65d055542996d980e7b14",
+          "hotpotqa:5a8a698255429930ff3c0dcf",
+          "hotpotqa:5adccafb5542992c1e3a2401",
+          "hotpotqa:5ac4f4255542996feb3fe99d",
+          "hotpotqa:5a85d5ba5542997175ce205a",
+          "hotpotqa:5a8a1eb755429970aeb70261",
+          "hotpotqa:5ac3bb805542993915413909",
+          "hotpotqa:5a81102b554299260e20a22a",
+          "hotpotqa:5a77a0205542995d83181225",
+          "hotpotqa:5a8f7992554299458435d64c",
+          "hotpotqa:5ab28cfb554299340b525515",
+          "hotpotqa:5a83088a55429966c78a6afc",
+          "hotpotqa:5ab54b5c5542992aa134a298",
+          "hotpotqa:5ac23b6f55429951e9e684b4",
+          "hotpotqa:5ae4ba9255429913cc2044e6",
+          "hotpotqa:5a7d231555429909bec76986",
+          "hotpotqa:5a79cc3c5542994bb94570b6",
+          "hotpotqa:5a769ac95542993569682c4f",
+          "hotpotqa:5a8a45f05542996c9b8d5e89",
+          "hotpotqa:5adf01425542995ec70e8f53",
+          "hotpotqa:5adc1b1a55429944faac2422",
+          "hotpotqa:5add67b05542995b365fab2a",
+          "hotpotqa:5ac25c9055429951e9e68580",
+          "hotpotqa:5a8ef28c5542995b44241f0f",
+          "hotpotqa:5adf1bf75542993344016bd9",
+          "hotpotqa:5a8235d25542995ce29dccda",
+          "hotpotqa:5a8edaa955429917b4a5bde3",
+          "hotpotqa:5a82099e55429926c1cdadf9",
+          "hotpotqa:5ab808755542990e739ec7f2",
+          "hotpotqa:5a8596c85542992a431d1b53",
+          "hotpotqa:5ab90af655429916710eb0ec",
+          "hotpotqa:5a7d15e35542995ed0d165dd",
+          "hotpotqa:5ac5247c55429924173fb602",
+          "hotpotqa:5a80b23a5542992bc0c4a7b2",
+          "hotpotqa:5a8d209555429941ae14df84",
+          "hotpotqa:5adf698f5542993a75d264e2",
+          "hotpotqa:5a8e506d5542990e94052ac8",
+          "hotpotqa:5ac3983a554299657fa290f5",
+          "hotpotqa:5ac1bfd85542994ab5c67dfb"
+        ],
+        "development_sample_count": 64,
+        "development_task_ids": [
+          "hotpotqa:5a80d30655429938b61421fe",
+          "hotpotqa:5a7e567b55429949594199a0",
+          "hotpotqa:5a77bd595542995d83181291",
+          "hotpotqa:5abffc58554299012d1db552",
+          "hotpotqa:5ab3dad4554299753aec59cb",
+          "hotpotqa:5ac12fda5542994d76dccdb0",
+          "hotpotqa:5a8e171b554299068b959e5a",
+          "hotpotqa:5a79c7f95542994bb9457099",
+          "hotpotqa:5a731dee5542992359bc3238",
+          "hotpotqa:5ae377a35542994393b9e6db",
+          "hotpotqa:5ae655c855429908198fa599",
+          "hotpotqa:5a7906f55542990784727792",
+          "hotpotqa:5ab74412554299110f219ae8",
+          "hotpotqa:5ac4bfd05542997ea680caab",
+          "hotpotqa:5ab72adb5542993667793f5d",
+          "hotpotqa:5abb06bc554299232ef4a3bb",
+          "hotpotqa:5ab51d295542996a3a96a01f",
+          "hotpotqa:5ae3cf7e5542990afbd1e1e2",
+          "hotpotqa:5adffc93554299025d62a39f",
+          "hotpotqa:5a7315015542994cef4bc448",
+          "hotpotqa:5a75e7215542992db947370a",
+          "hotpotqa:5ab1ce395542997061209579",
+          "hotpotqa:5a8afba155429949d91db458",
+          "hotpotqa:5ae3dde35542992f92d823a4",
+          "hotpotqa:5ade5a245542997c77adee0c",
+          "hotpotqa:5ae65d055542996d980e7b14",
+          "hotpotqa:5a8a698255429930ff3c0dcf",
+          "hotpotqa:5adccafb5542992c1e3a2401",
+          "hotpotqa:5ac4f4255542996feb3fe99d",
+          "hotpotqa:5a85d5ba5542997175ce205a",
+          "hotpotqa:5a8a1eb755429970aeb70261",
+          "hotpotqa:5ac3bb805542993915413909",
+          "hotpotqa:5a81102b554299260e20a22a",
+          "hotpotqa:5a77a0205542995d83181225",
+          "hotpotqa:5a8f7992554299458435d64c",
+          "hotpotqa:5ab28cfb554299340b525515",
+          "hotpotqa:5a83088a55429966c78a6afc",
+          "hotpotqa:5ab54b5c5542992aa134a298",
+          "hotpotqa:5ac23b6f55429951e9e684b4",
+          "hotpotqa:5ae4ba9255429913cc2044e6",
+          "hotpotqa:5a7d231555429909bec76986",
+          "hotpotqa:5a79cc3c5542994bb94570b6",
+          "hotpotqa:5a769ac95542993569682c4f",
+          "hotpotqa:5a8a45f05542996c9b8d5e89",
+          "hotpotqa:5adf01425542995ec70e8f53",
+          "hotpotqa:5adc1b1a55429944faac2422",
+          "hotpotqa:5add67b05542995b365fab2a",
+          "hotpotqa:5ac25c9055429951e9e68580",
+          "hotpotqa:5a8ef28c5542995b44241f0f",
+          "hotpotqa:5adf1bf75542993344016bd9",
+          "hotpotqa:5a8235d25542995ce29dccda",
+          "hotpotqa:5a8edaa955429917b4a5bde3",
+          "hotpotqa:5a82099e55429926c1cdadf9",
+          "hotpotqa:5ab808755542990e739ec7f2",
+          "hotpotqa:5a8596c85542992a431d1b53",
+          "hotpotqa:5ab90af655429916710eb0ec",
+          "hotpotqa:5a7d15e35542995ed0d165dd",
+          "hotpotqa:5ac5247c55429924173fb602",
+          "hotpotqa:5a80b23a5542992bc0c4a7b2",
+          "hotpotqa:5a8d209555429941ae14df84",
+          "hotpotqa:5adf698f5542993a75d264e2",
+          "hotpotqa:5a8e506d5542990e94052ac8",
+          "hotpotqa:5ac3983a554299657fa290f5",
+          "hotpotqa:5ac1bfd85542994ab5c67dfb"
+        ],
+        "embedding_model": "BAAI/bge-base-en-v1.5",
+        "mean_reciprocal_rank_by_top_k": {
+          "2": 0.9921875,
+          "3": 0.9921875,
+          "4": 0.9921875,
+          "5": 0.9921875
+        },
+        "normalize_embeddings": true,
+        "paraphrase_count": 512,
+        "schema_version": "flowsteer.hotpotqa.qa_memory_profile_selection.v1",
+        "selected_at": "2026-08-27T00:30:31.264818+00:00",
+        "selected_top_k": 2,
+        "selection_rule": "maximize train-development base_task_hit@k, then truncated MRR@k, then choose the smallest top-k",
+        "selection_source": "frozen_sequential_unique_train_records",
+        "selection_split": "train/architecture-development",
+        "similarity": "cosine",
+        "train_record_count": 512,
+        "unique_source_count": 512,
+        "validation_answer_or_alias_consulted": false,
+        "validation_identity_used_for_split_check_only": true,
+        "validation_question_consulted": false,
+        "validation_supporting_facts_consulted": false
+      }
+    }
+  },
+  "retrieval_execution_boundary": {
+    "director_tool_calls": 0,
+    "finished_retrieval_invoked_tasks": 126,
+    "retrieval_artifact_routed_tasks": 126,
+    "retrieval_artifact_routed_via_relation": true,
+    "retrieval_invoked_tasks": 127,
+    "retrieval_tool_calls_by_worker": 417,
+    "retrieval_worker_agent_ids": [
+      "R0",
+      "Retirement_Analyst",
+      "age_searcher_1",
+      "agent0",
+      "agent_0",
+      "agent_001",
+      "agent_1",
+      "agent_2",
+      "agent_3",
+      "agent_r1",
+      "agent_retriever",
+      "agent_rota_bc892a41",
+      "agent_router",
+      "agent_search",
+      "agent_validator",
+      "director",
+      "director_0",
+      "director_reasoner",
+      "fact_validator",
+      "lead_retriever",
+      "qa_agent_1",
+      "qa_agent_2",
+      "qa_researcher",
+      "qa_retriever",
+      "rag_agent",
+      "reader_1",
+      "reasoner_1",
+      "researcher",
+      "researcher_1",
+      "researcher_2",
+      "researcher_4",
+      "researcher_b",
+      "retriever",
+      "search_agent",
+      "solver"
+    ],
+    "unique_memory_ids_retrieved": 183,
+    "unique_train_base_task_ids_retrieved": 183
+  },
+  "retrieval_profile": {
+    "allow_query_rewriting": true,
+    "condition_id": "hotpotqa_round01_qa_memory_v17",
+    "corpus_kind": "train_qa_memory",
+    "dataset_scope": [
+      "hotpotqa"
+    ],
+    "development_sample_count": 64,
+    "development_tasks": "artifacts/hotpotqa_qa_memory_source_freeze_v2/aligned/train.jsonl",
+    "embedding_device": "cpu",
+    "embedding_model": "/ssd1/iclr/.private/skillflow-resources/bge-base-en-v1.5",
+    "embedding_model_id": "BAAI/bge-base-en-v1.5",
+    "enabled": true,
+    "frozen_validation_tasks": "artifacts/hotpotqa_qa_memory_source_freeze_v2/aligned/validation.jsonl",
+    "index_dir": "artifacts/hotpotqa_qa_memory_source_freeze_v2/index",
+    "index_scope": "global_train_only",
+    "max_action_tokens": 4096,
+    "max_tool_calls_per_agent_call": 4,
+    "max_turns_per_agent_call": 6,
+    "mode": "model_driven_search_read",
+    "normalize_embeddings": true,
+    "paraphrase_manifest_path": "artifacts/hotpotqa_qa_memory_v1/paraphrase_manifest.json",
+    "paraphrase_materialization_path": "artifacts/hotpotqa_qa_memory_v1/paraphrases.jsonl",
+    "profile_candidate_top_k": [
+      2,
+      3,
+      4,
+      5
+    ],
+    "retrieval_query_scope": "question_only",
+    "search_top_k": 2,
+    "similarity": "cosine",
+    "task_scope": "public_task",
+    "tool_id": "hotpotqa.qa_memory",
+    "tool_timeout_seconds": 30.0,
+    "train_sample_count": 512,
+    "train_tasks": "artifacts/hotpotqa_qa_memory_source_freeze_v2/aligned/train.jsonl",
+    "validation_sample_count": 128,
+    "web_search_enabled": false
+  },
+  "round01_agentgraph_official_rescore": {
+    "completed": 128,
+    "denominator": 128,
+    "evaluator_valid": 128,
+    "evaluator_version": "hotpotqa.official.answer.v1",
+    "model_calls": 0,
+    "source_path": "/ssd1/iclr/1/.tmp/FlowSteer-hotpotqa-best-qamemory-v16/artifacts/hotpotqa_round_01/agentgraph_trajectories.jsonl",
+    "strict_exact_match": 0.75,
+    "strict_token_f1": 0.839453125
+  },
+  "sample_count": 128,
+  "schema_version": "flowsteer.hotpotqa.round_report.v1",
+  "terminal_failures": 2,
+  "tool_usage": {
+    "failed_calls": 0,
+    "latency_ms": 38289.600471034646,
+    "query_rewrite_tasks": 7,
+    "read_calls": 278,
+    "search_calls": 139,
+    "successful_calls": 417,
+    "tool_calls": 417,
+    "tool_invoked_tasks": 127
+  },
+  "training_performed": false,
+  "typical_wrong_demo_task_ids": [
+    "hotpotqa:5a8d7341554299441c6b9fe5",
+    "hotpotqa:5a82171f5542990a1d231f4a",
+    "hotpotqa:5a84dd955542997b5ce3ff79",
+    "hotpotqa:5adf44985542993a75d2646d",
+    "hotpotqa:5a89372855429951533612e6",
+    "hotpotqa:5abd90545542996e802b47d7",
+    "hotpotqa:5aba66c855429939ce03dcdb",
+    "hotpotqa:5a7722d655429966f1a36c99",
+    "hotpotqa:5ab381b155429969a97a816b",
+    "hotpotqa:5ac2a5d455429921a00ab01b"
+  ],
+  "wrong_demo_count": 40
+}

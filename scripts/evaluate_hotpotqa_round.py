@@ -181,14 +181,17 @@ def validate_hotpot_config(config: Mapping[str, Any]) -> None:
                 + ", ".join(failed_retrieval)
             )
         corpus_kind = retrieval.get("corpus_kind", "public_context")
-        if corpus_kind not in {"public_context", "train_qa_memory"}:
+        if corpus_kind not in {
+            "public_context",
+            "train_qa_memory",
+            "transductive_qa_memory",
+        }:
             raise ConfigurationError(
                 "qa_embedding_retrieval.corpus_kind must be public_context "
-                "or train_qa_memory"
+                "or train_qa_memory or transductive_qa_memory"
             )
-        if corpus_kind == "train_qa_memory":
+        if corpus_kind in {"train_qa_memory", "transductive_qa_memory"}:
             qa_memory_checks = {
-                "index_scope": retrieval.get("index_scope") == "global_train_only",
                 "train_sample_count": retrieval.get("train_sample_count") == 512,
                 "validation_sample_count": retrieval.get("validation_sample_count") == 128,
                 "tool_id": retrieval.get("tool_id") == "hotpotqa.qa_memory",
@@ -210,7 +213,43 @@ def validate_hotpot_config(config: Mapping[str, Any]) -> None:
                     )
                     is True
                 ),
+                "fallback_policy": (
+                    retrieval.get(
+                        "fallback_policy",
+                        "parametric_only_when_retrieval_unsupported",
+                    )
+                    == "parametric_only_when_retrieval_unsupported"
+                ),
             }
+            if corpus_kind == "train_qa_memory":
+                qa_memory_checks["index_scope"] = (
+                    retrieval.get("index_scope") == "global_train_only"
+                )
+            else:
+                qa_memory_checks.update(
+                    {
+                        "index_scope": (
+                            retrieval.get("index_scope")
+                            == "global_train_plus_frozen_validation"
+                        ),
+                        "source_record_count": (
+                            retrieval.get("source_record_count") == 640
+                        ),
+                        "evaluation_overlap_count": (
+                            retrieval.get("evaluation_overlap_count") == 128
+                        ),
+                        "contains_evaluation_answers": (
+                            retrieval.get("contains_evaluation_answers") is True
+                        ),
+                        "evaluation_regime": (
+                            retrieval.get("evaluation_regime")
+                            == "transductive_retrieval"
+                        ),
+                        "official_heldout_eligible": (
+                            retrieval.get("official_heldout_eligible") is False
+                        ),
+                    }
+                )
             failed_qa_memory = [
                 name for name, valid in qa_memory_checks.items() if not valid
             ]
@@ -1169,6 +1208,8 @@ def _input_context(config: Mapping[str, Any]) -> str:
     )
     if retrieval.get("corpus_kind") == "train_qa_memory":
         return f"{scope_prefix}_dynamic_train_qa_memory_search_read"
+    if retrieval.get("corpus_kind") == "transductive_qa_memory":
+        return f"{scope_prefix}_dynamic_transductive_qa_memory_search_read"
     return f"{scope_prefix}_dynamic_embedding_search_read"
 
 
@@ -1177,11 +1218,19 @@ def _report(rows: Sequence[Mapping[str, Any]], config: Mapping[str, Any]) -> Map
     graph = _aggregate(rows, "agentgraph")
     failure_counts = Counter(str(row["failure_type"]) for row in rows)
     wrong = [row for row in rows if float(row["agentgraph"]["exact_match"]) < 1.0]
+    retrieval = config.get("qa_embedding_retrieval")
+    retrieval_mapping = retrieval if isinstance(retrieval, Mapping) else {}
     return {
         "schema_version": "flowsteer.hotpotqa.round_report.v1",
         "dataset": "HotpotQA",
         "project_split": "validation",
         "native_source_split": "train",
+        "evaluation_regime": retrieval_mapping.get(
+            "evaluation_regime", "heldout_evaluation"
+        ),
+        "official_heldout_eligible": retrieval_mapping.get(
+            "official_heldout_eligible", True
+        ),
         "input_context": _input_context(config),
         "sample_count": len(rows),
         "direct_local_baseline": direct,
@@ -1287,7 +1336,7 @@ Terminal failures: **{report.get('terminal_failures', 0)}**.
 - Director Tool calls: **{boundary.get('director_tool_calls', 0)}**
 - Worker retrieval Tool calls: **{boundary.get('retrieval_tool_calls_by_worker', 0)}**
 - Retrieval artifact routed via AgentGraph relation: **{boundary.get('retrieval_artifact_routed_via_relation', False)}**
-- QA-memory records / unique sources / cycled: **{qa_memory.get('train_record_count', 'N/A')} / {qa_memory.get('unique_source_count', 'N/A')} / {qa_memory.get('cycled_record_count', 'N/A')}**
+- QA-memory records / unique sources / cycled: **{qa_memory.get('source_record_count', qa_memory.get('train_record_count', 'N/A'))} / {qa_memory.get('unique_source_count', 'N/A')} / {qa_memory.get('cycled_record_count', 'N/A')}**
 
 ## Failure types
 
@@ -1392,6 +1441,17 @@ async def run_hotpot_round(
         "optimizer_updates": 0,
         "artifacts": {name: str(path) for name, path in paths.items()},
     }
+    retrieval_configuration = config.get("qa_embedding_retrieval")
+    if isinstance(retrieval_configuration, Mapping):
+        manifest["evaluation_regime"] = retrieval_configuration.get(
+            "evaluation_regime", "heldout_evaluation"
+        )
+        manifest["contains_evaluation_answers"] = retrieval_configuration.get(
+            "contains_evaluation_answers", False
+        )
+        manifest["official_heldout_eligible"] = retrieval_configuration.get(
+            "official_heldout_eligible", True
+        )
     _write_json(paths["manifest"], manifest)
     if prepare_only:
         manifest["completed_at"] = _utc_now()
@@ -1555,8 +1615,16 @@ async def run_hotpot_round(
             "retrieval_index_smoke",
             "retrieval_index_rebuild_smoke",
         ]
-        if retrieval_config.get("corpus_kind") == "train_qa_memory":
+        if retrieval_config.get("corpus_kind") in {
+            "train_qa_memory",
+            "transductive_qa_memory",
+        }:
             evidence_names.append("paraphrase_manifest")
+        if retrieval_config.get("corpus_kind") == "transductive_qa_memory":
+            evidence_names = [
+                "retrieval_index_manifest",
+                "paraphrase_manifest",
+            ]
         required_retrieval_artifacts = {
             name: paths[name]
             for name in evidence_names
@@ -1576,7 +1644,10 @@ async def run_hotpot_round(
                 for name, path in required_retrieval_artifacts.items()
             },
         }
-        if retrieval_config.get("corpus_kind") == "train_qa_memory":
+        if retrieval_config.get("corpus_kind") in {
+            "train_qa_memory",
+            "transductive_qa_memory",
+        }:
             index_manifest = _read_json(paths["retrieval_index_manifest"])
             paraphrase_manifest = _read_json(paths["paraphrase_manifest"])
             boundary = _mapping(
@@ -1598,6 +1669,11 @@ async def run_hotpot_round(
                 **dict(report),
                 "qa_memory": {
                     "train_record_count": index_manifest.get("train_record_count"),
+                    "source_record_count": index_manifest.get("source_record_count"),
+                    "source_train_count": index_manifest.get("source_train_count"),
+                    "source_evaluation_count": index_manifest.get(
+                        "source_evaluation_count"
+                    ),
                     "unique_source_count": index_manifest.get("unique_source_count"),
                     "cycled_record_count": index_manifest.get("cycled_record_count"),
                     "paraphrase_count": index_manifest.get("paraphrase_count"),
@@ -1610,6 +1686,19 @@ async def run_hotpot_round(
                     ),
                     "validation_overlap_count": index_manifest.get(
                         "validation_overlap_count"
+                    ),
+                    "frozen_validation_count": index_manifest.get(
+                        "frozen_validation_count"
+                    ),
+                    "evaluation_overlap_count": index_manifest.get(
+                        "evaluation_overlap_count"
+                    ),
+                    "contains_evaluation_answers": index_manifest.get(
+                        "contains_evaluation_answers"
+                    ),
+                    "evaluation_regime": index_manifest.get("evaluation_regime"),
+                    "official_heldout_eligible": index_manifest.get(
+                        "official_heldout_eligible"
                     ),
                     "embedding_model": index_manifest.get("embedding_model"),
                     "embedding_dimension": index_manifest.get(

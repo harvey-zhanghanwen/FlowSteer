@@ -6,7 +6,7 @@ execution shape: retrieval happens only when an Agent dispatches a Tool
 action, never as evaluation-time prefetch.
 
 The registry supports the existing task-scoped public-passage index and the
-train-only global QA-memory index.  In the passage condition, ``task_id``
+global paired QA-memory indices.  In the passage condition, ``task_id``
 selects the current task's public context.  In the QA-memory condition it is
 only evaluation-call provenance in the receipt and is never passed to global
 ``search(query, k)`` or ``read(memory_id)``.  Results are projected through an
@@ -26,6 +26,10 @@ import unicodedata
 
 from .agent_runtime import AgentRequest
 from .hotpotqa_qa_memory_index import QA_MEMORY_CORPUS_VERSION
+from .hotpotqa_transductive_qa_memory_index import (
+    TRANSDUCTIVE_EVALUATION_REGIME,
+    TRANSDUCTIVE_QA_MEMORY_CORPUS_VERSION,
+)
 from .react_execution import ToolReactExecutionAdapter
 from .tool_runtime import (
     ToolCapability,
@@ -42,7 +46,15 @@ HOTPOTQA_DATASET_SCOPE = ("hotpotqa",)
 
 _PASSAGE_INDEX_KIND = "public_passage"
 _QA_MEMORY_INDEX_KIND = "train_qa_memory"
+_TRANSDUCTIVE_QA_MEMORY_INDEX_KIND = "transductive_qa_memory"
 _QA_MEMORY_RETRIEVAL_SUFFICIENCY = frozenset({"supported", "unsupported"})
+
+
+def _is_qa_memory_index_kind(index_kind: str) -> bool:
+    return index_kind in {
+        _QA_MEMORY_INDEX_KIND,
+        _TRANSDUCTIVE_QA_MEMORY_INDEX_KIND,
+    }
 
 
 def _normalized_retrieval_query(query: str) -> str:
@@ -200,11 +212,20 @@ def _index_identity(
         "document_count": ("document_count", "doc_count"),
         "passage_count": ("passage_count",),
         "train_record_count": ("train_record_count",),
+        "source_record_count": ("source_record_count",),
+        "source_train_count": ("source_train_count",),
+        "source_evaluation_count": ("source_evaluation_count",),
+        "source_splits": ("source_splits",),
         "unique_source_count": ("unique_source_count",),
         "cycled_record_count": ("cycled_record_count",),
         "paraphrase_count": ("paraphrase_count",),
         "heldout_validation_count": ("heldout_validation_count",),
         "validation_overlap_count": ("validation_overlap_count",),
+        "frozen_validation_count": ("frozen_validation_count",),
+        "evaluation_overlap_count": ("evaluation_overlap_count",),
+        "contains_evaluation_answers": ("contains_evaluation_answers",),
+        "evaluation_regime": ("evaluation_regime",),
+        "official_heldout_eligible": ("official_heldout_eligible",),
         "paraphrase_versions": ("paraphrase_versions",),
         "paraphrase_provenances": ("paraphrase_provenances",),
         "frozen_top_k": ("frozen_top_k",),
@@ -252,6 +273,32 @@ def _index_kind(index: _EmbeddingIndex) -> str:
         if search_parameters != ("query", "k") or read_parameters != ("memory_id",):
             raise TypeError("QA-memory manifest and global search/read signatures differ")
         return _QA_MEMORY_INDEX_KIND
+    if corpus_version == TRANSDUCTIVE_QA_MEMORY_CORPUS_VERSION:
+        source_splits = _optional_manifest_field(manifest, "source_splits")
+        if tuple(source_splits) != ("train", "frozen_validation"):
+            raise ValueError("transductive QA-memory source splits differ")
+        if _optional_manifest_field(manifest, "contains_evaluation_answers") is not True:
+            raise ValueError("transductive QA-memory must declare evaluation answers")
+        if (
+            _optional_manifest_field(manifest, "evaluation_regime")
+            != TRANSDUCTIVE_EVALUATION_REGIME
+        ):
+            raise ValueError("transductive QA-memory evaluation regime differs")
+        if _optional_manifest_field(manifest, "official_heldout_eligible") is not False:
+            raise ValueError("transductive QA-memory cannot be held-out eligible")
+        frozen_validation_count = _optional_manifest_field(
+            manifest, "frozen_validation_count"
+        )
+        if (
+            not isinstance(frozen_validation_count, int)
+            or frozen_validation_count < 1
+            or _optional_manifest_field(manifest, "evaluation_overlap_count")
+            != frozen_validation_count
+        ):
+            raise ValueError("transductive QA-memory evaluation overlap differs")
+        if search_parameters != ("query", "k") or read_parameters != ("memory_id",):
+            raise TypeError("QA-memory manifest and global search/read signatures differ")
+        return _TRANSDUCTIVE_QA_MEMORY_INDEX_KIND
     if search_parameters != ("task_id", "query", "k") or read_parameters not in {
         ("task_id", "doc_id"),
         ("task_id", "passage_id"),
@@ -409,7 +456,7 @@ class HotpotQAEmbeddingToolBackend:
         if type(k) is not int or k != self.frozen_top_k:
             raise ValueError("search k differs from the frozen embedding top-k")
 
-        if self.index_kind == _QA_MEMORY_INDEX_KIND:
+        if _is_qa_memory_index_kind(self.index_kind):
             candidate = self.index.search(query, k)
         else:
             candidate = self.index.search(self.task_id, query, k)
@@ -418,7 +465,7 @@ class HotpotQAEmbeddingToolBackend:
             raise TypeError("embedding search must return a sequence of hits")
         if len(raw_hits) > self.frozen_top_k:
             raise ValueError("embedding search returned more than frozen top-k hits")
-        if self.index_kind == _QA_MEMORY_INDEX_KIND:
+        if _is_qa_memory_index_kind(self.index_kind):
             hits = [
                 _public_memory_hit(raw_hit, expected_rank=rank)
                 for rank, raw_hit in enumerate(raw_hits, start=1)
@@ -452,7 +499,7 @@ class HotpotQAEmbeddingToolBackend:
         _validate_action(request, "read")
         id_field = (
             "memory_id"
-            if self.index_kind == _QA_MEMORY_INDEX_KIND
+            if _is_qa_memory_index_kind(self.index_kind)
             else "doc_id"
         )
         if set(request.arguments) != {id_field}:
@@ -465,12 +512,12 @@ class HotpotQAEmbeddingToolBackend:
                 f"read {id_field} was not returned by a successful search"
             )
 
-        if self.index_kind == _QA_MEMORY_INDEX_KIND:
+        if _is_qa_memory_index_kind(self.index_kind):
             candidate = self.index.read(resource_id)
         else:
             candidate = self.index.read(self.task_id, resource_id)
         raw_value = await candidate if inspect.isawaitable(candidate) else candidate
-        if self.index_kind == _QA_MEMORY_INDEX_KIND:
+        if _is_qa_memory_index_kind(self.index_kind):
             public_memory = _public_memory(
                 raw_value,
                 expected_memory_id=resource_id,
@@ -639,7 +686,7 @@ class HotpotQAEmbeddingReactExecutionAdapter(ToolReactExecutionAdapter):
         successful_read_count = len(state.read_doc_ids)
         if tool_id == HOTPOTQA_QA_MEMORY_TOOL_ID:
             # NECESSARY_ADAPTATION: every member of the frozen embedding top-k
-            # is a paired train QA record.  Completion is admitted only after
+            # is a paired QA record. Completion is admitted only after
             # the worker has inspected the complete returned group, so an
             # unsupported assessment cannot be made from rank 1 alone.
             if state.latest_search_doc_ids and state.latest_unread_doc_ids:
@@ -653,7 +700,7 @@ class HotpotQAEmbeddingReactExecutionAdapter(ToolReactExecutionAdapter):
             return frozenset({(tool_id, "search")}), False
         # DIRECT_REUSE: SkillFlow/FlowSteer's shared QA retrieval adapter
         # admits completion after one successful public read.  QA-memory hits
-        # are complete train-split demonstrations rather than task-scoped
+        # are complete paired-QA demonstrations rather than task-scoped
         # passage hops, so forcing a second search/read only adds an unrelated
         # example and consumes the bounded ReAct turn budget.
         if successful_read_count >= 1:
@@ -785,7 +832,7 @@ class HotpotQAEmbeddingReactExecutionAdapter(ToolReactExecutionAdapter):
             )
             + ". Do not "
             "repeat a normalized successful query. Embedding similarity identifies "
-            "semantic-neighbor training examples; it is not factual entailment for "
+            "semantic-neighbor QA records; it is not factual entailment for "
             "the current question. Complete only on the admitted terminal state, "
             "after the semantic-alignment check, with exactly "
             + completion_example
@@ -954,7 +1001,7 @@ def build_hotpotqa_embedding_tool_registry(
     ``frozen_top_k`` must be present in the index manifest.  Supplying it here
     is an assertion and cannot override the manifest, which keeps validation
     runs fail-closed against architecture-development configuration drift.
-    ``task_id`` scopes the legacy passage index; for train QA-memory it is only
+    ``task_id`` scopes the legacy passage index; for global QA-memory it is only
     recorded as the evaluation-call context in Tool results/receipts.
     """
 
@@ -995,7 +1042,7 @@ def build_hotpotqa_embedding_tool_registry(
         },
     }
     read_identifier = (
-        "memory_id" if index_kind == _QA_MEMORY_INDEX_KIND else "doc_id"
+        "memory_id" if _is_qa_memory_index_kind(index_kind) else "doc_id"
     )
     read_schema = {
         "title": "read",
@@ -1090,7 +1137,7 @@ def build_hotpotqa_embedding_tool_registry(
             "paraphrase_provenance": {"type": "string"},
         },
     }
-    if index_kind == _QA_MEMORY_INDEX_KIND:
+    if _is_qa_memory_index_kind(index_kind):
         output_schema = {
             "oneOf": [
                 {

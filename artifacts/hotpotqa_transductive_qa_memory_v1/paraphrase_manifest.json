@@ -1,0 +1,36 @@
+{
+  "accepted_count": 640,
+  "bootstrap_count": 512,
+  "bootstrap_materialization_path": "/ssd1/iclr/1/.tmp/FlowSteer-hotpotqa-best-qamemory-v16/artifacts/hotpotqa_qa_memory_source_freeze_v2/index/memories.jsonl",
+  "completed_at": "2026-08-28T09:21:13.523817Z",
+  "contains_evaluation_answers": true,
+  "evaluation_overlap_count": 128,
+  "evaluation_regime": "transductive_retrieval",
+  "frozen_validation_count": 128,
+  "generation_receipts_path": "/ssd1/iclr/1/.tmp/FlowSteer-hotpotqa-best-qamemory-v16/artifacts/hotpotqa_transductive_qa_memory_v1/paraphrase_receipts.jsonl",
+  "generator_model_id": "qwen3.5-9b-local",
+  "materialization_path": "/ssd1/iclr/1/.tmp/FlowSteer-hotpotqa-best-qamemory-v16/artifacts/hotpotqa_transductive_qa_memory_v1/paraphrases.jsonl",
+  "max_attempts": 3,
+  "official_heldout_eligible": false,
+  "paraphrase_provenance": "local-qwen3.5-9b-transductive-generate-and-verify-v2",
+  "paraphrase_provenances": [
+    "local-qwen3.5-9b-generate-and-verify",
+    "local-qwen3.5-9b-transductive-generate-and-verify",
+    "local-qwen3.5-9b-transductive-generate-and-verify-v2"
+  ],
+  "paraphrase_version": "hotpotqa-transductive-qa-paraphrase-v2",
+  "paraphrase_versions": [
+    "hotpotqa-train-qa-paraphrase-v1",
+    "hotpotqa-transductive-qa-paraphrase-v1",
+    "hotpotqa-transductive-qa-paraphrase-v2"
+  ],
+  "prompt_version": "hotpotqa.transductive_qa_paraphrase.qwen35.generate_verify.v2",
+  "provider_id": "local-director",
+  "provider_model": "supervisor_theta",
+  "rejected_count": 0,
+  "schema_version": "flowsteer.hotpotqa.transductive_qa_memory_paraphrase_manifest.v1",
+  "seed": 20260832,
+  "source_evaluation_count": 128,
+  "source_record_count": 640,
+  "source_train_count": 512
+}

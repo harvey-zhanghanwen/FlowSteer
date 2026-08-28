@@ -1,0 +1,43 @@
+{
+  "contains_evaluation_answers": true,
+  "corpus_version": "flowsteer.hotpotqa.train512_eval128_qa_memory.v1",
+  "cycled_record_count": 0,
+  "document_template": "Question: {question}\nAnswer: {answer_statement}",
+  "embedding_dimension": 768,
+  "embedding_model": "BAAI/bge-base-en-v1.5",
+  "embedding_model_path": "/ssd1/iclr/.private/skillflow-resources/bge-base-en-v1.5",
+  "embeddings_path": "embeddings.npy",
+  "evaluation_overlap_count": 128,
+  "evaluation_regime": "transductive_retrieval",
+  "frozen_top_k": 2,
+  "frozen_validation_count": 128,
+  "index_id": "hotpotqa-transductive-qa-memory-d768-n640-topk2-v1",
+  "memories_path": "memories.jsonl",
+  "normalized": true,
+  "official_heldout_eligible": false,
+  "paraphrase_count": 640,
+  "paraphrase_provenances": [
+    "local-qwen3.5-9b-generate-and-verify",
+    "local-qwen3.5-9b-transductive-generate-and-verify",
+    "local-qwen3.5-9b-transductive-generate-and-verify-v2"
+  ],
+  "paraphrase_versions": [
+    "hotpotqa-train-qa-paraphrase-v1",
+    "hotpotqa-transductive-qa-paraphrase-v1",
+    "hotpotqa-transductive-qa-paraphrase-v2"
+  ],
+  "schema_version": "flowsteer.hotpotqa.transductive_qa_memory_index.v1",
+  "similarity": "cosine",
+  "source": "HotpotQA aligned 512 train + 128 frozen validation",
+  "source_evaluation_count": 128,
+  "source_evaluation_path": "/ssd1/iclr/1/.tmp/FlowSteer-hotpotqa-best-qamemory-v16/artifacts/hotpotqa_qa_memory_source_freeze_v2/aligned/validation.jsonl",
+  "source_record_count": 640,
+  "source_split_id_overlap_count": 0,
+  "source_splits": [
+    "train",
+    "frozen_validation"
+  ],
+  "source_train_count": 512,
+  "source_train_path": "/ssd1/iclr/1/.tmp/FlowSteer-hotpotqa-best-qamemory-v16/artifacts/hotpotqa_qa_memory_source_freeze_v2/aligned/train.jsonl",
+  "unique_source_count": 640
+}

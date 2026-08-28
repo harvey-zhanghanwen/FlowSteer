@@ -192,7 +192,7 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
         )
         if qa_memory_context:
             protocol += (
-                " QA-memory search returns semantic-neighbor training examples, not "
+                " QA-memory search returns semantic-neighbor paired QA records, not "
                 "automatically facts about the current question. Before completing, "
                 "align the current question and each read record by entity identity, "
                 "predicate or relation, qualifiers and requested answer slot. Copy a "
@@ -238,15 +238,14 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
                 "A routed retrieval_sufficiency=unsupported artifact is an explicit "
                 "worker abstention: do not use that memory's canonical answer for "
                 "the current task, and answer directly from the public task and any "
-                "other valid routed evidence. A supported assessment is necessary "
-                "but not sufficient: independently preserve the current entity "
-                "binding, relation, qualifiers, and requested answer slot. "
-                "Accept a memory-derived candidate only when the upstream artifact "
-                "preserves the current entity binding, requested relation, qualifiers "
-                "and answer slot; an embedding similarity score alone is not factual "
-                "support. If a retrieved record is unrelated, answer the public task "
-                "from the remaining valid upstream reasoning and the task itself, and "
-                "never copy the unrelated record's canonical answer."
+                "other valid routed evidence; never copy the unrelated record's "
+                "canonical answer. Only retrieval_sufficiency=unsupported "
+                "admits parametric fallback. For retrieval_sufficiency=supported, "
+                "consume the worker-selected memory candidate while preserving the "
+                "current entity binding, relation, qualifiers, and requested answer "
+                "slot; do not replace it with an ungrounded parametric candidate. An "
+                "embedding similarity score without the worker's supported assessment "
+                "is not factual support."
             )
     else:
         protocol = (
@@ -263,7 +262,7 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
                 " For QA-memory inputs, explicitly check entity binding, predicate or "
                 "relation, qualifiers and the requested answer slot before using a "
                 "retrieved answer. Preserve a clear coverage failure when the memory "
-                "is only an analogous training example; do not convert semantic "
+                "is only an analogous QA record; do not convert semantic "
                 "similarity into unsupported factual evidence."
             )
     if request.is_format_agent:

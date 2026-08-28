@@ -1,0 +1,27 @@
+# Build-only configuration for the isolated 512-train + 128-frozen-validation
+# paired QA-memory diagnostic. This profile intentionally contains evaluation
+# answers and must never replace the train-only index or an official held-out
+# AgentGraph result.
+qa_embedding_retrieval:
+  corpus_kind: "transductive_qa_memory"
+  evaluation_regime: "transductive_retrieval"
+  contains_evaluation_answers: true
+  official_heldout_eligible: false
+
+  train_tasks: "artifacts/hotpotqa_qa_memory_source_freeze_v2/aligned/train.jsonl"
+  train_sample_count: 512
+  frozen_validation_tasks: "artifacts/hotpotqa_qa_memory_source_freeze_v2/aligned/validation.jsonl"
+  validation_sample_count: 128
+  source_record_count: 640
+  evaluation_overlap_count: 128
+
+  # A complete 640-record materialization must be produced offline before the
+  # build command is run. The existing train-only materialization is not
+  # overwritten or silently reused as if it covered evaluation records.
+  paraphrase_materialization_path: "artifacts/hotpotqa_transductive_qa_memory_v1/paraphrases.jsonl"
+  index_dir: "artifacts/hotpotqa_transductive_qa_memory_v1/index"
+
+  embedding_model: "/ssd1/iclr/.private/skillflow-resources/bge-base-en-v1.5"
+  embedding_model_id: "BAAI/bge-base-en-v1.5"
+  embedding_device: "cpu"
+  search_top_k: 2
