@@ -331,9 +331,20 @@ class HotpotQAEmbeddingToolTests(unittest.TestCase):
                     resource_id=HOTPOTQA_QA_MEMORY_TOOL_ID,
                 ),
                 _action(
+                    "tool",
+                    name="read",
+                    arguments={"memory_id": "memory-2"},
+                    resource_id=HOTPOTQA_QA_MEMORY_TOOL_ID,
+                ),
+                _action(
                     "complete",
                     name="complete",
-                    arguments={"value": "retrieved evidence"},
+                    arguments={
+                        "value": {
+                            "retrieval_sufficiency": "unsupported",
+                            "selected_memory_id": None,
+                        }
+                    },
                     resource_id=None,
                 ),
                 "<answer>Delhi</answer>",
@@ -347,8 +358,8 @@ class HotpotQAEmbeddingToolTests(unittest.TestCase):
             gateway=gateway,
             tool_registry=tool_registry,
             retrieval_query_scope=question_scope,
-            max_turns=4,
-            max_tool_calls=2,
+            max_turns=5,
+            max_tool_calls=3,
         )
         runtime = AgentRuntime(
             registry,
@@ -427,7 +438,7 @@ class HotpotQAEmbeddingToolTests(unittest.TestCase):
             call for call in result.calls if call.request.agent.id == "output"
         )
         self.assertEqual(
-            ["search", "read"],
+            ["search", "read", "read"],
             [
                 receipt["request"]["action"]
                 for receipt in worker_call.response.metadata["tool_receipts"]
@@ -436,7 +447,7 @@ class HotpotQAEmbeddingToolTests(unittest.TestCase):
         self.assertEqual("worker", output_call.request.upstream[0].source_agent_id)
         self.assertEqual("output", output_call.request.upstream[0].target_agent_id)
         self.assertEqual(
-            2,
+            3,
             len(output_call.request.upstream[0].tool_receipts),
         )
 
@@ -857,9 +868,20 @@ class HotpotQAEmbeddingToolTests(unittest.TestCase):
                     resource_id=HOTPOTQA_QA_MEMORY_TOOL_ID,
                 ),
                 _action(
+                    "tool",
+                    name="read",
+                    arguments={"memory_id": "memory-2"},
+                    resource_id=HOTPOTQA_QA_MEMORY_TOOL_ID,
+                ),
+                _action(
                     "complete",
                     name="complete",
-                    arguments={"value": "Ada Lovelace"},
+                    arguments={
+                        "value": {
+                            "retrieval_sufficiency": "supported",
+                            "selected_memory_id": "memory-1",
+                        }
+                    },
                     resource_id=None,
                 ),
             ]
@@ -871,15 +893,41 @@ class HotpotQAEmbeddingToolTests(unittest.TestCase):
                 task_id="hotpotqa:heldout-validation-001",
                 tool_id=HOTPOTQA_QA_MEMORY_TOOL_ID,
             ),
-            max_turns=3,
-            max_tool_calls=2,
+            max_turns=4,
+            max_tool_calls=3,
         )
 
         response = asyncio.run(adapter.execute(_qa_memory_worker_request()))
 
-        self.assertEqual("Ada Lovelace", response.text)
+        self.assertEqual(
+            {
+                "retrieval_sufficiency": "supported",
+                "selected_memory_id": "memory-1",
+            },
+            json.loads(response.text),
+        )
         self.assertEqual([("Alpha author", 2)], index.search_calls)
-        self.assertEqual(["memory-1"], index.read_calls)
+        self.assertEqual(["memory-1", "memory-2"], index.read_calls)
+        self.assertEqual(
+            ["search", "read", "read", "complete"],
+            [
+                json.loads(request.model.metadata["response_json_schema"])[
+                    "properties"
+                ]["name"]["const"]
+                for request in gateway.requests
+            ],
+        )
+        completion_schema = json.loads(
+            gateway.requests[-1].model.metadata["response_json_schema"]
+        )["properties"]["arguments"]["properties"]["value"]
+        self.assertEqual(
+            ["retrieval_sufficiency", "selected_memory_id"],
+            completion_schema["required"],
+        )
+        self.assertIn(
+            "current query and public task passages",
+            gateway.requests[-1].agent.contract,
+        )
         self.assertTrue(
             all(
                 request.agent.id == "qa-memory-worker"
@@ -888,7 +936,11 @@ class HotpotQAEmbeddingToolTests(unittest.TestCase):
             )
         )
         self.assertEqual(
-            [HOTPOTQA_QA_MEMORY_TOOL_ID, HOTPOTQA_QA_MEMORY_TOOL_ID],
+            [
+                HOTPOTQA_QA_MEMORY_TOOL_ID,
+                HOTPOTQA_QA_MEMORY_TOOL_ID,
+                HOTPOTQA_QA_MEMORY_TOOL_ID,
+            ],
             [receipt["tool_id"] for receipt in response.metadata["tool_receipts"]],
         )
         self.assertTrue(

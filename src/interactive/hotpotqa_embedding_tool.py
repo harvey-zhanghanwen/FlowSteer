@@ -42,6 +42,7 @@ HOTPOTQA_DATASET_SCOPE = ("hotpotqa",)
 
 _PASSAGE_INDEX_KIND = "public_passage"
 _QA_MEMORY_INDEX_KIND = "train_qa_memory"
+_QA_MEMORY_RETRIEVAL_SUFFICIENCY = frozenset({"supported", "unsupported"})
 
 
 def _normalized_retrieval_query(query: str) -> str:
@@ -552,6 +553,56 @@ class HotpotQAEmbeddingReactExecutionAdapter(ToolReactExecutionAdapter):
         required = schema.get("required", ()) if isinstance(schema, Mapping) else ()
         return "memory_id" if tuple(required) == ("memory_id",) else "doc_id"
 
+    def _completion_arguments_schema(
+        self,
+        request: AgentRequest,
+    ) -> Mapping[str, object]:
+        """Bind QA-memory completion to a worker retrieval assessment.
+
+        DIRECT_REUSE: SkillFlow's bounded Agent completion remains one
+        ``StructuredAction``.  This HotpotQA compatibility schema replaces
+        the unconstrained text artifact only for the QA-memory resource: the
+        worker reads the complete frozen top-k group, then reports whether a
+        selected record supports the current public task or the whole group
+        is unsupported.  The judgment does not change AgentGraph roles,
+        relations, or terminal semantics.
+        """
+
+        if self._active_retrieval_tool_id() != HOTPOTQA_QA_MEMORY_TOOL_ID:
+            return super()._completion_arguments_schema(request)
+        del request
+        return {
+            "type": "object",
+            "required": ["value"],
+            "additionalProperties": False,
+            "properties": {
+                "value": {
+                    "type": "object",
+                    "required": ["retrieval_sufficiency", "selected_memory_id"],
+                    "additionalProperties": False,
+                    "properties": {
+                        "selected_memory_id": {
+                            "type": ["string", "null"],
+                            "description": (
+                                "For supported retrieval, one exact memory_id from "
+                                "the current fully read top-k group; null for an "
+                                "unsupported group."
+                            ),
+                        },
+                        "retrieval_sufficiency": {
+                            "type": "string",
+                            "enum": sorted(_QA_MEMORY_RETRIEVAL_SUFFICIENCY),
+                            "description": (
+                                "supported only when entity binding, relation, "
+                                "qualifiers, and answer slot align with the "
+                                "current public task; otherwise unsupported."
+                            ),
+                        },
+                    },
+                }
+            },
+        }
+
     def _allowed_tools_for_turn(
         self,
         request: AgentRequest,
@@ -586,6 +637,20 @@ class HotpotQAEmbeddingReactExecutionAdapter(ToolReactExecutionAdapter):
             self._max_tool_calls - state.dispatched_tool_calls,
         )
         successful_read_count = len(state.read_doc_ids)
+        if tool_id == HOTPOTQA_QA_MEMORY_TOOL_ID:
+            # NECESSARY_ADAPTATION: every member of the frozen embedding top-k
+            # is a paired train QA record.  Completion is admitted only after
+            # the worker has inspected the complete returned group, so an
+            # unsupported assessment cannot be made from rank 1 alone.
+            if state.latest_search_doc_ids and state.latest_unread_doc_ids:
+                if remaining_tool_calls == 0:
+                    return frozenset(), False
+                return frozenset({(tool_id, "read")}), False
+            if state.latest_search_doc_ids and not state.latest_unread_doc_ids:
+                return frozenset(), True
+            if remaining_tool_calls == 0:
+                return frozenset(), False
+            return frozenset({(tool_id, "search")}), False
         # DIRECT_REUSE: SkillFlow/FlowSteer's shared QA retrieval adapter
         # admits completion after one successful public read.  QA-memory hits
         # are complete train-split demonstrations rather than task-scoped
@@ -664,21 +729,40 @@ class HotpotQAEmbeddingReactExecutionAdapter(ToolReactExecutionAdapter):
                 + "."
             )
         elif completion_admitted and not actions:
-            next_action = (
-                "Current action mask: complete only. Treat the public read as a "
-                "retrieved train-split demonstration. Align its entity identity, "
-                "predicate or relation, qualifiers and requested answer slot with "
-                "the current question. If these fields do not align, explicitly "
-                "report that the memory does not cover the current fact and do not "
-                "copy its canonical answer. Return the best task artifact permitted "
-                "by the assigned contract."
-            )
+            if tool_id == HOTPOTQA_QA_MEMORY_TOOL_ID:
+                next_action = (
+                    "Current action mask: complete only. Judge the fully read top-k "
+                    "group against the current query and public task passages. "
+                    "Check entity identity, predicate or relation, qualifiers, and "
+                    "the requested answer slot. Use only those public inputs and the "
+                    "Tool observations; do not use a reference answer or evaluator "
+                    "metadata. Return retrieval_sufficiency=supported only when all "
+                    "four fields align. Otherwise return unsupported so downstream "
+                    "execution falls back to answering the public task directly."
+                )
+            else:
+                next_action = (
+                    "Current action mask: complete only. Return the best task "
+                    "artifact permitted by the assigned contract."
+                )
         else:
             next_action = (
                 "Current action mask: search only; read and complete are not "
                 "admitted. Supply all required search arguments."
             )
         query_scope = self._retrieval_query_scope or request.problem
+        completion_example = '{"value":"evidence-supported artifact"}'
+        if tool_id == HOTPOTQA_QA_MEMORY_TOOL_ID:
+            completion_example = json.dumps(
+                {
+                    "value": {
+                        "retrieval_sufficiency": "unsupported",
+                        "selected_memory_id": None,
+                    }
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
         return (
             base
             + "\nEmbedding retrieval query scope: "
@@ -704,7 +788,8 @@ class HotpotQAEmbeddingReactExecutionAdapter(ToolReactExecutionAdapter):
             "semantic-neighbor training examples; it is not factual entailment for "
             "the current question. Complete only on the admitted terminal state, "
             "after the semantic-alignment check, with exactly "
-            "{\"value\":\"evidence-supported artifact\"}. "
+            + completion_example
+            + ". "
             + next_action
         )
 
@@ -745,7 +830,7 @@ class HotpotQAEmbeddingReactExecutionAdapter(ToolReactExecutionAdapter):
         artifact: str,
         tool_receipts: list[dict[str, object]],
     ) -> str | None:
-        del action, artifact
+        del artifact
         tool_id = (
             self._active_retrieval_tool_id()
             if hasattr(self, "_tool_registry")
@@ -764,6 +849,95 @@ class HotpotQAEmbeddingReactExecutionAdapter(ToolReactExecutionAdapter):
             return "hotpotqa_dynamic_search_required"
         if "read" not in successful_actions:
             return "hotpotqa_dynamic_read_required"
+        if tool_id == HOTPOTQA_QA_MEMORY_TOOL_ID:
+            arguments = getattr(action, "arguments", None)
+            value = (
+                arguments.get("value")
+                if isinstance(arguments, Mapping)
+                else None
+            )
+            if not isinstance(value, Mapping) or set(value) != {
+                "retrieval_sufficiency",
+                "selected_memory_id",
+            }:
+                return "hotpotqa_qa_memory_completion_schema_invalid"
+            selected_memory_id = value.get("selected_memory_id")
+            sufficiency = value.get("retrieval_sufficiency")
+            if not isinstance(sufficiency, str) or (
+                sufficiency not in _QA_MEMORY_RETRIEVAL_SUFFICIENCY
+            ):
+                return "hotpotqa_qa_memory_retrieval_sufficiency_invalid"
+            if sufficiency == "supported" and (
+                not isinstance(selected_memory_id, str)
+                or not selected_memory_id.strip()
+            ):
+                return "hotpotqa_qa_memory_selected_memory_id_invalid"
+            if sufficiency == "unsupported" and selected_memory_id is not None:
+                return "hotpotqa_qa_memory_unsupported_selection_must_be_null"
+            latest_search_memory_ids: set[str] = set()
+            latest_read_memory_ids: set[str] = set()
+            for receipt in tool_receipts:
+                if (
+                    receipt.get("tool_id") != tool_id
+                    or receipt.get("error_type") is not None
+                ):
+                    continue
+                request_value = receipt.get("request")
+                result_value = receipt.get("result")
+                if not isinstance(request_value, Mapping) or not isinstance(
+                    result_value, Mapping
+                ):
+                    continue
+                result = result_value.get("value")
+                if result_value.get("completed") is not True or not isinstance(
+                    result, Mapping
+                ):
+                    continue
+                operation = request_value.get("action")
+                if operation == "search" and result.get("operation") == "search":
+                    memory_ids = result.get("memory_ids")
+                    hits = result.get("hits")
+                    if isinstance(memory_ids, list) and isinstance(hits, list):
+                        returned = {
+                            item
+                            for item in memory_ids
+                            if isinstance(item, str) and item
+                        }
+                        hit_ids = {
+                            item.get("memory_id")
+                            for item in hits
+                            if isinstance(item, Mapping)
+                            and isinstance(item.get("memory_id"), str)
+                            and item.get("memory_id")
+                        }
+                        latest_search_memory_ids = returned & hit_ids
+                        latest_read_memory_ids = set()
+                    continue
+                if operation != "read" or result.get("operation") != "read":
+                    continue
+                request_arguments = request_value.get("arguments")
+                memory = result.get("memory")
+                if (
+                    isinstance(request_arguments, Mapping)
+                    and isinstance(request_arguments.get("memory_id"), str)
+                    and request_arguments.get("memory_id")
+                    in latest_search_memory_ids
+                    and result.get("memory_id")
+                    == request_arguments.get("memory_id")
+                    and isinstance(memory, Mapping)
+                    and memory.get("memory_id")
+                    == request_arguments.get("memory_id")
+                ):
+                    latest_read_memory_ids.add(str(request_arguments["memory_id"]))
+            if not latest_search_memory_ids or (
+                latest_read_memory_ids != latest_search_memory_ids
+            ):
+                return "hotpotqa_qa_memory_top_k_not_fully_read"
+            if (
+                sufficiency == "supported"
+                and selected_memory_id not in latest_read_memory_ids
+            ):
+                return "hotpotqa_qa_memory_selected_memory_has_no_lineage"
         return None
 
 

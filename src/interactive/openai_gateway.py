@@ -235,6 +235,12 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
         if qa_memory_context:
             protocol += (
                 " Treat upstream QA-memory records as retrieved demonstrations. "
+                "A routed retrieval_sufficiency=unsupported artifact is an explicit "
+                "worker abstention: do not use that memory's canonical answer for "
+                "the current task, and answer directly from the public task and any "
+                "other valid routed evidence. A supported assessment is necessary "
+                "but not sufficient: independently preserve the current entity "
+                "binding, relation, qualifiers, and requested answer slot. "
                 "Accept a memory-derived candidate only when the upstream artifact "
                 "preserves the current entity binding, requested relation, qualifiers "
                 "and answer slot; an embedding similarity score alone is not factual "

@@ -101,6 +101,8 @@ class MessageTests(unittest.TestCase):
         self.assertIn("retrieved demonstrations", system)
         self.assertIn("entity binding", system)
         self.assertIn("answer slot", system)
+        self.assertIn("retrieval_sufficiency=unsupported", system)
+        self.assertIn("answer directly from the public task", system)
         self.assertIn("never copy the unrelated record", system)
 
 
