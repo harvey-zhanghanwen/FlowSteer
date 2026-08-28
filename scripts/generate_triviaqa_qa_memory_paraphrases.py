@@ -1040,6 +1040,102 @@ def _answer_statement_has_lexical_relation_lineage(
     return bool(relation_tokens & statement_tokens)
 
 
+def _canonicalize_answer_statement_from_accepted_alias(
+    source: TriviaQATrainSource,
+    answer_statement: str,
+) -> str | None:
+    """Replace one unambiguous train alias with the exact canonical span.
+
+    This is an admission-only repair over aliases already supplied by the
+    TriviaQA training row.  It does not infer aliases or rewrite surrounding
+    statement text.  Nested aliases are resolved by their unique longest span;
+    repeated, disjoint, or partially overlapping candidates remain fail-closed.
+    ASCII and curly apostrophe glyphs are the sole generated orthographic
+    variants because they preserve the same lexical span.
+    """
+
+    if not isinstance(answer_statement, str) or not answer_statement.strip():
+        return None
+    canonical = source.canonical_answer
+    if exact_canonical_span_preserved(answer_statement, canonical):
+        return None
+
+    def apostrophe_variants(text: str) -> tuple[str, ...]:
+        variants = {text}
+        if "'" in text:
+            variants.add(text.replace("'", "’"))
+        if "’" in text:
+            variants.add(text.replace("’", "'"))
+        return tuple(sorted(variants, key=lambda value: (-len(value), value)))
+
+    aliases: list[str] = []
+    for admitted_answer in source.accepted_answers_for_admission:
+        for alias in apostrophe_variants(admitted_answer):
+            if alias == canonical or alias in aliases:
+                continue
+            alias_tokens = tuple(_LEXICAL_TOKEN.findall(alias))
+            if not (
+                any(character.isdigit() for character in alias)
+                or any(
+                    token.casefold() not in _FUNCTION_WORDS
+                    for token in alias_tokens
+                )
+            ):
+                continue
+            aliases.append(alias)
+    if not aliases:
+        return None
+
+    matches: list[tuple[int, int, str]] = []
+    for alias in aliases:
+        pattern = re.compile(rf"(?<!\w){re.escape(alias)}(?!\w)")
+        alias_matches = tuple(pattern.finditer(answer_statement))
+        if not alias_matches:
+            continue
+        if any(
+            re.search(
+                rf"(?<!\w){re.escape(question_alias)}(?!\w)",
+                source.original_question,
+                re.IGNORECASE,
+            )
+            is not None
+            for question_alias in apostrophe_variants(alias)
+        ):
+            return None
+        matches.extend(
+            (match.start(), match.end(), alias) for match in alias_matches
+        )
+    if not matches:
+        return None
+
+    longest_width = max(stop - start for start, stop, _ in matches)
+    longest_spans = {
+        (start, stop)
+        for start, stop, _ in matches
+        if stop - start == longest_width
+    }
+    if len(longest_spans) != 1:
+        return None
+    selected_start, selected_stop = next(iter(longest_spans))
+    # Shorter aliases wholly nested in the unique longest span are the reason
+    # for longest-span selection, not an ambiguity.  Any other match means the
+    # statement contains a second or partially overlapping candidate.
+    if any(
+        (start, stop) != (selected_start, selected_stop)
+        and not (
+            selected_start <= start
+            and stop <= selected_stop
+        )
+        for start, stop, _ in matches
+    ):
+        return None
+    return (
+        answer_statement[:selected_start]
+        + canonical
+        + answer_statement[selected_stop:]
+    )
+
+
 def _listed_choice_answer_binding_preserved(
     *,
     original_question: str,
@@ -2759,6 +2855,37 @@ class LocalQwen35Paraphraser:
         rejected_statement: str,
         seed: int,
     ) -> str:
+        def validated_alias_repair(statement: str) -> str | None:
+            candidate = _canonicalize_answer_statement_from_accepted_alias(
+                source,
+                statement,
+            )
+            if candidate is None:
+                return None
+            try:
+                _, candidate = parse_paraphrase_response(
+                    json.dumps(
+                        {
+                            "paraphrase_question": question,
+                            "paraphrase_answer_statement": candidate,
+                        },
+                        ensure_ascii=False,
+                    ),
+                    source,
+                )
+                if self._answer_statement_verified(
+                    source,
+                    statement=candidate,
+                    seed=seed + 500_000,
+                ):
+                    return candidate
+            except ValueError:
+                pass
+            return None
+
+        alias_repaired = validated_alias_repair(rejected_statement)
+        if alias_repaired is not None:
+            return alias_repaired
         clausal_statement = _clausal_canonical_relation_statement(source)
         if clausal_statement is not None:
             _, clausal_statement = parse_paraphrase_response(
@@ -2833,6 +2960,9 @@ class LocalQwen35Paraphraser:
                 temperature=0.0,
             )
         )
+        alias_repaired = validated_alias_repair(repaired_statement)
+        if alias_repaired is not None:
+            return alias_repaired
         _, repaired_statement = parse_paraphrase_response(
             json.dumps(
                 {

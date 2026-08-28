@@ -34,6 +34,7 @@ from scripts.generate_triviaqa_qa_memory_paraphrases import (
     _listed_choice_answer_binding_preserved,
     _augment_listed_choice_answer_statement,
     _answer_statement_has_lexical_relation_lineage,
+    _canonicalize_answer_statement_from_accepted_alias,
     _quoted_scope_preserved,
     _quoted_attribution_qa,
     _restore_immutable_quoted_slots,
@@ -149,6 +150,219 @@ def _semantic_source(original: str, canonical: str) -> TriviaQATrainSource:
         canonical_answer=canonical,
         native_split="train",
     )
+
+
+def _alias_source(
+    *,
+    original: str,
+    canonical: str,
+    accepted: tuple[str, ...],
+) -> TriviaQATrainSource:
+    return TriviaQATrainSource(
+        source_train_task_id="triviaqa:alias_canonicalization",
+        base_task_id="triviaqa:alias_canonicalization",
+        selection_index=0,
+        cycled_training_sample=False,
+        cycle_index=None,
+        original_question=original,
+        canonical_answer=canonical,
+        native_split="train",
+        accepted_answers_for_admission=accepted,
+    )
+
+
+@pytest.mark.parametrize(
+    ("source", "statement", "expected"),
+    (
+        (
+            _alias_source(
+                original="How many vice presidents did Franklin D Roosevelt have?",
+                canonical="Three",
+                accepted=("Three", "3", "three"),
+            ),
+            "The number of vice presidents Franklin D Roosevelt had was 3.",
+            "The number of vice presidents Franklin D Roosevelt had was Three.",
+        ),
+        (
+            _alias_source(
+                original=(
+                    "What is the name of the alley in which cartoon character "
+                    "Top Cat lives?"
+                ),
+                canonical="Hoagy’s Alley",
+                accepted=("Hoagy’s Alley",),
+            ),
+            "Top Cat lives in Hoagy's Alley.",
+            "Top Cat lives in Hoagy’s Alley.",
+        ),
+        (
+            _alias_source(
+                original=(
+                    "Dick Dudgeon and Reverend Anthony Anderson are characters "
+                    "in which play by George Bernard Shaw?"
+                ),
+                canonical="THE DEVIL’S DISCIPLE",
+                accepted=(
+                    "THE DEVIL’S DISCIPLE",
+                    "The Devil’s Disciple",
+                    "Devil's Disciple",
+                    "The Devil's Disciple",
+                    "The Devils Disciple",
+                ),
+            ),
+            "The play by George Bernard Shaw is The Devil’s Disciple.",
+            "The play by George Bernard Shaw is THE DEVIL’S DISCIPLE.",
+        ),
+    ),
+)
+def test_accepted_alias_canonicalization_replaces_only_unique_longest_span(
+    source: TriviaQATrainSource,
+    statement: str,
+    expected: str,
+) -> None:
+    assert _canonicalize_answer_statement_from_accepted_alias(
+        source,
+        statement,
+    ) == expected
+
+
+@pytest.mark.parametrize(
+    ("source", "statement"),
+    (
+        (
+            _alias_source(
+                original="How many groups qualified?",
+                canonical="Three",
+                accepted=("Three", "3"),
+            ),
+            "There were 3 groups and 3 qualifying teams.",
+        ),
+        (
+            _alias_source(
+                original="Does 3 identify the number of qualifying teams?",
+                canonical="Three",
+                accepted=("Three", "3"),
+            ),
+            "The number of qualifying teams was 3.",
+        ),
+        (
+            _alias_source(
+                original="Is Hoagy’s Alley the place where Top Cat lives?",
+                canonical="Top Cat's alley",
+                accepted=("Top Cat's alley", "Hoagy's Alley"),
+            ),
+            "Top Cat lives in Hoagy's Alley.",
+        ),
+        (
+            _alias_source(
+                original="How many groups qualified?",
+                canonical="Three",
+                accepted=("Three", "3"),
+            ),
+            "The number of qualifying teams was a trio.",
+        ),
+        (
+            _alias_source(
+                original="Which item is requested?",
+                canonical="Target",
+                accepted=("Target", "the"),
+            ),
+            "The requested item is the.",
+        ),
+        (
+            _alias_source(
+                original="Which label identifies the target?",
+                canonical="Target",
+                accepted=("Target", "Alpha Beta", "Beta Gamma"),
+            ),
+            "The label is Alpha Beta Gamma.",
+        ),
+    ),
+)
+def test_accepted_alias_canonicalization_fails_closed(
+    source: TriviaQATrainSource,
+    statement: str,
+) -> None:
+    assert _canonicalize_answer_statement_from_accepted_alias(
+        source,
+        statement,
+    ) is None
+
+
+def test_answer_repair_prefers_verified_rejected_statement_alias(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _alias_source(
+        original="How many vice presidents did Franklin D Roosevelt have?",
+        canonical="Three",
+        accepted=("Three", "3", "three"),
+    )
+    client = object.__new__(LocalQwen35Paraphraser)
+    verified: list[str] = []
+    monkeypatch.setattr(
+        client,
+        "_complete",
+        lambda **_: pytest.fail("accepted alias repair must precede model repair"),
+    )
+    monkeypatch.setattr(
+        client,
+        "_answer_statement_verified",
+        lambda source, *, statement, seed: verified.append(statement) or True,
+    )
+
+    repaired = client._repair_answer_statement(
+        source,
+        question="What is the count of vice presidents Franklin D Roosevelt had?",
+        rejected_statement=(
+            "The number of vice presidents Franklin D Roosevelt had was 3."
+        ),
+        seed=41,
+    )
+
+    assert repaired == (
+        "The number of vice presidents Franklin D Roosevelt had was Three."
+    )
+    assert verified == [repaired]
+
+
+def test_answer_repair_canonicalizes_and_verifies_model_statement_alias(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _alias_source(
+        original="How many vice presidents did Franklin D Roosevelt have?",
+        canonical="Three",
+        accepted=("Three", "3", "three"),
+    )
+    client = object.__new__(LocalQwen35Paraphraser)
+    verified: list[str] = []
+    monkeypatch.setattr(
+        client,
+        "_complete",
+        lambda **_: json.dumps(
+            {
+                "paraphrase_answer_statement": (
+                    "The number of vice presidents Franklin D Roosevelt had was 3."
+                )
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        client,
+        "_answer_statement_verified",
+        lambda source, *, statement, seed: verified.append(statement) or True,
+    )
+
+    repaired = client._repair_answer_statement(
+        source,
+        question="What is the count of vice presidents Franklin D Roosevelt had?",
+        rejected_statement="No supported answer statement was produced.",
+        seed=43,
+    )
+
+    assert repaired == (
+        "The number of vice presidents Franklin D Roosevelt had was Three."
+    )
+    assert verified == [repaired]
 
 
 @pytest.mark.parametrize(
